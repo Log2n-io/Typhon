@@ -40,6 +40,32 @@ describe('AC2.14 — handoff resolution matrix', () => {
     expect(useSelectionStore.getState().leaf).toMatchObject({ type: 'archetype', ref: '2002' });
   });
 
+  // Open in → Data Browser scoped to a COHORT (#620 §4.4), from Entity Lifecycle. A separate row because the browser is
+  // narrowed to a caller-supplied id set that cannot be recomputed from the database — so the scope has to be carried,
+  // and has to announce itself. A silently filtered list reads as the archetype's whole population.
+  it('Open in → Data Browser carries a cohort scope, with a label and a way out', () => {
+    openDataBrowser('2002');
+    useDataBrowserStore.getState().setCohort({ entityIds: ['65537', '131073'], label: '2 spawned at tick 4,102 — still alive' });
+
+    const scoped = useDataBrowserStore.getState();
+    expect(scoped.cohort?.entityIds).toEqual(['65537', '131073']);
+    expect(scoped.cohort?.label).toMatch(/tick 4,102/);
+    expect(scoped.pageIndex).toBe(0);
+
+    useDataBrowserStore.getState().clearCohort();
+    expect(useDataBrowserStore.getState().cohort).toBeNull();
+  });
+
+  // Switching archetype must DROP the cohort: its ids belong to the archetype it came from, and carrying them across
+  // would render an empty list that looks like an empty archetype.
+  it('changing archetype drops a cohort scope rather than carrying it across', () => {
+    openDataBrowser('2002');
+    useDataBrowserStore.getState().setCohort({ entityIds: ['65537'], label: 'x' });
+    useDataBrowserStore.getState().setArchetype('3003');
+    expect(useDataBrowserStore.getState().cohort).toBeNull();
+  });
+
+  // File Map / Segment / Resource → Open in (Component Inspector / Schema) — routes through openComponentInSchema.
   it('Open in → Schema selects the component on the bus leaf', () => {
     openComponentInSchema('Position');
     expect(useSelectionStore.getState().leaf).toMatchObject({ type: 'component', ref: 'Position' });

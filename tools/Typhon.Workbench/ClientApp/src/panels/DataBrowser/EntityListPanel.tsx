@@ -37,6 +37,8 @@ export default function EntityListPanel(_props: IDockviewPanelProps) {
   const setAutoPageSize = useDataBrowserStore((s) => s.setAutoPageSize);
   const setPageIndex = useDataBrowserStore((s) => s.setPageIndex);
   const setPreviewFields = useDataBrowserStore((s) => s.setPreviewFields);
+  const cohort = useDataBrowserStore((s) => s.cohort);
+  const clearCohort = useDataBrowserStore((s) => s.clearCohort);
 
   const rowHeight = useDensityRowHeight(); // DS-1/H: re-measures when the density changes.
   const filePath = useSessionStore((s) => s.filePath);
@@ -99,7 +101,13 @@ export default function EntityListPanel(_props: IDockviewPanelProps) {
 
   const effectivePageSize = autoPageSize ? autoSize : pageSize;
   const offset = pageIndex * effectivePageSize;
-  const { rows, total, isLoading, isError, isFetching } = useEntityPage(archetypeId, offset, effectivePageSize, previewSpec);
+  const { rows, total, isLoading, isError, isFetching } = useEntityPage(
+    archetypeId,
+    offset,
+    effectivePageSize,
+    previewSpec,
+    cohort?.entityIds ?? null,
+  );
 
   const pageCount = Math.max(1, Math.ceil(total / effectivePageSize));
   const rangeStart = total === 0 ? 0 : offset + 1;
@@ -182,6 +190,26 @@ export default function EntityListPanel(_props: IDockviewPanelProps) {
     <div className="flex h-full w-full flex-col overflow-hidden bg-background">
       <div className="wb-pane-header flex items-center gap-2 border-b border-border px-3 py-1.5">
         <h3 className="font-mono text-fs-base font-semibold text-foreground">Data Browser</h3>
+        {cohort && (
+          // The scope is always visible and always clearable. A narrowed list that does not announce itself reads as the
+          // archetype's whole population, which is how a user ends up confidently wrong about how much data they have.
+          <span
+            className="flex items-center gap-1 rounded border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-fs-sm text-foreground"
+            data-testid="cohort-chip"
+            title={cohort.label}
+          >
+            <span className="max-w-[22rem] truncate">{cohort.label}</span>
+            <button
+              type="button"
+              onClick={clearCohort}
+              className="rounded px-1 text-muted-foreground hover:text-foreground"
+              aria-label="Clear cohort filter"
+              data-testid="cohort-chip-clear"
+            >
+              ×
+            </button>
+          </span>
+        )}
         <select
           className="ml-1 w-60 max-w-[15rem] truncate rounded border border-border bg-background px-1.5 py-0.5 text-fs-sm text-foreground"
           value={archetypeId ?? ''}

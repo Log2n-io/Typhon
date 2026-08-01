@@ -24,6 +24,9 @@ public record ProfilerMetadataDto(
     System.Collections.Generic.Dictionary<ushort, string> QueueIdToName,
     // v15 (#327) — Workbench Data Flow per-(tick, system, archetype) entity-touch rollups. Empty for v14-or-older caches.
     Typhon.Profiler.SystemArchetypeTouchSummary[] SystemArchetypeTouches,
+    // v17 (#620) — entity spawn/destroy runs backing the entity lens's cohorts. Empty for v16-or-older caches, which is
+    // distinguishable from "this capture recorded no spawns" only by the cache's chunker version.
+    Typhon.Profiler.EntityLifecycleRun[] EntityLifecycleRuns,
     // #354 W4 — runtime partitioning hierarchy (Engine → Track → DAG → Phase → System), projected from the trace's
     // Tracks + DAGs tables. Empty for traces with no track data. The flat <see cref="Phases"/> list is retained as a
     // derived first-seen rollup for consumers not yet migrated to the hierarchy.

@@ -258,7 +258,8 @@ public sealed class ThreadSchedulingTests
         public void WriteTrailer(IReadOnlyList<TickSummary> ts, in GlobalMetricsFixed gm, IReadOnlyList<SystemAggregateDuration> sa,
             IReadOnlyList<ChunkManifestEntry> cm, IReadOnlyDictionary<int, string> sn, ReadOnlySpan<byte> sourceMetadataBytes, in CacheHeader h,
             IReadOnlyList<SystemTickSummary> sts, IReadOnlyList<QueueTickSummary> qts, IReadOnlyList<PostTickSummary> pts,
-            IReadOnlyDictionary<ushort, string> qIdToName, IReadOnlyList<SystemArchetypeTouchSummary> sat)
+            IReadOnlyDictionary<ushort, string> qIdToName, IReadOnlyList<SystemArchetypeTouchSummary> sat,
+            IReadOnlyList<EntityLifecycleRun> elr)
             => throw new NotSupportedException("ListSink does not support trailer.");
 
         public void Dispose() { }

@@ -28,6 +28,7 @@ import {
   toggleViewDataBrowser,
   toggleViewDbMap,
   toggleViewDataFlow,
+  toggleViewEntityLifecycle,
   toggleViewDetail,
   toggleViewDevFixture,
   toggleViewLogs,
@@ -176,6 +177,9 @@ export default function MenuBar() {
  )}
  {isViewVisible('DataFlow', sessionScope) && (
  <MenubarItem onClick={toggleViewDataFlow}>Data Flow</MenubarItem>
+ )}
+ {isViewVisible('EntityLifecycle', sessionScope) && (
+ <MenubarItem onClick={toggleViewEntityLifecycle}>Entity Lifecycle</MenubarItem>
  )}
  {isViewVisible('QueryAnalyzer', sessionScope) && (
  <MenubarItem onClick={toggleViewQueryAnalyzer}>Query Analyzer</MenubarItem>

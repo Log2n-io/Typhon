@@ -6,6 +6,7 @@ import { refreshResourceGraph } from '@/hooks/useResourceIndex';
 import {
   toggleViewDataBrowser,
   toggleViewDataFlow,
+  toggleViewEntityLifecycle,
   toggleViewDbMap,
   toggleViewDevFixture,
   toggleViewStorageHealth,
@@ -75,6 +76,7 @@ export function buildBaseCommands(): CommandItem[] {
     //  four Schema* panels — those facts now live in the Component Inspector tabs.)
     { id: 'toggle-view-system-dag',           label: 'Toggle View System DAG',              keywords: 'system dag scheduler topology phases rfc07', action: toggleViewSystemDag, viewId: 'SystemDag' },
     { id: 'toggle-view-data-flow',            label: 'Toggle View Data Flow',               keywords: 'data flow timeline matrix marey tracks granularity bars access heatmap systems components', action: toggleViewDataFlow, viewId: 'DataFlow' },
+    { id: 'toggle-view-entity-lifecycle',      label: 'Toggle View Entity Lifecycle',        keywords: 'entity lifecycle spawn destroy cohort born created deleted alive survivors storm', action: toggleViewEntityLifecycle, viewId: 'EntityLifecycle' },
     { id: 'toggle-view-dbmap',                label: 'Toggle View Database File Map',       keywords: 'database file map storage layout pages hilbert fragmentation disk', action: toggleViewDbMap, viewId: 'DbMap' },
     { id: 'toggle-view-storage-health',       label: 'Open Storage Health',                 keywords: 'storage health dashboard segments occupancy dirty reclaimable fragmentation wal disk aggregate', action: toggleViewStorageHealth, viewId: 'StorageHealth' },
     { id: 'toggle-view-dev-fixture',          label: 'Create sample database',              keywords: 'sample playground dev fixture database generate preset advanced destination folder', action: toggleViewDevFixture, viewId: 'DevFixture' },

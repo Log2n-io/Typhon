@@ -274,6 +274,14 @@ public unsafe partial class Transaction
         // Allocate N entity keys in one atomic operation
         long baseKey = Interlocked.Add(ref engineState.NextEntityKey, count) - count + 1;
 
+        // #620 — record the cohort as a range. The single-entity Spawn path emits one EcsSpawn each; doing that here would cost ~56 B per entity for data
+        // the range already determines (every id is (baseKey + n, routingId)). Emitted here rather than after the loop so a mid-batch throw cannot drop it —
+        // the trace records the attempt, and a rolled-back batch is correctly reported by the Workbench as spawned-but-not-alive.
+        if (count > 0)
+        {
+            TyphonEvent.EmitEcsSpawnBatch(meta.ArchetypeId, _dbe.RoutingIdOf(meta), baseKey, count, TSN);
+        }
+
         _spawnedEntities ??= new List<SpawnEntry>(count);
         _spawnedEntityIndexStale = true;
 
@@ -373,6 +381,10 @@ public unsafe partial class Transaction
 
         // Allocate N entity keys in one atomic operation
         long baseKey = Interlocked.Add(ref engineState.NextEntityKey, count) - count + 1;
+
+        // #620 — same range record as SpawnBatch; this is the generated-SOA entry point and would otherwise be a second silent hole. `count == 0` returned
+        // above, so the range is always non-empty here.
+        TyphonEvent.EmitEcsSpawnBatch(meta.ArchetypeId, _dbe.RoutingIdOf(meta), baseKey, count, TSN);
 
         _spawnedEntities ??= new List<SpawnEntry>(count);
         // O4: ensure capacity when list already exists from prior spawns in this tx

@@ -863,6 +863,9 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
         var satTouches = reader.SystemArchetypeTouches is { Count: > 0 } sat
             ? ((List<Typhon.Profiler.SystemArchetypeTouchSummary>)sat).ToArray()
             : [];
+        var lifecycleRuns = reader.EntityLifecycleRuns is { Count: > 0 } elr
+            ? ((List<Typhon.Profiler.EntityLifecycleRun>)elr).ToArray()
+            : [];
 
         return new ProfilerMetadataDto(
             Fingerprint: fingerprintHex,
@@ -881,7 +884,8 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
             QueueTickSummaries: qTicks,
             PostTickSummaries: postTicks,
             QueueIdToName: qNames,
-            SystemArchetypeTouches: satTouches);
+            SystemArchetypeTouches: satTouches,
+            EntityLifecycleRuns: lifecycleRuns);
     }
 
     /// <summary>

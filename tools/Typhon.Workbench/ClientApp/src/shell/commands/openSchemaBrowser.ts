@@ -322,6 +322,15 @@ export function toggleViewDataFlow(): void {
   toggleDockPanel('data-flow', 'DataFlow', 'Data Flow');
 }
 
+/**
+ * Entity Lifecycle — spawn/destroy cohorts (#620). Its own view rather than a Data Flow tab: the two read from
+ * different sections of the capture, and Data Flow's bars depend on a rollup that a populated cluster archetype does
+ * not currently produce (#631), which would have made this feature unusable for reasons unrelated to it.
+ */
+export function toggleViewEntityLifecycle(): void {
+  toggleDockPanel('entity-lifecycle', 'EntityLifecycle', 'Entity Lifecycle');
+}
+
 export function toggleViewOptions(): void {
   toggleDockPanel('options', 'Options', 'Options');
 }

@@ -693,7 +693,8 @@ public sealed class AggregationServiceTests
             PostTickSummary[] postRows = null,
             Dictionary<ushort, string> queueIdToName = null,
             SystemArchetypeTouchSummary[] archetypeTouches = null,
-            ArchetypeDto[] archetypes = null)
+            ArchetypeDto[] archetypes = null,
+            EntityLifecycleRun[] lifecycleRuns = null)
         {
             return new ProfilerMetadataDto(
                 Fingerprint: "TEST",
@@ -712,7 +713,8 @@ public sealed class AggregationServiceTests
                 QueueTickSummaries: queueRows ?? System.Array.Empty<QueueTickSummary>(),
                 PostTickSummaries: postRows ?? System.Array.Empty<PostTickSummary>(),
                 QueueIdToName: queueIdToName ?? new Dictionary<ushort, string>(),
-                SystemArchetypeTouches: archetypeTouches ?? System.Array.Empty<SystemArchetypeTouchSummary>());
+                SystemArchetypeTouches: archetypeTouches ?? System.Array.Empty<SystemArchetypeTouchSummary>(),
+                EntityLifecycleRuns: lifecycleRuns ?? System.Array.Empty<EntityLifecycleRun>());
         }
     }
 }

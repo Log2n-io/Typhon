@@ -174,3 +174,66 @@ public struct PostTickSummary
     /// <summary>Reserved for the per-tier budget metrics phase (not yet wrapped in <c>InspectorPhase</c>; tracks at zero until the engine wraps it). Design §5.3.</summary>
     public float TierBudgetUs;
 }
+
+/// <summary>Which side of an entity's life an <see cref="EntityLifecycleRun"/> records.</summary>
+public enum EntityLifecycleKind : byte
+{
+    /// <summary>Entities came into existence. <see cref="EntityLifecycleRun.Count"/> may exceed 1 (a batch spawn).</summary>
+    Spawn = 0,
+
+    /// <summary>An entity was destroyed. <see cref="EntityLifecycleRun.Count"/> is always 1 — destroys are recorded per entity.</summary>
+    Destroy = 1,
+}
+
+/// <summary>
+/// One spawn or destroy **run** in <see cref="CacheSectionId.EntityLifecycle"/> — the trace-side index behind the Workbench entity lens (#620,
+/// design §4.4). Sorted by <c>(TickNumber, FirstEntityKey)</c> so a tick range resolves by binary search.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>A run, not a row per entity.</b> <c>Transaction.SpawnBatch</c> reserves all its keys with one <c>Interlocked.Add</c> and stamps one routing id,
+/// so a batch's ids are exactly <c>(FirstEntityKey + n, RoutingId)</c> for <c>n</c> in <c>[0, Count)</c>. The range is therefore an *exact*
+/// representation, not a summary, and a 200K bulk load costs one 24-byte row instead of 200K of them. Single spawns and destroys are runs of length 1.
+/// </para>
+/// <para>
+/// <b>Keys, not raw ids.</b> A raw <c>EntityId</c> is <c>(key &lt;&lt; 16) | routingId</c>, so consecutive entities are 65,536 apart in raw value but
+/// adjacent in key. Storing the key is what makes the run contiguous.
+/// </para>
+/// <para>
+/// <b>Two archetype identifiers, deliberately.</b> <see cref="RoutingId"/> is the durable per-database id embedded in every entity id;
+/// <see cref="ArchetypeId"/>
+/// is the per-process catalog id the trace's archetype table is keyed by. They are usually *different numbers for the same archetype* — design §5.3's
+/// landmine. Spawns know both. Destroys know only the routing id (the wire event carries just the entity id), and set <see cref="ArchetypeId"/> to
+/// <see cref="UnknownArchetypeId"/> rather than guessing: a fabricated catalog id would join to the wrong archetype and look plausible doing it.
+/// </para>
+/// </remarks>
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+public struct EntityLifecycleRun
+{
+    /// <summary>Sentinel for <see cref="ArchetypeId"/> when the source event did not carry a catalog id (every destroy).</summary>
+    public const ushort UnknownArchetypeId = 0xFFFF;
+
+    /// <summary>Tick number the run was recorded in. Zero for pre-tick activity — bulk loads during setup land here, and are kept, not dropped.</summary>
+    public uint TickNumber;
+
+    /// <summary>Per-process catalog archetype id (matches <c>ArchetypeRecord.ArchetypeId</c>), or <see cref="UnknownArchetypeId"/> for destroys.</summary>
+    public ushort ArchetypeId;
+
+    /// <summary>Durable per-database routing id — the low 16 bits of every entity id in this run, and the one identifier safe to join on directly.</summary>
+    public ushort RoutingId;
+
+    /// <summary>First entity key in the run. The n-th entity's raw id is <c>((FirstEntityKey + n) &lt;&lt; 16) | RoutingId</c>.</summary>
+    public long FirstEntityKey;
+
+    /// <summary>Number of consecutive keys in the run. Always &gt;= 1.</summary>
+    public uint Count;
+
+    /// <summary>Spawn or destroy — see <see cref="EntityLifecycleKind"/>.</summary>
+    public byte Kind;
+
+    /// <summary>Reserved; zero on disk. Keeps the record at 24 B and 8-byte aligned.</summary>
+    public byte _reserved0;
+
+    /// <summary>Reserved; zero on disk.</summary>
+    public ushort _reserved1;
+}

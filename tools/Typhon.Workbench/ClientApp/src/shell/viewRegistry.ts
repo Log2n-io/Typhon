@@ -51,6 +51,9 @@ export const ZONE_D_VIEW_ACTIVE: Readonly<Record<string, boolean>> = {
   // mode (the 2→1 consolidation, GAP-19's sibling). AccessMatrix is therefore *removed* — it is no longer a
   // standalone view, so it has no entry here (its panel/command/menu were deleted, not gated).
   DataFlow: true,
+  // Stage 3 / #620: the entity lens. Registered as its own view because its data comes from the capture's
+  // EntityLifecycle section, which is independent of the touch rollup Data Flow reads.
+  EntityLifecycle: true,
   // Query (P-A/B) — query-analysis deep view.
   // Stage 3 Phase 4 (GAP-19): the Query Analyzer — one master/detail view that CONSOLIDATED the former
   // Query Catalog + Query Plan Tree + Execution Inspector (those 3 panels deleted in 4D-2; their reused
@@ -117,6 +120,7 @@ const VIEW_SESSION_SCOPE: Readonly<Record<string, ViewSessionScope>> = {
   SystemDag: 'profiler',
   CriticalPath: 'profiler',
   DataFlow: 'profiler',
+  EntityLifecycle: 'profiler',
   QueryAnalyzer: 'profiler',
   EngineLiveHealth: 'profiler',
   SystemsQueriesNav: 'profiler',

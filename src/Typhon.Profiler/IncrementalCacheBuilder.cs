@@ -76,6 +76,149 @@ public sealed class IncrementalCacheBuilder : IDisposable
     private readonly Dictionary<uint, SystemArchetypeTouchAccumulator> _currentTickSystemArchetypeTouches = new();
     private readonly List<SystemArchetypeTouchSummary> _systemArchetypeTouches = new(capacity: 4096);
 
+    // Workbench entity lens (#620): spawn/destroy runs. Unlike the touch rollup there is nothing to accumulate — every lifecycle event *is* a run — so
+    // this is a per-tick scratch buffer whose only job is to let FinalizeCurrentTick stamp the authoritative tick number and sort the tick's slice by
+    // first key. Sorting per tick keeps the concatenated section sorted by (TickNumber, FirstEntityKey) without ever sorting the whole thing.
+    private readonly List<EntityLifecycleRun> _currentTickLifecycleRuns = new();
+    private readonly List<EntityLifecycleRun> _entityLifecycleRuns = new(capacity: 4096);
+
+    /// <summary>Entity key from a raw <c>EntityId</c> — the high 48 bits. Consecutive entities differ by 1 here (and by 65,536 in raw value).</summary>
+    private static long KeyOf(ulong rawEntityId) => (long)(rawEntityId >> 16);
+
+    /// <summary>Durable per-database routing id from a raw <c>EntityId</c> — the low 16 bits.</summary>
+    private static ushort RoutingIdOf(ulong rawEntityId) => (ushort)(rawEntityId & 0xFFFF);
+
+    /// <summary>
+    /// Folds one entity-lifecycle wire event (#620) into a buffered run.
+    /// </summary>
+    /// <remarks>
+    /// Lives outside <see cref="FoldV12Event"/>'s switch because BOTH the per-tick fold and the pre-tick path call it. A world populated during setup does
+    /// all its spawning before the first <c>TickStart</c>, and those records have to produce the same rows as in-tick ones — the first end-to-end probe of
+    /// a real capture returned zero lifecycle rows precisely because they did not.
+    /// </remarks>
+    private void FoldLifecycleEvent(TraceEventKind kind, ReadOnlySpan<byte> records, int pos, int size)
+    {
+        switch (kind)
+        {
+            case TraceEventKind.EcsSpawn:
+            {
+                // Span event. Required payload: u16 archetypeId. Then the optMask byte, then optional u64 entityId (0x01), i64 tsn (0x02).
+                // The entity id is what the whole entity lens joins on, so a record without it contributes nothing and is skipped rather than
+                // recorded as a run with a fabricated key.
+                if (!TryGetSpanPayload(records, pos, size, requiredBytes: 2, out var payload))
+                {
+                    return;
+                }
+
+                var archetypeId = BinaryPrimitives.ReadUInt16LittleEndian(payload);
+                var optMask = payload[2];
+                if ((optMask & 0x01) == 0 || payload.Length < 3 + 8)
+                {
+                    return;
+                }
+
+                var rawId = BinaryPrimitives.ReadUInt64LittleEndian(payload[3..]);
+                AddLifecycleRun(EntityLifecycleKind.Spawn, archetypeId, RoutingIdOf(rawId), KeyOf(rawId), count: 1);
+                return;
+            }
+            case TraceEventKind.EcsSpawnBatch:
+            {
+                // Instant event, all-required payload in declaration order: u16 archetypeId, u16 routingId, i64 baseKey, i32 count, i64 tsn = 24 B.
+                // No optMask — nothing here is optional, precisely so the cohort can never arrive half-described.
+                if (size < CommonHeaderSize + 24)
+                {
+                    return;
+                }
+
+                var batchArchetypeId = BinaryPrimitives.ReadUInt16LittleEndian(records[(pos + CommonHeaderSize)..]);
+                var batchRoutingId = BinaryPrimitives.ReadUInt16LittleEndian(records[(pos + CommonHeaderSize + 2)..]);
+                var baseKey = BinaryPrimitives.ReadInt64LittleEndian(records[(pos + CommonHeaderSize + 4)..]);
+                var batchCount = BinaryPrimitives.ReadInt32LittleEndian(records[(pos + CommonHeaderSize + 12)..]);
+                if (batchCount <= 0)
+                {
+                    return;
+                }
+
+                AddLifecycleRun(EntityLifecycleKind.Spawn, batchArchetypeId, batchRoutingId, baseKey, (uint)batchCount);
+                return;
+            }
+            case TraceEventKind.EcsDestroy:
+            {
+                // Span event. Required payload: u64 entityId. Then optMask, then optional i32 cascadeCount (0x01), i64 tsn (0x02).
+                // Only the routing id is recoverable here — the wire event carries no catalog archetype id, and inventing one would join the run to
+                // whichever archetype happened to register in that slot (design §5.3).
+                if (!TryGetSpanPayload(records, pos, size, requiredBytes: 8, out var destroyPayload))
+                {
+                    return;
+                }
+
+                var destroyedId = BinaryPrimitives.ReadUInt64LittleEndian(destroyPayload);
+                AddLifecycleRun(EntityLifecycleKind.Destroy, EntityLifecycleRun.UnknownArchetypeId,
+                    RoutingIdOf(destroyedId), KeyOf(destroyedId), count: 1);
+                return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Stamps the buffered lifecycle runs with <paramref name="tickNumber"/> and appends them to the section, sorted by first key.
+    /// </summary>
+    /// <remarks>
+    /// Stamping happens here rather than at fold time so the section always agrees with the tick the records were *attributed* to — which for pre-tick
+    /// activity is the synthetic tick 0, not the first real tick. Sorting per tick keeps the concatenated section ordered by
+    /// <c>(TickNumber, FirstEntityKey)</c> without ever sorting the whole array, which is the cohort endpoint's binary-search precondition.
+    /// </remarks>
+    private void FlushLifecycleRuns(uint tickNumber)
+    {
+        if (_currentTickLifecycleRuns.Count == 0)
+        {
+            return;
+        }
+
+        _currentTickLifecycleRuns.Sort(static (a, b) => a.FirstEntityKey.CompareTo(b.FirstEntityKey));
+        for (var i = 0; i < _currentTickLifecycleRuns.Count; i++)
+        {
+            var run = _currentTickLifecycleRuns[i];
+            run.TickNumber = tickNumber;
+            _entityLifecycleRuns.Add(run);
+        }
+        _currentTickLifecycleRuns.Clear();
+    }
+
+    /// <summary>Buffer one run for the tick in progress. <see cref="FinalizeCurrentTick"/> stamps the tick number and sorts.</summary>
+    private void AddLifecycleRun(EntityLifecycleKind kind, ushort archetypeId, ushort routingId, long firstKey, uint count)
+        => _currentTickLifecycleRuns.Add(new EntityLifecycleRun
+        {
+            ArchetypeId = archetypeId,
+            RoutingId = routingId,
+            FirstEntityKey = firstKey,
+            Count = count,
+            Kind = (byte)kind,
+        });
+
+    /// <summary>
+    /// Slices a span record's payload — everything after the variable-length span header. Returns false when the record is too short to hold
+    /// <paramref name="requiredBytes"/> of required payload plus the always-present optMask byte that follows it.
+    /// </summary>
+    private static bool TryGetSpanPayload(ReadOnlySpan<byte> records, int pos, int size, int requiredBytes, out ReadOnlySpan<byte> payload)
+    {
+        payload = default;
+        if (size < CommonHeaderSize + SpanHeaderExtSize)
+        {
+            return false;
+        }
+
+        var spanFlags = records[pos + 36];
+        var headerSize = TraceRecordHeader.SpanHeaderSize((spanFlags & 0x01) != 0, (spanFlags & 0x02) != 0);
+        if (headerSize + requiredBytes + 1 > size)
+        {
+            return false;
+        }
+
+        payload = records.Slice(pos + headerSize, size - headerSize);
+        return true;
+    }
+
     /// <summary>Per-(system, archetype) per-tick scratch entry, accumulated as <c>SchedulerSystemArchetype</c> events arrive.</summary>
     private struct SystemArchetypeTouchAccumulator
     {
@@ -106,6 +249,9 @@ public sealed class IncrementalCacheBuilder : IDisposable
 
     /// <summary>Read-only view of finalized per-(tick, system, archetype) rows.</summary>
     public IReadOnlyList<SystemArchetypeTouchSummary> SystemArchetypeTouches => _systemArchetypeTouches;
+
+    /// <summary>Read-only view of finalized entity spawn/destroy runs, sorted by (TickNumber, FirstEntityKey).</summary>
+    public IReadOnlyList<EntityLifecycleRun> EntityLifecycleRuns => _entityLifecycleRuns;
 
     /// <summary>Read-only view of finalized per-tick post-tick markers.</summary>
     public IReadOnlyList<PostTickSummary> PostTickSummaries => _postTickSummaries;
@@ -372,6 +518,10 @@ public sealed class IncrementalCacheBuilder : IDisposable
                         // Synthesize tick-0 summary BEFORE flushing so it lands in TickSummaries in tick-number order.
                         SynthesizeTickZeroSummary();
 
+                        // #620: the lifecycle runs folded from those pre-tick records belong to the same synthetic tick 0. FinalizeCurrentTick never
+                        // ran for it (no tick was active), so this is the only place they can be stamped correctly.
+                        FlushLifecycleRuns(tickNumber: 0);
+
                         _chunkFromTick = 0;
                         _chunkFlags = TraceFileCacheConstants.FlagIsContinuation;
                         FlushChunkInternal(toTick: 1);
@@ -546,6 +696,12 @@ public sealed class IncrementalCacheBuilder : IDisposable
                 // Memory/GC/ThreadInfo) silently dropped EcsSpawn and other "real" event kinds emitted pre-tick —
                 // fixing #289 also fixes that latent bug for replay traces of the same pattern. The 16 MB cap
                 // protects against runaway buffering.
+                // #620: fold the entity-lifecycle kinds even before the first TickStart. A world populated at startup does ALL its spawning here — the
+                // comment above is explicit that this is the AntHill 200K-entity case — so an entity lens that only folded post-TickStart records would
+                // report an empty cohort set for exactly the captures it exists to explain. Deliberately narrow: the other v12 accumulators are keyed to a
+                // tick that has not begun, and folding them here would attribute setup-phase work to tick 1.
+                FoldLifecycleEvent(kind, records, pos, size);
+
                 if (_preTickBuffer.Length + size <= PreTickBufferCap)
                 {
                     _preTickBuffer.Write(records.Slice(pos, size));
@@ -674,7 +830,7 @@ public sealed class IncrementalCacheBuilder : IDisposable
                 };
                 CacheHeader.SetIdentifier(ref cacheHeader, _fingerprint);
                 _sink.WriteTrailer(_tickSummaries, metrics, aggArr, _chunkManifest, _spanNames, default, cacheHeader,
-                    _systemTickSummaries, _queueTickSummaries, _postTickSummaries, _queueIdToName, _systemArchetypeTouches);
+                    _systemTickSummaries, _queueTickSummaries, _postTickSummaries, _queueIdToName, _systemArchetypeTouches, _entityLifecycleRuns);
             }
         }
         finally
@@ -1028,6 +1184,8 @@ public sealed class IncrementalCacheBuilder : IDisposable
             _currentTickSystemArchetypeTouches.Clear();
         }
 
+        FlushLifecycleRuns(tickNumber);
+
         // Post-tick row. Always emit one row per tick — zero µs for phases that didn't fire — so consumers can index by tick.
         if (_currentTickPostMarkersHasData)
         {
@@ -1177,6 +1335,11 @@ public sealed class IncrementalCacheBuilder : IDisposable
                 acc.ChunkCount += (uint)Math.Max(0, chunks);
                 break;
             }
+            case TraceEventKind.EcsSpawn:
+            case TraceEventKind.EcsSpawnBatch:
+            case TraceEventKind.EcsDestroy:
+                FoldLifecycleEvent(kind, records, pos, size);
+                break;
             case TraceEventKind.RuntimePhaseSpan:
             {
                 // Span event with u8 phase payload. Need durationTicks + the trailing phase byte.

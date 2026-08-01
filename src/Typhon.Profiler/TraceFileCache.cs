@@ -258,6 +258,14 @@ public enum CacheSectionId : ushort
     /// track families surfaced through <c>AggregationService</c>.
     /// </summary>
     SystemArchetypeTouches = 18,
+
+    /// <summary>
+    /// Entity spawn/destroy runs (<see cref="EntityLifecycleRun"/>[]) added in v17 for the Workbench entity lens (#620, design §4.4). Folded from the
+    /// <c>EcsSpawn</c>, <c>EcsSpawnBatch</c> and <c>EcsDestroy</c> wire events. Sorted by (TickNumber, FirstEntityKey) so a tick range resolves by binary
+    /// search. Answers "which entities were born here, and which of them has the database still got?" — the one bridge that is safe by construction,
+    /// because entity ids are monotonic and never recycled.
+    /// </summary>
+    EntityLifecycle = 19,
 }
 
 /// <summary>
@@ -566,12 +574,16 @@ public static class TraceFileCacheConstants
     /// v15: one new section <see cref="CacheSectionId.SystemArchetypeTouches"/> folded from the new
     /// <c>SchedulerSystemArchetype</c> wire event (kind 245). Drives the <c>archetype/*</c>, <c>system-archetype/*</c>, and
     /// <c>component-family/*</c> track families in the Workbench Data Flow module (#327). v14 caches must rebuild.
-    /// v16 (current, 2026-05-10): no schema change, but <see cref="TraceEventKind.NamedSpan"/> reassigned from value 200 to 246
+    /// v16 (2026-05-10): no schema change, but <see cref="TraceEventKind.NamedSpan"/> reassigned from value 200 to 246
     /// (was colliding with <see cref="TraceEventKind.EcsQueryMaskAnd"/>). Cached records reference the kind ID directly, so
     /// v15 caches must rebuild to re-emit NamedSpan records under the new ID. v15 caches load against v8 source files would
     /// mis-decode kind=200 records; bump enforces rebuild.
+    /// v17 (current): one new section <see cref="CacheSectionId.EntityLifecycle"/> (<see cref="EntityLifecycleRun"/>[]) folded from the
+    /// <c>EcsSpawn</c> / <c>EcsDestroy</c> spans and the new <c>EcsSpawnBatch</c> instant (kind 36). Drives the Workbench entity lens's
+    /// spawn/destroy cohorts (#620) and the <c>lifecycle/*</c> track families. v16 caches must rebuild — they carry no lifecycle rows, and
+    /// their source traces predate <c>EcsSpawnBatch</c>, so batch spawns in them were never recorded at all.
     /// </remarks>
-    public const ushort CurrentChunkerVersion = 16;
+    public const ushort CurrentChunkerVersion = 17;
 
     /// <summary>Sidecar file extension, appended to the source path (e.g., <c>foo.typhon-trace</c> → <c>foo.typhon-trace-cache</c>).</summary>
     public const string CacheFileExtension = "-cache";

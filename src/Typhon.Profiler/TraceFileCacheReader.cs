@@ -53,6 +53,8 @@ public sealed class TraceFileCacheReader : IDisposable
     private readonly Dictionary<ushort, string> _queueIdToName = new();
     // ── v15 (#327) ──────────────────────────────────────────────────────
     private readonly List<SystemArchetypeTouchSummary> _systemArchetypeTouches = [];
+    // ── v17 (#620) ──────────────────────────────────────────────────────
+    private readonly List<EntityLifecycleRun> _entityLifecycleRuns = [];
     private byte[] _sourceMetadataBytes;
     private GlobalMetricsFixed _globalMetrics;
     private CacheHeader _header;
@@ -141,6 +143,9 @@ public sealed class TraceFileCacheReader : IDisposable
 
     /// <summary>v15 per-(tick, system, archetype) entity-touch rows. Empty for v14-or-older caches.</summary>
     public IReadOnlyList<SystemArchetypeTouchSummary> SystemArchetypeTouches => _systemArchetypeTouches;
+
+    /// <summary>Entity spawn/destroy runs (v17, #620), sorted by (TickNumber, FirstEntityKey). Empty for caches built before v17.</summary>
+    public IReadOnlyList<EntityLifecycleRun> EntityLifecycleRuns => _entityLifecycleRuns;
 
     /// <summary>
     /// True when <see cref="CacheHeaderFlags.IsSelfContained"/> is set in the header. A self-contained cache carries the source metadata tables
@@ -411,6 +416,11 @@ public sealed class TraceFileCacheReader : IDisposable
         if (_sectionsByid.TryGetValue(CacheSectionId.SystemArchetypeTouches, out var satSec))
         {
             LoadStructArray(satSec, _systemArchetypeTouches);
+        }
+        // v17 section (#620). Optional for the same reason — a v16 cache has no lifecycle rows, which reads as an empty list.
+        if (_sectionsByid.TryGetValue(CacheSectionId.EntityLifecycle, out var elSec))
+        {
+            LoadStructArray(elSec, _entityLifecycleRuns);
         }
     }
 

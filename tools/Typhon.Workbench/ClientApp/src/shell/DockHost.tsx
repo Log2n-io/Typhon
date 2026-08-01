@@ -137,6 +137,7 @@ const components: Record<string, React.FC<IDockviewPanelProps>> = {
   ComponentInspector: lazyPanel(() => import('@/panels/ComponentInspector/ComponentInspectorPanel')),
   SystemDag: lazyPanel(() => import('@/panels/SystemDag/SystemDagPanel')),
   DataFlow: lazyPanel(() => import('@/panels/DataFlow/DataFlowPanel')),
+  EntityLifecycle: lazyPanel(() => import('@/panels/EntityLifecycle/CohortsPanel')),
   CriticalPath: lazyPanel(() => import('@/panels/CriticalPath/CriticalPathPanel')),
   CallTree: lazyPanel(() => import('@/panels/profiler/CallTree')),
   Options: lazyPanel(() => import('@/panels/options/OptionsPanel')),
