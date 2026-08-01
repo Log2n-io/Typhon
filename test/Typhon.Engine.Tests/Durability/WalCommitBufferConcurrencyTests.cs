@@ -780,6 +780,15 @@ public class WalCommitBufferConcurrencyTests : AllocatorTestBase
                 {
                     buffer.CompleteDrain(data.Length);
                 }
+                else
+                {
+                    // Park instead of re-trying hot — every other consumer in this fixture does the same. Without it this
+                    // loop burns a whole core polling an empty buffer while `threadCount` producers compete for what is
+                    // left; where threads outnumber cores that starves the producers this consumer exists to unblock,
+                    // until their 20 s claim deadline expires (observed on a 3-core CI runner: producer 0 threw
+                    // WalBackPressureTimeoutException).
+                    buffer.WaitForData(5);
+                }
             }
 
             while (buffer.TryDrain(out var remaining, out _))

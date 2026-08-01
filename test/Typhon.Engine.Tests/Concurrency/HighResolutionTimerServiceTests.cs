@@ -31,26 +31,44 @@ public class HighResolutionTimerServiceTests
     public void Single_FiresAtExpectedRate()
     {
         var count = 0L;
+        var intervalTicks = Stopwatch.Frequency / 200; // 5ms interval
 
         using var timer = new HighResolutionTimerService(
             "RateTest",
-            Stopwatch.Frequency / 200, // 5ms interval
+            intervalTicks,
             (_, _) => Interlocked.Increment(ref count),
             _registry.TimerDedicated);
 
         timer.Start();
 
-        // Run for 100ms — expect ~20 invocations (±50% margin for CI)
+        // The observation window is MEASURED, never assumed. `Thread.Sleep(100)` is a lower bound, not a duration:
+        // on a loaded or oversubscribed CI box it routinely overshoots, and against a hard-coded count that surfaces
+        // as "too many invocations" — a failure mode indistinguishable, from the count alone, from a timer that is
+        // genuinely running fast. Measured on a 3-core macOS runner: 44 invocations, i.e. a ~220 ms window.
+        var start = Stopwatch.GetTimestamp();
         Thread.Sleep(100);
 
         // Stop the timer before reading counters to avoid a race where the
         // timer fires between reading `count` and `InvocationCount`.
         timer.Dispose();
+        var elapsedTicks = Stopwatch.GetTimestamp() - start;
 
         var invocations = Interlocked.Read(ref count);
+        var expected = (double)elapsedTicks / intervalTicks;
+        var elapsedMs = elapsedTicks * 1000.0 / Stopwatch.Frequency;
 
-        Assert.That(invocations, Is.GreaterThanOrEqualTo(10), "Too few invocations");
-        Assert.That(invocations, Is.LessThanOrEqualTo(30), "Too many invocations");
+        // The upper bound is the real invariant here, and it is TIGHT: a metronome cannot fire more often than the
+        // elapsed window allows. ExecuteCallbacks advances _nextTick by exactly one interval and, when it has fallen
+        // behind, skips forward to within one interval of now — so catch-up can never burst. The +2 covers the two
+        // window boundaries (a tick in flight at Start, and one during Dispose's thread join).
+        Assert.That(invocations, Is.LessThanOrEqualTo((long)expected + 2),
+            $"Fired {invocations}x in {elapsedMs:F1}ms at a 5ms interval; a metronome cannot exceed {expected:F1}.");
+
+        // The lower bound stays deliberately loose. A starved timer thread legitimately misses ticks — that is a
+        // property of the machine, not a defect in the timer.
+        Assert.That(invocations, Is.GreaterThanOrEqualTo((long)(expected * 0.5)),
+            $"Fired only {invocations}x in {elapsedMs:F1}ms at a 5ms interval; expected at least half of {expected:F1}.");
+
         Assert.That(timer.InvocationCount, Is.EqualTo(invocations));
     }
 
@@ -149,10 +167,11 @@ public class HighResolutionTimerServiceTests
         // Verify that the timer uses metronome-style advancement:
         // Even if callbacks take some time, the average rate should be close to the configured interval
         var count = 0L;
+        var intervalTicks = Stopwatch.Frequency / 100; // 10ms interval
 
         using var timer = new HighResolutionTimerService(
             "DriftTest",
-            Stopwatch.Frequency / 100, // 10ms interval
+            intervalTicks,
             (_, _) =>
             {
                 Interlocked.Increment(ref count);
@@ -162,13 +181,22 @@ public class HighResolutionTimerServiceTests
 
         timer.Start();
 
-        // Run for 250ms at a 10ms interval — expect ~25 invocations with metronome-style (no drift). Half the wall-clock of the original 500ms/20ms form for the same tick count and drift signal.
+        // Run at a 10ms interval over a MEASURED window (see Single_FiresAtExpectedRate for why the sleep duration is
+        // not trustworthy as the window). 250ms nominal — half the wall-clock of the original 500ms/20ms form, for the
+        // same tick count and the same drift signal.
+        var start = Stopwatch.GetTimestamp();
         Thread.Sleep(250);
+        var elapsedTicks = Stopwatch.GetTimestamp() - start;
 
         var invocations = Interlocked.Read(ref count);
+        var expected = (double)elapsedTicks / intervalTicks;
+        var elapsedMs = elapsedTicks * 1000.0 / Stopwatch.Frequency;
 
-        // With drift, we'd see fewer invocations; metronome keeps the rate steady
-        Assert.That(invocations, Is.GreaterThanOrEqualTo(15), "Drift prevention: too few ticks");
-        Assert.That(invocations, Is.LessThanOrEqualTo(35), "Drift prevention: too many ticks");
+        // With drift, each callback's ~1ms of work would push the next tick out and the error would compound, so the
+        // count falls away from the ideal rate. The metronome advances from the SCHEDULED time, keeping it steady.
+        Assert.That(invocations, Is.GreaterThanOrEqualTo((long)(expected * 0.5)),
+            $"Drift prevention: fired {invocations}x in {elapsedMs:F1}ms at a 10ms interval; expected near {expected:F1}.");
+        Assert.That(invocations, Is.LessThanOrEqualTo((long)expected + 2),
+            $"Drift prevention: fired {invocations}x in {elapsedMs:F1}ms at a 10ms interval; cannot exceed {expected:F1}.");
     }
 }

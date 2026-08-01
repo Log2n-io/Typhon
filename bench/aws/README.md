@@ -26,6 +26,14 @@ Three tasks are launched by GitHub Actions, not by hand. Full design:
   (coverage is hardware-independent). Kept **off** the per-PR gate — a second instrumented pass roughly
   doubles the gate's wall-clock.
 
+A fourth workflow uses `shard.py` **without** AWS: `.github/workflows/nightly-macos-arm64.yml` runs the
+engine suite nightly on a GitHub-hosted `macos-15` runner (Apple Silicon — the arm64 platform Typhon
+supports for developers, which the x64 gate cannot exercise; see `claude/rules/durability.md` → SL-07).
+That runner has 3 cores, so the committed K=8 `shards.json` would oversubscribe it ~2.7×. It instead
+generates a **single-shard plan** at runtime from `shard.py`'s own `catchall_filter([])` and points
+`SHARD_PLAN` at it — a serial `workers=1` run that still inherits the `Category=Sensitive` quiet pass and
+the 2-attempt retry of failures. Non-blocking; never a required check.
+
 The AntHill runbook below is for **manual** trace-capture runs, unrelated to CI.
 
 Full design and one-time operator setup: see
