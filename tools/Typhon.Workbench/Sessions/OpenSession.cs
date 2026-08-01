@@ -64,6 +64,15 @@ public sealed class OpenSession : ISession, IDisposable
     /// <remarks>The profiler capability is acquired and released as profiles come and go, which is exactly why it cannot be derived from the session kind.</remarks>
     public IReadOnlySet<string> Capabilities => _profiles.IsEmpty ? DatabaseOnly : DatabaseAndProfiler;
 
+    /// <inheritdoc />
+    /// <remarks>
+    /// Delegated to the active profile, because a freshly attached capture is exactly as "still building" as a trace session is (#618). Without this the
+    /// session inherits the interface default of <c>false</c> and the not-ready answers in the seconds after an attach come back as <b>409 Conflict</b> —
+    /// permanent, a hard client error — instead of <b>202 Accepted</b>, which is what they are: the client polls and the request succeeds a moment later.
+    /// The capability flips the instant a profile is attached, so this window is reached on every single attach.
+    /// </remarks>
+    public bool IsSchemaBuilding => ActiveProfile is { } active && !active.IsBuildComplete;
+
     /// <summary>Attaches a capture and makes it the active profile. Returns its new profile id.</summary>
     public Guid AttachProfile(TraceSessionRuntime runtime)
     {

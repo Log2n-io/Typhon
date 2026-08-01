@@ -5,6 +5,7 @@ import { useProfilerNameMaps } from '@/hooks/useProfilerNameMaps';
 import { useExecutions } from './useExecutions';
 import { toNumber } from './numeric';
 import { QueryDetailHeader } from './QueryDetailHeader';
+import { useQueryTargetReality } from '@/hooks/profiles/useQueryTargetReality';
 import { QueryExecutionsTab } from './QueryExecutionsTab';
 import { useQueryAnalyzerStore, type QueryDetailTab } from './useQueryAnalyzerStore';
 
@@ -47,6 +48,11 @@ export function QueryDetail({ definition }: { definition: QueryDefinitionDto }) 
   const activeTab = useQueryAnalyzerStore((s) => s.activeTab);
   const setActiveTab = useQueryAnalyzerStore((s) => s.setActiveTab);
 
+  // The database's half of the §4.3 diagnosis. Resolved here rather than in the header so the header stays what its
+  // contract says it is — pure, everything pre-resolved. No-ops on a session with no database.
+  const targetIsComponent = componentTypeIds.has(targetId);
+  const reality = useQueryTargetReality(archetypeName || null, targetIsComponent);
+
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-background">
       <QueryDetailHeader
@@ -54,7 +60,8 @@ export function QueryDetail({ definition }: { definition: QueryDefinitionDto }) 
         archetypeName={archetypeName}
         ownerNames={ownerNames}
         targetId={targetId}
-        targetIsComponent={componentTypeIds.has(targetId)}
+        targetIsComponent={targetIsComponent}
+        reality={reality}
       />
       <Tabs
         value={activeTab}

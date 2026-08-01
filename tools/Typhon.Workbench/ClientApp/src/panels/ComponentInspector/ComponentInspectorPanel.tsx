@@ -16,7 +16,8 @@ import { useIndexesForComponent } from '@/hooks/schema/useIndexesForComponent';
 import { useArchetypesForComponent } from '@/hooks/schema/useArchetypesForComponent';
 import { useSystemRelationships } from '@/hooks/schema/useSystemRelationships';
 import { useSelectionStore } from '@/stores/useSelectionStore';
-import { useSessionStore } from '@/stores/useSessionStore';
+import { useSessionCapability } from '@/stores/useSessionStore';
+import type { ComponentIdentityLike } from '@/libs/schema/componentIdentity';
 import { openArchetypeInspector, openDataBrowser } from '@/shell/commands/openSchemaBrowser';
 import { openDbMapForComponent } from '@/shell/commands/openDbMap';
 import { pickPrimaryArchetype } from '@/hooks/dataBrowser/pickArchetype';
@@ -183,7 +184,8 @@ export default function ComponentInspectorPanel(props: IDockviewPanelProps) {
           <UsedInTab typeName={typeName} onReveal={(id) => { select('archetype', id); openArchetypeInspector(); }} />
         </TabsContent>
         <TabsContent value="relationships" className="mt-0 min-h-0 flex-1 overflow-auto">
-          <RelationshipsTab typeName={typeName} />
+          {/* Both names are passed: the panel displays `typeName`, but the capture join runs on `fullName` (#618 §4.1). */}
+          <RelationshipsTab typeName={typeName} component={summary ?? { typeName, fullName: typeName }} />
         </TabsContent>
       </Tabs>
     </div>
@@ -288,30 +290,42 @@ function IndexesTab({ typeName }: { typeName: string }) {
   );
 }
 
-function RelationshipsTab({ typeName }: { typeName: string }) {
-  const kind = useSessionStore((s) => s.kind);
-  // Relationships (who reads / triggers on a component) are a runtime concept — they come from a trace's
-  // recorded topology or a live engine. A static database file (Open) has no systems, so we don't fetch
-  // (which would 409 the profiler/topology endpoints) and show a kind-appropriate note instead.
-  if (kind === 'open') {
+function RelationshipsTab({ typeName, component }: { typeName: string; component: ComponentIdentityLike }) {
+  // Relationships are a runtime concept: they come from a capture's recorded topology or a live engine, never from the
+  // database file itself. Before #618 this asked "is this an Open session?" — a question that stopped being the right
+  // one when #617 let a capture attach TO an open database. The capability is the precise condition.
+  const hasProfiler = useSessionCapability('profiler');
+  const hasDatabase = useSessionCapability('database');
+
+  if (!hasProfiler) {
     return (
       <div className="p-4 text-fs-base" data-testid="component-relationships">
         <p className="text-foreground">System relationships</p>
         <p className="mt-1 text-fs-sm text-muted-foreground">
-          Which systems read or trigger on this component comes from a running engine — open a <strong>trace</strong> or{' '}
-          <strong>attach</strong> to a live engine to see it. A database file on its own has no systems.
+          {hasDatabase ? (
+            <>
+              A database file on its own has no systems — nothing in it records which code touches which data. Attach a
+              profiling capture from the <strong>Profiles</strong> panel and this shows which systems write and read this
+              component.
+            </>
+          ) : (
+            <>
+              Which systems read or trigger on this component comes from a running engine — open a <strong>trace</strong> or{' '}
+              <strong>attach</strong> to a live engine to see it.
+            </>
+          )}
         </p>
       </div>
     );
   }
-  return <ProfilerRelationships typeName={typeName} />;
+  return <ProfilerRelationships typeName={typeName} component={component} />;
 }
 
-function ProfilerRelationships({ typeName }: { typeName: string }) {
+function ProfilerRelationships({ typeName, component }: { typeName: string; component: ComponentIdentityLike }) {
   const { response, isLoading, isError } = useSystemRelationships(typeName);
   return (
     <div className="flex h-full w-full flex-col overflow-hidden">
-      <AccessChips componentTypeName={typeName} />
+      <AccessChips component={component} />
       {!response.runtimeHosted && (
         <div
           data-testid="rel-runtime-banner"

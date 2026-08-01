@@ -5,6 +5,7 @@ import type { IDockviewPanelProps } from 'dockview-react';
 import type { ArchetypeInfo, ComponentSchema, ComponentSummary, IndexInfo } from '@/hooks/schema/types';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useSessionStore } from '@/stores/useSessionStore';
+import { sessionCapabilitiesForKind } from '@/stores/sessionCapabilitiesForKind';
 import { useDataBrowserStore } from '@/stores/useDataBrowserStore';
 import { useInspectorTargetStore } from '@/stores/useInspectorTargetStore';
 
@@ -221,17 +222,30 @@ describe('ComponentInspectorPanel', () => {
     expect(screen.getByText('Position')).toBeTruthy();
   });
 
-  it('Relationships tab (Open session) shows the trace/attach note — no topology fetch', () => {
-    useSessionStore.setState({ kind: 'open' });
+  it('Relationships tab (database, no capture) points at the Profiles panel — no topology fetch', () => {
+    // #618 §4.1: the tab now gates on the profiler capability, not the session kind, because a capture can be attached
+    // to an open database. Without one there is still nothing to show — but the advice is "attach a capture", not
+    // "open a trace session instead", which stopped being true in #617.
+    useSessionStore.setState({ kind: 'open', capabilities: sessionCapabilitiesForKind('open') });
     useSelectionStore.getState().select('component', 'Position');
     render(<ComponentInspectorPanel {...PROPS} />);
     act(() => screen.getByRole('tab', { name: 'Relationships' }).focus());
     expect(screen.getByText(/a database file on its own has no systems/i)).toBeTruthy();
+    expect(screen.getByText(/attach a profiling capture/i)).toBeTruthy();
+    expect(screen.queryByTestId('rel-runtime-banner')).toBeNull();
+  });
+
+  it('Relationships tab (no session at all) still names trace / attach', () => {
+    useSessionStore.setState({ kind: 'open', capabilities: [] });
+    useSelectionStore.getState().select('component', 'Position');
+    render(<ComponentInspectorPanel {...PROPS} />);
+    act(() => screen.getByRole('tab', { name: 'Relationships' }).focus());
+    expect(screen.getByText(/open a/i)).toBeTruthy();
     expect(screen.queryByTestId('rel-runtime-banner')).toBeNull();
   });
 
   it('Relationships tab (trace, runtime not hosted) shows the runtime-not-hosted gate', () => {
-    useSessionStore.setState({ kind: 'trace' });
+    useSessionStore.setState({ kind: 'trace', capabilities: sessionCapabilitiesForKind('trace') });
     useSelectionStore.getState().select('component', 'Position');
     render(<ComponentInspectorPanel {...PROPS} />);
     act(() => screen.getByRole('tab', { name: 'Relationships' }).focus());

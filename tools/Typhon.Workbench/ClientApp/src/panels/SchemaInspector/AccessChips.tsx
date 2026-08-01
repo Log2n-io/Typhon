@@ -1,21 +1,39 @@
 import { useMemo } from 'react';
 import { useTopology } from '@/hooks/data/useTopology';
 import { useSessionStore } from '@/stores/useSessionStore';
+import {
+  captureComponentIdentities,
+  classifyComponentTraceRelation,
+  declaresComponent,
+  traceIdentityOf,
+  type ComponentIdentityLike,
+} from '@/libs/schema/componentIdentity';
 
 interface AccessChipsProps {
-  componentTypeName: string;
+  /** The focused component, carrying both names. The join runs on `fullName` — see {@link traceIdentityOf}. */
+  component: ComponentIdentityLike;
 }
 
 /**
- * Inline access-declaration summary for a focused component (RFC 07 §Q1 — Unit 6 surfacing).
- * Pulls the declarations directly from the cached topology — single source of truth, no extra
- * round-trip. When the topology is still loading or every system surfaces empty arrays (legacy
- * v5 trace, or a session without phase declarations), the section renders nothing so it doesn't
- * push other content around.
+ * Inline access-declaration summary for a focused component (RFC 07 §Q1; the database bridge is #618 §4.1).
+ *
+ * Pulls the declarations from the cached topology — single source of truth, no extra round-trip. With a capture
+ * attached to an open database this is the readout that gives a database file its **system dimension**: a database on
+ * disk has none of its own.
+ *
+ * **The join runs on the CLR full name, not the display name.** Before #618 this compared the panel's display name —
+ * a bare leaf in a trace session, the `[Component("…")]` schema name in an open database — against declarations
+ * holding `Type.FullName`, so it matched nothing in either session kind and rendered `null` silently. See
+ * `componentIdentity.ts` for the full identifier table.
+ *
+ * It also distinguishes **"the capture never saw this component"** from **"no system touches it"**. Collapsing the two
+ * into one empty state is the silent-wrongness §5.7 forbids: the first says nothing can be known, the second is a real
+ * finding about the recorded run.
  */
-export default function AccessChips({ componentTypeName }: AccessChipsProps) {
+export default function AccessChips({ component }: AccessChipsProps) {
   const sessionId = useSessionStore((s) => s.sessionId);
   const { data: topology } = useTopology(sessionId);
+  const identity = traceIdentityOf(component);
 
   const buckets = useMemo(() => {
     const writes: string[] = [];
@@ -26,18 +44,18 @@ export default function AccessChips({ componentTypeName }: AccessChipsProps) {
 
     for (const s of topology?.systems ?? []) {
       const name = s.name ?? '<unnamed>';
-      if (s.writes?.includes(componentTypeName)) writes.push(name);
-      if (s.sideWrites?.includes(componentTypeName)) sideWrites.push(name);
-      if (s.readsFresh?.includes(componentTypeName)) readsFresh.push(name);
-      if (s.readsSnapshot?.includes(componentTypeName)) readsSnapshot.push(name);
-      if (s.reads?.includes(componentTypeName) || s.additionalReads?.includes(componentTypeName)) {
+      if (declaresComponent(s.writes, identity)) writes.push(name);
+      if (declaresComponent(s.sideWrites, identity)) sideWrites.push(name);
+      if (declaresComponent(s.readsFresh, identity)) readsFresh.push(name);
+      if (declaresComponent(s.readsSnapshot, identity)) readsSnapshot.push(name);
+      if (declaresComponent(s.reads, identity) || declaresComponent(s.additionalReads, identity)) {
         reads.push(name);
       }
     }
     return { writes, sideWrites, readsFresh, readsSnapshot, reads };
-  }, [topology, componentTypeName]);
+  }, [topology, identity]);
 
-  const hasAny =
+  const declaredAnywhere =
     buckets.writes.length +
       buckets.sideWrites.length +
       buckets.readsFresh.length +
@@ -45,12 +63,37 @@ export default function AccessChips({ componentTypeName }: AccessChipsProps) {
       buckets.reads.length >
     0;
 
-  if (!hasAny) {
+  // Still loading: say nothing rather than flashing "not in this capture" and then correcting itself.
+  if (!topology) {
     return null;
   }
 
+  const relation = classifyComponentTraceRelation(
+    identity,
+    captureComponentIdentities(topology.componentTypes),
+    declaredAnywhere,
+  );
+
+  if (relation !== 'declared') {
+    return (
+      <div className="border-b border-border bg-muted/10 px-3 py-2" data-testid="access-chips-empty" data-relation={relation}>
+        <div className="text-fs-xs font-semibold uppercase tracking-wide text-muted-foreground">Access (RFC 07)</div>
+        <p className="mt-1 text-fs-sm text-muted-foreground">
+          {relation === 'absent' ? (
+            <>
+              This capture has no record of <span className="font-mono">{identity || 'this component'}</span> — it was added, removed or renamed since. Which
+              systems touch it cannot be answered from this profile.
+            </>
+          ) : (
+            <>No system declared access to this component in the recorded run.</>
+          )}
+        </p>
+      </div>
+    );
+  }
+
   return (
-    <div className="border-b border-border bg-muted/10 px-3 py-2">
+    <div className="border-b border-border bg-muted/10 px-3 py-2" data-testid="access-chips">
       <div className="text-fs-xs font-semibold uppercase tracking-wide text-muted-foreground">Access (RFC 07)</div>
       <div className="mt-1 flex flex-col gap-1.5">
         <ChipRow label="writes" tone="write" names={buckets.writes} />

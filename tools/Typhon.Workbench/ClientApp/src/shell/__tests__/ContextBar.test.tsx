@@ -1,7 +1,16 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+
+// The drift readout (#618 §4.6) reads the profiles list. Mutable holder so a test can put an active profile behind it;
+// the default is an empty list, which is what a session with no capture sees.
+const hoisted = vi.hoisted(() => ({ profiles: [] as unknown[], databaseTsn: 0 }));
+
+vi.mock('@/hooks/profiles/useProfileList', () => ({
+  useProfileList: () => ({ profiles: hoisted.profiles, databaseTsn: hoisted.databaseTsn }),
+}));
+
 import ContextBar from '@/shell/ContextBar';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
@@ -23,9 +32,21 @@ function renderBar() {
 beforeEach(() => {
   useSelectionStore.getState().clear();
   useEnvTagStore.setState({ tags: {} });
-  useSessionStore.setState({ kind: 'open', filePath: 'C:/data/AntHill.typhon', sessionId: null, capabilities: ['database'] });
+  useSessionStore.setState({
+    kind: 'open', filePath: 'C:/data/AntHill.typhon', sessionId: null, capabilities: ['database'], activeProfileId: null,
+  });
   useProfilerViewStore.setState({ scopeLinked: true, pinnedRange: null });
+  hoisted.profiles = [];
+  hoisted.databaseTsn = 0;
 });
+
+/** An attached capture, as `useProfileList` normalises it. */
+function attachedProfile(over: Record<string, unknown> = {}) {
+  return {
+    fileName: 'c.typhon-trace', profileId: 'pid-1', isActive: true, tsnMax: 900,
+    belongsToDatabase: true, driftTransactions: 124, ...over,
+  };
+}
 afterEach(cleanup);
 
 describe('ContextBar (zone B)', () => {
@@ -96,5 +117,69 @@ describe('ContextBar (zone B)', () => {
     expect(useEnvTagStore.getState().get('C:/data/AntHill.typhon')).toBe('prod');
     // The bar carries the prod tint border.
     expect(container.querySelector('.border-l-red-500')).toBeTruthy();
+  });
+});
+
+/**
+ * #618 §4.6 / §5.7 — never present trace-time and now-time as the same instant. With a capture attached the bar carries
+ * BOTH coordinates plus the drift between them; before this, attaching one swapped the database's coordinate out.
+ */
+describe('ContextBar — two coordinates with a capture attached (#618)', () => {
+  it('keeps the database coordinate AND shows the capture window', () => {
+    useSessionStore.setState({ capabilities: ['database', 'profiler'], activeProfileId: 'pid-1' });
+    useProfilerViewStore.getState().commitViewRange({ startUs: 1000, endUs: 5000 });
+    hoisted.profiles = [attachedProfile()];
+    hoisted.databaseTsn = 1024;
+
+    renderBar();
+
+    expect(screen.getByText('@HEAD')).toBeTruthy();
+    expect(screen.getByText(/1\.0ms–5\.0ms/)).toBeTruthy();
+  });
+
+  it('shows the drift between them', () => {
+    useSessionStore.setState({ capabilities: ['database', 'profiler'], activeProfileId: 'pid-1' });
+    hoisted.profiles = [attachedProfile({ driftTransactions: 124 })];
+    hoisted.databaseTsn = 1024;
+
+    renderBar();
+
+    expect(screen.getByTestId('context-drift').textContent).toContain('124 txns behind');
+  });
+
+  it('says "current" when the capture closed at the database’s present transaction', () => {
+    useSessionStore.setState({ capabilities: ['database', 'profiler'], activeProfileId: 'pid-1' });
+    hoisted.profiles = [attachedProfile({ driftTransactions: 0 })];
+
+    renderBar();
+
+    expect(screen.getByTestId('context-drift').textContent).toBe('current');
+  });
+
+  it('withholds a drift figure for a capture from another database', () => {
+    // Its transaction numbers come from a different sequence — the same rule the Profiles panel applies.
+    useSessionStore.setState({ capabilities: ['database', 'profiler'], activeProfileId: 'pid-1' });
+    hoisted.profiles = [attachedProfile({ belongsToDatabase: false, driftTransactions: null })];
+
+    renderBar();
+
+    expect(screen.getByTestId('context-drift').textContent).toBe('drift unknown');
+  });
+
+  it('a bare database shows its coordinate and no drift (AC11)', () => {
+    renderBar();
+    expect(screen.getByText('@HEAD')).toBeTruthy();
+    expect(screen.queryByTestId('context-drift')).toBeNull();
+  });
+
+  it('a bare trace session shows its window, no database coordinate and no drift (AC11)', () => {
+    useSessionStore.setState({ kind: 'trace', capabilities: ['profiler'], activeProfileId: null });
+    useProfilerViewStore.getState().commitViewRange({ startUs: 1000, endUs: 5000 });
+
+    renderBar();
+
+    expect(screen.getByText(/1\.0ms–5\.0ms/)).toBeTruthy();
+    expect(screen.queryByText('@HEAD')).toBeNull();
+    expect(screen.queryByTestId('context-drift')).toBeNull();
   });
 });

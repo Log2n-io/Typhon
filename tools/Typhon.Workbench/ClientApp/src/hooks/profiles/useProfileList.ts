@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ProfileDto, ProfileListDto, SessionDto } from '@/api/generated/model';
 import { customFetch } from '@/api/client';
-import { useSessionStore } from '@/stores/useSessionStore';
+import { useSessionCapability, useSessionStore } from '@/stores/useSessionStore';
 
 interface Envelope<T> {
   data: T;
@@ -76,12 +76,17 @@ function normalizeProfile(raw: ProfileDto, databaseTsn: number): Profile {
  */
 export function useProfileList() {
   const sessionId = useSessionStore((s) => s.sessionId);
+  // Profiles are a sub-resource OF a database, and the list endpoint 409s without one. Gating on the capability rather
+  // than on merely having a session keeps a trace session from firing a request whose only possible answer is an error
+  // — and matters more now the Context Bar consumes this hook, so it runs for every session rather than only when the
+  // Profiles panel is open (#618 §4.6).
+  const hasDatabase = useSessionCapability('database');
   const queryClient = useQueryClient();
   const queryKey = ['profiles', sessionId];
 
   const query = useQuery({
     queryKey,
-    enabled: !!sessionId,
+    enabled: !!sessionId && hasDatabase,
     staleTime: 5_000,
     queryFn: () =>
       customFetch<Envelope<ProfileListDto>>(`/api/sessions/${sessionId}/profiles`, { method: 'GET' }),

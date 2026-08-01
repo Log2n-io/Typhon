@@ -8,6 +8,7 @@ import { resolveChain, selectionRefLabel, type SelectionRef } from '@/stores/sel
 import { useEnvTagStore, ENV_TAG_STYLE, type EnvTag } from '@/stores/useEnvTagStore';
 import { useComponentNames } from '@/hooks/queryConsole/useComponentNames';
 import { useArchetypeNames } from '@/hooks/queryConsole/useArchetypeNames';
+import { useProfileList, type Profile } from '@/hooks/profiles/useProfileList';
 
 const ENV_OPTIONS: EnvTag[] = ['none', 'dev', 'staging', 'prod'];
 const KIND_LABEL: Record<string, string> = { open: 'Open', trace: 'Trace', attach: 'Attach', none: '—' };
@@ -15,6 +16,19 @@ const KIND_LABEL: Record<string, string> = { open: 'Open', trace: 'Trace', attac
 /** Compact µs→ms readout for the trace/attach time-window scope. */
 function fmtMs(us: number): string {
   return `${(us / 1000).toFixed(1)}ms`;
+}
+
+const compactNum = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 });
+
+/**
+ * How far the database has moved since the attached capture closed (#618 §4.6). Measured in transactions, which is
+ * exact, rather than inferred from timestamps. Mirrors the Profiles panel's wording so the same fact reads the same
+ * way in both places — and reuses the panel's server-computed figure rather than recomputing it here.
+ */
+function driftLabel(profile: Profile): string {
+  if (!profile.belongsToDatabase || profile.driftTransactions === null) return 'drift unknown';
+  if (profile.driftTransactions === 0) return 'current';
+  return `${compactNum.format(profile.driftTransactions)} txns behind`;
 }
 
 /**
@@ -44,6 +58,13 @@ export default function ContextBar() {
   const connected = kind !== 'none';
   const fileLabel = filePath ? (filePath.split(/[\\/]/).pop() ?? filePath) : kind;
   const isProfiler = useSessionCapability('profiler');
+  const hasDatabase = useSessionCapability('database');
+
+  // The drift readout. Only an open database with a capture attached has both coordinates to compare — a standalone
+  // trace has no database to be behind, and a bare database has no capture. The hook no-ops without a database.
+  const { profiles, databaseTsn } = useProfileList();
+  const activeProfileId = useSessionStore((s) => s.activeProfileId);
+  const activeProfile = activeProfileId ? (profiles.find((p) => p.profileId === activeProfileId) ?? null) : null;
   const dotColor = connected && status === 'green' ? 'bg-green-500' : 'bg-muted-foreground';
 
   // Breadcrumb = containment ancestors (root → parent) then the leaf itself, all clickable.
@@ -76,10 +97,39 @@ export default function ContextBar() {
       <span aria-hidden="true">·</span>
       <span>{KIND_LABEL[kind] ?? kind}</span>
 
-      {/* Scope */}
-      <span aria-hidden="true">·</span>
-      {isProfiler ? (
+      {/* Scope — the database's coordinate. Shown whenever there IS a database, including one with a capture attached:
+          §5.7's first rule is never to present trace-time and now-time as the same instant, and the way to honour that
+          is to show BOTH, not to let one replace the other. Before #618 attaching a capture swapped the revision out
+          for the trace window, which quietly dropped the database's own coordinate off the bar. */}
+      {hasDatabase && (
+        <>
+          <span aria-hidden="true">·</span>
+          <span title="Database read revision (HEAD until a revision counter exists)">@HEAD</span>
+        </>
+      )}
+
+      {/* Drift between the two coordinates — the readout §4.6 calls "frequently the answer someone debugging a
+          regression is looking for". Server-computed, from the same figure the Profiles panel shows. */}
+      {activeProfile && (
+        <>
+          <span aria-hidden="true">·</span>
+          <span
+            className={driftLabel(activeProfile) === 'current' ? 'text-muted-foreground' : 'text-amber-600 dark:text-amber-400'}
+            title={
+              `This profile closed at transaction ${activeProfile.tsnMax}; the database is at ${databaseTsn}. `
+              + 'Everything the profile shows is from that earlier state.'
+            }
+            data-testid="context-drift"
+          >
+            {driftLabel(activeProfile)}
+          </span>
+        </>
+      )}
+
+      {/* Scope — the capture's coordinate. Sits alongside the database's rather than replacing it. */}
+      {isProfiler && (
         <span className="flex items-center gap-1.5">
+          <span aria-hidden="true">·</span>
           {viewRange.endUs > viewRange.startUs ? (
             <span className="tabular-nums" title="Time window (global scope)">
               ⟮ {fmtMs(viewRange.startUs)}–{fmtMs(viewRange.endUs)} ⟯
@@ -109,8 +159,14 @@ export default function ContextBar() {
             {scopeLinked ? <Link2 className="h-3.5 w-3.5" /> : <Unlink2 className="h-3.5 w-3.5" />}
           </button>
         </span>
-      ) : (
-        <span title="Read revision (HEAD until a revision counter exists)">@HEAD</span>
+      )}
+
+      {/* Neither coordinate exists — no session, or one that is neither a database nor a capture. */}
+      {!hasDatabase && !isProfiler && (
+        <>
+          <span aria-hidden="true">·</span>
+          <span title="No session scope">—</span>
+        </>
       )}
 
       {/* Breadcrumb (drill path) */}
