@@ -1,0 +1,186 @@
+name: Nightly arm64 (macOS)
+
+# Runs the Typhon.Engine unit-test suite nightly on a GitHub-hosted `macos-15` runner — Apple Silicon,
+# i.e. a genuinely weakly-ordered arm64 target. The merge gate runs on x64 (c6id.8xlarge) and therefore
+# CANNOT observe a whole class of defect: acquire/release compile to plain `mov` under x64 TSO, so
+# conforming and violating code emit identical machine code there (claude/rules/durability.md → SL-07).
+#
+# WHAT THIS DOES AND DOES NOT PROVE
+#   Catches: OBSERVABLE arm64 failures — deadlocks, crashes, assertion failures, anything the suite asserts on.
+#   Does NOT catch: the silent class. A torn page is CRC-stamped over the torn bytes, so ADR-015 page-checksum
+#   validation passes on reload and nothing in the suite asserts on post-checkpoint page content under concurrent
+#   mutation. A green run here is NOT evidence that barriers are correct — only a reduced litmus harness turns a
+#   silent reorder into an observable signal. Read a green run as "no regression on the platform we support",
+#   never as "memory ordering verified".
+#
+# WHY macOS AND NOT GRAVITON: Apple Silicon is the platform Typhon actually supports for developers. Neoverse
+# reorders more aggressively, but it is not a target we ship to — see issue #624 for that discussion.
+#
+# Non-blocking by design: this is a nightly signal, not a merge gate. It is never a required check.
+
+on:
+  schedule:
+    - cron: "0 3 * * *"     # 03:00 UTC daily — off-peak; results are waiting by European morning.
+  workflow_dispatch: {}
+  # Self-validation: the workflow runs on any PR that touches THIS FILE, and only then. Scheduled workflows and
+  # workflow_dispatch only exist once the file is on the default branch, so without this a change here could not
+  # be tested until after it merged. The path filter keeps it off every other PR.
+  pull_request:
+    paths:
+      - '.github/workflows/nightly-macos-arm64.yml'
+
+concurrency:
+  group: nightly-macos-arm64
+  cancel-in-progress: false   # a nightly is a data point; let a slow run finish rather than dropping the night.
+
+permissions:
+  contents: read
+
+jobs:
+  engine:
+    runs-on: macos-15
+    # The suite runs SERIALLY here (see below), so this is far slower than the 32-vCPU gate. Generous, but the
+    # 10 s per-test DefaultTimeout in workers1.runsettings is the real deadlock guard — this only bounds a crawl.
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      # ── The load-bearing guard. ────────────────────────────────────────────────────────────────────────
+      # This job is worthless unless the tests execute as NATIVE arm64. Two ways it could silently not:
+      #   * the runner label resolves to an x64 image (`macos-15-large` IS x64 — one label typo away);
+      #   * an x64 .NET SDK gets installed and runs under Rosetta 2 — which enables Apple's hardware TSO mode
+      #     for translated processes. That would give the tests x86 memory ordering on ARM hardware: a green
+      #     run that proves exactly nothing, with no outward sign anything was wrong.
+      # Both failure modes produce a CONFIDENT FALSE GREEN, so they are asserted, not logged.
+      - name: Assert native arm64 (not x64, not Rosetta)
+        run: |
+          set -uo pipefail
+
+          # `uname -m` describes the SHELL's translation environment, so it catches a wrong runner image but
+          # NOT an x64 dotnet running under Rosetta beside a native shell. The host arch has to be read from
+          # dotnet itself. Both `Architecture:` and `RID:` appear under `dotnet --info`'s Host block (.NET 8+);
+          # either answering arm64 is enough, so a format change in one field cannot red the nightly on its own.
+          ARCH=$(uname -m)
+          INFO=$(dotnet --info 2>&1)
+          echo "uname -m = $ARCH"
+          echo "$INFO" | grep -E '^[[:space:]]*(Architecture|RID):' || true
+
+          if [ "$ARCH" != "arm64" ]; then
+            echo "::error::Runner reports '$ARCH', not arm64 — this job only has meaning on Apple Silicon."
+            echo "Check the runs-on label: macos-15 is arm64, but macos-15-large is x64."
+            exit 1
+          fi
+
+          if ! grep -qiE '^[[:space:]]*(Architecture:[[:space:]]*arm64|RID:[[:space:]]*osx-arm64)' <<<"$INFO"; then
+            echo "::error::Could not confirm the .NET host is arm64. An x64 SDK under Rosetta 2 runs with Apple's"
+            echo "::error::hardware TSO mode enabled, which would give the tests x86 memory ordering on ARM silicon"
+            echo "::error::— a green run that proves nothing, with no outward sign. Failing closed. Full output:"
+            echo "$INFO"
+            exit 1
+          fi
+          echo "Native arm64 confirmed."
+
+      # Release, deliberately — and not merely to match the gate. Debug suppresses the JIT reordering and
+      # register-allocation freedom that a missing barrier depends on to become visible; a Debug run would be
+      # even less able to surface the thing this job exists to look for.
+      - name: Build engine test project (Release)
+        run: dotnet build test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj -c Release
+
+      # ── Execution model: ONE serial process, not the gate's 8 shards. ──────────────────────────────────
+      # The gate runs K=8 `dotnet test` processes at workers=1 on 16 PHYSICAL cores — 0.5 processes per core.
+      # K=16 (1.0 per core) was measured FLAKY (claude/design/Infrastructure/ci-merge-gate.md). A GitHub-hosted
+      # macos-15 runner has 3 cores, so the gate's own plan would land at ~2.7 processes per core: far past the
+      # flaky threshold, and a nightly that cries wolf gets ignored. Wall-clock is not scarce at 03:00; trust is.
+      #
+      # So we hand shard.py a ONE-shard plan. That reuses its whole apparatus unchanged — the catch-all filter,
+      # the serial `Category=Sensitive` quiet pass, and (the reason this matters) the 2-attempt RETRY of failures
+      # run alone. Without the retry, a single timing flake reds the nightly. shard.py's own comment notes those
+      # windows are tightest on slow CI cores, which is exactly where we are.
+      #
+      # The plan is GENERATED from shard.py's own catchall_filter() rather than hand-written, so if the gate ever
+      # excludes another category the nightly follows automatically instead of silently drifting.
+      - name: Generate the single-shard (serial) plan
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, sys
+          sys.path.insert(0, "bench/aws")
+          import shard
+          plan = [{"filter": shard.catchall_filter([]), "classes": ["<catch-all>"]}]
+          json.dump(plan, open("shards-serial.json", "w"), indent=1)
+          print("filter:", plan[0]["filter"])
+          PY
+
+      - name: Run engine suite (serial + Sensitive pass + retries)
+        id: tests
+        env:
+          SHARD_REPO: ${{ github.workspace }}
+          SHARD_CONFIG: Release
+          SHARD_PLAN: shards-serial.json
+        run: |
+          set -o pipefail
+          mkdir -p ci-out
+          python3 bench/aws/shard.py run --results-dir ci-out 2>&1 | tee ci-out/engine.log
+
+      # if: always() — the report matters most precisely when the run went red.
+      - name: Render summary
+        if: always()
+        run: |
+          set -uo pipefail
+          {
+            echo "## Nightly arm64 (macOS) — Typhon.Engine"
+            echo
+            echo "Runner: \`macos-15\` · $(uname -m) · $(sysctl -n hw.ncpu) logical cores · Release · serial (workers=1)"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Sum the trx counters. Retry passes (shardR*.trx) re-run tests already counted in shard0/shardS, so
+          # they are EXCLUDED here — including them would double-count and inflate the totals.
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import glob, os, xml.etree.ElementTree as ET
+          NS = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
+          tot = pas = fail = skip = 0
+          files = [f for f in sorted(glob.glob("ci-out/shard*.trx"))
+                   if not os.path.basename(f).startswith("shardR")]
+          for f in files:
+              c = ET.parse(f).getroot().find(NS + "ResultSummary/" + NS + "Counters")
+              if c is None:
+                  continue
+              tot  += int(c.get("total", 0))
+              pas  += int(c.get("passed", 0))
+              fail += int(c.get("failed", 0))
+              skip += int(c.get("notExecuted", 0))
+          print(f"| | total | passed | failed | skipped |")
+          print(f"|---|---|---|---|---|")
+          print(f"| **arm64 (this run)** | {tot} | {pas} | {fail} | {skip} |")
+          print(f"| x64 gate baseline | 4156 | 4103 | 0 | 53 |")
+          print()
+          print("_Skip counts are expected to differ: `DatabaseFileLockingTests` carries a `[Platform(\"Win\")]`"
+                " test that self-skips off Windows. Enumerate any other delta rather than assuming it._")
+          print()
+          if not files:
+              print("**No .trx produced** — the run failed before any test executed.")
+          PY
+
+          # shard.py's own verdict lines: the flaked-but-recovered list and the still-failing list. The first is
+          # the interesting one on a nightly — a test that needed a retry on arm64 but never does on x64 is a lead.
+          {
+            echo
+            echo '### shard.py verdict'
+            echo '```'
+            grep -E '^\[shard\]|^ +[~x] ' ci-out/engine.log || echo '(no verdict lines — see the full log artifact)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts (.trx / logs)
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightly-macos-arm64
+          path: ci-out/**
+          if-no-files-found: ignore
