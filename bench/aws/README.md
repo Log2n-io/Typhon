@@ -29,10 +29,15 @@ Three tasks are launched by GitHub Actions, not by hand. Full design:
 A fourth workflow uses `shard.py` **without** AWS: `.github/workflows/nightly-macos-arm64.yml` runs the
 engine suite nightly on a GitHub-hosted `macos-15` runner (Apple Silicon — the arm64 platform Typhon
 supports for developers, which the x64 gate cannot exercise; see `claude/rules/durability.md` → SL-07).
-That runner has 3 cores, so the committed K=8 `shards.json` would oversubscribe it ~2.7×. It instead
-generates a **single-shard plan** at runtime from `shard.py`'s own `catchall_filter([])` and points
-`SHARD_PLAN` at it — a serial `workers=1` run that still inherits the `Category=Sensitive` quiet pass and
-the 2-attempt retry of failures. Non-blocking; never a required check.
+That runner has 3 cores, where the committed K=8 plan would land at ~2.7 processes per core, so the job sets
+**`SHARD_CONCURRENCY=1`** — the *same* `shards.json`, one shard at a time. It also points `TMPDIR` at a RAM
+disk, the macOS equivalent of the self-hosted gate's `TMPDIR=/nvme`. Non-blocking; never a required check.
+
+> **Cap concurrency, never swap the plan.** An earlier revision gave that job a custom single-shard catch-all
+> filter instead. It silently ran 32 `[Explicit]` stress/perf tests the gate deliberately skips — NUnit runs
+> `[Explicit]` tests when it reads the filter as naming them, and a 2-term category filter qualifies where the
+> gate's 305-term one does not. Reusing `shards.json` keeps selection identical by construction. (NUnit's
+> `ExplicitMode` runsettings knob was tried first and had no effect at any value.)
 
 The AntHill runbook below is for **manual** trace-capture runs, unrelated to CI.
 

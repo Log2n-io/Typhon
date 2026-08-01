@@ -91,40 +91,59 @@ jobs:
       - name: Build engine test project (Release)
         run: dotnet build test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj -c Release
 
-      # ── Execution model: ONE serial process, not the gate's 8 shards. ──────────────────────────────────
-      # The gate runs K=8 `dotnet test` processes at workers=1 on 16 PHYSICAL cores — 0.5 processes per core.
-      # K=16 (1.0 per core) was measured FLAKY (claude/design/Infrastructure/ci-merge-gate.md). A GitHub-hosted
-      # macos-15 runner has 3 cores, so the gate's own plan would land at ~2.7 processes per core: far past the
-      # flaky threshold, and a nightly that cries wolf gets ignored. Wall-clock is not scarce at 03:00; trust is.
+      # Test databases live on a RAM disk. The suite roots every database directory at Path.GetTempPath() (58 files
+      # do; TestBase and AllocatorTestBase both build their per-fixture dirs from it), and on Unix .NET resolves
+      # that through TMPDIR — so one env var moves ALL test I/O, main database file and WAL alike, off the runner's
+      # disk. It is the same lever the self-hosted c6id gate pulls with TMPDIR=/nvme in bench/aws/run-gate.sh.
       #
-      # So we hand shard.py a ONE-shard plan. That reuses its whole apparatus unchanged — the catch-all filter,
-      # the serial `Category=Sensitive` quiet pass, and (the reason this matters) the 2-attempt RETRY of failures
-      # run alone. Without the retry, a single timing flake reds the nightly. shard.py's own comment notes those
-      # windows are tightest on slow CI cores, which is exactly where we are.
+      # WHY: two runs of IDENTICAL code took 113 s and 616 s, and the 500 s was concentrated in fsync-heavy reopen
+      # tests (WAL_*_SurvivesReopen, WalSegmentReclaimReopen, UowRegistry overflow pages). The same commit runs in
+      # 90 s on a developer machine. Hosted-runner disk throughput is the variable, not the engine.
       #
-      # The plan is GENERATED from shard.py's own catchall_filter() rather than hand-written, so if the gate ever
-      # excludes another category the nightly follows automatically instead of silently drifting.
-      - name: Generate the single-shard (serial) plan
+      # macOS has no tmpfs, so hdiutil + diskutil is the equivalent. 2 GiB against a measured ~32 MiB suite
+      # footprint — the GiB-scale temp dirs on a dev box belong to benchmarks and AOT POCs, not this suite. The
+      # summary reports actual usage so this can be right-sized rather than guessed at again.
+      - name: Mount a RAM disk for test databases
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import json, sys
-          sys.path.insert(0, "bench/aws")
-          import shard
-          plan = [{"filter": shard.catchall_filter([]), "classes": ["<catch-all>"]}]
-          json.dump(plan, open("shards-serial.json", "w"), indent=1)
-          print("filter:", plan[0]["filter"])
-          PY
+          # `hdiutil attach -nomount` PADS its output ("/dev/disk6          "), and diskutil will not resolve a
+          # device path carrying trailing whitespace — it fails with "Unable to find disk for /dev/disk6", where
+          # the padding is invisible in the message. tr strips it. Do not drop this pipe.
+          DEV=$(hdiutil attach -nomount ram://4194304 | tr -d '[:space:]')     # 4194304 sectors x 512 B = 2 GiB
+          echo "ram disk device: '$DEV'"
+          diskutil eraseVolume HFS+ typhon-ramdisk "$DEV"
+          echo "TMPDIR=/Volumes/typhon-ramdisk" >> "$GITHUB_ENV"
+          df -h /Volumes/typhon-ramdisk
 
-      - name: Run engine suite (serial + Sensitive pass + retries)
+      # ── Execution model: the GATE'S OWN PLAN, run one shard at a time. ────────────────────────────────
+      # Concurrency and selection are separate concerns, and conflating them was a real bug here.
+      #
+      # Concurrency: the gate runs K=8 `dotnet test` processes at workers=1 on 16 PHYSICAL cores — 0.5 per core.
+      # K=16 (1.0 per core) was measured FLAKY (claude/design/Infrastructure/ci-merge-gate.md). This runner has 3
+      # cores, where that plan lands at ~2.7 per core: far past the flaky threshold. SHARD_CONCURRENCY=1 caps how
+      # many run at once WITHOUT touching the plan. Wall-clock is not scarce at 03:00; trust is.
+      #
+      # Selection: an earlier revision instead handed shard.py a custom one-shard catch-all plan. That quietly ran
+      # 32 tests the gate deliberately skips — NUnit runs [Explicit] tests when it reads the filter as naming them,
+      # and a 2-term category filter qualifies where the gate's 305-term one does not. Those tests say why that is
+      # wrong here: "spawns 16-32 threads, run manually to avoid thread pool saturation in parallel CI" and
+      # "Performance benchmarks — run manually". Thread-saturating stress tests on a 3-core hosted runner measure
+      # the runner. Reusing shards.json keeps nightly and gate selection identical BY CONSTRUCTION rather than by
+      # two mechanisms that have to be kept in agreement. (NUnit's ExplicitMode runsettings knob was tried first
+      # and had no effect at any value.)
+      #
+      # Everything else in shard.py still applies: the serial Category=Sensitive quiet pass, and — the part that
+      # matters most on a noisy hosted runner — the 2-attempt RETRY of failures re-run alone.
+      - name: Run engine suite (gate plan, 1 shard at a time, + Sensitive pass + retries)
         id: tests
         env:
           SHARD_REPO: ${{ github.workspace }}
           SHARD_CONFIG: Release
-          SHARD_PLAN: shards-serial.json
+          SHARD_CONCURRENCY: 1
         run: |
           set -o pipefail
           mkdir -p ci-out
+          echo "TMPDIR=$TMPDIR"
           python3 bench/aws/shard.py run --results-dir ci-out 2>&1 | tee ci-out/engine.log
 
       # if: always() — the report matters most precisely when the run went red.
@@ -135,7 +154,14 @@ jobs:
           {
             echo "## Nightly arm64 (macOS) — Typhon.Engine"
             echo
-            echo "Runner: \`macos-15\` · $(uname -m) · $(sysctl -n hw.ncpu) logical cores · Release · serial (workers=1)"
+            echo "Runner: \`macos-15\` · $(uname -m) · $(sysctl -n hw.ncpu) logical cores · Release · gate plan, 1 shard at a time"
+            echo
+            # RAM-disk headroom. Reported so the 2 GiB can be right-sized from data; a suite that ever fills it
+            # would fail with a confusing ENOSPC, so this is the number to watch, not a decoration.
+            echo "RAM disk (\`\$TMPDIR\`) after the run:"
+            echo '```'
+            df -h "${TMPDIR:-/Volumes/typhon-ramdisk}" 2>&1 || echo "(no RAM disk mounted)"
+            echo '```'
             echo
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -160,7 +186,11 @@ jobs:
           print(f"| **arm64 (this run)** | {tot} | {pas} | {fail} | {skip} |")
           print(f"| x64 gate baseline | 4156 | 4103 | 0 | 53 |")
           print()
-          print("_Skip counts are expected to differ: `DatabaseFileLockingTests` carries a `[Platform(\"Win\")]`"
+          print("_These totals are comparable BY CONSTRUCTION: this job runs the gate's own `shards.json`, so the"
+                " same tests are selected on both. A total that drifts from the gate's means the plan changed, not"
+                " the platform — investigate rather than shrug._")
+          print()
+          print("_Skip counts still differ legitimately: `DatabaseFileLockingTests` carries a `[Platform(\"Win\")]`"
                 " test that self-skips off Windows. Enumerate any other delta rather than assuming it._")
           print()
           if not files:
