@@ -67,7 +67,7 @@ public sealed class SwgFixtureFeatureTests
         _engine.RegisterComponentFromAccessor<Player>();
         _engine.RegisterComponentFromAccessor<Wallet>();
         _engine.RegisterComponentFromAccessor<Session>();
-        _engine.RegisterComponentFromAccessor<Typhon.Samples.Swg.ResourceType>();
+        _engine.RegisterComponentFromAccessor<Samples.Swg.ResourceType>();
         _engine.RegisterComponentFromAccessor<Recipe>();
         _engine.RegisterComponentFromAccessor<Deposit>();
         _engine.RegisterComponentFromAccessor<Structure>();

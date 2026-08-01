@@ -147,13 +147,13 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
         var archetypeId = (ushort)((long)e.RawValue & 0xFFF);
 
         int rootChunkId, reachableContent, orphanRev, orphanContent;
-        System.Collections.Generic.HashSet<int> reachableRoots;
+        HashSet<int> reachableRoots;
         {
             using var guard = EpochGuard.Enter(dbe.EpochManager);   // accessors require an ambient epoch scope (as ScrubVersionedChains holds)
 
             var heads = ComponentRevisionManager.EnumerateVersionedChainHeads(table, archetypeId);
             rootChunkId = heads[(long)e.RawValue];
-            reachableRoots = new System.Collections.Generic.HashSet<int>(heads.Values);
+            reachableRoots = new HashSet<int>(heads.Values);
 
             var acc = table.CompRevTableSegment.CreateChunkAccessor();
             acc.GetChunkAsSpan(rootChunkId).Split(out System.Span<CompRevStorageHeader> _, out System.Span<CompRevStorageElement> els);

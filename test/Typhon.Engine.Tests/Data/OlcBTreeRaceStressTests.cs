@@ -468,7 +468,7 @@ public class OlcBTreeRaceStressTests
     // Issue #297 follow-up: distinguish "Remove returned false" from "Remove returned true with wrong value"
     private static int _rdNotRemoved;
     private static int _rdWrongValue;
-    private static readonly System.Collections.Concurrent.ConcurrentBag<string> _rdSamples = new();
+    private static readonly ConcurrentBag<string> _rdSamples = new();
 
     private static unsafe void RemoveDisjointBody(ScenarioContext ctx)
     {

@@ -147,10 +147,10 @@ static class ArchetypeAccessorBenchmark
 
         runtime.Start();
         // Let it stabilize for 2s, then sample for 3s
-        System.Threading.Thread.Sleep(2000);
+        Thread.Sleep(2000);
         var telemetry = runtime.Telemetry;
         long startTick = telemetry.NewestTick;
-        System.Threading.Thread.Sleep(3000);
+        Thread.Sleep(3000);
         long endTick = telemetry.NewestTick;
 
         // Average system duration across sampled ticks
@@ -200,7 +200,7 @@ static class ArchetypeAccessorBenchmark
         }, new RuntimeOptions { BaseTickRate = 60, WorkerCount = 4 });
 
         runtime.Start();
-        System.Threading.Thread.Sleep(runSeconds * 1000);
+        Thread.Sleep(runSeconds * 1000);
         runtime.Shutdown();
         view.Dispose();
         Console.WriteLine("Done.");
@@ -236,7 +236,7 @@ static class ArchetypeAccessorBenchmark
         }, new RuntimeOptions { BaseTickRate = 60, WorkerCount = 4 });
 
         runtime.Start();
-        System.Threading.Thread.Sleep(runSeconds * 1000);
+        Thread.Sleep(runSeconds * 1000);
         runtime.Shutdown();
         view.Dispose();
         Console.WriteLine("Done.");
@@ -398,7 +398,7 @@ static class ArchetypeAccessorBenchmark
 
         // ── Benchmark: Standard path ────────────────────────────────
         GC.Collect(2, GCCollectionMode.Aggressive, true, true);
-        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var sw = Stopwatch.StartNew();
         RunStandard(dbe, entityIds, iterations);
         sw.Stop();
         double standardUs = sw.Elapsed.TotalMicroseconds;
@@ -442,7 +442,7 @@ static class ArchetypeAccessorBenchmark
                 ulong bits = cluster.OccupancyBits;
                 while (bits != 0)
                 {
-                    int idx = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    int idx = BitOperations.TrailingZeroCount(bits);
                     bits &= bits - 1;
                     ref var pos = ref positions[idx];
                     ref readonly var mov = ref movements[idx];
@@ -497,7 +497,7 @@ static class ArchetypeAccessorBenchmark
             {
                 WriteAllEntities(dbe, ids);
 
-                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var sw = Stopwatch.StartNew();
                 dbe.WriteTickFence(100 + i);
                 sw.Stop();
                 tickFenceTimes[i] = sw.Elapsed.TotalMicroseconds;

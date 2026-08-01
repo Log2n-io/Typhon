@@ -17,7 +17,7 @@ public sealed class TraceFixtureBuilderTests
     [SetUp]
     public void SetUp()
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "typhon-fixture-builder", System.Guid.NewGuid().ToString("N"));
+        _tempDir = Path.Combine(Path.GetTempPath(), "typhon-fixture-builder", Guid.NewGuid().ToString("N"));
     }
 
     [TearDown]
@@ -46,8 +46,8 @@ public sealed class TraceFixtureBuilderTests
         // The end-to-end smoke test: fixture → TraceFileCacheBuilder → readable cache. If this passes,
         // every TraceSessionRuntime integration test has a viable input.
         var path = TraceFixtureBuilder.BuildMinimalTrace(_tempDir, tickCount: 3, instantsPerTick: 2);
-        var cachePath = Typhon.Profiler.TraceFileCacheBuilder.GetCachePathFor(path);
-        var result = Typhon.Profiler.TraceFileCacheBuilder.Build(path, cachePath);
+        var cachePath = TraceFileCacheBuilder.GetCachePathFor(path);
+        var result = TraceFileCacheBuilder.Build(path, cachePath);
 
         Assert.That(result.TickCount, Is.EqualTo(3));
         // Each tick emits: TickStart + 2 Instant + TickEnd = 4 records.
@@ -62,7 +62,7 @@ public sealed class TraceFixtureBuilderTests
         Assert.That(File.Exists(path));
         using var fs = File.OpenRead(path);
         using var reader = new TraceFileReader(fs);
-        Assert.Throws<System.IO.InvalidDataException>(() => reader.ReadHeader(),
+        Assert.Throws<InvalidDataException>(() => reader.ReadHeader(),
             "ReadHeader must reject non-TYTR magic");
     }
 
@@ -75,8 +75,8 @@ public sealed class TraceFixtureBuilderTests
         var path = TraceFixtureBuilder.BuildTraceWithAnomalies(_tempDir);
         Assert.That(File.Exists(path), "anomalies fixture should land on disk");
 
-        var cachePath = Typhon.Profiler.TraceFileCacheBuilder.GetCachePathFor(path);
-        var result = Typhon.Profiler.TraceFileCacheBuilder.Build(path, cachePath);
+        var cachePath = TraceFileCacheBuilder.GetCachePathFor(path);
+        var result = TraceFileCacheBuilder.Build(path, cachePath);
         Assert.That(result.TickCount, Is.EqualTo(30), "thirty ticks total");
         // Record count: each tick = TickStart + TickEnd = 2; ticks 15 + 25 also carry one GcSuspension each (+2).
         Assert.That(result.EventCount, Is.EqualTo(30 * 2 + 2), "GcSuspension records on ticks 15 and 25");

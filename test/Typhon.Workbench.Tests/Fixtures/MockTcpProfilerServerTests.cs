@@ -27,7 +27,7 @@ public sealed class MockTcpProfilerServerTests
 
         // Read the Init frame header.
         var header = new byte[LiveStreamProtocol.FrameHeaderSize];
-        using var cts = new CancellationTokenSource(System.TimeSpan.FromSeconds(5));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         await stream.ReadExactlyAsync(header, cts.Token);
 
         var (type, payloadLength) = LiveStreamProtocol.ReadFrameHeader(header);
@@ -40,7 +40,7 @@ public sealed class MockTcpProfilerServerTests
     {
         await using var server = new MockTcpProfilerServer
         {
-            BlockInterval = System.TimeSpan.FromMilliseconds(50),
+            BlockInterval = TimeSpan.FromMilliseconds(50),
             MaxBlocks = 3,
         };
         server.Start();
@@ -49,7 +49,7 @@ public sealed class MockTcpProfilerServerTests
         await client.ConnectAsync("127.0.0.1", server.Port);
         var stream = client.GetStream();
 
-        using var cts = new CancellationTokenSource(System.TimeSpan.FromSeconds(5));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
 
         // Skip the Init frame.
         var header = new byte[LiveStreamProtocol.FrameHeaderSize];

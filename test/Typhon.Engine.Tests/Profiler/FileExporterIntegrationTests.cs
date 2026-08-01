@@ -72,7 +72,7 @@ public class FileExporterIntegrationTests
             // Tick + phase boundaries so the file has instant records too.
             TyphonEvent.SetCurrentTickNumber(1);
             TyphonEvent.EmitTickStart(System.Diagnostics.Stopwatch.GetTimestamp());
-            TyphonEvent.EmitPhaseStart(System.Diagnostics.Stopwatch.GetTimestamp(), (byte)Typhon.Profiler.TickPhase.SystemDispatch);
+            TyphonEvent.EmitPhaseStart(System.Diagnostics.Stopwatch.GetTimestamp(), (byte)TickPhase.SystemDispatch);
 
             // Scheduler chunk span.
             TyphonEvent.EmitSchedulerChunk(
@@ -131,7 +131,7 @@ public class FileExporterIntegrationTests
                 e.Dispose();
             }
 
-            TyphonEvent.EmitPhaseEnd(System.Diagnostics.Stopwatch.GetTimestamp(), (byte)Typhon.Profiler.TickPhase.SystemDispatch);
+            TyphonEvent.EmitPhaseEnd(System.Diagnostics.Stopwatch.GetTimestamp(), (byte)TickPhase.SystemDispatch);
             TyphonEvent.EmitTickEnd(System.Diagnostics.Stopwatch.GetTimestamp(), overloadLevel: 0, tickMultiplier: 1);
         })
         {

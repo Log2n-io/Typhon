@@ -57,7 +57,7 @@ public sealed class EngineLifecycleManifestTests
         // The original bug: without the schema the per-archetype segments were never registered, so the File Map rendered
         // them Unknown. With the resolved schema loaded, the cluster archetype's segment must be registered.
         var segments = lifecycle.Engine.EnumerateStorageSegments();
-        Assert.That(segments.Any(s => s.Kind == Typhon.Engine.StorageSegmentKind.Cluster), Is.True,
+        Assert.That(segments.Any(s => s.Kind == StorageSegmentKind.Cluster), Is.True,
             "the cluster archetype's segment must be registered once the resolved schema is loaded");
     }
 

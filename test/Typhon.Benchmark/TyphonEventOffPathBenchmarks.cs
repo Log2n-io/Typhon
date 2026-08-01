@@ -41,7 +41,7 @@ public class TyphonEventOffPathBenchmarks
     {
         // Ensure the profiler is off. typhon.telemetry.json in the bench bin/ dir defaults this OFF for
         // benchmarks; this is belt-and-braces.
-        if (Typhon.Engine.TelemetryConfig.ProfilerActive)
+        if (TelemetryConfig.ProfilerActive)
         {
             throw new System.InvalidOperationException(
                 "TyphonEventOffPathBenchmarks requires ProfilerActive=false. Check typhon.telemetry.json in the benchmark bin directory.");
@@ -110,7 +110,7 @@ public class TyphonEventOffPathBenchmarks
     {
         for (int i = 0; i < LoopCount; i++)
         {
-            var ev = TyphonEvent.BeginCheckpointCycle(targetLsn: 1000L, reason: Typhon.Profiler.CheckpointReason.Periodic);
+            var ev = TyphonEvent.BeginCheckpointCycle(targetLsn: 1000L, reason: Profiler.CheckpointReason.Periodic);
             try
             {
                 ev.DirtyPageCount = 256;

@@ -107,7 +107,7 @@ public class QueryDefinitionTraceFileTests
         // PhasesTable was replaced by a TracksTable + DagsTable. The reader hard-rejects v10-and-older traces;
         // a synthesized v8 header must throw at ReadHeader rather than mis-decode.
         var stream = new MemoryStream();
-        using var bw = new System.IO.BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+        using var bw = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
 
         bw.Write(TraceFileHeader.MagicValue);
         bw.Write((ushort)8);                                // Version=8
@@ -128,7 +128,7 @@ public class QueryDefinitionTraceFileTests
 
         stream.Position = 0;
         var reader = new TraceFileReader(stream);
-        var ex = Assert.Throws<System.IO.InvalidDataException>(() => reader.ReadHeader());
+        var ex = Assert.Throws<InvalidDataException>(() => reader.ReadHeader());
         Assert.That(ex.Message, Does.Contain("version: 8"));
     }
 }

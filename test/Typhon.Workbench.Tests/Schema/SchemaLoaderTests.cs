@@ -50,7 +50,7 @@ public sealed class SchemaLoaderTests
     {
         // Load the engine's own assembly — it has no [Component] public types, so ComponentTypes is empty.
         // This verifies the scanning path works end-to-end with a real managed DLL.
-        var enginePath = typeof(Typhon.Engine.DatabaseEngine).Assembly.Location;
+        var enginePath = typeof(DatabaseEngine).Assembly.Location;
         using var alc = new WorkbenchAssemblyLoadContext("test");
         var loaded = SchemaLoader.LoadSchemaDlls(alc, [enginePath]);
         Assert.That(loaded.Assemblies, Has.Length.EqualTo(1));

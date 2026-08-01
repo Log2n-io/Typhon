@@ -378,7 +378,7 @@ class ClusterSpatialTests : TestBase<ClusterSpatialTests>
                 var bits = cluster.OccupancyBits;
                 while (bits != 0)
                 {
-                    int slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    int slot = BitOperations.TrailingZeroCount(bits);
                     bits &= bits - 1;
                     ref var p = ref positions[slot];
                     p.Bounds.MinX = 200f - 0.5f; p.Bounds.MaxX = 200f + 0.5f;
@@ -674,8 +674,8 @@ class ClusterSpatialTests : TestBase<ClusterSpatialTests>
 
     private DatabaseEngine CreateNamedEngine(string dbName)
     {
-        var sc = new Microsoft.Extensions.DependencyInjection.ServiceCollection();
-        sc.AddLogging(b => b.SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Critical))
+        var sc = new ServiceCollection();
+        sc.AddLogging(b => b.SetMinimumLevel(LogLevel.Critical))
           .AddResourceRegistry()
           .AddMemoryAllocator()
           .AddEpochManager()

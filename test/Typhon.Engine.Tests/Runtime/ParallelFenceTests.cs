@@ -168,7 +168,7 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
         Directory.CreateDirectory(dbDir);
 
         var services = new ServiceCollection()
-            .AddLogging(b => b.SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Warning))
+            .AddLogging(b => b.SetMinimumLevel(LogLevel.Warning))
             .AddResourceRegistry()
             .AddMemoryAllocator()
             .AddEpochManager()
@@ -196,8 +196,8 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
         using var scope = sp.CreateScope();
         var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
 
-        dbe.RegisterComponentFromAccessor<Typhon.Engine.Tests.ClMigPos>();
-        dbe.RegisterComponentFromAccessor<Typhon.Engine.Tests.ClMigScratch>();
+        dbe.RegisterComponentFromAccessor<ClMigPos>();
+        dbe.RegisterComponentFromAccessor<ClMigScratch>();
         dbe.ConfigureSpatialGrid(new SpatialGridConfig(
             worldMin: new Vector2(0, 0),
             worldMax: new Vector2(1000, 1000),
@@ -213,12 +213,12 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
                 // Spread across the 10×10 grid by (i%10, i/10 mod 10).
                 float x = (i % 10) * 100f + 50f;
                 float y = ((i / 10) % 10) * 100f + 50f;
-                var p = new Typhon.Engine.Tests.ClMigPos
+                var p = new ClMigPos
                 {
                     Bounds = new AABB2F { MinX = x, MinY = y, MaxX = x, MaxY = y },
                     Tag = i,
                 };
-                ids[i] = tx.Spawn<Typhon.Engine.Tests.ClMigUnit>(Typhon.Engine.Tests.ClMigUnit.Pos.Set(in p));
+                ids[i] = tx.Spawn<ClMigUnit>(ClMigUnit.Pos.Set(in p));
             }
             tx.Commit();
         }
@@ -237,7 +237,7 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
                     for (int i = 0; i < EntityCount; i++)
                     {
                         var eref = tx.OpenMut(ids[i]);
-                        ref var pos = ref eref.Write(Typhon.Engine.Tests.ClMigUnit.Pos);
+                        ref var pos = ref eref.Write(ClMigUnit.Pos);
                         float nx = pos.Bounds.MinX + 30f;
                         float ny = pos.Bounds.MinY + 7f;
                         if (nx >= 950f) nx = 50f;
@@ -321,8 +321,8 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
         using var scope = sp.CreateScope();
         var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
 
-        dbe.RegisterComponentFromAccessor<Typhon.Engine.Tests.ClMigPos>();
-        dbe.RegisterComponentFromAccessor<Typhon.Engine.Tests.ClMigScratch>();
+        dbe.RegisterComponentFromAccessor<ClMigPos>();
+        dbe.RegisterComponentFromAccessor<ClMigScratch>();
         dbe.ConfigureSpatialGrid(new SpatialGridConfig(
             worldMin: new Vector2(0, 0),
             worldMax: new Vector2(1000, 1000),
@@ -332,12 +332,12 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
         EntityId id;
         using (var tx = dbe.CreateQuickTransaction())
         {
-            var p = new Typhon.Engine.Tests.ClMigPos
+            var p = new ClMigPos
             {
                 Bounds = new AABB2F { MinX = 50f, MinY = 50f, MaxX = 50f, MaxY = 50f },
                 Tag = 0,
             };
-            id = tx.Spawn<Typhon.Engine.Tests.ClMigUnit>(Typhon.Engine.Tests.ClMigUnit.Pos.Set(in p));
+            id = tx.Spawn<ClMigUnit>(ClMigUnit.Pos.Set(in p));
             tx.Commit();
         }
 
@@ -345,7 +345,7 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
         int dstCell = dbe.SpatialGrid.WorldToCellKey(350f, 450f);
         Assert.That(srcCell, Is.Not.EqualTo(dstCell));
 
-        var meta = Archetype<Typhon.Engine.Tests.ClMigUnit>.Metadata;
+        var meta = Archetype<ClMigUnit>.Metadata;
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
 
         var moved = false;
@@ -358,7 +358,7 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
                 {
                     using var tx = dbe.CreateQuickTransaction();
                     var eref = tx.OpenMut(id);
-                    ref var pos = ref eref.Write(Typhon.Engine.Tests.ClMigUnit.Pos);
+                    ref var pos = ref eref.Write(ClMigUnit.Pos);
                     pos.Bounds = new AABB2F { MinX = 350f, MinY = 450f, MaxX = 350f, MaxY = 450f };
                     tx.Commit();
                     Volatile.Write(ref moved, true);

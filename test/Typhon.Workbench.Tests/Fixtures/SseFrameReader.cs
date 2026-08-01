@@ -42,18 +42,18 @@ internal static class SseFrameReader
                 continue;
             }
 
-            if (line.StartsWith(":", System.StringComparison.Ordinal))
+            if (line.StartsWith(":", StringComparison.Ordinal))
             {
                 continue; // comment / keepalive
             }
 
             const string EventPrefix = "event:";
             const string DataPrefix = "data:";
-            if (line.StartsWith(EventPrefix, System.StringComparison.Ordinal))
+            if (line.StartsWith(EventPrefix, StringComparison.Ordinal))
             {
                 eventType = line[EventPrefix.Length..].Trim();
             }
-            else if (line.StartsWith(DataPrefix, System.StringComparison.Ordinal))
+            else if (line.StartsWith(DataPrefix, StringComparison.Ordinal))
             {
                 var chunk = line[DataPrefix.Length..].TrimStart();
                 data = data == null ? chunk : data + "\n" + chunk;

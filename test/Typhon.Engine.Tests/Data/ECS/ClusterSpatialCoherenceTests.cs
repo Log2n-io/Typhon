@@ -79,7 +79,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
     public void ConfigureSpatialGrid_AfterInitializeArchetypes_Throws()
     {
         using var dbe = SetupEngineWithGrid();
-        Assert.Throws<System.InvalidOperationException>(() =>
+        Assert.Throws<InvalidOperationException>(() =>
             dbe.ConfigureSpatialGrid(new SpatialGridConfig(new Vector2(0, 0), new Vector2(500, 500), 50f)));
     }
 
@@ -92,7 +92,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
         dbe.RegisterComponentFromAccessor<ClCohPos>();
         try
         {
-            Assert.Throws<System.InvalidOperationException>(() => dbe.InitializeArchetypes());
+            Assert.Throws<InvalidOperationException>(() => dbe.InitializeArchetypes());
         }
         finally
         {
@@ -393,13 +393,13 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
     public void ValidateSupportedFieldType_F64Variants_Throw()
     {
         // f64 spatial tiers are still deferred to a follow-up sub-issue of #228.
-        Assert.Throws<System.NotSupportedException>(
+        Assert.Throws<NotSupportedException>(
             () => SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.AABB2D, "MyArch"));
-        Assert.Throws<System.NotSupportedException>(
+        Assert.Throws<NotSupportedException>(
             () => SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.AABB3D, "MyArch"));
-        Assert.Throws<System.NotSupportedException>(
+        Assert.Throws<NotSupportedException>(
             () => SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.BSphere2D, "MyArch"));
-        Assert.Throws<System.NotSupportedException>(
+        Assert.Throws<NotSupportedException>(
             () => SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.BSphere3D, "MyArch"));
     }
 

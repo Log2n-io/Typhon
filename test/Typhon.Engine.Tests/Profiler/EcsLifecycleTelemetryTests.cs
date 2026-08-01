@@ -258,7 +258,7 @@ internal sealed class EcsLifecycleTelemetryTests : TestBase<EcsLifecycleTelemetr
                 // and which engine-internal events actually fire depends on per-subsystem telemetry gates — so relying on "opening an engine must have
                 // emitted something" made this read return -1 nondeterministically under the full suite.
                 TyphonEvent.EmitTickStart(System.Diagnostics.Stopwatch.GetTimestamp());
-                workloadSlot = Typhon.Engine.Internals.ThreadSlotRegistry.CurrentThreadSlotIndex;
+                workloadSlot = ThreadSlotRegistry.CurrentThreadSlotIndex;
 
                 workload(dbe);
             }
