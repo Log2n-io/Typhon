@@ -394,13 +394,38 @@ jobs:
             exit 1
           fi
 
-          if [ -z "$(git status --porcelain)" ]; then
+          # Stage FIRST, then ask the INDEX whether anything is there. Not `git status --porcelain`: that is a
+          # whole-worktree predicate and is never empty in this job, because download-artifact drops
+          # doc-fix.patch and fixes.txt in the workspace root and they show up as `??` lines. The guard could
+          # therefore never fire, and every no-op night fell through to `git commit` and died on "nothing added
+          # to commit" (run 30689709217, attempt 2) — a red run reporting the wrong cause. Same trap the `patch`
+          # step above calls out by name; the index is the exact question being asked here.
+          # -A so a newly created page counts, not just edits to existing ones.
+          git add -A doc/
+          if git diff --cached --quiet; then
+            # A no-op night is benign ONLY if the fixes already on the branch are visible in a PR. If the branch
+            # carries doc/ changes main does not have and no PR is open, they are STRANDED: the patch is
+            # idempotent, so no later run re-commits them and the create path never fires again for work already
+            # on the branch. That is exactly how #632-#635 ended up invisible (run 30689709217). Returning green
+            # here would report "nothing to do" when the truth is "nothing will ever happen" — so fail, and say
+            # how to recover. Diffing doc/ against main, rather than counting commits, keeps the merge commits
+            # this job creates from reading as stranded work.
+            # Name the files rather than testing `! git diff --quiet`: --quiet exits non-zero for ERRORS (128,
+            # e.g. an unresolvable origin/main) exactly as it does for "differs" (1), so the negation would
+            # report stranded fixes when the real fault was something else entirely. Assigning the output keeps
+            # a genuine git failure fatal under `set -e`, with git's own message instead of a misleading one.
+            UNMERGED=$(git diff --name-only origin/main -- doc/)
+            OPEN_PR=$(gh pr list --repo "${{ github.repository }}" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+            if [ -n "$UNMERGED" ] && [ -z "$OPEN_PR" ]; then
+              echo "::error::$BRANCH carries doc fixes that are not in main and has no open PR — they are stranded. Open one with: gh pr create --repo ${{ github.repository }} --draft --base main --head $BRANCH"
+              printf '  %s\n' $UNMERGED
+              exit 1
+            fi
             echo "::notice::Patch applied to a no-op — these fixes are already on the branch. Nothing to commit."
             echo "committed=0" >> "$GITHUB_ENV"
             exit 0
           fi
 
-          git add -A doc/
           git commit -m "[doc-drift] nightly doc fixes $(date -u +%F) [no-ut] [no-doc]" \
                      -m "$(cat fixes.txt)" \
                      -m "Filed and fixed by doc-accuracy-review.yml. Review the diff — the model fixes only what it is confident about, so the referenced issues may cover more than this commit does."
