@@ -27,7 +27,15 @@ regenerating for BALANCE, never for coverage (same contract as the
 test-affected map).
 
 Env knobs (run mode): SHARD_REPO (repo root, default cwd), SHARD_CONFIG (default
-Release).
+Release), SHARD_CONCURRENCY (shards to run at once, default = all of them).
+
+SHARD_CONCURRENCY=1 runs the SAME plan strictly sequentially. That is what the macOS
+arm64 nightly uses: a 3-core hosted runner cannot take K=8 concurrent processes (the
+gate's K is sized for 16 physical cores), but running a DIFFERENT, looser filter there
+silently changed which tests were selected -- NUnit runs [Explicit] tests when it reads
+the filter as naming them, and a 2-term category filter qualifies where the gate's
+305-term one does not. Reusing the gate's plan keeps nightly and gate selection
+identical by construction instead of by two mechanisms that have to agree.
 """
 import argparse, json, os, subprocess, sys, time
 import xml.etree.ElementTree as ET
@@ -178,11 +186,14 @@ def all_results(path):
 def cmd_run(results_dir):
     shards = json.load(open(SHARDS_JSON))
     os.makedirs(results_dir, exist_ok=True)
-    print(f"[shard] {len(shards)} parallel shards (workers=1) + serial Sensitive pass; "
+    # Default = every shard at once (the gate). SHARD_CONCURRENCY caps it without touching the PLAN, so a
+    # core-poor runner slows down instead of silently testing a different set.
+    conc = max(1, int(os.environ.get("SHARD_CONCURRENCY") or len(shards)))
+    print(f"[shard] {len(shards)} shards (workers=1, {conc} at a time) + serial Sensitive pass; "
           f"cfg={CFG} repo={REPO}", flush=True)
     t0 = time.time()
     results = []
-    with ThreadPoolExecutor(max_workers=len(shards)) as ex:
+    with ThreadPoolExecutor(max_workers=conc) as ex:
         futs = [ex.submit(run_one, str(i), s["filter"], results_dir)
                 for i, s in enumerate(shards)]
         for f in futs:
