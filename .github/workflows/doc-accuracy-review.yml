@@ -386,6 +386,16 @@ jobs:
             git switch -c "$BRANCH"
           fi
 
+          # Layer 1 (scripts/check-doc-links.py) gates doc/ on every PR through build-docs.yml — but never on
+          # THIS one. GitHub suppresses `pull_request` workflows for PRs created with GITHUB_TOKEN, so a
+          # bot-opened doc-drift PR is the one doc change in the repo that no link check ever sees. Run the same
+          # lint here instead, which is strictly stronger than the check it stands in for: it refuses to COMMIT
+          # a dead link rather than annotating one after it is already on the branch.
+          # Baseline BEFORE the patch, because the lint covers all of doc/ and main can in principle arrive
+          # already broken. Without this, inherited breakage would be reported as "tonight's fixes broke a
+          # link", and a nightly that misattributes its failures is one people learn to ignore.
+          python3 scripts/check-doc-links.py --quiet && BASE_OK=1 || BASE_OK=0
+
           # --3way so a hunk that already moved (because an earlier night touched the same page) merges
           # instead of hard-failing on context mismatch.
           if ! git apply --3way doc-fix.patch; then
@@ -424,6 +434,16 @@ jobs:
             echo "::notice::Patch applied to a no-op — these fixes are already on the branch. Nothing to commit."
             echo "committed=0" >> "$GITHUB_ENV"
             exit 0
+          fi
+
+          # There is something to commit — hold it to the same mechanical bar every other doc change clears.
+          if ! python3 scripts/check-doc-links.py; then
+            if [ "$BASE_OK" = 0 ]; then
+              echo "::warning::doc/ link lint was ALREADY failing before tonight's patch — committing anyway, this breakage is inherited from main and not caused by these fixes."
+            else
+              echo "::error::Tonight's doc fixes introduce a dead link, a stale anchor or an unresolvable src/ path. Refusing to commit them. The findings remain filed as issues and the next run retries from a clean tree."
+              exit 1
+            fi
           fi
 
           git commit -m "[doc-drift] nightly doc fixes $(date -u +%F) [no-ut] [no-doc]" \
