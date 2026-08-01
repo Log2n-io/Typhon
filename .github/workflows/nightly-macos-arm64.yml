@@ -106,7 +106,11 @@ jobs:
       - name: Mount a RAM disk for test databases
         run: |
           set -euo pipefail
-          DEV=$(hdiutil attach -nomount ram://4194304)     # 4194304 sectors x 512 B = 2 GiB
+          # `hdiutil attach -nomount` PADS its output ("/dev/disk6          "), and diskutil will not resolve a
+          # device path carrying trailing whitespace — it fails with "Unable to find disk for /dev/disk6", where
+          # the padding is invisible in the message. tr strips it. Do not drop this pipe.
+          DEV=$(hdiutil attach -nomount ram://4194304 | tr -d '[:space:]')     # 4194304 sectors x 512 B = 2 GiB
+          echo "ram disk device: '$DEV'"
           diskutil eraseVolume HFS+ typhon-ramdisk "$DEV"
           echo "TMPDIR=/Volumes/typhon-ramdisk" >> "$GITHUB_ENV"
           df -h /Volumes/typhon-ramdisk
