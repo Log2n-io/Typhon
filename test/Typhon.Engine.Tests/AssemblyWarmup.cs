@@ -19,6 +19,11 @@ public class AssemblyWarmup
     [OneTimeSetUp]
     public void JitWarmup()
     {
+        // Keep this suite out of the developer's machine-local database registry (#622, D-7). Nearly every fixture already roots its database under
+        // %TEMP%, which the registry suppresses on its own — this is the explicit half of that guard, so a future fixture that legitimately builds a
+        // database elsewhere cannot silently start writing rows into a real %LOCALAPPDATA%. DatabaseRegistryTests re-enables it around its own cases.
+        DatabaseRegistry.SuppressForProcess = true;
+
         // Install a last-chance handler so unhandled exceptions on background threads
         // dump their stack trace before the process dies.
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>

@@ -33,6 +33,10 @@ public static class ServiceExtensions
         services.AddSingleton<StreamSubscriptionRegistry>();
         // #386 Phase 1: Query Console — DSL parser + compiler + execute/plan/parse service.
         services.AddSingleton<QueryConsoleService>();
+        // #622 (D-7): the machine-local database registry, rooted where the engine writes it. Registered rather than
+        // constructed per-request so tests can substitute a temp-rooted instance, the same isolation the bootstrap
+        // token, PAT store and options store already need to keep test runs out of the real %LOCALAPPDATA%.
+        services.AddSingleton(_ => new Typhon.Engine.DatabaseRegistry(Typhon.Engine.DatabaseRegistry.EffectiveDirectory));
         return services;
     }
 

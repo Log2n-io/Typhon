@@ -14,6 +14,7 @@ import { useOpenDatabaseFile } from '@/hooks/useOpenDatabaseFile';
 import { logError, logInfo } from '@/stores/useLogStore';
 import { extractDetail } from './connectErrors';
 import RecentFilesTab from './tabs/RecentFilesTab';
+import KnownDatabasesTab from './tabs/KnownDatabasesTab';
 import OpenFileTab from './tabs/OpenFileTab';
 import OpenTraceTab from './tabs/OpenTraceTab';
 import AttachTab from './tabs/AttachTab';
@@ -23,7 +24,7 @@ import { toggleViewProfiler } from '@/shell/commands/profilerCommands';
 // Dev Fixture used to be a tab here; it now lives in `panels/DevFixture/DevFixturePanel.tsx`, reachable from the
 // View menu and palette ("Open Dev Fixture"). The `'devfixture'` literal stays in the union so any caller still
 // passing `initialTab='devfixture'` doesn't break compile (it silently falls through to the default `recent` tab).
-export type ConnectTab = 'recent' | 'open' | 'trace' | 'attach' | 'cached' | 'devfixture';
+export type ConnectTab = 'recent' | 'known' | 'open' | 'trace' | 'attach' | 'cached' | 'devfixture';
 
 interface Props {
  open: boolean;
@@ -125,6 +126,7 @@ export default function ConnectDialog({ open, initialTab, onOpenChange }: Props)
  >
  <TabsList className="shrink-0">
  <TabsTrigger value="recent">Recent</TabsTrigger>
+ <TabsTrigger value="known">Known</TabsTrigger>
  <TabsTrigger value="open">Open File</TabsTrigger>
  <TabsTrigger value="trace">Open Trace</TabsTrigger>
  <TabsTrigger value="attach">Attach</TabsTrigger>
@@ -135,6 +137,11 @@ export default function ConnectDialog({ open, initialTab, onOpenChange }: Props)
  </TabsList>
  <TabsContent value="recent" className="min-h-0 flex-1">
  <RecentFilesTab onOpen={handleOpen} onOpenTrace={handleOpenTrace} openingPath={openingPath} />
+ </TabsContent>
+ <TabsContent value="known" className="min-h-0 flex-1">
+ {/* `active` holds the request until the tab is actually shown — the registry is a filesystem read, and opening
+     the dialog on Recent should not pay for it. */}
+ <KnownDatabasesTab onOpen={handleOpen} openingPath={openingPath} active={tab === 'known'} />
  </TabsContent>
  <TabsContent value="open" className="min-h-0 flex-1">
  <OpenFileTab onOpen={handleOpen} isOpening={postFile.isPending} />

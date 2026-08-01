@@ -32,6 +32,10 @@ internal static class Program
 
     private static async Task<int> Main(string[] args)
     {
+        // A load-generator's scratch database is not something anyone wants to find later — stay out of the
+        // machine-local registry (#622, design D-7).
+        DatabaseRegistry.SuppressForProcess = true;
+
         AnsiConsole.Write(new FigletText("Typhon Monitor").Color(Color.Cyan1));
         AnsiConsole.MarkupLine("[grey]Real-time observability for the Typhon database engine[/]");
         AnsiConsole.WriteLine();

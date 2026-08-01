@@ -13,6 +13,11 @@ public static class Program
     /// <summary>Exit codes: 0 = all runs passed, 1 = a run failed, 2 = scenario load/validation error.</summary>
     public static int Main(string[] args)
     {
+        // The harness builds colonies in its own bin directory as measurement scaffolding, so it is outside the
+        // registry's automatic temp guard — opt out explicitly (#622, design D-7). AntHill.Demo, a real application
+        // whose colony is worth finding again, is a different process and keeps registering.
+        Typhon.Engine.DatabaseRegistry.SuppressForProcess = true;
+
         if (HasFlag(args, "--help", "-h"))
         {
             PrintUsage();

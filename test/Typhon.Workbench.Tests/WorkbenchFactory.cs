@@ -41,6 +41,12 @@ public sealed class WorkbenchFactory : WebApplicationFactory<Program>
             services.AddSingleton(sp => new OptionsStore(
                 sp.GetRequiredService<ILogger<OptionsStore>>(),
                 Path.Combine(DemoDirectory, "options")));
+
+            // Same isolation again for the machine-local database registry (#622): it defaults to
+            // %LOCALAPPDATA%\Typhon\databases, so an unredirected test host would list — and let tests delete —
+            // the developer's real entries.
+            services.RemoveAll<DatabaseRegistry>();
+            services.AddSingleton(_ => new DatabaseRegistry(Path.Combine(DemoDirectory, "databases")));
         });
     }
 

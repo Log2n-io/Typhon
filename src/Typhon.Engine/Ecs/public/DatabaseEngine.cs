@@ -1043,6 +1043,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         InitializeStatisticsWorker();
 
         _constructed = true;
+
+        // Machine-local discoverability index (#622, D-7). Deliberately the last statement: every path into this engine — DI, DatabaseEngine.Open, the
+        // Workbench's EngineLifecycle — funnels through this constructor, so one call covers all of them, and an open that threw (the #615 system-schema gate
+        // refuses one from above) never reaches here and so is never recorded as a database this machine has. Silent and best-effort by contract.
+        DatabaseRegistry.TryRecordOpen(Logger, MMF.BundleDirectory, MMF.DatabaseName, DatabaseId);
     }
 
     /// <summary>
