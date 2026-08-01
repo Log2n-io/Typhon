@@ -1,0 +1,166 @@
+name: Nightly x64 (Linux)
+
+# EXPERIMENT: can a free GitHub-hosted x64 runner do the engine suite's job, well enough to retire the
+# ephemeral c6id.8xlarge the merge gate rents from AWS?
+#
+# This is the x64 sibling of nightly-macos-arm64.yml and runs the SAME thing the same way — the gate's own
+# `bench/aws/shards.json`, capped concurrency, test databases on a RAM disk. Keeping the two in step is the
+# point: a difference in the numbers should mean a difference in the MACHINE, never in what was run.
+#
+# WHAT IT WOULD TAKE TO REPLACE THE AWS GATE — this workflow answers only the first of three:
+#   1. Speed. Measured here.
+#   2. Stability. NOT answerable from one green run. It needs a stretch of nights with zero retries; the
+#      suite's timing-sensitive tests are exactly the ones a contended shared runner disturbs.
+#   3. Scope. The gate also runs the Workbench suite (npm ci, orval, tsc, eslint, vitest, vite build) and the
+#      opt-in coverage pass. This covers the ENGINE suite only, so a green run here retires part of the bill,
+#      not the bill. See bench/aws/run-gate.sh.
+#
+# Non-blocking, never a required check.
+
+on:
+  schedule:
+    - cron: "0 3 * * *"     # same slot as the macOS nightly, so a given night's two runs are directly comparable
+  workflow_dispatch:
+    inputs:
+      shard_concurrency:
+        description: "Shards to run at once (the plan is never changed — only how many run together)"
+        required: false
+        default: "2"
+  # Self-validation, same rationale as the macOS nightly: schedule/dispatch only exist once a workflow is on the
+  # default branch, so without this the file could not be tested until after it merged. Scoped to its own path.
+  pull_request:
+    paths:
+      - '.github/workflows/nightly-linux-x64.yml'
+
+concurrency:
+  group: nightly-linux-x64
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  engine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      # 2 on the standard 4-vCPU hosted runner. The gate uses K=8 on 16 PHYSICAL cores (0.5 processes per core);
+      # K=16 there was measured FLAKY. Start conservative and raise it only with evidence — the dispatch input
+      # exists so that experiment costs an input box, not a commit.
+      SHARD_CONCURRENCY: ${{ github.event.inputs.shard_concurrency || '2' }}
+      RAMDISK: /mnt/typhon-ramdisk
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      # Cheaper than the macOS sibling's guard — there is no Rosetta-style trap on Linux x64 (nothing here can
+      # silently change the memory model). It stays because a runner-label change is otherwise invisible: this
+      # job's whole purpose is to be the x64 datapoint, and an arm64 runner would answer a different question
+      # while looking identical in the summary.
+      - name: Assert x64
+        run: |
+          set -uo pipefail
+          ARCH=$(uname -m)
+          INFO=$(dotnet --info 2>&1)
+          echo "uname -m = $ARCH"
+          echo "$INFO" | grep -E '^[[:space:]]*(Architecture|RID):' || true
+          if [ "$ARCH" != "x86_64" ]; then
+            echo "::error::Runner reports '$ARCH', not x86_64 — this job exists to be the x64 comparison point."
+            exit 1
+          fi
+          echo "nproc = $(nproc), SHARD_CONCURRENCY = $SHARD_CONCURRENCY"
+
+      - name: Build engine test project (Release)
+        run: dotnet build test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj -c Release
+
+      # Same lever as the macOS sibling and the self-hosted gate (TMPDIR=/nvme in run-gate.sh), and far simpler
+      # here: Linux has tmpfs natively, no hdiutil/diskutil dance. The suite roots every database directory at
+      # Path.GetTempPath(), which .NET resolves through TMPDIR on Unix — so this moves the main database file and
+      # the WAL alike into RAM. On macOS this took the suite from 616 s to 96 s and from 4 flakes to none.
+      - name: Mount a tmpfs for test databases
+        run: |
+          set -euo pipefail
+          sudo mkdir -p "$RAMDISK"
+          sudo mount -t tmpfs -o size=2G tmpfs "$RAMDISK"
+          sudo chown "$(id -u):$(id -g)" "$RAMDISK"
+          echo "TMPDIR=$RAMDISK" >> "$GITHUB_ENV"
+          df -h "$RAMDISK"
+
+      - name: Run engine suite (gate plan + Sensitive pass + retries)
+        id: tests
+        env:
+          SHARD_REPO: ${{ github.workspace }}
+          SHARD_CONFIG: Release
+        run: |
+          set -o pipefail
+          mkdir -p ci-out
+          echo "TMPDIR=$TMPDIR  SHARD_CONCURRENCY=$SHARD_CONCURRENCY"
+          python3 bench/aws/shard.py run --results-dir ci-out 2>&1 | tee ci-out/engine.log
+
+      - name: Render summary
+        if: always()
+        run: |
+          set -uo pipefail
+          {
+            echo "## Nightly x64 (Linux) — Typhon.Engine"
+            echo
+            echo "Runner: \`ubuntu-latest\` · $(uname -m) · $(nproc) vCPU · Release · gate plan, ${SHARD_CONCURRENCY} shard(s) at a time"
+            echo
+            echo "tmpfs (\`\$TMPDIR\`) after the run — the number to watch is Avail, since filling it would surface as a"
+            echo "confusing ENOSPC rather than as an out-of-space error:"
+            echo '```'
+            df -h "${TMPDIR:-/mnt/typhon-ramdisk}" 2>&1 || echo "(no tmpfs mounted)"
+            echo '```'
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Retry passes (shardR*.trx) re-run tests already counted in shard0..N/shardS, so they are EXCLUDED —
+          # including them would double-count and inflate the totals.
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import glob, os, xml.etree.ElementTree as ET
+          NS = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
+          tot = pas = fail = skip = 0
+          files = [f for f in sorted(glob.glob("ci-out/shard*.trx"))
+                   if not os.path.basename(f).startswith("shardR")]
+          for f in files:
+              c = ET.parse(f).getroot().find(NS + "ResultSummary/" + NS + "Counters")
+              if c is None:
+                  continue
+              tot  += int(c.get("total", 0))
+              pas  += int(c.get("passed", 0))
+              fail += int(c.get("failed", 0))
+              skip += int(c.get("notExecuted", 0))
+          print("| | total | passed | failed | skipped |")
+          print("|---|---|---|---|---|")
+          print(f"| **x64 hosted (this run)** | {tot} | {pas} | {fail} | {skip} |")
+          print("| x64 c6id gate baseline | 4156 | 4103 | 0 | 53 |")
+          print()
+          print("_Same platform AND same plan as the c6id gate, so these should match closely. This is the"
+                " comparison that decides whether a free hosted runner can stand in for the rented one._")
+          print()
+          if not files:
+              print("**No .trx produced** — the run failed before any test executed.")
+          PY
+
+          # The flaked-but-recovered list is the stability signal this experiment exists to gather. A fast run
+          # that needed two retry passes has NOT earned the right to replace the gate.
+          {
+            echo
+            echo '### shard.py verdict'
+            echo '```'
+            grep -E '^\[shard\]|^ +[~x] ' ci-out/engine.log || echo '(no verdict lines — see the full log artifact)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts (.trx / logs)
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightly-linux-x64
+          path: ci-out/**
+          if-no-files-found: ignore

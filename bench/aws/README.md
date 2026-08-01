@@ -33,6 +33,11 @@ That runner has 3 cores, where the committed K=8 plan would land at ~2.7 process
 **`SHARD_CONCURRENCY=1`** — the *same* `shards.json`, one shard at a time. It also points `TMPDIR` at a RAM
 disk, the macOS equivalent of the self-hosted gate's `TMPDIR=/nvme`. Non-blocking; never a required check.
 
+`.github/workflows/nightly-linux-x64.yml` is its x64 sibling on a free `ubuntu-latest` runner — same plan, same
+tmpfs trick, `SHARD_CONCURRENCY=2`. It is an **experiment**: if a hosted runner proves fast *and* stable across a
+stretch of nights, the engine half of the rented `c6id` gate becomes optional. It does not cover the Workbench
+suite or coverage, so it can only ever retire part of that bill.
+
 > **Cap concurrency, never swap the plan.** An earlier revision gave that job a custom single-shard catch-all
 > filter instead. It silently ran 32 `[Explicit]` stress/perf tests the gate deliberately skips — NUnit runs
 > `[Explicit]` tests when it reads the filter as naming them, and a 2-term category filter qualifies where the
