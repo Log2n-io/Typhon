@@ -4,6 +4,7 @@ import { useSessionStore } from '@/stores/useSessionStore';
 import { useDbMapStore } from '@/stores/useDbMapStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { isDbMapLeafType } from '@/libs/dbmap/dbMapSelection';
+import { resolveRevealTarget } from '@/libs/dbmap/dbMapReveal';
 import { useDbMapOverlayStore } from '@/stores/useDbMapOverlayStore';
 import { useDbMap } from '@/hooks/dbmap/useDbMap';
 import { useDbMapChunks, useDbMapPages, useDbMapSlots, useDbMapTiles } from '@/hooks/dbmap/useDbMapDetail';
@@ -167,7 +168,7 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
   const lens = useDbMapStore((s) => s.lens);
   const lensSegmentId = useDbMapStore((s) => s.lensSegmentId);
   const filter = useDbMapStore((s) => s.filter);
-  const pendingFocusType = useDbMapStore((s) => s.pendingFocusType);
+  const pendingFocus = useDbMapStore((s) => s.pendingFocus);
   const pendingFocusPage = useDbMapStore((s) => s.pendingFocusPage);
   const clearPendingFocus = useDbMapStore((s) => s.clearPendingFocus);
   const select = useSelectionStore((s) => s.select);
@@ -542,30 +543,40 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     [flyTo, pushNav, pushHistory],
   );
 
-  const flyToRegion = useCallback(
+  /**
+   * Frame one or more page runs. Takes a *list* because an archetype's storage is not contiguous (#619 §4.2): its
+   * cluster rows, entity map and cluster index are three separate segments, and framing only the first — or the
+   * span between the first and last, which would swallow everything in between — misrepresents the set. The bbox
+   * is taken over the runs' actual Hilbert cells, so a reveal frames exactly what the archetype owns.
+   */
+  const flyToRuns = useCallback(
     (
-      startPage: number,
-      pageCount: number,
+      runs: readonly { startPage: number; pageCount: number }[],
       opts?: { label?: string; fillFraction?: number; startFromDatabaseFit?: boolean },
     ) => {
       const renderer = rendererRef.current;
       const surface = surfaceRef.current;
       const layout = renderer?.getLayout();
-      if (!renderer || !surface || !layout || pageCount <= 0) {
+      if (!renderer || !surface || !layout || runs.length === 0) {
         return;
       }
-      // Bounding box of the run's Hilbert cells — sample-capped so a huge run stays cheap.
+      // Bounding box of every run's Hilbert cells — sample-capped per run so a huge one stays cheap.
       let minX = Infinity;
       let minY = Infinity;
       let maxX = -Infinity;
       let maxY = -Infinity;
-      const step = Math.max(1, Math.floor(pageCount / 4096));
-      for (let p = startPage; p < startPage + pageCount && p < layout.pageCount; p += step) {
-        const { x, y } = hilbertD2XY(layout.order, p);
-        if (x < minX) minX = x;
-        if (y < minY) minY = y;
-        if (x > maxX) maxX = x;
-        if (y > maxY) maxY = y;
+      for (const run of runs) {
+        if (run.pageCount <= 0) {
+          continue;
+        }
+        const step = Math.max(1, Math.floor(run.pageCount / 4096));
+        for (let p = run.startPage; p < run.startPage + run.pageCount && p < layout.pageCount; p += step) {
+          const { x, y } = hilbertD2XY(layout.order, p);
+          if (x < minX) minX = x;
+          if (y < minY) minY = y;
+          if (x > maxX) maxX = x;
+          if (y > maxY) maxY = y;
+        }
       }
       if (!Number.isFinite(minX)) {
         return;
@@ -597,6 +608,13 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
       flyTo(target);
     },
     [flyTo, pushHistory, pushNav],
+  );
+
+  /** Frame one contiguous run — the single-segment case, which is every in-panel jump. */
+  const flyToRegion = useCallback(
+    (startPage: number, pageCount: number, opts?: { label?: string; fillFraction?: number; startFromDatabaseFit?: boolean }) =>
+      flyToRuns([{ startPage, pageCount }], opts),
+    [flyToRuns],
   );
 
   // Publish the camera fly-to so an `Alt+←/→` nav-history restore can drive it (§13 A4 AC2).
@@ -661,19 +679,25 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
   }, []);
 
   useEffect(() => {
-    if (!data || !pendingFocusType) {
+    if (!data || !pendingFocus) {
       return;
     }
-    const seg = data.segments.find((s) => s.typeName === pendingFocusType);
+    // Which segments a reveal frames lives in `resolveRevealTarget` — a component owns one, an archetype owns up
+    // to three (#619 §4.2). Pure and unit-tested there, because this effect is canvas-bound and the *selection*
+    // is the part that can be quietly wrong: before #619 it took the first match only.
+    const { segments, primary, label } = resolveRevealTarget(pendingFocus, data.segments);
     clearPendingFocus();
-    if (seg) {
-      select('segment', { kind: 'segment', segmentId: seg.id, typeName: seg.typeName || undefined });
-      // Reveal as a drill-down: start from the whole-database fit, then animate IN to the segment at HALF the view
+    if (primary) {
+      select('segment', { kind: 'segment', segmentId: primary.id, typeName: primary.typeName || undefined });
+      // Reveal as a drill-down: start from the whole-database fit, then animate IN to the segments at HALF the view
       // so the revealed zone settles with its surroundings for context. The pulse frames it throughout.
-      flyToRegion(seg.rootPageIndex, seg.pageCount, { label: `Component ${pendingFocusType}`, fillFraction: 0.5, startFromDatabaseFit: true });
-      pulseSegment(seg.id);
+      flyToRuns(
+        segments.map((s) => ({ startPage: s.rootPageIndex, pageCount: s.pageCount })),
+        { label, fillFraction: 0.5, startFromDatabaseFit: true },
+      );
+      pulseSegment(primary.id);
     }
-  }, [data, pendingFocusType, clearPendingFocus, flyToRegion, select, pulseSegment]);
+  }, [data, pendingFocus, clearPendingFocus, flyToRuns, select, pulseSegment]);
 
   // #729 — an integrity finding asked to reveal one damaged page. Unlike the component reveal above there is
   // no segment to frame: the target is a single cell, and the interesting context is its neighbours (damage

@@ -5,8 +5,11 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { useArchetypeList } from '@/hooks/schema/useArchetypeList';
 import { useComponentList } from '@/hooks/schema/useComponentList';
 import { useSelectionStore } from '@/stores/useSelectionStore';
+import { useSessionCapability } from '@/stores/useSessionStore';
 import { openComponentInspector, openDataBrowser } from '@/shell/commands/openSchemaBrowser';
-import { openDbMapForComponent } from '@/shell/commands/openDbMap';
+import { revealArchetypeInFileMap } from '@/shell/commands/openDbMap';
+import { useArchetypeStorage } from '@/hooks/profiles/useArchetypeStorage';
+import { formatFileSize } from '@/lib/formatters';
 import { StorageModePill } from '@/panels/SchemaExplorer/SchemaExplorerPanel';
 import InspectorTargetSwitcher, { type SwitcherItem } from '@/panels/schemaCommon/InspectorTargetSwitcher';
 import { useInspectorTarget } from '@/panels/schemaCommon/useInspectorTarget';
@@ -208,19 +211,7 @@ export default function ArchetypeInspectorPanel(_props: IDockviewPanelProps) {
                 ? `${archetype.occupancyPct.toFixed(1)}%`
                 : '—'}
             </dd>
-            {rows.length > 0 && (
-              <dd className="col-span-2 mt-2">
-                <button
-                  type="button"
-                  onClick={() => openDbMapForComponent(rows[0].typeName)}
-                  data-testid="archetype-reveal-file-map"
-                  title="Reveal this archetype's storage in the File Map"
-                  className="rounded border border-border px-2 py-1 text-fs-sm text-foreground hover:bg-accent"
-                >
-                  Reveal in File Map →
-                </button>
-              </dd>
-            )}
+            <ArchetypeStorageBreakdown archetypeName={archetype.name} />
           </dl>
         )}
 
@@ -256,5 +247,70 @@ export default function ArchetypeInspectorPanel(_props: IDockviewPanelProps) {
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * Where this archetype actually lives on disk (#619 §4.2), and the reveal that frames it.
+ *
+ * The split is the point. **Owned** segments — cluster rows, entity map, cluster index — are this archetype's
+ * alone, and they are what the totals and the reveal cover. **Shared** component tables are type-global: one table
+ * per component type, used by every archetype carrying it. Listing them without summing them is the only honest
+ * rendering, and it is what makes a legacy (non-cluster) archetype legible — its rows are in those shared tables,
+ * so a small owned footprint is the correct answer rather than a suspicious one.
+ *
+ * Before #619 this section's reveal called `openDbMapForComponent(rows[0].typeName)` — the archetype's *first
+ * component*, which for a cluster archetype has no component-table segment at all, so the button did nothing.
+ */
+function ArchetypeStorageBreakdown({ archetypeName }: { archetypeName: string }): React.JSX.Element {
+  const hasDatabase = useSessionCapability('database');
+  // The staleness caveat belongs here only when a capture is attached — that is the one situation where these
+  // present-tense numbers sit near recorded ones and could be read as explaining them. With no capture there is no
+  // trace-time to confuse them with, and an unprompted apology for data that is simply current is noise.
+  const hasCapture = useSessionCapability('profiler');
+  const storage = useArchetypeStorage(hasDatabase ? archetypeName : null);
+
+  // §5.7 / IA §7: a handoff that cannot resolve is absent, not a disabled button that lies about being available.
+  if (!hasDatabase || !storage.resolved) {
+    return <></>;
+  }
+
+  return (
+    <>
+      <dt className="text-muted-foreground">Segments</dt>
+      <dd data-testid="archetype-owned-segments">
+        {storage.owned.map((s) => s.kind).join(' · ')}
+        <span className="ml-1 text-muted-foreground">
+          ({storage.totalPages.toLocaleString()} {storage.totalPages === 1 ? 'page' : 'pages'}
+          {storage.totalBytes > 0 && ` · ${formatFileSize(storage.totalBytes)}`})
+        </span>
+      </dd>
+      {storage.shared.length > 0 && (
+        <>
+          <dt className="text-muted-foreground">Shared tables</dt>
+          <dd data-testid="archetype-shared-tables" className="text-muted-foreground">
+            {storage.shared.length} component {storage.shared.length === 1 ? 'table' : 'tables'}, shared with every
+            archetype carrying those components — not counted above.
+          </dd>
+        </>
+      )}
+      {hasCapture && (
+        <dd className="col-span-2 mt-1 text-fs-sm text-muted-foreground" data-testid="archetype-storage-caveat">
+          This is the layout <em>now</em>, not at the attached capture's ticks — checkpointing, compaction and cluster
+          migration move pages.
+        </dd>
+      )}
+      <dd className="col-span-2 mt-2">
+        <button
+          type="button"
+          onClick={() => revealArchetypeInFileMap(archetypeName)}
+          data-testid="archetype-reveal-file-map"
+          title="Frame this archetype's own segments in the File Map"
+          className="rounded border border-border px-2 py-1 text-fs-sm text-foreground hover:bg-accent"
+        >
+          Reveal in File Map →
+        </button>
+      </dd>
+    </>
   );
 }

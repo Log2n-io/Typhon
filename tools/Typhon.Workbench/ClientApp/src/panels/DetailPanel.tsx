@@ -20,7 +20,13 @@ import { openComponentInspector, openArchetypeInspector, openDataBrowser } from 
 import { useArchetypesForComponent } from '@/hooks/schema/useArchetypesForComponent';
 import { pickPrimaryArchetype } from '@/hooks/dataBrowser/pickArchetype';
 import { componentNameFromResource } from '@/hooks/dataBrowser/resourceComponent';
-import { openComponentInSchema, openDbMapForComponent, revealComponentInResourceTree, revealSystemInDag } from '@/shell/commands/openDbMap';
+import {
+  openComponentInSchema,
+  openDbMapForComponent,
+  revealArchetypeInFileMap,
+  revealComponentInResourceTree,
+  revealSystemInDag,
+} from '@/shell/commands/openDbMap';
 import { revealQueryInAnalyzer } from '@/shell/commands/profilerCommands';
 import { isViewActive } from '@/shell/viewRegistry';
 import type { ComponentSchema, Field } from '@/hooks/schema/types';
@@ -760,30 +766,71 @@ function DbMapSegmentDetail({
 }
 
 /**
- * Segment → handoff verbs (AC2.14). A component-table segment pivots to the same destinations a component does
- * — Open in Component Inspector (Schema), Open in Data Browser (type-first archetype pick), Reveal in File Map,
- * Reveal in Resource Tree. Mirrors {@link ResourceActions}; renders only for a component segment (a `typeName`),
- * so a non-component segment never shows a dead verb (PC-6). This is what makes a Storage Health row (which
- * carries the type name on the bus segment leaf) reach all four views.
+ * Segment → handoff verbs (AC2.14). Mirrors {@link ResourceActions}; renders only for a segment that names an
+ * owner, so a segment with none never shows a dead verb (PC-6).
+ *
+ * **A segment's owner is not always a component.** `ResolveSegmentOwnerName` labels `Cluster`, `EntityMap` and
+ * per-archetype `Index` segments with an **archetype** name (`DatabaseEngine.StorageIntrospection.cs:498`), and
+ * everything else with a component's. Sending an archetype name down the component verbs is not a cosmetic
+ * mismatch — it 404s `components/{t}/archetypes`, opens a Component Inspector on a type that does not exist, and
+ * reveals `ComponentTable_{archetype}` in a tree that has no such node: four dead verbs behind live-looking
+ * buttons, which is precisely what PC-6 exists to prevent. Found in #619 by following the new archetype reveal
+ * (design §4.2) into the Detail pane, where every one of them fired.
+ *
+ * The fork is decided by the same name join the physical lens is built on: an owner that names an archetype in
+ * this database *is* an archetype (§5.2 — names are the stable identifier; ids are not comparable across the
+ * epic's bridges).
  */
 function SegmentActions({ typeName }: { typeName: string }): React.JSX.Element {
-  const { archetypes } = useArchetypesForComponent(typeName);
-  const primary = pickPrimaryArchetype(archetypes);
-  const cls = 'w-full rounded border border-border px-2 py-1 text-fs-sm text-foreground hover:bg-accent';
+  const { list: archetypes } = useArchetypeList();
+  const ownerArchetype = archetypes.find((a) => a.name === typeName) ?? null;
+  return ownerArchetype
+    ? <ArchetypeSegmentActions archetypeId={ownerArchetype.archetypeId} name={typeName} />
+    : <ComponentSegmentActions typeName={typeName} />;
+}
+
+const SEGMENT_VERB_CLS = 'w-full rounded border border-border px-2 py-1 text-fs-sm text-foreground hover:bg-accent';
+
+/** Verbs for a segment an archetype owns — its cluster rows, entity map, or cluster index. */
+function ArchetypeSegmentActions({ archetypeId, name }: { archetypeId: string; name: string }): React.JSX.Element {
   return (
     <div className="mt-3 flex flex-col gap-1 border-t border-border pt-2">
-      <button type="button" onClick={() => openComponentInSchema(typeName)} data-testid="segment-open-schema" className={cls}>
+      <button
+        type="button"
+        onClick={() => { useSelectionStore.getState().select('archetype', archetypeId); openArchetypeInspector(); }}
+        data-testid="segment-open-archetype"
+        className={SEGMENT_VERB_CLS}
+      >
+        Open in Archetype Inspector
+      </button>
+      <button type="button" onClick={() => openDataBrowser(archetypeId)} data-testid="segment-open-data-browser" className={SEGMENT_VERB_CLS}>
+        Open in Data Browser
+      </button>
+      <button type="button" onClick={() => revealArchetypeInFileMap(name)} data-testid="segment-reveal-file-map" className={SEGMENT_VERB_CLS}>
+        Reveal in File Map
+      </button>
+    </div>
+  );
+}
+
+/** Verbs for a component-table / revision / component-index segment — the original four. */
+function ComponentSegmentActions({ typeName }: { typeName: string }): React.JSX.Element {
+  const { archetypes } = useArchetypesForComponent(typeName);
+  const primary = pickPrimaryArchetype(archetypes);
+  return (
+    <div className="mt-3 flex flex-col gap-1 border-t border-border pt-2">
+      <button type="button" onClick={() => openComponentInSchema(typeName)} data-testid="segment-open-schema" className={SEGMENT_VERB_CLS}>
         Open in Component Inspector
       </button>
       {primary && (
-        <button type="button" onClick={() => openDataBrowser(primary.archetypeId)} data-testid="segment-open-data-browser" className={cls}>
+        <button type="button" onClick={() => openDataBrowser(primary.archetypeId)} data-testid="segment-open-data-browser" className={SEGMENT_VERB_CLS}>
           Open in Data Browser
         </button>
       )}
-      <button type="button" onClick={() => openDbMapForComponent(typeName)} data-testid="segment-reveal-file-map" className={cls}>
+      <button type="button" onClick={() => openDbMapForComponent(typeName)} data-testid="segment-reveal-file-map" className={SEGMENT_VERB_CLS}>
         Reveal in File Map
       </button>
-      <button type="button" onClick={() => revealComponentInResourceTree(typeName)} data-testid="segment-reveal-resource" className={cls}>
+      <button type="button" onClick={() => revealComponentInResourceTree(typeName)} data-testid="segment-reveal-resource" className={SEGMENT_VERB_CLS}>
         Reveal in Resource Tree
       </button>
     </div>

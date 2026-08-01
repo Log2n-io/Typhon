@@ -1,6 +1,13 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openDataBrowser, registerDockApi } from '@/shell/commands/openSchemaBrowser';
-import { openComponentInSchema, openDbMapForComponent, revealArchetypeInInspector, revealComponentInResourceTree, revealSystemInDag } from '@/shell/commands/openDbMap';
+import {
+  openComponentInSchema,
+  openDbMapForComponent,
+  revealArchetypeInFileMap,
+  revealArchetypeInInspector,
+  revealComponentInResourceTree,
+  revealSystemInDag,
+} from '@/shell/commands/openDbMap';
 import { jumpToTimeRange } from '@/shell/commands/profilerCommands';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useDataBrowserStore } from '@/stores/useDataBrowserStore';
@@ -33,7 +40,6 @@ describe('AC2.14 — handoff resolution matrix', () => {
     expect(useSelectionStore.getState().leaf).toMatchObject({ type: 'archetype', ref: '2002' });
   });
 
-  // File Map / Segment / Resource → Open in (Component Inspector / Schema) — routes through openComponentInSchema.
   it('Open in → Schema selects the component on the bus leaf', () => {
     openComponentInSchema('Position');
     expect(useSelectionStore.getState().leaf).toMatchObject({ type: 'component', ref: 'Position' });
@@ -42,7 +48,15 @@ describe('AC2.14 — handoff resolution matrix', () => {
   // Reveal in → File Map, from {Resource, Schema, Inspector, Storage Health} — routes through openDbMapForComponent.
   it('Reveal in → File Map requests focus on the component’s segment', () => {
     openDbMapForComponent('Position');
-    expect(useDbMapStore.getState().pendingFocusType).toBe('Position');
+    expect(useDbMapStore.getState().pendingFocus).toEqual({ kind: 'component', name: 'Position' });
+  });
+
+  // Reveal in → File Map for an ARCHETYPE (#619 §4.2), from {Data Flow, Archetype Inspector}. A separate row
+  // because an archetype owns a *set* of segments and is keyed by its own name, not by one of its components'
+  // — which is what the Archetype Inspector passed before #619, revealing the wrong thing or nothing at all.
+  it('Reveal in → File Map requests the archetype’s own segments, keyed by the archetype name', () => {
+    revealArchetypeInFileMap('Swg.Shard.Unit');
+    expect(useDbMapStore.getState().pendingFocus).toEqual({ kind: 'archetype', name: 'Swg.Shard.Unit' });
   });
 
   // File Map / Segment → Reveal in Resource Tree — routes through revealComponentInResourceTree.

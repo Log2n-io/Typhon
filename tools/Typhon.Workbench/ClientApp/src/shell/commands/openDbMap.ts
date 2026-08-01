@@ -17,6 +17,22 @@ export function openDbMapForComponent(typeName: string): void {
 }
 
 /**
+ * Data Flow / Archetype Inspector → map: frame **every** segment an archetype owns — its cluster rows, its entity
+ * map and its cluster index (#619 §4.2, design's "Reveal in File Map").
+ *
+ * Distinct from {@link openDbMapForComponent} in two ways that matter. It frames a *set*, because an archetype's
+ * storage is three segments and the physical lens is about seeing all of it. And it joins on the **archetype
+ * name** — the one identifier the trace and the database provably agree on (both derive it from
+ * `meta.Alias ?? ArchetypeType?.FullName`), where the ids do not: §5.3's two `ushort` spaces.
+ *
+ * Callers must gate this on the session having a database. Per IA §7 a handoff that cannot work is **absent**, not
+ * a disabled button, so there is deliberately no "no database" branch here to fall into.
+ */
+export function revealArchetypeInFileMap(archetypeName: string): void {
+  useDbMapStore.getState().requestFocusArchetype(archetypeName);
+}
+
+/**
  * Integrity finding → map: switch to the integrity lens and centre on the damaged page.
  *
  * The lens is switched on as part of the reveal rather than left to the user, because arriving at a page
