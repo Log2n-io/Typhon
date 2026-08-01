@@ -180,15 +180,36 @@ public class ParallelQueryTests
     {
         var threadIds = new ConcurrentBag<int>();
         var captured = 0;
+        var arrivals = 0;
+
+        // Declared BEFORE the scheduler so `using` disposal order (reverse of declaration) tears the scheduler down
+        // first — no worker can touch the event after it is disposed.
+        using var secondWorkerArrived = new ManualResetEventSlim(false);
 
         using var scheduler = CreateParallelScheduler(
             entityCount: 512,
             onChunk: (_, chunk, _) =>
             {
-                if (captured == 0)
+                if (Volatile.Read(ref captured) != 0)
                 {
-                    Thread.SpinWait(1000); // Give time for multiple workers to participate
-                    threadIds.Add(Environment.CurrentManagedThreadId);
+                    return;
+                }
+
+                threadIds.Add(Environment.CurrentManagedThreadId);
+
+                // Rendezvous, not a fixed spin. `Thread.SpinWait(1000)` merely HOPED a sibling worker would be
+                // scheduled in the meantime; where usable cores are scarce, one worker routinely drained every chunk
+                // before any sibling woke and the assertion below saw a single thread id (observed: 1 of an expected
+                // 2+ on a 3-core runner). Here the first chunk BLOCKS — releasing its core — until a second worker
+                // actually picks up work, which is precisely the property under test. A genuinely single-threaded
+                // dispatch still fails the assertion, on merit, one second later.
+                if (Interlocked.Increment(ref arrivals) >= 2)
+                {
+                    secondWorkerArrived.Set();
+                }
+                else
+                {
+                    secondWorkerArrived.Wait(TimeSpan.FromSeconds(1));
                 }
             },
             workerCount: 4,

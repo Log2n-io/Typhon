@@ -1,6 +1,8 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.CompilerServices;
+using System.Text;
 using NUnit.Framework;
 
 namespace Typhon.Engine.Tests.Profiler;
@@ -61,6 +63,12 @@ public sealed class CpuSampleParserTests
     }
 
     // Named CPU-burn method — sampled while the EventPipe session runs, so a stack frame for it must resolve back to this source file.
+    //
+    // NoInlining is load-bearing, not decoration: two tests below assert on a frame *named* SpinHotLoop, so an inlined
+    // body would be attributed to OneTimeSetUp and those tests would fail with no frame to point at. RyuJIT has
+    // historically declined to inline methods containing loops, but that is a heuristic — not a guarantee — and its cost
+    // model differs per architecture, so relying on it makes the assertion silently platform-dependent.
+    [MethodImpl(MethodImplOptions.NoInlining)]
     private static long SpinHotLoop(int milliseconds)
     {
         var sw = Stopwatch.StartNew();
@@ -82,6 +90,35 @@ public sealed class CpuSampleParserTests
         {
             Assert.Ignore("EventPipe diagnostics server unavailable in this environment — the capture→parse round-trip could not be exercised.");
         }
+    }
+
+    /// <summary>
+    /// Failure diagnostic: what the capture ACTUALLY sampled inside this fixture. A bare <c>Expected: True / But was:
+    /// False</c> gives the next reader no way to separate "the sampler caught nothing here", "the burn method was
+    /// inlined into its caller" and "the frame resolved but carried no PDB path" — three distinct causes with
+    /// identical assertion output. Both capture-dependent assertions below append this.
+    /// </summary>
+    private string DescribeFixtureFrames()
+    {
+        var sb = new StringBuilder()
+            .Append(_samples.SampleCount).Append(" samples, ")
+            .Append(_samples.Frames.Length).Append(" interned frames; ");
+
+        var matched = 0;
+        foreach (var frame in _samples.Frames)
+        {
+            if (!frame.Method.Contains(nameof(CpuSampleParserTests), StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (matched++ < 10)
+            {
+                sb.Append(frame.Method).Append(" @ ").Append(frame.FilePath ?? "<no pdb path>").Append(':').Append(frame.Line).Append("; ");
+            }
+        }
+
+        return matched == 0 ? sb.Append("NO frame from this fixture was sampled at all.").ToString() : sb.ToString();
     }
 
     [Test]
@@ -142,7 +179,9 @@ public sealed class CpuSampleParserTests
                 resolvedHotFrame = true;
             }
         }
-        Assert.That(resolvedHotFrame, Is.True, "The named CPU-burn method must appear in a sampled stack and resolve to this test file via the portable PDB.");
+        Assert.That(resolvedHotFrame, Is.True,
+            "The named CPU-burn method must appear in a sampled stack and resolve to this test file via the portable PDB. "
+            + DescribeFixtureFrames());
     }
 
     [Test]
@@ -159,7 +198,8 @@ public sealed class CpuSampleParserTests
                 spinFrames++;
             }
         }
-        Assert.That(spinFrames, Is.EqualTo(1), "the same method must intern to a single frame regardless of sampled IL offset");
+        Assert.That(spinFrames, Is.EqualTo(1),
+            "the same method must intern to a single frame regardless of sampled IL offset. " + DescribeFixtureFrames());
     }
 
     [Test]

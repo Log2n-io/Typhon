@@ -188,8 +188,6 @@ class ChunksPerWorkerTests : TestBase<ChunksPerWorkerTests>
     /// Pre-fix, the buggy <c>chunkIndex</c> would have indexed slot 1 on the second chunk and thrown.
     /// </summary>
     [Test]
-    [Category("Sensitive")] // dispatches the DAG + counts processed entities; worker dispatch starves under parallel
-                            // CPU load (seen=0). Runs in the gate's serial quiet pass.
     public void WorkerCount1_TwoX_SingleWorkerHandlesBothChunks()
     {
         const int entityCount = 8;
@@ -234,8 +232,17 @@ class ChunksPerWorkerTests : TestBase<ChunksPerWorkerTests>
         });
 
         runtime.Start();
-        SpinWait.SpinUntil(() => ticksSeen >= 1, TimeSpan.FromSeconds(5));
+
+        // Wait on the SUBJECT, not on a proxy for it. `ticksSeen` is incremented by the "Tick" callback system, and
+        // "Single" is declared `after: "Tick"` — so `ticksSeen >= 1` becomes true BEFORE the query system this test is
+        // actually asserting on has run, and Shutdown() then truncates it mid-tick. That is not a load artifact to be
+        // categorised away: on a 3-core CI runner it reliably produced seen = 0 of 8, in the serial pass as well.
+        // Waiting on `seen` cannot mask a real defect — a query system that genuinely skips chunks still times out
+        // here and still fails the assertion below, just five seconds later.
+        SpinWait.SpinUntil(() => seen.Count >= entityCount, TimeSpan.FromSeconds(5));
         runtime.Shutdown();
+
+        Assert.That(ticksSeen, Is.GreaterThanOrEqualTo(1), "The predecessor callback system never ran — the tick never dispatched.");
 
         var seenSet = new HashSet<EntityId>(seen);
         Assert.That(seenSet.Count, Is.EqualTo(entityCount));
