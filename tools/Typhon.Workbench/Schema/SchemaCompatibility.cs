@@ -29,6 +29,14 @@ public static class SchemaCompatibility
 
     public sealed record Result(State State, Diagnostic[] Diagnostics, int RegisteredCount);
 
+    /// <summary>
+    /// Diagnostic kind for a component the loaded assembly declares but the database does not contain. Informational, NOT an
+    /// error: it is the normal and correct outcome of pointing a general-purpose schema assembly at a database that uses part
+    /// of it. It must never contribute to <see cref="State.MigrationRequired"/> or <see cref="State.Incompatible"/> — a
+    /// database is not broken for lacking something it never had.
+    /// </summary>
+    public const string NotInDatabaseKind = "not_in_database";
+
     public static Result ClassifyAndRegister(DatabaseEngine engine, LoadedSchema loaded)
     {
         ArgumentNullException.ThrowIfNull(engine);
@@ -46,9 +54,35 @@ public static class SchemaCompatibility
         var hadBreakingChange = false;
         var hadOther = false;
 
+        // The DATABASE is the reference; the assembly is checked against it. Registering a component the database has never
+        // held does not read it — it CREATES it (DatabaseEngine's "Create path"), allocating segments and persisting a
+        // ComponentR1 row. That turned opening a database in an inspector into a permanent, silent schema mutation: the
+        // Workbench loads the whole schema DLL, so every type the file lacked was written into it (measured: 20 components /
+        // 6.2 MB on a database that declared 6). Those invented segments are also what the next application write destroys,
+        // since it does not know they exist (CK-09). ADR-055's migrate-on-open is preserved exactly — it concerns components
+        // that ARE present and behind — but a component absent from the file is reported, never invented.
+        var persisted = engine.PersistedComponents;
+
         foreach (var type in loaded.ComponentTypes)
         {
-            var name = type.GetCustomAttribute<ComponentAttribute>()?.Name ?? type.Name;
+            var attribute = type.GetCustomAttribute<ComponentAttribute>();
+            var name = attribute?.Name ?? type.Name;
+
+            // Match the engine's own reopen matching (DatabaseEngine.cs:2576): a renamed component is persisted under its
+            // PREVIOUS name until the rename is carried forward, so keying on the current name alone would report a renamed
+            // component as absent and silently defeat the [Component(PreviousName)] hatch (#514 D4).
+            var previousName = attribute?.PreviousName;
+            var isInDatabase = persisted != null
+                && (persisted.ContainsKey(name) || (previousName != null && persisted.ContainsKey(previousName)));
+
+            if (!isInDatabase)
+            {
+                diagnostics.Add(new Diagnostic(name, NotInDatabaseKind,
+                    $"'{name}' is declared by the loaded schema assembly but is not present in this database. It is shown as empty; "
+                    + "opening a database never adds components to it."));
+                continue;
+            }
+
             try
             {
                 engine.RegisterComponentByType(type, schemaValidation: SchemaValidationMode.Enforce);
@@ -77,7 +111,16 @@ public static class SchemaCompatibility
         }
 
         var state = ClassifyAggregate(registered, hadDowngrade, hadMigrationFailed, hadBreakingChange, hadOther);
-        return new Result(state, diagnostics.ToArray(), registered);
+
+        // Errors first, informational last. The MigrationRequired banner renders only `diagnostics.slice(0, 3)`, so a
+        // database with one real breaking change and a dozen merely-absent components would otherwise show three "not in
+        // this database" notes and bury the thing the user actually has to act on. Stable within each group, so the
+        // per-component order is otherwise unchanged.
+        var ordered = diagnostics
+            .OrderBy(d => d.Kind == NotInDatabaseKind ? 1 : 0)
+            .ToArray();
+
+        return new Result(state, ordered, registered);
     }
 
     /// <summary>
