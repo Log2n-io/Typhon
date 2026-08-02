@@ -583,13 +583,42 @@ export function resetLayout(): void {
 }
 
 /**
- * Open (or focus) the Profiles list — the captures recorded against the database this session has open (#617).
+ * Open (or focus) the **Profile sessions** list — the captures recorded against the database this session has open
+ * (#617).
  *
- * An open-session view rather than a profiler one: it is how you *find* a capture, so it has to be reachable
- * before any profile is attached.
+ * An open-session view rather than a profiler one: it is how you *find* a capture, so it has to be reachable before
+ * any profile is attached. That is also why it docks **left, beside Resources** rather than in the centre: it is a
+ * navigator — you pick a capture from it and the result appears elsewhere — not a workspace you read.
+ *
+ * The anchor is the Resource Tree panel rather than the left edge group's id, so it still lands correctly in a
+ * restored layout where the group was rebuilt under a different id. With no Resource Tree at all we let dockview
+ * place it; "Reset Layout to Default" restores the canonical spot. (Same fallback as the Systems & Queries navigator.)
  */
 export function openProfiles(): void {
-  ensureDockPanel('profiles', 'Profiles', 'Profiles');
+  const api = registeredApi;
+  if (!api) return;
+  const from = readActivePanelId();
+  const existing = api.getPanel('profiles');
+  if (existing) {
+    const group = existing.api.group;
+    if (group.api.isCollapsed()) {
+      group.api.expand();
+    }
+    existing.focus();
+  } else {
+    const leftEdge = api.getEdgeGroup('left');
+    if (leftEdge?.isCollapsed()) {
+      leftEdge.expand();
+    }
+    const anchor = api.getPanel('resource-tree');
+    api.addPanel({
+      id: 'profiles',
+      component: 'Profiles',
+      title: 'Profile sessions',
+      position: anchor ? { referencePanel: anchor.id, direction: 'within' } : undefined,
+    });
+  }
+  recordPanelTransition('profiles', from);
 }
 
 /**

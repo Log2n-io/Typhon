@@ -305,8 +305,8 @@ function RelationshipsTab({ typeName, component }: { typeName: string; component
           {hasDatabase ? (
             <>
               A database file on its own has no systems — nothing in it records which code touches which data. Attach a
-              profiling capture from the <strong>Profiles</strong> panel and this shows which systems write and read this
-              component.
+              profiling capture from the <strong>Profile sessions</strong> panel and this shows which systems write and
+              read this component.
             </>
           ) : (
             <>

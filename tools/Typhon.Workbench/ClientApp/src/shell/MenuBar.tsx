@@ -153,7 +153,7 @@ export default function MenuBar() {
  <MenubarItem onClick={toggleViewStorageHealth}>Storage Health</MenubarItem>
  )}
  {isViewVisible('Profiles', sessionScope) && (
- <MenubarItem onClick={openProfiles}>Profiles</MenubarItem>
+ <MenubarItem onClick={openProfiles}>Profile sessions</MenubarItem>
  )}
  {/* (Stage 2 / GAP-02: the Component Layout/Archetypes/Indexes/Relationships items were removed —
      those facts are now tabs of the Component Inspector, reached by selecting a component.) */}

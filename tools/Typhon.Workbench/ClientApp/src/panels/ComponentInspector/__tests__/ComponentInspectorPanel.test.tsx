@@ -222,7 +222,7 @@ describe('ComponentInspectorPanel', () => {
     expect(screen.getByText('Position')).toBeTruthy();
   });
 
-  it('Relationships tab (database, no capture) points at the Profiles panel — no topology fetch', () => {
+  it('Relationships tab (database, no capture) points at the Profile sessions panel — no topology fetch', () => {
     // #618 §4.1: the tab now gates on the profiler capability, not the session kind, because a capture can be attached
     // to an open database. Without one there is still nothing to show — but the advice is "attach a capture", not
     // "open a trace session instead", which stopped being true in #617.
