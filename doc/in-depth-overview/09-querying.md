@@ -147,7 +147,18 @@ Singleton (`PlanBuilder.Instance`). Two stages:
 | `EstimatedCounts` | Per-evaluator cardinality (parallel array). |
 | `UsesSecondaryIndex` | `PrimaryFieldIndex >= 0`. |
 
-**On the "PK fallback":** When `SelectPrimaryStream` cannot narrow a range — in practice an all-`!=` predicate, since `NotEqual` is excluded from range selection — `BuildPlanWithPrimarySelection` now calls `SelectFullScanStream`, which picks any indexed field referenced by the predicate and scans its full type range, leaving every evaluator to filter. For the typical NE-only case the plan is therefore executable with a non-negative `PrimaryFieldIndex`. `PrimaryFieldIndex = -1` and a **non-executable plan** are still produced in two remaining cases: OrderBy PK (`orderByFieldIndex == -1`, because no secondary index reproduces PK order) and the degenerate case where no evaluator carries a usable index (unreachable in practice — `WhereField` rejects non-indexed fields). In either case `PipelineExecutor.ExecuteCore` short-circuits when `UsesSecondaryIndex` is false; `Count` returns 0 directly. The PK B+Tree that the historical full-table-scan fallback used was removed; the engine relies on every query reaching a secondary index. Cluster-storage ordered scans separately handle a `-1` plan by using the OrderBy field's per-archetype B+Tree directly (see `ExecuteOrderedClustered` in `EcsQuery.cs`).
+**On the "PK fallback" — non-cluster storage:** When `SelectPrimaryStream` cannot narrow a range — in practice an all-`!=` predicate, since `NotEqual` is excluded from range selection — `BuildPlanWithPrimarySelection` calls `SelectFullScanStream`, which picks any indexed field referenced by the predicate and scans its full type range, leaving every evaluator to filter. For the typical NE-only case the plan is therefore executable with a non-negative `PrimaryFieldIndex`. `PrimaryFieldIndex = -1` and a **non-executable plan** are still produced in two remaining cases: OrderBy PK (`orderByFieldIndex == -1`, because no secondary index reproduces PK order) and the degenerate case where no evaluator carries a usable index (unreachable in practice — `WhereField` rejects non-indexed fields). Against **non-cluster** archetypes such a plan yields nothing: `PipelineExecutor.ExecuteCore` runs the scan only when `UsesSecondaryIndex` is true, and `PipelineExecutor.Count` returns 0 outright. The PK B+Tree that the historical full-table-scan fallback used was removed; the engine relies on every non-cluster query reaching a secondary index.
+
+**Cluster storage never takes that path — ordered or unordered.** A `-1` plan *is* executable against cluster archetypes, because each one carries per-archetype B+Trees and `EcsQuery` dispatches to them before `PipelineExecutor` is consulted at all:
+
+| Query shape | Entry point |
+|---|---|
+| Unordered | `ExecuteTargeted` → `ScanPerArchetypeBTree` — the non-selective branch, taken whenever `UsesSecondaryIndex` is false |
+| Ordered, every archetype clustered | `ExecuteOrderedClustered` — K-way merge over the OrderBy field's per-archetype B+Trees |
+| Ordered, mixed cluster + non-cluster | `ExecuteOrderedViaSortFallback` |
+| `Count()` with any cluster archetype in the mask | `ExecuteTargeted().Count` — `PipelineExecutor.Count` is never reached, so the `return 0` above does not apply |
+
+All four scan real data and return correct results (`src/Typhon.Engine/Ecs/public/EcsQuery.cs`). In particular, a cluster query is never empty and `Count` is never 0 *merely because of plan shape*.
 
 ### `FieldEvaluator`
 
