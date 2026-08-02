@@ -514,6 +514,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     private string BuildLockFilePath() => Path.Combine(Options.BundleDirectory, "db.lock");
 
+    /// <summary>True once THIS instance successfully wrote the advisory lock file. Gates <see cref="ReleaseLockFile"/> so a rejected open never deletes the
+    /// lock belonging to the live holder that rejected it.</summary>
+    private bool _lockFileOwned;
+
     /// <summary>
     /// Checks for an existing advisory lock file and creates a new one.
     /// If a stale lock file is found (dead PID), it is deleted with a warning.
@@ -571,6 +575,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 machineName = Environment.MachineName
             });
             File.WriteAllText(_lockFilePath, lockContent);
+
+            // Only now may this instance ever delete that file — see ReleaseLockFile. A failed write below leaves this false,
+            // so an instance that never owned a lock can never remove one.
+            _lockFileOwned = true;
         }
         catch (Exception ex)
         {
@@ -580,16 +588,29 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     }
 
     /// <summary>
-    /// Deletes the advisory lock file if it exists.
+    /// Deletes the advisory lock file — but ONLY the one this instance created.
+    ///
+    /// <para>The ownership check is load-bearing, not defensive tidiness. A rejected open (the database is held by a live
+    /// process) reaches this through the <see cref="DatabaseLockedException"/> handler in the constructor, having never
+    /// written a lock of its own — it found somebody else's. Deleting it there stripped the LIVE holder's advisory lock, so
+    /// the very collision the lock exists to report destroyed the evidence of itself: subsequent openers saw an unlocked
+    /// database and fell through to the OS sharing violation with no idea who held it.</para>
     /// </summary>
     private void ReleaseLockFile()
     {
+        if (!_lockFileOwned)
+        {
+            return;
+        }
+
         try
         {
             if (_lockFilePath != null)
             {
                 DeleteFileAndWait(_lockFilePath);
             }
+
+            _lockFileOwned = false;
         }
         catch (Exception ex)
         {
