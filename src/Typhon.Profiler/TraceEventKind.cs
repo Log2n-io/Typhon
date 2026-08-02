@@ -1104,6 +1104,15 @@ public static class TraceEventKindExtensions
         {
             return false;
         }
+        // EcsSpawnBatch (36, #620) — instant rollup for a whole batch spawn, declared `Shape = Instant` on its producer so the
+        // generator emits a 12-byte header with NO 25-byte span-header extension. Its numeric neighbours (EcsSpawn 30,
+        // EcsDestroy 31) ARE spans, so it needs an explicit carve-out rather than a range. Without it every span-aware reader
+        // consumed 25 payload bytes as a span header — fabricated duration and parent links — and the Workbench rendered it on a
+        // thread lane as a phantom span named `Kind[36]`.
+        if (kind == TraceEventKind.EcsSpawnBatch)
+        {
+            return false;
+        }
         // Concurrency tracing instant range (Phase 2, #280): 90–116.
         if (v >= 90 && v <= 116)
         {
