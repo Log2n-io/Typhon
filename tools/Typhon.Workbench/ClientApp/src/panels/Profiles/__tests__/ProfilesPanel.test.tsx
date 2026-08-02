@@ -12,6 +12,13 @@ const hoisted = vi.hoisted(() => ({
   attachError: null as Error | null,
   attached: [] as string[],
   detached: [] as string[],
+  revealed: 0,
+}));
+
+// The panel switches to the Profiler view on a successful attach; stub the dock command so the assertion is about
+// intent rather than about dockview being mounted.
+vi.mock('@/shell/commands/profilerCommands', () => ({
+  toggleViewProfiler: () => { hoisted.revealed++; },
 }));
 
 vi.mock('@/hooks/profiles/useProfileList', () => ({
@@ -27,7 +34,11 @@ vi.mock('@/hooks/profiles/useProfileList', () => ({
       isPending: false,
       error: hoisted.attachError,
       reset: () => undefined,
-      mutate: (f: string) => hoisted.attached.push(f),
+      mutate: (f: string, opts?: { onSuccess?: () => void }) => {
+        hoisted.attached.push(f);
+        // A rejected attach must not reveal the profiler, so the mock only fires onSuccess when there is no error.
+        if (!hoisted.attachError) opts?.onSuccess?.();
+      },
     },
     detach: {
       isPending: false,
@@ -72,6 +83,7 @@ describe('ProfilesPanel (#617)', () => {
   beforeEach(() => {
     hoisted.profiles = [];
     hoisted.attachError = null;
+    hoisted.revealed = 0;
     hoisted.attached = [];
     hoisted.detached = [];
     useSessionStore.setState({ kind: 'open', sessionId: 'sid', capabilities: ['database'], activeProfileId: null });
@@ -88,6 +100,16 @@ describe('ProfilesPanel (#617)', () => {
     hoisted.profiles = [makeProfile({ driftTransactions: 0 })];
     renderPanel();
     expect(screen.getByText('current')).toBeTruthy();
+  });
+
+  it('puts the open marker in the FIRST column', () => {
+    // Which session is open is the one fact this list is scanned for. In the last column it sits off the right edge of
+    // a left-docked navigator and is never seen.
+    hoisted.profiles = [makeProfile({ profileId: 'pid-1', isActive: true })];
+    renderPanel();
+
+    const cells = screen.getAllByRole('row')[1].querySelectorAll('td');
+    expect(cells[0].textContent).toBe('open');
   });
 
   it('withholds the drift figure for a capture belonging to another database', () => {
@@ -119,16 +141,60 @@ describe('ProfilesPanel (#617)', () => {
     expect(alert.textContent).toContain('not the one this session has open');
   });
 
-  it('clicking an unattached row attaches it and an attached row detaches it', () => {
+  it('double-clicking an unattached row opens it, and an attached row closes it', () => {
     hoisted.profiles = [makeProfile({ fileName: 'a.typhon-trace' })];
     const { rerender } = renderPanel();
-    fireEvent.click(screen.getAllByRole('row')[1]);   // [0] is the header row
+    fireEvent.doubleClick(screen.getAllByRole('row')[1]);   // [0] is the header row
     expect(hoisted.attached).toEqual(['a.typhon-trace']);
 
     hoisted.profiles = [makeProfile({ fileName: 'a.typhon-trace', profileId: 'pid-1', isActive: true })];
     rerender(<ProfilesPanel {...({} as IDockviewPanelProps)} />);
-    fireEvent.click(screen.getByText('open'));
+    fireEvent.doubleClick(screen.getAllByRole('row')[1]);
     expect(hoisted.detached).toEqual(['pid-1']);
+  });
+
+  it('opening a profile switches to the Profiler view', () => {
+    // Opening a capture in order to then go hunting for the timeline is a step nobody wants; the reason to open it is
+    // to look at it. This also covers the panel not existing yet: an Open session's dock layout is built before the
+    // profiler capability is gained, so revealing it has to be able to create it.
+    hoisted.profiles = [makeProfile({ fileName: 'a.typhon-trace' })];
+    renderPanel();
+
+    fireEvent.doubleClick(screen.getAllByRole('row')[1]);
+
+    expect(hoisted.attached).toEqual(['a.typhon-trace']);
+    expect(hoisted.revealed).toBe(1);
+  });
+
+  it('a rejected attach does not switch away from the reason it was rejected', () => {
+    hoisted.profiles = [makeProfile({ fileName: 'a.typhon-trace' })];
+    hoisted.attachError = new Error('recorded against another database');
+    renderPanel();
+
+    fireEvent.doubleClick(screen.getAllByRole('row')[1]);
+
+    expect(hoisted.revealed).toBe(0);
+  });
+
+  it('single click only selects — it must not toggle', () => {
+    // Attach and detach are the same gesture, so when a single click acted, a double click ran the toggle twice and
+    // landed back where it started. The row looked dead to anyone who double-clicked it, which is what people try first.
+    hoisted.profiles = [makeProfile({ fileName: 'a.typhon-trace' })];
+    renderPanel();
+
+    fireEvent.click(screen.getAllByRole('row')[1]);
+
+    expect(hoisted.attached).toEqual([]);
+    expect(hoisted.detached).toEqual([]);
+  });
+
+  it('Enter activates the focused row, so the panel works without a pointer', () => {
+    hoisted.profiles = [makeProfile({ fileName: 'a.typhon-trace' })];
+    renderPanel();
+
+    fireEvent.keyDown(screen.getAllByRole('row')[1], { key: 'Enter' });
+
+    expect(hoisted.attached).toEqual(['a.typhon-trace']);
   });
 
   it('tells the user where captures would go when there are none', () => {
@@ -142,6 +208,6 @@ describe('ProfilesPanel (#617)', () => {
     useSessionStore.setState({ kind: 'trace', capabilities: ['profiler'] });
     hoisted.profiles = [];
     renderPanel();
-    expect(screen.getByText(/Profiles live with a database/)).toBeTruthy();
+    expect(screen.getByText(/Profile sessions live with a database/)).toBeTruthy();
   });
 });

@@ -1,7 +1,9 @@
+import { useState } from 'react';
 import type { IDockviewPanelProps } from 'dockview-react';
 import { AlertTriangle, FileQuestion, Pin, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useProfileList, type Profile } from '@/hooks/profiles/useProfileList';
+import { toggleViewProfiler } from '@/shell/commands/profilerCommands';
 import { useSessionCapability } from '@/stores/useSessionStore';
 
 /** Ticks → a short human duration. Trace durations are Stopwatch ticks, so the frequency comes from the header. */
@@ -35,14 +37,14 @@ function formatSize(bytes: number): string {
 
 const compact = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 });
 
-/** Row tooltip — says what clicking will do, or why it will not work, before the click rather than after it. */
+/** Row tooltip — says what activating the row will do, or why it will not work, before the click rather than after it. */
 function rowTitle(profile: Profile): string {
   if (!profile.isReadable) return `${profile.fileName} — could not be read`;
   if (!profile.belongsToDatabase) {
     const recorded = profile.databaseName || profile.databaseId || 'another database';
     return `Recorded against ${recorded}, not the database this session has open. Open it as a standalone trace instead.`;
   }
-  return profile.profileId ? 'Close this profile' : 'Open this profile';
+  return profile.profileId ? 'Double-click to close this profile' : 'Double-click to open this profile';
 }
 
 /**
@@ -65,16 +67,22 @@ function formatDrift(profile: Profile): string {
 }
 
 /**
- * The **Profiles** panel — the captures recorded against the database this session has open (#617, design D-10 + D-5).
+ * The **Profile sessions** panel — the captures recorded against the database this session has open (#617, design
+ * D-10 + D-5). It docks left, beside Resources: it is a navigator you pick from, not a workspace you read.
  *
  * Every row is rendered from the capture's own header: nothing here builds a sidecar cache, which is what makes opening
- * a database with thirty captures cheap. Clicking a row attaches it as the session's active profile, at which point the
- * profiler panels become available — the session acquires the capability, rather than changing what kind of session it
- * is.
+ * a database with thirty captures cheap. **Double-clicking** a row attaches it as the session's active profile, at which
+ * point the profiler panels become available — the session acquires the capability, rather than changing what kind of
+ * session it is.
+ *
+ * Single click selects; double click acts. That split is not decoration: attaching and detaching are the same row
+ * gesture, so while a single click did it, a double click ran the toggle twice and landed back where it started — the
+ * row appeared dead to anyone who double-clicked it, which is what most people try first on a list of files.
  */
 export default function ProfilesPanel(_props: IDockviewPanelProps) {
   const { profiles, profilingsDirectory, isLoading, isError, isFetching, refetch, attach, detach } = useProfileList();
   const hasDatabase = useSessionCapability('database');
+  const [selected, setSelected] = useState<string | null>(null);
 
   const busy = attach.isPending || detach.isPending;
 
@@ -83,21 +91,33 @@ export default function ProfilesPanel(_props: IDockviewPanelProps) {
   // provenance. Without this the click would look like it did nothing at all.
   const actionError = attach.error ?? detach.error;
 
-  const onRowClick = (profile: Profile) => {
+  const onRowActivate = (profile: Profile) => {
     if (busy) return;
     attach.reset();
     detach.reset();
     if (profile.profileId) {
       detach.mutate(profile.profileId);
     } else if (profile.isReadable) {
-      attach.mutate(profile.fileName);
+      // Opening a capture and then having to go find the timeline yourself is a step nobody wants: the reason to open
+      // it is to look at it. Only on success — a rejected attach (the wrong-database guard) must leave you here reading
+      // why, not staring at an empty profiler.
+      attach.mutate(profile.fileName, { onSuccess: () => toggleViewProfiler() });
+    }
+  };
+
+  // Enter activates the focused row, so the panel is reachable without a pointer — a double-click-only surface would
+  // otherwise have no keyboard equivalent at all.
+  const onRowKeyDown = (e: React.KeyboardEvent, profile: Profile) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      onRowActivate(profile);
     }
   };
 
   return (
     <div className="h-full w-full overflow-hidden flex flex-col text-xs">
       <div className="flex items-center gap-2 px-2 py-1 border-b border-border shrink-0">
-        <span className="font-medium">Profiles</span>
+        <span className="font-medium">Profile sessions</span>
         <span className="text-muted-foreground">{profiles.length}</span>
         <div className="flex-1" />
         <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => void refetch()} title="Refresh">
@@ -117,7 +137,7 @@ export default function ProfilesPanel(_props: IDockviewPanelProps) {
 
       <div className="flex-1 overflow-auto">
         {!hasDatabase ? (
-          <Empty>Profiles live with a database. Open a <code>.typhon</code> database to see its captures.</Empty>
+          <Empty>Profile sessions live with a database. Open a <code>.typhon</code> database to see its captures.</Empty>
         ) : isLoading ? (
           <Empty>Loading captures…</Empty>
         ) : isError ? (
@@ -133,27 +153,36 @@ export default function ProfilesPanel(_props: IDockviewPanelProps) {
           <table className="w-full border-collapse">
             <thead className="sticky top-0 bg-background">
               <tr className="text-muted-foreground text-left">
+                {/* Which session is open is the one fact you scan this list for, so it leads — a marker in the last
+                    column is off the right edge of a left-docked navigator and never seen. Shrink-to-fit (w-0) so it
+                    costs the columns that carry data nothing. */}
+                <Th className="w-0" />
                 <Th>Recorded</Th>
                 <Th>Duration</Th>
                 <Th className="text-right">Ticks</Th>
                 <Th>Drift</Th>
                 <Th className="text-right">Size</Th>
-                <Th />
               </tr>
             </thead>
             <tbody>
               {profiles.map((p) => (
                 <tr
                   key={p.fileName}
-                  onClick={() => onRowClick(p)}
+                  onClick={() => setSelected(p.fileName)}
+                  onDoubleClick={() => onRowActivate(p)}
+                  onKeyDown={(e) => onRowKeyDown(e, p)}
+                  tabIndex={0}
                   title={rowTitle(p)}
                   className={[
-                    'h-[22px] cursor-pointer border-b border-border/40',
+                    'h-[22px] cursor-pointer border-b border-border/40 outline-none',
                     p.isActive ? 'bg-primary/10 font-medium' : 'hover:bg-muted/50',
+                    selected === p.fileName && !p.isActive ? 'bg-muted' : '',
+                    'focus-visible:ring-1 focus-visible:ring-ring',
                     p.isReadable && p.belongsToDatabase ? '' : 'text-muted-foreground italic',
                     busy ? 'pointer-events-none opacity-60' : '',
                   ].join(' ')}
                 >
+                  <Td className="w-0 text-muted-foreground">{p.isActive ? 'open' : ''}</Td>
                   <Td>
                     <span className="flex items-center gap-1">
                       {p.isPinned && <Pin className="h-3 w-3 shrink-0" aria-label="Pinned" />}
@@ -176,7 +205,6 @@ export default function ProfilesPanel(_props: IDockviewPanelProps) {
                   <Td className="text-right tabular-nums">{p.tickCount > 0 ? compact.format(p.tickCount) : '—'}</Td>
                   <Td className="text-muted-foreground">{formatDrift(p)}</Td>
                   <Td className="text-right tabular-nums">{formatSize(p.sizeBytes)}</Td>
-                  <Td className="text-right text-muted-foreground">{p.isActive ? 'open' : ''}</Td>
                 </tr>
               ))}
             </tbody>
