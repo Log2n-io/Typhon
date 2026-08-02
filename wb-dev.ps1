@@ -171,6 +171,49 @@ function Stop-ProcTree($processId) {
     taskkill /F /T /PID $processId 2>&1 | Out-Null
 }
 
+# Close any OPEN DATABASE SESSION before the host is force-killed.
+#
+# The thing that must happen cleanly is the DATABASE close, not the process exit. Disposing a session runs
+# DatabaseEngine.Dispose, which writes the clean-shutdown marker and releases the advisory lock; skipping it leaves the
+# file marked unclean and a stale db.lock behind, so the next open distrusts the persisted MVCC heads
+# (DatabaseEngine._headsTrusted) and redoes work it did not need to.
+#
+# The host itself CANNOT be asked to exit politely: it is a console process with no window, so `taskkill` without /F is
+# refused outright ("This process can only be terminated forcefully"), and its console is not ours to send Ctrl+Break to.
+# Measured, not assumed. But the running server exposes DELETE /api/sessions/{id} already — so we ask it to let go of the
+# databases, and only then kill it. Once nothing holds a database, how the process dies stops mattering.
+#
+# Auth mirrors the Vite dev proxy: read the bootstrap token from disk and send it as X-Workbench-Token (plus the session's
+# own token). Best-effort throughout — a server that is already gone, wedged, or holding nothing just falls through to the
+# force-kill, which is exactly the old behaviour.
+function Close-WorkbenchSessions($timeoutSec = 15) {
+    if (-not (Test-PortBound 5200)) { return 0 }
+
+    $tokenFile = Join-Path $env:LOCALAPPDATA 'Typhon\Workbench\bootstrap.token'
+    if (-not (Test-Path $tokenFile)) { return 0 }
+
+    try {
+        $token = (Get-Content $tokenFile -Raw).Trim()
+        $headers = @{ 'X-Workbench-Token' = $token }
+        $sessions = Invoke-RestMethod -Uri 'http://localhost:5200/api/sessions' -Headers $headers -TimeoutSec $timeoutSec
+    } catch {
+        return 0
+    }
+
+    $closed = 0
+    foreach ($s in @($sessions)) {
+        if (-not $s.sessionId) { continue }
+        try {
+            $h = @{ 'X-Workbench-Token' = $token; 'X-Session-Token' = $s.sessionId }
+            Invoke-RestMethod -Uri "http://localhost:5200/api/sessions/$($s.sessionId)" -Method Delete -Headers $h -TimeoutSec $timeoutSec | Out-Null
+            $closed++
+        } catch {
+            Write-Host "  WARN: could not close session $($s.sessionId) — its database will be left unclean"
+        }
+    }
+    return $closed
+}
+
 # This script's own process plus its ancestor chain (pwsh -> cmd/bash -> ...). The `reset` sweep
 # excludes these so a `/T` tree-kill can never take down the shell running it — the documented
 # "pwsh self-kill" gotcha. Bounded + cycle-guarded against a pathological parent loop.
@@ -449,6 +492,11 @@ function Invoke-Stop {
         }
         return
     }
+
+    # Let go of any open database BEFORE the host is force-killed, so it closes cleanly (clean-shutdown marker + lock
+    # release) instead of looking like a crash to the next process that opens it.
+    $closed = Close-WorkbenchSessions
+    if ($closed -gt 0) { Write-Host "  closed $closed open database session(s) cleanly before stopping" }
 
     Stop-ProcTree $state.kestrelPid
     Stop-ProcTree $state.vitePid
