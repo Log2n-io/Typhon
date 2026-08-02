@@ -264,6 +264,21 @@ jobs:
               State the exemptions, not just the headline. A rule with carve-outs documented as absolute
               teaches readers to expect the wrong thing in precisely the cases that bite.
 
+              VERIFY THE WHOLE PARAGRAPH YOU EDIT, not only the sentence you came for. A paragraph is one
+              unit to a reader, so rewriting half of it and inheriting the rest unchecked signs your name to
+              claims you never read. This has already caused drift: the 2026-08-01 run rewrote the "PK
+              fallback" paragraph in 09-querying.md and inherited a stale cluster-storage sentence beside it,
+              which the next night had to file again as #642.
+
+              NEVER write a linking phrase — "in either case", "likewise", "the same applies", "in both
+              paths" — into prose you have not verified THIS run. A connector widens the scope of the claim
+              it points at; widening an unverified claim is precisely how a fix manufactures new drift. That
+              is the exact mechanism behind #642: "In either case ..." was added in front of a sentence that
+              was only ever true for non-cluster archetypes, and the connector made it read as universal.
+
+              If a neighbouring claim is wrong and you are not confident how to fix it, SPLIT the paragraph
+              instead of bridging across it, and file the remainder as its own issue.
+
             Your edits will be pushed to a long-lived `doc-drift/nightly` branch and opened as a DRAFT PR
             for the maintainer to review, adjust or merge. The issues you filed are referenced from it and
             close on merge.
@@ -434,6 +449,42 @@ jobs:
             echo "::notice::Patch applied to a no-op — these fixes are already on the branch. Nothing to commit."
             echo "committed=0" >> "$GITHUB_ENV"
             exit 0
+          fi
+
+          # Ping-pong guard. Is this patch rewriting prose a PREVIOUS [doc-drift] run wrote? Touching the same
+          # PAGE two nights running is fine and expected (--3way exists for it). Rewriting the same LINES is not:
+          # it means the reviewer is arguing with itself, and since each run only sees the current text, neither
+          # side knows a round trip is happening. #642 was that — the 2026-08-01 fix bridged into a claim it had
+          # not checked, and 2026-08-02 filed the result. Blame the PRE-IMAGE line ranges of each hunk (HEAD is
+          # still pre-patch here; the patch is staged, not committed) and refuse if any land on a recent
+          # [doc-drift] commit. Recent, not ever: prose the bot wrote months ago legitimately needs revising when
+          # the code moves, and a permanent ban would freeze those pages.
+          PINGPONG=""
+          NOW=$(date +%s)
+          for f in $(git diff --cached --name-only); do
+            for hunk in $(git diff --cached -U0 -- "$f" | sed -n 's/^@@ -\([0-9,]*\).*/\1/p'); do
+              start=${hunk%,*}
+              len=${hunk#*,}
+              [ "$hunk" = "$start" ] && len=1          # "@@ -12 @@" means one line, no comma
+              [ "$len" = 0 ] && continue               # pure insertion — touches nobody's prose
+              end=$((start + len - 1))
+              for sha in $(git blame -L "$start,$end" --porcelain HEAD -- "$f" 2>/dev/null \
+                             | grep -oE '^[0-9a-f]{40}' | sort -u); do
+                case "$(git log -1 --format=%s "$sha")" in
+                  '[doc-drift]'*)
+                    age=$(( (NOW - $(git log -1 --format=%ct "$sha")) / 86400 ))
+                    if [ "$age" -le 30 ]; then
+                      PINGPONG="$PINGPONG  $f:$start-$end was written ${age}d ago by ${sha:0:7}"$'\n'
+                    fi
+                    ;;
+                esac
+              done
+            done
+          done
+          if [ -n "$PINGPONG" ]; then
+            echo "::error::This patch rewrites lines a recent [doc-drift] run wrote — the reviewer is revising its own output, which is how a fix turns into a round trip. Findings remain filed as issues; apply them by hand after deciding which reading is right."
+            printf '%s' "$PINGPONG"
+            exit 1
           fi
 
           # There is something to commit — hold it to the same mechanical bar every other doc change clears.
