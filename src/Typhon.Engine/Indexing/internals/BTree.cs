@@ -1184,16 +1184,16 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         => Remove(Unsafe.AsRef<TKey>(keyAddr), out value, ref accessor);
     public override unsafe Result<int, BTreeLookupStatus> TryGet(void* keyAddr, ref ChunkAccessor<TStore> accessor)
         => TryGet(Unsafe.AsRef<TKey>(keyAddr), ref accessor);
-    public override unsafe bool RemoveValue(void* keyAddr, int elementId, int value, ref ChunkAccessor<TStore> accessor, bool preserveEmptyBuffer = false)
-        => RemoveValue(Unsafe.AsRef<TKey>(keyAddr), elementId, value, ref accessor, preserveEmptyBuffer);
+    public override unsafe bool RemoveValue(void* keyAddr, int elementId, int value, ref ChunkAccessor<TStore> accessor)
+        => RemoveValue(Unsafe.AsRef<TKey>(keyAddr), elementId, value, ref accessor);
     public override unsafe VariableSizedBufferAccessor<int, TStore> TryGetMultiple(void* keyAddr, ref ChunkAccessor<TStore> accessor)
         => TryGetMultiple(Unsafe.AsRef<TKey>(keyAddr), ref accessor);
     public override unsafe bool Move(void* oldKeyAddr, void* newKeyAddr, int value, ref ChunkAccessor<TStore> accessor)
         => Move(Unsafe.AsRef<TKey>(oldKeyAddr), Unsafe.AsRef<TKey>(newKeyAddr), value, ref accessor);
     public override unsafe int MoveValue(void* oldKeyAddr, void* newKeyAddr, int elementId, int value,
-        ref ChunkAccessor<TStore> accessor, out int oldHeadBufferId, out int newHeadBufferId, bool preserveEmptyBuffer = false)
+        ref ChunkAccessor<TStore> accessor, out int oldHeadBufferId, out int newHeadBufferId)
         => MoveValue(Unsafe.AsRef<TKey>(oldKeyAddr), Unsafe.AsRef<TKey>(newKeyAddr), elementId, value,
-            ref accessor, out oldHeadBufferId, out newHeadBufferId, preserveEmptyBuffer);
+            ref accessor, out oldHeadBufferId, out newHeadBufferId);
 
     public int Add(TKey key, int value, ref ChunkAccessor<TStore> accessor) => Add(key, value, ref accessor, out _);
 
@@ -1425,7 +1425,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         }
     }
 
-    public bool RemoveValue(TKey key, int elementId, int value, ref ChunkAccessor<TStore> accessor, bool preserveEmptyBuffer = false)
+    public bool RemoveValue(TKey key, int elementId, int value, ref ChunkAccessor<TStore> accessor)
     {
         var scope = TyphonEvent.BeginBTreeDelete();
 
@@ -1468,11 +1468,9 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
                     {
                         result = false;
                     }
-                    else if (res == 0 && !preserveEmptyBuffer)
+                    else if (res == 0)
                     {
                         // Remove the key if we no longer have values stored there.
-                        // When preserveEmptyBuffer is true, keep the BTree key and empty HEAD buffer alive so that linked TAIL version-history buffers
-                        // remain reachable for temporal queries.
                         var args = new RemoveArguments(key, Comparer, ref opAccessor, ref sibAccessor);
                         RemoveCorePessimistic(ref args);
 

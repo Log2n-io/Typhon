@@ -1,4 +1,4 @@
-// unset
+﻿// unset
 
 using System;
 using System.Threading;
@@ -241,7 +241,7 @@ internal abstract partial class BTree<TKey, TStore>
     /// Returns the new element ID and both HEAD buffer IDs for inline TAIL tracking.
     /// </summary>
     public int MoveValue(TKey oldKey, TKey newKey, int elementId, int value,
-        ref ChunkAccessor<TStore> accessor, out int oldHeadBufferId, out int newHeadBufferId, bool preserveEmptyBuffer = false)
+        ref ChunkAccessor<TStore> accessor, out int oldHeadBufferId, out int newHeadBufferId)
     {
         // Per-operation accessor for thread safety under OLC (thread-local warm cache)
         ref var opAccessor = ref _segment.RentWarmAccessor(accessor.ChangeSet);
@@ -335,8 +335,8 @@ internal abstract partial class BTree<TKey, TStore>
                     {
                         // newKey doesn't exist — need to insert a new key entry
                         // If leaf is full and we won't reclaim a slot, bail to pessimistic.
-                        // We can only reclaim when res==0 (old buffer empty) AND !preserveEmptyBuffer.
-                        if (leaf.GetIsFull(ref opAccessor) && (res != 0 || preserveEmptyBuffer))
+                        // We can only reclaim when res==0 (the old buffer emptied).
+                        if (leaf.GetIsFull(ref opAccessor) && res != 0)
                         {
                             // Undo the buffer removal — re-add the element
                             _storage.Append(oldBufferId, value, ref sibAccessor);
@@ -348,7 +348,7 @@ internal abstract partial class BTree<TKey, TStore>
                         newElementId = _storage.Append(newBufferId, value, ref sibAccessor);
                         ni = ~ni;
                         // If old buffer empty (res==0) and not preserving, remove old key first to free a slot
-                        if (res == 0 && !preserveEmptyBuffer)
+                        if (res == 0)
                         {
                             oi = leaf.Find(oldKey, Comparer, ref opAccessor);
                             if (oi >= 0)
@@ -368,7 +368,7 @@ internal abstract partial class BTree<TKey, TStore>
                     newHeadBufferId = newBufferId;
 
                     // If old buffer is now empty and not yet cleaned up, remove the BTree entry for oldKey
-                    if (res == 0 && !preserveEmptyBuffer)
+                    if (res == 0)
                     {
                         // Re-find oldKey (index may have shifted after insert)
                         oi = leaf.Find(oldKey, Comparer, ref opAccessor);
@@ -478,7 +478,7 @@ internal abstract partial class BTree<TKey, TStore>
                     newHeadBufferId = newBufferId;
 
                     // If old buffer is now empty, remove the BTree entry
-                    if (res == 0 && !preserveEmptyBuffer)
+                    if (res == 0)
                     {
                         oi = oldLeaf.Find(oldKey, Comparer, ref opAccessor);
                         if (oi >= 0)
@@ -498,7 +498,7 @@ internal abstract partial class BTree<TKey, TStore>
 
             // Pessimistic fallback
             Interlocked.Increment(ref _pessimisticFallbacks);
-            return MoveValuePessimistic(oldKey, newKey, elementId, value, ref opAccessor, ref sibAccessor, out oldHeadBufferId, out newHeadBufferId, preserveEmptyBuffer);
+            return MoveValuePessimistic(oldKey, newKey, elementId, value, ref opAccessor, ref sibAccessor, out oldHeadBufferId, out newHeadBufferId);
         }
         finally
         {
@@ -513,7 +513,7 @@ internal abstract partial class BTree<TKey, TStore>
     /// No global lock — concurrency is handled by per-node OLC latches in Remove/Insert.
     /// </summary>
     private int MoveValuePessimistic(TKey oldKey, TKey newKey, int elementId, int value, ref ChunkAccessor<TStore> accessor, ref ChunkAccessor<TStore> sibAccessor,
-        out int oldHeadBufferId, out int newHeadBufferId, bool preserveEmptyBuffer = false)
+        out int oldHeadBufferId, out int newHeadBufferId)
     {
         try
         {
@@ -557,7 +557,7 @@ internal abstract partial class BTree<TKey, TStore>
             newHeadBufferId = newBufferId;
 
             // If old buffer is now empty, remove the BTree entry
-            if (res == 0 && !preserveEmptyBuffer)
+            if (res == 0)
             {
                 var removeArgs = new RemoveArguments(oldKey, Comparer, ref accessor, ref sibAccessor);
                 RemoveCorePessimistic(ref removeArgs);

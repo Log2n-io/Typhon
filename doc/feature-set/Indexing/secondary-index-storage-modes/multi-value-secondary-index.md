@@ -1,4 +1,4 @@
----
+﻿---
 uid: feature-indexing-secondary-index-storage-modes-multi-value-secondary-index
 title: 'Multi-Value Secondary Index (AllowMultiple)'
 description: 'Many entities share one key — the B+Tree value is a growable HEAD buffer of chunk-ids, at a fixed +4-byte-per-entity cost.'
@@ -89,8 +89,8 @@ using (var tx = dbe.CreateQuickTransaction())
 
 - Parent feature: [Secondary Index Storage Modes](./README.md)
 - Sibling: [Unique (single-value) secondary index](./unique-secondary-index.md)
-- See also: [Versioned (HEAD/TAIL) Secondary Indexes for MVCC](../versioned-secondary-indexes.md), [Temporal (Point-in-Time) Index Query](../temporal-index-query.md)
+- See also: [Element-Precise Secondary Indexes for MVCC](../versioned-secondary-indexes.md)
 
-<!-- Deep dive: claude/overview/04-data.md §4.7 B+Tree Indexes — Versioned Secondary Indexes (HEAD/TAIL) -->
+<!-- Deep dive: claude/overview/04-data.md §4.7 B+Tree Indexes — Versioned Secondary Indexes -->
 <!-- Deep dive: claude/design/Indexing/VersionedSecondaryIndexes.md -->
 <!-- Deep dive: claude/design/Indexing/public-api.md -->

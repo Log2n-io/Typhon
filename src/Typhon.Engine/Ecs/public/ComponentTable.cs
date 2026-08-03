@@ -204,9 +204,6 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     /// <summary>Segment backing the <see cref="String64"/>-keyed secondary indexes.</summary>
     public ChunkBasedSegment<PersistentStore> String64IndexSegment { get; private set; }
 
-    /// <summary>Segment backing the version-history tail for AllowMultiple secondary indexes. Null when the component has no multi-value index.</summary>
-    public ChunkBasedSegment<PersistentStore> TailIndexSegment { get; private set; }
-
     /// <summary>
     /// Surfaces the entity count as <see cref="IResource.Count"/> so the Workbench can render a
     /// live badge on the ComponentTable tree node without a second round-trip.
@@ -242,7 +239,6 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
             return total;
         }
     }
-    internal VariableSizedBufferSegment<VersionedIndexEntry, PersistentStore> TailVSBS { get; private set; }
 
     // ── Transient segments (non-null only when StorageMode == Transient) ──
     internal ChunkBasedSegment<TransientStore> TransientComponentSegment { get; private set; }
@@ -350,8 +346,8 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
             (DefaultIndexSegment?.AllocatedChunkCount ?? 0) +
             (TransientDefaultIndexSegment?.AllocatedChunkCount ?? 0) +
             (String64IndexSegment?.AllocatedChunkCount ?? 0) +
-            (TransientString64IndexSegment?.AllocatedChunkCount ?? 0) +
-            (TailIndexSegment?.AllocatedChunkCount ?? 0);
+            (TransientString64IndexSegment?.AllocatedChunkCount ?? 0);
+
 
         long totalCapacityChunks =
             (ComponentSegment?.ChunkCapacity ?? 0) +
@@ -360,8 +356,8 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
             (DefaultIndexSegment?.ChunkCapacity ?? 0) +
             (TransientDefaultIndexSegment?.ChunkCapacity ?? 0) +
             (String64IndexSegment?.ChunkCapacity ?? 0) +
-            (TransientString64IndexSegment?.ChunkCapacity ?? 0) +
-            (TailIndexSegment?.ChunkCapacity ?? 0);
+            (TransientString64IndexSegment?.ChunkCapacity ?? 0);
+
 
         writer.WriteCapacity(totalAllocatedChunks, totalCapacityChunks);
     }
@@ -408,12 +404,6 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         {
             props["String64IndexSegment.AllocatedChunks"] = String64IndexSegment.AllocatedChunkCount;
             props["String64IndexSegment.Capacity"] = String64IndexSegment.ChunkCapacity;
-        }
-
-        if (TailIndexSegment != null)
-        {
-            props["TailIndexSegment.AllocatedChunks"] = TailIndexSegment.AllocatedChunkCount;
-            props["TailIndexSegment.Capacity"] = TailIndexSegment.ChunkCapacity;
         }
 
         // Transient segments
@@ -475,13 +465,6 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
                 changeSet, StorageSegmentKind.Revision);
         }
 
-        // Allocate TAIL version-history segment for AllowMultiple secondary indexes
-        if (Definition.MultipleIndicesCount > 0)
-        {
-            TailIndexSegment = mmf.AllocateChunkBasedSegment(PageBlockType.None, MainIndexSegmentStartingSize, 512, changeSet, StorageSegmentKind.Index);
-            TailVSBS = new VariableSizedBufferSegment<VersionedIndexEntry, PersistentStore>(TailIndexSegment);
-        }
-
         BuildIndexedFieldInfo(false, changeSet);
         ViewRegistry = new ViewRegistry(IndexedFieldInfos.Length);
         BuildComponentCollectionInfo(changeSet);
@@ -510,7 +493,6 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     /// <param name="versionSPI">Persisted SPI of the MVCC revision-chain segment; used only for <see cref="StorageMode.Versioned"/>.</param>
     /// <param name="defaultIndexSPI">Persisted SPI of the default index segment (primary key and non-<see cref="String64"/> secondary indexes).</param>
     /// <param name="string64IndexSPI">Persisted SPI of the <see cref="String64"/> index segment.</param>
-    /// <param name="tailIndexSPI">Persisted SPI of the multi-value index version-history tail; <c>0</c> when the component has no AllowMultiple index.</param>
     /// <param name="storageMode">Storage mode from persisted ComponentR1 metadata.</param>
     /// <param name="exhaustionPolicy">Resource-exhaustion policy forwarded to the base <see cref="ResourceNode"/>.</param>
     /// <param name="newIndexFieldIds">Optional set of FieldIds for newly added indexes that need creating instead of loading.
@@ -519,7 +501,7 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     /// <param name="restoreCollectionInfo">When <c>true</c>, reconnect the component-collection buffer map to the persisted segments (user tables); when
     /// <c>false</c>, start with an empty map (system tables, which re-derive their collection info from runtime registration).</param>
     internal ComponentTable(DatabaseEngine dbe, DBComponentDefinition definition, IResource parent, int componentSPI, int versionSPI, int defaultIndexSPI,
-        int string64IndexSPI, int tailIndexSPI = 0, StorageMode storageMode = StorageMode.Versioned, ExhaustionPolicy exhaustionPolicy = ExhaustionPolicy.None,
+        int string64IndexSPI, StorageMode storageMode = StorageMode.Versioned, ExhaustionPolicy exhaustionPolicy = ExhaustionPolicy.None,
         HashSet<int> newIndexFieldIds = null, ChangeSet changeSet = null, bool restoreCollectionInfo = false) :
         base($"ComponentTable_{definition.Name}", ResourceType.ComponentTable, parent, exhaustionPolicy)
     {
@@ -545,13 +527,6 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         if (storageMode == StorageMode.Versioned)
         {
             CompRevTableSegment = mmf.LoadChunkBasedSegment(versionSPI, ComponentRevisionManager.CompRevChunkSize);
-        }
-
-        // Restore TAIL version-history segment for AllowMultiple secondary indexes
-        if (Definition.MultipleIndicesCount > 0)
-        {
-            TailIndexSegment = mmf.LoadChunkBasedSegment(tailIndexSPI, 512);
-            TailVSBS = new VariableSizedBufferSegment<VersionedIndexEntry, PersistentStore>(TailIndexSegment);
         }
 
         BuildIndexedFieldInfo(true, changeSet, newIndexFieldIds);
@@ -582,7 +557,7 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     /// Only valid for Versioned components.
     /// </summary>
     internal ComponentTable(DatabaseEngine dbe, DBComponentDefinition definition, IResource parent, ChunkBasedSegment<PersistentStore> componentSegment,
-        ChunkBasedSegment<PersistentStore> revisionSegment, int defaultIndexSPI, int string64IndexSPI, int tailIndexSPI = 0,
+        ChunkBasedSegment<PersistentStore> revisionSegment, int defaultIndexSPI, int string64IndexSPI,
         ExhaustionPolicy exhaustionPolicy = ExhaustionPolicy.None, HashSet<int> newIndexFieldIds = null, ChangeSet changeSet = null, bool restoreCollectionInfo = false) :
         base($"ComponentTable_{definition.Name}", ResourceType.ComponentTable, parent, exhaustionPolicy)
     {
@@ -596,12 +571,6 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         CompRevTableSegment = revisionSegment;
         DefaultIndexSegment = mmf.LoadChunkBasedSegment(defaultIndexSPI, sizeof(Index64Chunk));
         String64IndexSegment = mmf.LoadChunkBasedSegment(string64IndexSPI, sizeof(IndexString64Chunk));
-
-        if (Definition.MultipleIndicesCount > 0)
-        {
-            TailIndexSegment = mmf.LoadChunkBasedSegment(tailIndexSPI, 512);
-            TailVSBS = new VariableSizedBufferSegment<VersionedIndexEntry, PersistentStore>(TailIndexSegment);
-        }
 
         BuildIndexedFieldInfo(true, changeSet, newIndexFieldIds);
         ViewRegistry = new ViewRegistry(IndexedFieldInfos.Length);
@@ -680,7 +649,6 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         {
             BTreeBase<PersistentStore>.ClearSharedSegment(DefaultIndexSegment, changeSet);
             BTreeBase<PersistentStore>.ClearSharedSegment(String64IndexSegment, changeSet);
-            ClearMultiValueTail(changeSet);
             newIndexFieldIds = CollectAllIndexedFieldIds(newIndexFieldIds);
         }
 
@@ -738,30 +706,6 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         }
     }
 
-    /// <summary>
-    /// Crash-path clear of the multi-value (AllowMultiple) index version-history tail (<see cref="TailVSBS"/>). The current-value HEAD buffers live in the
-    /// DefaultIndexSegment and are cleared with the BTree nodes by <see cref="BTreeBase{TStore}.ClearSharedSegment"/>; the TAIL holds superseded
-    /// VersionedIndexEntry history (temporal queries) which collapses at crash (D1). Freeing its data chunks (chunkId &gt;= 1; chunk 0 is segment-reserved) leaves
-    /// an empty tail — the Phase-5 rebuild re-Adds each entity once, producing fresh HEAD buffers and no history. Torn-safe: FreeChunk touches only the page
-    /// occupancy bitmap, and the crash-path RecoveryOnly mode defers CRC verification.
-    /// </summary>
-    private void ClearMultiValueTail(ChangeSet changeSet)
-    {
-        if (TailIndexSegment == null)
-        {
-            return;
-        }
-
-        using var guard = EpochGuard.Enter(DBE.EpochManager);
-        var capacity = TailIndexSegment.ChunkCapacity;
-        for (var chunkId = 1; chunkId < capacity; chunkId++)
-        {
-            if (TailIndexSegment.IsChunkAllocated(chunkId))
-            {
-                TailIndexSegment.FreeChunk(chunkId);
-            }
-        }
-    }
 
     /// <summary>Returns every indexed FieldId in this table's schema, unioned with <paramref name="seed"/> (any migration-new fields). Used on the crash path to
     /// force all secondary indexes into create-mode so they are rebuilt from data rather than loaded (RB-01).</summary>
@@ -1111,7 +1055,6 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         if (disposing)
         {
             // Persistent segments
-            TailIndexSegment?.Dispose();
             String64IndexSegment?.Dispose();
             DefaultIndexSegment?.Dispose();
             CompRevTableSegment?.Dispose();

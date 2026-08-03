@@ -99,9 +99,6 @@ public struct ComponentR1
     /// <summary>Root page index (SPI) of the <see cref="String64"/> value index segment; 0 when absent.</summary>
     public int String64IndexSPI;
 
-    /// <summary>Root page index (SPI) of the tail (multi-value) index segment; 0 when absent.</summary>
-    public int TailIndexSPI;
-
     /// <summary>Field descriptors for this component in declaration order, stored inline as a variable-size collection.</summary>
     public ComponentCollection<FieldR1> Fields;
 
@@ -1651,7 +1648,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             VersionSPI          = table.CompRevTableSegment?.RootPageIndex ?? 0,
             DefaultIndexSPI     = table.DefaultIndexSegment?.RootPageIndex ?? 0,
             String64IndexSPI    = table.String64IndexSegment?.RootPageIndex ?? 0,
-            TailIndexSPI        = table.TailIndexSegment?.RootPageIndex ?? 0,
             SchemaRevision      = definition.Revision,
             FieldCount          = nonStaticCount,
             StorageMode         = (byte)table.StorageMode,
@@ -2500,13 +2496,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 if (migrationResult.HasValue)
                 {
                     componentTable = new ComponentTable(this, definition, this, migrationResult.Value.NewComponentSegment, migrationResult.Value.NewRevisionSegment,
-                        persisted.Comp.DefaultIndexSPI, persisted.Comp.String64IndexSPI, persisted.Comp.TailIndexSPI, newIndexFieldIds: newIndexFieldIds,
+                        persisted.Comp.DefaultIndexSPI, persisted.Comp.String64IndexSPI, newIndexFieldIds: newIndexFieldIds,
                         changeSet: migrationChangeSet, restoreCollectionInfo: true);
                 }
                 else
                 {
                     componentTable = new ComponentTable(this, definition, this, persisted.Comp.ComponentSPI, persisted.Comp.VersionSPI, persisted.Comp.DefaultIndexSPI,
-                        persisted.Comp.String64IndexSPI, persisted.Comp.TailIndexSPI, storageMode: persistedMode, newIndexFieldIds: newIndexFieldIds,
+                        persisted.Comp.String64IndexSPI, storageMode: persistedMode, newIndexFieldIds: newIndexFieldIds,
                         changeSet: migrationChangeSet, restoreCollectionInfo: true);
                 }
 

@@ -843,7 +843,7 @@ internal class String64MultipleBTree<TStore> : String64BTree<TStore> where TStor
         internal override void Initialize(BTree<String64, TStore> owner, ChunkBasedSegment<TStore> segment)
         {
             base.Initialize(owner, segment);
-            _valueStore = new VariableSizedBufferSegment<int, IndexBufferExtraHeader, TStore>(segment);
+            _valueStore = new VariableSizedBufferSegment<int, TStore>(segment);
 
         }
 

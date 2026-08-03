@@ -1,5 +1,10 @@
-// LEGACY — will be removed after #168. Kept as reference for index maintenance patterns.
-// ECS path inserts indexes directly in FinalizeSpawns (Transaction.ECS.cs).
+﻿// The per-ComponentTable index maintainer: the sole index maintainer for Versioned components in NON-cluster (pure-Versioned) archetypes. The old
+// "LEGACY — will be removed after #168" header was wrong twice over — this file is live, and #168 is not what removes it. #666 does, once pure-Versioned
+// archetypes own per-archetype trees. The cluster path inserts indexes directly in FinalizeSpawns (Transaction.ECS.cs).
+//
+// The TAIL version-history machinery this file used to drive was deleted by #666: TemporalIndexQuery and TailGarbageCollector had zero production
+// callers, no public temporal API ever existed, and nothing pruned the TAIL — it was an unbounded write amplifier paid for on every AllowMultiple
+// Versioned mutation.
 
 using System;
 using System.Runtime.CompilerServices;
@@ -31,39 +36,9 @@ internal static unsafe class IndexMaintainer
                     var accessor = index.Segment.CreateChunkAccessor(changeSet);
                     if (ifi.AllowMultiple)
                     {
-                        var tailVSBS = info.ComponentTable.TailVSBS;
-
                         // Compound MoveValue: atomic remove-from-old + insert-under-new in a single traversal.
-                        // With TAIL tracking, preserveEmptyBuffer keeps the old HEAD buffer alive for tombstone writes.
                         *(int*)&cur[ifi.OffsetToIndexElementId] = index.MoveValue(&prev[ifi.OffsetToField], &cur[ifi.OffsetToField],
-                            *(int*)&prev[ifi.OffsetToIndexElementId], startChunkId, ref accessor,
-                            out var oldHeadBufferId, out var newHeadBufferId, tailVSBS != null);
-
-                        if (tailVSBS != null)
-                        {
-                            var tailAccessor = tailVSBS.Segment.CreateChunkAccessor(changeSet);
-
-                            // Tombstone on old key's TAIL buffer (entity left this key)
-                            if (oldHeadBufferId >= 0)
-                            {
-                                var oldTailBufferId = EnsureTailPopulated(oldHeadBufferId, tailVSBS,
-                                    ref accessor, ref tailAccessor, info, includeChainId: startChunkId);
-                                // Ensure this entity has an Active entry (may be missing if created after a prior backfill)
-                                var creationTsn = LookupCreationTSN(startChunkId, info);
-                                tailVSBS.AddElement(oldTailBufferId, VersionedIndexEntry.Active(startChunkId, creationTsn), ref tailAccessor);
-                                tailVSBS.AddElement(oldTailBufferId, VersionedIndexEntry.Tombstone(startChunkId, tsn), ref tailAccessor);
-                            }
-
-                            // Active on new key's TAIL buffer (entity arrived at this key)
-                            if (newHeadBufferId >= 0)
-                            {
-                                var newTailBufferId = EnsureTailPopulated(newHeadBufferId, tailVSBS,
-                                    ref accessor, ref tailAccessor, info, startChunkId);
-                                tailVSBS.AddElement(newTailBufferId, VersionedIndexEntry.Active(startChunkId, tsn), ref tailAccessor);
-                            }
-
-                            tailAccessor.Dispose();
-                        }
+                            *(int*)&prev[ifi.OffsetToIndexElementId], startChunkId, ref accessor, out _, out _);
                     }
                     else
                     {
@@ -101,7 +76,6 @@ internal static unsafe class IndexMaintainer
                 if (ifi.AllowMultiple)
                 {
                     *(int*)&cur[ifi.OffsetToIndexElementId] = index.Add(&cur[ifi.OffsetToField], startChunkId, ref accessor, out _);
-                    // TAIL write deferred to first mutation — see EnsureTailPopulated
                 }
                 else
                 {
@@ -140,28 +114,7 @@ internal static unsafe class IndexMaintainer
             var accessor = index.Segment.CreateChunkAccessor(changeSet);
             if (ifi.AllowMultiple)
             {
-                var tailVSBS = info.ComponentTable.TailVSBS;
-
-                // When TAIL tracking is active, preserve the BTree key even if the HEAD buffer empties.
-                // This keeps the TAIL version-history buffer reachable for temporal queries.
-                index.RemoveValue(&prev[ifi.OffsetToField], *(int*)&prev[ifi.OffsetToIndexElementId], startChunkId, ref accessor, tailVSBS != null);
-
-                // TAIL: backfill + Active + Tombstone for the deleted entity.
-                // preserveEmptyBuffer keeps the key alive so TryGet succeeds after RemoveValue.
-                if (tailVSBS != null)
-                {
-                    var tailAccessor = tailVSBS.Segment.CreateChunkAccessor(changeSet);
-                    var headResult = index.TryGet(&prev[ifi.OffsetToField], ref accessor);
-                    if (headResult.IsSuccess)
-                    {
-                        var tailBufId = EnsureTailPopulated(headResult.Value, tailVSBS,
-                            ref accessor, ref tailAccessor, info, includeChainId: startChunkId);
-                        var creationTsn = LookupCreationTSN(startChunkId, info);
-                        tailVSBS.AddElement(tailBufId, VersionedIndexEntry.Active(startChunkId, creationTsn), ref tailAccessor);
-                        tailVSBS.AddElement(tailBufId, VersionedIndexEntry.Tombstone(startChunkId, tsn), ref tailAccessor);
-                    }
-                    tailAccessor.Dispose();
-                }
+                index.RemoveValue(&prev[ifi.OffsetToField], *(int*)&prev[ifi.OffsetToIndexElementId], startChunkId, ref accessor);
             }
             else
             {
@@ -178,7 +131,7 @@ internal static unsafe class IndexMaintainer
     /// accessors to eliminate per-entity accessor create/dispose overhead. Caller owns accessor lifecycle.
     /// </summary>
     internal static void UpdateIndices(long pk, ComponentInfo info, ComponentInfo.CompRevInfo compRevInfo, int prevCompChunkId, ChangeSet changeSet, long tsn,
-        ChunkAccessor<PersistentStore>[] indexAccessors, ref ChunkAccessor<PersistentStore> tailAccessor)
+        ChunkAccessor<PersistentStore>[] indexAccessors)
     {
         var startChunkId = compRevInfo.CompRevTableFirstChunkId;
         if (prevCompChunkId != 0)
@@ -198,30 +151,8 @@ internal static unsafe class IndexMaintainer
                 {
                     if (ifi.AllowMultiple)
                     {
-                        var tailVSBS = info.ComponentTable.TailVSBS;
-
                         *(int*)&cur[ifi.OffsetToIndexElementId] = index.MoveValue(&prev[ifi.OffsetToField], &cur[ifi.OffsetToField],
-                            *(int*)&prev[ifi.OffsetToIndexElementId], startChunkId, ref indexAccessors[i],
-                            out var oldHeadBufferId, out var newHeadBufferId, tailVSBS != null);
-
-                        if (tailVSBS != null)
-                        {
-                            if (oldHeadBufferId >= 0)
-                            {
-                                var oldTailBufferId = EnsureTailPopulated(oldHeadBufferId, tailVSBS,
-                                    ref indexAccessors[i], ref tailAccessor, info, includeChainId: startChunkId);
-                                var creationTsn = LookupCreationTSN(startChunkId, info);
-                                tailVSBS.AddElement(oldTailBufferId, VersionedIndexEntry.Active(startChunkId, creationTsn), ref tailAccessor);
-                                tailVSBS.AddElement(oldTailBufferId, VersionedIndexEntry.Tombstone(startChunkId, tsn), ref tailAccessor);
-                            }
-
-                            if (newHeadBufferId >= 0)
-                            {
-                                var newTailBufferId = EnsureTailPopulated(newHeadBufferId, tailVSBS,
-                                    ref indexAccessors[i], ref tailAccessor, info, startChunkId);
-                                tailVSBS.AddElement(newTailBufferId, VersionedIndexEntry.Active(startChunkId, tsn), ref tailAccessor);
-                            }
-                        }
+                            *(int*)&prev[ifi.OffsetToIndexElementId], startChunkId, ref indexAccessors[i], out _, out _);
                     }
                     else
                     {
@@ -273,7 +204,7 @@ internal static unsafe class IndexMaintainer
     /// eliminate per-entity accessor create/dispose overhead. Caller owns accessor lifecycle.
     /// </summary>
     internal static void RemoveSecondaryIndices(long pk, ComponentInfo info, int prevCompChunkId, int startChunkId, ChangeSet changeSet, long tsn,
-        ChunkAccessor<PersistentStore>[] indexAccessors, ref ChunkAccessor<PersistentStore> tailAccessor)
+        ChunkAccessor<PersistentStore>[] indexAccessors)
     {
         var prev = info.CompContentAccessor.GetChunkAddress(prevCompChunkId);
         var indexedFieldInfos = info.ComponentTable.IndexedFieldInfos;
@@ -291,22 +222,7 @@ internal static unsafe class IndexMaintainer
             var index = ifi.PersistentIndex;
             if (ifi.AllowMultiple)
             {
-                var tailVSBS = info.ComponentTable.TailVSBS;
-
-                index.RemoveValue(&prev[ifi.OffsetToField], *(int*)&prev[ifi.OffsetToIndexElementId], startChunkId, ref indexAccessors[i], tailVSBS != null);
-
-                if (tailVSBS != null)
-                {
-                    var headResult = index.TryGet(&prev[ifi.OffsetToField], ref indexAccessors[i]);
-                    if (headResult.IsSuccess)
-                    {
-                        var tailBufId = EnsureTailPopulated(headResult.Value, tailVSBS,
-                            ref indexAccessors[i], ref tailAccessor, info, includeChainId: startChunkId);
-                        var creationTsn = LookupCreationTSN(startChunkId, info);
-                        tailVSBS.AddElement(tailBufId, VersionedIndexEntry.Active(startChunkId, creationTsn), ref tailAccessor);
-                        tailVSBS.AddElement(tailBufId, VersionedIndexEntry.Tombstone(startChunkId, tsn), ref tailAccessor);
-                    }
-                }
+                index.RemoveValue(&prev[ifi.OffsetToField], *(int*)&prev[ifi.OffsetToIndexElementId], startChunkId, ref indexAccessors[i]);
             }
             else
             {
@@ -344,126 +260,5 @@ internal static unsafe class IndexMaintainer
             // whole file is slated for deletion when the per-ComponentTable index goes (#666).
             reg.DeltaBuffer.TryAppend(EntityId.FromRaw(pk), beforeKey, afterKey, tsn, flags, reg.ComponentTag);
         }
-    }
-
-    /// <summary>
-    /// Ensures the TAIL version-history buffer is populated for the given HEAD buffer.
-    /// On first call (TailBufferId == 0), locks the HEAD buffer, scans all HEAD entries,
-    /// and backfills Active entries to a newly allocated TAIL buffer.
-    /// Subsequent calls return the existing TailBufferId immediately (fast path).
-    /// </summary>
-    /// <param name="headBufferId">Root chunk ID of the HEAD buffer.</param>
-    /// <param name="tailVSBS">The TAIL VSBS for VersionedIndexEntry storage.</param>
-    /// <param name="headAccessor"><see cref="ChunkAccessor{PersistentStore}"/> for the BTree's segment (HEAD buffer lives here).</param>
-    /// <param name="tailAccessor"><see cref="ChunkAccessor{PersistentStore}"/> for the TailIndexSegment.</param>
-    /// <param name="info">ComponentInfo for looking up creation TSNs via the revision chain.</param>
-    /// <param name="excludeChainId">Chain ID to skip during backfill (entity just arrived at this key via MoveValue).</param>
-    /// <param name="includeChainId">Chain ID to include even though it's been removed from HEAD (entity just left via MoveValue/RemoveValue).</param>
-    /// <returns>The TAIL buffer ID (existing or newly allocated and backfilled).</returns>
-    private static int EnsureTailPopulated(int headBufferId, VariableSizedBufferSegment<VersionedIndexEntry, PersistentStore> tailVSBS, ref ChunkAccessor<PersistentStore> headAccessor, 
-        ref ChunkAccessor<PersistentStore> tailAccessor, ComponentInfo info, int excludeChainId = 0, int includeChainId = 0)
-    {
-        // Fast path: TAIL already exists
-        ref var extra = ref IndexBufferExtraHeader.FromChunkAddress(headAccessor.GetChunkAddress(headBufferId));
-        if (extra.TailBufferId != 0)
-        {
-            return extra.TailBufferId;
-        }
-
-        // Slow path: lock HEAD buffer, double-check, backfill
-        ref var rh = ref headAccessor.GetChunk<VariableSizedBufferRootHeader>(headBufferId, true);
-        var wc = WaitContext.FromTimeout(TimeoutOptions.Current.SegmentAllocationLockTimeout);
-        if (!rh.Lock.EnterExclusiveAccess(ref wc))
-        {
-            ThrowHelper.ThrowLockTimeout("IndexMaintainer/EnsureTailPopulated", TimeoutOptions.Current.SegmentAllocationLockTimeout);
-        }
-
-        try
-        {
-            // Re-read after lock (another thread may have populated)
-            extra = ref IndexBufferExtraHeader.FromChunkAddress(headAccessor.GetChunkAddress(headBufferId, true));
-            if (extra.TailBufferId != 0)
-            {
-                return extra.TailBufferId;
-            }
-
-            // Allocate TAIL buffer
-            var tailBufferId = tailVSBS.AllocateBuffer(ref tailAccessor);
-
-            // Backfill: scan HEAD entries, write Active for each to TAIL
-            BackfillHeadEntriesToTail(headBufferId, tailBufferId, tailVSBS, ref headAccessor, ref tailAccessor, info, excludeChainId, includeChainId);
-
-            // Publish (visible after lock release)
-            extra = ref IndexBufferExtraHeader.FromChunkAddress(headAccessor.GetChunkAddress(headBufferId, true));
-            extra.TailBufferId = tailBufferId;
-            return tailBufferId;
-        }
-        finally
-        {
-            rh = ref headAccessor.GetChunk<VariableSizedBufferRootHeader>(headBufferId, true);
-            rh.Lock.ExitExclusiveAccess();
-        }
-    }
-
-    /// <summary>
-    /// Scans all entries in the HEAD buffer and writes corresponding Active entries to the TAIL buffer.
-    /// Called once per key on first mutation to populate the TAIL version history.
-    /// </summary>
-    private static void BackfillHeadEntriesToTail(int headBufferId, int tailBufferId, VariableSizedBufferSegment<VersionedIndexEntry, PersistentStore> tailVSBS, 
-        ref ChunkAccessor<PersistentStore> headAccessor, ref ChunkAccessor<PersistentStore> tailAccessor, ComponentInfo info, int excludeChainId, int includeChainId)
-    {
-        int rootHeaderTotalSize = sizeof(VariableSizedBufferRootHeader) + sizeof(IndexBufferExtraHeader);
-
-        // Read root header to get the stored chunk chain start
-        ref var rh = ref headAccessor.GetChunk<VariableSizedBufferRootHeader>(headBufferId);
-        var curChunkId = rh.FirstStoredChunkId;
-
-        while (curChunkId != 0)
-        {
-            var chunkAddr = headAccessor.GetChunkAddress(curChunkId);
-            ref var chunkHeader = ref Unsafe.AsRef<VariableSizedBufferChunkHeader>(chunkAddr);
-            var elementCount = chunkHeader.ElementCount;
-            // Read NextChunkId to local before any further accessor calls that might evict this slot
-            var nextChunkId = chunkHeader.NextChunkId;
-            var isRoot = (curChunkId == headBufferId);
-            var offset = isRoot ? rootHeaderTotalSize : sizeof(VariableSizedBufferChunkHeader);
-            var elements = new Span<int>(chunkAddr + offset, elementCount);
-
-            for (int i = 0; i < elements.Length; i++)
-            {
-                var chainId = elements[i];
-                if (chainId == excludeChainId)
-                {
-                    continue;
-                }
-                var creationTsn = LookupCreationTSN(chainId, info);
-                tailVSBS.AddElement(tailBufferId, VersionedIndexEntry.Active(chainId, creationTsn), ref tailAccessor);
-            }
-
-            curChunkId = nextChunkId;
-        }
-
-        // Include entry that was already removed from HEAD (by MoveValue/RemoveValue)
-        if (includeChainId > 0)
-        {
-            var creationTsn = LookupCreationTSN(includeChainId, info);
-            tailVSBS.AddElement(tailBufferId, VersionedIndexEntry.Active(includeChainId, creationTsn), ref tailAccessor);
-        }
-    }
-
-    /// <summary>
-    /// Recovers the creation TSN for a given revision chain by reading the oldest surviving revision element.
-    /// Returns 0 (sentinel) if the chain has been fully cleaned up, meaning "active since before recorded history".
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static long LookupCreationTSN(int startChunkId, ComponentInfo info)
-    {
-        ref var header = ref info.CompRevTableAccessor.GetChunk<CompRevStorageHeader>(startChunkId);
-        if (header.ItemCount == 0)
-        {
-            return 0;
-        }
-        var element = ComponentRevisionManager.GetRevisionElement(ref info.CompRevTableAccessor, startChunkId, header.FirstItemIndex);
-        return element.Element.TSN;
     }
 }

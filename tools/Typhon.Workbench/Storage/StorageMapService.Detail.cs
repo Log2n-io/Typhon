@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Typhon.Engine;
@@ -933,7 +933,7 @@ public sealed partial class StorageMapService
     }
 
     /// <summary>True when <paramref name="rootPage"/> is the root of one of <paramref name="table"/>'s component-data / MVCC-revision / index segments
-    /// (default / String64 / tail). Covers the kinds the File Map labels per-component; the auxiliary VSBS / spatial chains are intentionally excluded
+    /// (default / String64). Covers the kinds the File Map labels per-component; the auxiliary VSBS / spatial chains are intentionally excluded
     /// (see <see cref="ResolveSegmentOwnerName"/>).</summary>
     private static bool OwnsSegment(ComponentTable table, int rootPage)
     {
@@ -941,7 +941,6 @@ public sealed partial class StorageMapService
         if (table.CompRevTableSegment?.RootPageIndex == rootPage) return true;
         if (table.DefaultIndexSegment?.RootPageIndex == rootPage) return true;
         if (table.String64IndexSegment?.RootPageIndex == rootPage) return true;
-        if (table.TailIndexSegment?.RootPageIndex == rootPage) return true;
         return false;
     }
 }

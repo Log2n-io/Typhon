@@ -940,7 +940,7 @@ internal class L16MultipleBTree<TKey, TStore> : L16BTree<TKey, TStore> where TSt
         internal override void Initialize(BTree<TKey, TStore> owner, ChunkBasedSegment<TStore> segment)
         {
             base.Initialize(owner, segment);
-            _valueStore = new VariableSizedBufferSegment<int, IndexBufferExtraHeader, TStore>(segment);
+            _valueStore = new VariableSizedBufferSegment<int, TStore>(segment);
         }
 
         public override int Append(int bufferId, int value, ref ChunkAccessor<TStore> bufferAccessor) => _valueStore.AddElement(bufferId, value, ref bufferAccessor);

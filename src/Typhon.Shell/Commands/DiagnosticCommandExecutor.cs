@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
@@ -196,7 +196,6 @@ internal sealed class DiagnosticCommandExecutor
             Collect($"{name}.RevTable", table.CompRevTableSegment);
             Collect($"{name}.PK_Index", table.DefaultIndexSegment);
             Collect($"{name}.Str64_Index", table.String64IndexSegment);
-            Collect($"{name}.Tail_Index", table.TailIndexSegment);
         }
 
         var totalFill = totalChunksCap > 0 ? (double)totalChunksUsed / totalChunksCap : 0.0;

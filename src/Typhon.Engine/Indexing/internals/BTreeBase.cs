@@ -1,4 +1,4 @@
-// unset
+﻿// unset
 
 using System.Runtime.CompilerServices;
 
@@ -24,7 +24,7 @@ internal abstract class BTreeBase<TStore> : IBTreeIndex where TStore : struct, I
     public abstract unsafe int Add(void* keyAddr, int value, ref ChunkAccessor<TStore>accessor, out int bufferRootId);
     public abstract unsafe bool Remove(void* keyAddr, out int value, ref ChunkAccessor<TStore>accessor);
     public abstract unsafe Result<int, BTreeLookupStatus> TryGet(void* keyAddr, ref ChunkAccessor<TStore>accessor);
-    public abstract unsafe bool RemoveValue(void* keyAddr, int elementId, int value, ref ChunkAccessor<TStore>accessor, bool preserveEmptyBuffer = false);
+    public abstract unsafe bool RemoveValue(void* keyAddr, int elementId, int value, ref ChunkAccessor<TStore>accessor);
     public abstract unsafe VariableSizedBufferAccessor<int, TStore> TryGetMultiple(void* keyAddr, ref ChunkAccessor<TStore>accessor);
 
     /// <summary>
@@ -39,8 +39,8 @@ internal abstract class BTreeBase<TStore> : IBTreeIndex where TStore : struct, I
     /// from <paramref name="oldKeyAddr"/>'s buffer and appends <paramref name="value"/> under <paramref name="newKeyAddr"/>.
     /// Returns the new element ID and both HEAD buffer IDs for inline TAIL tracking.
     /// </summary>
-    public abstract unsafe int MoveValue(void* oldKeyAddr, void* newKeyAddr, int elementId, int value, ref ChunkAccessor<TStore>accessor, out int oldHeadBufferId,
-        out int newHeadBufferId, bool preserveEmptyBuffer = false);
+    public abstract unsafe int MoveValue(void* oldKeyAddr, void* newKeyAddr, int elementId, int value, ref ChunkAccessor<TStore>accessor, 
+        out int oldHeadBufferId, out int newHeadBufferId);
 
     public abstract void CheckConsistency(ref ChunkAccessor<TStore>accessor);
 

@@ -63,7 +63,6 @@ public unsafe partial class Transaction : EntityAccessor
 
     // Hoisted accessors for batch index maintenance (set per component type during Commit)
     private ChunkAccessor<PersistentStore>[] _batchIndexAccessors;
-    private ChunkAccessor<PersistentStore> _batchTailAccessor;
     private bool _batchIndexActive;
     private int _batchEntityCount;
 
@@ -277,7 +276,6 @@ public unsafe partial class Transaction : EntityAccessor
     {
         // Dispose transient batch accessors first — safe even on double-dispose or if never created
         // (ChunkAccessor<PersistentStore>.Dispose() is idempotent: no-op when _segment==null).
-        _batchTailAccessor.Dispose();
         _clusterCommitMapAccessor.Dispose();
         _clusterCommitContentAccessor.Dispose();
         _clusterCommitClusterAccessor.Dispose();
@@ -1240,7 +1238,7 @@ public unsafe partial class Transaction : EntityAccessor
                 {
                     if (_batchIndexActive)
                     {
-                        IndexMaintainer.UpdateIndices(pk, info, compRevInfo, readCompChunkId, _changeSet, TSN, _batchIndexAccessors, ref _batchTailAccessor);
+                        IndexMaintainer.UpdateIndices(pk, info, compRevInfo, readCompChunkId, _changeSet, TSN, _batchIndexAccessors);
                     }
                     else
                     {
@@ -1252,7 +1250,7 @@ public unsafe partial class Transaction : EntityAccessor
                     if (_batchIndexActive)
                     {
                         IndexMaintainer.RemoveSecondaryIndices(pk, info, readCompChunkId, compRevInfo.CompRevTableFirstChunkId, _changeSet, TSN,
-                            _batchIndexAccessors, ref _batchTailAccessor);
+                            _batchIndexAccessors);
                     }
                     else
                     {
@@ -1288,10 +1286,6 @@ public unsafe partial class Transaction : EntityAccessor
                 for (int i = 0; i < _batchIndexAccessors.Length; i++)
                 {
                     _batchIndexAccessors[i].CommitChanges();
-                }
-                if (info.ComponentTable.TailVSBS != null)
-                {
-                    _batchTailAccessor.CommitChanges();
                 }
 
                 // Flush warm accessors: exit+enter cycle performs a single CommitChanges per cache
@@ -2396,8 +2390,6 @@ public unsafe partial class Transaction : EntityAccessor
                     {
                         _batchIndexAccessors[i] = indexedFieldInfos[i].PersistentIndex.Segment.CreateChunkAccessor(_changeSet);
                     }
-                    var tailVSBS = info.ComponentTable.TailVSBS;
-                    _batchTailAccessor = tailVSBS != null ? tailVSBS.Segment.CreateChunkAccessor(_changeSet) : default;
                     _batchIndexActive = true;
                     _batchEntityCount = 0;
                     ChunkBasedSegment<PersistentStore>.EnterBatchMode();
@@ -2414,10 +2406,6 @@ public unsafe partial class Transaction : EntityAccessor
                         for (int i = 0; i < _batchIndexAccessors.Length; i++)
                         {
                             _batchIndexAccessors[i].Dispose();
-                        }
-                        if (tailVSBS != null)
-                        {
-                            _batchTailAccessor.Dispose();
                         }
                         _batchIndexAccessors = null;
 

@@ -1,4 +1,4 @@
----
+﻿---
 uid: feature-querying-temporal-queries
 title: 'Temporal Queries (Point-in-Time Read & Revision History)'
 description: 'Opt-in per-component history retention enabling reads of past state and full revision timelines.'
@@ -62,7 +62,8 @@ You opt a component into retention with `[TemporalRetention(KeepCount = N)]` (or
 ## 🔗 Related
 
 - Related feature: [Persistent Views](./persistent-views.md) — a different live-data mechanism (current-state delta tracking, not history)
-- Sibling: [Temporal (Point-in-Time) Index Query](../Indexing/temporal-index-query.md) — the index-side counterpart reconstructing past key membership from version history
+- Note: there is no index-side counterpart. Past key MEMBERSHIP is not reconstructible — the append-only index TAIL that would have answered it was removed
+  in #666 (no caller, no pruning). Point-in-time reads go through the revision chain, which is what this feature describes.
 
 <!-- Deep dive: claude/design/Querying/temporal-queries.md — full design (retention model, chunk directory layout, compaction algorithm, phased implementation plan) -->
 <!-- Research: claude/research/Querying/TemporalQueries.md -->
