@@ -782,11 +782,13 @@ public class WalCommitBufferConcurrencyTests : AllocatorTestBase
                 }
                 else
                 {
-                    // Park instead of re-trying hot — every other consumer in this fixture does the same. Without it this
-                    // loop burns a whole core polling an empty buffer while `threadCount` producers compete for what is
-                    // left; where threads outnumber cores that starves the producers this consumer exists to unblock,
-                    // until their 20 s claim deadline expires (observed on a 3-core CI runner: producer 0 threw
-                    // WalBackPressureTimeoutException).
+                    // Park instead of re-trying hot — every other consumer in this fixture does the same. Without it this loop burns a
+                    // whole core polling an empty buffer while `threadCount` producers compete for what is left.
+                    //
+                    // This was ALSO once credited with fixing this test's CI failures. It did not: it only narrowed the window. The
+                    // failure was an ABA in WalCommitBuffer's own back-pressure wait (producers keyed on the ping-pong _activeBufferIndex
+                    // and missed a double swap), which is fixed in the engine and pinned by
+                    // BackPressureWait_ProducerLappedByTwoSwaps_IsNotStillWaiting below.
                     buffer.WaitForData(5);
                 }
             }
@@ -858,6 +860,102 @@ public class WalCommitBufferConcurrencyTests : AllocatorTestBase
         var tooBig = WalCommitBuffer.MaxBufferCapacity + 64;
         var ex = Assert.Throws<ArgumentException>(() => _ = CreateBuffer(tooBig));
         Assert.That(ex.Message, Does.Contain("at most"), "the rejection should name the ceiling");
+    }
+
+    /// <summary>
+    /// A producer parked in back-pressure must be released by the swap that serves it, even when the active buffer index has since ping-ponged back to the
+    /// value the producer started from.
+    /// </summary>
+    /// <remarks>
+    /// Regression test. The wait used to be <c>while (_activeBufferIndex == bufferIndex)</c>, an ABA test on a single bit: a producer that was off-CPU while
+    /// TWO swaps completed found the index back at its captured value and went on waiting for an edge that had already passed twice. Nothing recovered it —
+    /// the only thing that advances the index is another producer overflowing the buffer — so once every live producer was in that state the buffer sat
+    /// drained and idle until each deadline expired and threw <c>WalBackPressureTimeoutException</c> on a commit that had space available throughout.
+    /// <para>
+    /// The two swaps below are driven deterministically, so this test does not depend on losing a scheduling race to be meaningful. It asserts the predicate
+    /// directly rather than trying to reproduce the race: reproducing it needed a producer descheduled across two whole swaps, which took a 2-core machine to
+    /// hit and never happened on a developer box (found on a 3-core macOS CI runner; reproduced locally only under a 2-CPU affinity mask).
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(10_000)]
+    public void BackPressureWait_ProducerLappedByTwoSwaps_IsNotStillWaiting()
+    {
+        using var buffer = CreateBuffer(64 * 1024);
+
+        var startIndex = buffer.ActiveBufferIndex;
+        var producerGeneration = buffer.SwapGeneration;
+
+        DriveOneSwap(buffer);
+        DriveOneSwap(buffer);
+
+        Assert.That(buffer.ActiveBufferIndex, Is.EqualTo(startIndex),
+            "two swaps must bring the ping-pong index back to where it started — that is the premise of the bug this test guards.");
+        Assert.That(buffer.SwapGeneration, Is.EqualTo(producerGeneration + 2), "the generation counter must NOT ping-pong");
+        Assert.That(buffer.IsStillWaitingForSwap(producerGeneration), Is.False,
+            "a producer that captured the pre-swap generation has been served twice over; keying the wait on the buffer index instead would leave it "
+            + "blocked here until its deadline expired.");
+    }
+
+    /// <summary>
+    /// Fills the active buffer, has a background producer take the over-capacity claim that requests a swap, and drains until the swap completes.
+    /// </summary>
+    private static void DriveOneSwap(WalCommitBuffer buffer)
+    {
+        const int payloadSize = 200;
+        var frameSize = WalCommitBuffer.Align8(WalFrameHeader.SizeInBytes + payloadSize);
+
+        // Fill to just under capacity. These all take CASE A and never block.
+        while (buffer.TailPosition + frameSize <= buffer.BufferCapacity)
+        {
+            var ctx = WaitContext.FromTimeout(TimeSpan.FromSeconds(5));
+            var claim = buffer.TryClaim(payloadSize, 1, ref ctx);
+            claim.DataSpan.Fill(0xAB);
+            buffer.Publish(ref claim);
+        }
+
+        // The next claim overflows: it writes the padding sentinel, requests the swap and parks. It has to run off-thread because this thread is the
+        // consumer that has to drain before the swap can happen.
+        var startGeneration = buffer.SwapGeneration;
+        Exception producerFailure = null;
+        var producer = new Thread(() =>
+        {
+            try
+            {
+                var ctx = WaitContext.FromTimeout(TimeSpan.FromSeconds(5));
+                var claim = buffer.TryClaim(payloadSize, 1, ref ctx);
+                claim.DataSpan.Fill(0xCD);
+                buffer.Publish(ref claim);
+            }
+            catch (Exception ex)
+            {
+                producerFailure = ex;
+            }
+        })
+        { IsBackground = true };
+        producer.Start();
+
+        // Drain until the swap lands. TryDrain performs it once the drain position reaches the padding sentinel.
+        while (buffer.SwapGeneration == startGeneration)
+        {
+            if (buffer.TryDrain(out var data, out _))
+            {
+                buffer.CompleteDrain(data.Length);
+            }
+            else
+            {
+                buffer.WaitForData(5);
+            }
+        }
+
+        Assert.That(producer.Join(TimeSpan.FromSeconds(5)), Is.True, "the producer that requested the swap should have been released by it");
+        Assert.That(producerFailure, Is.Null, $"producer failed: {producerFailure}");
+
+        // Leave the fresh buffer drained so the next call starts from a clean position.
+        while (buffer.TryDrain(out var rest, out _))
+        {
+            buffer.CompleteDrain(rest.Length);
+        }
     }
 
     #endregion

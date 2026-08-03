@@ -134,6 +134,22 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
     private int _swapState;
     private int _inflightCount;
 
+    /// <summary>
+    /// Monotonic count of completed buffer swaps. This — not <see cref="_activeBufferIndex"/> — is what a producer parked in the back-pressure loop waits on.
+    /// </summary>
+    /// <remarks>
+    /// The active index ping-pongs between 0 and 1, so "wait until the index differs from the one I captured" is an ABA test on a single bit. A producer that
+    /// is off-CPU while TWO swaps complete sees the index back at its captured value and goes on waiting for a transition that has already happened — twice.
+    /// Nothing recovers it: the only thing that advances the index is another producer overflowing the buffer, so once every live producer is in that state
+    /// the buffer sits drained and idle until each one's <see cref="WaitContext"/> deadline expires and it throws
+    /// <see cref="WalBackPressureTimeoutException"/> on a commit that had space available the whole time.
+    /// <para>
+    /// A 64-bit monotonic counter cannot ABA. Incremented last in <see cref="PerformSwap"/> — after the index, the reset claim word and the folded LSN base
+    /// are all published — so a producer that observes a new generation observes everything the new generation needs.
+    /// </para>
+    /// </remarks>
+    private long _swapGeneration;
+
     // ═══════════════════════════════════════════════════════════════════════
     // Signaling
     // ═══════════════════════════════════════════════════════════════════════
@@ -300,6 +316,12 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
     /// <summary>Current swap state (0=Normal, 1=Requested, 2=Draining).</summary>
     internal int SwapState => _swapState;
 
+    /// <summary>Number of buffer swaps completed so far — see <see cref="_swapGeneration"/>. Test hook.</summary>
+    internal long SwapGeneration => Volatile.Read(ref _swapGeneration);
+
+    /// <summary>Test hook over the back-pressure loop predicate — see <see cref="WaitingForSwap"/>.</summary>
+    internal bool IsStillWaitingForSwap(long observedGeneration) => WaitingForSwap(true, observedGeneration);
+
     // ═══════════════════════════════════════════════════════════════════════
     // TryClaim — Atomic Space Allocation (Producer, lock-free)
     // ═══════════════════════════════════════════════════════════════════════
@@ -354,6 +376,7 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
             int bufferIndex;
             byte* buffer;
             var gotSlot = false;
+            var swapGeneration = 0L;
 
             if (Volatile.Read(ref _swapState) != SwapDraining)
             {
@@ -397,14 +420,21 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
             }
             else
             {
-                // Backed out: a swap is draining. Nothing was claimed, so there is no slot to abandon and no hole to leave.
+                // Backed out: a swap is draining. Nothing was claimed, so there is no slot to abandon and no hole to leave — and, as the wait
+                // predicate records, no swap is owed to us either. The active index deliberately goes UNREAD here: sampling it was how this path
+                // used to arm a wait for a transition it had no stake in.
                 offset = 0;
-                bufferIndex = _activeBufferIndex;
                 buffer = null;
             }
 
             if (gotSlot)
             {
+                // Sample the swap generation while the claim gate is STILL HELD. That is what makes this value trustworthy: having observed
+                // _swapState != SwapDraining while registered, no swap can complete until we release the gate (the Dekker pair above), so this
+                // is necessarily the generation our over-capacity claim belongs to — the one the wait below needs to see superseded. Reading it
+                // here rather than beside _activeBufferIndex also keeps it off the CASE A fast path, which never waits.
+                swapGeneration = Volatile.Read(ref _swapGeneration);
+
                 // CASE B: This producer straddles the boundary (overlap initiator).
                 // offset < BufferCapacity: the claim starts inside the buffer but extends past the end.
                 //   Write a padding sentinel at the claim offset so TryDrain/CompleteDrain knows to stop.
@@ -436,8 +466,10 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
             // slot after claiming one would leave an unpublished frame header, and TryDrain stops at the first of those — a permanent drain stall.
             Interlocked.Decrement(ref _claimsInProgress);
 
-            // CASE B & C: Wait for the buffer swap to complete.// Poll _activeBufferIndex — when it changes, a swap happened and the fresh buffer is ready.
-            // AdaptiveWaiter provides spin → yield → sleep(1) progression.
+            // Wait for the swap this producer needs, then loop round and re-claim. What "the swap this producer needs" MEANS differs by case, and
+            // conflating the two was a liveness bug (see WaitingForSwap):
+            //   CASE B & C (gotSlot): we hold an over-capacity claim. Only a NEW generation can serve it — wait for _swapGeneration to move.
+            //   Backed out: we hold nothing at all. We only need the draining window to pass, then retry; there is no swap owed to us.
             // Phase 8: Backpressure span — captures how long this producer blocked waiting for the writer thread to swap buffers.
             // Emitted on the calling (producer) thread, not the writer. Parents under whatever span the producer is in (e.g. TransactionPersist).
             var bpStart = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -445,11 +477,16 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
             try
             {
                 var retries = 0;
-                while (_activeBufferIndex == bufferIndex)
+                while (WaitingForSwap(gotSlot, swapGeneration))
                 {
                     if (!Unsafe.IsNullRef(ref ctx) && ctx.ShouldStop)
                     {
-                        ThrowHelper.ThrowWalBackPressureTimeout(frameSize, ctx.Deadline.Remaining);
+                        // Report how long we ACTUALLY waited, not Deadline.Remaining — that is TimeSpan.Zero by definition here, because
+                        // ShouldStop is only true once the deadline has passed. Deadline stores the expiry timestamp and not the start, so
+                        // it cannot compute elapsed on its own; the waiter has to. Passing Remaining made every such exception read
+                        // "timeout after 0ms", which destroys the one number that says whether the wait was the configured budget or a
+                        // pathological stall — exactly what you need when this fires from CI.
+                        ThrowHelper.ThrowWalBackPressureTimeout(frameSize, System.Diagnostics.Stopwatch.GetElapsedTime(bpStart));
                     }
 
                     ThrowIfDisposed();
@@ -458,6 +495,7 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
                     // swap that lands in microseconds is caught in user mode; a slow one parks the thread rather than burning a core.
                     // The bounded timeout is a liveness backstop only — it caps the cost of a lost wake-up (an event reset that
                     // raced a completing swap) at one iteration, and lets ShouldStop / disposal be re-checked on a fixed cadence.
+                    // It is NOT what bounds an ABA miss: a missed generation would never be re-observed, however often we re-checked.
                     _swapCompletedEvent.Wait(SwapWaitBackstopMs);
                     retries++;
                 }
@@ -747,15 +785,20 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
         _lsnBase += LsnOffsetOf(finalClaim);
         _drainPosition = 0;
 
-        // This Exchange acts as a release fence: producers spinning on _activeBufferIndex will see _tailPosition = 0 before they see
-        // the new index, because both stores went through Interlocked.Exchange which provides sequential consistency.
+        // This Exchange acts as a release fence: producers will see _claim = 0 before they see the new index, because both stores went
+        // through Interlocked.Exchange which provides sequential consistency.
         Interlocked.Exchange(ref _activeBufferIndex, newIndex);
 
         // SwapNormal must be last — some code paths check _swapState
         Interlocked.Exchange(ref _swapState, SwapNormal);
 
-        // Release every producer parked in TryClaim. Set AFTER _activeBufferIndex is published, so a woken producer's re-read of
-        // the index always observes the new buffer.
+        // The producers' actual wake condition, published LAST so that observing it implies observing everything above: the fresh index, the
+        // reset claim word and the folded LSN base. Interlocked.Increment is a full fence on both x64 and arm64, which is what the parked
+        // producers' Volatile.Read acquire pairs with. Once per swap, so its cost is irrelevant.
+        Interlocked.Increment(ref _swapGeneration);
+
+        // Release every producer parked in TryClaim. Set AFTER the generation is published, so a woken producer's re-read always
+        // observes the new generation rather than going back to sleep for another backstop interval.
         _swapCompletedEvent.Set();
     }
 
@@ -828,6 +871,28 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static int Align8(int value) => (value + 7) & ~7;
+
+    /// <summary>
+    /// Back-pressure loop predicate: must this producer keep waiting before it retries its claim?
+    /// </summary>
+    /// <param name="gotSlot">True if the producer holds an over-capacity claim (CASE B/C); false if it backed out at the claim gate holding nothing.</param>
+    /// <param name="observedGeneration">The value of <see cref="_swapGeneration"/> sampled under the claim gate. Meaningful only when <paramref name="gotSlot"/>.</param>
+    /// <remarks>
+    /// Both arms are deliberately EDGE-FREE — they test a value against a monotonic reference, or test a state directly. Neither can miss a transition that
+    /// happened while this thread was off-CPU, which is what the previous <c>_activeBufferIndex != capturedIndex</c> test could do (see
+    /// <see cref="_swapGeneration"/>).
+    /// <para>
+    /// A backed-out producer must NOT wait on the generation. It claimed nothing, so no swap is owed to it — and the generation it could sample is already
+    /// racing the in-progress swap, which would reintroduce the same missed-edge hazard through a different door. Waiting on the <see cref="SwapDraining"/>
+    /// state and then retrying is both correct and strictly simpler: the state is a level, not an edge.
+    /// </para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool WaitingForSwap(bool gotSlot, long observedGeneration)
+        => gotSlot
+            ? Volatile.Read(ref _swapGeneration) == observedGeneration
+            : Volatile.Read(ref _swapState) == SwapDraining;
+
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void ThrowIfDisposed()
