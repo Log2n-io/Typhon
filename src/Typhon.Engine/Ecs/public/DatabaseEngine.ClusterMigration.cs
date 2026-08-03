@@ -31,7 +31,7 @@ public partial class DatabaseEngine
     /// <c>ZoneMap?.Widen(dstChunkId, ...)</c> call below), so a cluster that only gained entities by migration is correct without a rescan here.
     /// </para>
     /// </remarks>
-    private unsafe void RecomputeClusterZoneMaps(ArchetypeClusterState clusterState, long[] dirtyBits)
+    private void RecomputeClusterZoneMaps(ArchetypeClusterState clusterState, long[] dirtyBits)
     {
         // Nothing durable-or-indexed was written this tick ⇒ every zone map still describes its cluster exactly. Bail before renting an accessor.
         var writtenSlots = clusterState.FenceWrittenSlots;
@@ -40,48 +40,128 @@ public partial class DatabaseEngine
             return;
         }
 
-        var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
-        try
+        var pureTransient = clusterState.ClusterSegment == null;
+
+        if (HasZoneMaps(clusterState.IndexSlots))
         {
-            for (var wordIdx = 0; wordIdx < dirtyBits.Length; wordIdx++)
+            Debug.Assert(!pureTransient, "a pure-Transient archetype cannot own PersistentStore-backed index slots");
+            var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
+            try
             {
-                if (dirtyBits[wordIdx] == 0)
+                RecomputeZoneMapsForHome(clusterState, dirtyBits, writtenSlots, clusterState.IndexSlots, clusterState.ClusterSegment, ref clusterAccessor,
+                    ref clusterAccessor);
+            }
+            finally
+            {
+                clusterAccessor.Dispose();
+            }
+        }
+
+        if (HasZoneMaps(clusterState.TransientIndexSlots))
+        {
+            var transientAccessor = clusterState.TransientSegment.CreateChunkAccessor();
+            try
+            {
+                if (pureTransient)
                 {
-                    continue;
+                    RecomputeZoneMapsForHome(clusterState, dirtyBits, writtenSlots, clusterState.TransientIndexSlots, clusterState.TransientSegment,
+                        ref transientAccessor, ref transientAccessor);
                 }
-
-                var clusterChunkId = wordIdx;
-
-                // Guard against freed/unallocated chunks (stale dirty bits from destroyed entities)
-                if (clusterChunkId == 0 || !clusterState.ClusterSegment.IsChunkAllocated(clusterChunkId))
+                else
                 {
-                    continue;
-                }
-
-                var clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId);
-                var ixSlots = clusterState.IndexSlots;
-
-                for (var s = 0; s < ixSlots.Length; s++)
-                {
-                    ref var ixSlot = ref ixSlots[s];
-
-                    // Skip a component nobody wrote this tick: its values are unchanged, so its zone map's min/max is unchanged. AllSlotsWritten (-1) has
-                    // every bit set, so the fail-safe path takes this branch for every slot and rescans exactly as before.
-                    if ((writtenSlots & (1 << ixSlot.Slot)) == 0)
+                    var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
+                    try
                     {
-                        continue;
+                        RecomputeZoneMapsForHome(clusterState, dirtyBits, writtenSlots, clusterState.TransientIndexSlots, clusterState.ClusterSegment,
+                            ref clusterAccessor, ref transientAccessor);
                     }
-
-                    for (var f = 0; f < ixSlot.Fields.Length; f++)
+                    finally
                     {
-                        ixSlot.Fields[f].ZoneMap?.Recompute(clusterChunkId, clusterBase, clusterState.Layout, ixSlot.Slot, ixSlot.Fields[f].FieldOffset);
+                        clusterAccessor.Dispose();
                     }
                 }
             }
+            finally
+            {
+                transientAccessor.Dispose();
+            }
         }
-        finally
+    }
+
+    /// <summary>True when any field in <paramref name="ixSlots"/> carries a zone map. Null-safe; also false for a home whose only indexed fields are
+    /// <c>String64</c>, which get none.</summary>
+    private static bool HasZoneMaps<TStore>(ClusterIndexSlot<TStore>[] ixSlots) where TStore : struct, IPageStore
+    {
+        if (ixSlots == null)
         {
-            clusterAccessor.Dispose();
+            return false;
+        }
+
+        for (var s = 0; s < ixSlots.Length; s++)
+        {
+            for (var f = 0; f < ixSlots[s].Fields.Length; f++)
+            {
+                if (ixSlots[s].Fields[f].ZoneMap != null)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Recomputes one index home's zone maps over the dirty clusters. Same three-store split as <see cref="ProcessClusterShadowEntries"/>: the occupancy word
+    /// comes from <paramref name="primaryAccessor"/>, the component column from <paramref name="dataAccessor"/>, and they are the same accessor for every home
+    /// except a Transient slot on a mixed archetype.
+    /// </summary>
+    /// <remarks>
+    /// Allocation guard reads <paramref name="primarySegment"/> — the segment the dirty bits are indexed against. Chunk ids are lockstep across the two
+    /// segments, so one guard covers both.
+    /// </remarks>
+    private static unsafe void RecomputeZoneMapsForHome<TIdx, TPrimary, TData>(ArchetypeClusterState clusterState, long[] dirtyBits, int writtenSlots,
+        ClusterIndexSlot<TIdx>[] ixSlots, ChunkBasedSegment<TPrimary> primarySegment, ref ChunkAccessor<TPrimary> primaryAccessor,
+        ref ChunkAccessor<TData> dataAccessor)
+        where TIdx : struct, IPageStore
+        where TPrimary : struct, IPageStore
+        where TData : struct, IPageStore
+    {
+        for (var wordIdx = 0; wordIdx < dirtyBits.Length; wordIdx++)
+        {
+            if (dirtyBits[wordIdx] == 0)
+            {
+                continue;
+            }
+
+            var clusterChunkId = wordIdx;
+
+            // Guard against freed/unallocated chunks (stale dirty bits from destroyed entities)
+            if (clusterChunkId == 0 || !primarySegment.IsChunkAllocated(clusterChunkId))
+            {
+                continue;
+            }
+
+            var primaryBase = primaryAccessor.GetChunkAddress(clusterChunkId);
+            var dataBase = dataAccessor.GetChunkAddress(clusterChunkId);
+
+            for (var s = 0; s < ixSlots.Length; s++)
+            {
+                ref var ixSlot = ref ixSlots[s];
+
+                // Skip a component nobody wrote this tick: its values are unchanged, so its zone map's min/max is unchanged. AllSlotsWritten (-1) has
+                // every bit set, so the fail-safe path takes this branch for every slot and rescans exactly as before.
+                if ((writtenSlots & (1 << ixSlot.Slot)) == 0)
+                {
+                    continue;
+                }
+
+                for (var f = 0; f < ixSlot.Fields.Length; f++)
+                {
+                    ixSlot.Fields[f].ZoneMap?.Recompute(clusterChunkId, primaryBase, dataBase, clusterState.Layout, ixSlot.Slot,
+                        ixSlot.Fields[f].FieldOffset);
+                }
+            }
         }
     }
 

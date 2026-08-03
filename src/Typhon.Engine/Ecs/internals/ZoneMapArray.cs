@@ -43,10 +43,23 @@ internal sealed unsafe class ZoneMapArray
     /// Called at tick fence for each dirty cluster.
     /// </summary>
     public void Recompute(int clusterChunkId, byte* clusterBase, ArchetypeClusterInfo layout, int compSlot, int fieldOffset)
+        => Recompute(clusterChunkId, clusterBase, clusterBase, layout, compSlot, fieldOffset);
+
+    /// <summary>
+    /// <see cref="Recompute(int,byte*,ArchetypeClusterInfo,int,int)"/> for a slot whose component bytes do NOT live in the same segment as the occupancy word:
+    /// a <see cref="Typhon.Schema.Definition.StorageMode.Transient"/> slot on a mixed archetype (#655).
+    /// </summary>
+    /// <param name="clusterChunkId">Chunk id, identical in both segments — allocation is lockstep.</param>
+    /// <param name="primaryBase">Chunk holding the occupancy word: the cluster segment, or the Transient segment on a pure-Transient archetype.</param>
+    /// <param name="dataBase">Chunk holding this slot's component column, in whichever segment matches its storage mode.</param>
+    /// <param name="layout">Cluster layout — shared by both segments, which is what makes one set of offsets address either.</param>
+    /// <param name="compSlot">Per-archetype component slot to scan.</param>
+    /// <param name="fieldOffset">Byte offset of the indexed field within the component.</param>
+    public void Recompute(int clusterChunkId, byte* primaryBase, byte* dataBase, ArchetypeClusterInfo layout, int compSlot, int fieldOffset)
     {
         EnsureCapacity(clusterChunkId);
 
-        ulong occupancy = *(ulong*)clusterBase;
+        ulong occupancy = *(ulong*)primaryBase;
         if (occupancy == 0)
         {
             _valid[clusterChunkId] = false;
@@ -54,7 +67,7 @@ internal sealed unsafe class ZoneMapArray
         }
 
         int compSize = layout.ComponentSize(compSlot);
-        byte* compBase = clusterBase + layout.ComponentOffset(compSlot);
+        byte* compBase = dataBase + layout.ComponentOffset(compSlot);
 
         long min = long.MaxValue;
         long max = long.MinValue;

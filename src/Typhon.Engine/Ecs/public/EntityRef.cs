@@ -453,9 +453,10 @@ public unsafe ref struct EntityRef
     /// Called once per entity per tick, before the first write mutation.
     /// </summary>
     /// <remarks>
-    /// Walks both index homes since #655. A slot's bytes live in the segment matching its storage mode, so the base is chosen per slot rather than taken from
-    /// <c>_clusterBase</c> for all of them — a Transient slot's key read off the cluster base would capture whatever the SoA holds at that offset, which is
-    /// another component's data. That is silent: the shadow entry looks well-formed and the drain moves the index off a key the entity never had.
+    /// Walks both index homes since #655. A slot's bytes live in the segment matching its storage mode, so the base is chosen per home rather than taken from
+    /// <c>_clusterBase</c> for all of them — a Transient slot's key read off a MIXED archetype's cluster base would capture whatever the SoA holds at that
+    /// offset, which is another component's data. That is silent: the shadow entry looks well-formed and the drain moves the index off a key the entity never
+    /// had.
     /// </remarks>
     private void ShadowClusterIndexedFields(ArchetypeClusterState clusterState)
     {
@@ -463,7 +464,12 @@ public unsafe ref struct EntityRef
 
         // Versioned slots are skipped: their indexes are updated at commit time, not at the fence.
         CaptureIndexedSlots(clusterState.IndexSlots, _clusterBase, entityIndex, _archetype.VersionedSlotMask);
-        CaptureIndexedSlots(clusterState.TransientIndexSlots, _transientClusterBase, entityIndex, _archetype.VersionedSlotMask);
+
+        // A PURE-Transient archetype has no second base — _clusterBase already IS the Transient one (see the field comment on _transientClusterBase), so it
+        // stays null here. Passing it straight through hit CaptureIndexedSlots' null guard and captured NOTHING, leaving the tree on the pre-mutation key for
+        // the entity's whole lifetime: spawn indexed correctly, every later in-place write was invisible to the index.
+        byte* transientBase = _transientClusterBase != null ? _transientClusterBase : _clusterBase;
+        CaptureIndexedSlots(clusterState.TransientIndexSlots, transientBase, entityIndex, _archetype.VersionedSlotMask);
     }
 
     /// <summary>

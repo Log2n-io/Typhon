@@ -2782,13 +2782,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // Versioned stores HEAD in cluster slot, chain separate. Transient stores component data in a parallel CBS<TransientStore> segment (zero page cache).
             // Pure-Versioned archetypes stay on legacy path (must have ≥1 SV or Transient).
             // ═══════════════════════════════════════════════════════════════════════
-            var isClusterEligible = true;
-            var hasClusterIndexableFields = false;  // Non-Transient indexed fields (for per-archetype cluster B+Trees)
+            // An indexed Transient field no longer disqualifies its archetype (#655). Both documented reasons for that exclusion were wrong: the
+            // BTree<TransientStore> / BTree<PersistentStore> split constrains tree INSTANCES rather than archetype placement, and the "cluster Write<T>
+            // returns a ref so there is no hook" claim was false — EntityRef's Transient write branch already runs the shadow capture before returning the
+            // ref. Deferred-fence indexing never needs a post-mutation hook: capture the old key before the write, read the new value at the fence.
+            var hasClusterIndexableFields = false;  // Any indexed field, in either index home (for per-archetype B+Trees)
             var hasSpatialField = false;
             var hasSvSlot = false;
             var hasTransientSlot = false;
-            // #655 step 3 admitted MIXED archetypes; a PURE-Transient one with an indexed field is still excluded — see the eligibility note below.
-            var hasIndexedTransientSlot = false;
             ushort versionedSlotMask = 0;
             ushort transientSlotMask = 0;
             for (var slot = 0; slot < meta.ComponentCount; slot++)
@@ -2806,22 +2807,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 {
                     transientSlotMask |= (ushort)(1 << slot);
                     hasTransientSlot = true;
-                    // An archetype with an INDEXED Transient component stays off the cluster path. #655 is removing this, and its groundwork is in place —
-                    // ClusterIndexSlot/ClusterIndexField are generic over the store, CreateIndexForFieldCore is generic, and InitializeIndexes builds
-                    // Transient slots into TransientIndexSlots against heap-backed segments. What is NOT yet in place is index MAINTENANCE for those trees:
-                    // capture (EntityRef.ShadowClusterIndexedFields), drain (ProcessClusterShadowEntries), spawn/destroy/migration, the pure-Transient fence
-                    // path, and the EcsQuery read path all still walk IndexSlots alone. Lifting the gate before those land yields a cluster archetype whose
-                    // Transient indexed fields are allocated and never populated — silently wrong queries, which is worse than the exclusion (issue #655,
-                    // trap 1). The gate goes when the maintenance does, not before.
-                    //
-                    // For the record, both ORIGINAL justifications for the exclusion were wrong: the BTree<TransientStore>/BTree<PersistentStore> split
-                    // constrains tree INSTANCES, not archetype placement (both instantiations always shipped), and the "cluster Write<T> returns a ref so
-                    // there is no hook" claim was false — EntityRef's Transient write branch already runs the shadow capture before returning the ref.
-                    // Deferred-fence indexing never needs a post-mutation hook: capture the old key before the write, read the new value at the fence.
-                    if (table.IndexedFieldInfos != null && table.IndexedFieldInfos.Length > 0)
-                    {
-                        hasIndexedTransientSlot = true;
-                    }
                 }
                 if (table.SpatialIndex != null)
                 {
@@ -2833,21 +2818,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 }
             }
 
-            // Require at least one SV or Transient slot. Pure-Versioned stays on legacy path.
-            if (isClusterEligible && !hasSvSlot && !hasTransientSlot)
-            {
-                isClusterEligible = false;
-            }
-
-            // A PURE-Transient archetype with an indexed field stays off the cluster path (#655 step 4). Admitting it needs the query layer's Path B to run
-            // over TransientSegment as BOTH primary and data: with no ClusterSegment, EcsQuery's cluster scan cannot execute, and the non-cluster fallback
-            // reads ComponentTable.TransientComponentSegment — which holds nothing, because a cluster-backed archetype's Transient bytes live in the cluster's
-            // own Transient segment. That combination returns silently empty, so the gate stays until Path B is store-generic.
-            // A MIXED archetype has a ClusterSegment and is admitted.
-            if (isClusterEligible && hasIndexedTransientSlot && !hasSvSlot && versionedSlotMask == 0)
-            {
-                isClusterEligible = false;
-            }
+            // Require at least one SV or Transient slot. Pure-Versioned stays on legacy path — and that is now the ONLY disqualifier.
+            var isClusterEligible = hasSvSlot || hasTransientSlot;
 
             meta.IsClusterEligible = isClusterEligible;
             meta.HasClusterIndexes = isClusterEligible && hasClusterIndexableFields;
@@ -2866,10 +2838,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 {
                     var table = slotToTable[slot];
                     componentSizes[slot] = table.Definition.ComponentStorageSize;
-                    // Count AllowMultiple indexed fields for the cluster tail elementId storage. Only non-Transient slots participate in cluster B+Tree
-                    // indexing (Transient indexed fields stay on the legacy per-entity path — see the eligibility check above). Mirror that gate here so the
-                    // tail is sized correctly. When #655 lifts the eligibility gate this must lift WITH it, in the same change: admitting Transient slots to
-                    // the index slots while sizing the tail without them misroutes every AllowMultiple element id (trap 1 of that issue).
+                    // Count AllowMultiple indexed fields for the cluster tail elementId storage. EVERY indexed slot participates, Transient included (#655) —
+                    // the tail lives in the primary chunk and is addressed by MultiFieldIndex, which InitializeIndexes assigns across both homes from one
+                    // counter. Sizing it over a subset of the slots that get index fields misroutes every AllowMultiple element id.
                     if (table.IndexedFieldInfos != null)
                     {
                         for (var fi = 0; fi < table.IndexedFieldInfos.Length; fi++)

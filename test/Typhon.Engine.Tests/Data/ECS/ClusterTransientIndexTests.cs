@@ -284,6 +284,49 @@ class ClusterTransientIndexTests : TestBase<ClusterTransientIndexTests>
     }
 
     /// <summary>
+    /// AC: the same query still works after the field is mutated OUTSIDE the range spawn established. Path B prunes by zone map and spawn only WIDENS one, so
+    /// tracking a value that moves out of range depends on the fence recompute — which walked the persistent home alone and left the Transient home's maps
+    /// frozen at their spawn-time bounds (#655).
+    /// </summary>
+    /// <remarks>
+    /// The mixed counterpart of <c>ClusterPureTransientIndexTests.Query_AfterMutatingOutOfTheSpawnRange_StillFindsTheEntity</c>, and the harder of the two:
+    /// here the occupancy word the recompute reads is in the CLUSTER chunk while the column it scans is in the Transient one. Recomputing off a single base
+    /// reads an all-zero occupancy word out of the Transient chunk and silently marks the map invalid instead of refreshing it.
+    /// </remarks>
+    [Test]
+    public void Query_AfterMutatingTheTransientFieldOutOfRange_UsesTheRefreshedZoneMap()
+    {
+        using var dbe = SetupEngine();
+
+        var ids = new List<EntityId>();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < 4; i++)
+            {
+                ids.Add(Spawn(tx, hp: i, bucket: 10 + i));
+            }
+            tx.Commit();
+        }
+        dbe.WriteTickFence(1);
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(ids[2]).Write(TIdxMixedArch.Runtime) = new TIdxRuntime(999, 1);
+            tx.Commit();
+        }
+        dbe.WriteTickFence(2);
+
+        using var txQ = dbe.CreateQuickTransaction();
+        Assert.Multiple(() =>
+        {
+            Assert.That(txQ.Query<TIdxMixedArch>().WhereField<TIdxRuntime>(r => r.Bucket == 999).Execute(), Is.EquivalentTo(new[] { ids[2] }),
+                "the mutated entity must be findable under its new key");
+            Assert.That(txQ.Query<TIdxMixedArch>().WhereField<TIdxRuntime>(r => r.Bucket == 12).Count(), Is.EqualTo(0), "and must not answer to the old one");
+            Assert.That(txQ.Query<TIdxMixedArch>().WhereField<TIdxRuntime>(r => r.Bucket == 11).Count(), Is.EqualTo(1), "its siblings are untouched");
+        });
+    }
+
+    /// <summary>
     /// AC: reopen — Transient trees are absent, never reloaded stale. Transient data does not survive the process, so its index must not either.
     /// </summary>
     [Test]

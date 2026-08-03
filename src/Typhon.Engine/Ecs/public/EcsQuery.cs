@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq.Expressions;
@@ -930,8 +930,10 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     continue;
                 }
 
-                int ixSlotIdx = FindClusterIndexSlot(clusterState, meta);
-                if (ixSlotIdx < 0)
+                // A Transient home is skipped: ArchetypeSortedStream streams a BTreeBase<PersistentStore>. Skipping falls through to the generic sort, which
+                // is correct but not index-accelerated — ordered streaming over the Transient home is a #655 follow-up, tracked in #665.
+                int ixSlotIdx = FindClusterIndexSlot(clusterState, meta, out bool transientHome);
+                if (ixSlotIdx < 0 || transientHome)
                 {
                     continue;
                 }
@@ -1106,8 +1108,10 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 continue;
             }
 
-            int ixSlotIdx = FindClusterIndexSlot(clusterState, meta);
-            if (ixSlotIdx < 0 || orderByFieldIdx < 0 || orderByFieldIdx >= clusterState.IndexSlots[ixSlotIdx].Fields.Length)
+            // Persistent home only — see the note in ExecuteOrderedClustered. A Transient home leaves this archetype's entities out of entityKeyMap, so they
+            // sort by EntityKey rather than by the ordered field (#655 follow-up, tracked in #665).
+            int ixSlotIdx = FindClusterIndexSlot(clusterState, meta, out bool transientHome);
+            if (ixSlotIdx < 0 || transientHome || orderByFieldIdx < 0 || orderByFieldIdx >= clusterState.IndexSlots[ixSlotIdx].Fields.Length)
             {
                 continue;
             }
@@ -1242,24 +1246,33 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
                 var engineState = dbe._archetypeStates[meta.ArchetypeId];
                 var clusterState = engineState?.ClusterState;
-                // A where-component with no entry in the PERSISTED index home routes to the cross-archetype scan, which evaluates predicates against component
-                // DATA and is therefore correct whichever home owns the index. Without this, FindClusterIndexSlot returns -1 inside ScanPerArchetypeBTree and
-                // it returns with NO results — a silently empty query, the same shape as #663. Reached by a Transient indexed field since #655; using its tree
-                // for selectivity here is a performance follow-up, not a correctness one.
-                if (clusterState?.IndexSlots == null || FindClusterIndexSlot(clusterState, meta) < 0)
+                // A where-component indexed in NEITHER home routes to the cross-archetype scan, which evaluates predicates against component DATA and is
+                // therefore correct whichever home owns the index. Without this, FindClusterIndexSlot returns -1 inside ScanPerArchetypeBTree and it returns
+                // with NO results — a silently empty query, the same shape as #663.
+                if (clusterState == null)
                 {
                     hasNonClusterArchetypes = true;
                     continue;
                 }
 
-                // Query planner: choose Path A (B+Tree selective) vs Path B (zone map + eval) based on selectivity
-                if (plan.UsesSecondaryIndex && EstimateClusterSelectivity(plan, clusterState) < 0.05f)
+                int ixSlotIdx = FindClusterIndexSlot(clusterState, meta, out bool transientHome);
+                if (ixSlotIdx < 0)
+                {
+                    hasNonClusterArchetypes = true;
+                    continue;
+                }
+
+                // Query planner: choose Path A (B+Tree selective) vs Path B (zone map + eval) based on selectivity.
+                // A Transient home always takes Path B. Path A range-scans the tree, and the collector is typed to BTreeBase<PersistentStore>; Path B never
+                // touches a tree at all, so it is correct for either home. Selecting it here costs a full SoA scan instead of a selective one — a performance
+                // gap, not a correctness one, and one that #665 revisits when it unfreezes cluster selectivity statistics (#655).
+                if (!transientHome && plan.UsesSecondaryIndex && EstimateClusterSelectivity(plan, clusterState) < 0.05f)
                 {
                     ScanPerArchetypeBTreeSelective(plan, evaluators, clusterState, meta, ref sink);
                 }
                 else
                 {
-                    ScanPerArchetypeBTree(plan, evaluators, clusterState, meta, ref sink);
+                    ScanPerArchetypeBTree(evaluators, clusterState, meta, ref sink);
                 }
             }
         }
@@ -1295,16 +1308,81 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// Scan cluster entities for a per-archetype indexed archetype using direct cluster evaluation (Path B).
     /// Evaluates all field predicates on cluster SoA data, resolving EntityKeys from the cluster.
     /// </summary>
-    private void ScanPerArchetypeBTree<TSink>(ExecutionPlan plan, FieldEvaluator[] evaluators, ArchetypeClusterState clusterState, ArchetypeMetadata meta,
-        ref TSink result) where TSink : struct, IEntityIdSink
+    /// <remarks>
+    /// Resolves the two segments the scan addresses and hands accessors over them to <see cref="ScanClusterSoa{TSink,TPrimary,TData}"/>. The two are separate
+    /// axes (#655): <b>primary</b> holds the occupancy word and the entity-id tail — the cluster segment, or the Transient segment when the archetype is
+    /// pure-Transient and has no cluster segment at all (exactly as <c>ArchetypeClusterState.RebuildActiveList</c> already treats it); <b>data</b> holds the
+    /// matched slot's component bytes, in whichever segment matches that slot's storage mode. For a SingleVersion / Versioned slot the two collapse onto the
+    /// cluster segment, which is why this path needed only one accessor before. Same three-store split as
+    /// <see cref="DatabaseEngine.ProcessClusterShadowEntries"/>, and deliberately the same shape.
+    /// </remarks>
+    private void ScanPerArchetypeBTree<TSink>(FieldEvaluator[] evaluators, ArchetypeClusterState clusterState, ArchetypeMetadata meta, ref TSink result)
+        where TSink : struct, IEntityIdSink
     {
-        int ixSlotIdx = FindClusterIndexSlot(clusterState, meta);
+        int ixSlotIdx = FindClusterIndexSlot(clusterState, meta, out bool transientHome);
         if (ixSlotIdx < 0)
         {
             return;
         }
 
-        var ixSlots = clusterState.IndexSlots;
+        if (!transientHome)
+        {
+            var svAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
+            try
+            {
+                ScanClusterSoa(evaluators, clusterState, clusterState.IndexSlots, ixSlotIdx, ref svAccessor, ref svAccessor, ref result);
+            }
+            finally
+            {
+                svAccessor.Dispose();
+            }
+
+            return;
+        }
+
+        var transientAccessor = clusterState.TransientSegment.CreateChunkAccessor();
+        try
+        {
+            if (clusterState.ClusterSegment == null)
+            {
+                ScanClusterSoa(evaluators, clusterState, clusterState.TransientIndexSlots, ixSlotIdx, ref transientAccessor, ref transientAccessor,
+                    ref result);
+            }
+            else
+            {
+                var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
+                try
+                {
+                    ScanClusterSoa(evaluators, clusterState, clusterState.TransientIndexSlots, ixSlotIdx, ref clusterAccessor, ref transientAccessor,
+                        ref result);
+                }
+                finally
+                {
+                    clusterAccessor.Dispose();
+                }
+            }
+        }
+        finally
+        {
+            transientAccessor.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// The store-generic body of Path B: zone-map-prune each active cluster, then evaluate every predicate against the matched slot's SoA column and emit the
+    /// entity ids that pass.
+    /// </summary>
+    /// <remarks>
+    /// Never reads a B+Tree — only the zone maps hanging off the index fields — which is what lets one body serve both index homes. Path A
+    /// (<see cref="ScanPerArchetypeBTreeSelective{TSink}"/>) does range-scan the tree and stays persistent-home-only for now; the planner in
+    /// <see cref="ScanAllArchetypes{TSink}"/> routes every Transient home here.
+    /// </remarks>
+    private void ScanClusterSoa<TSink, TPrimary, TData>(FieldEvaluator[] evaluators, ArchetypeClusterState clusterState, ClusterIndexSlot<TData>[] ixSlots,
+        int ixSlotIdx, ref ChunkAccessor<TPrimary> primaryAccessor, ref ChunkAccessor<TData> dataAccessor, ref TSink result)
+        where TSink : struct, IEntityIdSink
+        where TPrimary : struct, IPageStore
+        where TData : struct, IPageStore
+    {
         ref var matchSlot = ref ixSlots[ixSlotIdx];
         var layout = clusterState.Layout;
         int compSlot = matchSlot.Slot;
@@ -1355,136 +1433,130 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
         int clusterSize = layout.ClusterSize;
 
-        var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
-        try
+        for (int c = 0; c < clusterState.ActiveClusterCount; c++)
         {
-            for (int c = 0; c < clusterState.ActiveClusterCount; c++)
+            int clusterChunkId = clusterState.ActiveClusterIds[c];
+
+            // Zone map pruning: skip cluster if any predicate's range doesn't overlap the cluster's [min, max].
+            // Iterates fields to find zone maps, then checks matching evaluators — avoids ref-type array allocation.
+            if (hasZoneMaps)
             {
-                int clusterChunkId = clusterState.ActiveClusterIds[c];
-
-                // Zone map pruning: skip cluster if any predicate's range doesn't overlap the cluster's [min, max].
-                // Iterates fields to find zone maps, then checks matching evaluators — avoids ref-type array allocation.
-                if (hasZoneMaps)
+                bool skip = false;
+                for (int fi = 0; fi < matchSlot.Fields.Length && !skip; fi++)
                 {
-                    bool skip = false;
-                    for (int fi = 0; fi < matchSlot.Fields.Length && !skip; fi++)
-                    {
-                        ref var field = ref matchSlot.Fields[fi];
-                        if (field.ZoneMap == null)
-                        {
-                            continue;
-                        }
-
-                        for (int e = 0; e < evalCount && !skip; e++)
-                        {
-                            if ((zoneMapEvalMask & (1UL << e)) == 0)
-                            {
-                                continue;
-                            }
-                            if (evaluators[e].FieldOffset != field.FieldOffset)
-                            {
-                                continue;
-                            }
-                            if (!field.ZoneMap.MayContain(clusterChunkId, zoneMapMins[e], zoneMapMaxs[e]))
-                            {
-                                skip = true;
-                            }
-                        }
-                    }
-
-                    if (skip)
+                    ref var field = ref matchSlot.Fields[fi];
+                    if (field.ZoneMap == null)
                     {
                         continue;
                     }
-                }
 
-                byte* clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId);
-                ulong occupancy = *(ulong*)clusterBase;
-                if (occupancy == 0)
-                {
-                    continue;
-                }
-
-                byte* compBase = clusterBase + compOffset;
-
-                if (anySimd)
-                {
-                    // SIMD path: batch-evaluate SIMD-eligible evaluators, then scalar-verify the rest
-                    ulong matchBits = occupancy;
-
-                    // Phase 1: SIMD evaluators narrow the match set
-                    for (int e = 0; e < evalCount; e++)
+                    for (int e = 0; e < evalCount && !skip; e++)
                     {
-                        if (!simdEligible[e])
+                        if ((zoneMapEvalMask & (1UL << e)) == 0)
                         {
                             continue;
                         }
-
-                        matchBits &= SimdPredicateEvaluator.EvaluateCluster(ref evaluators[e], compBase, compSize, clusterSize);
-                        if (matchBits == 0)
+                        if (evaluators[e].FieldOffset != field.FieldOffset)
                         {
+                            continue;
+                        }
+                        if (!field.ZoneMap.MayContain(clusterChunkId, zoneMapMins[e], zoneMapMaxs[e]))
+                        {
+                            skip = true;
+                        }
+                    }
+                }
+
+                if (skip)
+                {
+                    continue;
+                }
+            }
+
+            byte* clusterBase = primaryAccessor.GetChunkAddress(clusterChunkId);
+            ulong occupancy = *(ulong*)clusterBase;
+            if (occupancy == 0)
+            {
+                continue;
+            }
+
+            // The component column can live in a DIFFERENT segment from the occupancy word — a Transient slot on a mixed archetype. Chunk ids are held in
+            // lockstep between the two segments, so the same clusterChunkId addresses both.
+            byte* compBase = dataAccessor.GetChunkAddress(clusterChunkId) + compOffset;
+
+            if (anySimd)
+            {
+                // SIMD path: batch-evaluate SIMD-eligible evaluators, then scalar-verify the rest
+                ulong matchBits = occupancy;
+
+                // Phase 1: SIMD evaluators narrow the match set
+                for (int e = 0; e < evalCount; e++)
+                {
+                    if (!simdEligible[e])
+                    {
+                        continue;
+                    }
+
+                    matchBits &= SimdPredicateEvaluator.EvaluateCluster(ref evaluators[e], compBase, compSize, clusterSize);
+                    if (matchBits == 0)
+                    {
+                        break;
+                    }
+                }
+
+                // Phase 2: scalar-verify non-SIMD evaluators on remaining matches
+                while (matchBits != 0)
+                {
+                    int slotIndex = System.Numerics.BitOperations.TrailingZeroCount(matchBits);
+                    matchBits &= matchBits - 1;
+
+                    byte* entityComp = compBase + slotIndex * compSize;
+                    bool pass = true;
+                    for (int e = 0; e < evalCount; e++)
+                    {
+                        if (simdEligible[e])
+                        {
+                            continue;
+                        }
+                        if (!FieldEvaluator.Evaluate(ref evaluators[e], entityComp + evaluators[e].FieldOffset))
+                        {
+                            pass = false;
                             break;
                         }
                     }
 
-                    // Phase 2: scalar-verify non-SIMD evaluators on remaining matches
-                    while (matchBits != 0)
+                    if (pass)
                     {
-                        int slotIndex = System.Numerics.BitOperations.TrailingZeroCount(matchBits);
-                        matchBits &= matchBits - 1;
-
-                        byte* entityComp = compBase + slotIndex * compSize;
-                        bool pass = true;
-                        for (int e = 0; e < evalCount; e++)
-                        {
-                            if (simdEligible[e])
-                            {
-                                continue;
-                            }
-                            if (!FieldEvaluator.Evaluate(ref evaluators[e], entityComp + evaluators[e].FieldOffset))
-                            {
-                                pass = false;
-                                break;
-                            }
-                        }
-
-                        if (pass)
-                        {
-                            result.Add(EntityId.FromRaw(*(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8)));
-                        }
-                    }
-                }
-                else
-                {
-                    // Scalar path (unchanged): evaluate each occupied entity against all field predicates
-                    while (occupancy != 0)
-                    {
-                        int slotIndex = System.Numerics.BitOperations.TrailingZeroCount(occupancy);
-                        occupancy &= occupancy - 1;
-
-                        byte* entityComp = compBase + slotIndex * compSize;
-                        bool allMatch = true;
-                        for (int e = 0; e < evaluators.Length; e++)
-                        {
-                            ref var eval = ref evaluators[e];
-                            if (!FieldEvaluator.Evaluate(ref eval, entityComp + eval.FieldOffset))
-                            {
-                                allMatch = false;
-                                break;
-                            }
-                        }
-
-                        if (allMatch)
-                        {
-                            result.Add(EntityId.FromRaw(*(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8)));
-                        }
+                        result.Add(EntityId.FromRaw(*(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8)));
                     }
                 }
             }
-        }
-        finally
-        {
-            clusterAccessor.Dispose();
+            else
+            {
+                // Scalar path (unchanged): evaluate each occupied entity against all field predicates
+                while (occupancy != 0)
+                {
+                    int slotIndex = System.Numerics.BitOperations.TrailingZeroCount(occupancy);
+                    occupancy &= occupancy - 1;
+
+                    byte* entityComp = compBase + slotIndex * compSize;
+                    bool allMatch = true;
+                    for (int e = 0; e < evaluators.Length; e++)
+                    {
+                        ref var eval = ref evaluators[e];
+                        if (!FieldEvaluator.Evaluate(ref eval, entityComp + eval.FieldOffset))
+                        {
+                            allMatch = false;
+                            break;
+                        }
+                    }
+
+                    if (allMatch)
+                    {
+                        result.Add(EntityId.FromRaw(*(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8)));
+                    }
+                }
+            }
         }
     }
 
@@ -1520,21 +1592,47 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     }
 
     /// <summary>
-    /// Find the cluster index slot that corresponds to <see cref="_whereComponentTable"/>.
-    /// Returns the index into <see cref="ArchetypeClusterState.IndexSlots"/>, or -1 if not found.
+    /// Find the per-archetype index slot that owns <see cref="_whereComponentTable"/>, in EITHER index home. Returns an index into
+    /// <see cref="ArchetypeClusterState.IndexSlots"/> when <paramref name="transientHome"/> is <c>false</c> and into
+    /// <see cref="ArchetypeClusterState.TransientIndexSlots"/> when it is <c>true</c>; -1 when neither home indexes that component.
     /// </summary>
-    private int FindClusterIndexSlot(ArchetypeClusterState clusterState, ArchetypeMetadata meta)
+    /// <remarks>
+    /// The two arrays are different closed generic types, so a caller has to know which one the returned index addresses — hence the out-parameter rather
+    /// than one fused array. A component slot appears in exactly one home (its <see cref="StorageMode"/> decides which), so the search order carries no
+    /// meaning; persistent goes first only because it is the common case. Every caller that reads a slot must branch on <paramref name="transientHome"/> —
+    /// the search is the ONLY place that knows a second home exists (#655).
+    /// </remarks>
+    private int FindClusterIndexSlot(ArchetypeClusterState clusterState, ArchetypeMetadata meta, out bool transientHome)
     {
-        var ixSlots = clusterState.IndexSlots;
         var engineState = _tx.DBE._archetypeStates[meta.ArchetypeId];
-        for (int s = 0; s < ixSlots.Length; s++)
+
+        var ixSlots = clusterState.IndexSlots;
+        if (ixSlots != null)
         {
-            if (engineState.SlotToComponentTable[ixSlots[s].Slot] == _whereComponentTable)
+            for (int s = 0; s < ixSlots.Length; s++)
             {
-                return s;
+                if (engineState.SlotToComponentTable[ixSlots[s].Slot] == _whereComponentTable)
+                {
+                    transientHome = false;
+                    return s;
+                }
             }
         }
 
+        var trSlots = clusterState.TransientIndexSlots;
+        if (trSlots != null)
+        {
+            for (int s = 0; s < trSlots.Length; s++)
+            {
+                if (engineState.SlotToComponentTable[trSlots[s].Slot] == _whereComponentTable)
+                {
+                    transientHome = true;
+                    return s;
+                }
+            }
+        }
+
+        transientHome = false;
         return -1;
     }
 
@@ -1701,8 +1799,10 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     private void ScanPerArchetypeBTreeSelective<TSink>(ExecutionPlan plan, FieldEvaluator[] evaluators, ArchetypeClusterState clusterState,
         ArchetypeMetadata meta, ref TSink result) where TSink : struct, IEntityIdSink
     {
-        int ixSlotIdx = FindClusterIndexSlot(clusterState, meta);
-        if (ixSlotIdx < 0)
+        // Persistent home only: the range scan below is typed to BTreeBase<PersistentStore>. ScanAllArchetypes never routes a Transient home here, so this is
+        // a guard against a future caller rather than a live branch (#655).
+        int ixSlotIdx = FindClusterIndexSlot(clusterState, meta, out bool transientHome);
+        if (ixSlotIdx < 0 || transientHome)
         {
             return;
         }
@@ -1719,7 +1819,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         if (plan.PrimaryFieldIndex < 0 || plan.PrimaryFieldIndex >= matchSlot.Fields.Length)
         {
             // Fall back to Path B (full scan) if primary field not found
-            ScanPerArchetypeBTree(plan, evaluators, clusterState, meta, ref result);
+            ScanPerArchetypeBTree(evaluators, clusterState, meta, ref result);
             return;
         }
 
