@@ -891,9 +891,13 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     }
 
     /// <summary>
-    /// Populates newly created secondary indexes by scanning all occupied entities.
-    /// Called after schema migration creates empty indexes that need backfilling.
+    /// Populates newly created secondary indexes from data already on disk. Called after schema migration adds an <c>[Index]</c> to an existing field, which
+    /// creates the tree empty.
     /// </summary>
+    /// <remarks>
+    /// Dispatches on <see cref="StorageMode"/> because the two storage shapes disagree on both what an index entry is worth indexing and what its VALUE must
+    /// be — see <see cref="PopulateNewIndexesVersioned"/> (#670).
+    /// </remarks>
     internal void PopulateNewIndexes(HashSet<int> newIndexFieldIds, ChangeSet changeSet)
     {
         if (newIndexFieldIds == null || newIndexFieldIds.Count == 0)
@@ -901,6 +905,14 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
             return;
         }
 
+        if (StorageMode == StorageMode.Versioned)
+        {
+            PopulateNewIndexesVersioned(newIndexFieldIds, changeSet);
+            return;
+        }
+
+        // SingleVersion (and Transient, which never reaches migration — its data does not survive a restart): one chunk per live entity, and the index value
+        // IS that chunk id, so the segment scan is both complete and correctly valued.
         using var guard = EpochGuard.Enter(DBE.EpochManager);
         var accessor = ComponentSegment.CreateChunkAccessor(changeSet);
         try
@@ -930,6 +942,108 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         finally
         {
             accessor.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// The <see cref="StorageMode.Versioned"/> half of <see cref="PopulateNewIndexes"/>: walks this table's revision-chain heads and inserts
+    /// <c>key → rootChunkId</c> for each live entity, exactly as the Phase-5 crash rebuild does (#670).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The segment scan the other branch uses is wrong here in two independent ways, and both were live before #670.
+    /// </para>
+    /// <para>
+    /// <b>The value.</b> A Versioned secondary index stores the CompRev chain ROOT, never a content chunk id —
+    /// <see cref="RebuildSecondaryIndexEntriesFromHeads"/> inserts <c>rootChunkId</c>, and the query path walks the revision chain starting from whatever the
+    /// leaf holds. Backfilling a content chunk id hands the reader a meaningless start, so every lookup on the new index resolves to nothing.
+    /// </para>
+    /// <para>
+    /// <b>The population.</b> Every allocated chunk in a Versioned component segment is a retained REVISION, not an entity. A repeatedly-updated entity
+    /// contributed one entry per revision, each keyed on whatever value that revision happened to hold — resurrecting superseded keys as though they were
+    /// current.
+    /// </para>
+    /// <para>
+    /// Unlike the crash rebuild this takes no archetype filter: a ComponentTable's index is shared by every archetype holding the component, so the backfill
+    /// must cover all of them. Tombstone heads (a deleted entity) carry no entry, and a multi-value insert writes the element id back to the content tail so
+    /// later removals resolve — both matching the crash rebuild exactly.
+    /// </para>
+    /// </remarks>
+    private void PopulateNewIndexesVersioned(HashSet<int> newIndexFieldIds, ChangeSet changeSet)
+    {
+        // Epoch first: EnumerateVersionedChainHeads opens its own accessor over the revision segment, and every accessor must be created inside a scope.
+        using var guard = EpochGuard.Enter(DBE.EpochManager);
+
+        var heads = ComponentRevisionManager.EnumerateVersionedChainHeads(this);
+        if (heads.Count == 0)
+        {
+            return;
+        }
+
+        var anyMultiValue = false;
+        for (var i = 0; i < IndexedFieldInfos.Length; i++)
+        {
+            if (IndexedFieldInfos[i].AllowMultiple && newIndexFieldIds.Contains(GetFieldIdForIndex(IndexedFieldInfos[i])))
+            {
+                anyMultiValue = true;
+                break;
+            }
+        }
+
+        var revAccessor = CompRevTableSegment.CreateChunkAccessor(changeSet);
+        var contentAccessor = ComponentSegment.CreateChunkAccessor(changeSet);
+        var idxAccessors = new Dictionary<ChunkBasedSegment<PersistentStore>, IndexAccessorBox>();
+        try
+        {
+            foreach (var kv in heads)
+            {
+                var rootChunkId = kv.Value;
+                revAccessor.GetChunkAsSpan(rootChunkId).Split(out Span<CompRevStorageHeader> _, out Span<CompRevStorageElement> els);
+                var contentChunkId = els[0].ComponentChunkId;
+                if (contentChunkId == 0)
+                {
+                    continue; // tombstone head (deleted entity) — no index entry
+                }
+
+                var contentBase = contentAccessor.GetChunkAddress(contentChunkId, anyMultiValue);
+                for (var i = 0; i < IndexedFieldInfos.Length; i++)
+                {
+                    ref var ifi = ref IndexedFieldInfos[i];
+                    if (!newIndexFieldIds.Contains(GetFieldIdForIndex(ifi)))
+                    {
+                        continue;
+                    }
+
+                    var index = ifi.PersistentIndex;
+                    if (!idxAccessors.TryGetValue(index.Segment, out var box))
+                    {
+                        box = new IndexAccessorBox { Accessor = index.Segment.CreateChunkAccessor(changeSet) };
+                        idxAccessors[index.Segment] = box;
+                    }
+
+                    var keyAddr = contentBase + ifi.OffsetToField;
+                    if (ifi.AllowMultiple)
+                    {
+                        *(int*)(contentBase + ifi.OffsetToIndexElementId) = index.Add(keyAddr, rootChunkId, ref box.Accessor, out _);
+                    }
+                    else
+                    {
+                        index.Add(keyAddr, rootChunkId, ref box.Accessor);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            foreach (var box in idxAccessors.Values)
+            {
+                box.Accessor.CommitChanges();
+                box.Accessor.Dispose();
+            }
+
+            contentAccessor.CommitChanges();
+            contentAccessor.Dispose();
+            revAccessor.Dispose();
         }
     }
 

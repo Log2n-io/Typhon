@@ -1,5 +1,6 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Typhon.Schema.Definition;
@@ -228,7 +229,40 @@ struct EvoBulkV2
 
 #endregion
 
+#region Add Index (#670)
+
+// Same [Component] name across the pair: V2 adds [Index] to an EXISTING field, which is the schema change that makes
+// DatabaseEngine call ComponentTable.PopulateNewIndexes to backfill the new tree from data already on disk.
+// Versioned (the default) is the shape that matters — its index value must be the CompRev chain ROOT, not a content chunk id.
+[Component("Typhon.Schema.UnitTest.EvoIndex", 1)]
+[StructLayout(LayoutKind.Sequential)]
+struct EvoIndexV1
+{
+    public int A;
+    public int Bucket;
+
+    public EvoIndexV1(int a, int bucket) { A = a; Bucket = bucket; }
+}
+
+[Component("Typhon.Schema.UnitTest.EvoIndex", 1)]
+[StructLayout(LayoutKind.Sequential)]
+struct EvoIndexV2
+{
+    public int A;
+    [Index(AllowMultiple = true)] public int Bucket;
+
+    public EvoIndexV2(int a, int bucket) { A = a; Bucket = bucket; }
+}
+
+#endregion
+
 // ── Archetypes for V1 components (used for Spawn in first scope) ──
+
+[Archetype]
+class EvoIndexArch : Archetype<EvoIndexArch>
+{
+    public static readonly Comp<EvoIndexV1> Comp = Register<EvoIndexV1>();
+}
 
 [Archetype]
 class EvoAddArch : Archetype<EvoAddArch>
@@ -287,6 +321,12 @@ class EvoBulkArch : Archetype<EvoBulkArch>
 // ── V2 Archetypes (used for Open().Read() in scope 2 after schema evolution) ──
 // V1 and V2 CLR types sharing the same [Component] name get the SAME ComponentTypeId.
 // InitializeArchetypes connects V1Arch's slots to V2's ComponentTable via schema-name fallback.
+
+[Archetype]
+class EvoIndexV2Arch : Archetype<EvoIndexV2Arch>
+{
+    public static readonly Comp<EvoIndexV2> Comp = Register<EvoIndexV2>();
+}
 
 [Archetype]
 class EvoAddV2Arch : Archetype<EvoAddV2Arch>
@@ -625,6 +665,146 @@ class SchemaEvolutionTests : TestBase<SchemaEvolutionTests>
                 Assert.That(comp.C, Is.EqualTo(0), $"Entity {i}: new field C should be zero (got {comp.C})");
             }
         }
+    }
+
+    /// <summary>
+    /// AC: adding an <c>[Index]</c> to a field of a populated <b>Versioned</b> component produces an index that resolves — one entry per live entity, keyed
+    /// to the chain root (#670).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>PopulateNewIndexes</c> backfilled by scanning the component segment and inserting <c>key → chunkId</c>. Both halves are wrong for a Versioned
+    /// table. The VALUE must be the CompRev chain root — <c>RebuildSecondaryIndexEntriesFromHeads</c> inserts <c>key → rootChunkId</c> and
+    /// <c>ExecutePKsTypedVersioned</c> walks the chain from the leaf value — so a content chunk id sends the reader into the chain walk with a
+    /// meaningless start. And the scan visits every allocated chunk, which for a Versioned table is every retained REVISION, so a repeatedly-updated entity
+    /// contributed one entry per revision, each under whatever key that revision happened to hold.
+    /// </para>
+    /// <para>
+    /// The entities are deliberately updated several times before the reopen, so superseded values exist to be wrongly indexed.
+    /// </para>
+    /// <para>
+    /// <b>What this test does and does not pin.</b> It discriminates on the POPULATION half: with the segment scan restored, the index holds three distinct
+    /// keys instead of two, and the assertion fires. It does NOT independently pin the VALUE half — measured, not assumed. Content chunk ids are recycled and
+    /// occupy the same small-integer range as revision chunk ids, so a content chunk id written as a leaf value numerically ALIASES a valid chain root and
+    /// resolves to a plausible entity rather than failing. Raising the revision churn does not separate the two id spaces. The value defect is real (the query
+    /// path walks the chain from the leaf value, and <c>RebuildSecondaryIndexEntriesFromHeads</c> writes the root) but only the population half is caught
+    /// here; the aliasing is itself the reason the bug survived this long.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void AddIndexToPopulatedVersionedComponent_BackfillsOneEntryPerEntity()
+    {
+        var expectedInBucket7 = new HashSet<EntityId>();
+
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<EvoIndexV1>();
+            dbe.InitializeArchetypes();
+
+            var ids = new List<EntityId>();
+            using (var t = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                for (var i = 0; i < 6; i++)
+                {
+                    var c = new EvoIndexV1(i, 0);
+                    ids.Add(t.Spawn<EvoIndexArch>(EvoIndexArch.Comp.Set(in c)));
+                }
+                t.Commit();
+            }
+
+            // Several updates per entity, so each accumulates revisions under DIFFERENT bucket values. Only the final one is the entity's key.
+            for (var round = 1; round <= 3; round++)
+            {
+                using var t = dbe.CreateQuickTransaction(DurabilityMode.Immediate);
+                for (var i = 0; i < ids.Count; i++)
+                {
+                    ref var c = ref t.OpenMut(ids[i]).Write(EvoIndexArch.Comp);
+                    c = new EvoIndexV1(i, round == 3 ? (i < 3 ? 7 : 3) : round);
+                }
+                t.Commit();
+            }
+
+            for (var i = 0; i < 3; i++)
+            {
+                expectedInBucket7.Add(ids[i]);
+            }
+        }
+
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<EvoIndexV2>();
+            dbe.InitializeArchetypes();
+
+            var table = dbe.GetComponentTable<EvoIndexV2>();
+            var indexedEntities = IndexedChainRoots(table, bucket: 7);
+
+            Assert.Multiple(() =>
+            {
+                // Half 1 — the VALUE. Every leaf value must be a live CompRev chain root; a content chunk id is not one.
+                Assert.That(indexedEntities, Is.EquivalentTo(expectedInBucket7),
+                    "each leaf value must be the chain root of an entity whose CURRENT Bucket is 7");
+
+                // Half 2 — the POPULATION. Distinct keys must be the set of current values {7, 3}, not every value any
+                // revision ever held. Backfilling per revision resurrects superseded keys as though they were current.
+                Assert.That(table.IndexStats[0].EntryCount, Is.EqualTo(2),
+                    "exactly two distinct keys — one per CURRENT value, not one per revision-value");
+
+                Assert.That(IndexedChainRoots(table, bucket: 3), Has.Count.EqualTo(3),
+                    "the three entities whose final value is 3, exactly once each");
+                Assert.That(IndexedChainRoots(table, bucket: 1), Is.Empty,
+                    "bucket 1 was only ever a superseded revision's value");
+            });
+        }
+    }
+
+    /// <summary>
+    /// Every entity indexed under <paramref name="bucket"/>, resolved by treating each leaf value as a CompRev chain root and reading that chain's owning
+    /// entity — which is precisely the contract #670 was violating, so a wrong value fails to resolve rather than resolving to something plausible.
+    /// </summary>
+    private static unsafe HashSet<EntityId> IndexedChainRoots(ComponentTable table, int bucket)
+    {
+        using var epoch = EpochGuard.Enter(table.DBE.EpochManager);
+        var index = (BTree<int, PersistentStore>)table.IndexedFieldInfos[0].Index;
+        var idxAccessor = index.Segment.CreateChunkAccessor();
+        var revAccessor = table.CompRevTableSegment.CreateChunkAccessor();
+        var result = new HashSet<EntityId>();
+        try
+        {
+            var e = index.EnumerateRangeMultiple(bucket, bucket);
+            try
+            {
+                while (e.MoveNextKey())
+                {
+                    do
+                    {
+                        var values = e.CurrentValues;
+                        for (var i = 0; i < values.Length; i++)
+                        {
+                            var rootChunkId = values[i];
+                            Assert.That(table.CompRevTableSegment.IsChunkAllocated(rootChunkId), Is.True,
+                                $"leaf value {rootChunkId} must be an allocated revision-chain chunk — a content chunk id is not");
+
+                            ref var hdr = ref revAccessor.GetChunk<CompRevStorageHeader>(rootChunkId);
+                            result.Add(EntityId.FromRaw(hdr.EntityPK));
+                        }
+                    }
+                    while (e.NextChunk());
+                }
+            }
+            finally
+            {
+                e.Dispose();
+            }
+        }
+        finally
+        {
+            revAccessor.Dispose();
+            idxAccessor.Dispose();
+        }
+
+        return result;
     }
 
     [Test]

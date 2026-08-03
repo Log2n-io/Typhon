@@ -1,4 +1,4 @@
-using JetBrains.Annotations;
+﻿using JetBrains.Annotations;
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
@@ -521,7 +521,12 @@ internal ref struct ComponentRevisionManager
     /// (2) heads = allocated ∧ not-overflow ∧ archetype-match. Shared by EntityMap rebuild (<see cref="DatabaseEngine"/>) and recovery scrub
     /// (03-recovery.md §6) so the two scans never drift. Returns an empty map for a null / non-Versioned / empty table.
     /// </summary>
-    internal static Dictionary<long, int> EnumerateVersionedChainHeads(ComponentTable table, ushort archetypeId)
+    /// <remarks>
+    /// <paramref name="archetypeId"/> is a FILTER, and omitting it means "every archetype". The crash rebuild passes one because it runs per archetype;
+    /// the schema-migration backfill (<c>ComponentTable.PopulateNewIndexes</c>) must not, because a ComponentTable's index is shared by every archetype
+    /// holding the component and a filtered backfill would leave the others unindexed (#670).
+    /// </remarks>
+    internal static Dictionary<long, int> EnumerateVersionedChainHeads(ComponentTable table, ushort? archetypeId = null)
     {
         var heads = new Dictionary<long, int>();
         if (table?.CompRevTableSegment == null || table.StorageMode != StorageMode.Versioned)
@@ -554,7 +559,7 @@ internal ref struct ComponentRevisionManager
             }
         }
 
-        // Pass 2: heads = allocated chunks not in the overflow set, owned by this archetype.
+        // Pass 2: heads = allocated chunks not in the overflow set, owned by this archetype (or all of them when unfiltered).
         for (var chunkId = 0; chunkId < capacity; chunkId++)
         {
             if (!segment.IsChunkAllocated(chunkId) || overflowSet.Contains(chunkId))
@@ -564,7 +569,7 @@ internal ref struct ComponentRevisionManager
 
             ref var hdr = ref accessor.GetChunk<CompRevStorageHeader>(chunkId);
             var pk = hdr.EntityPK;
-            if (EntityId.FromRaw(pk).ArchetypeId != archetypeId)
+            if (archetypeId.HasValue && EntityId.FromRaw(pk).ArchetypeId != archetypeId.Value)
             {
                 continue;
             }
