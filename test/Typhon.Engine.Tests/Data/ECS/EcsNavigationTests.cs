@@ -226,6 +226,9 @@ class EcsNavigationTests : TestBase<EcsNavigationTests>
         view.Refresh(txR);
 
         Assert.That(view.Count, Is.EqualTo(2));
+        // #660: assert the IDENTITY, not just the count. A delta published in the wrong PK space still bumps Count — it inserts a
+        // key that no reverse lookup can ever match or evict — so a Count-only assertion passes while the view is quietly corrupt.
+        Assert.That(view.Contains((long)player2.RawValue), Is.True, "the incremental entry must be keyed on the full EntityId");
     }
 
     // ═══════════════════════════════════════════════════════════════════════

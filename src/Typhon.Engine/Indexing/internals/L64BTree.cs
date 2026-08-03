@@ -850,14 +850,16 @@ internal abstract class L64BTree<TKey, TStore> : BTree<TKey, TStore> where TStor
 
     protected override BaseNodeStorage GetStorage() => new L64NodeStorage();
     public override bool AllowMultiple => false;
-    protected L64BTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    protected L64BTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }
 
 internal class L64MultipleBTree<TKey, TStore> : L64BTree<TKey, TStore> where TStore : struct, IPageStore where TKey : unmanaged
 {
-    public L64MultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public L64MultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 
@@ -889,41 +891,47 @@ internal class L64MultipleBTree<TKey, TStore> : L64BTree<TKey, TStore> where TSt
 
 internal class LongSingleBTree<TStore> : L64BTree<long, TStore> where TStore : struct, IPageStore
 {
-    public LongSingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public LongSingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }
 
 internal class LongMultipleBTree<TStore> : L64MultipleBTree<long, TStore> where TStore : struct, IPageStore
 {
-    public LongMultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public LongMultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }
 internal class ULongSingleBTree<TStore> : L64BTree<long, TStore> where TStore : struct, IPageStore
 {
-    public ULongSingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public ULongSingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }
 
 internal class ULongMultipleBTree<TStore> : L64MultipleBTree<long, TStore> where TStore : struct, IPageStore
 {
-    public ULongMultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public ULongMultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }
 
 internal class DoubleSingleBTree<TStore> : L64BTree<double, TStore> where TStore : struct, IPageStore
 {
-    public DoubleSingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public DoubleSingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }
 
 internal class DoubleMultipleBTree<TStore> : L64MultipleBTree<double, TStore> where TStore : struct, IPageStore
 {
-    public DoubleMultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public DoubleMultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }

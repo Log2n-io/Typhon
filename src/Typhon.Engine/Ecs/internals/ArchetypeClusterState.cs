@@ -525,6 +525,20 @@ internal sealed unsafe class ArchetypeClusterState
     /// <summary>Shared <see cref="ChunkBasedSegment{TStore}"/> backing all per-archetype B+Trees for this archetype.</summary>
     public ChunkBasedSegment<PersistentStore> IndexSegment;
 
+    /// <summary>
+    /// Second per-archetype index segment, striped for <see cref="String64"/> B+Tree nodes. Null when the archetype indexes no
+    /// <c>String64</c> field.
+    /// </summary>
+    /// <remarks>
+    /// A segment serves exactly one node size — every B+Tree variant asserts <c>segment.Stride == sizeof(its node)</c>. The
+    /// <c>Index16/32/64Chunk</c> layouts are all 256 bytes (they differ only in key width, hence capacity 38/29/19), so one segment
+    /// covers every numeric key type. <c>IndexString64Chunk</c> is larger, so it needs its own — exactly the split
+    /// <c>ComponentTable</c> has always had between <c>DefaultIndexSegment</c> and <c>String64IndexSegment</c>. The cluster path
+    /// originally allocated only the 256-byte segment and handed it to every field type, so indexing a <c>String64</c> field on a
+    /// cluster-backed archetype tripped the stride assert in Debug and would have written past the chunk in Release (issue #658).
+    /// </remarks>
+    public ChunkBasedSegment<PersistentStore> IndexSegmentString64;
+
     // ═══════════════════════════════════════════════════════════════════════
     // Per-archetype Spatial R-Tree. Null if archetype has no spatial fields.
     // ═══════════════════════════════════════════════════════════════════════
@@ -2735,9 +2749,11 @@ internal sealed unsafe class ArchetypeClusterState
     /// Initialize per-archetype B+Tree index infrastructure from the component tables.
     /// Called after cluster state creation for archetypes with <see cref="ArchetypeMetadata.HasClusterIndexes"/>.
     /// </summary>
-    public void InitializeIndexes(ComponentTable[] slotToTable, ChunkBasedSegment<PersistentStore> indexSegment, bool load, ChangeSet changeSet)
+    public void InitializeIndexes(ComponentTable[] slotToTable, ChunkBasedSegment<PersistentStore> indexSegment,
+        ChunkBasedSegment<PersistentStore> string64IndexSegment, bool load, ChangeSet changeSet)
     {
         IndexSegment = indexSegment;
+        IndexSegmentString64 = string64IndexSegment;
 
         int slotCount = 0;
         for (int slot = 0; slot < slotToTable.Length; slot++)
@@ -2790,7 +2806,16 @@ internal sealed unsafe class ArchetypeClusterState
                 ref var ifi = ref infos[fi];
                 // FieldOffset in cluster = field offset within pure component data (no ComponentOverhead in clusters)
                 int clusterFieldOffset = ifi.OffsetToField - table.ComponentOverhead;
-                var btree = ComponentTable.CreateIndexForFieldCore(fieldDef, (short)fieldDef.FieldId, load, indexSegment, changeSet);
+                // Node stride is per key type: String64 nodes don't fit the 256-byte segment (#658). Mirrors ComponentTable.CreateIndexForField.
+                var fieldSegment = fieldDef.Type == FieldType.String64 ? string64IndexSegment : indexSegment;
+                Debug.Assert(fieldSegment != null,
+                    $"Archetype index segment missing for field '{fieldDef.Name}' of type {fieldDef.Type} — the String64 segment is allocated only when a "
+                    + "String64 field is indexed, so eligibility detection and allocation have diverged.");
+                // Key on (fieldId, slot), NOT fieldId alone: this segment is shared by every component slot in the archetype and field ids restart at 0 per
+                // component, so two components each indexing their field #0 would otherwise register two entries with the same key — and on reopen both
+                // trees would resolve to the first one's root (#657).
+                var indexKey = new BTreeStableKey((short)fieldDef.FieldId, (short)slot);
+                var btree = ComponentTable.CreateIndexForFieldCore(fieldDef, indexKey, load, fieldSegment, changeSet);
                 // AllowMultiple fields claim the next sequential slot in the cluster's elementId tail.
                 // Single-value fields don't allocate tail space and use MultiFieldIndex = -1.
                 int multiFieldIndex = ifi.AllowMultiple ? multiFieldCounter++ : -1;
@@ -2800,9 +2825,13 @@ internal sealed unsafe class ArchetypeClusterState
                     FieldSize = ifi.Size,
                     Index = btree,
                     AllowMultiple = ifi.AllowMultiple,
-                    ZoneMap = new ZoneMapArray(PrimarySegmentCapacity, ifi.Size,
-                        fieldDef.Type == FieldType.Float, fieldDef.Type == FieldType.Double,
-                        (fieldDef.Type & FieldType.Unsigned) != 0),
+                    // Zone maps are a numeric min/max per cluster used to prune Path-B scans; a 64-byte String64 key has no such summary,
+                    // so it gets none. Every producer uses `ZoneMap?.` and both consumers null-check, so a null map simply means
+                    // "no cluster pruning for this field" — the correct behaviour rather than a special case (#658).
+                    ZoneMap = fieldDef.Type == FieldType.String64 ? null
+                        : new ZoneMapArray(PrimarySegmentCapacity, ifi.Size,
+                            fieldDef.Type == FieldType.Float, fieldDef.Type == FieldType.Double,
+                            (fieldDef.Type & FieldType.Unsigned) != 0),
                     MultiFieldIndex = multiFieldIndex,
                 };
                 shadowBuffers[fi] = new FieldShadowBuffer();
@@ -2839,6 +2868,9 @@ internal sealed unsafe class ArchetypeClusterState
         // Index rebuild reads from primary segment (SV/V data — Transient excluded from IndexSlots)
         var clusterAccessor = ClusterSegment.CreateChunkAccessor();
         var idxAccessor = IndexSegment.CreateChunkAccessor(changeSet);
+        // A field's nodes live in whichever segment its stride requires, so rebuild needs an accessor per segment, not per archetype (#658).
+        var hasString64 = IndexSegmentString64 != null;
+        var idxAccessorS64 = hasString64 ? IndexSegmentString64.CreateChunkAccessor(changeSet) : default;
         try
         {
             for (int c = 0; c < ActiveClusterCount; c++)
@@ -2862,7 +2894,9 @@ internal sealed unsafe class ArchetypeClusterState
                         {
                             ref var field = ref ixSlot.Fields[f];
                             byte* fieldPtr = compBase + slotIndex * compSize + field.FieldOffset;
-                            int elementId = field.Index.Add(fieldPtr, clusterLocation, ref idxAccessor);
+                            int elementId = hasString64 && ReferenceEquals(field.Index.Segment, IndexSegmentString64)
+                                ? field.Index.Add(fieldPtr, clusterLocation, ref idxAccessorS64)
+                                : field.Index.Add(fieldPtr, clusterLocation, ref idxAccessor);
                             // Rebuild writes a fresh elementId into the cluster tail, overwriting any stale
                             // value from the previous (torn-down) BTree state. Issue #229 Phase 3.
                             if (field.AllowMultiple)
@@ -2876,6 +2910,10 @@ internal sealed unsafe class ArchetypeClusterState
         }
         finally
         {
+            if (hasString64)
+            {
+                idxAccessorS64.Dispose();
+            }
             idxAccessor.Dispose();
             clusterAccessor.Dispose();
         }

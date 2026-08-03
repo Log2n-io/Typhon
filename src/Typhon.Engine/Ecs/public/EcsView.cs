@@ -374,22 +374,25 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
         }
 
         // Check archetype mask: only process entities from matching archetypes
-        var entityId = EntityId.FromRaw(entry.EntityPK);
+        var entityId = entry.EntityPK;
         if (!_query.MaskTestPublicByRouting(entityId.ArchetypeId))
         {
             return;
         }
+
+        // The view's entity set is keyed on the raw EntityId value (see PopulateFromEntityMaps / _entityIds).
+        var pk = (long)entityId.RawValue;
 
         var wasInView = !isCreation && EvaluateKey(ref eval, ref entry.BeforeKey);
         var shouldBeInView = !isDeletion && EvaluateKey(ref eval, ref entry.AfterKey);
 
         if (Evaluators.Length == 1)
         {
-            ApplyDelta(entry.EntityPK, wasInView, shouldBeInView);
+            ApplyDelta(pk, wasInView, shouldBeInView);
         }
         else
         {
-            ProcessMultiField(entry.EntityPK, fieldIndex, wasInView, shouldBeInView, tx);
+            ProcessMultiField(pk, fieldIndex, wasInView, shouldBeInView, tx);
         }
     }
 
@@ -518,13 +521,13 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void ProcessEntryOr(ref ViewDeltaEntry entry, int fieldIndex, bool isCreation, bool isDeletion, Transaction tx)
     {
-        var entityId = EntityId.FromRaw(entry.EntityPK);
+        var entityId = entry.EntityPK;
         if (!_query.MaskTestPublicByRouting(entityId.ArchetypeId))
         {
             return;
         }
 
-        var pk = entry.EntityPK;
+        var pk = (long)entityId.RawValue;
         _branchBitmaps.TryGetValue(pk, out var oldBitmap);
         if (isCreation)
         {

@@ -454,7 +454,6 @@ public unsafe ref struct EntityRef
     /// </summary>
     private void ShadowClusterIndexedFields(ArchetypeClusterState clusterState)
     {
-        long pk = (long)_id.RawValue;
         int entityIndex = _clusterChunkId * 64 + _clusterSlotIndex;
         var slots = clusterState.IndexSlots;
         // Skip Versioned slots (indexes updated at commit time) and Transient slots (indexes maintained per-ComponentTable)
@@ -476,7 +475,7 @@ public unsafe ref struct EntityRef
             {
                 ref var field = ref ixSlot.Fields[f];
                 var oldKey = KeyBytes8.FromPointer(compBase + field.FieldOffset, field.FieldSize);
-                ixSlot.ShadowBuffers[f].Append(entityIndex, pk, oldKey);
+                ixSlot.ShadowBuffers[f].Append(entityIndex, _id, oldKey);
             }
         }
     }

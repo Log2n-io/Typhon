@@ -406,6 +406,9 @@ public partial class DatabaseEngine
 
         var hasIdxAccessor = clusterState.IndexSegment != null;
         var idxAccessor = hasIdxAccessor ? clusterState.IndexSegment.CreateChunkAccessor(changeSet) : default;
+        // A field's nodes live in whichever segment its stride requires; String64 fields use the archetype's second segment (#658).
+        var hasIdxAccessorS64 = clusterState.IndexSegmentString64 != null;
+        var idxAccessorS64 = hasIdxAccessorS64 ? clusterState.IndexSegmentString64.CreateChunkAccessor(changeSet) : default;
 
         var emAccessor = engineState.EntityMap.Segment.CreateChunkAccessor(changeSet);
 
@@ -551,14 +554,32 @@ public partial class DatabaseEngine
                             if (field.AllowMultiple)
                             {
                                 var elementId = *(int*)(srcBase + layout.IndexElementIdOffset(field.MultiFieldIndex, srcSlot));
-                                field.Index.RemoveValue(&key, elementId, oldClusterLocation, ref idxAccessor);
-                                var newElementId = field.Index.Add(fieldPtr, newClusterLocation, ref idxAccessor);
+                                var useS64 = hasIdxAccessorS64 && ReferenceEquals(field.Index.Segment, clusterState.IndexSegmentString64);
+                                int newElementId;
+                                if (useS64)
+                                {
+                                    field.Index.RemoveValue(&key, elementId, oldClusterLocation, ref idxAccessorS64);
+                                    newElementId = field.Index.Add(fieldPtr, newClusterLocation, ref idxAccessorS64);
+                                }
+                                else
+                                {
+                                    field.Index.RemoveValue(&key, elementId, oldClusterLocation, ref idxAccessor);
+                                    newElementId = field.Index.Add(fieldPtr, newClusterLocation, ref idxAccessor);
+                                }
                                 *(int*)(dstBase + layout.IndexElementIdOffset(field.MultiFieldIndex, dstSlot)) = newElementId;
                             }
                             else
                             {
-                                field.Index.Remove(&key, out _, ref idxAccessor);
-                                field.Index.Add(fieldPtr, newClusterLocation, ref idxAccessor);
+                                if (hasIdxAccessorS64 && ReferenceEquals(field.Index.Segment, clusterState.IndexSegmentString64))
+                                {
+                                    field.Index.Remove(&key, out _, ref idxAccessorS64);
+                                    field.Index.Add(fieldPtr, newClusterLocation, ref idxAccessorS64);
+                                }
+                                else
+                                {
+                                    field.Index.Remove(&key, out _, ref idxAccessor);
+                                    field.Index.Add(fieldPtr, newClusterLocation, ref idxAccessor);
+                                }
                             }
                             field.ZoneMap?.Widen(dstChunkId, fieldPtr);
                         }
@@ -720,6 +741,11 @@ public partial class DatabaseEngine
             {
                 idxAccessor.Dispose();
             }
+
+            if (hasIdxAccessorS64)
+            {
+                idxAccessorS64.Dispose();
+            }
             if (hasTransientClusterAccessor)
             {
                 transientClusterAccessor.Dispose();
@@ -829,7 +855,19 @@ public partial class DatabaseEngine
                             {
                                 // Entity destroyed — remove old index entry using shadow value
                                 var destroyOldKey = entry.OldKey;
-                                field.Index.Remove(&destroyOldKey, out _, ref idxAccessor);
+                                if (field.AllowMultiple)
+                                {
+                                    // Remove only THIS entity's (key, clusterLocation) element — Remove(key) would drop the whole buffer and
+                                    // take every sibling sharing the value with it (issue #659; same rule as the destroy and commit paths).
+                                    // ClearSlotMetadata zeroes occupancy, EnabledBits and the EntityIds slot but leaves the elementId tail
+                                    // intact, so it is still readable here even though the slot is already released.
+                                    var destroyElementId = *(int*)(clusterBase + clusterState.Layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
+                                    field.Index.RemoveValue(&destroyOldKey, destroyElementId, entry.ChunkId, ref idxAccessor);
+                                }
+                                else
+                                {
+                                    field.Index.Remove(&destroyOldKey, out _, ref idxAccessor);
+                                }
 
                                 // Notify views of deletion (same pattern as ProcessShadowFieldEntries)
                                 var table = engineState.SlotToComponentTable[ixSlot.Slot];
@@ -863,7 +901,20 @@ public partial class DatabaseEngine
 
                             // Update per-archetype B+Tree: remove old key, insert new key, same ClusterLocation value
                             var clusterLocation = entry.ChunkId; // entityIndex = clusterLocation
-                            field.Index.Move(&oldKey, fieldPtr, clusterLocation, ref idxAccessor);
+                            if (field.AllowMultiple)
+                            {
+                                // A multi-value leaf holds a VSBS buffer id, not an entity location: a plain Move would overwrite it with the
+                                // raw clusterLocation and every entity at that key would vanish from the index (issue #659). MoveValue moves
+                                // just this entity's element and returns its new id, which goes back into the cluster's elementId tail.
+                                // Fetched forWrite only on this branch; the mutation that triggered shadowing already dirtied the page.
+                                var writableBase = clusterAccessor.GetChunkAddress(clusterChunkId, true);
+                                var elementIdPtr = (int*)(writableBase + clusterState.Layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
+                                *elementIdPtr = field.Index.MoveValue(&oldKey, fieldPtr, *elementIdPtr, clusterLocation, ref idxAccessor, out _, out _);
+                            }
+                            else
+                            {
+                                field.Index.Move(&oldKey, fieldPtr, clusterLocation, ref idxAccessor);
+                            }
 
                             // Notify registered views (same pattern as ProcessShadowFieldEntries)
                             {

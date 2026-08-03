@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using Typhon.Schema.Definition;
@@ -1314,6 +1315,10 @@ public unsafe partial class Transaction
         public bool HasClusterTransientAccessor;
         public ChunkAccessor<PersistentStore> ClusterIdxAccessor;
         public bool HasClusterIdxAccessor;
+
+        /// <summary>Accessor for the archetype's String64 index segment — a field's nodes live in whichever segment its stride requires (#658).</summary>
+        public ChunkAccessor<PersistentStore> ClusterIdxAccessorS64;
+        public bool HasClusterIdxAccessorS64;
         public ChunkAccessor<PersistentStore>[] ClusterSrcAccessors;
         public int ClusterSrcAccessorCount;
         public ChunkAccessor<TransientStore>[] ClusterTransientSrcAccessors;
@@ -1575,7 +1580,11 @@ public unsafe partial class Transaction
                             {
                                 ref var field = ref ixSlot.Fields[fi];
                                 byte* fieldPtr = compBase + field.FieldOffset;
-                                int elementId = field.Index.Add(fieldPtr, clusterLocation, ref ctx.ClusterIdxAccessor);
+                                // Pick the accessor matching this field's segment — passing one built on the other segment resolves node chunks
+                                // at the wrong stride and corrupts neighbouring nodes (#658).
+                                int elementId = ctx.HasClusterIdxAccessorS64 && ReferenceEquals(field.Index.Segment, ctx.ClusterState.IndexSegmentString64)
+                                    ? field.Index.Add(fieldPtr, clusterLocation, ref ctx.ClusterIdxAccessorS64)
+                                    : field.Index.Add(fieldPtr, clusterLocation, ref ctx.ClusterIdxAccessor);
                                 // For AllowMultiple fields, record elementId in the cluster tail so destroy/migration can call RemoveValue(key,
                                 // elementId, value) — removes only this entity's entry, not the entire buffer at the key (which would wipe all siblings on
                                 // a non-unique index).
@@ -1599,7 +1608,7 @@ public unsafe partial class Transaction
 
                                     var newKey = KeyBytes8.FromPointer(fieldPtr, field.FieldSize);
                                     byte flags = (byte)((fi & 0x3F) | 0x40); // isCreation
-                                    reg.DeltaBuffer.TryAppend(entry.Id.EntityKey, default, newKey, TSN, flags, reg.ComponentTag);
+                                    reg.DeltaBuffer.TryAppend(entry.Id, default, newKey, TSN, flags, reg.ComponentTag);
                                 }
                             }
                         }
@@ -1905,6 +1914,12 @@ public unsafe partial class Transaction
             }
         }
         ctx.ClusterSrcAccessorCount = 0;
+        if (ctx.HasClusterIdxAccessorS64)
+        {
+            ctx.ClusterIdxAccessorS64.Dispose();
+            ctx.HasClusterIdxAccessorS64 = false;
+        }
+
         if (ctx.HasClusterIdxAccessor)
         {
             ctx.ClusterIdxAccessor.Dispose();
@@ -2005,6 +2020,12 @@ public unsafe partial class Transaction
             {
                 ctx.ClusterIdxAccessor = ctx.ClusterState.IndexSegment.CreateChunkAccessor(_changeSet);
                 ctx.HasClusterIdxAccessor = true;
+            }
+
+            if (ctx.ClusterState.IndexSegmentString64 != null)
+            {
+                ctx.ClusterIdxAccessorS64 = ctx.ClusterState.IndexSegmentString64.CreateChunkAccessor(_changeSet);
+                ctx.HasClusterIdxAccessorS64 = true;
             }
 
             // Issue #229 Phase 1+2: cache spatial-cell routing info once per archetype. The hot spawn path reads SpatialSlotIndexCached once per entity to
@@ -2242,6 +2263,9 @@ public unsafe partial class Transaction
         ArchetypeClusterState destroyClusterState = null;
         var destroyClusterIdxAccessor = default(ChunkAccessor<PersistentStore>);
         bool hasDestroyClusterIdxAccessor = false;
+        // A field's nodes live in whichever segment its stride requires; String64 fields use the archetype's second segment (#658).
+        var destroyClusterIdxAccessorS64 = default(ChunkAccessor<PersistentStore>);
+        bool hasDestroyClusterIdxAccessorS64 = false;
 
         try
         {
@@ -2278,6 +2302,11 @@ public unsafe partial class Transaction
                             destroyClusterIdxAccessor.Dispose();
                             hasDestroyClusterIdxAccessor = false;
                         }
+                        if (hasDestroyClusterIdxAccessorS64)
+                        {
+                            destroyClusterIdxAccessorS64.Dispose();
+                            hasDestroyClusterIdxAccessorS64 = false;
+                        }
                     }
                     accessor = engineState.EntityMap.Segment.CreateChunkAccessor(_changeSet);
                     lastArchId = entityId.ArchetypeId;
@@ -2302,6 +2331,11 @@ public unsafe partial class Transaction
                         {
                             destroyClusterIdxAccessor = destroyClusterState.IndexSegment.CreateChunkAccessor(_changeSet);
                             hasDestroyClusterIdxAccessor = true;
+                        }
+                        if (destroyClusterState.IndexSegmentString64 != null)
+                        {
+                            destroyClusterIdxAccessorS64 = destroyClusterState.IndexSegmentString64.CreateChunkAccessor(_changeSet);
+                            hasDestroyClusterIdxAccessorS64 = true;
                         }
                     }
                 }
@@ -2339,34 +2373,56 @@ public unsafe partial class Transaction
                                     {
                                         ref var field = ref ixSlot.Fields[fi];
                                         byte* fieldPtr = compBase + field.FieldOffset;
-                                        var key = KeyBytes8.FromPointer(fieldPtr, field.FieldSize);
+                                        // The B+Tree takes the key by raw pointer, so pass fieldPtr straight through. Copying into a KeyBytes8 first
+                                        // (an 8-byte struct) smashed the stack for any wider key — a 64-byte String64 field memcpy'd 56 bytes past it
+                                        // (#658) — and silently truncated the key even when it didn't crash.
                                         // Non-unique index: read the per-entity elementId from the cluster tail and call RemoveValue so only this entity's
                                         // specific (key, clusterLocation) entry is removed — Remove(key) would wipe the entire buffer at the key and corrupt
                                         // sibling entities sharing the same field value. Issue #229 Phase 3.
                                         // Regression test: ClusterIndex_NonUniqueField_DestroyOneEntity_PreservesSiblingsInIndex.
+                                        var useS64 = hasDestroyClusterIdxAccessorS64
+                                            && ReferenceEquals(field.Index.Segment, destroyClusterState.IndexSegmentString64);
                                         if (field.AllowMultiple)
                                         {
                                             int elementId = *(int*)(clusterBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
-                                            field.Index.RemoveValue(&key, elementId, destroyClusterLocation, ref destroyClusterIdxAccessor);
+                                            if (useS64)
+                                            {
+                                                field.Index.RemoveValue(fieldPtr, elementId, destroyClusterLocation, ref destroyClusterIdxAccessorS64);
+                                            }
+                                            else
+                                            {
+                                                field.Index.RemoveValue(fieldPtr, elementId, destroyClusterLocation, ref destroyClusterIdxAccessor);
+                                            }
+                                        }
+                                        else if (useS64)
+                                        {
+                                            field.Index.Remove(fieldPtr, out _, ref destroyClusterIdxAccessorS64);
                                         }
                                         else
                                         {
-                                            field.Index.Remove(&key, out _, ref destroyClusterIdxAccessor);
+                                            field.Index.Remove(fieldPtr, out _, ref destroyClusterIdxAccessor);
                                         }
 
                                         // Notify views of deletion
                                         var destroyTable = engineState.SlotToComponentTable[ixSlot.Slot];
                                         var views = destroyTable.ViewRegistry.GetViewsForField(fi);
-                                        for (int v = 0; v < views.Length; v++)
+                                        // ViewDeltaEntry carries an 8-byte key, so a wider field cannot be reported to a view. Unreachable in practice —
+                                        // the query layer refuses those key types for predicates, so no view can register on one — but guarded rather
+                                        // than truncated, so widening the delta key later is an additive change (#658).
+                                        if (views.Length > 0 && field.FieldSize <= sizeof(long))
                                         {
-                                            var reg = views[v];
-                                            if (reg.View.IsDisposed)
+                                            var key = KeyBytes8.FromPointer(fieldPtr, field.FieldSize);
+                                            for (int v = 0; v < views.Length; v++)
                                             {
-                                                continue;
-                                            }
+                                                var reg = views[v];
+                                                if (reg.View.IsDisposed)
+                                                {
+                                                    continue;
+                                                }
 
-                                            byte flags = (byte)((fi & 0x3F) | 0x80); // isDeletion
-                                            reg.DeltaBuffer.TryAppend(entityId.EntityKey, key, default, TSN, flags, reg.ComponentTag);
+                                                byte flags = (byte)((fi & 0x3F) | 0x80); // isDeletion
+                                                reg.DeltaBuffer.TryAppend(entityId, key, default, TSN, flags, reg.ComponentTag);
+                                            }
                                         }
                                     }
                                 }
@@ -2412,6 +2468,10 @@ public unsafe partial class Transaction
             if (hasDestroyClusterIdxAccessor)
             {
                 destroyClusterIdxAccessor.Dispose();
+            }
+            if (hasDestroyClusterIdxAccessorS64)
+            {
+                destroyClusterIdxAccessorS64.Dispose();
             }
         }
     }
@@ -2593,6 +2653,14 @@ public unsafe partial class Transaction
         var fields = table.IndexedFieldInfos;
         byte* ptr = compAccessor.GetChunkAddress(chunkId);
 
+        // View deltas are keyed on the ENTITY, not the chunk (issue #660 — this site used to publish the raw chunkId, which consumers
+        // then reinterpreted as an EntityId and mask-tested on its low 16 bits, silently discarding every deletion notification).
+        // An indexed SV/Transient component always carries the owning entity's PK inline at offset 0 of its chunk — written at spawn
+        // precisely so a chunk id can be resolved back to an entity (see FinalizeSpawns).
+        Debug.Assert(table.Definition.EntityPKOverheadSize > 0,
+            $"Indexed component '{table.Name}' has no inline entity-PK overhead; view deletion deltas cannot name their entity.");
+        var entityId = EntityId.FromRaw(*(long*)ptr);
+
         for (int i = 0; i < fields.Length; i++)
         {
             ref var ifi = ref fields[i];
@@ -2653,7 +2721,7 @@ public unsafe partial class Transaction
 
                 var key = KeyBytes8.FromPointer(fieldPtr, ifi.Size);
                 byte flags = (byte)((i & 0x3F) | 0x80); // isDeletion flag
-                reg.DeltaBuffer.TryAppend(chunkId, key, default, 0, flags, reg.ComponentTag);
+                reg.DeltaBuffer.TryAppend(entityId, key, default, 0, flags, reg.ComponentTag);
             }
         }
     }
@@ -2827,7 +2895,6 @@ public unsafe partial class Transaction
     private void NotifyViewsForEnableDisable(EntityId entityId, ArchetypeMetadata meta, ArchetypeEngineState engineState, ushort oldBits, ushort newBits)
     {
         ushort changedBits = (ushort)(oldBits ^ newBits);
-        long pk = (long)entityId.RawValue;
 
         for (int slot = 0; slot < meta.ComponentCount && changedBits != 0; slot++)
         {
@@ -2858,7 +2925,7 @@ public unsafe partial class Transaction
 
                     // isDeletion (0x80) for disable, isCreation (0x40) for enable
                     byte flags = wasEnabled ? (byte)((fi & 0x3F) | 0x80) : (byte)((fi & 0x3F) | 0x40);
-                    reg.DeltaBuffer.TryAppend(pk, default, default, TSN, flags, reg.ComponentTag);
+                    reg.DeltaBuffer.TryAppend(entityId, default, default, TSN, flags, reg.ComponentTag);
                 }
             }
         }

@@ -12,7 +12,10 @@ namespace Typhon.Engine.Internals;
 internal struct ShadowEntry
 {
     public int ChunkId;
-    public long EntityPK;
+
+    /// <summary>Full <see cref="EntityId"/> of the mutated entity — typed, not a bare key or chunk id (issue #660).</summary>
+    public EntityId EntityPK;
+
     public KeyBytes8 OldKey;
 }
 
@@ -73,7 +76,7 @@ internal sealed class FieldShadowBuffer
 
     /// <summary>Append a shadow entry. Wait-free: one interlocked reservation, then a write into a slot owned exclusively by this call.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal void Append(int chunkId, long entityPK, KeyBytes8 oldKey)
+    internal void Append(int chunkId, EntityId entityPK, KeyBytes8 oldKey)
     {
         var index = Interlocked.Increment(ref _count) - 1;
         var blockIndex = index >> BlockShift;

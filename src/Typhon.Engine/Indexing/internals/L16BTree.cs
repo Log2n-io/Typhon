@@ -917,14 +917,16 @@ internal abstract class L16BTree<TKey, TStore> : BTree<TKey, TStore> where TStor
 
     protected override BaseNodeStorage GetStorage() => new L16NodeStorage();
     public override bool AllowMultiple => false;
-    protected L16BTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    protected L16BTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }
 
 internal class L16MultipleBTree<TKey, TStore> : L16BTree<TKey, TStore> where TStore : struct, IPageStore where TKey : unmanaged
 {
-    public L16MultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public L16MultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 
@@ -955,69 +957,79 @@ internal class L16MultipleBTree<TKey, TStore> : L16BTree<TKey, TStore> where TSt
 
 internal class CharSingleBTree<TStore> : L16BTree<char, TStore> where TStore : struct, IPageStore
 {
-    public CharSingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public CharSingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }
 
 internal class CharMultipleBTree<TStore> : L16MultipleBTree<char, TStore> where TStore : struct, IPageStore
 {
-    public CharMultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public CharMultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }
 
 internal class ByteSingleBTree<TStore> : L16BTree<sbyte, TStore> where TStore : struct, IPageStore
 {
-    public ByteSingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public ByteSingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }
 
 internal class ByteMultipleBTree<TStore> : L16MultipleBTree<sbyte, TStore> where TStore : struct, IPageStore
 {
-    public ByteMultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public ByteMultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }
 
 internal class ShortSingleBTree<TStore> : L16BTree<short, TStore> where TStore : struct, IPageStore
 {
-    public ShortSingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public ShortSingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }
 
 internal class ShortMultipleBTree<TStore> : L16MultipleBTree<short, TStore> where TStore : struct, IPageStore
 {
-    public ShortMultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public ShortMultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }
 internal class UByteSingleBTree<TStore> : L16BTree<byte, TStore> where TStore : struct, IPageStore
 {
-    public UByteSingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public UByteSingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }
 
 internal class UByteMultipleBTree<TStore> : L16MultipleBTree<byte, TStore> where TStore : struct, IPageStore
 {
-    public UByteMultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public UByteMultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }
 
 internal class UShortSingleBTree<TStore> : L16BTree<ushort, TStore> where TStore : struct, IPageStore
 {
-    public UShortSingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public UShortSingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }
 
 internal class UShortMultipleBTree<TStore> : L16MultipleBTree<ushort, TStore> where TStore : struct, IPageStore
 {
-    public UShortMultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public UShortMultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }

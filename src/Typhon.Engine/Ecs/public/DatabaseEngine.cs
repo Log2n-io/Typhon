@@ -406,6 +406,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <see cref="InitializeArchetypes"/>. 0 on a trusted (clean) reopen; &gt;0 after a crash or on a legacy database.</summary>
     internal int LastOpenVersionedHeadRebuildCount;
 
+    /// <summary>Diagnostic + test oracle: the number of archetypes whose per-archetype B+Tree indexes were rebuilt from a cluster scan during the last
+    /// <see cref="InitializeArchetypes"/> instead of being loaded from the persisted chunk-0 directory. 0 when every index segment reloaded. Lets a test
+    /// assert it is exercising the LOAD path (<c>FindInDirectory</c>) and not the create-and-rebuild path, which resolves keys differently (#657).</summary>
+    internal int LastOpenClusterIndexRebuildCount;
+
     /// <summary>True when WAL segment files exist at open (a crash left a recovery window). Captured ONCE in <see cref="InitializeArchetypes"/> before any
     /// ComponentTable loads. Gates the crash-path secondary-index clear+rebuild (RB-01): the load ctors read it to clear+recreate indexes fresh (torn-safe),
     /// and <see cref="RunWalV2Recovery"/> reads the SAME flag to fire the Phase-5 rebuild — so clear and rebuild always agree (clearing without rebuilding would
@@ -2130,6 +2135,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 MMF.Bootstrap.SetInt($"clusterindex.{meta.ArchetypeId}", state.ClusterState.IndexSegment.RootPageIndex);
             }
 
+            // Second segment, present only when the archetype indexes a String64 field — its B+Tree nodes need a wider stride (#658).
+            if (state.ClusterState?.IndexSegmentString64 != null)
+            {
+                MMF.Bootstrap.SetInt($"clusterindexs64.{meta.ArchetypeId}", state.ClusterState.IndexSegmentString64.RootPageIndex);
+            }
+
             // Issue #230 Phase 3 Option B: nothing about the per-cell cluster index is persisted. All cell-level state is transient per Phase 1 Q2/Q6 and
             // rebuilt from cluster data at startup by RebuildCellState + RebuildClusterAabbs.
 
@@ -2652,6 +2663,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // is independent of CheckpointLSN, so a bulk-generated DB (CheckpointLSN == 0) is trusted too. The on-disk flag was
         // already cleared in the ctor, before registration could mutate anything (CS-02, #583); this reads the value captured there.
         LastOpenVersionedHeadRebuildCount = 0;
+        LastOpenClusterIndexRebuildCount = 0;
         _headsTrusted = _cleanShutdownAtOpen
             && (_migratedComponents == null || _migratedComponents.Count == 0);
         LogVersionedHeadReopenDecision(_headsTrusted, _cleanShutdownAtOpen, _checkpointLsnAtOpen);
@@ -2987,17 +2999,48 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         }
                         else
                         {
-                            indexSegment = MMF.AllocateChunkBasedSegment(PageBlockType.None, 20, 256 /* sizeof(Index64Chunk) */, null, 
+                            indexSegment = MMF.AllocateChunkBasedSegment(PageBlockType.None, 20, 256 /* sizeof(Index64Chunk) */, null,
                                 StorageSegmentKind.Index);
                         }
 
-                        clusterState.InitializeIndexes(slotToTable, indexSegment, loadIndexes, changeSet);
+                        // A String64 index node is wider than the 256-byte chunk the segment above is striped for, and every B+Tree variant asserts its
+                        // segment's stride. Give String64 fields their own segment — the same split ComponentTable has between DefaultIndexSegment and
+                        // String64IndexSegment. Allocated only when needed, so archetypes without a String64 index pay nothing (#658).
+                        ChunkBasedSegment<PersistentStore> string64IndexSegment = null;
+                        if (ArchetypeHasIndexedString64Field(slotToTable))
+                        {
+                            var s64Key = $"clusterindexs64.{meta.ArchetypeId}";
+                            var s64SPI = !isFreshAllocation ? MMF.Bootstrap.GetInt(s64Key) : 0;
+                            if (s64SPI > 0 && MMF.TryLoadChunkBasedSegment(s64SPI, Unsafe.SizeOf<IndexString64Chunk>(), out var loadedS64))
+                            {
+                                string64IndexSegment = loadedS64;
+                            }
+                            else
+                            {
+                                string64IndexSegment = MMF.AllocateChunkBasedSegment(PageBlockType.None, 20, Unsafe.SizeOf<IndexString64Chunk>(), null,
+                                    StorageSegmentKind.Index);
+                                // A half-loaded pair would rebuild one segment's trees and trust the other's. Rebuild both together.
+                                loadIndexes = false;
+                            }
+                        }
+
+                        // Re-registering trees into a directory that already has entries would double-register every key. That silently appended shadowing
+                        // entries before #657 and now throws, so clear first — the same thing ComponentTable.BuildIndexedFieldInfo does on its crash path.
+                        // Also reclaims the stale node chunks the rebuild is about to orphan. No-op on a segment we just allocated.
+                        if (!loadIndexes)
+                        {
+                            BTreeBase<PersistentStore>.ClearSharedSegment(indexSegment, changeSet);
+                            BTreeBase<PersistentStore>.ClearSharedSegment(string64IndexSegment, changeSet);
+                        }
+
+                        clusterState.InitializeIndexes(slotToTable, indexSegment, string64IndexSegment, loadIndexes, changeSet);
 
                         // If fresh indexes on a reopened database with existing cluster data, rebuild from scan
                         if (!loadIndexes && !isFreshAllocation && clusterState.ActiveClusterCount > 0)
                         {
                             using var idxEpoch = EpochGuard.Enter(EpochManager);
                             clusterState.RebuildIndexesFromData(changeSet);
+                            LastOpenClusterIndexRebuildCount++;
                         }
                     }
                     finally
@@ -3324,6 +3367,35 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// spatial indexes, and the occupancy bitmap. Everything else (component/revision content, EntityMap, collections, cluster, string table, system) is primary —
     /// a CRC failure there is heal-or-loud-fail (RB-04). Post-FPI (increment D) this predicate is the ONLY thing standing between a torn page and silent corruption,
     /// so its boundary is asserted directly by <c>SuspectPageClassification_PartitionsDerivedVsPrimary</c>. Internal for that test.</summary>
+    /// <summary>
+    /// True when any cluster-indexed component slot indexes a <see cref="String64"/> field, i.e. the archetype needs the wider-stride
+    /// second index segment (issue #658). Mirrors the slot/field walk in <c>ArchetypeClusterState.InitializeIndexes</c>, including its
+    /// Transient exclusion — a divergence here means a field is handed a segment whose stride its B+Tree asserts against.
+    /// </summary>
+    private static bool ArchetypeHasIndexedString64Field(ComponentTable[] slotToTable)
+    {
+        for (var slot = 0; slot < slotToTable.Length; slot++)
+        {
+            var table = slotToTable[slot];
+            if (table.StorageMode == StorageMode.Transient)
+            {
+                continue;
+            }
+
+            var definition = table.Definition;
+            for (var i = 0; i < definition.MaxFieldId; i++)
+            {
+                var field = definition[i];
+                if (field != null && field.HasIndex && field.Type == FieldType.String64)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     internal static bool IsDerivedSegmentKind(StorageSegmentKind kind)
         => kind is StorageSegmentKind.Index or StorageSegmentKind.Spatial or StorageSegmentKind.Occupancy;
 

@@ -820,14 +820,16 @@ internal abstract class String64BTree<TStore> : BTree<String64, TStore> where TS
 
     protected override BaseNodeStorage GetStorage() => new String64NodeStorage();
     public override bool AllowMultiple => false;
-    protected String64BTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    protected String64BTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }
 
 internal class String64MultipleBTree<TStore> : String64BTree<TStore> where TStore : struct, IPageStore
 {
-    public String64MultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public String64MultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 
@@ -859,7 +861,8 @@ internal class String64MultipleBTree<TStore> : String64BTree<TStore> where TStor
 
 internal class String64SingleBTree<TStore> : String64BTree<TStore> where TStore : struct, IPageStore
 {
-    public String64SingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public String64SingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }

@@ -1483,7 +1483,9 @@ public unsafe partial class Transaction : EntityAccessor
         int recordSize = meta._entityRecordSize;
         byte* recordBuf = stackalloc byte[recordSize];
 
-        long entityKey = EntityId.FromRaw(pk).EntityKey;
+        var entityId = EntityId.FromRaw(pk);
+        // The EntityMap is keyed on the bare 48-bit key; view deltas are keyed on the full EntityId (#660). Both are needed here.
+        long entityKey = entityId.EntityKey;
         if (!es.EntityMap.TryGet(entityKey, recordBuf, ref _clusterCommitMapAccessor))
         {
             return;
@@ -1507,7 +1509,7 @@ public unsafe partial class Transaction : EntityAccessor
             byte* oldComp = readCompChunkId != 0 ?
                 _clusterCommitContentAccessor.GetChunkAddress(readCompChunkId) + table.ComponentOverhead : null;
 
-            ReconcileClusterIndexAndViews(es, clusterState, compSlot, clusterChunkId, clusterLocation, entityKey, oldComp, newComp);
+            ReconcileClusterIndexAndViews(es, clusterState, compSlot, clusterChunkId, clusterLocation, entityId, oldComp, newComp);
         }
 
         // Phase B (HEAD→cluster slot copy) is deferred to PublishClusterVersionedSlot (AP-01). The cluster dirty bit it sets is what later drives
@@ -1567,7 +1569,7 @@ public unsafe partial class Transaction : EntityAccessor
     /// (<see cref="PublishStagedCommitWrites"/>, old = cluster HEAD, new = staging buffer).
     /// </summary>
     private void ReconcileClusterIndexAndViews(ArchetypeEngineState es, ArchetypeClusterState clusterState, int compSlot, int clusterChunkId,
-        int clusterLocation, long entityKey, byte* oldComp, byte* newComp)
+        int clusterLocation, EntityId entityId, byte* oldComp, byte* newComp)
     {
         var layout = clusterState.Layout;
         int slotIndex = clusterLocation & 63;
@@ -1669,21 +1671,21 @@ public unsafe partial class Transaction : EntityAccessor
                             var oldKey = KeyBytes8.FromPointer(oldComp + field.FieldOffset, field.FieldSize);
                             var newKey = KeyBytes8.FromPointer(newComp + field.FieldOffset, field.FieldSize);
                             byte flags = (byte)(fi & 0x3F);
-                            reg.DeltaBuffer.TryAppend(entityKey, oldKey, newKey, TSN, flags, reg.ComponentTag);
+                            reg.DeltaBuffer.TryAppend(entityId, oldKey, newKey, TSN, flags, reg.ComponentTag);
                         }
                         else if (newComp != null)
                         {
                             // Add: isCreation flag
                             var newKey = KeyBytes8.FromPointer(newComp + field.FieldOffset, field.FieldSize);
                             byte flags = (byte)((fi & 0x3F) | 0x40); // isCreation
-                            reg.DeltaBuffer.TryAppend(entityKey, default, newKey, TSN, flags, reg.ComponentTag);
+                            reg.DeltaBuffer.TryAppend(entityId, default, newKey, TSN, flags, reg.ComponentTag);
                         }
                         else if (oldComp != null)
                         {
                             // Remove: isDeletion flag
                             var oldKey = KeyBytes8.FromPointer(oldComp + field.FieldOffset, field.FieldSize);
                             byte flags = (byte)((fi & 0x3F) | 0x80); // isDeletion
-                            reg.DeltaBuffer.TryAppend(entityKey, oldKey, default, TSN, flags, reg.ComponentTag);
+                            reg.DeltaBuffer.TryAppend(entityId, oldKey, default, TSN, flags, reg.ComponentTag);
                         }
                     }
                 }
@@ -1753,7 +1755,7 @@ public unsafe partial class Transaction : EntityAccessor
         // Non-cluster (flat) archetype: publish to the entity's content chunk HEAD instead of a cluster SoA slot (Location = content chunkId).
         if (clusterState == null || !meta.IsClusterEligible)
         {
-            PublishStagedFlatEntry(info, stagedSlot.Location, entityId.EntityKey, staged);
+            PublishStagedFlatEntry(info, stagedSlot.Location, entityId, staged);
             return;
         }
 
@@ -1782,7 +1784,7 @@ public unsafe partial class Transaction : EntityAccessor
         // Exact-index reconcile BEFORE the HEAD memcpy: old key still lives in the HEAD slot, new key in the staged slot (CM-05/AC-11).
         if (clusterState.IndexSlots != null)
         {
-            ReconcileClusterIndexAndViews(es, clusterState, compSlot, clusterChunkId, clusterLocation, entityId.EntityKey, headPtr, staged);
+            ReconcileClusterIndexAndViews(es, clusterState, compSlot, clusterChunkId, clusterLocation, entityId, headPtr, staged);
         }
 
         // Visibility act: publish the staged value to the cluster HEAD, then mark dirty (CM-03: memcpy THEN dirty).
@@ -1795,7 +1797,7 @@ public unsafe partial class Transaction : EntityAccessor
     /// re-lookup): reconciles the table's exact B+Tree index(es) (old key from the still-unpublished HEAD, new key from the staged slot — CM-05/AC-11),
     /// copies the staged value into the chunk HEAD (the visibility act), then marks the chunk dirty for the tick fence.
     /// </summary>
-    private void PublishStagedFlatEntry(ComponentInfo info, int chunkId, long entityKey, byte* staged)
+    private void PublishStagedFlatEntry(ComponentInfo info, int chunkId, EntityId entityId, byte* staged)
     {
         if (chunkId == 0)
         {
@@ -1808,7 +1810,7 @@ public unsafe partial class Transaction : EntityAccessor
         // Exact-index reconcile BEFORE the HEAD memcpy: old key still lives in the chunk HEAD, new key in the staged slot.
         if (table.HasShadowableIndexes)
         {
-            ReconcileFlatIndexAndViews(table, chunkId, entityKey, headPtr, staged);
+            ReconcileFlatIndexAndViews(table, chunkId, entityId, headPtr, staged);
         }
 
         // Visibility act: publish the staged value to the chunk HEAD, then mark dirty (CM-03: memcpy THEN dirty).
@@ -1822,7 +1824,7 @@ public unsafe partial class Transaction : EntityAccessor
     /// <c>ProcessShadowFieldEntries</c> Move branch, but runs at commit (the Commit-discipline write skips shadow capture). The B+Tree value is the entity's
     /// content chunkId; for an AllowMultiple index the element id (in the chunk overhead, untouched by the value memcpy) is moved and written back.
     /// </summary>
-    private void ReconcileFlatIndexAndViews(ComponentTable table, int chunkId, long entityKey, byte* oldComp, byte* newComp)
+    private void ReconcileFlatIndexAndViews(ComponentTable table, int chunkId, EntityId entityId, byte* oldComp, byte* newComp)
     {
         var fields = table.IndexedFieldInfos;
         for (int fi = 0; fi < fields.Length; fi++)
@@ -1865,7 +1867,7 @@ public unsafe partial class Transaction : EntityAccessor
                     {
                         continue;
                     }
-                    reg.DeltaBuffer.TryAppend(entityKey, oldKey, newKey, TSN, (byte)(fi & 0x3F), reg.ComponentTag);
+                    reg.DeltaBuffer.TryAppend(entityId, oldKey, newKey, TSN, (byte)(fi & 0x3F), reg.ComponentTag);
                 }
             }
             finally

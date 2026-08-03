@@ -340,7 +340,9 @@ internal static unsafe class IndexMaintainer
             {
                 continue;
             }
-            reg.DeltaBuffer.TryAppend(pk, beforeKey, afterKey, tsn, flags, reg.ComponentTag);
+            // pk is the full entity PK on this path (Versioned commit) — wrap it rather than widening the signature, since this
+            // whole file is slated for deletion when the per-ComponentTable index goes (#666).
+            reg.DeltaBuffer.TryAppend(EntityId.FromRaw(pk), beforeKey, afterKey, tsn, flags, reg.ComponentTag);
         }
     }
 

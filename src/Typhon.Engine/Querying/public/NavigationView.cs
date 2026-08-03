@@ -169,7 +169,8 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
     /// </summary>
     private void ProcessFKChange(ref ViewDeltaEntry entry, bool isDeletion, Transaction tx)
     {
-        var sourcePK = entry.EntityPK;
+        // _entityIds is keyed on the raw EntityId value (PopulateFromEntityMaps, ReverseLookupAndUpdate) — convert once here.
+        var sourcePK = (long)entry.EntityPK.RawValue;
         var wasInView = _entityIds.Contains(sourcePK);
 
         if (isDeletion)
@@ -192,7 +193,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
     /// </summary>
     private void ProcessSourcePredicateChange(ref ViewDeltaEntry entry, int fieldIndex, bool isCreation, bool isDeletion, Transaction tx)
     {
-        var sourcePK = entry.EntityPK;
+        var sourcePK = (long)entry.EntityPK.RawValue;
 
         // Find the evaluator for this field
         ref var eval = ref FindSourceEvaluator(fieldIndex);
@@ -238,7 +239,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
     /// </summary>
     private void ProcessTargetFieldChange(ref ViewDeltaEntry entry, int fieldIndex, bool isCreation, bool isDeletion, Transaction tx)
     {
-        var targetPK = entry.EntityPK;
+        var targetPK = (long)entry.EntityPK.RawValue;
 
         // Find the target evaluator for this field
         ref var eval = ref FindTargetEvaluator(fieldIndex);
