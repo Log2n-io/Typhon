@@ -41,7 +41,12 @@ internal sealed class FillRenderBufferSystem : QuerySystem
         .Parallel()
         .Reads<WorldBounds>()
         .Reads<AntState>()
-        .ReadsSnapshot<Genetics>()
+        // Genetics is SingleVersion — no MVCC history, so ReadsSnapshot is rejected at Build() (AC-05 / CM-04).
+        // Plain Reads is correct and behaviour-identical here: the sole writer (AntUpdate) sits in the Simulation
+        // phase, so the cross-phase deriver emits the same writer→reader edge ReadsSnapshot did, and a snapshot
+        // read whose writer is in an earlier phase already degenerated to fresh semantics anyway (RFC 07,
+        // "Semantic shift: cross-phase ReadsSnapshot"). Matches Bounds/State above, written by the same system.
+        .Reads<Genetics>()
         .ReadsResource("CameraAABB")
         .ReadsResource("TierMirror")
         .WritesResource("RenderBuffers")

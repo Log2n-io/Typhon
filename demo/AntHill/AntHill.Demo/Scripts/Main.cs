@@ -54,6 +54,7 @@ public partial class Main : Node3D
     // HUD
     private Label _hudLeft;
     private Label _hudRight;
+    private Label _hudHelp;
 
     // Persisted window state — path is a user:// URI so Godot resolves it to the platform app-data dir (on Windows:
     // %APPDATA%/Godot/app_userdata/<project-name>/window_state.cfg), keeping the file out of the project folder and per-user.
@@ -111,7 +112,10 @@ public partial class Main : Node3D
         BuildToolCursor();
 
         _bridge.Start();
-        GD.Print("AntHill: Runtime started. WASD=pan, wheel=zoom, T=tilt, Ctrl+T=cinematic, mid-drag=yaw, `=pause, 1-4=speed, H=pheromone overlay, M=minimap toggle, Esc=settings, F1=debug HUD, tools 1/2/3/4/5/P.");
+        // Deliberately does NOT restate the keybindings: the on-screen cheat-sheet (HelpText) is the single
+        // list, and the copy that used to live here had drifted (it claimed wheel=zoom, mid-drag=yaw and
+        // 1-4=speed — none of which are the current bindings).
+        GD.Print("AntHill: Runtime started. F1 toggles the debug HUD + the on-screen control reference.");
     }
 
     private void BuildSettings()
@@ -127,10 +131,7 @@ public partial class Main : Node3D
         {
             if (_terrain != null) _terrain.ShowPheromone = enabled;
         };
-        _settings.DebugToggled += enabled =>
-        {
-            if (_hudRight != null) _hudRight.Visible = enabled;
-        };
+        _settings.DebugToggled += SetDebugHudVisible;
         _settings.SnapToGridChanged += enabled => _snapToGrid = enabled;
         _settings.LuminosityChanged += val =>
         {
@@ -269,7 +270,62 @@ public partial class Main : Node3D
         StyleLabel(_hudRight, 14);
         hud.AddChild(_hudRight);
 
+        // Keybinding cheat-sheet, bottom-left, visibility tied to the debug HUD (see SetDebugHudVisible).
+        //
+        // Anchored rather than positioned: _hudLeft/_hudRight sit at fixed top-left pixel coords, but this one
+        // must stay glued to the bottom edge across window resizes (the demo persists window state — see
+        // WindowStatePath). Point-anchors at the bottom-left corner (Anchor{Top,Bottom}=1, Anchor{Left,Right}=0)
+        // give a zero-sized rect; GrowVertical=Begin / GrowHorizontal=End then let Godot inflate it to the
+        // label's own minimum size upward and rightward from that corner, so the text block's bottom-left stays
+        // pinned 10 px off both edges no matter how many lines it has.
+        _hudHelp = new Label
+        {
+            Text = HelpText,
+            AnchorLeft = 0f, AnchorRight = 0f, AnchorTop = 1f, AnchorBottom = 1f,
+            OffsetLeft = 10, OffsetRight = 10, OffsetTop = -10, OffsetBottom = -10,
+            GrowHorizontal = Control.GrowDirection.End,
+            GrowVertical = Control.GrowDirection.Begin,
+            Visible = _hudRight.Visible,
+        };
+        StyleLabel(_hudHelp, 13);
+        // Dimmer than the stat HUDs — reference material, not live data.
+        _hudHelp.AddThemeColorOverride("font_color", new Color(0.78f, 0.80f, 0.84f));
+        hud.AddChild(_hudHelp);
+
         AddChild(hud);
+    }
+
+    /// <summary>
+    /// Keybindings, transcribed from the actual handlers: camera from <see cref="GameCamera"/>
+    /// (<c>_UnhandledInput</c> + <c>_Process</c>), everything else from <see cref="_UnhandledInput"/> below.
+    /// Keep in sync when a shortcut moves — this is the only user-facing list.
+    /// </summary>
+    /// <remarks>
+    /// Kept to a narrow column on purpose: the minimap is anchored bottom-right at 256 px (BuildMinimap), so a
+    /// wide block down here would collide with it once the window drops below ~1150 px. Godot's default theme
+    /// font is proportional, which rules out a space-aligned two-column layout — hence one indented column.
+    /// </remarks>
+    private const string HelpText =
+        "Camera\n" +
+        "   WASD fly · Space / Ctrl up-down · Shift sprint\n" +
+        "   right-drag look · wheel move speed\n" +
+        "   T tilt · Ctrl+T cinematic\n" +
+        "Layers\n" +
+        "   H pheromone · M minimap · F1 debug HUD + this help\n" +
+        "Time\n" +
+        "   ` pause · [ ] speed step (0 · 0.5× · 1× · 2× · 4× · 10×)\n" +
+        "Tools\n" +
+        "   1 pointer · 2 food · 3 rock · 4 cull · 5 ignite · P pause\n" +
+        "   left-click applies · Esc settings · click minimap to fly there";
+
+    /// <summary>
+    /// Single owner of debug-overlay visibility: the stat HUD and the keybinding cheat-sheet show and hide
+    /// together. Both the F1 key and the settings checkbox route through here so the two can't drift apart.
+    /// </summary>
+    private void SetDebugHudVisible(bool visible)
+    {
+        if (_hudRight != null) _hudRight.Visible = visible;
+        if (_hudHelp != null) _hudHelp.Visible = visible;
     }
 
     private static void StyleLabel(Label label, int fontSize)
@@ -421,7 +477,14 @@ void fragment() {
                     }
                     break;
                 case Key.M: if (_minimapRect != null) _minimapRect.Visible = !_minimapRect.Visible; break;
-                case Key.F1: if (_hudRight != null) _hudRight.Visible = !_hudRight.Visible; break;
+                case Key.F1:
+                    // Mirrors the H/pheromone route: flip the state, then push it back into the settings
+                    // checkbox so the panel doesn't show a stale tick. Re-entrancy is bounded — assigning
+                    // ButtonPressed the value it already holds emits nothing.
+                    var debugOn = _hudRight == null || !_hudRight.Visible;
+                    SetDebugHudVisible(debugOn);
+                    _settings?.SetDebugToggle(debugOn);
+                    break;
             }
         }
         else if (@event is InputEventMouseButton mb && mb.Pressed && mb.ButtonIndex == MouseButton.Left)
