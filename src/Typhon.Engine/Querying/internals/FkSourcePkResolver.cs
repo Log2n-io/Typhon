@@ -28,11 +28,14 @@ namespace Typhon.Engine.Internals;
 /// keeps the two layouts described in exactly one place.
 /// </para>
 /// <para>
-/// <b>The SingleVersion branch is not reachable from navigation yet</b> — <see cref="Create"/> rejects that mode. Fixing the
-/// read layout was necessary but not sufficient: navigation resolves the FK index off the <c>ComponentTable</c>, and a
-/// SingleVersion archetype is cluster-backed, so its field indexes live on the archetype with packed <c>ClusterLocation</c>
-/// values and the component-table index is never populated. The branch is kept because it is the correct layout and the
-/// cluster-aware FK path needs it; it goes live when that path lands.
+/// <b>Scope: the per-ComponentTable index only.</b> This type turns a chunk id from that tree into an entity PK. A cluster-backed archetype keeps its field
+/// indexes on the ARCHETYPE, where the value is a packed <c>ClusterLocation</c> and the PK comes from the cluster's own entity-id array — no chunk header is
+/// involved, so that path does not use this type at all. See <see cref="FkReverseLookup"/>, which runs both.
+/// </para>
+/// <para>
+/// The SingleVersion branch below is therefore for a SingleVersion component in a NON-cluster archetype. It was unreachable while
+/// <see cref="Create"/> rejected the mode outright (a deliberate loud failure, because the cluster-backed case would otherwise have returned a silently
+/// empty result); that guard is gone since #662 gave the reverse lookup the cluster path it was missing.
 /// </para>
 /// <para>
 /// Holds an open <c>ChunkAccessor</c> for the whole enumeration — construct once outside the loop and dispose it, as the
@@ -55,8 +58,7 @@ internal unsafe struct FkSourcePkResolver : IDisposable
     /// </summary>
     /// <param name="table">Source component table the FK index belongs to.</param>
     /// <exception cref="NotSupportedException">
-    /// Thrown for <see cref="StorageMode.Transient"/> (no persistent index to navigate) and, for now, for
-    /// <see cref="StorageMode.SingleVersion"/> — see the remarks on this type.
+    /// Thrown for <see cref="StorageMode.Transient"/> — Transient data has no persistent index to navigate.
     /// </exception>
     internal static FkSourcePkResolver Create(ComponentTable table)
     {
@@ -66,19 +68,6 @@ internal unsafe struct FkSourcePkResolver : IDisposable
         {
             throw new NotSupportedException(
                 $"FK navigation is not supported on Transient component '{table.Name}' — Transient data has no persistent index to navigate.");
-        }
-
-        // Guard, not a capability statement: the read layouts below are correct for both modes, but navigation resolves the
-        // FK index off the ComponentTable, and a SingleVersion archetype keeps its field indexes on the ARCHETYPE instead
-        // (values are packed ClusterLocation, not chunk ids). The ComponentTable index is therefore empty and the reverse
-        // lookup silently returns nothing — a wrong answer with no signal, which is worse than the NullReferenceException
-        // this replaced. Fail loudly until the cluster-aware FK path lands.
-        if (table.StorageMode == StorageMode.SingleVersion)
-        {
-            throw new NotSupportedException(
-                $"FK navigation currently requires a Versioned source component; '{table.Name}' is SingleVersion. A SingleVersion archetype keeps its "
-                + "field indexes on the archetype (cluster-local) rather than on the component table, so the FK reverse lookup has no index to scan. "
-                + "Track: https://github.com/Log2n-io/Typhon/issues/623");
         }
 
         var singleVersion = table.StorageMode == StorageMode.SingleVersion;

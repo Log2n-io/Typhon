@@ -447,8 +447,10 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
             var requeryStart = Stopwatch.GetTimestamp();
             if (HasCachedPlanInternal && _fieldReader != null)
             {
-                // Use PipelineExecutor with cached plan for fast re-population
-                _fieldReader.ExecuteFullScan(CachedPlan, CachedPlan.OrderedEvaluators, _componentTable, tx, _entityIds);
+                // Cross-archetype scan with the cached plan. The `else` branch below already went through EcsQuery.Execute() and was therefore correct for
+                // cluster-backed archetypes; this branch bypassed it and re-populated to empty (#663) — correctness depended on whether a plan was cached.
+                _query.UpdateTransaction(tx);
+                _query.ExecuteFullScanAcrossArchetypes(CachedPlan, CachedPlan.OrderedEvaluators, _componentTable, _entityIds);
             }
             else if (_fieldReader != null)
             {
@@ -498,10 +500,13 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
         var plans = CachedPlans;
         if (plans == null) return;
 
+        _query.UpdateTransaction(tx);
         for (var b = 0; b < plans.Length; b++)
         {
             var branchResult = new HashMap<long>();
-            _fieldReader.ExecuteFullScan(plans[b], plans[b].OrderedEvaluators, _componentTable, tx, branchResult);
+            // Cross-archetype: a cluster-backed archetype's indexes live on the archetype, so scanning only the ComponentTable tree leaves every OR branch
+            // empty (#663).
+            _query.ExecuteFullScanAcrossArchetypes(plans[b], plans[b].OrderedEvaluators, _componentTable, branchResult);
             var bit = (ushort)(1 << b);
             foreach (var pk in branchResult)
             {
@@ -618,10 +623,12 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
 
             if (plans != null)
             {
+                _query.UpdateTransaction(tx);
                 for (var b = 0; b < plans.Length; b++)
                 {
                     var branchResult = new HashMap<long>();
-                    _fieldReader.ExecuteFullScan(plans[b], plans[b].OrderedEvaluators, _componentTable, tx, branchResult);
+                    // Cross-archetype — same reason as PopulateInitialOr (#663).
+                    _query.ExecuteFullScanAcrossArchetypes(plans[b], plans[b].OrderedEvaluators, _componentTable, branchResult);
                     var bit = (ushort)(1 << b);
                     foreach (var pk in branchResult)
                     {

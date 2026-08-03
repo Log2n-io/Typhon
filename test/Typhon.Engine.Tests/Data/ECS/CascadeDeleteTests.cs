@@ -1,4 +1,5 @@
-﻿using System.Runtime.InteropServices;
+﻿using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -38,6 +39,116 @@ class CascadeItem : Archetype<CascadeItem>
     public static readonly Comp<ItemData> Item = Register<ItemData>();
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// #664 — cascade across BOTH secondary-index homes
+//
+// The fixture above is Versioned-only, so every archetype in it keeps its field indexes on the shared ComponentTable. An archetype with at least one SV or
+// Transient slot is cluster-backed instead, and its indexes move onto the ARCHETYPE — which is where cascade used to find nothing at all.
+// ═══════════════════════════════════════════════════════════════════════
+
+[Component("Typhon.Test.ECS.ClusterBagData", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+struct ClusterBagData
+{
+    public int Capacity;
+    public int _pad;
+}
+
+// SV FK source. Its archetypes below decide the index home, not this storage mode — the same component sits in a cluster-backed archetype AND a non-cluster
+// one, and its entries are split between the two trees accordingly.
+[Component("Typhon.Test.ECS.SvItemData", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+struct SvItemData
+{
+    [Index(AllowMultiple = true, OnParentDelete = CascadeAction.Delete)]
+    public EntityLink<ClusterBag> Owner;
+    public int Weight;
+    public int _pad;
+}
+
+// VERSIONED FK source in a cluster-backed archetype: the component's own storage mode says "ComponentTable", the archetype's composition says otherwise.
+// This is the case no storage-mode guard can catch.
+[Component("Typhon.Test.ECS.MixedItemData", 1, StorageMode = StorageMode.Versioned)]
+[StructLayout(LayoutKind.Sequential)]
+struct MixedItemData
+{
+    [Index(AllowMultiple = true, OnParentDelete = CascadeAction.Delete)]
+    public EntityLink<ClusterBag> Owner;
+    public int Weight;
+    public int _pad;
+}
+
+/// <summary>SV sibling whose only job is to make <see cref="MixedItem"/> cluster-eligible.</summary>
+[Component("Typhon.Test.ECS.ItemTagData", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+struct ItemTagData
+{
+    public int Marker;
+    public int _pad;
+}
+
+/// <summary>
+/// Transient component with an INDEXED field — the one and only thing that disqualifies an archetype from cluster storage
+/// (<c>DatabaseEngine.cs</c>, cluster-eligibility scan). Without it there is no way to build a non-cluster archetype holding an SV component, and the
+/// null-<c>CompRevTableSegment</c> failure mode would be unreachable.
+/// </summary>
+[Component("Typhon.Test.ECS.ItemAuditData", 1, StorageMode = StorageMode.Transient)]
+[StructLayout(LayoutKind.Sequential)]
+struct ItemAuditData
+{
+    [Index(AllowMultiple = true)]
+    public int Code;
+    public int _pad;
+}
+
+/// <summary>Grandchild, to prove recursion still descends THROUGH a cluster-backed layer.</summary>
+[Component("Typhon.Test.ECS.PartData", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+struct PartData
+{
+    [Index(AllowMultiple = true, OnParentDelete = CascadeAction.Delete)]
+    public EntityLink<ClusterItem> Item;
+    public int Serial;
+    public int _pad;
+}
+
+/// <summary>SV-only parent — cluster-backed.</summary>
+[Archetype]
+class ClusterBag : Archetype<ClusterBag>
+{
+    public static readonly Comp<ClusterBagData> Bag = Register<ClusterBagData>();
+}
+
+/// <summary>Pure-SV child: cluster-eligible, so its FK index lives on the archetype.</summary>
+[Archetype]
+class ClusterItem : Archetype<ClusterItem>
+{
+    public static readonly Comp<SvItemData> Item = Register<SvItemData>();
+}
+
+/// <summary>Mixed child: a Versioned FK component with an SV sibling — cluster-eligible, FK index on the archetype.</summary>
+[Archetype]
+class MixedItem : Archetype<MixedItem>
+{
+    public static readonly Comp<MixedItemData> Item = Register<MixedItemData>();
+    public static readonly Comp<ItemTagData> Tag = Register<ItemTagData>();
+}
+
+/// <summary>Same SV FK component as <see cref="ClusterItem"/>, but the Transient indexed sibling forces this archetype onto the ComponentTable home.</summary>
+[Archetype]
+class FlatSvItem : Archetype<FlatSvItem>
+{
+    public static readonly Comp<SvItemData> Item = Register<SvItemData>();
+    public static readonly Comp<ItemAuditData> Audit = Register<ItemAuditData>();
+}
+
+/// <summary>Cluster-backed grandchild of <see cref="ClusterBag"/> via <see cref="ClusterItem"/>.</summary>
+[Archetype]
+class ClusterPart : Archetype<ClusterPart>
+{
+    public static readonly Comp<PartData> Part = Register<PartData>();
+}
+
 // [NonParallelizable] removed (#514 Phase 3): it was an incomplete mitigation for the cascade-diamond registry race (Face B).
 // The cascade graph is now built once under the registration lock inside ArchetypeRegistry.Freeze, so these fixtures are parallel-safe.
 class CascadeDeleteTests : TestBase<CascadeDeleteTests>
@@ -55,6 +166,12 @@ class CascadeDeleteTests : TestBase<CascadeDeleteTests>
         dbe.RegisterComponentFromAccessor<EcsHealth>();
         dbe.RegisterComponentFromAccessor<BagData>();
         dbe.RegisterComponentFromAccessor<ItemData>();
+        dbe.RegisterComponentFromAccessor<ClusterBagData>();
+        dbe.RegisterComponentFromAccessor<SvItemData>();
+        dbe.RegisterComponentFromAccessor<MixedItemData>();
+        dbe.RegisterComponentFromAccessor<ItemTagData>();
+        dbe.RegisterComponentFromAccessor<ItemAuditData>();
+        dbe.RegisterComponentFromAccessor<PartData>();
         dbe.InitializeArchetypes();
         return dbe;
     }
@@ -407,5 +524,281 @@ class CascadeDeleteTests : TestBase<CascadeDeleteTests>
             }
             Assert.That(deadCount, Is.EqualTo(childCount), $"All {childCount} children should be cascade-destroyed");
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // #664 — cluster-backed child archetypes
+    //
+    // FindCascadeChildren resolved the FK index on the child's ComponentTable and then dereferenced CompRevTableSegment unconditionally. For a cluster-backed
+    // child that tree is empty, so the cascade destroyed NOTHING and orphaned the children — no exception, no log, nothing to notice. Every test below fails
+    // on the pre-#664 code, most of them by finding the children still alive.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Guards the premise. Without these four assertions the tests below could pass while exercising a single index home, proving nothing about the other.
+    /// </summary>
+    [Test]
+    public void Fixture_ChildArchetypesSpanBothIndexHomes()
+    {
+        using var dbe = SetupEngine();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(Archetype<ClusterItem>.Metadata.HasClusterIndexes, Is.True, "pure-SV child must index on the ARCHETYPE");
+            Assert.That(Archetype<MixedItem>.Metadata.HasClusterIndexes, Is.True, "a Versioned FK component with an SV sibling must index on the ARCHETYPE");
+            Assert.That(Archetype<FlatSvItem>.Metadata.HasClusterIndexes, Is.False, "the Transient indexed sibling must force this onto the ComponentTable");
+            Assert.That(Archetype<CascadeItem>.Metadata.HasClusterIndexes, Is.False, "the pre-existing Versioned-only child stays on the ComponentTable");
+        });
+    }
+
+    /// <summary>AC: cascade destroys committed children of a pure-SV, cluster-backed child archetype.</summary>
+    [Test]
+    public void Destroy_ClusterBackedSvChildren_CascadeDeletes()
+    {
+        using var dbe = SetupEngine();
+
+        EntityId bagId, item1Id, item2Id;
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            bagId = t.Spawn<ClusterBag>(ClusterBag.Bag.Set(new ClusterBagData { Capacity = 10 }));
+            item1Id = t.Spawn<ClusterItem>(ClusterItem.Item.Set(new SvItemData { Owner = bagId, Weight = 5 }));
+            item2Id = t.Spawn<ClusterItem>(ClusterItem.Item.Set(new SvItemData { Owner = bagId, Weight = 3 }));
+            t.Commit();
+        }
+        dbe.WriteTickFence(1);
+
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            t.Destroy(bagId);
+            t.Commit();
+        }
+
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That(t.IsAlive(bagId), Is.False, "bag should be destroyed");
+                Assert.That(t.IsAlive(item1Id), Is.False, "cluster-backed child 1 should be cascade-destroyed");
+                Assert.That(t.IsAlive(item2Id), Is.False, "cluster-backed child 2 should be cascade-destroyed");
+            });
+        }
+    }
+
+    /// <summary>
+    /// AC: cascade destroys committed children of a MIXED SV+Versioned child archetype. The FK component is Versioned, so any guard that tested the
+    /// component's storage mode would wave this through — and then read an empty ComponentTable tree.
+    /// </summary>
+    [Test]
+    public void Destroy_ClusterBackedMixedChildren_CascadeDeletes()
+    {
+        using var dbe = SetupEngine();
+
+        EntityId bagId, item1Id, item2Id;
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            bagId = t.Spawn<ClusterBag>(ClusterBag.Bag.Set(new ClusterBagData { Capacity = 10 }));
+            item1Id = t.Spawn<MixedItem>(MixedItem.Item.Set(new MixedItemData { Owner = bagId, Weight = 7 }),
+                MixedItem.Tag.Set(new ItemTagData { Marker = 1 }));
+            item2Id = t.Spawn<MixedItem>(MixedItem.Item.Set(new MixedItemData { Owner = bagId, Weight = 9 }),
+                MixedItem.Tag.Set(new ItemTagData { Marker = 2 }));
+            t.Commit();
+        }
+        dbe.WriteTickFence(1);
+
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            t.Destroy(bagId);
+            t.Commit();
+        }
+
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That(t.IsAlive(bagId), Is.False, "bag should be destroyed");
+                Assert.That(t.IsAlive(item1Id), Is.False, "mixed cluster-backed child 1 should be cascade-destroyed");
+                Assert.That(t.IsAlive(item2Id), Is.False, "mixed cluster-backed child 2 should be cascade-destroyed");
+            });
+        }
+    }
+
+    /// <summary>
+    /// AC: one parent whose children straddle BOTH index homes. Cascade walks each edge separately, so this proves the cluster phase and the ComponentTable
+    /// phase both run — and, via the second bag, that neither over-reaches into another parent's children.
+    /// </summary>
+    [Test]
+    public void Destroy_ChildrenSplitAcrossBothIndexHomes_AllCascadeAndOnlyOwners()
+    {
+        using var dbe = SetupEngine();
+
+        EntityId bag1Id, bag2Id, clusterChild, mixedChild, flatChild, otherBagChild;
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            bag1Id = t.Spawn<ClusterBag>(ClusterBag.Bag.Set(new ClusterBagData { Capacity = 10 }));
+            bag2Id = t.Spawn<ClusterBag>(ClusterBag.Bag.Set(new ClusterBagData { Capacity = 20 }));
+
+            clusterChild = t.Spawn<ClusterItem>(ClusterItem.Item.Set(new SvItemData { Owner = bag1Id, Weight = 1 }));
+            mixedChild = t.Spawn<MixedItem>(MixedItem.Item.Set(new MixedItemData { Owner = bag1Id, Weight = 2 }),
+                MixedItem.Tag.Set(new ItemTagData { Marker = 1 }));
+            flatChild = t.Spawn<FlatSvItem>(FlatSvItem.Item.Set(new SvItemData { Owner = bag1Id, Weight = 3 }),
+                FlatSvItem.Audit.Set(new ItemAuditData { Code = 42 }));
+
+            // Same component type, same shared ComponentTable tree, different parent — the routing/key filters must exclude it.
+            otherBagChild = t.Spawn<FlatSvItem>(FlatSvItem.Item.Set(new SvItemData { Owner = bag2Id, Weight = 4 }),
+                FlatSvItem.Audit.Set(new ItemAuditData { Code = 43 }));
+            t.Commit();
+        }
+        dbe.WriteTickFence(1);
+
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            t.Destroy(bag1Id);
+            t.Commit();
+        }
+
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That(t.IsAlive(bag1Id), Is.False, "bag1 should be destroyed");
+                Assert.That(t.IsAlive(clusterChild), Is.False, "archetype-homed child should be cascade-destroyed");
+                Assert.That(t.IsAlive(mixedChild), Is.False, "mixed archetype-homed child should be cascade-destroyed");
+                Assert.That(t.IsAlive(flatChild), Is.False, "ComponentTable-homed child should be cascade-destroyed");
+
+                Assert.That(t.IsAlive(bag2Id), Is.True, "bag2 must survive");
+                Assert.That(t.IsAlive(otherBagChild), Is.True, "bag2's child must survive — it shares the tree with bag1's flat child");
+            });
+        }
+    }
+
+    /// <summary>
+    /// AC: a SingleVersion FK component in a NON-cluster archetype. <c>ComponentTable</c> allocates <c>CompRevTableSegment</c> only for Versioned, so the old
+    /// unconditional <c>table.CompRevTableSegment.CreateChunkAccessor()</c> threw a <see cref="NullReferenceException"/> here — the loud half of the defect.
+    /// Reachable only because the Transient indexed sibling disqualifies the archetype from cluster storage.
+    /// </summary>
+    [Test]
+    public void Destroy_NonClusterSingleVersionChild_DoesNotThrowAndCascades()
+    {
+        using var dbe = SetupEngine();
+
+        EntityId bagId, childId;
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            bagId = t.Spawn<ClusterBag>(ClusterBag.Bag.Set(new ClusterBagData { Capacity = 4 }));
+            childId = t.Spawn<FlatSvItem>(FlatSvItem.Item.Set(new SvItemData { Owner = bagId, Weight = 8 }),
+                FlatSvItem.Audit.Set(new ItemAuditData { Code = 7 }));
+            t.Commit();
+        }
+        dbe.WriteTickFence(1);
+
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            Assert.DoesNotThrow(() => t.Destroy(bagId), "an SV child component has no CompRev table — the old code dereferenced it unconditionally");
+            t.Commit();
+        }
+
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That(t.IsAlive(bagId), Is.False);
+                Assert.That(t.IsAlive(childId), Is.False, "non-cluster SV child should be cascade-destroyed");
+            });
+        }
+    }
+
+    /// <summary>
+    /// AC: same-tx pending children of a cluster-backed archetype still cascade. That path reads the spawn staging chunks
+    /// (<c>SpawnEntry.Loc[]</c>), not either index — cluster entities only reach the cluster SoA at commit — so it must stay untouched by the index-home fix.
+    /// </summary>
+    [Test]
+    public void Destroy_PendingClusterBackedChildren_CascadeDeletes()
+    {
+        using var dbe = SetupEngine();
+
+        using var t = dbe.CreateQuickTransaction();
+
+        var bagId = t.Spawn<ClusterBag>(ClusterBag.Bag.Set(new ClusterBagData { Capacity = 10 }));
+        var svChild = t.Spawn<ClusterItem>(ClusterItem.Item.Set(new SvItemData { Owner = bagId, Weight = 5 }));
+        var mixedChild = t.Spawn<MixedItem>(MixedItem.Item.Set(new MixedItemData { Owner = bagId, Weight = 6 }),
+            MixedItem.Tag.Set(new ItemTagData { Marker = 3 }));
+
+        t.Destroy(bagId);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(t.TryOpen(bagId, out _), Is.False, "bag should be destroyed");
+            Assert.That(t.TryOpen(svChild, out _), Is.False, "pending SV cluster child should be cascade-destroyed");
+            Assert.That(t.TryOpen(mixedChild, out _), Is.False, "pending mixed cluster child should be cascade-destroyed");
+        });
+    }
+
+    /// <summary>
+    /// AC: depth/recursion still descends THROUGH a cluster-backed layer — bag → cluster item → cluster part. A cluster middle layer that returns no children
+    /// truncates the whole chain silently, so the grandchild is the real assertion here.
+    /// </summary>
+    [Test]
+    public void Cascade_ClusterBackedMidChain_RecursesToGrandchildren()
+    {
+        using var dbe = SetupEngine();
+
+        EntityId bagId, itemId, part1Id, part2Id;
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            bagId = t.Spawn<ClusterBag>(ClusterBag.Bag.Set(new ClusterBagData { Capacity = 10 }));
+            itemId = t.Spawn<ClusterItem>(ClusterItem.Item.Set(new SvItemData { Owner = bagId, Weight = 5 }));
+            part1Id = t.Spawn<ClusterPart>(ClusterPart.Part.Set(new PartData { Item = itemId, Serial = 1 }));
+            part2Id = t.Spawn<ClusterPart>(ClusterPart.Part.Set(new PartData { Item = itemId, Serial = 2 }));
+            t.Commit();
+        }
+        dbe.WriteTickFence(1);
+
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            t.Destroy(bagId);
+            t.Commit();
+        }
+
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That(t.IsAlive(bagId), Is.False, "bag should be destroyed");
+                Assert.That(t.IsAlive(itemId), Is.False, "cluster-backed child should be cascade-destroyed");
+                Assert.That(t.IsAlive(part1Id), Is.False, "grandchild 1 should be cascade-destroyed through the cluster layer");
+                Assert.That(t.IsAlive(part2Id), Is.False, "grandchild 2 should be cascade-destroyed through the cluster layer");
+            });
+        }
+    }
+
+    /// <summary>
+    /// The cycle/diamond validator runs over the WHOLE registry on every <c>InitializeArchetypes</c>, so the new edges above are already exercised by every
+    /// other test here. This states that explicitly: ClusterBag fans out to three distinct children and one of them has its own child.
+    /// </summary>
+    [Test]
+    public void CascadeGraph_ClusterBagFansOutToBothHomesWithoutDiamond()
+    {
+        using var dbe = SetupEngine();
+
+        var bagMeta = ArchetypeRegistry.GetMetadata<ClusterBag>();
+        Assert.That(bagMeta._cascadeTargets, Is.Not.Null);
+
+        var childIds = new HashSet<ushort>();
+        foreach (var target in bagMeta._cascadeTargets)
+        {
+            childIds.Add(target.ChildArchetypeId);
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(childIds, Does.Contain(ArchetypeRegistry.GetMetadata<ClusterItem>().ArchetypeId));
+            Assert.That(childIds, Does.Contain(ArchetypeRegistry.GetMetadata<MixedItem>().ArchetypeId));
+            Assert.That(childIds, Does.Contain(ArchetypeRegistry.GetMetadata<FlatSvItem>().ArchetypeId));
+            Assert.That(childIds.Count, Is.EqualTo(bagMeta._cascadeTargets.Count), "one edge per child archetype — a repeat would be a diamond");
+        });
+
+        var itemMeta = ArchetypeRegistry.GetMetadata<ClusterItem>();
+        Assert.That(itemMeta._cascadeTargets, Is.Not.Null.And.Count.EqualTo(1), "the cluster-backed child is itself a parent");
+        Assert.That(itemMeta._cascadeTargets[0].ChildArchetypeId, Is.EqualTo(ArchetypeRegistry.GetMetadata<ClusterPart>().ArchetypeId));
     }
 }

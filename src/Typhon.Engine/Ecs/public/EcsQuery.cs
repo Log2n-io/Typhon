@@ -466,13 +466,20 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// The FK field selector identifies the long FK field on the source component.
     /// </summary>
     /// <remarks>
-    /// <b>The source component must be <see cref="StorageMode.Versioned"/>.</b> Navigation resolves the foreign-key index off the
-    /// component table, and a <see cref="StorageMode.SingleVersion"/> archetype keeps its field indexes on the archetype instead
-    /// (cluster-local, values are packed cluster locations), so there is no component-table index for the reverse lookup to scan.
-    /// A SingleVersion source therefore throws <see cref="NotSupportedException"/> rather than silently returning nothing.
-    /// Tracked by issue #623; <see cref="StorageMode.Transient"/> has no persistent index at all and is likewise rejected.
+    /// <para>
+    /// Works against both persistent storage modes and both index homes. A cluster-backed archetype keeps its field indexes on the
+    /// ARCHETYPE (values are packed cluster locations) while the rest use the shared component-table index (values are chunk ids);
+    /// the reverse lookup scans whichever owns each candidate archetype. <see cref="StorageMode.Transient"/> is still rejected —
+    /// it has no persistent index to navigate at all.
+    /// </para>
+    /// <para>
+    /// Until issue #662 this resolved the foreign-key index off the component table only, so a <see cref="StorageMode.SingleVersion"/>
+    /// source threw <see cref="NotSupportedException"/> (issue #623) — and, worse, a Versioned source in an archetype made
+    /// cluster-eligible by a SingleVersion sibling silently returned nothing, because the guard tested the component's storage mode
+    /// rather than the archetype's composition.
+    /// </para>
     /// </remarks>
-    /// <exception cref="NotSupportedException">The source component is <see cref="StorageMode.SingleVersion"/> or <see cref="StorageMode.Transient"/>.</exception>
+    /// <exception cref="NotSupportedException">The source component is <see cref="StorageMode.Transient"/>.</exception>
     public readonly EcsNavigationQueryBuilder<TArchetype, TSource, TTarget> NavigateField<TSource, TTarget>(Expression<Func<TSource, long>> fkSelector)
         where TSource : unmanaged where TTarget : unmanaged
     {
@@ -662,8 +669,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         // Register with ViewRegistry for delta notifications
         ct.ViewRegistry.RegisterView(view, view.DeltaBuffer);
 
-        // Initial population via PipelineExecutor (uses secondary index if plan selects one)
-        _whereFieldReader.ExecuteFullScan(plan, plan.OrderedEvaluators, ct, _tx, view.EntityIdsInternal);
+        // Initial population. Must go through the cross-archetype scan, not IFieldReader.ExecuteFullScan directly: a cluster-backed archetype keeps its
+        // indexes on the archetype, so the ComponentTable tree this plan targets is empty and the view would populate to nothing (#663).
+        ExecuteFullScanAcrossArchetypes(plan, plan.OrderedEvaluators, ct, view.EntityIdsInternal);
 
         // Process any deltas that arrived during population
         view.RefreshFromScheduler(_tx);
@@ -1177,9 +1185,44 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             executionSourceFile: callerFile, executionSourceLine: callerLine, executionSourceMethod: callerMethod);
 
         // Scan for matching entities across all matching archetypes.
-        // Cluster archetypes: direct cluster scan with evaluator predicates (bypasses shared B+Tree).
-        // Non-cluster archetypes: shared ComponentTable B+Tree via PipelineExecutor.
         var result = new HashSet<EntityId>(_take > 0 ? _take : 64);
+        var sink = new EntityIdSetSink(result);
+        ScanAllArchetypes(plan, evaluators, ct, ref sink);
+
+        // Read-your-own-writes: pending spawns have no secondary index entries, so the targeted scan above can't find them. Evaluate them via compiled
+        // predicate fallback.
+        CollectPendingSpawnsWithFieldFilter(result);
+
+        // Opaque WHERE post-filter (from .Where<T>(Func), separate from WhereField)
+        var filter = _whereFilter;
+        if (filter != null)
+        {
+            var tx = _tx;
+            result.RemoveWhere(id => !filter(id, tx));
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// The one place that knows secondary indexes live in two homes: per-archetype for cluster-backed archetypes (values are packed
+    /// <c>ClusterLocation</c>s) and per-ComponentTable for the rest (values are chunk ids). Scans every archetype this query's mask admits, from whichever
+    /// home owns it, and deposits the matches in <paramref name="sink"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Shared deliberately. This loop used to exist only inside <see cref="ExecuteTargeted"/>, while the four view-population call sites passed the
+    /// ComponentTable straight to <c>PipelineExecutor</c> — scanning a tree that is empty for a cluster-backed archetype, so <c>ToView()</c> came back
+    /// permanently empty while <c>Execute()</c> on the same query was correct (#663). One copy cannot drift from the other.
+    /// </para>
+    /// <para>
+    /// The two homes filter by archetype at different points: the cluster loop tests the mask per ARCHETYPE before scanning, while the ComponentTable is
+    /// shared across every archetype holding that component, so its results are filtered per ENTITY by routing id.
+    /// </para>
+    /// </remarks>
+    private void ScanAllArchetypes<TSink>(ExecutionPlan plan, FieldEvaluator[] evaluators, ComponentTable ct, ref TSink sink)
+        where TSink : struct, IEntityIdSink
+    {
         bool hasNonClusterArchetypes = false;
 
         // Direct cluster scan for cluster-eligible archetypes with indexed fields
@@ -1208,11 +1251,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 // Query planner: choose Path A (B+Tree selective) vs Path B (zone map + eval) based on selectivity
                 if (plan.UsesSecondaryIndex && EstimateClusterSelectivity(plan, clusterState) < 0.05f)
                 {
-                    ScanPerArchetypeBTreeSelective(plan, evaluators, clusterState, meta, result);
+                    ScanPerArchetypeBTreeSelective(plan, evaluators, clusterState, meta, ref sink);
                 }
                 else
                 {
-                    ScanPerArchetypeBTree(plan, evaluators, clusterState, meta, result);
+                    ScanPerArchetypeBTree(plan, evaluators, clusterState, meta, ref sink);
                 }
             }
         }
@@ -1228,32 +1271,28 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 var entityId = EntityId.FromRaw(pk);
                 if (MaskTestByRouting(entityId.ArchetypeId))
                 {
-                    result.Add(entityId);
+                    sink.Add(entityId);
                 }
             }
         }
+    }
 
-        // Read-your-own-writes: pending spawns have no secondary index entries, so the targeted scan above can't find them. Evaluate them via compiled
-        // predicate fallback.
-        CollectPendingSpawnsWithFieldFilter(result);
-
-        // Opaque WHERE post-filter (from .Where<T>(Func), separate from WhereField)
-        var filter = _whereFilter;
-        if (filter != null)
-        {
-            var tx = _tx;
-            result.RemoveWhere(id => !filter(id, tx));
-        }
-
-        return result;
+    /// <summary>
+    /// <see cref="ScanAllArchetypes{TSink}"/> for callers whose result container is a view's raw-PK entity set. Replaces the bare
+    /// <c>IFieldReader.ExecuteFullScan</c> calls at the view-population sites, which saw only the per-ComponentTable index home (#663).
+    /// </summary>
+    internal void ExecuteFullScanAcrossArchetypes(ExecutionPlan plan, FieldEvaluator[] evaluators, ComponentTable ct, HashMap<long> result)
+    {
+        var sink = new PkMapSink(result);
+        ScanAllArchetypes(plan, evaluators, ct, ref sink);
     }
 
     /// <summary>
     /// Scan cluster entities for a per-archetype indexed archetype using direct cluster evaluation (Path B).
     /// Evaluates all field predicates on cluster SoA data, resolving EntityKeys from the cluster.
     /// </summary>
-    private void ScanPerArchetypeBTree(ExecutionPlan plan, FieldEvaluator[] evaluators, ArchetypeClusterState clusterState, ArchetypeMetadata meta,
-        HashSet<EntityId> result)
+    private void ScanPerArchetypeBTree<TSink>(ExecutionPlan plan, FieldEvaluator[] evaluators, ArchetypeClusterState clusterState, ArchetypeMetadata meta,
+        ref TSink result) where TSink : struct, IEntityIdSink
     {
         int ixSlotIdx = FindClusterIndexSlot(clusterState, meta);
         if (ixSlotIdx < 0)
@@ -1655,8 +1694,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// Path A selective query: scan per-archetype B+Tree for the primary predicate range, collect ClusterLocations,
     /// then verify remaining predicates only on matched entities. Optimal for highly selective queries (&lt;5% match).
     /// </summary>
-    private void ScanPerArchetypeBTreeSelective(ExecutionPlan plan, FieldEvaluator[] evaluators, ArchetypeClusterState clusterState,
-        ArchetypeMetadata meta, HashSet<EntityId> result)
+    private void ScanPerArchetypeBTreeSelective<TSink>(ExecutionPlan plan, FieldEvaluator[] evaluators, ArchetypeClusterState clusterState,
+        ArchetypeMetadata meta, ref TSink result) where TSink : struct, IEntityIdSink
     {
         int ixSlotIdx = FindClusterIndexSlot(clusterState, meta);
         if (ixSlotIdx < 0)
@@ -1676,7 +1715,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         if (plan.PrimaryFieldIndex < 0 || plan.PrimaryFieldIndex >= matchSlot.Fields.Length)
         {
             // Fall back to Path B (full scan) if primary field not found
-            ScanPerArchetypeBTree(plan, evaluators, clusterState, meta, result);
+            ScanPerArchetypeBTree(plan, evaluators, clusterState, meta, ref result);
             return;
         }
 

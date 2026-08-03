@@ -1002,9 +1002,22 @@ internal class PipelineExecutor
 
 
     /// <summary>
-    /// Finds the IndexedFieldInfo for the FK field by matching its offset.
+    /// Finds the FK field's position among <paramref name="ct"/>'s indexed fields, by matching its offset.
     /// </summary>
-    internal static IndexedFieldInfo FindFKIndex(ComponentTable ct, int fkFieldOffset)
+    /// <remarks>
+    /// <para>
+    /// Returns the ORDINAL, not the <c>IndexedFieldInfo</c>, because the same number indexes both index homes: <c>ct.IndexedFieldInfos[o]</c> for the
+    /// per-ComponentTable tree and <c>clusterState.IndexSlots[s].Fields[o]</c> for a cluster-backed archetype's own tree. A caller that has only the
+    /// <c>IndexedFieldInfo</c> cannot reach the second (#662).
+    /// </para>
+    /// <para>
+    /// <b>The two lists are positionally aligned by construction</b>: <c>ComponentTable.BuildIndexedFieldInfo</c> and
+    /// <c>ArchetypeClusterState.InitializeIndexes</c> both walk the component definition in field-id order and append on <c>HasIndex</c>, using the same
+    /// counter. Nothing enforces that beyond the two loops agreeing, and a divergence would MISROUTE every cluster FK lookup rather than fail — so the
+    /// alignment is asserted at the point of use, in <c>FkReverseLookup.ScanClusterArchetype</c>.
+    /// </para>
+    /// </remarks>
+    internal static int FindFKIndexOrdinal(ComponentTable ct, int fkFieldOffset)
     {
         var expectedOffset = ct.ComponentOverhead + fkFieldOffset;
 
@@ -1012,7 +1025,7 @@ internal class PipelineExecutor
         {
             if (ct.IndexedFieldInfos[i].OffsetToField == expectedOffset)
             {
-                return ct.IndexedFieldInfos[i];
+                return i;
             }
         }
 

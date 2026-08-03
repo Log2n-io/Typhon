@@ -23,8 +23,16 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
     private readonly FieldEvaluator[] _targetEvaluators;
     private readonly int[] _sourceEvalLookup;
     private readonly int[] _targetEvalLookup;
-    private readonly int _fkFieldIndex;      // Index into source's IndexedFieldInfos for the FK field
+    private readonly int _fkFieldIndex;      // Index into the source definition's field list — matched against delta entries' fieldIndex
     private readonly int _fkFieldOffset;     // Byte offset of FK field within source component struct
+
+    // Position of the FK field among the source component's INDEXED fields. Distinct from _fkFieldIndex above, which is a definition field index.
+    // Indexes both IndexedFieldInfos[o] and, for a cluster-backed archetype, IndexSlots[s].Fields[o].
+    private readonly int _fkFieldOrdinal;
+
+    // Which archetypes can hold the source component, split by index home. Resolved ONCE here rather than per lookup: ReverseLookupAndUpdate runs per
+    // target delta entry, so anything built inside it is rebuilt on every fan-out (#662 AC: no allocation per target PK).
+    private readonly FkCandidates _candidates;
 
     internal NavigationView(FieldEvaluator[] sourceEvaluators, FieldEvaluator[] targetEvaluators, ComponentTable sourceTable, ComponentTable targetTable,
         int fkFieldIndex, int fkFieldOffset, int bufferCapacity = ViewDeltaRingBuffer.DefaultCapacity, long baseTSN = 0, string sourceFile = null, 
@@ -40,6 +48,8 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
         _targetEvalLookup = BuildEvaluatorLookup(targetEvaluators);
         _fkFieldIndex = fkFieldIndex;
         _fkFieldOffset = fkFieldOffset;
+        _fkFieldOrdinal = PipelineExecutor.FindFKIndexOrdinal(sourceTable, fkFieldOffset);
+        _candidates = FkReverseLookup.ResolveCandidates(sourceTable.DBE, ArchetypeRegistry.GetComponentTypeId<TSource>());
     }
 
     /// <summary>
@@ -436,40 +446,23 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
         // Pre-evaluate target predicates once — all sources in this fan-out share the same target
         bool targetPasses = EvaluateTargetPredicates(targetPK, tx);
 
-        var fkIndexInfo = PipelineExecutor.FindFKIndex(_sourceTable, _fkFieldOffset);
-        var fkIndex = (BTree<long, PersistentStore>)fkIndexInfo.Index;
-        // Issue #623: SingleVersion sources have no CompRev table — FkSourcePkResolver picks the right segment per storage mode.
-        var pkResolver = FkSourcePkResolver.Create(_sourceTable);
+        var action = new ApplyDeltaAction { View = this, Tx = tx, TargetPasses = targetPasses };
+        FkReverseLookup.ForEachSource(_sourceTable.DBE, _sourceTable, in _candidates, _fkFieldOrdinal, targetPK, ref action);
+    }
 
-        try
-        {
-            var enumerator = fkIndex.EnumerateRangeMultiple(targetPK, targetPK);
-            try
-            {
-                while (enumerator.MoveNextKey())
-                {
-                    do
-                    {
-                        var values = enumerator.CurrentValues;
-                        for (var j = 0; j < values.Length; j++)
-                        {
-                            var sourcePK = pkResolver.Resolve(values[j]);
+    /// <summary>Applies the source-side view transition for each entity found by the reverse lookup.</summary>
+    private struct ApplyDeltaAction : IFkSourceAction
+    {
+        public NavigationView<TSource, TTarget> View;
+        public Transaction Tx;
+        public bool TargetPasses;
 
-                            var wasInView = _entityIds.Contains(sourcePK);
-                            var shouldBeInView = targetPasses && EvaluateSourcePredicates(sourcePK, tx);
-                            ApplyDelta(sourcePK, wasInView, shouldBeInView);
-                        }
-                    } while (enumerator.NextChunk());
-                }
-            }
-            finally
-            {
-                enumerator.Dispose();
-            }
-        }
-        finally
+        public bool Process(long sourcePK, ArchetypeMetadata meta)
         {
-            pkResolver.Dispose();
+            var wasInView = View._entityIds.Contains(sourcePK);
+            var shouldBeInView = TargetPasses && View.EvaluateSourcePredicates(sourcePK, Tx);
+            View.ApplyDelta(sourcePK, wasInView, shouldBeInView);
+            return true;
         }
     }
 
@@ -478,41 +471,22 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
     /// </summary>
     private void MarkSourcesModified(long targetPK)
     {
-        var fkIndexInfo = PipelineExecutor.FindFKIndex(_sourceTable, _fkFieldOffset);
-        var fkIndex = (BTree<long, PersistentStore>)fkIndexInfo.Index;
-        // Issue #623: SingleVersion sources have no CompRev table — FkSourcePkResolver picks the right segment per storage mode.
-        var pkResolver = FkSourcePkResolver.Create(_sourceTable);
+        var action = new MarkModifiedAction { View = this };
+        FkReverseLookup.ForEachSource(_sourceTable.DBE, _sourceTable, in _candidates, _fkFieldOrdinal, targetPK, ref action);
+    }
 
-        try
-        {
-            var enumerator = fkIndex.EnumerateRangeMultiple(targetPK, targetPK);
-            try
-            {
-                while (enumerator.MoveNextKey())
-                {
-                    do
-                    {
-                        var values = enumerator.CurrentValues;
-                        for (var j = 0; j < values.Length; j++)
-                        {
-                            var sourcePK = pkResolver.Resolve(values[j]);
+    /// <summary>Marks each already-present source entity Modified.</summary>
+    private struct MarkModifiedAction : IFkSourceAction
+    {
+        public NavigationView<TSource, TTarget> View;
 
-                            if (_entityIds.Contains(sourcePK))
-                            {
-                                CompactDelta(sourcePK, DeltaKind.Modified);
-                            }
-                        }
-                    } while (enumerator.NextChunk());
-                }
-            }
-            finally
-            {
-                enumerator.Dispose();
-            }
-        }
-        finally
+        public bool Process(long sourcePK, ArchetypeMetadata meta)
         {
-            pkResolver.Dispose();
+            if (View._entityIds.Contains(sourcePK))
+            {
+                View.CompactDelta(sourcePK, DeltaKind.Modified);
+            }
+            return true;
         }
     }
 

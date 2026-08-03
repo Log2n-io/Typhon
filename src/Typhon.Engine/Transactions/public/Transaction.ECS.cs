@@ -852,48 +852,52 @@ public unsafe partial class Transaction
             }
         }
 
-        // 2. Find committed children via FK index lookup (O(log n + k) instead of O(n) EntityMap scan)
+        // 2. Find committed children via FK index lookup (O(log n + k) instead of O(n) EntityMap scan).
+        // Routed through FkReverseLookup so BOTH index homes are read (#664). This site used to resolve the per-ComponentTable tree and then deref
+        // `table.CompRevTableSegment` unconditionally, which meant a cluster-backed child archetype scanned an empty tree — the cascade silently destroyed
+        // nothing and orphaned its children — and a SingleVersion child component (only reachable in a non-cluster archetype, i.e. alongside a Transient
+        // indexed field) hit a null CompRev segment. The helper picks the right tree per archetype and the right PK decode per home.
         var childEngineState = _dbe._archetypeStates[target.ChildArchetypeId];
         if (childEngineState?.SlotToComponentTable != null)
         {
             var table = childEngineState.SlotToComponentTable[target.FkSlotIndex];
-            var fkIndexInfo = PipelineExecutor.FindFKIndex(table, target.FkFieldOffset);
-            var fkIndex = (BTree<long, PersistentStore>)fkIndexInfo.Index;
-            long parentPK = (long)parentId.RawValue;
+            var fkFieldOrdinal = PipelineExecutor.FindFKIndexOrdinal(table, target.FkFieldOffset);
+            var candidates = FkReverseLookup.ResolveCandidatesForArchetype(_dbe, childMeta, target.FkSlotIndex);
 
             using var guard = EpochGuard.Enter(_epochManager);
-            var compRevAccessor = table.CompRevTableSegment.CreateChunkAccessor();
-
-            var enumerator = fkIndex.EnumerateRangeMultiple(parentPK, parentPK);
-            try
+            var collector = new CascadeChildCollector
             {
-                while (enumerator.MoveNextKey())
-                {
-                    do
-                    {
-                        var values = enumerator.CurrentValues;
-                        for (int j = 0; j < values.Length; j++)
-                        {
-                            ref var header = ref compRevAccessor.GetChunk<CompRevStorageHeader>(values[j]);
-                            long childPK = header.EntityPK;
-                            var childId = Unsafe.As<long, EntityId>(ref childPK);
-                            // childId.ArchetypeId is a routing id; target.ChildArchetypeId is a catalog id — compare in routing space.
-                            if (childId.ArchetypeId == _dbe.RoutingIdOf(childMeta))
-                            {
-                                result.Add(childId);
-                            }
-                        }
-                    } while (enumerator.NextChunk());
-                }
-            }
-            finally
-            {
-                enumerator.Dispose();
-                compRevAccessor.Dispose();
-            }
+                Result = result,
+                RoutingId = _dbe.RoutingIdOf(childMeta),
+            };
+            FkReverseLookup.ForEachSource(_dbe, table, in candidates, fkFieldOrdinal, (long)parentId.RawValue, ref collector);
         }
 
         return result;
+    }
+
+    /// <summary>Collects the cascade children found by the FK reverse lookup, keeping only those of the target child archetype.</summary>
+    /// <remarks>
+    /// The routing filter is structurally redundant in the cluster phase — that PK is read from the scanned archetype's own entity-id array — but the
+    /// ComponentTable phase scans one tree shared by every archetype holding the component, so it stays. Cheap, and dropping it would be a silent
+    /// over-delete on exactly the shape that is hardest to notice.
+    /// </remarks>
+    private struct CascadeChildCollector : IFkSourceAction
+    {
+        public List<EntityId> Result;
+        public ushort RoutingId;
+
+        public bool Process(long sourcePK, ArchetypeMetadata meta)
+        {
+            // childId.ArchetypeId is a routing id; target.ChildArchetypeId is a catalog id — compare in routing space.
+            var childId = EntityId.FromRaw(sourcePK);
+            if (childId.ArchetypeId == RoutingId)
+            {
+                Result.Add(childId);
+            }
+
+            return true;
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
