@@ -214,11 +214,15 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
         // via the TLS open-span chain, so the viewer shows "Commit contained a WAL wait of N µs".
         using var waitScope = TyphonEvent.BeginWalWait(lsn);
 
+        var waitStart = Stopwatch.GetTimestamp();
+
         while (Interlocked.Read(ref _durableLsn) < lsn)
         {
             if (!Unsafe.IsNullRef(ref ctx) && ctx.ShouldStop)
             {
-                ThrowHelper.ThrowWalBackPressureTimeout(0, ctx.Deadline.Remaining);
+                // Elapsed, not Deadline.Remaining — Remaining is TimeSpan.Zero whenever ShouldStop is true, so the exception could only
+                // ever say "timeout after 0ms". See the same fix in WalCommitBuffer.TryClaim's back-pressure loop.
+                ThrowHelper.ThrowWalBackPressureTimeout(0, Stopwatch.GetElapsedTime(waitStart));
             }
 
             if (_fatalError != null)
