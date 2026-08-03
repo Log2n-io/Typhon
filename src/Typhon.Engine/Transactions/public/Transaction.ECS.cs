@@ -1330,6 +1330,7 @@ public unsafe partial class Transaction
                 byte* fieldPtr = compBase + field.FieldOffset;
                 // Pick the accessor matching this field's segment — passing one built on the other segment resolves node chunks
                 // at the wrong stride and corrupts neighbouring nodes (#658).
+                ctx.ClusterState.MutationsSinceRebuild++;   // (#665)
                 int elementId = s64Segment != null && ReferenceEquals(field.Index.Segment, s64Segment)
                     ? field.Index.Add(fieldPtr, clusterLocation, ref idxAccessorS64)
                     : field.Index.Add(fieldPtr, clusterLocation, ref idxAccessor);
@@ -1397,6 +1398,7 @@ public unsafe partial class Transaction
                 // sibling entities sharing the same field value. Issue #229 Phase 3.
                 // Regression test: ClusterIndex_NonUniqueField_DestroyOneEntity_PreservesSiblingsInIndex.
                 var useS64 = s64Segment != null && ReferenceEquals(field.Index.Segment, s64Segment);
+                engineState.ClusterState.MutationsSinceRebuild++;   // (#665)
                 if (field.AllowMultiple)
                 {
                     int elementId = *(int*)(primaryBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
@@ -2114,7 +2116,7 @@ public unsafe partial class Transaction
             }
 
             // TransientStore cluster accessor (for archetypes with Transient components)
-            if (ctx.ClusterState.TransientSegment != null)
+            if (ctx.ClusterState!.TransientSegment != null)
             {
                 ctx.ClusterTransientAccessor = ctx.ClusterState.TransientSegment.CreateChunkAccessor();
                 ctx.HasClusterTransientAccessor = true;

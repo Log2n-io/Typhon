@@ -273,6 +273,57 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
     private readonly int MaskMaxId => _useLargeMask ? _maskLarge.MaxId : _mask256.MaxId;
 
+    /// <summary>
+    /// The statistics array the planner should estimate this query's selectivity from — the per-archetype one when the query resolves to exactly one
+    /// cluster-backed archetype, otherwise the shared per-ComponentTable array (#665).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Statistics describe a key DISTRIBUTION, and the two homes hold different populations. For a cluster-backed archetype the ComponentTable's array wraps
+    /// a tree with no entries, so <c>EntryCount == 0</c> and every estimate comes back 0 — which the planner reads as "perfectly selective" and the cluster
+    /// executor separately reads as "unknown, take Path B". The plan is built from a number that describes nothing.
+    /// </para>
+    /// <para>
+    /// Restricted to a single matching archetype on purpose. Across several there is no one distribution to hand the planner: blending them would make a
+    /// predicate that is selective within one archetype read as unselective, which is the same defect as sharing one array in the first place. Those queries
+    /// keep today's behaviour, and the honest fix for them is a merged estimate — a follow-up, not this issue.
+    /// </para>
+    /// </remarks>
+    internal IndexStatistics[] PlannerStats(ComponentTable ct)
+    {
+        var dbe = _tx.DBE;
+        IndexStatistics[] found = null;
+
+        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        {
+            if (!MaskTest(meta.ArchetypeId))
+            {
+                continue;
+            }
+
+            if (found != null)
+            {
+                return ct.IndexStats;   // more than one archetype matches — no single distribution to describe them
+            }
+
+            var clusterState = dbe._archetypeStates[meta.ArchetypeId]?.ClusterState;
+            if (clusterState == null)
+            {
+                return ct.IndexStats;
+            }
+
+            var ixSlotIdx = FindClusterIndexSlot(clusterState, meta, out var transientHome);
+            if (ixSlotIdx < 0)
+            {
+                return ct.IndexStats;
+            }
+
+            found = transientHome ? clusterState.TransientIndexSlots[ixSlotIdx].Stats : clusterState.IndexSlots[ixSlotIdx].Stats;
+        }
+
+        return found ?? ct.IndexStats;
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Tier 3 constraints — WHERE predicates (broad scan evaluation)
     // ═══════════════════════════════════════════════════════════════════════
@@ -659,7 +710,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
         // Single AND branch
         var evaluators = QueryResolverHelper.ResolveEvaluators(branches[0], ct, 0);
-        var plan = PlanBuilder.Instance.BuildPlanAttributed(evaluators, ct, AdvancedSelectivityEstimator.Instance, null,
+        var plan = PlanBuilder.Instance.BuildPlanAttributed(evaluators, ct, PlannerStats(ct), AdvancedSelectivityEstimator.Instance, null,
             queryInstanceKind: 1, queryInstanceLocalId: (uint)EcsQueryId,
             definitionSourceFile: SourceFile, definitionSourceLine: SourceLine, definitionSourceMethod: SourceMethod,
             executionSourceFile: callerFile, executionSourceLine: callerLine, executionSourceMethod: callerMethod);
@@ -687,7 +738,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         for (var b = 0; b < branches.Length; b++)
         {
             branchEvaluators[b] = QueryResolverHelper.ResolveEvaluators(branches[b], ct, 0, (byte)b);
-            plans[b] = PlanBuilder.Instance.BuildPlanAttributed(branchEvaluators[b], ct, AdvancedSelectivityEstimator.Instance, null,
+            plans[b] = PlanBuilder.Instance.BuildPlanAttributed(branchEvaluators[b], ct, PlannerStats(ct), AdvancedSelectivityEstimator.Instance, null,
                 queryInstanceKind: 1, queryInstanceLocalId: (uint)EcsQueryId,
                 definitionSourceFile: SourceFile, definitionSourceLine: SourceLine, definitionSourceMethod: SourceMethod,
                 executionSourceFile: callerFile, executionSourceLine: callerLine, executionSourceMethod: callerMethod);
@@ -802,7 +853,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
         var ct = _whereComponentTable;
         var evaluators = QueryResolverHelper.ResolveEvaluators(SingleBranchOrThrow("ExecuteOrdered()"), ct, 0);
-        var plan = PlanBuilder.Instance.BuildPlanAttributed(evaluators, ct, AdvancedSelectivityEstimator.Instance, _orderBy.Value,
+        var plan = PlanBuilder.Instance.BuildPlanAttributed(evaluators, ct, PlannerStats(ct), AdvancedSelectivityEstimator.Instance, _orderBy.Value,
             queryInstanceKind: 1, queryInstanceLocalId: (uint)EcsQueryId,
             definitionSourceFile: SourceFile, definitionSourceLine: SourceLine, definitionSourceMethod: SourceMethod,
             executionSourceFile: callerFile, executionSourceLine: callerLine, executionSourceMethod: callerMethod);
@@ -1183,7 +1234,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var ct = _whereComponentTable;
 
         var evaluators = QueryResolverHelper.ResolveEvaluators(SingleBranchOrThrow("One-shot execution"), ct, 0);
-        var plan = PlanBuilder.Instance.BuildPlanAttributed(evaluators, ct, AdvancedSelectivityEstimator.Instance, null,
+        var plan = PlanBuilder.Instance.BuildPlanAttributed(evaluators, ct, PlannerStats(ct), AdvancedSelectivityEstimator.Instance, null,
             queryInstanceKind: 1, queryInstanceLocalId: (uint)EcsQueryId,
             definitionSourceFile: SourceFile, definitionSourceLine: SourceLine, definitionSourceMethod: SourceMethod,
             executionSourceFile: callerFile, executionSourceLine: callerLine, executionSourceMethod: callerMethod);
@@ -2326,7 +2377,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
                 var ct = _whereComponentTable;
                 var evaluators = QueryResolverHelper.ResolveEvaluators(SingleBranchOrThrow("Count()"), ct, 0);
-                var plan = PlanBuilder.Instance.BuildPlanAttributed(evaluators, ct, AdvancedSelectivityEstimator.Instance, null,
+                var plan = PlanBuilder.Instance.BuildPlanAttributed(evaluators, ct, PlannerStats(ct), AdvancedSelectivityEstimator.Instance, null,
                     queryInstanceKind: 1, queryInstanceLocalId: (uint)EcsQueryId,
                     definitionSourceFile: SourceFile, definitionSourceLine: SourceLine, definitionSourceMethod: SourceMethod,
                     executionSourceFile: callerFile, executionSourceLine: callerLine, executionSourceMethod: callerMethod);
@@ -2394,7 +2445,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             {
                 var ct = _whereComponentTable;
                 var evaluators = QueryResolverHelper.ResolveEvaluators(SingleBranchOrThrow("Any()"), ct, 0);
-                var plan = PlanBuilder.Instance.BuildPlanAttributed(evaluators, ct, AdvancedSelectivityEstimator.Instance, null,
+                var plan = PlanBuilder.Instance.BuildPlanAttributed(evaluators, ct, PlannerStats(ct), AdvancedSelectivityEstimator.Instance, null,
                     queryInstanceKind: 1, queryInstanceLocalId: (uint)EcsQueryId,
                     definitionSourceFile: SourceFile, definitionSourceLine: SourceLine, definitionSourceMethod: SourceMethod,
                     executionSourceFile: callerFile, executionSourceLine: callerLine, executionSourceMethod: callerMethod);

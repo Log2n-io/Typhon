@@ -532,6 +532,22 @@ internal sealed unsafe class ArchetypeClusterState
     /// <summary>Shadow guard bitmap. Guards first-write-per-tick shadow capture. Same index semantics as <see cref="ClusterDirtyBitmap"/>.</summary>
     public DirtyBitmap ClusterShadowBitmap;
 
+    /// <summary>
+    /// Approximate count of index mutations across BOTH homes since the last statistics rebuild — the per-archetype counterpart of
+    /// <see cref="ComponentTable.MutationsSinceRebuild"/>, and the threshold <see cref="StatisticsWorker"/> trips on for a cluster-backed archetype (#665).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Non-atomic on purpose, exactly as the ComponentTable field is: it only gates a background refresh, so a lost increment under contention costs at most
+    /// a delayed rebuild. Reset to zero by the worker after a successful rebuild.
+    /// </para>
+    /// <para>
+    /// Counted only where the index actually changed. An update that leaves every indexed field alone does no tree work (the unchanged-field guards), so it
+    /// must not push the statistics toward a rebuild either — and that makes "no work" directly observable in a test, which no other counter here is.
+    /// </para>
+    /// </remarks>
+    internal int MutationsSinceRebuild;
+
     /// <summary>Shared <see cref="ChunkBasedSegment{TStore}"/> backing all per-archetype B+Trees for this archetype.</summary>
     public ChunkBasedSegment<PersistentStore> IndexSegment;
 
@@ -2869,6 +2885,7 @@ internal sealed unsafe class ArchetypeClusterState
         var infos = table.IndexedFieldInfos;
         var fields = new ClusterIndexField<TStore>[infos.Length];
         var shadowBuffers = new FieldShadowBuffer[infos.Length];
+        var stats = new IndexStatistics[infos.Length];
 
         // Iterate component definition fields to find indexed ones (in stable order matching IndexedFieldInfos)
         int fi = 0;
@@ -2912,6 +2929,7 @@ internal sealed unsafe class ArchetypeClusterState
                 MultiFieldIndex = multiFieldIndex,
             };
             shadowBuffers[fi] = new FieldShadowBuffer();
+            stats[fi] = new IndexStatistics(btree);
             fi++;
         }
 
@@ -2920,6 +2938,7 @@ internal sealed unsafe class ArchetypeClusterState
             Slot = slot,
             Fields = fields,
             ShadowBuffers = shadowBuffers,
+            Stats = stats,
         };
     }
 
@@ -3183,6 +3202,18 @@ internal struct ClusterIndexSlot<TStore> where TStore : struct, IPageStore
 
     /// <summary>Per-indexed-field shadow buffers for old value capture before mutation.</summary>
     public FieldShadowBuffer[] ShadowBuffers;
+
+    /// <summary>
+    /// Per-indexed-field selectivity statistics, parallel to <see cref="Fields"/> — the per-archetype counterpart of
+    /// <see cref="ComponentTable.IndexStats"/> (#665).
+    /// </summary>
+    /// <remarks>
+    /// Not shared with the ComponentTable's array on purpose. Statistics describe a key DISTRIBUTION, and a ComponentTable is shared across every archetype
+    /// holding that component: folding several archetypes into one array blends their distributions, so a predicate that is highly selective within one
+    /// archetype reads as unselective and the planner picks the wrong path. <see cref="IndexStatistics"/> wraps the store-agnostic
+    /// <see cref="IBTreeIndex"/>, so the same type serves either index home with no generic surgery.
+    /// </remarks>
+    public IndexStatistics[] Stats;
 }
 
 /// <summary>

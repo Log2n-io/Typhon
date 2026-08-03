@@ -1,4 +1,4 @@
-// unset
+﻿// unset
 
 using System;
 using System.Threading;
@@ -156,7 +156,79 @@ internal sealed class StatisticsWorker : ResourceNode
                     // Continue processing other tables — one table's failure should not block the rest
                 }
             }
+
+            RebuildClusterArchetypes();
         }
+    }
+
+    /// <summary>
+    /// The per-archetype half of the sweep (#665). A cluster-backed archetype's entities are not in any <see cref="ComponentTable.ComponentSegment"/>, so the
+    /// loop above sees no mutations for them and would leave their statistics frozen at whatever the first rebuild produced — or, if it were merely
+    /// handed the ComponentTable, publish statistics built from an empty scan.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately a second pass rather than a branch inside the first: the two are keyed on different things (a ComponentTable is shared across archetypes,
+    /// a cluster state belongs to exactly one) and share no threshold state.
+    /// </remarks>
+    private void RebuildClusterArchetypes()
+    {
+        var states = _dbe._archetypeStates;
+        if (states == null)
+        {
+            return;
+        }
+
+        for (var i = 0; i < states.Length; i++)
+        {
+            if (_shutdown)
+            {
+                return;
+            }
+
+            var clusterState = states[i]?.ClusterState;
+            if (clusterState == null || clusterState.MutationsSinceRebuild < _options.MutationThreshold)
+            {
+                continue;
+            }
+
+            var liveEntities = clusterState.ActiveClusterCount * clusterState.Layout.ClusterSize;
+            if (liveEntities < _options.MinEntitiesForRebuild)
+            {
+                continue;
+            }
+
+            try
+            {
+                var clusterInterval = ComputeClusterSamplingInterval(clusterState, _options.SamplingMinEntities);
+                using var rebuildScope = TyphonEvent.BeginStatisticsRebuild(liveEntities, clusterState.MutationsSinceRebuild, clusterInterval);
+                StatisticsRebuilder.RebuildClusterAll(clusterState, _epochManager, clusterInterval);
+
+                // Reset after a successful rebuild — a failure preserves the count so the next sweep retries.
+                clusterState.MutationsSinceRebuild = 0;
+            }
+            catch (Exception ex)
+            {
+                _lastError = ex;
+                // Continue with the other archetypes — one archetype's failure should not block the rest.
+            }
+        }
+    }
+
+    /// <summary>
+    /// Cluster-granularity sampling interval: visit roughly <paramref name="samplingMinEntities"/> entities. Returns 1 (every active cluster) when the
+    /// archetype is small enough. The cluster counterpart of <see cref="ComputeSamplingInterval"/>, whose unit is a page.
+    /// </summary>
+    private static int ComputeClusterSamplingInterval(ArchetypeClusterState clusterState, int samplingMinEntities)
+    {
+        var clusterSize = clusterState.Layout.ClusterSize;
+        var totalEntities = clusterState.ActiveClusterCount * clusterSize;
+        if (totalEntities <= samplingMinEntities || clusterSize == 0)
+        {
+            return 1;
+        }
+
+        var clustersNeeded = Math.Max(1, samplingMinEntities / clusterSize);
+        return Math.Max(1, clusterState.ActiveClusterCount / clustersNeeded);
     }
 
     /// <summary>

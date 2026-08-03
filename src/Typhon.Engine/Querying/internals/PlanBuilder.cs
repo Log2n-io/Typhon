@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Runtime.CompilerServices;
 using Typhon.Profiler;
 
@@ -19,7 +19,7 @@ internal class PlanBuilder
     /// (short-circuit optimization). Attempts to select a unique secondary index as the primary scan stream.
     /// </summary>
     public ExecutionPlan BuildPlan(FieldEvaluator[] evaluators, ComponentTable table, ISelectivityEstimator estimator) =>
-        BuildPlanCore(evaluators, table, estimator, descending: false, orderByFieldIndex: int.MinValue,
+        BuildPlanCore(evaluators, table, null, estimator, descending: false, orderByFieldIndex: int.MinValue,
             queryInstanceKind: 0, queryInstanceLocalId: 0, definitionSourceFile: null, definitionSourceLine: 0, definitionSourceMethod: null,
             executionSourceFile: null, executionSourceLine: 0, executionSourceMethod: null);
 
@@ -28,7 +28,7 @@ internal class PlanBuilder
     /// Secondary index selection is only used when OrderBy is by the same field as the primary predicate, or when OrderBy is by PK (falls back to PK scan).
     /// </summary>
     public ExecutionPlan BuildPlan(FieldEvaluator[] evaluators, ComponentTable table, ISelectivityEstimator estimator, OrderByField orderBy) =>
-        BuildPlanCore(evaluators, table, estimator, descending: orderBy.Descending, orderByFieldIndex: orderBy.FieldIndex,
+        BuildPlanCore(evaluators, table, null, estimator, descending: orderBy.Descending, orderByFieldIndex: orderBy.FieldIndex,
             queryInstanceKind: 0, queryInstanceLocalId: 0, definitionSourceFile: null, definitionSourceLine: 0, definitionSourceMethod: null,
             executionSourceFile: null, executionSourceLine: 0, executionSourceMethod: null);
 
@@ -42,18 +42,18 @@ internal class PlanBuilder
     /// When the issuer omits identity (kind/localId == 0), the plan still builds correctly — the trace events simply
     /// carry zeros for the new fields, equivalent to legacy callers.
     /// </summary>
-    public ExecutionPlan BuildPlanAttributed(FieldEvaluator[] evaluators, ComponentTable table, ISelectivityEstimator estimator, OrderByField? orderBy,
-        byte queryInstanceKind, uint queryInstanceLocalId,
+    public ExecutionPlan BuildPlanAttributed(FieldEvaluator[] evaluators, ComponentTable table, IndexStatistics[] stats, ISelectivityEstimator estimator,
+        OrderByField? orderBy, byte queryInstanceKind, uint queryInstanceLocalId,
         string definitionSourceFile, int definitionSourceLine, string definitionSourceMethod,
         string executionSourceFile, int executionSourceLine, string executionSourceMethod) =>
-        BuildPlanCore(evaluators, table, estimator,
+        BuildPlanCore(evaluators, table, stats, estimator,
             descending: orderBy?.Descending ?? false,
             orderByFieldIndex: orderBy?.FieldIndex ?? int.MinValue,
             queryInstanceKind, queryInstanceLocalId,
             definitionSourceFile, definitionSourceLine, definitionSourceMethod,
             executionSourceFile, executionSourceLine, executionSourceMethod);
 
-    private static ExecutionPlan BuildPlanCore(FieldEvaluator[] evaluators, ComponentTable table, ISelectivityEstimator estimator,
+    private static ExecutionPlan BuildPlanCore(FieldEvaluator[] evaluators, ComponentTable table, IndexStatistics[] stats, ISelectivityEstimator estimator,
         bool descending, int orderByFieldIndex,
         byte queryInstanceKind, uint queryInstanceLocalId,
         string definitionSourceFile, int definitionSourceLine, string definitionSourceMethod,
@@ -63,7 +63,7 @@ internal class PlanBuilder
         // Previously the descriptor was emitted before plan resolution with primaryIndexFieldIdx=-1, forcing the Workbench catalog to render every query as
         // "no index scan". The build is pure computation (no telemetry emission yet) so reordering doesn't affect trace event ordering — the
         // QueryDefinitionDescribe still lands BEFORE BeginQueryPlan opens its span.
-        var (ordered, estimates) = OrderBySelectivity(evaluators, table, estimator);
+        var (ordered, estimates) = OrderBySelectivity(evaluators, stats ?? table.IndexStats, estimator);
         var plan = BuildPlanWithPrimarySelection(ordered, estimates, table, descending, orderByFieldIndex);
 
         // ── Step 2: emit QueryDefinitionDescribe (first time per identity) BEFORE the QueryPlan span ──
@@ -387,7 +387,8 @@ internal class PlanBuilder
         return (-1, default, 0, 0);
     }
 
-    private static (FieldEvaluator[] Ordered, long[] Estimates) OrderBySelectivity(FieldEvaluator[] evaluators, ComponentTable table, ISelectivityEstimator estimator)
+    private static (FieldEvaluator[] Ordered, long[] Estimates) OrderBySelectivity(FieldEvaluator[] evaluators, IndexStatistics[] stats,
+        ISelectivityEstimator estimator)
     {
         if (evaluators.Length == 0)
         {
@@ -407,7 +408,7 @@ internal class PlanBuilder
             {
                 ordered[i] = evaluators[i];
                 ref var eval = ref ordered[i];
-                estimates[i] = estimator.EstimateCardinality(table, eval.FieldIndex, eval.CompareOp, eval.Threshold);
+                estimates[i] = estimator.EstimateCardinality(stats, eval.FieldIndex, eval.CompareOp, eval.Threshold);
             }
 
             // Insertion sort by ascending cardinality, tie-break by lower FieldIndex.

@@ -185,6 +185,53 @@ class ClusterString64IndexTests : TestBase<ClusterString64IndexTests>
         Assert.That(IndexedEntityForName(dbe, (String64)"other"), Is.Not.Null, "an unrelated key must be untouched");
     }
 
+    /// <summary>
+    /// AC: the commit path's unchanged-field guard compares the WHOLE key, so a String64 mutation that leaves the first 8 bytes alone still moves the index.
+    /// </summary>
+    /// <remarks>
+    /// The guard added by #665 short-circuits <c>ReconcileClusterIndexAndViews</c> when an indexed field did not change, which is what keeps an unrelated
+    /// write off the B+Tree. Its flat twin <c>ReconcileFlatIndexAndViews</c> compares through <c>KeyBytes8</c> — legal there, because Commit discipline is
+    /// SingleVersion-only and registration refuses a String64 index on any in-place storage mode. The per-archetype path has no such luxury: it is also the
+    /// Versioned commit path, and Versioned is exactly where a String64 index IS legal. Comparing 8 of 64 bytes would silently skip the move and leave the
+    /// entity indexed under a key it no longer has — an invisible corruption, since the query layer cannot reach a String64 index to contradict it.
+    /// </remarks>
+    [Test]
+    public void String64Index_MutationSharingTheFirstEightBytes_StillMovesTheKey()
+    {
+        using var dbe = SetupEngine();
+
+        // Premise: the guard must be told the field is 64 bytes wide. Same length so the comparison cannot be decided by a length prefix.
+        var clusterState0 = ClusterState(dbe);
+        Assert.That(clusterState0.IndexSlots[0].Fields[0].FieldSize, Is.EqualTo(64), "a String64 index field must report its full width to the guard");
+
+        const string before = "shared_prefix_alpha";
+        const string after = "shared_prefix_bravo";
+        Assert.That(before.Length, Is.EqualTo(after.Length), "premise: equal length");
+        Assert.That(before[..8], Is.EqualTo(after[..8]), "premise: the two keys are byte-identical over the first 8 characters");
+
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            id = Spawn(tx, before, 1);
+            tx.Commit();
+        }
+        dbe.WriteTickFence(1);
+        Assert.That(IndexedEntityForName(dbe, (String64)before), Is.EqualTo(id), "premise: indexed under the original key");
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(id).Write(ClusterS64Arch.Data) = new ClusterS64Named((String64)after, 1);
+            tx.Commit();
+        }
+        dbe.WriteTickFence(2);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(IndexedEntityForName(dbe, (String64)after), Is.EqualTo(id), "the key must move even though the first 8 bytes are unchanged");
+            Assert.That(IndexedEntityForName(dbe, (String64)before), Is.Null, "and the old key must be gone");
+        });
+    }
+
     [Test]
     public void String64Index_Destroy_RemovesTheKey()
     {

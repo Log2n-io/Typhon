@@ -49,10 +49,10 @@ class AdvancedEstimatorTests : TestBase<AdvancedEstimatorTests>
         StatisticsRebuilder.RebuildStatistics(ct, dbe.EpochManager);
 
         // MCV hit: should return exact frequency from MCV (Gold is field 0)
-        var card42 = estimator.EstimateCardinality(ct, 0, CompareOp.Equal, 42);
+        var card42 = estimator.EstimateCardinality(ct.IndexStats, 0, CompareOp.Equal, 42);
         Assert.That(card42, Is.EqualTo(80));
 
-        var card99 = estimator.EstimateCardinality(ct, 0, CompareOp.Equal, 99);
+        var card99 = estimator.EstimateCardinality(ct.IndexStats, 0, CompareOp.Equal, 99);
         Assert.That(card99, Is.EqualTo(20));
     }
 
@@ -74,11 +74,11 @@ class AdvancedEstimatorTests : TestBase<AdvancedEstimatorTests>
         StatisticsRebuilder.RebuildStatistics(ct, dbe.EpochManager);
 
         // Value 50 is in MCV but B is a unique index — BTree fallback should also give 1
-        var card = estimator.EstimateCardinality(ct, 1, CompareOp.Equal, 50);
+        var card = estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.Equal, 50);
         Assert.That(card, Is.EqualTo(1));
 
         // Value 999 doesn't exist
-        var cardMiss = estimator.EstimateCardinality(ct, 1, CompareOp.Equal, 999);
+        var cardMiss = estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.Equal, 999);
         Assert.That(cardMiss, Is.EqualTo(0));
     }
 
@@ -95,8 +95,8 @@ class AdvancedEstimatorTests : TestBase<AdvancedEstimatorTests>
         CreateAndCommitCompD(dbe, 2.0f, 99, 2.0);
 
         // No statistics built — should fall back to B+Tree point seek
-        Assert.That(estimator.EstimateCardinality(ct, 1, CompareOp.Equal, 42), Is.EqualTo(1));
-        Assert.That(estimator.EstimateCardinality(ct, 1, CompareOp.Equal, 999), Is.EqualTo(0));
+        Assert.That(estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.Equal, 42), Is.EqualTo(1));
+        Assert.That(estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.Equal, 999), Is.EqualTo(0));
     }
 
     [Test]
@@ -117,11 +117,11 @@ class AdvancedEstimatorTests : TestBase<AdvancedEstimatorTests>
         StatisticsRebuilder.RebuildStatistics(ct, dbe.EpochManager);
 
         // B > 499 should estimate ~500 (histogram available)
-        var gt = estimator.EstimateCardinality(ct, 1, CompareOp.GreaterThan, 499);
+        var gt = estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.GreaterThan, 499);
         Assert.That(gt, Is.InRange(400, 600));
 
         // B <= 499 should estimate ~500
-        var lte = estimator.EstimateCardinality(ct, 1, CompareOp.LessThanOrEqual, 499);
+        var lte = estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.LessThanOrEqual, 499);
         Assert.That(lte, Is.InRange(400, 600));
     }
 
@@ -141,7 +141,7 @@ class AdvancedEstimatorTests : TestBase<AdvancedEstimatorTests>
         }
 
         // No rebuild → uniform distribution fallback
-        var gt = estimator.EstimateCardinality(ct, 1, CompareOp.GreaterThan, 49);
+        var gt = estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.GreaterThan, 49);
         Assert.That(gt, Is.InRange(40, 60));
     }
 
@@ -167,7 +167,7 @@ class AdvancedEstimatorTests : TestBase<AdvancedEstimatorTests>
         StatisticsRebuilder.RebuildStatistics(ct, dbe.EpochManager);
 
         // Gold != 42 should be total - 80 = 20 (Gold is field 0)
-        var card = estimator.EstimateCardinality(ct, 0, CompareOp.NotEqual, 42);
+        var card = estimator.EstimateCardinality(ct.IndexStats, 0, CompareOp.NotEqual, 42);
         Assert.That(card, Is.EqualTo(20));
     }
 
@@ -190,13 +190,13 @@ class AdvancedEstimatorTests : TestBase<AdvancedEstimatorTests>
         for (int threshold = 0; threshold < 50; threshold += 10)
         {
             Assert.That(
-                advanced.EstimateCardinality(ct, 1, CompareOp.Equal, threshold),
-                Is.EqualTo(basic.EstimateCardinality(ct, 1, CompareOp.Equal, threshold)),
+                advanced.EstimateCardinality(ct.IndexStats, 1, CompareOp.Equal, threshold),
+                Is.EqualTo(basic.EstimateCardinality(ct.IndexStats, 1, CompareOp.Equal, threshold)),
                 $"Equality mismatch at threshold {threshold}");
 
             Assert.That(
-                advanced.EstimateCardinality(ct, 1, CompareOp.GreaterThan, threshold),
-                Is.EqualTo(basic.EstimateCardinality(ct, 1, CompareOp.GreaterThan, threshold)),
+                advanced.EstimateCardinality(ct.IndexStats, 1, CompareOp.GreaterThan, threshold),
+                Is.EqualTo(basic.EstimateCardinality(ct.IndexStats, 1, CompareOp.GreaterThan, threshold)),
                 $"GreaterThan mismatch at threshold {threshold}");
         }
     }

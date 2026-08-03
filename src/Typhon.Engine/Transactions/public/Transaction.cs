@@ -72,6 +72,11 @@ public unsafe partial class Transaction : EntityAccessor
     private ChunkAccessor<PersistentStore> _clusterCommitMapAccessor;
     private ChunkAccessor<PersistentStore> _clusterCommitContentAccessor;
     private ChunkAccessor<PersistentStore> _clusterCommitClusterAccessor;
+    // Per-archetype index segments, cached on the same archetype key as the three above (#665). Before this the reconcile created and disposed an accessor
+    // per entity PER FIELD; every field of an archetype shares one of these two segments, so all but the first were redundant. Two rather than one because
+    // a segment serves exactly one node size and String64 nodes are wider — the same split ComponentTable has always had.
+    private ChunkAccessor<PersistentStore> _clusterCommitIndexAccessor;
+    private ChunkAccessor<PersistentStore> _clusterCommitIndexAccessorS64;
     private bool _hasClusterCommitAccessors;
 
     // AP-01 (Append-before-publish): the commit pipeline splits each component entry into a PREPARE half (all fallible work — conflict
@@ -276,6 +281,8 @@ public unsafe partial class Transaction : EntityAccessor
         _clusterCommitMapAccessor.Dispose();
         _clusterCommitContentAccessor.Dispose();
         _clusterCommitClusterAccessor.Dispose();
+        _clusterCommitIndexAccessor.Dispose();
+        _clusterCommitIndexAccessorS64.Dispose();
         _hasClusterCommitAccessors = false;
 
         if (_isDisposed)
@@ -1469,15 +1476,7 @@ public unsafe partial class Transaction : EntityAccessor
         outCompSlot = compSlotByte;
 
         // Lazy-cache accessors by archetype — reused across all entities in the same commit batch
-        if (!_hasClusterCommitAccessors || _clusterCommitArchId != archId)
-        {
-            DisposeClusterCommitAccessors();
-            _clusterCommitMapAccessor = es.EntityMap.Segment.CreateChunkAccessor();
-            _clusterCommitContentAccessor = table.ComponentSegment.CreateChunkAccessor();
-            _clusterCommitClusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
-            _clusterCommitArchId = archId;
-            _hasClusterCommitAccessors = true;
-        }
+        EnsureClusterCommitAccessors(archId, es, table.ComponentSegment, clusterState);
 
         // Read entity's cluster location from EntityMap (once)
         int recordSize = meta._entityRecordSize;
@@ -1529,15 +1528,7 @@ public unsafe partial class Transaction : EntityAccessor
         var table = e.Info.ComponentTable;
 
         // Re-establish lazy-cached accessors by archetype — reused across consecutive same-archetype entries in the publish drain.
-        if (!_hasClusterCommitAccessors || _clusterCommitArchId != archId)
-        {
-            DisposeClusterCommitAccessors();
-            _clusterCommitMapAccessor = es.EntityMap.Segment.CreateChunkAccessor();
-            _clusterCommitContentAccessor = table.ComponentSegment.CreateChunkAccessor();
-            _clusterCommitClusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
-            _clusterCommitArchId = archId;
-            _hasClusterCommitAccessors = true;
-        }
+        EnsureClusterCommitAccessors(archId, es, table.ComponentSegment, clusterState);
 
         var layout = clusterState.Layout;
         byte* srcAddr = _clusterCommitContentAccessor.GetChunkAddress(e.CurCompContentChunkId);
@@ -1557,9 +1548,69 @@ public unsafe partial class Transaction : EntityAccessor
             _clusterCommitMapAccessor.Dispose();
             _clusterCommitContentAccessor.Dispose();
             _clusterCommitClusterAccessor.Dispose();
+            _clusterCommitIndexAccessor.Dispose();
+            _clusterCommitIndexAccessorS64.Dispose();
             _hasClusterCommitAccessors = false;
         }
     }
+
+    /// <summary>
+    /// Establishes the per-archetype commit accessors, reused across every entity of that archetype in the batch. Idempotent for the archetype already
+    /// cached; switching archetypes disposes the previous set first.
+    /// </summary>
+    /// <remarks>
+    /// One method rather than the three byte-identical blocks it replaced (#665) — the set has to stay in step with
+    /// <see cref="DisposeClusterCommitAccessors"/>, and three copies is three chances for it not to. An index segment the archetype does not own leaves its
+    /// accessor <c>default</c>, which disposes as a no-op.
+    /// </remarks>
+    private void EnsureClusterCommitAccessors(ushort archId, ArchetypeEngineState es, ChunkBasedSegment<PersistentStore> contentSegment,
+        ArchetypeClusterState clusterState)
+    {
+        if (_hasClusterCommitAccessors && _clusterCommitArchId == archId)
+        {
+            return;
+        }
+
+        DisposeClusterCommitAccessors();
+        _clusterCommitMapAccessor = es.EntityMap.Segment.CreateChunkAccessor();
+        _clusterCommitContentAccessor = contentSegment.CreateChunkAccessor();
+        _clusterCommitClusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
+        _clusterCommitIndexAccessor = clusterState.IndexSegment?.CreateChunkAccessor(_changeSet) ?? default;
+        _clusterCommitIndexAccessorS64 = clusterState.IndexSegmentString64?.CreateChunkAccessor(_changeSet) ?? default;
+        _clusterCommitArchId = archId;
+        _hasClusterCommitAccessors = true;
+    }
+
+    /// <summary>
+    /// The cached commit accessor for whichever per-archetype index segment <paramref name="segment"/> is. Returned by reference — the B+Tree mutation
+    /// methods take <c>ref ChunkAccessor</c> and record page state in it.
+    /// </summary>
+    /// <remarks>
+    /// Passing an accessor built on the other segment resolves node chunks at the wrong stride and corrupts neighbouring nodes (#658), so this is a
+    /// reference comparison rather than a guess from the field type. When the archetype has no String64 segment the comparison is against <c>null</c>, which
+    /// a live tree's segment never equals — no extra guard needed.
+    /// </remarks>
+    private ref ChunkAccessor<PersistentStore> ClusterCommitIndexAccessor(ArchetypeClusterState clusterState, ChunkBasedSegment<PersistentStore> segment)
+        => ref ReferenceEquals(segment, clusterState.IndexSegmentString64) ? ref _clusterCommitIndexAccessorS64 : ref _clusterCommitIndexAccessor;
+
+    /// <summary>
+    /// Whether <paramref name="size"/> bytes at <paramref name="a"/> and <paramref name="b"/> are identical — the unchanged-field guard's test.
+    /// </summary>
+    /// <remarks>
+    /// Scalar compares for the widths an index key actually has, with <see cref="MemoryExtensions.SequenceEqual{T}(ReadOnlySpan{T},ReadOnlySpan{T})"/> only
+    /// for the <c>String64</c> tail. Measured, not assumed: going through spans for every width cost ~2.9 % on the path where the key DOES change (95.4 µs
+    /// against a 92.7 µs baseline, reproduced twice) — the guard has to pay for itself on both sides, not just the one it optimises. The comparison must
+    /// stay width-exact: an 8-byte shortcut for a 64-byte key silently skips a real move (#665).
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool FieldBytesEqual(byte* a, byte* b, int size) => size switch
+    {
+        1 => *a == *b,
+        2 => *(short*)a == *(short*)b,
+        4 => *(int*)a == *(int*)b,
+        8 => *(long*)a == *(long*)b,
+        _ => new ReadOnlySpan<byte>(a, size).SequenceEqual(new ReadOnlySpan<byte>(b, size)),
+    };
 
     /// <summary>
     /// Reconciles the per-archetype B+Tree index(es) and view delta buffers for one component slot of one cluster entity, given the field-value
@@ -1589,109 +1640,117 @@ public unsafe partial class Transaction : EntityAccessor
             for (int fi = 0; fi < ixSlot.Fields.Length; fi++)
             {
                 ref var field = ref ixSlot.Fields[fi];
-                var idxAccessor = field.Index.Segment.CreateChunkAccessor(_changeSet);
-                try
+
+                // Unchanged-field guard (#665). An update that leaves an indexed field alone — the common shape: index the classification, write the value
+                // that churns — used to pay two optimistic B+Tree descents, a leaf write-lock and a dirtied index page per field per commit, plus a dirtied
+                // CLUSTER page for an AllowMultiple field, to move a key onto itself. The legacy path has short-circuited here since it was written
+                // (IndexMaintainer.cs:29) and so does the flat twin below (ReconcileFlatIndexAndViews); only the per-archetype path never got it.
+                //
+                // Compared as raw bytes over FieldSize, NOT through KeyBytes8: a Versioned component may index a String64 field (64 bytes), and comparing
+                // the first 8 would silently skip a real key move. Skipping the view notification with it is correct — nothing changed — and so is skipping
+                // the zone-map Widen, since an unchanged value is already inside the bounds that admitted it.
+                if (newComp != null && oldComp != null && FieldBytesEqual(oldComp + field.FieldOffset, newComp + field.FieldOffset, field.FieldSize))
                 {
+                    continue;
+                }
+
+                ref var idxAccessor = ref ClusterCommitIndexAccessor(clusterState, field.Index.Segment);
+                clusterState.MutationsSinceRebuild++;   // past the guard, so this is real tree work (#665)
+                if (newComp != null && oldComp != null)
+                {
+                    // Update: move this entity's entry from the old key to the new key.
+                    if (field.AllowMultiple)
+                    {
+                        // The leaf value for an AllowMultiple index is a VSBS buffer-root id, NOT the clusterLocation — the entity's location lives
+                        // inside the buffer. Plain Move() is unique-only: it overwrites the leaf value with the raw clusterLocation, which the read path
+                        // then treats as a buffer id (finds nothing → the entity vanishes from every scan of that key). Use MoveValue with this entity's
+                        // element id (kept in the cluster tail slot exactly as spawn/destroy do) and write the returned new element id back so a later
+                        // update/destroy still targets the right buffer entry. Mirrors ReconcileFlatIndexAndViews / IndexMaintainer.UpdateIndices.
+                        if (clusterBase == null)
+                        {
+                            clusterBase = _clusterCommitClusterAccessor.GetChunkAddress(clusterChunkId, true);
+                        }
+                        int* elementIdPtr = (int*)(clusterBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
+                        *elementIdPtr = field.Index.MoveValue(oldComp + field.FieldOffset, newComp + field.FieldOffset, *elementIdPtr, clusterLocation,
+                            ref idxAccessor, out _, out _);
+                    }
+                    else
+                    {
+                        field.Index.Move(oldComp + field.FieldOffset, newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
+                    }
+                }
+                else if (newComp != null)
+                {
+                    // Insert (first commit after spawn): Add returns the per-entity element id for an AllowMultiple index, which must be recorded in the
+                    // cluster tail slot so destroy/update can target this entity's entry (mirrors FinalizeSpawns).
+                    int elementId = field.Index.Add(newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
+                    if (field.AllowMultiple)
+                    {
+                        if (clusterBase == null)
+                        {
+                            clusterBase = _clusterCommitClusterAccessor.GetChunkAddress(clusterChunkId, true);
+                        }
+                        *(int*)(clusterBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex)) = elementId;
+                    }
+                }
+                else if (oldComp != null)
+                {
+                    // Delete: for an AllowMultiple index, RemoveValue removes only this entity's (key, clusterLocation) entry — Remove(key) would wipe the
+                    // whole buffer and drop siblings sharing the value (the same rule the cluster destroy path follows).
+                    if (field.AllowMultiple)
+                    {
+                        if (clusterBase == null)
+                        {
+                            clusterBase = _clusterCommitClusterAccessor.GetChunkAddress(clusterChunkId, true);
+                        }
+                        int elementId = *(int*)(clusterBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
+                        field.Index.RemoveValue(oldComp + field.FieldOffset, elementId, clusterLocation, ref idxAccessor);
+                    }
+                    else
+                    {
+                        field.Index.Remove(oldComp + field.FieldOffset, out _, ref idxAccessor);
+                    }
+                }
+
+                // Widen zone map with new value
+                if (newComp != null)
+                {
+                    field.ZoneMap?.Widen(clusterChunkId, newComp + field.FieldOffset);
+                }
+
+                // Notify views of index change (delta buffer for incremental views)
+                var viewTable = es.SlotToComponentTable[ixSlot.Slot];
+                var views = viewTable.ViewRegistry.GetViewsForField(fi);
+                for (int v = 0; v < views.Length; v++)
+                {
+                    var reg = views[v];
+                    if (reg.View.IsDisposed)
+                    {
+                        continue;
+                    }
+
                     if (newComp != null && oldComp != null)
                     {
-                        // Update: move this entity's entry from the old key to the new key.
-                        if (field.AllowMultiple)
-                        {
-                            // The leaf value for an AllowMultiple index is a VSBS buffer-root id, NOT the clusterLocation — the entity's location lives
-                            // inside the buffer. Plain Move() is unique-only: it overwrites the leaf value with the raw clusterLocation, which the read path
-                            // then treats as a buffer id (finds nothing → the entity vanishes from every scan of that key). Use MoveValue with this entity's
-                            // element id (kept in the cluster tail slot exactly as spawn/destroy do) and write the returned new element id back so a later
-                            // update/destroy still targets the right buffer entry. Mirrors ReconcileFlatIndexAndViews / IndexMaintainer.UpdateIndices.
-                            if (clusterBase == null)
-                            {
-                                clusterBase = _clusterCommitClusterAccessor.GetChunkAddress(clusterChunkId, true);
-                            }
-                            int* elementIdPtr = (int*)(clusterBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
-                            *elementIdPtr = field.Index.MoveValue(oldComp + field.FieldOffset, newComp + field.FieldOffset, *elementIdPtr, clusterLocation,
-                                ref idxAccessor, out _, out _);
-                        }
-                        else
-                        {
-                            field.Index.Move(oldComp + field.FieldOffset, newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
-                        }
+                        // Move: emit old and new keys
+                        var oldKey = KeyBytes8.FromPointer(oldComp + field.FieldOffset, field.FieldSize);
+                        var newKey = KeyBytes8.FromPointer(newComp + field.FieldOffset, field.FieldSize);
+                        byte flags = (byte)(fi & 0x3F);
+                        reg.DeltaBuffer.TryAppend(entityId, oldKey, newKey, TSN, flags, reg.ComponentTag);
                     }
                     else if (newComp != null)
                     {
-                        // Insert (first commit after spawn): Add returns the per-entity element id for an AllowMultiple index, which must be recorded in the
-                        // cluster tail slot so destroy/update can target this entity's entry (mirrors FinalizeSpawns).
-                        int elementId = field.Index.Add(newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
-                        if (field.AllowMultiple)
-                        {
-                            if (clusterBase == null)
-                            {
-                                clusterBase = _clusterCommitClusterAccessor.GetChunkAddress(clusterChunkId, true);
-                            }
-                            *(int*)(clusterBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex)) = elementId;
-                        }
+                        // Add: isCreation flag
+                        var newKey = KeyBytes8.FromPointer(newComp + field.FieldOffset, field.FieldSize);
+                        byte flags = (byte)((fi & 0x3F) | 0x40); // isCreation
+                        reg.DeltaBuffer.TryAppend(entityId, default, newKey, TSN, flags, reg.ComponentTag);
                     }
                     else if (oldComp != null)
                     {
-                        // Delete: for an AllowMultiple index, RemoveValue removes only this entity's (key, clusterLocation) entry — Remove(key) would wipe the
-                        // whole buffer and drop siblings sharing the value (the same rule the cluster destroy path follows).
-                        if (field.AllowMultiple)
-                        {
-                            if (clusterBase == null)
-                            {
-                                clusterBase = _clusterCommitClusterAccessor.GetChunkAddress(clusterChunkId, true);
-                            }
-                            int elementId = *(int*)(clusterBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
-                            field.Index.RemoveValue(oldComp + field.FieldOffset, elementId, clusterLocation, ref idxAccessor);
-                        }
-                        else
-                        {
-                            field.Index.Remove(oldComp + field.FieldOffset, out _, ref idxAccessor);
-                        }
+                        // Remove: isDeletion flag
+                        var oldKey = KeyBytes8.FromPointer(oldComp + field.FieldOffset, field.FieldSize);
+                        byte flags = (byte)((fi & 0x3F) | 0x80); // isDeletion
+                        reg.DeltaBuffer.TryAppend(entityId, oldKey, default, TSN, flags, reg.ComponentTag);
                     }
-
-                    // Widen zone map with new value
-                    if (newComp != null)
-                    {
-                        field.ZoneMap?.Widen(clusterChunkId, newComp + field.FieldOffset);
-                    }
-
-                    // Notify views of index change (delta buffer for incremental views)
-                    var viewTable = es.SlotToComponentTable[ixSlot.Slot];
-                    var views = viewTable.ViewRegistry.GetViewsForField(fi);
-                    for (int v = 0; v < views.Length; v++)
-                    {
-                        var reg = views[v];
-                        if (reg.View.IsDisposed)
-                        {
-                            continue;
-                        }
-
-                        if (newComp != null && oldComp != null)
-                        {
-                            // Move: emit old and new keys
-                            var oldKey = KeyBytes8.FromPointer(oldComp + field.FieldOffset, field.FieldSize);
-                            var newKey = KeyBytes8.FromPointer(newComp + field.FieldOffset, field.FieldSize);
-                            byte flags = (byte)(fi & 0x3F);
-                            reg.DeltaBuffer.TryAppend(entityId, oldKey, newKey, TSN, flags, reg.ComponentTag);
-                        }
-                        else if (newComp != null)
-                        {
-                            // Add: isCreation flag
-                            var newKey = KeyBytes8.FromPointer(newComp + field.FieldOffset, field.FieldSize);
-                            byte flags = (byte)((fi & 0x3F) | 0x40); // isCreation
-                            reg.DeltaBuffer.TryAppend(entityId, default, newKey, TSN, flags, reg.ComponentTag);
-                        }
-                        else if (oldComp != null)
-                        {
-                            // Remove: isDeletion flag
-                            var oldKey = KeyBytes8.FromPointer(oldComp + field.FieldOffset, field.FieldSize);
-                            byte flags = (byte)((fi & 0x3F) | 0x80); // isDeletion
-                            reg.DeltaBuffer.TryAppend(entityId, oldKey, default, TSN, flags, reg.ComponentTag);
-                        }
-                    }
-                }
-                finally
-                {
-                    idxAccessor.Dispose();
                 }
             }
             break; // Found the matching index slot
@@ -1761,15 +1820,7 @@ public unsafe partial class Transaction : EntityAccessor
 
         // Lazy-cache the per-archetype cluster accessor (reused across consecutive same-archetype staged entries; map/content accessors kept for parity
         // with the Versioned publish that shares these fields).
-        if (!_hasClusterCommitAccessors || _clusterCommitArchId != archId)
-        {
-            DisposeClusterCommitAccessors();
-            _clusterCommitMapAccessor = es.EntityMap.Segment.CreateChunkAccessor();
-            _clusterCommitContentAccessor = es.SlotToComponentTable[compSlot].ComponentSegment.CreateChunkAccessor();
-            _clusterCommitClusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
-            _clusterCommitArchId = archId;
-            _hasClusterCommitAccessors = true;
-        }
+        EnsureClusterCommitAccessors(archId, es, es.SlotToComponentTable[compSlot].ComponentSegment, clusterState);
 
         // Coords captured at stage time — no per-component EntityMap re-lookup (Location = clusterChunkId*64 + slotIndex).
         int clusterLocation = stagedSlot.Location;

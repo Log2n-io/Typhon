@@ -13,5 +13,10 @@ internal interface ISelectivityEstimator
     /// <paramref name="fieldIndex"/> using <paramref name="op"/> and <paramref name="threshold"/>
     /// (encoded via <see cref="QueryResolverHelper.EncodeThreshold"/>).
     /// </summary>
-    long EstimateCardinality(ComponentTable table, int fieldIndex, CompareOp op, long threshold);
+    /// <remarks>
+    /// Takes the statistics array rather than the <see cref="ComponentTable"/> that owns one (#665). Both implementations only ever reached through the table
+    /// for <c>table.IndexStats</c>, and a cluster-backed archetype's statistics live on its <c>ArchetypeClusterState</c> instead — so the narrower parameter
+    /// is what lets one estimator serve both index homes.
+    /// </remarks>
+    long EstimateCardinality(IndexStatistics[] stats, int fieldIndex, CompareOp op, long threshold);
 }
