@@ -10,7 +10,7 @@ namespace AntHill.Demo;
 ///   • Time-scale slider (0× / 0.5× / 1× / 2× / 4× / 10×)
 ///   • Tilt mode (90° top-down / 45° iso / 85° cinematic)
 ///   • Pheromone overlay toggle
-///   • Debug overlay toggle (right-side HUD visibility)
+///   • Debug overlay toggle (stat HUD + bottom-left control reference, same visibility — see Main.SetDebugHudVisible)
 /// </summary>
 public partial class SettingsPanel : CanvasLayer
 {
@@ -159,6 +159,12 @@ public partial class SettingsPanel : CanvasLayer
     public void SetPheromoneToggle(bool enabled)
     {
         if (_pheromoneCheck != null) _pheromoneCheck.ButtonPressed = enabled;
+    }
+
+    /// <summary>Push the debug-overlay state back into the checkbox after an F1 press, so the panel never shows a stale tick.</summary>
+    public void SetDebugToggle(bool enabled)
+    {
+        if (_debugCheck != null) _debugCheck.ButtonPressed = enabled;
     }
 
     /// <summary>
