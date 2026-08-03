@@ -452,12 +452,31 @@ public unsafe ref struct EntityRef
     /// Capture old indexed field values from cluster SoA for all indexed components.
     /// Called once per entity per tick, before the first write mutation.
     /// </summary>
+    /// <remarks>
+    /// Walks both index homes since #655. A slot's bytes live in the segment matching its storage mode, so the base is chosen per slot rather than taken from
+    /// <c>_clusterBase</c> for all of them — a Transient slot's key read off the cluster base would capture whatever the SoA holds at that offset, which is
+    /// another component's data. That is silent: the shadow entry looks well-formed and the drain moves the index off a key the entity never had.
+    /// </remarks>
     private void ShadowClusterIndexedFields(ArchetypeClusterState clusterState)
     {
         int entityIndex = _clusterChunkId * 64 + _clusterSlotIndex;
-        var slots = clusterState.IndexSlots;
-        // Skip Versioned slots (indexes updated at commit time) and Transient slots (indexes maintained per-ComponentTable)
-        ushort skipMask = (ushort)(_archetype.VersionedSlotMask | _archetype.TransientSlotMask);
+
+        // Versioned slots are skipped: their indexes are updated at commit time, not at the fence.
+        CaptureIndexedSlots(clusterState.IndexSlots, _clusterBase, entityIndex, _archetype.VersionedSlotMask);
+        CaptureIndexedSlots(clusterState.TransientIndexSlots, _transientClusterBase, entityIndex, _archetype.VersionedSlotMask);
+    }
+
+    /// <summary>
+    /// Appends every indexed field of every non-skipped slot in <paramref name="slots"/> to its shadow buffer, reading from
+    /// <paramref name="segmentBase"/>.
+    /// </summary>
+    private void CaptureIndexedSlots<TStore>(ClusterIndexSlot<TStore>[] slots, byte* segmentBase, int entityIndex, ushort skipMask)
+        where TStore : struct, IPageStore
+    {
+        if (slots == null || segmentBase == null)
+        {
+            return;
+        }
 
         for (int s = 0; s < slots.Length; s++)
         {
@@ -469,7 +488,7 @@ public unsafe ref struct EntityRef
             }
 
             int compSize = _clusterLayout.ComponentSize(ixSlot.Slot);
-            byte* compBase = _clusterBase + _clusterLayout.ComponentOffset(ixSlot.Slot) + _clusterSlotIndex * compSize;
+            byte* compBase = segmentBase + _clusterLayout.ComponentOffset(ixSlot.Slot) + _clusterSlotIndex * compSize;
 
             for (int f = 0; f < ixSlot.Fields.Length; f++)
             {

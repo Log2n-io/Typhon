@@ -483,6 +483,22 @@ public partial class DatabaseEngine
             var clusterScopeT = TyphonEvent.BeginWriteTickFenceCluster(meta.ArchetypeId);
             try
             {
+                // Drain the archetype's own index shadow buffers (#655). This branch had none: a pure-Transient archetype could not carry per-archetype
+                // indexes at all, so an in-place write to an indexed field captured a shadow entry that nothing ever consumed — the index would keep the
+                // pre-mutation key forever. Runs before the dormancy sweep, matching the ordering of the cluster branch below.
+                if (clusterState.TransientIndexSlots != null)
+                {
+                    var transientShadowScope = TyphonEvent.BeginWriteTickFenceShadow(meta.ArchetypeId, clusterState.TransientIndexSlots.Length);
+                    try
+                    {
+                        transientShadowScope.TotalShadowEntries = ProcessClusterShadowEntries(clusterState, engineState, null);
+                    }
+                    finally
+                    {
+                        transientShadowScope.Dispose();
+                    }
+                }
+
                 if (clusterState.ClusterDirtyBitmap.HasDirty)
                 {
                     var transientDirtyBits = clusterState.ClusterDirtyBitmap.Snapshot();

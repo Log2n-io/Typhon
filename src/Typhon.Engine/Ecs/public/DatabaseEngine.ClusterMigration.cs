@@ -795,34 +795,110 @@ public partial class DatabaseEngine
     /// Drains the per-archetype shadow buffers for cluster-backed indexed fields, updating per-archetype B+Trees. Reads current field values from cluster SoA,
     /// compares with captured old values, and calls B+Tree.Move for changes. Called at tick boundary from <see cref="WriteClusterTickFence"/>.
     /// </summary>
-    private unsafe int ProcessClusterShadowEntries(ArchetypeClusterState clusterState, ArchetypeEngineState engineState, ChangeSet changeSet)
+    /// <remarks>
+    /// Dispatches over the archetype's two index homes (#655). Three segments are in play and they are not the same axis:
+    /// <list type="bullet">
+    ///   <item><description><b>index</b> — where the tree's nodes live: the persisted segments for SingleVersion / Versioned slots, the heap-backed ones for
+    ///   Transient slots.</description></item>
+    ///   <item><description><b>primary</b> — where the occupancy word and the AllowMultiple elementId tail live: the cluster segment, or the Transient segment
+    ///   when the archetype is pure-Transient and has no cluster segment at all (as <c>ScanActiveChunksTransient</c> already treats it).</description></item>
+    ///   <item><description><b>data</b> — where this slot's component bytes live: whichever segment matches the slot's storage mode.</description></item>
+    /// </list>
+    /// For a SingleVersion / Versioned slot all three collapse onto the cluster segment, which is why this needed only one accessor before.
+    /// </remarks>
+    private int ProcessClusterShadowEntries(ArchetypeClusterState clusterState, ArchetypeEngineState engineState, ChangeSet changeSet)
     {
-        // Quick check: any shadow buffers non-empty? Skip allocation if all empty.
-        var anyShadow = false;
-        var ixSlots = clusterState.IndexSlots;
-        for (var s = 0; s < ixSlots.Length && !anyShadow; s++)
+        var totalShadowEntries = 0;
+        var pureTransient = clusterState.ClusterSegment == null;
+
+        if (HasPendingShadow(clusterState.IndexSlots))
+        {
+            Debug.Assert(!pureTransient, "a pure-Transient archetype cannot own PersistentStore-backed index slots");
+            var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
+            try
+            {
+                totalShadowEntries += DrainClusterShadowSlots(clusterState, engineState, clusterState.IndexSlots, ref clusterAccessor, ref clusterAccessor,
+                    changeSet);
+            }
+            finally
+            {
+                clusterAccessor.Dispose();
+            }
+        }
+
+        if (HasPendingShadow(clusterState.TransientIndexSlots))
+        {
+            var transientAccessor = clusterState.TransientSegment.CreateChunkAccessor();
+            try
+            {
+                if (pureTransient)
+                {
+                    totalShadowEntries += DrainClusterShadowSlots(clusterState, engineState, clusterState.TransientIndexSlots, ref transientAccessor,
+                        ref transientAccessor, changeSet);
+                }
+                else
+                {
+                    var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
+                    try
+                    {
+                        totalShadowEntries += DrainClusterShadowSlots(clusterState, engineState, clusterState.TransientIndexSlots, ref clusterAccessor,
+                            ref transientAccessor, changeSet);
+                    }
+                    finally
+                    {
+                        clusterAccessor.Dispose();
+                    }
+                }
+            }
+            finally
+            {
+                transientAccessor.Dispose();
+            }
+        }
+
+        clusterState.ClusterShadowBitmap.Clear();
+        return totalShadowEntries;
+    }
+
+    /// <summary>True when any field in <paramref name="ixSlots"/> has captured shadow entries awaiting a drain. Null-safe: an archetype has a slot array per
+    /// index home and may have only one of them.</summary>
+    private static bool HasPendingShadow<TStore>(ClusterIndexSlot<TStore>[] ixSlots) where TStore : struct, IPageStore
+    {
+        if (ixSlots == null)
+        {
+            return false;
+        }
+
+        for (var s = 0; s < ixSlots.Length; s++)
         {
             for (var f = 0; f < ixSlots[s].Fields.Length; f++)
             {
                 if (ixSlots[s].ShadowBuffers[f].Count > 0)
                 {
-                    anyShadow = true;
-                    break;
+                    return true;
                 }
             }
         }
 
-        if (!anyShadow)
-        {
-            clusterState.ClusterShadowBitmap.Clear();
-            return 0;
-        }
+        return false;
+    }
 
-        var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
+    /// <summary>Opens an accessor over an index segment, threading the caller's <see cref="ChangeSet"/> only for a persisted store.</summary>
+    /// <remarks>
+    /// A Transient segment has nothing to log or checkpoint, and <see cref="ProcessShadowEntries"/> makes the same distinction by hand in its two branches.
+    /// Resolved by type test rather than by an overload because the caller is generic over the store; the test is a JIT-time constant per instantiation.
+    /// </remarks>
+    private static ChunkAccessor<TStore> CreateIndexAccessor<TStore>(ChunkBasedSegment<TStore> segment, ChangeSet changeSet) where TStore : struct, IPageStore
+        => typeof(TStore) == typeof(PersistentStore) ? segment.CreateChunkAccessor(changeSet) : segment.CreateChunkAccessor();
 
+    /// <summary>Drains one index home's shadow buffers. See <see cref="ProcessClusterShadowEntries"/> for what each of the three stores addresses.</summary>
+    private unsafe int DrainClusterShadowSlots<TIdx, TPrimary, TData>(ArchetypeClusterState clusterState, ArchetypeEngineState engineState,
+        ClusterIndexSlot<TIdx>[] ixSlots, ref ChunkAccessor<TPrimary> primaryAccessor, ref ChunkAccessor<TData> dataAccessor, ChangeSet changeSet)
+        where TIdx : struct, IPageStore
+        where TPrimary : struct, IPageStore
+        where TData : struct, IPageStore
+    {
         var totalShadowEntries = 0;
-        try
-        {
             for (var s = 0; s < ixSlots.Length; s++)
             {
                 ref var ixSlot = ref ixSlots[s];
@@ -838,7 +914,7 @@ public partial class DatabaseEngine
                     totalShadowEntries += count;
 
                     ref var field = ref ixSlot.Fields[f];
-                    var idxAccessor = field.Index.Segment.CreateChunkAccessor(changeSet);
+                    var idxAccessor = CreateIndexAccessor(field.Index.Segment, changeSet);
 
                     try
                     {
@@ -848,9 +924,12 @@ public partial class DatabaseEngine
                             var clusterChunkId = entry.ChunkId >> 6;   // entityIndex → chunkId
                             var slotIndex = entry.ChunkId & 0x3F;      // entityIndex → slot
 
-                            // Check occupancy (entity may have been destroyed this tick)
-                            var clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId);
-                            var occupancy = *(ulong*)clusterBase;
+                            // Check occupancy (entity may have been destroyed this tick). The occupancy word and the elementId tail come from the PRIMARY
+                            // segment; this slot's component bytes come from the DATA one. They are the same chunk of the same segment for a SingleVersion /
+                            // Versioned slot, and different segments for a Transient slot in a mixed archetype (#655).
+                            var primaryBase = primaryAccessor.GetChunkAddress(clusterChunkId);
+                            var dataBase = dataAccessor.GetChunkAddress(clusterChunkId);
+                            var occupancy = *(ulong*)primaryBase;
                             if ((occupancy & (1UL << slotIndex)) == 0)
                             {
                                 // Entity destroyed — remove old index entry using shadow value
@@ -861,7 +940,7 @@ public partial class DatabaseEngine
                                     // take every sibling sharing the value with it (issue #659; same rule as the destroy and commit paths).
                                     // ClearSlotMetadata zeroes occupancy, EnabledBits and the EntityIds slot but leaves the elementId tail
                                     // intact, so it is still readable here even though the slot is already released.
-                                    var destroyElementId = *(int*)(clusterBase + clusterState.Layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
+                                    var destroyElementId = *(int*)(primaryBase + clusterState.Layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
                                     field.Index.RemoveValue(&destroyOldKey, destroyElementId, entry.ChunkId, ref idxAccessor);
                                 }
                                 else
@@ -889,7 +968,7 @@ public partial class DatabaseEngine
 
                             // Read current (post-mutation) field value from cluster SoA
                             var compSize = clusterState.Layout.ComponentSize(ixSlot.Slot);
-                            var compBase = clusterBase + clusterState.Layout.ComponentOffset(ixSlot.Slot) + slotIndex * compSize;
+                            var compBase = dataBase + clusterState.Layout.ComponentOffset(ixSlot.Slot) + slotIndex * compSize;
                             var fieldPtr = compBase + field.FieldOffset;
                             var oldKey = entry.OldKey;
                             var newKey = KeyBytes8.FromPointer(fieldPtr, field.FieldSize);
@@ -907,7 +986,7 @@ public partial class DatabaseEngine
                                 // raw clusterLocation and every entity at that key would vanish from the index (issue #659). MoveValue moves
                                 // just this entity's element and returns its new id, which goes back into the cluster's elementId tail.
                                 // Fetched forWrite only on this branch; the mutation that triggered shadowing already dirtied the page.
-                                var writableBase = clusterAccessor.GetChunkAddress(clusterChunkId, true);
+                                var writableBase = primaryAccessor.GetChunkAddress(clusterChunkId, true);
                                 var elementIdPtr = (int*)(writableBase + clusterState.Layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
                                 *elementIdPtr = field.Index.MoveValue(&oldKey, fieldPtr, *elementIdPtr, clusterLocation, ref idxAccessor, out _, out _);
                             }
@@ -942,14 +1021,7 @@ public partial class DatabaseEngine
                     buffer.Reset();
                 }
             }
-        }
-        finally
-        {
-            clusterAccessor.Dispose();
-            // SaveChanges deliberately omitted: caller (WriteTickFence) owns the ChangeSet lifecycle. See ExecuteMigrations finally for full rationale.
-        }
 
-        clusterState.ClusterShadowBitmap.Clear();
         return totalShadowEntries;
     }
 

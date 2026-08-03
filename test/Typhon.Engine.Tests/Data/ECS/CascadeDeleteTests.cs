@@ -88,9 +88,9 @@ struct ItemTagData
 }
 
 /// <summary>
-/// Transient component with an INDEXED field — the one and only thing that disqualifies an archetype from cluster storage
-/// (<c>DatabaseEngine.cs</c>, cluster-eligibility scan). Without it there is no way to build a non-cluster archetype holding an SV component, and the
-/// null-<c>CompRevTableSegment</c> failure mode would be unreachable.
+/// Transient component with an INDEXED field. This USED to disqualify an archetype from cluster storage outright, and was the only way to build a non-cluster
+/// archetype holding an SV component — the shape that made the null-<c>CompRevTableSegment</c> path reachable. #655 admits it to cluster storage, so that
+/// shape no longer exists and this component now just adds a second index home to the archetype.
 /// </summary>
 [Component("Typhon.Test.ECS.ItemAuditData", 1, StorageMode = StorageMode.Transient)]
 [StructLayout(LayoutKind.Sequential)]
@@ -546,7 +546,8 @@ class CascadeDeleteTests : TestBase<CascadeDeleteTests>
         {
             Assert.That(Archetype<ClusterItem>.Metadata.HasClusterIndexes, Is.True, "pure-SV child must index on the ARCHETYPE");
             Assert.That(Archetype<MixedItem>.Metadata.HasClusterIndexes, Is.True, "a Versioned FK component with an SV sibling must index on the ARCHETYPE");
-            Assert.That(Archetype<FlatSvItem>.Metadata.HasClusterIndexes, Is.False, "the Transient indexed sibling must force this onto the ComponentTable");
+            Assert.That(Archetype<FlatSvItem>.Metadata.HasClusterIndexes, Is.True,
+                "cluster-backed since #655 — a Transient indexed sibling no longer forces the archetype onto the ComponentTable home");
             Assert.That(Archetype<CascadeItem>.Metadata.HasClusterIndexes, Is.False, "the pre-existing Versioned-only child stays on the ComponentTable");
         });
     }
@@ -672,12 +673,13 @@ class CascadeDeleteTests : TestBase<CascadeDeleteTests>
     }
 
     /// <summary>
-    /// AC: a SingleVersion FK component in a NON-cluster archetype. <c>ComponentTable</c> allocates <c>CompRevTableSegment</c> only for Versioned, so the old
-    /// unconditional <c>table.CompRevTableSegment.CreateChunkAccessor()</c> threw a <see cref="NullReferenceException"/> here — the loud half of the defect.
-    /// Reachable only because the Transient indexed sibling disqualifies the archetype from cluster storage.
+    /// AC: a SingleVersion FK component whose archetype also carries a Transient indexed one. Before #655 that combination was forced off the cluster path,
+    /// which made it the only reachable route to the old unconditional <c>table.CompRevTableSegment.CreateChunkAccessor()</c> — null for SingleVersion, so a
+    /// <see cref="NullReferenceException"/>, the loud half of #664's defect. The archetype is cluster-backed now, so this stands as a cascade test over an
+    /// archetype with BOTH index homes rather than as the non-cluster repro it originally was.
     /// </summary>
     [Test]
-    public void Destroy_NonClusterSingleVersionChild_DoesNotThrowAndCascades()
+    public void Destroy_SingleVersionChildWithTransientSibling_DoesNotThrowAndCascades()
     {
         using var dbe = SetupEngine();
 
@@ -702,7 +704,7 @@ class CascadeDeleteTests : TestBase<CascadeDeleteTests>
             Assert.Multiple(() =>
             {
                 Assert.That(t.IsAlive(bagId), Is.False);
-                Assert.That(t.IsAlive(childId), Is.False, "non-cluster SV child should be cascade-destroyed");
+                Assert.That(t.IsAlive(childId), Is.False, "SV child should be cascade-destroyed");
             });
         }
     }

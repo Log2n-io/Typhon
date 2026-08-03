@@ -1042,44 +1042,58 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     }
 
     private BTreeBase<TransientStore> CreateIndexForFieldTransient(DBComponentDefinition.Field field, BTreeStableKey key)
-    {
-        var s = field.Type == FieldType.String64 ? TransientString64IndexSegment : TransientDefaultIndexSegment;
-        BTreeBase<TransientStore> index = field.Type switch
-        {
-            FieldType.Byte     => field.IndexAllowMultiple ? new ByteMultipleBTree<TransientStore>      (s, false, key) : new ByteSingleBTree<TransientStore>    (s, false, key),
-            FieldType.Short    => field.IndexAllowMultiple ? new ShortMultipleBTree<TransientStore>     (s, false, key) : new ShortSingleBTree<TransientStore>   (s, false, key),
-            FieldType.Int      => field.IndexAllowMultiple ? new IntMultipleBTree<TransientStore>       (s, false, key) : new IntSingleBTree<TransientStore>     (s, false, key),
-            FieldType.Long     => field.IndexAllowMultiple ? new LongMultipleBTree<TransientStore>      (s, false, key) : new LongSingleBTree<TransientStore>    (s, false, key),
-            FieldType.UByte    => field.IndexAllowMultiple ? new UByteMultipleBTree<TransientStore>     (s, false, key) : new UByteSingleBTree<TransientStore>   (s, false, key),
-            FieldType.UShort   => field.IndexAllowMultiple ? new UShortMultipleBTree<TransientStore>    (s, false, key) : new UShortSingleBTree<TransientStore>  (s, false, key),
-            FieldType.UInt     => field.IndexAllowMultiple ? new UIntMultipleBTree<TransientStore>      (s, false, key) : new UIntSingleBTree<TransientStore>    (s, false, key),
-            FieldType.ULong    => field.IndexAllowMultiple ? new ULongMultipleBTree<TransientStore>     (s, false, key) : new ULongSingleBTree<TransientStore>   (s, false, key),
-            FieldType.Float    => field.IndexAllowMultiple ? new FloatMultipleBTree<TransientStore>     (s, false, key) : new FloatSingleBTree<TransientStore>   (s, false, key),
-            FieldType.Double   => field.IndexAllowMultiple ? new DoubleMultipleBTree<TransientStore>    (s, false, key) : new DoubleSingleBTree<TransientStore>  (s, false, key),
-            FieldType.Char     => field.IndexAllowMultiple ? new CharMultipleBTree<TransientStore>      (s, false, key) : new CharSingleBTree<TransientStore>    (s, false, key),
-            FieldType.String64 => field.IndexAllowMultiple ? new String64MultipleBTree<TransientStore>  (s, false, key) : new String64SingleBTree<TransientStore>(s, false, key),
-            _                  => null
-        };
-        return index;
-    }
+        => CreateIndexForFieldCore(field, key, false, field.Type == FieldType.String64 ? TransientString64IndexSegment : TransientDefaultIndexSegment);
 
-    internal static BTreeBase<PersistentStore> CreateIndexForFieldCore(DBComponentDefinition.Field field, BTreeStableKey key, bool load,
-        ChunkBasedSegment<PersistentStore> s, ChangeSet changeSet = null)
+
+    /// <summary>
+    /// Creates one field's B+Tree in <paramref name="s"/>, picking the variant from the field's key type and multiplicity.
+    /// </summary>
+    /// <remarks>
+    /// Generic over the store since #655. The Transient and Persistent factories were identical switches differing only in the instantiation, and the cluster
+    /// path now needs both — a Transient component in a cluster-backed archetype indexes into a heap-backed segment, everything else into a persisted one.
+    /// </remarks>
+    internal static BTreeBase<TStore> CreateIndexForFieldCore<TStore>(DBComponentDefinition.Field field, BTreeStableKey key, bool load,
+        ChunkBasedSegment<TStore> s, ChangeSet changeSet = null)
+        where TStore : struct, IPageStore
     {
-        BTreeBase<PersistentStore> index = field.Type switch
+        BTreeBase<TStore> index = field.Type switch
         {
-            FieldType.Byte     => field.IndexAllowMultiple ? new ByteMultipleBTree<PersistentStore>      (s, load, key, changeSet) : new ByteSingleBTree<PersistentStore>    (s, load, key, changeSet),
-            FieldType.Short    => field.IndexAllowMultiple ? new ShortMultipleBTree<PersistentStore>     (s, load, key, changeSet) : new ShortSingleBTree<PersistentStore>   (s, load, key, changeSet),
-            FieldType.Int      => field.IndexAllowMultiple ? new IntMultipleBTree<PersistentStore>       (s, load, key, changeSet) : new IntSingleBTree<PersistentStore>     (s, load, key, changeSet),
-            FieldType.Long     => field.IndexAllowMultiple ? new LongMultipleBTree<PersistentStore>      (s, load, key, changeSet) : new LongSingleBTree<PersistentStore>    (s, load, key, changeSet),
-            FieldType.UByte    => field.IndexAllowMultiple ? new UByteMultipleBTree<PersistentStore>     (s, load, key, changeSet) : new UByteSingleBTree<PersistentStore>   (s, load, key, changeSet),
-            FieldType.UShort   => field.IndexAllowMultiple ? new UShortMultipleBTree<PersistentStore>    (s, load, key, changeSet) : new UShortSingleBTree<PersistentStore>  (s, load, key, changeSet),
-            FieldType.UInt     => field.IndexAllowMultiple ? new UIntMultipleBTree<PersistentStore>      (s, load, key, changeSet) : new UIntSingleBTree<PersistentStore>    (s, load, key, changeSet),
-            FieldType.ULong    => field.IndexAllowMultiple ? new ULongMultipleBTree<PersistentStore>     (s, load, key, changeSet) : new ULongSingleBTree<PersistentStore>   (s, load, key, changeSet),
-            FieldType.Float    => field.IndexAllowMultiple ? new FloatMultipleBTree<PersistentStore>     (s, load, key, changeSet) : new FloatSingleBTree<PersistentStore>   (s, load, key, changeSet),
-            FieldType.Double   => field.IndexAllowMultiple ? new DoubleMultipleBTree<PersistentStore>    (s, load, key, changeSet) : new DoubleSingleBTree<PersistentStore>  (s, load, key, changeSet),
-            FieldType.Char     => field.IndexAllowMultiple ? new CharMultipleBTree<PersistentStore>      (s, load, key, changeSet) : new CharSingleBTree<PersistentStore>    (s, load, key, changeSet),
-            FieldType.String64 => field.IndexAllowMultiple ? new String64MultipleBTree<PersistentStore>  (s, load, key, changeSet) : new String64SingleBTree<PersistentStore>(s, load, key, changeSet),
+            FieldType.Byte => field.IndexAllowMultiple
+                ? new ByteMultipleBTree<TStore>(s, load, key, changeSet)
+                : new ByteSingleBTree<TStore>(s, load, key, changeSet),
+            FieldType.Short => field.IndexAllowMultiple
+                ? new ShortMultipleBTree<TStore>(s, load, key, changeSet)
+                : new ShortSingleBTree<TStore>(s, load, key, changeSet),
+            FieldType.Int => field.IndexAllowMultiple
+                ? new IntMultipleBTree<TStore>(s, load, key, changeSet)
+                : new IntSingleBTree<TStore>(s, load, key, changeSet),
+            FieldType.Long => field.IndexAllowMultiple
+                ? new LongMultipleBTree<TStore>(s, load, key, changeSet)
+                : new LongSingleBTree<TStore>(s, load, key, changeSet),
+            FieldType.UByte => field.IndexAllowMultiple
+                ? new UByteMultipleBTree<TStore>(s, load, key, changeSet)
+                : new UByteSingleBTree<TStore>(s, load, key, changeSet),
+            FieldType.UShort => field.IndexAllowMultiple
+                ? new UShortMultipleBTree<TStore>(s, load, key, changeSet)
+                : new UShortSingleBTree<TStore>(s, load, key, changeSet),
+            FieldType.UInt => field.IndexAllowMultiple
+                ? new UIntMultipleBTree<TStore>(s, load, key, changeSet)
+                : new UIntSingleBTree<TStore>(s, load, key, changeSet),
+            FieldType.ULong => field.IndexAllowMultiple
+                ? new ULongMultipleBTree<TStore>(s, load, key, changeSet)
+                : new ULongSingleBTree<TStore>(s, load, key, changeSet),
+            FieldType.Float => field.IndexAllowMultiple
+                ? new FloatMultipleBTree<TStore>(s, load, key, changeSet)
+                : new FloatSingleBTree<TStore>(s, load, key, changeSet),
+            FieldType.Double => field.IndexAllowMultiple
+                ? new DoubleMultipleBTree<TStore>(s, load, key, changeSet)
+                : new DoubleSingleBTree<TStore>(s, load, key, changeSet),
+            FieldType.Char => field.IndexAllowMultiple
+                ? new CharMultipleBTree<TStore>(s, load, key, changeSet)
+                : new CharSingleBTree<TStore>(s, load, key, changeSet),
+            FieldType.String64 => field.IndexAllowMultiple
+                ? new String64MultipleBTree<TStore>(s, load, key, changeSet)
+                : new String64SingleBTree<TStore>(s, load, key, changeSet),
             _                  => null
         };
         return index;

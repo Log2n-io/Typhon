@@ -1242,7 +1242,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
                 var engineState = dbe._archetypeStates[meta.ArchetypeId];
                 var clusterState = engineState?.ClusterState;
-                if (clusterState?.IndexSlots == null)
+                // A where-component with no entry in the PERSISTED index home routes to the cross-archetype scan, which evaluates predicates against component
+                // DATA and is therefore correct whichever home owns the index. Without this, FindClusterIndexSlot returns -1 inside ScanPerArchetypeBTree and
+                // it returns with NO results — a silently empty query, the same shape as #663. Reached by a Transient indexed field since #655; using its tree
+                // for selectivity here is a performance follow-up, not a correctness one.
+                if (clusterState?.IndexSlots == null || FindClusterIndexSlot(clusterState, meta) < 0)
                 {
                     hasNonClusterArchetypes = true;
                     continue;

@@ -122,7 +122,12 @@ public struct ComponentR1
 /// Persisted archetype schema. One entity per registered archetype.
 /// Enables load-time validation: mismatch between persisted and runtime archetype definitions → hard error.
 /// </summary>
-[Component(SchemaName, 1)]
+/// <remarks>
+/// Revision 2 (#661) appends <see cref="ClusterIndexSPI"/> / <see cref="ClusterString64IndexSPI"/>. Both are appended, so every pre-existing field keeps its
+/// id, and an added field is <c>CompatibilityLevel.Compatible</c> — <c>SchemaEvolutionEngine</c> zero-fills it with no migration function, and zero is already
+/// the "not persisted, rebuild" sentinel the other SPIs use.
+/// </remarks>
+[Component(SchemaName, 2)]
 [StructLayout(LayoutKind.Sequential)]
 [PublicAPI]
 public struct ArchetypeR1
@@ -168,6 +173,20 @@ public struct ArchetypeR1
 
     /// <summary>AssemblyR1 row id (chunkId) of the assembly that declares this archetype. 0 = core engine assembly (implicit, never in the manifest).</summary>
     public ushort AssemblyId;
+
+    /// <summary>
+    /// Root page index of this archetype's per-archetype secondary-index segment (default 256-byte node stride); 0 = not persisted, rebuild from cluster data.
+    /// </summary>
+    /// <remarks>
+    /// The per-archetype counterpart of <c>ComponentR1.DefaultIndexSPI</c>. Lived in the bootstrap dictionary under <c>clusterindex.{ArchetypeId}</c> until
+    /// #661 — a key built from a value this very struct documents as not stable across processes (see <see cref="ArchetypeId"/>), outside CK-10's coverage,
+    /// and consuming ~22 B of a fixed 8016 B bootstrap page for every archetype.
+    /// </remarks>
+    public int ClusterIndexSPI;
+
+    /// <summary>Root page index of this archetype's String64 index segment (wider node stride, #658); 0 = absent or not persisted.</summary>
+    /// <remarks>The per-archetype counterpart of <c>ComponentR1.String64IndexSPI</c>. Allocated only when the archetype indexes a String64 field.</remarks>
+    public int ClusterString64IndexSPI;
 
     /// <summary>Sentinel <see cref="ParentArchetypeId"/> value meaning "no parent" (a root archetype).</summary>
     public const ushort NoParent = 0xFFFF;
@@ -2110,17 +2129,27 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             var arch = persisted.Arch;
             var newEntityMapSpi = state.EntityMap.Segment.RootPageIndex;
             var newClusterSpi = state.ClusterState?.ClusterSegment?.RootPageIndex ?? 0;
+            var newIndexSpi = state.ClusterState?.IndexSegment?.RootPageIndex ?? 0;
+            var newString64IndexSpi = state.ClusterState?.IndexSegmentString64?.RootPageIndex ?? 0;
             var newNextKey = Interlocked.Read(ref state.NextEntityKey);
 
             // Skip archetypes whose persisted state is already current. The segment SPIs are stable once allocated, so a steady-state checkpoint with no
             // spawns persists nothing — this is what makes it cheap enough to run at EVERY checkpoint (#395), not just at clean shutdown.
-            if (arch.EntityMapSPI == newEntityMapSpi && arch.ClusterSegmentSPI == newClusterSpi && arch.NextEntityKey == newNextKey)
+            //
+            // The two index SPIs are part of the comparison, not written after it (#661). They used to be a bootstrap-dictionary write placed BELOW this
+            // guard, so they were persisted only on a cycle where something ELSE changed. Benign while the index segment is allocated in the same open as the
+            // cluster segment — the consolidation makes every archetype depend on it, and a pointer whose persistence is conditional on an unrelated field is
+            // not a pointer you can build on.
+            if (arch.EntityMapSPI == newEntityMapSpi && arch.ClusterSegmentSPI == newClusterSpi && arch.ClusterIndexSPI == newIndexSpi
+                && arch.ClusterString64IndexSPI == newString64IndexSpi && arch.NextEntityKey == newNextKey)
             {
                 continue;
             }
 
             arch.EntityMapSPI = newEntityMapSpi;
             arch.ClusterSegmentSPI = newClusterSpi;
+            arch.ClusterIndexSPI = newIndexSpi;
+            arch.ClusterString64IndexSPI = newString64IndexSpi;
             arch.NextEntityKey = newNextKey;
 
             // EntityMap's meta chunk tracks the total entry count, but FlushMetaToChunk is otherwise only called during a bucket split. For append-only
@@ -2128,18 +2157,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // Create() even though the bucket data is correct. Flush it here so the next InitializeOpen reads an accurate total without having to walk
             // the bucket chains.
             state.EntityMap.FlushMeta(cs);
-
-            // Persist per-archetype cluster index segment SPI via bootstrap dictionary
-            if (state.ClusterState?.IndexSegment != null)
-            {
-                MMF.Bootstrap.SetInt($"clusterindex.{meta.ArchetypeId}", state.ClusterState.IndexSegment.RootPageIndex);
-            }
-
-            // Second segment, present only when the archetype indexes a String64 field — its B+Tree nodes need a wider stride (#658).
-            if (state.ClusterState?.IndexSegmentString64 != null)
-            {
-                MMF.Bootstrap.SetInt($"clusterindexs64.{meta.ArchetypeId}", state.ClusterState.IndexSegmentString64.RootPageIndex);
-            }
 
             // Issue #230 Phase 3 Option B: nothing about the per-cell cluster index is persisted. All cell-level state is transient per Phase 1 Q2/Q6 and
             // rebuilt from cluster data at startup by RebuildCellState + RebuildClusterAabbs.
@@ -2719,6 +2736,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
         }
 
+        DropLegacyClusterIndexBootstrapKeys();
+
         foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
         {
             // Connect slots to ComponentTables — skip archetypes with unregistered component types
@@ -2768,6 +2787,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             var hasSpatialField = false;
             var hasSvSlot = false;
             var hasTransientSlot = false;
+            // #655 step 3 admitted MIXED archetypes; a PURE-Transient one with an indexed field is still excluded — see the eligibility note below.
+            var hasIndexedTransientSlot = false;
             ushort versionedSlotMask = 0;
             ushort transientSlotMask = 0;
             for (var slot = 0; slot < meta.ComponentCount; slot++)
@@ -2785,22 +2806,28 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 {
                     transientSlotMask |= (ushort)(1 << slot);
                     hasTransientSlot = true;
-                    // Transient components with indexed fields stay on legacy per-entity path.
-                    // Reason: cluster Write<T> returns a ref into the SoA slot — there's no hook to update TransientIndex.Move(oldKey→newKey) after the
-                    // caller modifies the value. The shadow/tick-fence mechanism used by SV indexed fields reads from ClusterSegment (PersistentStore),
-                    // not TransientSegment.
-                    // Since Transient indexed fields are rare (most Transient components are unindexed runtime state), this exclusion has minimal impact.
+                    // An archetype with an INDEXED Transient component stays off the cluster path. #655 is removing this, and its groundwork is in place —
+                    // ClusterIndexSlot/ClusterIndexField are generic over the store, CreateIndexForFieldCore is generic, and InitializeIndexes builds
+                    // Transient slots into TransientIndexSlots against heap-backed segments. What is NOT yet in place is index MAINTENANCE for those trees:
+                    // capture (EntityRef.ShadowClusterIndexedFields), drain (ProcessClusterShadowEntries), spawn/destroy/migration, the pure-Transient fence
+                    // path, and the EcsQuery read path all still walk IndexSlots alone. Lifting the gate before those land yields a cluster archetype whose
+                    // Transient indexed fields are allocated and never populated — silently wrong queries, which is worse than the exclusion (issue #655,
+                    // trap 1). The gate goes when the maintenance does, not before.
+                    //
+                    // For the record, both ORIGINAL justifications for the exclusion were wrong: the BTree<TransientStore>/BTree<PersistentStore> split
+                    // constrains tree INSTANCES, not archetype placement (both instantiations always shipped), and the "cluster Write<T> returns a ref so
+                    // there is no hook" claim was false — EntityRef's Transient write branch already runs the shadow capture before returning the ref.
+                    // Deferred-fence indexing never needs a post-mutation hook: capture the old key before the write, read the new value at the fence.
                     if (table.IndexedFieldInfos != null && table.IndexedFieldInfos.Length > 0)
                     {
-                        isClusterEligible = false;
-                        break;
+                        hasIndexedTransientSlot = true;
                     }
                 }
                 if (table.SpatialIndex != null)
                 {
                     hasSpatialField = true;
                 }
-                if (table.IndexedFieldInfos != null && table.IndexedFieldInfos.Length > 0 && table.StorageMode != StorageMode.Transient)
+                if (table.IndexedFieldInfos != null && table.IndexedFieldInfos.Length > 0)
                 {
                     hasClusterIndexableFields = true;
                 }
@@ -2808,6 +2835,16 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
             // Require at least one SV or Transient slot. Pure-Versioned stays on legacy path.
             if (isClusterEligible && !hasSvSlot && !hasTransientSlot)
+            {
+                isClusterEligible = false;
+            }
+
+            // A PURE-Transient archetype with an indexed field stays off the cluster path (#655 step 4). Admitting it needs the query layer's Path B to run
+            // over TransientSegment as BOTH primary and data: with no ClusterSegment, EcsQuery's cluster scan cannot execute, and the non-cluster fallback
+            // reads ComponentTable.TransientComponentSegment — which holds nothing, because a cluster-backed archetype's Transient bytes live in the cluster's
+            // own Transient segment. That combination returns silently empty, so the gate stays until Path B is store-generic.
+            // A MIXED archetype has a ClusterSegment and is admitted.
+            if (isClusterEligible && hasIndexedTransientSlot && !hasSvSlot && versionedSlotMask == 0)
             {
                 isClusterEligible = false;
             }
@@ -2831,8 +2868,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     componentSizes[slot] = table.Definition.ComponentStorageSize;
                     // Count AllowMultiple indexed fields for the cluster tail elementId storage. Only non-Transient slots participate in cluster B+Tree
                     // indexing (Transient indexed fields stay on the legacy per-entity path — see the eligibility check above). Mirror that gate here so the
-                    // tail is sized correctly.
-                    if (table.StorageMode != StorageMode.Transient && table.IndexedFieldInfos != null)
+                    // tail is sized correctly. When #655 lifts the eligibility gate this must lift WITH it, in the same change: admitting Transient slots to
+                    // the index slots while sizing the tail without them misroutes every AllowMultiple element id (trap 1 of that issue).
+                    if (table.IndexedFieldInfos != null)
                     {
                         for (var fi = 0; fi < table.IndexedFieldInfos.Length; fi++)
                         {
@@ -2987,15 +3025,30 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     var changeSet = MMF.CreateChangeSet();
                     try
                     {
-                        // Try to load persisted per-archetype index segment
+                        // Try to load persisted per-archetype index segments from this archetype's ArchetypeR1 row (#661). The row is matched by NAME, which
+                        // is the durable identity; the previous home was a bootstrap key built from the per-process catalog id, which is not. Absent row or
+                        // zero SPI ⇒ allocate fresh and rebuild, exactly as EntityMapSPI/ClusterSegmentSPI behave.
+                        var indexSPI = 0;
+                        var s64SPI = 0;
+                        if (!isFreshAllocation && TryGetPersistedArchetype(meta, out var indexPersisted))
+                        {
+                            indexSPI = indexPersisted.Arch.ClusterIndexSPI;
+                            s64SPI = indexPersisted.Arch.ClusterString64IndexSPI;
+                        }
+
+                        // RB-01, crash path (#656): a persisted secondary index is DERIVED and is never trusted after a crash. The segment is still loaded —
+                        // tolerating a torn page, as the cluster and EntityMap loads do — so its pages are reclaimed rather than leaked, but the trees are
+                        // cleared below and recreated empty. The repopulation is NOT here: it is Phase 5, after apply + scrub, because RB-02 requires indexes
+                        // built from FINAL head data and this block runs BEFORE RunWalV2Recovery. Rebuilding here would index pre-apply state — an index that
+                        // is confidently wrong rather than merely stale. Mirrors ComponentTable.BuildIndexedFieldInfo / RebuildSecondaryIndexes for the
+                        // per-ComponentTable home.
+                        var crashPath = WalFilesPresentAtOpen;
                         var loadIndexes = false;
                         ChunkBasedSegment<PersistentStore> indexSegment;
-                        var indexKey = $"clusterindex.{meta.ArchetypeId}";
-                        var indexSPI = !isFreshAllocation ? MMF.Bootstrap.GetInt(indexKey) : 0;
-                        if (indexSPI > 0 && MMF.TryLoadChunkBasedSegment(indexSPI, 256 /* sizeof(Index64Chunk) */, out var loadedIdx))
+                        if (indexSPI > 0 && MMF.TryLoadChunkBasedSegment(indexSPI, 256 /* sizeof(Index64Chunk) */, out var loadedIdx, crashPath))
                         {
                             indexSegment = loadedIdx;
-                            loadIndexes = true;
+                            loadIndexes = !crashPath;
                         }
                         else
                         {
@@ -3009,9 +3062,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         ChunkBasedSegment<PersistentStore> string64IndexSegment = null;
                         if (ArchetypeHasIndexedString64Field(slotToTable))
                         {
-                            var s64Key = $"clusterindexs64.{meta.ArchetypeId}";
-                            var s64SPI = !isFreshAllocation ? MMF.Bootstrap.GetInt(s64Key) : 0;
-                            if (s64SPI > 0 && MMF.TryLoadChunkBasedSegment(s64SPI, Unsafe.SizeOf<IndexString64Chunk>(), out var loadedS64))
+                            if (s64SPI > 0 && MMF.TryLoadChunkBasedSegment(s64SPI, Unsafe.SizeOf<IndexString64Chunk>(), out var loadedS64, crashPath))
                             {
                                 string64IndexSegment = loadedS64;
                             }
@@ -3033,10 +3084,29 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                             BTreeBase<PersistentStore>.ClearSharedSegment(string64IndexSegment, changeSet);
                         }
 
-                        clusterState.InitializeIndexes(slotToTable, indexSegment, string64IndexSegment, loadIndexes, changeSet);
+                        // Transient trees get their own heap-backed segments, created fresh every open and never given an SPI (#655). A Transient tree in a
+                        // persisted segment would be reloaded next open pointing at data that no longer exists — Transient data does not survive the
+                        // process, so the correct post-reopen state is an empty tree, not a restored one.
+                        ChunkBasedSegment<TransientStore> transientIndexSegment = null;
+                        ChunkBasedSegment<TransientStore> transientString64IndexSegment = null;
+                        if (ArchetypeHasIndexedTransientField(slotToTable))
+                        {
+                            CreateTransientClusterSegment(256 /* sizeof(Index64Chunk) */, out var tIdxStore, out transientIndexSegment);
+                            clusterState.TransientIndexStore = tIdxStore;
+                            if (ArchetypeHasIndexedTransientString64Field(slotToTable))
+                            {
+                                CreateTransientClusterSegment(Unsafe.SizeOf<IndexString64Chunk>(), out var tS64Store, out transientString64IndexSegment);
+                                clusterState.TransientIndexStoreString64 = tS64Store;
+                            }
+                        }
 
-                        // If fresh indexes on a reopened database with existing cluster data, rebuild from scan
-                        if (!loadIndexes && !isFreshAllocation && clusterState.ActiveClusterCount > 0)
+                        clusterState.InitializeIndexes(slotToTable, indexSegment, string64IndexSegment, transientIndexSegment,
+                            transientString64IndexSegment, loadIndexes, changeSet);
+
+                        // Fresh indexes over a reopened database's existing cluster data ⇒ rebuild from scan. NOT on the crash path: there the cluster SoA is
+                        // still pre-apply at this point, so RebuildClusterIndexes (Phase 5) owns the rebuild. Exactly one of the two runs — RunWalV2Recovery
+                        // returns immediately when no WAL window exists.
+                        if (!loadIndexes && !crashPath && !isFreshAllocation && clusterState.ActiveClusterCount > 0)
                         {
                             using var idxEpoch = EpochGuard.Enter(EpochManager);
                             clusterState.RebuildIndexesFromData(changeSet);
@@ -3256,6 +3326,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // the same checkpoint consolidates the rebuilt index pages.
         RebuildSecondaryIndexes();
 
+        // ...and the per-archetype half (#656). A cluster-backed archetype's indexes live on the ARCHETYPE, so the walk above never reaches them; before this
+        // they were loaded from disk at open and never rebuilt, which left RB-04's "a derived page was discarded and rebuilt" premise false for this home —
+        // a torn cluster-index node page was neither loud-failed nor rebuilt, but silently served.
+        RebuildClusterIndexes();
+
         // Phase 6 — SUSPECT RESOLUTION (03-recovery.md §9, RB-04): now that derived structures are rebuilt and chains scrubbed, classify every page that failed
         // CRC during recovery (RecoverySuspect mode). Derived/orphaned suspects are already healed (rebuilt / freed by scrub); a suspect page still holding a live
         // primary chunk is unhealable torn data → fail the open loudly. Before the seal so a loud failure aborts before the data file is rewritten.
@@ -3368,16 +3443,20 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// a CRC failure there is heal-or-loud-fail (RB-04). Post-FPI (increment D) this predicate is the ONLY thing standing between a torn page and silent corruption,
     /// so its boundary is asserted directly by <c>SuspectPageClassification_PartitionsDerivedVsPrimary</c>. Internal for that test.</summary>
     /// <summary>
-    /// True when any cluster-indexed component slot indexes a <see cref="String64"/> field, i.e. the archetype needs the wider-stride
-    /// second index segment (issue #658). Mirrors the slot/field walk in <c>ArchetypeClusterState.InitializeIndexes</c>, including its
-    /// Transient exclusion — a divergence here means a field is handed a segment whose stride its B+Tree asserts against.
+    /// True when a slot whose storage mode is (or is not, per <paramref name="transient"/>) <see cref="StorageMode.Transient"/> indexes a field matching
+    /// <paramref name="ofType"/> — or any field at all when <paramref name="ofType"/> is <see langword="null"/>.
     /// </summary>
-    private static bool ArchetypeHasIndexedString64Field(ComponentTable[] slotToTable)
+    /// <remarks>
+    /// Mirrors the slot/field walk in <c>ArchetypeClusterState.InitializeIndexes</c>. The two must agree exactly: this decides which segments get allocated,
+    /// that decides which segment each tree is handed, and a divergence means a field is given a segment whose stride its B+Tree asserts against (#658), or —
+    /// since #655 — a Transient tree with no segment to live in at all.
+    /// </remarks>
+    private static bool ArchetypeIndexesField(ComponentTable[] slotToTable, bool transient, FieldType? ofType)
     {
         for (var slot = 0; slot < slotToTable.Length; slot++)
         {
             var table = slotToTable[slot];
-            if (table.StorageMode == StorageMode.Transient)
+            if ((table.StorageMode == StorageMode.Transient) != transient)
             {
                 continue;
             }
@@ -3386,7 +3465,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             for (var i = 0; i < definition.MaxFieldId; i++)
             {
                 var field = definition[i];
-                if (field != null && field.HasIndex && field.Type == FieldType.String64)
+                if (field != null && field.HasIndex && (ofType == null || field.Type == ofType.Value))
                 {
                     return true;
                 }
@@ -3396,6 +3475,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         return false;
     }
 
+    /// <summary>Any non-Transient indexed <see cref="String64"/> field ⇒ the archetype needs the wider-stride persisted index segment (#658).</summary>
+    private static bool ArchetypeHasIndexedString64Field(ComponentTable[] slotToTable)
+        => ArchetypeIndexesField(slotToTable, transient: false, FieldType.String64);
+
+    /// <summary>Any indexed field on a Transient slot ⇒ the archetype needs its heap-backed index segment (#655).</summary>
+    private static bool ArchetypeHasIndexedTransientField(ComponentTable[] slotToTable)
+        => ArchetypeIndexesField(slotToTable, transient: true, null);
+
+    /// <summary>Any indexed <see cref="String64"/> field on a Transient slot ⇒ it also needs the wider-stride heap-backed segment.</summary>
+    private static bool ArchetypeHasIndexedTransientString64Field(ComponentTable[] slotToTable)
+        => ArchetypeIndexesField(slotToTable, transient: true, FieldType.String64);
+
     internal static bool IsDerivedSegmentKind(StorageSegmentKind kind)
         => kind is StorageSegmentKind.Index or StorageSegmentKind.Spatial or StorageSegmentKind.Occupancy;
 
@@ -3403,8 +3494,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// Phase 5 — REBUILD (03-recovery.md §7, RB-01). After apply+scrub, rebuild every Versioned table's secondary indexes from the final chain HEADs. The indexes
     /// were emptied at open on the crash path (<see cref="ComponentTable.BuildIndexedFieldInfo"/>), so a torn checkpointed index page is replaced by rebuild rather
     /// than FPI repair. Mirrors <see cref="RebuildEntityMapsFromPersistedData"/>'s archetype/slot walk; a table shared across archetypes accumulates each
-    /// archetype's heads into the one (already-empty) index. SingleVersion indexed components are cluster-eligible and rebuilt on the cluster path, not here.
+    /// archetype's heads into the one (already-empty) index.
     /// </summary>
+    /// <remarks>
+    /// This walk covers the per-ComponentTable home only. A cluster-backed archetype keeps its indexes on the ARCHETYPE, and those are rebuilt by
+    /// <see cref="RebuildClusterIndexes"/> immediately after. Until #656 this method's own comment claimed the cluster path handled them "not here" — true on a
+    /// clean reopen, false on the crash path, where the cluster init block loaded the persisted segment and skipped its rebuild. Each side believed the other
+    /// did it, so after a crash neither did.
+    /// </remarks>
     private void RebuildSecondaryIndexes()
     {
         using var guard = EpochGuard.Enter(EpochManager);
@@ -3433,6 +3530,51 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         table.RebuildSecondaryIndexEntriesFromHeads(heads, changeSet);
                     }
                 }
+            }
+        }
+        finally
+        {
+            changeSet.SaveChanges();
+        }
+    }
+
+    /// <summary>
+    /// Phase 5, per-archetype half (RB-01 / RB-02, #656). Repopulates every cluster-backed archetype's own B+Trees from the cluster SoA, which the apply and
+    /// scrub phases have just brought to its final state.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Crash path only — the trees were cleared and left empty by the cluster-index init block, which no longer trusts a persisted index segment after a
+    /// crash. On a clean reopen this method never runs (<see cref="RunWalV2Recovery"/> returns immediately with no WAL window) and the init block does the
+    /// rebuild itself, over data that is already final.
+    /// </para>
+    /// <para>
+    /// Rebuilding from the cluster SoA rather than from chain heads is what makes this correct for a cluster archetype whatever its slots' storage modes: the
+    /// cluster slot IS the head for SingleVersion, and holds the published head for Versioned (D1). <c>ActiveClusterCount == 0</c> — an archetype whose
+    /// entities were all in the lost window — leaves the empty trees alone, which is the right answer, not a skipped rebuild.
+    /// </para>
+    /// </remarks>
+    private void RebuildClusterIndexes()
+    {
+        using var guard = EpochGuard.Enter(EpochManager);
+        var changeSet = MMF.CreateChangeSet();
+        try
+        {
+            foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+            {
+                if (!meta.HasClusterIndexes || meta.ArchetypeId >= _archetypeStates.Length)
+                {
+                    continue;
+                }
+
+                var clusterState = _archetypeStates[meta.ArchetypeId]?.ClusterState;
+                if (clusterState?.IndexSlots == null || clusterState.ActiveClusterCount == 0)
+                {
+                    continue;
+                }
+
+                clusterState.RebuildIndexesFromData(changeSet);
+                LastOpenClusterIndexRebuildCount++;
             }
         }
         finally
@@ -3993,6 +4135,45 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
         persisted = default;
         return false;
+    }
+
+    /// <summary>
+    /// Removes every pre-#661 bootstrap entry that carried a per-archetype index segment root, so a database reopened by this build sheds them.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Retiring the key means deleting it, not merely ceasing to read it. Every surviving entry costs ~22 B of a fixed 8016 B bootstrap page
+    /// (<c>ManagedPagedMMF</c>), and overflow throws from inside <c>PersistMetaNow</c> — under <c>_metaLock</c>, mid-checkpoint — surfacing as a CK-06 cycle
+    /// failure rather than at the point of fault. Leaving dead keys behind would keep that ceiling in place for exactly the databases the move was meant to
+    /// relieve.
+    /// </para>
+    /// <para>
+    /// Swept by PREFIX rather than per archetype, because the id in the key is precisely what could not be trusted: on a database whose catalog numbering has
+    /// shifted since it was written, removing the key the CURRENT id names would leave the one it was actually stored under orphaned forever — the ceiling
+    /// preserved by the very instability the move was made to escape. The prefix is dead key space, so taking all of it is both correct and complete.
+    /// </para>
+    /// </remarks>
+    private void DropLegacyClusterIndexBootstrapKeys()
+    {
+        List<string> stale = null;
+        foreach (var key in MMF.Bootstrap.Keys)
+        {
+            if (key.StartsWith("clusterindex.", StringComparison.Ordinal) || key.StartsWith("clusterindexs64.", StringComparison.Ordinal))
+            {
+                (stale ??= []).Add(key);
+            }
+        }
+
+        if (stale == null)
+        {
+            return;
+        }
+
+        // Snapshot first: Keys is a live view over the dictionary being mutated.
+        for (var i = 0; i < stale.Count; i++)
+        {
+            MMF.Bootstrap.Remove(stale[i]);
+        }
     }
 
     private void LoadPersistedArchetypes()

@@ -496,6 +496,175 @@ internal sealed class DifferentialRecoveryOracleTests
         }
     }
 
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // #656 — the same RB-01 guarantees for the PER-ARCHETYPE index home
+    //
+    // Every index-axis test above runs over CompD: a flat, non-cluster, Versioned archetype whose indexes live on the ComponentTable. That is exactly the
+    // population the defect did NOT affect. A cluster-backed archetype keeps its indexes on the ARCHETYPE, and on the crash path that home loaded the
+    // persisted segment and skipped its rebuild entirely — so a torn cluster-index node page was neither loud-failed (RB-04 skips derived kinds) nor
+    // rebuilt, but silently served.
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>Metadata of the cluster-backed archetype under test, resolved the same way the rest of the fixture resolves its archetype.</summary>
+    private static ArchetypeMetadata SvIndexedMeta => Archetype<SvIndexedArch>.Metadata;
+
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("RB-01")]
+    public void ClusterIndexed_IndexAxis_MatchesBroadScan()
+    {
+        RecoverWith(new ClusterAllSvWorkload(40, DurabilityDiscipline.Commit), (dbe, shadow) =>
+        {
+            RecoveryOracle.AssertPrimaryAxis(dbe, shadow);
+
+            using var tx = dbe.CreateQuickTransaction();
+            var broad = RecoveryOracle.BroadScanEntityIds(tx, shadow.Entities.Keys.First().ArchetypeId);
+            Assert.That(broad, Is.Not.Empty, "sanity: the cluster entities must be recovered for the index-axis comparison to mean anything");
+
+            var indexed = RecoveryOracle.ClusterIndexEntityIds(dbe, SvIndexedMeta, 0, 0, int.MinValue, int.MaxValue);
+            Assert.That(
+                indexed,
+                Is.EquivalentTo(broad),
+                $"cluster index axis: the archetype-homed SvIndexed.K tree ({indexed.Count}) must equal the broad-scan set ({broad.Count}). A shortfall means "
+                + "the crash path trusted the persisted index instead of clearing and rebuilding it (RB-01).");
+        });
+    }
+
+    // ── The cluster twin of MultiValueIndex_DuplicateKeys_AllRebuiltAfterCrash. An AllowMultiple leaf holds a VSBS buffer ROOT, not the location itself, so a
+    //    rebuild that gets the unique case right can still keep one entity per key and drop the rest — invisible to a unique-key workload. ──
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("RB-01")]
+    public void ClusterMultiValueIndex_DuplicateKeys_AllRebuiltAfterCrash()
+    {
+        RecoverWith(new ClusterMultiValueDupKeyWorkload(count: 120, groups: 8), (dbe, shadow) =>
+        {
+            RecoveryOracle.AssertPrimaryAxis(dbe, shadow);
+
+            using var tx = dbe.CreateQuickTransaction();
+            var broad = RecoveryOracle.BroadScanEntityIds(tx, shadow.Entities.Keys.First().ArchetypeId);
+
+            var indexed = RecoveryOracle.ClusterIndexEntityIds(dbe, Archetype<SvMultiIndexedArch>.Metadata, 0, 0, int.MinValue, int.MaxValue);
+            Assert.That(
+                indexed,
+                Is.EquivalentTo(broad),
+                $"cluster multi-value index G: rebuilt set ({indexed.Count}) must equal broad-scan set ({broad.Count}) — 15 entities share each of the 8 keys, "
+                + "so a per-key shortfall means the rebuild's AllowMultiple append path is not exercised on this home (RB-01).");
+        });
+    }
+
+    // ── The frontier case: half the entities are consolidated into the data file by a checkpoint, half live only in the WAL window. The cluster rebuild
+    //    runs in Phase 5 over the cluster SoA, so it must see BOTH — the checkpointed slots and the ones the apply phase has just written. ──
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("RB-02")]
+    public void ClusterIndexed_MidCheckpoint_IndexAxisHolds()
+    {
+        RecoverWithMidCheckpoint(
+            new ClusterAllSvWorkload(30, DurabilityDiscipline.Commit),
+            new ClusterAllSvWorkload(20, DurabilityDiscipline.Commit, keyBase: 1000),
+            (dbe, shadow) =>
+            {
+                RecoveryOracle.AssertPrimaryAxis(dbe, shadow);
+
+                using var tx = dbe.CreateQuickTransaction();
+                var broad = RecoveryOracle.BroadScanEntityIds(tx, shadow.Entities.Keys.First().ArchetypeId);
+                var indexed = RecoveryOracle.ClusterIndexEntityIds(dbe, SvIndexedMeta, 0, 0, int.MinValue, int.MaxValue);
+
+                Assert.That(
+                    indexed,
+                    Is.EquivalentTo(broad),
+                    $"cluster index axis across the checkpoint frontier: rebuilt set ({indexed.Count}) must equal broad-scan ({broad.Count}). Rebuilding at "
+                    + "OPEN instead of in Phase 5 would index only the checkpointed half — the window's entities are applied later (RB-02).");
+            });
+    }
+
+    // ── PROOF GATE for this home: tear a CHECKPOINTED per-archetype index node page on disk and prove recovery still yields a correct index. Before #656 the
+    //    crash path loaded that segment and served it: RB-04 skips CRC-failed pages of a derived segment kind on the premise that RB-01 discarded and rebuilt
+    //    them, and for this home that premise was simply false. ──
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("RB-01")]
+    public void TornCheckpointedClusterIndexPage_RecoversViaRebuild()
+    {
+        var shadow = new RecoveryShadowModel();
+        var below = new ClusterAllSvWorkload(3000, DurabilityDiscipline.Commit);                    // checkpointed: an index spanning many node pages
+        var window = new ClusterAllSvWorkload(8, DurabilityDiscipline.Commit, keyBase: 900_000);    // WAL window: keeps the crash path active
+
+        int tornFilePage;
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            below.Register(dbe);
+            dbe.InitializeArchetypes();
+
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                below.Execute(uow, shadow);
+                uow.Flush();
+            }
+            dbe.WriteTickFence(1);
+
+            dbe.ForceCheckpoint();
+            dbe.CheckpointManager.WaitForCheckpoint(TimeSpan.FromSeconds(10));
+            tornFilePage = ResolveNonRootClusterIndexNodeFilePage(dbe);
+            Assert.That(tornFilePage, Is.GreaterThan(0), "test needs a checkpointed non-root cluster-index node page to tear (workload too small?)");
+
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                window.Execute(uow, shadow);
+                uow.Flush();
+            }
+
+            shadow.CaptureValues(dbe);
+            dbe.SimulateHardCrash();
+        }
+
+        TearDataFilePage(tornFilePage);
+
+        {
+            using var scope2 = _serviceProvider.CreateScope();
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            below.Register(dbe);
+            dbe.InitializeArchetypes();
+
+            RecoveryOracle.AssertPrimaryAxis(dbe, shadow);
+
+            using var tx = dbe.CreateQuickTransaction();
+            var broad = RecoveryOracle.BroadScanEntityIds(tx, shadow.Entities.Keys.First().ArchetypeId);
+            var indexed = RecoveryOracle.ClusterIndexEntityIds(dbe, SvIndexedMeta, 0, 0, int.MinValue, int.MaxValue);
+            Assert.That(
+                indexed,
+                Is.EquivalentTo(broad),
+                $"torn cluster-index proof gate: rebuilt index ({indexed.Count}) must equal broad-scan set ({broad.Count}). A shortfall means the torn "
+                + "checkpointed page was parsed and served rather than discarded and rebuilt (RB-01/RB-04).");
+        }
+    }
+
+    /// <summary>
+    /// The cluster twin of <see cref="ResolveNonRootIndexNodeFilePage"/>: an allocated node chunk of the PER-ARCHETYPE index segment living on a non-root
+    /// segment page, so tearing it leaves the chunk-0 B+Tree directory intact. Returns 0 if the whole index fits on the root page.
+    /// </summary>
+    private static int ResolveNonRootClusterIndexNodeFilePage(DatabaseEngine dbe)
+    {
+        var seg = dbe._archetypeStates[SvIndexedMeta.ArchetypeId].ClusterState.IndexSegment;
+        for (var chunkId = seg.ChunkCapacity - 1; chunkId >= BTreeBase<PersistentStore>.DirectoryChunkCount; chunkId--)
+        {
+            if (!seg.IsChunkAllocated(chunkId))
+            {
+                continue;
+            }
+
+            var (segPageIndex, _) = seg.GetChunkLocation(chunkId);
+            if (segPageIndex >= 1)
+            {
+                return seg.Pages[segPageIndex];
+            }
+        }
+
+        return 0;
+    }
+
     /// <summary>Resolves the on-disk file page index of an allocated CompD secondary-index node chunk that lives on a NON-root segment page (so tearing it leaves the
     /// chunk-0 BTree directory intact). Returns 0 if none exists (index fits on the root page).</summary>
     private static int ResolveNonRootIndexNodeFilePage(DatabaseEngine dbe)
@@ -884,7 +1053,10 @@ internal sealed class DifferentialRecoveryOracleTests
             "cluster archetype → EntityMap fully re-derivable from cluster occupancy + EntityKeys[N]");
         Assert.That(dbe.IsEntityMapRebuildable(Archetype<CompDArch>.Metadata), Is.True,
             "flat all-Versioned → EntityMap re-derivable from chain heads");
-        Assert.That(dbe.IsEntityMapRebuildable(Archetype<FlatSvArch>.Metadata), Is.False,
-            "non-cluster archetype with an SV slot (forced flat by a Transient-indexed slot) → not rebuildable → torn EntityMap loud-fails (RB-04 residual)");
+        // The RB-01/RB-04 "non-rebuildable" residual was exactly one shape: {SV slot + Transient-indexed slot}, which the old cluster-eligibility rule forced
+        // onto the flat path, leaving its SV locations with no persisted source. #655 admits that shape to cluster storage, so the class no longer exists —
+        // this archetype is now rebuildable like every other, and the rules no longer carry the carve-out.
+        Assert.That(dbe.IsEntityMapRebuildable(Archetype<FlatSvArch>.Metadata), Is.True,
+            "{SV + Transient-indexed} is cluster-backed since #655 → cluster occupancy + EntityKeys[N] make its EntityMap re-derivable like any other");
     }
 }
