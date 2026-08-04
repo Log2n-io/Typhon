@@ -91,6 +91,12 @@ class Program
                 return;
             }
 
+            if (args.Contains("--storage-model"))
+            {
+                StorageModelProfile.Run(args);
+                return;
+            }
+
             if (args.Contains("--profile-spawn"))
             {
                 SpawnProfile.Run();

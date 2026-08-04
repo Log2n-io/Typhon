@@ -70,6 +70,13 @@ public unsafe partial class Transaction : EntityAccessor
     private ushort _clusterCommitArchId;
     private ChunkAccessor<PersistentStore> _clusterCommitMapAccessor;
     private ChunkAccessor<PersistentStore> _clusterCommitContentAccessor;
+
+    /// <summary>
+    /// The segment <see cref="_clusterCommitContentAccessor"/> was opened on. The other cluster-commit accessors belong to the ARCHETYPE, but content
+    /// chunks belong to the COMPONENT, and one archetype can carry several Versioned components — so caching the content accessor on the archetype alone
+    /// hands the second component's chunk id to the first component's segment.
+    /// </summary>
+    private ChunkBasedSegment<PersistentStore> _clusterCommitContentSegment;
     private ChunkAccessor<PersistentStore> _clusterCommitClusterAccessor;
     // Per-archetype index segments, cached on the same archetype key as the three above (#665). Before this the reconcile created and disposed an accessor
     // per entity PER FIELD; every field of an archetype shares one of these two segments, so all but the first were redundant. Two rather than one because
@@ -455,6 +462,24 @@ public unsafe partial class Transaction : EntityAccessor
     /// <summary>
     /// Returns an enumerator that streams entities via a secondary index in key order, filtered by MVCC visibility at this transaction's snapshot.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Fans out across every archetype holding the component (#666).</b> Indexes live per-archetype, so a component-keyed <see cref="IndexRef"/> names K
+    /// trees rather than one. Fanning out is what preserves the semantics the single shared tree used to give — the alternative, making the handle name one
+    /// archetype, would silently narrow every existing caller's result set. ADR-045 §2 accepted the K-way merge when it chose per-archetype trees.
+    /// </para>
+    /// <para>
+    /// <b>Index entries are materialised; entity resolution stays lazy.</b> The B+Tree range cursors are <c>ref struct</c>s, so K of them cannot be held side
+    /// by side for a streaming merge — the language has no way to store them. Each tree's <c>(key, location)</c> pairs are therefore drained into one pooled
+    /// buffer and sorted once, which costs 12 bytes per matching index entry. The expensive half — chain walks, page faults, component reads — remains
+    /// per-<see cref="IndexEntityEnumerator{T,TKey}.MoveNext"/>, so this bounds memory by the number of index entries in range, not by the data behind them.
+    /// Stated rather than hidden: for K == 1 the buffer holds exactly what a single-tree scan would have walked anyway.
+    /// </para>
+    /// <para>
+    /// Transient components are not reachable here and never were: their trees are <c>BTree&lt;TKey, TransientStore&gt;</c>, which fails the cast below
+    /// exactly as it did against the shared home.
+    /// </para>
+    /// </remarks>
     public IndexEntityEnumerator<T, TKey> EnumerateIndex<T, TKey>(IndexRef indexRef, TKey minKey, TKey maxKey) where T : unmanaged where TKey : unmanaged
     {
         AssertThreadAffinity();
@@ -467,58 +492,308 @@ public unsafe partial class Transaction : EntityAccessor
             throw new InvalidOperationException("PK B+Tree has been removed. Use ECS queries with EntityMap instead.");
         }
 
-        var ifi = ct.IndexedFieldInfos[indexRef.FieldIndex];
-        if (ifi.Index is not BTree<TKey, PersistentStore> skIndex)
+        var fieldIndex = indexRef.FieldIndex;
+        var sources = new List<IndexArchetypeSource>();
+        var trees = new List<BTree<TKey, PersistentStore>>();
+        var multi = new List<bool>();
+
+        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
         {
-            throw new InvalidOperationException(
-                $"TKey type mismatch: index uses '{ifi.Index.GetType().GenericTypeArguments[0].Name}', caller specified '{typeof(TKey).Name}'.");
+            var es = _dbe._archetypeStates[meta.ArchetypeId];
+            var clusterState = es?.ClusterState;
+            if (clusterState?.IndexSlots == null)
+            {
+                continue;
+            }
+
+            // The archetype's slot for THIS component table. A component type can sit at a different slot in each archetype, and the index slots are keyed on
+            // the archetype's own slot numbering, so the table identity is the only reliable join.
+            var compSlot = -1;
+            for (var slot = 0; slot < meta.ComponentCount; slot++)
+            {
+                if (ReferenceEquals(es.SlotToComponentTable[slot], ct))
+                {
+                    compSlot = slot;
+                    break;
+                }
+            }
+
+            if (compSlot < 0)
+            {
+                continue;
+            }
+
+            var ixSlotIdx = -1;
+            for (var s = 0; s < clusterState.IndexSlots.Length; s++)
+            {
+                if (clusterState.IndexSlots[s].Fields != null && clusterState.IndexSlots[s].Slot == compSlot)
+                {
+                    ixSlotIdx = s;
+                    break;
+                }
+            }
+
+            if (ixSlotIdx < 0 || fieldIndex >= clusterState.IndexSlots[ixSlotIdx].Fields.Length)
+            {
+                continue;
+            }
+
+            ref var field = ref clusterState.IndexSlots[ixSlotIdx].Fields[fieldIndex];
+            if (field.Index is not BTree<TKey, PersistentStore> typedIndex)
+            {
+                throw new InvalidOperationException(
+                    $"TKey type mismatch: index uses '{field.Index.GetType().GenericTypeArguments[0].Name}', caller specified '{typeof(TKey).Name}'.");
+            }
+
+            var layout = clusterState.Layout;
+            sources.Add(new IndexArchetypeSource
+            {
+                ClusterState = clusterState,
+                EngineState = es,
+                RecordSize = meta._entityRecordSize,
+                CompOffset = layout.ComponentOffset(compSlot),
+                CompSize = layout.ComponentSize(compSlot),
+                VersionedIndex = layout.SlotToVersionedIndex != null ? layout.SlotToVersionedIndex[compSlot] : -1,
+            });
+
+            trees.Add(typedIndex);
+            multi.Add(field.AllowMultiple);
         }
 
-        BTree<TKey, PersistentStore> typedIndex = skIndex;
+        // ONE archetype holds this component — the common case, and the one an early-terminating caller depends on. Stream straight off its cursor and
+        // materialise nothing: a caller that breaks after N entries must pay for N entries, not for the whole range. Draining up front turns
+        // EnumerateIndex(startKey, MaxValue) + break-at-100 from O(100) into O(everything at or after startKey), which is what a YCSB-style scan does.
+        if (trees.Count == 1)
+        {
+            return new IndexEntityEnumerator<T, TKey>(trees[0], multi[0], minKey, maxKey, sources[0], ct, this, _changeSet);
+        }
 
-        return new IndexEntityEnumerator<T, TKey>(typedIndex, ct, this, minKey, maxKey, _changeSet);
+        // Genuine fan-out: K cursors cannot be held side by side (they are ref structs), so the entries are merged eagerly. Early termination degrades here
+        // and that is a known limit of the multi-archetype path, recorded rather than hidden.
+        var runs = new List<List<IndexMergeEntry<TKey>>>(trees.Count);
+        for (var i = 0; i < trees.Count; i++)
+        {
+            var run = new List<IndexMergeEntry<TKey>>();
+            CollectIndexEntries(trees[i], multi[i], minKey, maxKey, i, run);
+            runs.Add(run);
+        }
+
+        return new IndexEntityEnumerator<T, TKey>(MergeRuns(runs), sources.ToArray(), ct, this, _changeSet);
     }
 
     /// <summary>
-    /// MVCC-correct streaming enumerator over any index B+Tree leaf chain.
+    /// Merges K already-ordered per-archetype runs into one ascending sequence.
+    /// </summary>
+    /// <remarks>
+    /// A B+Tree range scan emits its keys in order, so each run arrives sorted and the combined order is a K-way MERGE — linear in the total, with one
+    /// comparison per output element. Concatenating and calling <see cref="Array.Sort{T}(T[], Comparison{T})"/> instead throws that ordering away and pays
+    /// O(n log n) delegate-dispatched comparisons to rediscover it; measured at 40 000 entries that mistake cost 8.1 ms of pure set-up before a single entity
+    /// was read. The single-run case — one archetype holds the component, which is the common one — returns the run untouched and does no merging at all.
+    /// </remarks>
+    private static IndexMergeEntry<TKey>[] MergeRuns<TKey>(List<List<IndexMergeEntry<TKey>>> runs) where TKey : unmanaged
+    {
+        if (runs.Count == 0)
+        {
+            return [];
+        }
+
+        if (runs.Count == 1)
+        {
+            return runs[0].ToArray();
+        }
+
+        var total = 0;
+        for (var r = 0; r < runs.Count; r++)
+        {
+            total += runs[r].Count;
+        }
+
+        var result = new IndexMergeEntry<TKey>[total];
+        var cursors = new int[runs.Count];
+        var comparer = Comparer<TKey>.Default;
+
+        for (var outIdx = 0; outIdx < total; outIdx++)
+        {
+            var best = -1;
+            for (var r = 0; r < runs.Count; r++)
+            {
+                if (cursors[r] >= runs[r].Count)
+                {
+                    continue;
+                }
+
+                // Ties break on source order so a repeated run over an unchanged index yields the same sequence.
+                if (best < 0 || comparer.Compare(runs[r][cursors[r]].Key, runs[best][cursors[best]].Key) < 0)
+                {
+                    best = r;
+                }
+            }
+
+            result[outIdx] = runs[best][cursors[best]++];
+        }
+
+        return result;
+    }
+
+    /// <summary>Drains one archetype's B+Tree over <paramref name="minKey"/>..<paramref name="maxKey"/> into <paramref name="sink"/>.</summary>
+    /// <remarks>
+    /// Separated so the <c>ref struct</c> range cursors live and die inside one stack frame. That is the whole reason the merge materialises: two of these
+    /// cannot be alive in the same object at the same time.
+    /// </remarks>
+    private static void CollectIndexEntries<TKey>(BTree<TKey, PersistentStore> index, bool allowMultiple, TKey minKey, TKey maxKey, int sourceIndex,
+        List<IndexMergeEntry<TKey>> sink) where TKey : unmanaged
+    {
+        if (allowMultiple)
+        {
+            var e = index.EnumerateRangeMultiple(minKey, maxKey);
+            try
+            {
+                while (e.MoveNextKey())
+                {
+                    var key = e.CurrentKey;
+                    do
+                    {
+                        var values = e.CurrentValues;
+                        for (var i = 0; i < values.Length; i++)
+                        {
+                            sink.Add(new IndexMergeEntry<TKey> { Key = key, Location = values[i], SourceIndex = sourceIndex });
+                        }
+                    }
+                    while (e.NextChunk());
+                }
+            }
+            finally
+            {
+                e.Dispose();
+            }
+
+            return;
+        }
+
+        var u = index.EnumerateRange(minKey, maxKey);
+        try
+        {
+            while (u.MoveNext())
+            {
+                var kv = u.Current;
+                sink.Add(new IndexMergeEntry<TKey> { Key = kv.Key, Location = kv.Value, SourceIndex = sourceIndex });
+            }
+        }
+        finally
+        {
+            u.Dispose();
+        }
+    }
+
+    /// <summary>One index entry pulled from an archetype's tree, carrying the source it came from so resolution can find its cluster again.</summary>
+    internal struct IndexMergeEntry<TKey> where TKey : unmanaged
+    {
+        public TKey Key;
+
+        /// <summary>Packed <c>ClusterLocation</c> — <c>clusterChunkId * 64 + slotIndex</c>.</summary>
+        public int Location;
+
+        public int SourceIndex;
+    }
+
+    /// <summary>Everything needed to turn a <c>ClusterLocation</c> from one archetype's index back into an entity and its component bytes.</summary>
+    internal sealed class IndexArchetypeSource
+    {
+        public ArchetypeClusterState ClusterState;
+        public ArchetypeEngineState EngineState;
+        public int RecordSize;
+        public int CompOffset;
+        public int CompSize;
+
+        /// <summary>Position among the archetype's Versioned slots, or -1 when this component is SingleVersion here.</summary>
+        public int VersionedIndex;
+    }
+
+    /// <summary>
+    /// MVCC-correct streaming enumerator over the per-archetype index B+Trees backing one component.
     /// Use <see cref="CurrentComponent"/> for zero-copy ref access into page memory, or <see cref="Current"/> for a convenience copy.
-    /// Supports both unique and AllowMultiple indexes (including PK).
+    /// Supports both unique and AllowMultiple indexes.
     /// </summary>
     [PublicAPI]
     public ref struct IndexEntityEnumerator<T, TKey> where T : unmanaged where TKey : unmanaged
     {
-        // Unique index path
+        private readonly IndexMergeEntry<TKey>[] _entries;
+        private readonly IndexArchetypeSource[] _sources;
+        private readonly ChunkAccessor<PersistentStore>[] _clusterAccessors;
+        private readonly ChunkAccessor<PersistentStore>[] _mapAccessors;
+        private int _entryIndex;
+
+        /// <summary>Largest EntityMap record across the sources — the one buffer size that serves every archetype this enumerator spans.</summary>
+        private readonly int _maxRecordSize;
+
+        // Streaming mode (single archetype): one live B+Tree cursor, nothing materialised. A ref struct can hold ONE of these; it is holding K of them that
+        // the language forbids, which is why the fan-out path materialises instead.
+        private readonly bool _streaming;
+        private readonly bool _isAllowMultiple;
         private BTree<TKey, PersistentStore>.RangeEnumerator _innerUnique;
-        // AllowMultiple index path
         private BTree<TKey, PersistentStore>.RangeMultipleEnumerator _innerMultiple;
         private ReadOnlySpan<int> _currentValues;
         private int _currentValueIndex;
+        private bool _multipleStarted;
 
         private ChunkAccessor<PersistentStore> _compRevAccessor;
         private ChunkAccessor<PersistentStore> _compContentAccessor;
         private readonly Transaction _tx;
         private readonly long _transactionTSN;
         private readonly int _componentOverhead;
-        private readonly bool _isAllowMultiple;
         private int _entityCount;
         private long _currentPK;
         private TKey _currentKey;
         private ReadOnlySpan<byte> _currentComponentSpan;
         private bool _disposed;
 
-        internal IndexEntityEnumerator(BTree<TKey, PersistentStore> index, ComponentTable ct, Transaction tx, TKey minKey, TKey maxKey, ChangeSet changeSet)
+        /// <summary>Streaming constructor — one archetype, one cursor, no materialisation.</summary>
+        internal IndexEntityEnumerator(BTree<TKey, PersistentStore> index, bool allowMultiple, TKey minKey, TKey maxKey, IndexArchetypeSource source,
+            ComponentTable ct, Transaction tx, ChangeSet changeSet) : this([], [source], ct, tx, changeSet)
         {
-            _isAllowMultiple = index.AllowMultiple;
-            if (_isAllowMultiple)
+            _streaming = true;
+            _isAllowMultiple = allowMultiple;
+            if (allowMultiple)
             {
                 _innerMultiple = index.EnumerateRangeMultiple(minKey, maxKey);
-                _innerUnique = default;
             }
             else
             {
                 _innerUnique = index.EnumerateRange(minKey, maxKey);
-                _innerMultiple = default;
             }
+        }
+
+        internal IndexEntityEnumerator(IndexMergeEntry<TKey>[] entries, IndexArchetypeSource[] sources, ComponentTable ct, Transaction tx, ChangeSet changeSet)
+        {
+            _entries = entries;
+            _sources = sources;
+            _entryIndex = 0;
+            _streaming = false;
+            _isAllowMultiple = false;
+            _innerUnique = default;
+            _innerMultiple = default;
+            _currentValues = default;
+            _currentValueIndex = 0;
+            _multipleStarted = false;
+
+            _clusterAccessors = new ChunkAccessor<PersistentStore>[sources.Length];
+            _mapAccessors = new ChunkAccessor<PersistentStore>[sources.Length];
+            for (var i = 0; i < sources.Length; i++)
+            {
+                _clusterAccessors[i] = sources[i].ClusterState.ClusterSegment.CreateChunkAccessor(changeSet);
+                _mapAccessors[i] = sources[i].EngineState.EntityMap.Segment.CreateChunkAccessor(changeSet);
+            }
+
+            var maxRecord = 0;
+            for (var i = 0; i < sources.Length; i++)
+            {
+                if (sources[i].RecordSize > maxRecord)
+                {
+                    maxRecord = sources[i].RecordSize;
+                }
+            }
+
+            _maxRecordSize = maxRecord;
 
             _compRevAccessor = ct.CompRevTableSegment.CreateChunkAccessor(changeSet);
             _compContentAccessor = ct.ComponentSegment.CreateChunkAccessor(changeSet);
@@ -529,8 +804,6 @@ public unsafe partial class Transaction : EntityAccessor
             _currentPK = 0;
             _currentKey = default;
             _currentComponentSpan = default;
-            _currentValues = default;
-            _currentValueIndex = 0;
             _disposed = false;
         }
 
@@ -553,37 +826,75 @@ public unsafe partial class Transaction : EntityAccessor
         /// Advances to the next index entry visible at this transaction's snapshot (skipping entries hidden by MVCC), positioning <see cref="Current"/> /
         /// <see cref="CurrentComponent"/>. Returns <see langword="false"/> when the range is exhausted.
         /// </summary>
+        /// <remarks>
+        /// Two resolutions, chosen by how the component is stored in THIS archetype. A SingleVersion slot's bytes are the cluster slot itself, so the span
+        /// points straight into the SoA. A Versioned slot's cluster bytes are only the HEAD; a transaction reading at an older TSN must go through the chain,
+        /// so the entity's record supplies the chain root and <c>RevisionChainReader.WalkChain</c> picks the visible revision. Reading the SoA for a
+        /// Versioned slot would return the newest value to every snapshot — visible only as a subtly wrong read, never as an error.
+        /// </remarks>
         public bool MoveNext()
         {
-            if (_isAllowMultiple)
+            // Hoisted out of the loop DELIBERATELY. `stackalloc` inside the body allocates on EVERY iteration and the stack pointer is not restored
+            // until the method returns, so one MoveNext that skips n entries — freed slots, tombstones, revisions invisible at this snapshot — grows
+            // the frame by n * RecordSize. Over a mostly-invisible range that is unbounded, and a stack overflow cannot be caught: it takes the
+            // process down instead of surfacing as an error. One buffer per call, sized for the largest archetype, costs nothing and cannot grow.
+            var recordBuf = stackalloc byte[_maxRecordSize];
+
+            while (TryNextEntry(out var key, out var location, out var sourceIndex))
             {
-                return MoveNextMultiple();
-            }
+                var src = _sources[sourceIndex];
 
-            return MoveNextUnique();
-        }
+                var clusterChunkId = location >> 6;
+                var slotIndex = location & 63;
 
-        private bool MoveNextUnique()
-        {
-            while (_innerUnique.MoveNext())
-            {
-                var kv = _innerUnique.Current;
-                int compRevFirstChunkId = kv.Value;
+                var clusterBase = _clusterAccessors[sourceIndex].GetChunkAddress(clusterChunkId);
+                var occupancy = *(ulong*)clusterBase;
+                if ((occupancy & (1UL << slotIndex)) == 0)
+                {
+                    continue;   // slot freed since the entry was written — a destroyed entity, not a visible one
+                }
 
-                // MVCC visibility check
-                var result = RevisionChainReader.WalkChain(ref _compRevAccessor, compRevFirstChunkId, _transactionTSN);
-                if (result.IsFailure || result.Value.CurCompContentChunkId == 0)
+                var layout = src.ClusterState.Layout;
+                var entityRaw = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
+                if (entityRaw == 0)
                 {
                     continue;
                 }
 
-                // Recover EntityPK from CompRevStorageHeader
-                _currentPK = _compRevAccessor.GetChunk<CompRevStorageHeader>(compRevFirstChunkId).EntityPK;
-                _currentKey = kv.Key;
 
-                // Store span into page memory — no copy
-                var src = _compContentAccessor.GetChunkAsReadOnlySpan(result.Value.CurCompContentChunkId);
-                _currentComponentSpan = src.Slice(_componentOverhead);
+                if (src.VersionedIndex < 0)
+                {
+                    // SingleVersion in this archetype: the cluster slot IS the component.
+                    _currentComponentSpan = new ReadOnlySpan<byte>(clusterBase + src.CompOffset + slotIndex * src.CompSize, src.CompSize);
+                }
+                else
+                {
+                    // Hinted, not plain TryGet: entity keys are dense, so the location-hint cache resolves in one bucket visit instead of a full
+                    // hash + directory + chain walk. Identical semantics — the hint is a pure accelerator that falls back on any mismatch.
+                    if (!src.EngineState.EntityMap.TryGetWithHint(EntityId.FromRaw(entityRaw).EntityKey, recordBuf, ref _mapAccessors[sourceIndex]))
+                    {
+                        continue;
+                    }
+
+                    var chainRoot = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(recordBuf, src.VersionedIndex);
+                    if (chainRoot == 0)
+                    {
+                        continue;
+                    }
+
+
+                    var walked = RevisionChainReader.WalkChain(ref _compRevAccessor, chainRoot, _transactionTSN);
+                    if (walked.IsFailure || walked.Value.CurCompContentChunkId == 0)
+                    {
+                        continue;   // not visible at this snapshot, or tombstoned
+                    }
+
+
+                    _currentComponentSpan = _compContentAccessor.GetChunkAsReadOnlySpan(walked.Value.CurCompContentChunkId).Slice(_componentOverhead);
+                }
+
+                _currentPK = entityRaw;
+                _currentKey = key;
 
                 if (++_entityCount % EpochRefreshInterval == 0)
                 {
@@ -596,57 +907,79 @@ public unsafe partial class Transaction : EntityAccessor
             return false;
         }
 
-        private bool MoveNextMultiple()
+        /// <summary>
+        /// Pulls the next <c>(key, location)</c> from whichever source this enumerator has: a live B+Tree cursor when one archetype holds the component, or
+        /// the pre-merged array when several do. Keeping the two shapes behind one call is what lets the resolution below stay single-bodied.
+        /// </summary>
+        private bool TryNextEntry(out TKey key, out int location, out int sourceIndex)
         {
-            while (true)
+            if (!_streaming)
             {
-                // Try to consume remaining values from current key's VSBS buffer
-                while (_currentValueIndex < _currentValues.Length)
+                if (_entryIndex >= _entries.Length)
                 {
-                    int compRevFirstChunkId = _currentValues[_currentValueIndex++];
+                    key = default;
+                    location = 0;
+                    sourceIndex = 0;
+                    return false;
+                }
 
-                    var result = RevisionChainReader.WalkChain(ref _compRevAccessor, compRevFirstChunkId, _transactionTSN);
-                    if (result.IsFailure || result.Value.CurCompContentChunkId == 0)
-                    {
-                        continue;
-                    }
+                ref var entry = ref _entries[_entryIndex++];
+                key = entry.Key;
+                location = entry.Location;
+                sourceIndex = entry.SourceIndex;
+                return true;
+            }
 
-                    _currentPK = _compRevAccessor.GetChunk<CompRevStorageHeader>(compRevFirstChunkId).EntityPK;
+            sourceIndex = 0;
 
-                    // Store span into page memory — no copy
-                    var src = _compContentAccessor.GetChunkAsReadOnlySpan(result.Value.CurCompContentChunkId);
-                    _currentComponentSpan = src.Slice(_componentOverhead);
-
-                    if (++_entityCount % EpochRefreshInterval == 0)
-                    {
-                        _tx.EnumerateRefreshEpoch();
-                    }
-
+            if (!_isAllowMultiple)
+            {
+                if (_innerUnique.MoveNext())
+                {
+                    var kv = _innerUnique.Current;
+                    key = kv.Key;
+                    location = kv.Value;
                     return true;
                 }
 
-                // Try next chunk of the same key's VSBS buffer (guard: _currentValues.Length > 0 prevents calling NextChunk before the first MoveNextKey,
-                // when no VSBS buffer is open yet)
-                if (_currentValues.Length > 0 && _innerMultiple.NextChunk())
+                key = default;
+                location = 0;
+                return false;
+            }
+
+            while (true)
+            {
+                if (_currentValueIndex < _currentValues.Length)
+                {
+                    key = _currentKey;
+                    location = _currentValues[_currentValueIndex++];
+                    return true;
+                }
+
+                // Remaining chunks of the current key's buffer before advancing the key. The guard mirrors the pre-#666 enumerator: NextChunk must not be
+                // called before the first MoveNextKey, when no buffer is open yet.
+                if (_multipleStarted && _innerMultiple.NextChunk())
                 {
                     _currentValues = _innerMultiple.CurrentValues;
                     _currentValueIndex = 0;
                     continue;
                 }
 
-                // Advance to the next key
                 if (!_innerMultiple.MoveNextKey())
                 {
+                    key = default;
+                    location = 0;
                     return false;
                 }
 
+                _multipleStarted = true;
                 _currentKey = _innerMultiple.CurrentKey;
                 _currentValues = _innerMultiple.CurrentValues;
                 _currentValueIndex = 0;
             }
         }
 
-        /// <summary>Releases the underlying B+Tree range enumerator and its accessors (unpins accessed pages). Idempotent.</summary>
+        /// <summary>Releases the per-archetype and component accessors (unpins accessed pages). Idempotent.</summary>
         public void Dispose()
         {
             if (_disposed)
@@ -655,13 +988,23 @@ public unsafe partial class Transaction : EntityAccessor
             }
 
             _disposed = true;
-            if (_isAllowMultiple)
+
+            for (var i = 0; i < _clusterAccessors.Length; i++)
             {
-                _innerMultiple.Dispose();
+                _clusterAccessors[i].Dispose();
+                _mapAccessors[i].Dispose();
             }
-            else
+
+            if (_streaming)
             {
-                _innerUnique.Dispose();
+                if (_isAllowMultiple)
+                {
+                    _innerMultiple.Dispose();
+                }
+                else
+                {
+                    _innerUnique.Dispose();
+                }
             }
 
             _compRevAccessor.Dispose();
@@ -1544,6 +1887,7 @@ public unsafe partial class Transaction : EntityAccessor
             _clusterCommitClusterAccessor.Dispose();
             _clusterCommitIndexAccessor.Dispose();
             _clusterCommitIndexAccessorS64.Dispose();
+            _clusterCommitContentSegment = null;
             _hasClusterCommitAccessors = false;
         }
     }
@@ -1562,12 +1906,23 @@ public unsafe partial class Transaction : EntityAccessor
     {
         if (_hasClusterCommitAccessors && _clusterCommitArchId == archId)
         {
+            // Archetype unchanged, so the map / cluster / index accessors stand. The CONTENT accessor may not: it is scoped to the component, and a drain
+            // covering several Versioned components of one archetype passes a different segment each time. Swapping just that one keeps the common case
+            // (consecutive entries of the same component) free while making the mixed case correct.
+            if (!ReferenceEquals(_clusterCommitContentSegment, contentSegment))
+            {
+                _clusterCommitContentAccessor.Dispose();
+                _clusterCommitContentAccessor = contentSegment.CreateChunkAccessor();
+                _clusterCommitContentSegment = contentSegment;
+            }
+
             return;
         }
 
         DisposeClusterCommitAccessors();
         _clusterCommitMapAccessor = es.EntityMap.Segment.CreateChunkAccessor();
         _clusterCommitContentAccessor = contentSegment.CreateChunkAccessor();
+        _clusterCommitContentSegment = contentSegment;
         _clusterCommitClusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
         _clusterCommitIndexAccessor = clusterState.IndexSegment?.CreateChunkAccessor(_changeSet) ?? default;
         _clusterCommitIndexAccessorS64 = clusterState.IndexSegmentString64?.CreateChunkAccessor(_changeSet) ?? default;

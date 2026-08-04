@@ -2785,7 +2785,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             var hasClusterIndexableFields = false;  // Any indexed field, in either index home (for per-archetype B+Trees)
             var hasSpatialField = false;
             var hasSvSlot = false;
-            var hasTransientSlot = false;
             ushort versionedSlotMask = 0;
             ushort transientSlotMask = 0;
             for (var slot = 0; slot < meta.ComponentCount; slot++)
@@ -2802,7 +2801,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 else if (table.StorageMode == StorageMode.Transient)
                 {
                     transientSlotMask |= (ushort)(1 << slot);
-                    hasTransientSlot = true;
                 }
                 if (table.SpatialIndex != null)
                 {
@@ -2814,8 +2812,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 }
             }
 
-            // Require at least one SV or Transient slot. Pure-Versioned stays on legacy path — and that is now the ONLY disqualifier.
-            var isClusterEligible = hasSvSlot || hasTransientSlot;
+            // EVERY archetype is cluster-backed (#666). The last disqualifier — pure-Versioned — is gone: a cluster stores the Versioned HEAD in the slot and
+            // keeps the chain separate, which is exactly what a mixed SV+Versioned archetype has done since Phase 5, so the machinery was never the obstacle.
+            // The exclusion was a cost/benefit DEFAULT ("enable clusters for pure-Versioned only if iteration is the bottleneck",
+            // design/Ecs/EntityClusters/07-versioned-overlay.md:150), and defaulting it off is what left a second index home alive for every consumer to
+            // branch on. Making it unconditional is what makes ADR-045 §2/§5 literally true.
+            const bool isClusterEligible = true;
 
             meta.IsClusterEligible = isClusterEligible;
             meta.HasClusterIndexes = isClusterEligible && hasClusterIndexableFields;

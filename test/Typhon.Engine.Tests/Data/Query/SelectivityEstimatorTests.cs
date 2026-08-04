@@ -18,6 +18,27 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
         return (long)bits;
     }
 
+    /// <summary>
+    /// The per-archetype statistics for this fixture's component. Was <c>ct.IndexStats</c>, which after #666 wraps a tree with no entries — every assertion
+    /// against it silently described an empty index rather than the data the test had just spawned.
+    /// </summary>
+    private static IndexStatistics[] Stats(DatabaseEngine dbe, ComponentTable ct)
+        => ct.Definition.Name.Contains("CompF")
+            ? IndexTestHelpers.ArchetypeIndexStats<CompFArch>(dbe, ct)
+            : IndexTestHelpers.ArchetypeIndexStats<CompDArch>(dbe, ct);
+
+    /// <summary>
+    /// Rebuilds the statistics the planner actually reads. Was <c>StatisticsRebuilder.RebuildStatistics(ct, …)</c>, which walks the ComponentTable's segment
+    /// — a cluster-backed archetype has no entities there, so the scan sampled nothing and published statistics built from an empty population (#665).
+    /// </summary>
+    private static void RebuildStats(DatabaseEngine dbe, ComponentTable ct)
+    {
+        var archetypeId = ct.Definition.Name.Contains("CompF")
+            ? ArchetypeRegistry.GetMetadata<CompFArch>().ArchetypeId
+            : ArchetypeRegistry.GetMetadata<CompDArch>().ArchetypeId;
+        StatisticsRebuilder.RebuildClusterAll(dbe._archetypeStates[archetypeId].ClusterState, dbe.EpochManager);
+    }
+
     private static long DoubleThreshold(double v) => Unsafe.As<double, long>(ref v);
 
     private static void CreateAndCommit(DatabaseEngine dbe, float a, int b, double c)
@@ -47,13 +68,13 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
         var ct = dbe.GetComponentTable<CompD>();
 
         // CompD has 3 indexed fields: A(float), B(int), C(double)
-        Assert.That(ct.IndexStats.Length, Is.EqualTo(3));
+        Assert.That(Stats(dbe, ct).Length, Is.EqualTo(3));
 
-        for (var i = 0; i < ct.IndexStats.Length; i++)
+        for (var i = 0; i < Stats(dbe, ct).Length; i++)
         {
-            Assert.That(ct.IndexStats[i].EntryCount, Is.EqualTo(0));
-            Assert.That(ct.IndexStats[i].MinValue, Is.EqualTo(0));
-            Assert.That(ct.IndexStats[i].MaxValue, Is.EqualTo(0));
+            Assert.That(Stats(dbe, ct)[i].EntryCount, Is.EqualTo(0));
+            Assert.That(Stats(dbe, ct)[i].MinValue, Is.EqualTo(0));
+            Assert.That(Stats(dbe, ct)[i].MaxValue, Is.EqualTo(0));
         }
     }
 
@@ -68,7 +89,7 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
         CreateAndCommit(dbe, 1.5f, 42, 3.14);
 
         // Field B (int, index 1): min and max should both be 42
-        var stats = ct.IndexStats[1];
+        var stats = Stats(dbe, ct)[1];
         Assert.That(stats.EntryCount, Is.EqualTo(1));
         Assert.That(stats.MinValue, Is.EqualTo(42));
         Assert.That(stats.MaxValue, Is.EqualTo(42));
@@ -87,7 +108,7 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
         CreateAndCommit(dbe, 3.0f, 30, 3.0);
 
         // Field B (int, index 1): min=10, max=50
-        var stats = ct.IndexStats[1];
+        var stats = Stats(dbe, ct)[1];
         Assert.That(stats.EntryCount, Is.EqualTo(3));
         Assert.That(stats.MinValue, Is.EqualTo(10));
         Assert.That(stats.MaxValue, Is.EqualTo(50));
@@ -101,7 +122,7 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
         dbe.InitializeArchetypes();
         var ct = dbe.GetComponentTable<CompD>();
 
-        Assert.That(ct.IndexStats[0].DistinctValues, Is.EqualTo(-1));
+        Assert.That(Stats(dbe, ct)[0].DistinctValues, Is.EqualTo(-1));
     }
 
     [Test]
@@ -112,9 +133,9 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
         dbe.InitializeArchetypes();
         var ct = dbe.GetComponentTable<CompD>();
 
-        Assert.That(ct.IndexStats[0].Histogram, Is.Null);
-        Assert.That(ct.IndexStats[1].Histogram, Is.Null);
-        Assert.That(ct.IndexStats[2].Histogram, Is.Null);
+        Assert.That(Stats(dbe, ct)[0].Histogram, Is.Null);
+        Assert.That(Stats(dbe, ct)[1].Histogram, Is.Null);
+        Assert.That(Stats(dbe, ct)[2].Histogram, Is.Null);
     }
 
     #endregion
@@ -130,8 +151,8 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
         var ct = dbe.GetComponentTable<CompD>();
         var estimator = BasicSelectivityEstimator.Instance;
 
-        Assert.That(estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.Equal, 42), Is.EqualTo(0));
-        Assert.That(estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.GreaterThan, 42), Is.EqualTo(0));
+        Assert.That(estimator.EstimateCardinality(Stats(dbe, ct), 1, CompareOp.Equal, 42), Is.EqualTo(0));
+        Assert.That(estimator.EstimateCardinality(Stats(dbe, ct), 1, CompareOp.GreaterThan, 42), Is.EqualTo(0));
     }
 
     [Test]
@@ -148,10 +169,10 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
         CreateAndCommit(dbe, 3.0f, 30, 3.0);
 
         // B is unique index: exactly 1 match for B==20
-        Assert.That(estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.Equal, 20), Is.EqualTo(1));
+        Assert.That(estimator.EstimateCardinality(Stats(dbe, ct), 1, CompareOp.Equal, 20), Is.EqualTo(1));
 
         // No match for B==99
-        Assert.That(estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.Equal, 99), Is.EqualTo(0));
+        Assert.That(estimator.EstimateCardinality(Stats(dbe, ct), 1, CompareOp.Equal, 99), Is.EqualTo(0));
     }
 
     [Test]
@@ -170,9 +191,9 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
         CreateAndCommitCompF(dbe, 200, 4);
 
         // Gold index is field 0
-        Assert.That(estimator.EstimateCardinality(ct.IndexStats, 0, CompareOp.Equal, 100), Is.EqualTo(3));
-        Assert.That(estimator.EstimateCardinality(ct.IndexStats, 0, CompareOp.Equal, 200), Is.EqualTo(1));
-        Assert.That(estimator.EstimateCardinality(ct.IndexStats, 0, CompareOp.Equal, 999), Is.EqualTo(0));
+        Assert.That(estimator.EstimateCardinality(Stats(dbe, ct), 0, CompareOp.Equal, 100), Is.EqualTo(3));
+        Assert.That(estimator.EstimateCardinality(Stats(dbe, ct), 0, CompareOp.Equal, 200), Is.EqualTo(1));
+        Assert.That(estimator.EstimateCardinality(Stats(dbe, ct), 0, CompareOp.Equal, 999), Is.EqualTo(0));
     }
 
     [Test]
@@ -189,7 +210,7 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
         CreateAndCommit(dbe, 3.0f, 30, 3.0);
 
         // NotEqual to B==20: 3 total - 1 = 2
-        Assert.That(estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.NotEqual, 20), Is.EqualTo(2));
+        Assert.That(estimator.EstimateCardinality(Stats(dbe, ct), 1, CompareOp.NotEqual, 20), Is.EqualTo(2));
     }
 
     [Test]
@@ -208,19 +229,19 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
         }
 
         // B > 49 should estimate ~50 (uniform distribution: 50 out of 99 range)
-        var gt = estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.GreaterThan, 49);
+        var gt = estimator.EstimateCardinality(Stats(dbe, ct), 1, CompareOp.GreaterThan, 49);
         Assert.That(gt, Is.InRange(40, 60));
 
         // B < 50 should estimate ~50
-        var lt = estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.LessThan, 50);
+        var lt = estimator.EstimateCardinality(Stats(dbe, ct), 1, CompareOp.LessThan, 50);
         Assert.That(lt, Is.InRange(40, 60));
 
         // B >= 0 should estimate ~total
-        var gte = estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.GreaterThanOrEqual, 0);
+        var gte = estimator.EstimateCardinality(Stats(dbe, ct), 1, CompareOp.GreaterThanOrEqual, 0);
         Assert.That(gte, Is.InRange(90, 100));
 
         // B <= 99 should estimate ~total
-        var lte = estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.LessThanOrEqual, 99);
+        var lte = estimator.EstimateCardinality(Stats(dbe, ct), 1, CompareOp.LessThanOrEqual, 99);
         Assert.That(lte, Is.InRange(90, 100));
     }
 
@@ -236,12 +257,12 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
         CreateAndCommit(dbe, 1.0f, 42, 1.0);
 
         // min == max == 42: degenerate case
-        Assert.That(estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.Equal, 42), Is.EqualTo(1));
-        Assert.That(estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.Equal, 99), Is.EqualTo(0));
-        Assert.That(estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.GreaterThanOrEqual, 42), Is.EqualTo(1));
-        Assert.That(estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.GreaterThan, 42), Is.EqualTo(0));
-        Assert.That(estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.LessThanOrEqual, 42), Is.EqualTo(1));
-        Assert.That(estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.LessThan, 42), Is.EqualTo(0));
+        Assert.That(estimator.EstimateCardinality(Stats(dbe, ct), 1, CompareOp.Equal, 42), Is.EqualTo(1));
+        Assert.That(estimator.EstimateCardinality(Stats(dbe, ct), 1, CompareOp.Equal, 99), Is.EqualTo(0));
+        Assert.That(estimator.EstimateCardinality(Stats(dbe, ct), 1, CompareOp.GreaterThanOrEqual, 42), Is.EqualTo(1));
+        Assert.That(estimator.EstimateCardinality(Stats(dbe, ct), 1, CompareOp.GreaterThan, 42), Is.EqualTo(0));
+        Assert.That(estimator.EstimateCardinality(Stats(dbe, ct), 1, CompareOp.LessThanOrEqual, 42), Is.EqualTo(1));
+        Assert.That(estimator.EstimateCardinality(Stats(dbe, ct), 1, CompareOp.LessThan, 42), Is.EqualTo(0));
     }
 
     #endregion
@@ -262,8 +283,8 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
             CreateAndCommit(dbe, 1.0f, i, 1.0);
         }
 
-        ct.IndexStats[1].RebuildHistogram();
-        var histogram = ct.IndexStats[1].Histogram;
+        Stats(dbe, ct)[1].RebuildHistogram();
+        var histogram = Stats(dbe, ct)[1].Histogram;
 
         Assert.That(histogram, Is.Not.Null);
         Assert.That(histogram.TotalCount, Is.EqualTo(200));
@@ -305,8 +326,8 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
             CreateAndCommit(dbe, 1.0f, 9980 + i, 1.0);
         }
 
-        ct.IndexStats[1].RebuildHistogram();
-        var histogram = ct.IndexStats[1].Histogram;
+        Stats(dbe, ct)[1].RebuildHistogram();
+        var histogram = Stats(dbe, ct)[1].Histogram;
 
         Assert.That(histogram, Is.Not.Null);
         Assert.That(histogram.TotalCount, Is.EqualTo(100));
@@ -335,8 +356,8 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
             CreateAndCommit(dbe, 1.0f, i, 1.0);
         }
 
-        ct.IndexStats[1].RebuildHistogram();
-        var histogram = ct.IndexStats[1].Histogram;
+        Stats(dbe, ct)[1].RebuildHistogram();
+        var histogram = Stats(dbe, ct)[1].Histogram;
 
         long estimate = histogram.EstimateRange(50, 150);
         long expected = 100;
@@ -357,8 +378,8 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
             CreateAndCommit(dbe, 1.0f, i, 1.0);
         }
 
-        ct.IndexStats[1].RebuildHistogram();
-        var histogram = ct.IndexStats[1].Histogram;
+        Stats(dbe, ct)[1].RebuildHistogram();
+        var histogram = Stats(dbe, ct)[1].Histogram;
 
         long estimate = histogram.EstimateEquality(100);
         Assert.That(estimate, Is.GreaterThanOrEqualTo(1));
@@ -388,8 +409,8 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
         dbe.InitializeArchetypes();
         var ct = dbe.GetComponentTable<CompD>();
 
-        ct.IndexStats[1].RebuildHistogram();
-        Assert.That(ct.IndexStats[1].Histogram, Is.Null);
+        Stats(dbe, ct)[1].RebuildHistogram();
+        Assert.That(Stats(dbe, ct)[1].Histogram, Is.Null);
     }
 
     [Test]
@@ -402,8 +423,8 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
 
         CreateAndCommit(dbe, 1.0f, 42, 1.0);
 
-        ct.IndexStats[1].RebuildHistogram();
-        var histogram = ct.IndexStats[1].Histogram;
+        Stats(dbe, ct)[1].RebuildHistogram();
+        var histogram = Stats(dbe, ct)[1].Histogram;
 
         Assert.That(histogram, Is.Not.Null);
         Assert.That(histogram.TotalCount, Is.EqualTo(1));
@@ -433,8 +454,8 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
             CreateAndCommitCompF(dbe, 90, 80 + i);
         }
 
-        ct.IndexStats[0].RebuildHistogram();
-        var histogram = ct.IndexStats[0].Histogram;
+        Stats(dbe, ct)[0].RebuildHistogram();
+        var histogram = Stats(dbe, ct)[0].Histogram;
 
         Assert.That(histogram, Is.Not.Null);
         Assert.That(histogram.TotalCount, Is.EqualTo(100));
@@ -467,11 +488,11 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
             CreateAndCommitCompF(dbe, 90, 50 + i);
         }
 
-        var beforeHistogram = estimator.EstimateCardinality(ct.IndexStats, 0, CompareOp.GreaterThan, 10);
+        var beforeHistogram = estimator.EstimateCardinality(Stats(dbe, ct), 0, CompareOp.GreaterThan, 10);
         Assert.That(beforeHistogram, Is.LessThanOrEqualTo(2));
 
-        ct.IndexStats[0].RebuildHistogram();
-        var afterHistogram = estimator.EstimateCardinality(ct.IndexStats, 0, CompareOp.GreaterThan, 10);
+        Stats(dbe, ct)[0].RebuildHistogram();
+        var afterHistogram = estimator.EstimateCardinality(Stats(dbe, ct), 0, CompareOp.GreaterThan, 10);
         Assert.That(afterHistogram, Is.GreaterThan(40));
     }
 
@@ -493,12 +514,12 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
             CreateAndCommit(dbe, 1.0f, i, 1.0);
         }
 
-        ct.IndexStats[1].RebuildHistogram();
+        Stats(dbe, ct)[1].RebuildHistogram();
 
-        var result = estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.GreaterThan, 49);
+        var result = estimator.EstimateCardinality(Stats(dbe, ct), 1, CompareOp.GreaterThan, 49);
         Assert.That(result, Is.InRange(30, 70));
 
-        var lte = estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.LessThanOrEqual, 49);
+        var lte = estimator.EstimateCardinality(Stats(dbe, ct), 1, CompareOp.LessThanOrEqual, 49);
         Assert.That(lte, Is.InRange(30, 70));
     }
 
@@ -519,8 +540,8 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
             CreateAndCommit(dbe, i + 1.0f, i, 1.0);
         }
 
-        StatisticsRebuilder.RebuildStatistics(ct, dbe.EpochManager);
-        var histogram = ct.IndexStats[0].Histogram;
+        RebuildStats(dbe, ct);
+        var histogram = Stats(dbe, ct)[0].Histogram;
 
         Assert.That(histogram, Is.Not.Null);
         Assert.That(histogram.TotalCount, Is.EqualTo(200));
@@ -545,9 +566,9 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
             CreateAndCommit(dbe, i + 1.0f, i, 1.0);
         }
 
-        StatisticsRebuilder.RebuildStatistics(ct, dbe.EpochManager);
+        RebuildStats(dbe, ct);
 
-        var result = estimator.EstimateCardinality(ct.IndexStats, 0, CompareOp.GreaterThan, FloatThreshold(100.0f));
+        var result = estimator.EstimateCardinality(Stats(dbe, ct), 0, CompareOp.GreaterThan, FloatThreshold(100.0f));
         Assert.That(result, Is.InRange(50, 150));
     }
 
@@ -565,9 +586,9 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
             CreateAndCommit(dbe, i + 1.0f, i, 1.0);
         }
 
-        StatisticsRebuilder.RebuildStatistics(ct, dbe.EpochManager);
+        RebuildStats(dbe, ct);
 
-        var result = estimator.EstimateCardinality(ct.IndexStats, 0, CompareOp.LessThan, FloatThreshold(101.0f));
+        var result = estimator.EstimateCardinality(Stats(dbe, ct), 0, CompareOp.LessThan, FloatThreshold(101.0f));
         Assert.That(result, Is.InRange(50, 150));
     }
 
@@ -589,9 +610,9 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
             CreateAndCommit(dbe, 99.0f, 80 + i, 1.0);
         }
 
-        StatisticsRebuilder.RebuildStatistics(ct, dbe.EpochManager);
+        RebuildStats(dbe, ct);
 
-        var result = estimator.EstimateCardinality(ct.IndexStats, 0, CompareOp.Equal, FloatThreshold(42.0f));
+        var result = estimator.EstimateCardinality(Stats(dbe, ct), 0, CompareOp.Equal, FloatThreshold(42.0f));
         Assert.That(result, Is.EqualTo(80));
     }
 
@@ -607,9 +628,9 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
         CreateAndCommit(dbe, 1.0f, 10, 1.0);
         CreateAndCommit(dbe, 2.0f, 20, 2.0);
 
-        StatisticsRebuilder.RebuildStatistics(ct, dbe.EpochManager);
+        RebuildStats(dbe, ct);
 
-        var result = estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.GreaterThan, long.MaxValue);
+        var result = estimator.EstimateCardinality(Stats(dbe, ct), 1, CompareOp.GreaterThan, long.MaxValue);
         Assert.That(result, Is.EqualTo(0));
     }
 
@@ -625,9 +646,9 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
         CreateAndCommit(dbe, 1.0f, 10, 1.0);
         CreateAndCommit(dbe, 2.0f, 20, 2.0);
 
-        StatisticsRebuilder.RebuildStatistics(ct, dbe.EpochManager);
+        RebuildStats(dbe, ct);
 
-        var result = estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.LessThan, long.MinValue);
+        var result = estimator.EstimateCardinality(Stats(dbe, ct), 1, CompareOp.LessThan, long.MinValue);
         Assert.That(result, Is.EqualTo(0));
     }
 
@@ -644,8 +665,8 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
             CreateAndCommit(dbe, i - 100.0f, i, 1.0);
         }
 
-        StatisticsRebuilder.RebuildStatistics(ct, dbe.EpochManager);
-        var histogram = ct.IndexStats[0].Histogram;
+        RebuildStats(dbe, ct);
+        var histogram = Stats(dbe, ct)[0].Histogram;
 
         Assert.That(histogram, Is.Not.Null);
         Assert.That(histogram.TotalCount, Is.EqualTo(100));
@@ -671,8 +692,8 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
             CreateAndCommit(dbe, 3.14f, i, 1.0);
         }
 
-        StatisticsRebuilder.RebuildStatistics(ct, dbe.EpochManager);
-        var histogram = ct.IndexStats[0].Histogram;
+        RebuildStats(dbe, ct);
+        var histogram = Stats(dbe, ct)[0].Histogram;
 
         Assert.That(histogram, Is.Not.Null);
         Assert.That(histogram.TotalCount, Is.EqualTo(50));
@@ -692,8 +713,8 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
             CreateAndCommit(dbe, i - 100.0f, i, 1.0);
         }
 
-        StatisticsRebuilder.RebuildStatistics(ct, dbe.EpochManager);
-        var histogram = ct.IndexStats[0].Histogram;
+        RebuildStats(dbe, ct);
+        var histogram = Stats(dbe, ct)[0].Histogram;
 
         Assert.That(histogram, Is.Not.Null);
         Assert.That(histogram.TotalCount, Is.EqualTo(200));
@@ -726,8 +747,8 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
             CreateAndCommit(dbe, 1.0f, i, i * 0.5 - 50.0);
         }
 
-        StatisticsRebuilder.RebuildStatistics(ct, dbe.EpochManager);
-        var histogram = ct.IndexStats[2].Histogram;
+        RebuildStats(dbe, ct);
+        var histogram = Stats(dbe, ct)[2].Histogram;
 
         Assert.That(histogram, Is.Not.Null);
         Assert.That(histogram.TotalCount, Is.EqualTo(200));
@@ -754,12 +775,12 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
             CreateAndCommit(dbe, i - 100.0f, i, 1.0);
         }
 
-        StatisticsRebuilder.RebuildStatistics(ct, dbe.EpochManager);
+        RebuildStats(dbe, ct);
 
-        var result = estimator.EstimateCardinality(ct.IndexStats, 0, CompareOp.GreaterThan, FloatThreshold(0.0f));
+        var result = estimator.EstimateCardinality(Stats(dbe, ct), 0, CompareOp.GreaterThan, FloatThreshold(0.0f));
         Assert.That(result, Is.InRange(50, 150));
 
-        var resultNeg = estimator.EstimateCardinality(ct.IndexStats, 0, CompareOp.LessThan, FloatThreshold(0.0f));
+        var resultNeg = estimator.EstimateCardinality(Stats(dbe, ct), 0, CompareOp.LessThan, FloatThreshold(0.0f));
         Assert.That(resultNeg, Is.InRange(50, 150));
     }
 
@@ -781,8 +802,8 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
             CreateAndCommit(dbe, (float)i, i * 10, (double)i);
         }
 
-        var cardGt10 = estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.GreaterThan, 10);
-        var cardEq30 = estimator.EstimateCardinality(ct.IndexStats, 1, CompareOp.Equal, 30);
+        var cardGt10 = estimator.EstimateCardinality(Stats(dbe, ct), 1, CompareOp.GreaterThan, 10);
+        var cardEq30 = estimator.EstimateCardinality(Stats(dbe, ct), 1, CompareOp.Equal, 30);
 
         Assert.That(cardEq30, Is.LessThan(cardGt10));
     }

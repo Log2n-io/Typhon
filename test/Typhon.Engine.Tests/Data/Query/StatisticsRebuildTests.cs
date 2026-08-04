@@ -1,5 +1,6 @@
 ﻿using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
+using System.Threading;
 using NUnit.Framework;
 using System;
 using Typhon.Schema.Definition;
@@ -50,6 +51,44 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
         t.Spawn<CompFArch>(CompFArch.F.Set(in f));
         t.Commit();
     }
+    /// <summary>The statistics the worker actually publishes into — it rebuilds per archetype (StatisticsWorker:188-207), not per ComponentTable.</summary>
+    private static IndexStatistics[] ArchStats(DatabaseEngine dbe, ComponentTable ct)
+    {
+        // Resolved by ARCHETYPE, not by searching for any archetype holding the component: CompD alone sits in three archetypes, and the search returned
+        // whichever came first — typically one with no entities, so every distribution came back empty.
+        var name = ct.Definition.Name;
+        if (name.Contains("CompStr64")) { return IndexTestHelpers.ArchetypeIndexStats<CompStr64Arch>(dbe, ct); }
+        return name.Contains("CompF")
+            ? IndexTestHelpers.ArchetypeIndexStats<CompFArch>(dbe, ct)
+            : IndexTestHelpers.ArchetypeIndexStats<CompDArch>(dbe, ct);
+    }
+
+    /// <summary>
+    /// Rebuilds through the ARCHETYPE. <c>StatisticsRebuilder.RebuildAll(ct, …)</c> scans the ComponentTable's segment, where a cluster-backed archetype has
+    /// no entities — the scan samples nothing and publishes statistics describing an empty population (#665).
+    /// </summary>
+    private static void RebuildStats(DatabaseEngine dbe, ComponentTable ct, int interval = 1)
+    {
+        // The cluster scan reads the archetype's ACTIVE cluster list, which is settled at the tick fence — without one, a just-spawned population is not yet
+        // visible to the rebuilder and it publishes statistics over nothing.
+        dbe.WriteTickFence(Interlocked.Increment(ref _tick));
+        StatisticsRebuilder.RebuildClusterAll(ClusterOf(dbe, ct), dbe.EpochManager, interval);
+    }
+
+    private static int _tick;
+
+    /// <summary>
+    /// The cluster state whose counter the write path actually moves. <c>ComponentTable.MutationsSinceRebuild</c> is only incremented by the flat index
+    /// maintainer, which a cluster-backed archetype never reaches — so it reads 0 no matter how much index work happened (#665).
+    /// </summary>
+    private static ArchetypeClusterState ClusterOf(DatabaseEngine dbe, ComponentTable ct)
+    {
+        var archetypeId = ct.Definition.Name.Contains("CompF")
+            ? ArchetypeRegistry.GetMetadata<CompFArch>().ArchetypeId
+            : ArchetypeRegistry.GetMetadata<CompDArch>().ArchetypeId;
+        return dbe._archetypeStates[archetypeId].ClusterState;
+    }
+
 
     [Test]
     public void RebuildAll_PopulatesHLL_MCV_Histogram()
@@ -65,10 +104,10 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
             CreateAndCommitCompD(dbe, 1.0f, i, 1.0);
         }
 
-        StatisticsRebuilder.RebuildStatistics(ct, dbe.EpochManager);
+        RebuildStats(dbe, ct);
 
         // HLL should estimate ~200 distinct values
-        var stats = ct.IndexStats[1]; // B field
+        var stats = ArchStats(dbe, ct)[1]; // B field
         Assert.That(stats.HyperLogLog, Is.Not.Null);
         Assert.That(stats.DistinctValues, Is.InRange(180, 220));
 
@@ -98,9 +137,9 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
         // Sample with an EVEN page stride. Under v4 the root (page 0) holds zero chunks, so a stride starting at page 0 would sample
         // pages 0,2,4,... and entirely SKIP page 1 — where every entity lives — yielding zero samples and empty statistics. The fix
         // starts sampling at the first DATA page. This proves the small-segment sampled path produces non-empty stats.
-        StatisticsRebuilder.RebuildAll(ct, dbe.EpochManager, pageInterval: 2);
+        RebuildStats(dbe, ct, interval: 2);
 
-        var stats = ct.IndexStats[1]; // B field
+        var stats = ArchStats(dbe, ct)[1]; // B field
         Assert.That(stats.HyperLogLog, Is.Not.Null, "sampling a small segment must reach data page 1 — not skip it under an even stride starting at the empty root");
         Assert.That(stats.DistinctValues, Is.GreaterThan(0), "the sampled small segment must yield distinct values, not an empty estimate");
         Assert.That(stats.Histogram, Is.Not.Null);
@@ -120,15 +159,15 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
             CreateAndCommitCompD(dbe, i * 1.5f, i, i * 2.5);
         }
 
-        StatisticsRebuilder.RebuildStatistics(ct, dbe.EpochManager);
+        RebuildStats(dbe, ct);
 
         // All 3 indexed fields (A, B, C) should have HLL, MCV, and Histogram
-        for (int f = 0; f < ct.IndexStats.Length; f++)
+        for (int f = 0; f < ArchStats(dbe, ct).Length; f++)
         {
-            Assert.That(ct.IndexStats[f].HyperLogLog, Is.Not.Null, $"Field {f} HLL missing");
-            Assert.That(ct.IndexStats[f].MostCommonValues, Is.Not.Null, $"Field {f} MCV missing");
-            Assert.That(ct.IndexStats[f].Histogram, Is.Not.Null, $"Field {f} Histogram missing");
-            Assert.That(ct.IndexStats[f].Histogram.TotalCount, Is.EqualTo(100), $"Field {f} Histogram count wrong");
+            Assert.That(ArchStats(dbe, ct)[f].HyperLogLog, Is.Not.Null, $"Field {f} HLL missing");
+            Assert.That(ArchStats(dbe, ct)[f].MostCommonValues, Is.Not.Null, $"Field {f} MCV missing");
+            Assert.That(ArchStats(dbe, ct)[f].Histogram, Is.Not.Null, $"Field {f} Histogram missing");
+            Assert.That(ArchStats(dbe, ct)[f].Histogram.TotalCount, Is.EqualTo(100), $"Field {f} Histogram count wrong");
         }
     }
 
@@ -150,9 +189,9 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
             CreateAndCommitCompF(dbe, 99, 80 + i);
         }
 
-        StatisticsRebuilder.RebuildStatistics(ct, dbe.EpochManager);
+        RebuildStats(dbe, ct);
 
-        var mcv = ct.IndexStats[0].MostCommonValues; // Gold field (index 0)
+        var mcv = ArchStats(dbe, ct)[0].MostCommonValues; // Gold field (index 0)
         Assert.That(mcv, Is.Not.Null);
 
         Assert.That(mcv.TryGetCount(42, out long count42), Is.True);
@@ -176,10 +215,10 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
         }
 
         // First rebuild
-        StatisticsRebuilder.RebuildStatistics(ct, dbe.EpochManager);
-        var firstHll = ct.IndexStats[1].HyperLogLog;
-        var firstMcv = ct.IndexStats[1].MostCommonValues;
-        var firstHisto = ct.IndexStats[1].Histogram;
+        RebuildStats(dbe, ct);
+        var firstHll = ArchStats(dbe, ct)[1].HyperLogLog;
+        var firstMcv = ArchStats(dbe, ct)[1].MostCommonValues;
+        var firstHisto = ArchStats(dbe, ct)[1].Histogram;
 
         Assert.That(firstHll, Is.Not.Null);
         Assert.That(firstMcv, Is.Not.Null);
@@ -191,13 +230,13 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
             CreateAndCommitCompD(dbe, 1.0f, i, 1.0);
         }
 
-        StatisticsRebuilder.RebuildStatistics(ct, dbe.EpochManager);
+        RebuildStats(dbe, ct);
 
         // New references should be different objects (atomic swap, not in-place mutation)
-        Assert.That(ct.IndexStats[1].HyperLogLog, Is.Not.SameAs(firstHll));
-        Assert.That(ct.IndexStats[1].MostCommonValues, Is.Not.SameAs(firstMcv));
-        Assert.That(ct.IndexStats[1].Histogram, Is.Not.SameAs(firstHisto));
-        Assert.That(ct.IndexStats[1].Histogram.TotalCount, Is.EqualTo(200));
+        Assert.That(ArchStats(dbe, ct)[1].HyperLogLog, Is.Not.SameAs(firstHll));
+        Assert.That(ArchStats(dbe, ct)[1].MostCommonValues, Is.Not.SameAs(firstMcv));
+        Assert.That(ArchStats(dbe, ct)[1].Histogram, Is.Not.SameAs(firstHisto));
+        Assert.That(ArchStats(dbe, ct)[1].Histogram.TotalCount, Is.EqualTo(200));
     }
 
     [Test]
@@ -208,7 +247,7 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
         dbe.InitializeArchetypes();
         var ct = dbe.GetComponentTable<CompD>();
 
-        Assert.That(ct.MutationsSinceRebuild, Is.EqualTo(0));
+        Assert.That(ClusterOf(dbe, ct).MutationsSinceRebuild, Is.EqualTo(0));
 
         // Create increments
         EntityId id;
@@ -218,9 +257,9 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
             id = t.Spawn<CompDArch>(CompDArch.D.Set(in d));
             t.Commit();
         }
-        Assert.That(ct.MutationsSinceRebuild, Is.GreaterThan(0));
+        Assert.That(ClusterOf(dbe, ct).MutationsSinceRebuild, Is.GreaterThan(0));
 
-        int afterCreate = ct.MutationsSinceRebuild;
+        int afterCreate = ClusterOf(dbe, ct).MutationsSinceRebuild;
 
         // Update with changed index field increments further
         using var t2 = dbe.CreateQuickTransaction();
@@ -229,7 +268,7 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
         w = d2;
         t2.Commit();
 
-        Assert.That(ct.MutationsSinceRebuild, Is.GreaterThan(afterCreate));
+        Assert.That(ClusterOf(dbe, ct).MutationsSinceRebuild, Is.GreaterThan(afterCreate));
     }
 
     [Test]
@@ -245,11 +284,11 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
             CreateAndCommitCompD(dbe, 1.0f, i, 1.0);
         }
 
-        Assert.That(ct.MutationsSinceRebuild, Is.GreaterThan(0));
+        Assert.That(ClusterOf(dbe, ct).MutationsSinceRebuild, Is.GreaterThan(0));
 
         // Simulate what StatisticsWorker does: reset before rebuild
-        ct.MutationsSinceRebuild = 0;
-        Assert.That(ct.MutationsSinceRebuild, Is.EqualTo(0));
+        ClusterOf(dbe, ct).MutationsSinceRebuild = 0;
+        Assert.That(ClusterOf(dbe, ct).MutationsSinceRebuild, Is.EqualTo(0));
     }
 
     [Test]
@@ -261,10 +300,10 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
         var ct = dbe.GetComponentTable<CompD>();
 
         // Should not throw on empty table
-        StatisticsRebuilder.RebuildStatistics(ct, dbe.EpochManager);
+        RebuildStats(dbe, ct);
 
         // No statistics built (0 entities)
-        Assert.That(ct.IndexStats[1].HyperLogLog, Is.Null);
+        Assert.That(ArchStats(dbe, ct)[1].HyperLogLog, Is.Null);
     }
 
     [Test]
@@ -285,10 +324,10 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
             CreateAndCommitCompF(dbe, 50, 30 + i);
         }
 
-        StatisticsRebuilder.RebuildStatistics(ct, dbe.EpochManager);
+        RebuildStats(dbe, ct);
 
         // Histogram total should count entities, not distinct keys
-        var stats = ct.IndexStats[0]; // Gold field
+        var stats = ArchStats(dbe, ct)[0]; // Gold field
         Assert.That(stats.Histogram.TotalCount, Is.EqualTo(50));
 
         // MCV should capture both values
@@ -331,7 +370,7 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
         }
 
         // Set mutation count above threshold
-        ct.MutationsSinceRebuild = 2000;
+        ClusterOf(dbe, ct).MutationsSinceRebuild = 2000;
 
         var options = new StatisticsOptions
         {
@@ -348,12 +387,12 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
 
         // Wait briefly for the rebuild to complete
         var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (ct.IndexStats[1].HyperLogLog == null && DateTime.UtcNow < deadline)
+        while (ArchStats(dbe, ct)[1].HyperLogLog == null && DateTime.UtcNow < deadline)
         {
             System.Threading.Thread.Sleep(1);
         }
 
-        Assert.That(ct.IndexStats[1].HyperLogLog, Is.Not.Null, "ForceRebuild should trigger statistics rebuild");
+        Assert.That(ArchStats(dbe, ct)[1].HyperLogLog, Is.Not.Null, "ForceRebuild should trigger statistics rebuild");
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -380,12 +419,12 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
         }
 
         // RebuildAll must NOT throw — it should skip the String64 field
-        Assert.DoesNotThrow(() => StatisticsRebuilder.RebuildStatistics(ct, dbe.EpochManager));
+        Assert.DoesNotThrow(() => RebuildStats(dbe, ct));
 
         // String64 field should have no statistics (skipped)
-        Assert.That(ct.IndexStats[0].HyperLogLog, Is.Null);
-        Assert.That(ct.IndexStats[0].MostCommonValues, Is.Null);
-        Assert.That(ct.IndexStats[0].Histogram, Is.Null);
+        Assert.That(ArchStats(dbe, ct)[0].HyperLogLog, Is.Null);
+        Assert.That(ArchStats(dbe, ct)[0].MostCommonValues, Is.Null);
+        Assert.That(ArchStats(dbe, ct)[0].Histogram, Is.Null);
     }
 
     [Test]
@@ -458,24 +497,24 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
             CreateAndCommitCompD(dbe, -50.0f + i, i, -25.0 + i * 0.5);
         }
 
-        StatisticsRebuilder.RebuildStatistics(ct, dbe.EpochManager);
+        RebuildStats(dbe, ct);
 
         // Float field (A, index 0): all three statistics should work
-        Assert.That(ct.IndexStats[0].HyperLogLog, Is.Not.Null, "Float field should have HLL");
-        Assert.That(ct.IndexStats[0].MostCommonValues, Is.Not.Null, "Float field should have MCV");
-        Assert.That(ct.IndexStats[0].Histogram, Is.Not.Null, "Float field should have histogram (order-preserving encoding)");
-        Assert.That(ct.IndexStats[0].Histogram.TotalCount, Is.EqualTo(100));
-        Assert.That(ct.IndexStats[0].DistinctValues, Is.InRange(90, 110), "Float HLL should estimate ~100 distinct values");
+        Assert.That(ArchStats(dbe, ct)[0].HyperLogLog, Is.Not.Null, "Float field should have HLL");
+        Assert.That(ArchStats(dbe, ct)[0].MostCommonValues, Is.Not.Null, "Float field should have MCV");
+        Assert.That(ArchStats(dbe, ct)[0].Histogram, Is.Not.Null, "Float field should have histogram (order-preserving encoding)");
+        Assert.That(ArchStats(dbe, ct)[0].Histogram.TotalCount, Is.EqualTo(100));
+        Assert.That(ArchStats(dbe, ct)[0].DistinctValues, Is.InRange(90, 110), "Float HLL should estimate ~100 distinct values");
 
         // Double field (C, index 2): same — full statistics with order-preserving histogram
-        Assert.That(ct.IndexStats[2].HyperLogLog, Is.Not.Null, "Double field should have HLL");
-        Assert.That(ct.IndexStats[2].MostCommonValues, Is.Not.Null, "Double field should have MCV");
-        Assert.That(ct.IndexStats[2].Histogram, Is.Not.Null, "Double field should have histogram (order-preserving encoding)");
-        Assert.That(ct.IndexStats[2].Histogram.TotalCount, Is.EqualTo(100));
+        Assert.That(ArchStats(dbe, ct)[2].HyperLogLog, Is.Not.Null, "Double field should have HLL");
+        Assert.That(ArchStats(dbe, ct)[2].MostCommonValues, Is.Not.Null, "Double field should have MCV");
+        Assert.That(ArchStats(dbe, ct)[2].Histogram, Is.Not.Null, "Double field should have histogram (order-preserving encoding)");
+        Assert.That(ArchStats(dbe, ct)[2].Histogram.TotalCount, Is.EqualTo(100));
 
         // Int field (B, index 1): should have all three
-        Assert.That(ct.IndexStats[1].Histogram, Is.Not.Null, "Int field should have histogram");
-        Assert.That(ct.IndexStats[1].Histogram.TotalCount, Is.EqualTo(100));
+        Assert.That(ArchStats(dbe, ct)[1].Histogram, Is.Not.Null, "Int field should have histogram");
+        Assert.That(ArchStats(dbe, ct)[1].Histogram.TotalCount, Is.EqualTo(100));
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -561,7 +600,7 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
             CreateAndCommitCompD(dbe, 1.0f, i, 1.0);
         }
 
-        ct.MutationsSinceRebuild = 2000;
+        ClusterOf(dbe, ct).MutationsSinceRebuild = 2000;
 
         var options = new StatisticsOptions
         {
@@ -575,14 +614,14 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
         worker.ForceRebuild();
 
         var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (ct.IndexStats[1].HyperLogLog == null && DateTime.UtcNow < deadline)
+        while (ArchStats(dbe, ct)[1].HyperLogLog == null && DateTime.UtcNow < deadline)
         {
             System.Threading.Thread.Sleep(1);
         }
 
         // After successful rebuild, counter should be reset
-        Assert.That(ct.IndexStats[1].HyperLogLog, Is.Not.Null);
-        Assert.That(ct.MutationsSinceRebuild, Is.LessThan(2000), "Counter should be reset after successful rebuild");
+        Assert.That(ArchStats(dbe, ct)[1].HyperLogLog, Is.Not.Null);
+        Assert.That(ClusterOf(dbe, ct).MutationsSinceRebuild, Is.LessThan(2000), "Counter should be reset after successful rebuild");
     }
 
     [Test]
@@ -614,9 +653,9 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
         }
 
         // Sample every other page (pageInterval: 2)
-        StatisticsRebuilder.RebuildAll(ct, dbe.EpochManager, pageInterval: 2);
+        RebuildStats(dbe, ct, interval: 2);
 
-        var stats = ct.IndexStats[1]; // B field
+        var stats = ArchStats(dbe, ct)[1]; // B field
         Assert.That(stats.HyperLogLog, Is.Not.Null, "HLL should be populated even with sampling");
 
         // HLL only sees sampled pages (~half the entities with pageInterval=2), so its raw estimate is ~100.
