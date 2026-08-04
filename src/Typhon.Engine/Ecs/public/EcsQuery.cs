@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq.Expressions;
@@ -1326,7 +1326,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             var svAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
             try
             {
-                ScanClusterSoa(evaluators, clusterState, clusterState.IndexSlots, ixSlotIdx, ref svAccessor, ref svAccessor, ref result);
+                ScanClusterSoa(evaluators, clusterState, meta, clusterState.IndexSlots, ixSlotIdx, ref svAccessor, ref svAccessor, ref result);
             }
             finally
             {
@@ -1341,7 +1341,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         {
             if (clusterState.ClusterSegment == null)
             {
-                ScanClusterSoa(evaluators, clusterState, clusterState.TransientIndexSlots, ixSlotIdx, ref transientAccessor, ref transientAccessor,
+                ScanClusterSoa(evaluators, clusterState, meta, clusterState.TransientIndexSlots, ixSlotIdx, ref transientAccessor, ref transientAccessor,
                     ref result);
             }
             else
@@ -1349,7 +1349,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
                 try
                 {
-                    ScanClusterSoa(evaluators, clusterState, clusterState.TransientIndexSlots, ixSlotIdx, ref clusterAccessor, ref transientAccessor,
+                    ScanClusterSoa(evaluators, clusterState, meta, clusterState.TransientIndexSlots, ixSlotIdx, ref clusterAccessor, ref transientAccessor,
                         ref result);
                 }
                 finally
@@ -1373,185 +1373,246 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// (<see cref="ScanPerArchetypeBTreeSelective{TSink}"/>) does range-scan the tree and stays persistent-home-only for now; the planner in
     /// <see cref="ScanAllArchetypes{TSink}"/> routes every Transient home here.
     /// </remarks>
-    private void ScanClusterSoa<TSink, TPrimary, TData>(FieldEvaluator[] evaluators, ArchetypeClusterState clusterState, ClusterIndexSlot<TData>[] ixSlots,
-        int ixSlotIdx, ref ChunkAccessor<TPrimary> primaryAccessor, ref ChunkAccessor<TData> dataAccessor, ref TSink result)
+    /// <summary>
+    /// Born/died visibility for one entity emitted by the cluster SoA scan, resolved from its EntityMap record header — the same
+    /// <c>BornTSN</c>/<c>DiedTSN</c> test the chain-walking paths apply (<c>BroadScanAction.Process</c>, <c>MatchAction.Matches</c>).
+    /// </summary>
+    /// <remarks>
+    /// Returns true unconditionally when the archetype is not Versioned: <c>SingleVersion</c> and <c>Transient</c> are non-MVCC and
+    /// promise no isolation, so gating them would cost a hash lookup per match to enforce a guarantee they do not make. When the record
+    /// cannot be read the entity is treated as visible — the scan already proved it occupied, and dropping it would silently shrink the
+    /// result, the failure mode this whole migration exists to remove (#663).
+    /// </remarks>
+    private static bool IsVisibleAtSnapshot(long rawId, bool visGated, ArchetypeEngineState visState, byte* visBuf, int visRecordSize, long txTsn,
+        ref ChunkAccessor<PersistentStore> visAccessor)
+    {
+        if (!visGated || visState == null)
+        {
+            return true;
+        }
+
+        if (!visState.EntityMap.TryGet(EntityId.FromRaw(rawId).EntityKey, visBuf, ref visAccessor))
+        {
+            return true;
+        }
+
+        ref var header = ref EntityRecordAccessor.GetHeader(visBuf);
+        if (header.BornTSN != 0 && header.BornTSN > txTsn)
+        {
+            return false; // committed after this snapshot — the phantom the fixed snapshot must hide
+        }
+
+        return header.DiedTSN == 0 || header.DiedTSN > txTsn;
+    }
+
+    private void ScanClusterSoa<TSink, TPrimary, TData>(FieldEvaluator[] evaluators, ArchetypeClusterState clusterState, ArchetypeMetadata meta,
+        ClusterIndexSlot<TData>[] ixSlots, int ixSlotIdx, ref ChunkAccessor<TPrimary> primaryAccessor, ref ChunkAccessor<TData> dataAccessor, ref TSink result)
         where TSink : struct, IEntityIdSink
         where TPrimary : struct, IPageStore
         where TData : struct, IPageStore
     {
-        ref var matchSlot = ref ixSlots[ixSlotIdx];
-        var layout = clusterState.Layout;
-        var compSlot = matchSlot.Slot;
-        var compSize = layout.ComponentSize(compSlot);
-        var compOffset = layout.ComponentOffset(compSlot);
-
-        // Pre-compute zone map query bounds for each evaluator (zone map pruning).
-        // Bounds stored on stack; zone map references accessed via field iteration (no ref-type array allocation).
-        var evalCount = evaluators.Length;
-        var zoneMapMins = evalCount <= 8 ? stackalloc long[evalCount] : new long[evalCount];
-        var zoneMapMaxs = evalCount <= 8 ? stackalloc long[evalCount] : new long[evalCount];
-        // Track which evaluators have zone map bounds (bit per evaluator, fits in ulong for ≤64 evaluators)
-        ulong zoneMapEvalMask = 0;
-        var hasZoneMaps = false;
-
-        for (var e = 0; e < evalCount && e < 64; e++)
+        // MVCC born/died gate (04-data.md "Isolation guarantees"). The SoA scan walks CURRENT occupancy and reads the committed HEAD column, neither of which
+        // knows about the reader's snapshot — so without it an entity committed AFTER the snapshot is emitted, exactly the phantom read the fixed snapshot is
+        // specified to prevent. Only Versioned archetypes promise it (the storage-mode matrix is explicit: snapshot isolation is "no" for both SingleVersion
+        // and Transient), so a pure-SV / pure-Transient archetype keeps the lookup-free scan.
+        var visGated = meta.VersionedSlotMask != 0;
+        var txTsn = _tx.TSN;
+        var visState = visGated ? _tx.DBE._archetypeStates[meta.ArchetypeId] : null;
+        var visRecordSize = meta._entityRecordSize;
+        byte* visBuf = stackalloc byte[visRecordSize];
+        var visAccessor = visState != null ? visState.EntityMap.Segment.CreateChunkAccessor() : default;
+        try
         {
-            ref var eval = ref evaluators[e];
-            for (var fi = 0; fi < matchSlot.Fields.Length; fi++)
+            ref var matchSlot = ref ixSlots[ixSlotIdx];
+            var layout = clusterState.Layout;
+            var compSlot = matchSlot.Slot;
+            var compSize = layout.ComponentSize(compSlot);
+            var compOffset = layout.ComponentOffset(compSlot);
+
+            // Pre-compute zone map query bounds for each evaluator (zone map pruning).
+            // Bounds stored on stack; zone map references accessed via field iteration (no ref-type array allocation).
+            var evalCount = evaluators.Length;
+            var zoneMapMins = evalCount <= 8 ? stackalloc long[evalCount] : new long[evalCount];
+            var zoneMapMaxs = evalCount <= 8 ? stackalloc long[evalCount] : new long[evalCount];
+            // Track which evaluators have zone map bounds (bit per evaluator, fits in ulong for ≤64 evaluators)
+            ulong zoneMapEvalMask = 0;
+            var hasZoneMaps = false;
+
+            for (var e = 0; e < evalCount && e < 64; e++)
             {
-                ref var field = ref matchSlot.Fields[fi];
-                if (field.FieldOffset == eval.FieldOffset && field.FieldSize == eval.FieldSize && field.ZoneMap != null)
-                {
-                    if (ZoneMapArray.TryGetQueryBounds(ref eval, out var qMin, out var qMax))
-                    {
-                        zoneMapMins[e] = qMin;
-                        zoneMapMaxs[e] = qMax;
-                        zoneMapEvalMask |= 1UL << e;
-                        hasZoneMaps = true;
-                    }
-
-                    break;
-                }
-            }
-        }
-
-        // Pre-determine SIMD eligibility for each evaluator (once, before cluster loop)
-        var anySimd = false;
-        var simdEligible = evalCount <= 8 ? stackalloc bool[8] : new bool[evalCount];
-        if (Avx2.IsSupported)
-        {
-            for (var e = 0; e < evalCount; e++)
-            {
-                simdEligible[e] = SimdPredicateEvaluator.IsSimdEligible(evaluators[e].KeyType);
-                anySimd |= simdEligible[e];
-            }
-        }
-
-        var clusterSize = layout.ClusterSize;
-
-        for (var c = 0; c < clusterState.ActiveClusterCount; c++)
-        {
-            var clusterChunkId = clusterState.ActiveClusterIds[c];
-
-            // Zone map pruning: skip cluster if any predicate's range doesn't overlap the cluster's [min, max].
-            // Iterates fields to find zone maps, then checks matching evaluators — avoids ref-type array allocation.
-            if (hasZoneMaps)
-            {
-                var skip = false;
-                for (var fi = 0; fi < matchSlot.Fields.Length && !skip; fi++)
+                ref var eval = ref evaluators[e];
+                for (var fi = 0; fi < matchSlot.Fields.Length; fi++)
                 {
                     ref var field = ref matchSlot.Fields[fi];
-                    if (field.ZoneMap == null)
+                    if (field.FieldOffset == eval.FieldOffset && field.FieldSize == eval.FieldSize && field.ZoneMap != null)
                     {
-                        continue;
-                    }
-
-                    for (var e = 0; e < evalCount && !skip; e++)
-                    {
-                        if ((zoneMapEvalMask & (1UL << e)) == 0)
+                        if (ZoneMapArray.TryGetQueryBounds(ref eval, out var qMin, out var qMax))
                         {
-                            continue;
+                            zoneMapMins[e] = qMin;
+                            zoneMapMaxs[e] = qMax;
+                            zoneMapEvalMask |= 1UL << e;
+                            hasZoneMaps = true;
                         }
-                        if (evaluators[e].FieldOffset != field.FieldOffset)
-                        {
-                            continue;
-                        }
-                        if (!field.ZoneMap.MayContain(clusterChunkId, zoneMapMins[e], zoneMapMaxs[e]))
-                        {
-                            skip = true;
-                        }
-                    }
-                }
 
-                if (skip)
-                {
-                    continue;
-                }
-            }
-
-            var clusterBase = primaryAccessor.GetChunkAddress(clusterChunkId);
-            var occupancy = *(ulong*)clusterBase;
-            if (occupancy == 0)
-            {
-                continue;
-            }
-
-            // The component column can live in a DIFFERENT segment from the occupancy word — a Transient slot on a mixed archetype. Chunk ids are held in
-            // lockstep between the two segments, so the same clusterChunkId addresses both.
-            var compBase = dataAccessor.GetChunkAddress(clusterChunkId) + compOffset;
-
-            if (anySimd)
-            {
-                // SIMD path: batch-evaluate SIMD-eligible evaluators, then scalar-verify the rest
-                var matchBits = occupancy;
-
-                // Phase 1: SIMD evaluators narrow the match set
-                for (var e = 0; e < evalCount; e++)
-                {
-                    if (!simdEligible[e])
-                    {
-                        continue;
-                    }
-
-                    matchBits &= SimdPredicateEvaluator.EvaluateCluster(ref evaluators[e], compBase, compSize, clusterSize);
-                    if (matchBits == 0)
-                    {
                         break;
                     }
                 }
+            }
 
-                // Phase 2: scalar-verify non-SIMD evaluators on remaining matches
-                while (matchBits != 0)
+            // Pre-determine SIMD eligibility for each evaluator (once, before cluster loop)
+            var anySimd = false;
+            var simdEligible = evalCount <= 8 ? stackalloc bool[8] : new bool[evalCount];
+            if (Avx2.IsSupported)
+            {
+                for (var e = 0; e < evalCount; e++)
                 {
-                    var slotIndex = System.Numerics.BitOperations.TrailingZeroCount(matchBits);
-                    matchBits &= matchBits - 1;
+                    simdEligible[e] = SimdPredicateEvaluator.IsSimdEligible(evaluators[e].KeyType);
+                    anySimd |= simdEligible[e];
+                }
+            }
 
-                    var entityComp = compBase + slotIndex * compSize;
-                    var pass = true;
-                    for (var e = 0; e < evalCount; e++)
+            var clusterSize = layout.ClusterSize;
+
+            for (var c = 0; c < clusterState.ActiveClusterCount; c++)
+            {
+                var clusterChunkId = clusterState.ActiveClusterIds[c];
+
+                // Zone map pruning: skip cluster if any predicate's range doesn't overlap the cluster's [min, max].
+                // Iterates fields to find zone maps, then checks matching evaluators — avoids ref-type array allocation.
+                if (hasZoneMaps)
+                {
+                    var skip = false;
+                    for (var fi = 0; fi < matchSlot.Fields.Length && !skip; fi++)
                     {
-                        if (simdEligible[e])
+                        ref var field = ref matchSlot.Fields[fi];
+                        if (field.ZoneMap == null)
                         {
                             continue;
                         }
-                        if (!FieldEvaluator.Evaluate(ref evaluators[e], entityComp + evaluators[e].FieldOffset))
+
+                        for (var e = 0; e < evalCount && !skip; e++)
                         {
-                            pass = false;
+                            if ((zoneMapEvalMask & (1UL << e)) == 0)
+                            {
+                                continue;
+                            }
+                            if (evaluators[e].FieldOffset != field.FieldOffset)
+                            {
+                                continue;
+                            }
+                            if (!field.ZoneMap.MayContain(clusterChunkId, zoneMapMins[e], zoneMapMaxs[e]))
+                            {
+                                skip = true;
+                            }
+                        }
+                    }
+
+                    if (skip)
+                    {
+                        continue;
+                    }
+                }
+
+                var clusterBase = primaryAccessor.GetChunkAddress(clusterChunkId);
+                var occupancy = *(ulong*)clusterBase;
+                if (occupancy == 0)
+                {
+                    continue;
+                }
+
+                // The component column can live in a DIFFERENT segment from the occupancy word — a Transient slot on a mixed archetype. Chunk ids are held in
+                // lockstep between the two segments, so the same clusterChunkId addresses both.
+                var compBase = dataAccessor.GetChunkAddress(clusterChunkId) + compOffset;
+
+                if (anySimd)
+                {
+                    // SIMD path: batch-evaluate SIMD-eligible evaluators, then scalar-verify the rest
+                    var matchBits = occupancy;
+
+                    // Phase 1: SIMD evaluators narrow the match set
+                    for (var e = 0; e < evalCount; e++)
+                    {
+                        if (!simdEligible[e])
+                        {
+                            continue;
+                        }
+
+                        matchBits &= SimdPredicateEvaluator.EvaluateCluster(ref evaluators[e], compBase, compSize, clusterSize);
+                        if (matchBits == 0)
+                        {
                             break;
                         }
                     }
 
-                    if (pass)
+                    // Phase 2: scalar-verify non-SIMD evaluators on remaining matches
+                    while (matchBits != 0)
                     {
-                        result.Add(EntityId.FromRaw(*(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8)));
+                        var slotIndex = System.Numerics.BitOperations.TrailingZeroCount(matchBits);
+                        matchBits &= matchBits - 1;
+
+                        var entityComp = compBase + slotIndex * compSize;
+                        var pass = true;
+                        for (var e = 0; e < evalCount; e++)
+                        {
+                            if (simdEligible[e])
+                            {
+                                continue;
+                            }
+                            if (!FieldEvaluator.Evaluate(ref evaluators[e], entityComp + evaluators[e].FieldOffset))
+                            {
+                                pass = false;
+                                break;
+                            }
+                        }
+
+                        if (pass)
+                        {
+                            var rawId = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
+                            if (IsVisibleAtSnapshot(rawId, visGated, visState, visBuf, visRecordSize, txTsn, ref visAccessor))
+                            {
+                                result.Add(EntityId.FromRaw(rawId));
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    // Scalar path (unchanged): evaluate each occupied entity against all field predicates
+                    while (occupancy != 0)
+                    {
+                        var slotIndex = System.Numerics.BitOperations.TrailingZeroCount(occupancy);
+                        occupancy &= occupancy - 1;
+
+                        var entityComp = compBase + slotIndex * compSize;
+                        var allMatch = true;
+                        for (var e = 0; e < evaluators.Length; e++)
+                        {
+                            ref var eval = ref evaluators[e];
+                            if (!FieldEvaluator.Evaluate(ref eval, entityComp + eval.FieldOffset))
+                            {
+                                allMatch = false;
+                                break;
+                            }
+                        }
+
+                        if (allMatch)
+                        {
+                            var rawId = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
+                            if (IsVisibleAtSnapshot(rawId, visGated, visState, visBuf, visRecordSize, txTsn, ref visAccessor))
+                            {
+                                result.Add(EntityId.FromRaw(rawId));
+                            }
+                        }
                     }
                 }
             }
-            else
+
+        }
+        finally
+        {
+            if (visState != null)
             {
-                // Scalar path (unchanged): evaluate each occupied entity against all field predicates
-                while (occupancy != 0)
-                {
-                    var slotIndex = System.Numerics.BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-
-                    var entityComp = compBase + slotIndex * compSize;
-                    var allMatch = true;
-                    for (var e = 0; e < evaluators.Length; e++)
-                    {
-                        ref var eval = ref evaluators[e];
-                        if (!FieldEvaluator.Evaluate(ref eval, entityComp + eval.FieldOffset))
-                        {
-                            allMatch = false;
-                            break;
-                        }
-                    }
-
-                    if (allMatch)
-                    {
-                        result.Add(EntityId.FromRaw(*(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8)));
-                    }
-                }
+                visAccessor.Dispose();
             }
         }
     }
