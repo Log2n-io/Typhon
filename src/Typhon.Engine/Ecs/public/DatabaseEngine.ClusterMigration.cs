@@ -965,7 +965,7 @@ public partial class DatabaseEngine
 
     /// <summary>Opens an accessor over an index segment, threading the caller's <see cref="ChangeSet"/> only for a persisted store.</summary>
     /// <remarks>
-    /// A Transient segment has nothing to log or checkpoint, and <see cref="ProcessShadowEntries"/> makes the same distinction by hand in its two branches.
+    /// A Transient segment has nothing to log or checkpoint, and the tick-fence shadow pass makes the same distinction by hand in its two branches.
     /// Resolved by type test rather than by an overload because the caller is generic over the store; the test is a JIT-time constant per instantiation.
     /// </remarks>
     private static ChunkAccessor<TStore> CreateIndexAccessor<TStore>(ChunkBasedSegment<TStore> segment, ChangeSet changeSet) where TStore : struct, IPageStore
@@ -1105,73 +1105,6 @@ public partial class DatabaseEngine
                 }
             }
 
-        return totalShadowEntries;
-    }
-
-    /// <summary>
-    /// Drains the per-field shadow buffers for a SingleVersion ComponentTable, updating indexes and notifying views for any field values that changed since
-    /// the shadow was captured.
-    /// Called at tick boundary from <see cref="WriteTickFence"/>.
-    /// </summary>
-    private int ProcessShadowEntries(ComponentTable table, ChangeSet changeSet)
-    {
-        var fields = table.IndexedFieldInfos;
-        var buffers = table.FieldShadowBuffers;
-        var isTransient = table.StorageMode == StorageMode.Transient;
-
-        var totalShadowEntries = 0;
-        for (var fieldIdx = 0; fieldIdx < fields.Length; fieldIdx++)
-        {
-            var buffer = buffers[fieldIdx];
-            var count = buffer.Count;
-            if (count == 0)
-            {
-                continue;
-            }
-
-            totalShadowEntries += count;
-
-            ref var ifi = ref fields[fieldIdx];
-
-            if (isTransient)
-            {
-                var index = ifi.TransientIndex;
-                var compAccessor = table.TransientComponentSegment.CreateChunkAccessor();
-                var idxAccessor = index.Segment.CreateChunkAccessor();
-                try
-                {
-                    ProcessShadowFieldEntries(table, fieldIdx, ref ifi, buffer, count, index, ref compAccessor, ref idxAccessor);
-                }
-                finally
-                {
-                    compAccessor.Dispose();
-                    idxAccessor.Dispose();
-                }
-            }
-            else
-            {
-                var index = ifi.PersistentIndex;
-
-                // ChangeSet required for index write operations (Move/MoveValue may trigger TAIL segment growth for AllowMultiple indexes).
-                // Reuse the caller's shared ChangeSet — UoW owns the commit lifecycle (see WriteTickFence).
-                var compAccessor = table.ComponentSegment.CreateChunkAccessor(changeSet);
-                var idxAccessor = index.Segment.CreateChunkAccessor(changeSet);
-                try
-                {
-                    ProcessShadowFieldEntries(table, fieldIdx, ref ifi, buffer, count, index, ref compAccessor, ref idxAccessor);
-                }
-                finally
-                {
-                    compAccessor.Dispose();
-                    idxAccessor.Dispose();
-                }
-            }
-
-            buffer.Reset();
-        }
-
-        table.ShadowBitmap.Clear();
-        table.ClearDestroyedChunkIds();
         return totalShadowEntries;
     }
 

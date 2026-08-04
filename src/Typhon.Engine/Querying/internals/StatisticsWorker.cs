@@ -16,9 +16,9 @@ namespace Typhon.Engine.Internals;
 /// <para>
 /// The worker polls at <see cref="StatisticsOptions.PollIntervalMs"/> and for each ComponentTable:
 /// <list type="number">
-///   <item>Checks <see cref="ComponentTable.MutationsSinceRebuild"/> against threshold</item>
+///   <item>Checks <see cref="ArchetypeClusterState.MutationsSinceRebuild"/> against threshold</item>
 ///   <item>Computes page-sampling interval based on table size and <see cref="StatisticsOptions.SamplingMinEntities"/></item>
-///   <item>Calls <see cref="StatisticsRebuilder.RebuildAll"/> for a single-pass chunk scan</item>
+///   <item>Calls <see cref="StatisticsRebuilder.RebuildClusterAll"/> for a single-pass cluster scan</item>
 /// </list>
 /// </para>
 /// </remarks>
@@ -119,44 +119,9 @@ internal sealed class StatisticsWorker : ResourceNode
                 break;
             }
 
-            foreach (var ct in _dbe.GetAllComponentTables())
-            {
-                if (_shutdown)
-                {
-                    break;
-                }
-
-                if (ct.IndexedFieldInfos.Length == 0)
-                {
-                    continue;
-                }
-
-                if (ct.MutationsSinceRebuild < _options.MutationThreshold)
-                {
-                    continue;
-                }
-
-                if (ct.EstimatedEntityCount < _options.MinEntitiesForRebuild)
-                {
-                    continue;
-                }
-
-                try
-                {
-                    int pageInterval = ComputeSamplingInterval(ct, _options.SamplingMinEntities);
-                    using var rebuildScope = TyphonEvent.BeginStatisticsRebuild(ct.EstimatedEntityCount, ct.MutationsSinceRebuild, pageInterval);
-                    StatisticsRebuilder.RebuildAll(ct, _epochManager, pageInterval);
-
-                    // Reset counter after successful rebuild — if rebuild fails, mutations are preserved for retry
-                    ct.MutationsSinceRebuild = 0;
-                }
-                catch (Exception ex)
-                {
-                    _lastError = ex;
-                    // Continue processing other tables — one table's failure should not block the rest
-                }
-            }
-
+            // The per-ComponentTable half of this sweep is gone (#629). It rebuilt statistics over ComponentSegment, where a cluster-backed archetype keeps
+            // no entities, into an array no estimator reads — and it could never even run: ComponentTable.MutationsSinceRebuild was never incremented by any
+            // production write path, so the threshold below it was never crossed. The per-archetype sweep is the whole job.
             RebuildClusterArchetypes();
         }
     }

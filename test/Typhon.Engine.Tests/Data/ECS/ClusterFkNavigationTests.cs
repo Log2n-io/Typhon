@@ -108,16 +108,23 @@ class ClusterFkNavigationTests : TestBase<ClusterFkNavigationTests>
         return dbe;
     }
 
-    /// <summary>Guards the premise: without these two shapes the tests below prove nothing about two index homes.</summary>
+    /// <summary>
+    /// Guards the premise: both FK source shapes index on the ARCHETYPE, which is the only home left (#629).
+    /// </summary>
+    /// <remarks>
+    /// This used to assert that the two shapes landed in DIFFERENT homes, which was the whole point of #662 — the reverse lookup had to scan both. After the
+    /// eligibility flip there is one home, so what needs guarding is the opposite: that no fixture here has quietly fallen back to the shared tree, which
+    /// would leave the lookup below reading an empty index and passing for the wrong reason.
+    /// </remarks>
     [Test]
-    public void Fixture_SourceArchetypesSpanBothIndexHomes()
+    public void Fixture_SourceArchetypesShareTheArchetypeIndexHome()
     {
         using var dbe = SetupEngine();
 
         Assert.That(Archetype<MixNavPlayerArch>.Metadata.HasClusterIndexes, Is.True,
             "a Versioned FK source in an archetype with an SV sibling must index on the ARCHETYPE");
-        Assert.That(Archetype<FlatNavPlayerArch>.Metadata.HasClusterIndexes, Is.False,
-            "the same component alone must stay on the ComponentTable index");
+        Assert.That(Archetype<FlatNavPlayerArch>.Metadata.HasClusterIndexes, Is.True,
+            "the same component alone is cluster-backed too now — Versioned-only is no longer a disqualifier");
     }
 
     /// <summary>AC: Versioned FK source in a mixed SV+Versioned archetype — silently empty before #662.</summary>

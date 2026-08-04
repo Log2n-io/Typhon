@@ -76,12 +76,13 @@ class TickBoundaryIndexTests : TestBase<TickBoundaryIndexTests>
             }
         }
 
+        // Reads the ARCHETYPE's tree — the ComponentTable owns none since #629.
         var table = dbe.GetComponentTable<TbSvData>();
-        var ifi = table.IndexedFieldInfos[0]; // Category is the first (only) indexed field
-        var accessor2 = ifi.PersistentIndex.Segment.CreateChunkAccessor();
+        var index = (BTreeBase<PersistentStore>)IndexTestHelpers.ArchetypeIndex<TbSvArch>(dbe, table, 0); // Category is the first (only) indexed field
+        var accessor2 = index.Segment.CreateChunkAccessor();
         try
         {
-            var result2 = ifi.PersistentIndex.TryGet(&category, ref accessor2);
+            var result2 = index.TryGet(&category, ref accessor2);
             return result2.IsSuccess;
         }
         finally

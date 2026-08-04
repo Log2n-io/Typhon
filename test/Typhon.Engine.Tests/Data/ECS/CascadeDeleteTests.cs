@@ -535,10 +535,15 @@ class CascadeDeleteTests : TestBase<CascadeDeleteTests>
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Guards the premise. Without these four assertions the tests below could pass while exercising a single index home, proving nothing about the other.
+    /// Guards the premise. Without these four assertions the tests below could pass while exercising an archetype whose FK index is empty.
     /// </summary>
+    /// <remarks>
+    /// These four shapes used to straddle two index homes, and that was the point — cascade delete had to find children through either. The eligibility flip
+    /// (#629) collapsed them onto one, so the assertion that still earns its place is that every child archetype really does own a per-archetype FK tree. A
+    /// child that silently had none would make its cascade test vacuous rather than failing.
+    /// </remarks>
     [Test]
-    public void Fixture_ChildArchetypesSpanBothIndexHomes()
+    public void Fixture_ChildArchetypesAllIndexOnTheArchetype()
     {
         using var dbe = SetupEngine();
 
@@ -548,7 +553,7 @@ class CascadeDeleteTests : TestBase<CascadeDeleteTests>
             Assert.That(Archetype<MixedItem>.Metadata.HasClusterIndexes, Is.True, "a Versioned FK component with an SV sibling must index on the ARCHETYPE");
             Assert.That(Archetype<FlatSvItem>.Metadata.HasClusterIndexes, Is.True,
                 "cluster-backed since #655 — a Transient indexed sibling no longer forces the archetype onto the ComponentTable home");
-            Assert.That(Archetype<CascadeItem>.Metadata.HasClusterIndexes, Is.False, "the pre-existing Versioned-only child stays on the ComponentTable");
+            Assert.That(Archetype<CascadeItem>.Metadata.HasClusterIndexes, Is.True, "the Versioned-only child is cluster-backed too since #629");
         });
     }
 

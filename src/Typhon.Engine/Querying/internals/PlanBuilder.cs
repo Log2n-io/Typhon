@@ -63,7 +63,7 @@ internal class PlanBuilder
         // Previously the descriptor was emitted before plan resolution with primaryIndexFieldIdx=-1, forcing the Workbench catalog to render every query as
         // "no index scan". The build is pure computation (no telemetry emission yet) so reordering doesn't affect trace event ordering — the
         // QueryDefinitionDescribe still lands BEFORE BeginQueryPlan opens its span.
-        var (ordered, estimates) = OrderBySelectivity(evaluators, stats ?? table.IndexStats, estimator);
+        var (ordered, estimates) = OrderBySelectivity(evaluators, stats, estimator);
         var plan = BuildPlanWithPrimarySelection(ordered, estimates, table, descending, orderByFieldIndex);
 
         // ── Step 2: emit QueryDefinitionDescribe (first time per identity) BEFORE the QueryPlan span ──
@@ -248,54 +248,16 @@ internal class PlanBuilder
     private static (int FieldIndex, KeyType KeyType, long ScanMin, long ScanMax) SelectFullScanStream(FieldEvaluator[] orderedEvaluators, ComponentTable table,
         int orderByFieldIndex)
     {
-        // OrderBy PK — a secondary index cannot reproduce PK order.
-        if (orderByFieldIndex == -1)
-        {
-            return (-1, default, 0, 0);
-        }
-
-        var indexedFieldInfos = table.IndexedFieldInfos;
-        var fallbackFieldIndex = -1;
-        KeyType fallbackKeyType = default;
-
-        for (var i = 0; i < orderedEvaluators.Length; i++)
-        {
-            ref var eval = ref orderedEvaluators[i];
-
-            if (eval.FieldIndex >= indexedFieldInfos.Length)
-            {
-                continue;
-            }
-
-            // With an OrderBy set, only that field's index preserves the required iteration order.
-            if (orderByFieldIndex != int.MinValue && orderByFieldIndex != eval.FieldIndex)
-            {
-                continue;
-            }
-
-            ref var ifi = ref indexedFieldInfos[eval.FieldIndex];
-
-            // Empty shared index → nothing to enumerate, and critically this is also how a CLUSTER archetype presents: its entries live in per-archetype
-            // B+Trees, so the shared one is always empty. SelectPrimaryStream guards on the same condition, and ExecuteOrderedClustered keys off the resulting
-            // PrimaryFieldIndex == -1 to run its own compensation. Substituting a stream here would divert it into the plan-bounds branch, whose float
-            // endpoints drop negative keys (see the remarks above).
-            if (ifi.Index == null || ifi.Index.EntryCount == 0)
-            {
-                continue;
-            }
-
-            fallbackFieldIndex = eval.FieldIndex;
-            fallbackKeyType = eval.KeyType;
-            break;
-        }
-
-        if (fallbackFieldIndex < 0)
-        {
-            return (-1, default, 0, 0);
-        }
-
-        // Full type range, not long.MinValue/MaxValue — LongToKey truncates to the target type, so (int)long.MaxValue = -1 would invert the range.
-        return (fallbackFieldIndex, fallbackKeyType, TypeMinAsLong(fallbackKeyType), TypeMaxAsLong(fallbackKeyType));
+        // No stream to select: the shared per-ComponentTable B+Trees this scanned are gone (#629), and every archetype keeps its indexes on the ARCHETYPE.
+        //
+        // Returning -1 is not a simplification, it is the behaviour that was already in force. Both loops here rejected every candidate on
+        // `ifi.Index.EntryCount == 0`, and that tree has been empty since the eligibility flip — so PrimaryFieldIndex was ALREADY permanently -1. Two consumers
+        // depend on it: ExecuteOrderedClustered keys off -1 to run its own K-way merge, and ScanAllArchetypes reads UsesSecondaryIndex to choose between the
+        // selective B+Tree scan and the SoA scan. Letting a stream be selected here would change both, so the value is pinned rather than recomputed.
+        //
+        // The cost is that the selective cluster scan stays unreachable — a real optimisation, lost to the sentinel meaning two things at once. Untangling that
+        // is #22, and it is where this method earns a real implementation against the per-archetype trees.
+        return (-1, default, 0, 0);
     }
 
     /// <summary>
@@ -312,78 +274,15 @@ internal class PlanBuilder
     private static (int FieldIndex, KeyType KeyType, long ScanMin, long ScanMax) SelectPrimaryStream(FieldEvaluator[] orderedEvaluators, ComponentTable table,
         int orderByFieldIndex)
     {
-        // OrderBy PK → must use PK scan
-        if (orderByFieldIndex == -1)
-        {
-            return (-1, default, 0, 0);
-        }
-
-        var indexedFieldInfos = table.IndexedFieldInfos;
-
-        for (var i = 0; i < orderedEvaluators.Length; i++)
-        {
-            ref var eval = ref orderedEvaluators[i];
-
-            // NE cannot narrow a range
-            if (eval.CompareOp == CompareOp.NotEqual)
-            {
-                continue;
-            }
-
-            // Must reference a valid indexed field
-            if (eval.FieldIndex >= indexedFieldInfos.Length)
-            {
-                continue;
-            }
-
-            ref var ifi = ref indexedFieldInfos[eval.FieldIndex];
-
-            // If OrderBy is specified, only select this field if it matches
-            if (orderByFieldIndex != int.MinValue && orderByFieldIndex != eval.FieldIndex)
-            {
-                continue;
-            }
-
-            // Empty index → no benefit
-            if (ifi.Index.EntryCount == 0)
-            {
-                continue;
-            }
-
-            // Use type-appropriate max/min for unbounded ranges so the plan remains valid when reused after new keys are inserted (e.g., overflow recovery).
-            // long.MaxValue/MinValue cannot be used because LongToKey truncates to the target type (e.g., (int)long.MaxValue = -1), creating invalid scan ranges.
-            var typeMin = TypeMinAsLong(eval.KeyType);
-            var typeMax = TypeMaxAsLong(eval.KeyType);
-            var isInteger = IsIntegerKeyType(eval.KeyType);
-            var (scanMin, scanMax) = ComputeBounds(ref eval, typeMin, typeMax, isInteger);
-
-            // Merge bounds from additional evaluators on the same field (e.g., B >= 5 && B < 15 → intersect ranges).
-            var selectedFieldIndex = eval.FieldIndex;
-            var selectedKeyType = eval.KeyType;
-            for (var j = i + 1; j < orderedEvaluators.Length; j++)
-            {
-                ref var other = ref orderedEvaluators[j];
-                if (other.FieldIndex != selectedFieldIndex || other.CompareOp == CompareOp.NotEqual)
-                {
-                    continue;
-                }
-
-                var (otherMin, otherMax) = ComputeBounds(ref other, typeMin, typeMax, isInteger);
-                // Intersect: tighten both bounds
-                if (otherMin > scanMin)
-                {
-                    scanMin = otherMin;
-                }
-
-                if (otherMax < scanMax)
-                {
-                    scanMax = otherMax;
-                }
-            }
-
-            return (selectedFieldIndex, selectedKeyType, scanMin, scanMax);
-        }
-
+        // No stream to select: the shared per-ComponentTable B+Trees this scanned are gone (#629), and every archetype keeps its indexes on the ARCHETYPE.
+        //
+        // Returning -1 is not a simplification, it is the behaviour that was already in force. Both loops here rejected every candidate on
+        // `ifi.Index.EntryCount == 0`, and that tree has been empty since the eligibility flip — so PrimaryFieldIndex was ALREADY permanently -1. Two consumers
+        // depend on it: ExecuteOrderedClustered keys off -1 to run its own K-way merge, and ScanAllArchetypes reads UsesSecondaryIndex to choose between the
+        // selective B+Tree scan and the SoA scan. Letting a stream be selected here would change both, so the value is pinned rather than recomputed.
+        //
+        // The cost is that the selective cluster scan stays unreachable — a real optimisation, lost to the sentinel meaning two things at once. Untangling that
+        // is #22, and it is where this method earns a real implementation against the per-archetype trees.
         return (-1, default, 0, 0);
     }
 
@@ -408,7 +307,11 @@ internal class PlanBuilder
             {
                 ordered[i] = evaluators[i];
                 ref var eval = ref ordered[i];
-                estimates[i] = estimator.EstimateCardinality(stats, eval.FieldIndex, eval.CompareOp, eval.Threshold);
+
+                // No statistics home for this query — several archetypes match, or none does. Estimate 0 for every predicate, which is exactly what the
+                // per-ComponentTable array produced before it was removed (#629): its trees were empty, so EntryCount was 0 and both estimators early-return 0
+                // for that. An EMPTY array would not do here — both estimators index fieldStats[fieldIndex] unchecked.
+                estimates[i] = stats == null ? 0L : estimator.EstimateCardinality(stats, eval.FieldIndex, eval.CompareOp, eval.Threshold);
             }
 
             // Insertion sort by ascending cardinality, tie-break by lower FieldIndex.

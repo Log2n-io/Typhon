@@ -142,7 +142,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// <summary>Include only archetypes that declare <typeparamref name="T"/>. Mask AND.</summary>
     public EcsQuery<TArchetype> With<T>() where T : unmanaged
     {
-        int typeId = ArchetypeRegistry.GetComponentTypeId<T>();
+        var typeId = ArchetypeRegistry.GetComponentTypeId<T>();
         if (typeId < 0)
         {
             _mask256 = default;
@@ -163,7 +163,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// <summary>Exclude archetypes that declare <typeparamref name="T"/>. Mask AND NOT.</summary>
     public EcsQuery<TArchetype> Without<T>() where T : unmanaged
     {
-        int typeId = ArchetypeRegistry.GetComponentTypeId<T>();
+        var typeId = ArchetypeRegistry.GetComponentTypeId<T>();
         if (typeId < 0)
         {
             return this;
@@ -211,7 +211,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// <summary>Include only entities where <typeparamref name="T"/> is enabled.</summary>
     public EcsQuery<TArchetype> Enabled<T>() where T : unmanaged
     {
-        int typeId = ArchetypeRegistry.GetComponentTypeId<T>();
+        var typeId = ArchetypeRegistry.GetComponentTypeId<T>();
         CheckConfig.Require(CheckConfig.Enabled, typeId >= 0, $"Component {typeof(T).Name} not registered");
         // Phase 7: ECS:Query:Constraint:Enabled instant.
         TyphonEvent.EmitEcsQueryConstraintEnabled((ushort)Math.Min(typeId, ushort.MaxValue), 1);
@@ -222,7 +222,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// <summary>Include only entities where <typeparamref name="T"/> is disabled.</summary>
     public EcsQuery<TArchetype> Disabled<T>() where T : unmanaged
     {
-        int typeId = ArchetypeRegistry.GetComponentTypeId<T>();
+        var typeId = ArchetypeRegistry.GetComponentTypeId<T>();
         CheckConfig.Require(CheckConfig.Enabled, typeId >= 0, $"Component {typeof(T).Name} not registered");
         // Phase 7: ECS:Query:Constraint:Enabled instant (enableBit=0 means Disabled).
         TyphonEvent.EmitEcsQueryConstraintEnabled((ushort)Math.Min(typeId, ushort.MaxValue), 0);
@@ -303,25 +303,25 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
             if (found != null)
             {
-                return ct.IndexStats;   // more than one archetype matches — no single distribution to describe them
+                return null;   // more than one archetype matches — no single distribution to describe them
             }
 
             var clusterState = dbe._archetypeStates[meta.ArchetypeId]?.ClusterState;
             if (clusterState == null)
             {
-                return ct.IndexStats;
+                return null;
             }
 
             var ixSlotIdx = FindClusterIndexSlot(clusterState, meta, out var transientHome);
             if (ixSlotIdx < 0)
             {
-                return ct.IndexStats;
+                return null;
             }
 
             found = transientHome ? clusterState.TransientIndexSlots[ixSlotIdx].Stats : clusterState.IndexSlots[ixSlotIdx].Stats;
         }
 
-        return found ?? ct.IndexStats;
+        return found;
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -609,20 +609,20 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         requiredEnabled = 0;
         requiredDisabled = 0;
 
-        for (int i = 0; i < _enabledTypeIdCount; i++)
+        for (var i = 0; i < _enabledTypeIdCount; i++)
         {
-            int typeId = i switch { 0 => _enabledTypeId0, 1 => _enabledTypeId1, 2 => _enabledTypeId2, _ => _enabledTypeId3 };
-            if (!meta.TryGetSlot(typeId, out byte slot))
+            var typeId = i switch { 0 => _enabledTypeId0, 1 => _enabledTypeId1, 2 => _enabledTypeId2, _ => _enabledTypeId3 };
+            if (!meta.TryGetSlot(typeId, out var slot))
             {
                 return false;
             }
             requiredEnabled |= (ushort)(1 << slot);
         }
 
-        for (int i = 0; i < _disabledTypeIdCount; i++)
+        for (var i = 0; i < _disabledTypeIdCount; i++)
         {
-            int typeId = i switch { 0 => _disabledTypeId0, 1 => _disabledTypeId1, 2 => _disabledTypeId2, _ => _disabledTypeId3 };
-            if (!meta.TryGetSlot(typeId, out byte slot))
+            var typeId = i switch { 0 => _disabledTypeId0, 1 => _disabledTypeId1, 2 => _disabledTypeId2, _ => _disabledTypeId3 };
+            if (!meta.TryGetSlot(typeId, out var slot))
             {
                 continue;
             }
@@ -858,9 +858,10 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             definitionSourceFile: SourceFile, definitionSourceLine: SourceLine, definitionSourceMethod: SourceMethod,
             executionSourceFile: callerFile, executionSourceLine: callerLine, executionSourceMethod: callerMethod);
 
-        // Detect cluster vs non-cluster archetypes in the mask
-        bool hasClusterArchetypes = false;
-        bool hasNonClusterArchetypes = false;
+        // Every archetype whose where-component owns a per-archetype tree can be K-way merged; anything else falls back to scan-then-sort. The third case this
+        // used to have — a PipelineExecutor ordered scan over the shared ComponentTable tree — is gone with that tree (#629). It could only ever have returned
+        // an empty list once the trees stopped being maintained, so the fallback is strictly the better answer, not merely the surviving one.
+        var allArchetypesIndexOnArchetype = true;
         var dbe = _tx.DBE;
         foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
         {
@@ -868,67 +869,16 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             {
                 continue;
             }
-            var engineState = dbe._archetypeStates[meta.ArchetypeId];
-            var clusterState = engineState?.ClusterState;
-            if (clusterState?.IndexSlots != null && meta.HasClusterIndexes)
+
+            var clusterState = dbe._archetypeStates[meta.ArchetypeId]?.ClusterState;
+            if (clusterState?.IndexSlots == null || !meta.HasClusterIndexes)
             {
-                hasClusterArchetypes = true;
-            }
-            else
-            {
-                hasNonClusterArchetypes = true;
-            }
-        }
-
-        if (!hasClusterArchetypes)
-        {
-            // Pure non-cluster path: existing PipelineExecutor ordered scan (unchanged)
-            return ExecuteOrderedNonCluster(plan);
-        }
-
-        if (!hasNonClusterArchetypes)
-        {
-            // Pure cluster path: K-way merge over per-archetype B+Trees
-            return ExecuteOrderedClustered(plan, evaluators);
-        }
-
-        // Mixed path: sort fallback handles true global ordering across cluster + non-cluster archetypes
-        return ExecuteOrderedViaSortFallback(evaluators, plan);
-    }
-
-    /// <summary>Original non-cluster ordered execution path via PipelineExecutor.</summary>
-    private List<EntityId> ExecuteOrderedNonCluster(ExecutionPlan plan)
-    {
-        var ct = _whereComponentTable;
-        var pkResult = new List<long>();
-        _whereFieldReader.ExecuteOrderedScan(plan, plan.OrderedEvaluators, ct, _tx, pkResult);
-
-        var result = new List<EntityId>(_take > 0 ? _take : Math.Min(pkResult.Count, 256));
-        int skipped = 0;
-        int taken = 0;
-        int take = _take > 0 ? _take : int.MaxValue;
-
-        for (var i = 0; i < pkResult.Count; i++)
-        {
-            var entityId = EntityId.FromRaw(pkResult[i]);
-            if (!MaskTestByRouting(entityId.ArchetypeId))
-            {
-                continue;
-            }
-            if (skipped < _skip)
-            {
-                skipped++;
-                continue;
-            }
-            result.Add(entityId);
-            taken++;
-            if (taken >= take)
-            {
+                allArchetypesIndexOnArchetype = false;
                 break;
             }
         }
 
-        return result;
+        return allArchetypesIndexOnArchetype ? ExecuteOrderedClustered(plan, evaluators) : ExecuteOrderedViaSortFallback(evaluators, plan);
     }
 
     /// <summary>
@@ -941,22 +891,22 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         // Use rented array instead of List + ToArray to avoid redundant allocations.
         // Typical K is 1-3 archetypes; rent 8 to avoid resize in common cases.
         var streams = System.Buffers.ArrayPool<ArchetypeSortedStream>.Shared.Rent(8);
-        int streamCount = 0;
+        var streamCount = 0;
 
         // Early termination: each per-archetype stream only needs skip+take entries at most.
         // The B+Tree enumerator yields in sort order, so stopping early is correct.
-        int maxPerStream = _take > 0 ? _skip + _take : 0;
+        var maxPerStream = _take > 0 ? _skip + _take : 0;
 
         // The plan's PrimaryFieldIndex may be -1 when the shared B+Tree has 0 entries (cluster archetypes store entries in per-archetype B+Trees,
         // not the shared one). In that case, use the OrderBy field index directly and full type range for scan bounds.
         Debug.Assert(_orderBy.HasValue, "ExecuteOrderedClustered requires OrderBy to be set");
-        int orderByFieldIdx = _orderBy.Value.FieldIndex;
-        bool descending = plan.Descending;
-        int primaryFieldIdx = plan.PrimaryFieldIndex >= 0 ? plan.PrimaryFieldIndex : orderByFieldIdx;
+        var orderByFieldIdx = _orderBy.Value.FieldIndex;
+        var descending = plan.Descending;
+        var primaryFieldIdx = plan.PrimaryFieldIndex >= 0 ? plan.PrimaryFieldIndex : orderByFieldIdx;
 
         // If there are evaluators on fields OTHER than the scan field, the B+Tree scan won't filter them.
         // Fall back to ExecuteTargeted (which verifies all evaluators) + sort for correctness.
-        for (int e = 0; e < evaluators.Length; e++)
+        for (var e = 0; e < evaluators.Length; e++)
         {
             if (evaluators[e].FieldIndex != primaryFieldIdx && evaluators[e].CompareOp != CompareOp.NotEqual)
             {
@@ -983,7 +933,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
                 // A Transient home is skipped: ArchetypeSortedStream streams a BTreeBase<PersistentStore>. Skipping falls through to the generic sort, which
                 // is correct but not index-accelerated — ordered streaming over the Transient home is a #655 follow-up, tracked in #665.
-                int ixSlotIdx = FindClusterIndexSlot(clusterState, meta, out bool transientHome);
+                var ixSlotIdx = FindClusterIndexSlot(clusterState, meta, out var transientHome);
                 if (ixSlotIdx < 0 || transientHome)
                 {
                     continue;
@@ -994,7 +944,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 // Determine which field's B+Tree to scan for ordering.
                 // If the plan selected a secondary index (PrimaryFieldIndex >= 0), use it.
                 // Otherwise, use the OrderBy field index directly (the shared B+Tree had 0 entries).
-                int fieldIdx = plan.PrimaryFieldIndex >= 0 ? plan.PrimaryFieldIndex : orderByFieldIdx;
+                var fieldIdx = plan.PrimaryFieldIndex >= 0 ? plan.PrimaryFieldIndex : orderByFieldIdx;
                 if (fieldIdx < 0 || fieldIdx >= matchSlot.Fields.Length)
                 {
                     continue;
@@ -1018,7 +968,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     keyType = KeyType.Int;
                     scanMin = long.MinValue;
                     scanMax = long.MaxValue;
-                    for (int e = 0; e < evaluators.Length; e++)
+                    for (var e = 0; e < evaluators.Length; e++)
                     {
                         if (evaluators[e].FieldIndex == fieldIdx)
                         {
@@ -1066,7 +1016,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         catch
         {
             // Dispose streams on failure path
-            for (int i = 0; i < streamCount; i++)
+            for (var i = 0; i < streamCount; i++)
             {
                 streams[i].Dispose();
             }
@@ -1079,11 +1029,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     private List<EntityId> CollectMergedResults(ref KWayMergeState merge, FieldEvaluator[] evaluators)
     {
         var result = new List<EntityId>(_take > 0 ? _take : 64);
-        int skipped = 0;
-        int taken = 0;
-        int take = _take > 0 ? _take : int.MaxValue;
+        var skipped = 0;
+        var taken = 0;
+        var take = _take > 0 ? _take : int.MaxValue;
 
-        while (merge.MoveNext(out long entityPK))
+        while (merge.MoveNext(out var entityPK))
         {
             if (skipped < _skip)
             {
@@ -1105,11 +1055,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     private List<EntityId> ApplySkipTake(List<long> pks)
     {
         var result = new List<EntityId>(_take > 0 ? _take : Math.Min(pks.Count, 256));
-        int skipped = 0;
-        int taken = 0;
-        int take = _take > 0 ? _take : int.MaxValue;
+        var skipped = 0;
+        var taken = 0;
+        var take = _take > 0 ? _take : int.MaxValue;
 
-        for (int i = 0; i < pks.Count; i++)
+        for (var i = 0; i < pks.Count; i++)
         {
             if (skipped < _skip)
             {
@@ -1142,7 +1092,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         // to match against our result set.
         var entityKeyMap = new Dictionary<long, long>(unordered.Count); // entityPK → orderedKey
         Debug.Assert(_orderBy != null, nameof(_orderBy) + " != null");
-        int orderByFieldIdx = _orderBy.Value.FieldIndex;
+        var orderByFieldIdx = _orderBy.Value.FieldIndex;
         var dbe = _tx.DBE;
 
         foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
@@ -1161,7 +1111,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
             // Persistent home only — see the note in ExecuteOrderedClustered. A Transient home leaves this archetype's entities out of entityKeyMap, so they
             // sort by EntityKey rather than by the ordered field (#655 follow-up, tracked in #665).
-            int ixSlotIdx = FindClusterIndexSlot(clusterState, meta, out bool transientHome);
+            var ixSlotIdx = FindClusterIndexSlot(clusterState, meta, out var transientHome);
             if (ixSlotIdx < 0 || transientHome || orderByFieldIdx < 0 || orderByFieldIdx >= clusterState.IndexSlots[ixSlotIdx].Fields.Length)
             {
                 continue;
@@ -1191,8 +1141,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var withKeys = new List<(long orderedKey, EntityId id)>(unordered.Count);
         foreach (var id in unordered)
         {
-            long pk = (long)id.RawValue;
-            long orderedKey = entityKeyMap.GetValueOrDefault(pk, id.EntityKey);
+            var pk = (long)id.RawValue;
+            var orderedKey = entityKeyMap.GetValueOrDefault(pk, id.EntityKey);
             withKeys.Add((orderedKey, id));
         }
 
@@ -1207,10 +1157,10 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
         // Apply Skip/Take
         var result = new List<EntityId>();
-        int skipped = 0;
-        int taken = 0;
-        int take = _take > 0 ? _take : int.MaxValue;
-        for (int i = 0; i < withKeys.Count; i++)
+        var skipped = 0;
+        var taken = 0;
+        var take = _take > 0 ? _take : int.MaxValue;
+        for (var i = 0; i < withKeys.Count; i++)
         {
             if (skipped < _skip)
             {
@@ -1278,7 +1228,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     private void ScanAllArchetypes<TSink>(ExecutionPlan plan, FieldEvaluator[] evaluators, ComponentTable ct, ref TSink sink)
         where TSink : struct, IEntityIdSink
     {
-        bool hasNonClusterArchetypes = false;
+        var hasNonClusterArchetypes = false;
 
         // Direct cluster scan for cluster-eligible archetypes with indexed fields
         {
@@ -1306,7 +1256,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     continue;
                 }
 
-                int ixSlotIdx = FindClusterIndexSlot(clusterState, meta, out bool transientHome);
+                var ixSlotIdx = FindClusterIndexSlot(clusterState, meta, out var transientHome);
                 if (ixSlotIdx < 0)
                 {
                     hasNonClusterArchetypes = true;
@@ -1328,20 +1278,15 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
         }
 
-        // Fall through to shared pipeline for non-cluster archetypes
+        // This used to fall through to a PipelineExecutor scan over the shared ComponentTable index. That home is gone (#629), and a scan of it would have
+        // contributed nothing — so an archetype reaching here would silently drop out of the result rather than fail, which is precisely the #663 shape the
+        // per-archetype migration existed to remove. Instrumenting the old fallthrough and running the full suite showed it was never entered, so this is a
+        // guard against a future classification bug, not a live branch. Loud beats silently-incomplete either way.
         if (hasNonClusterArchetypes)
         {
-            var pkResult = new HashMap<long>();
-            _whereFieldReader.ExecuteFullScan(plan, plan.OrderedEvaluators, ct, _tx, pkResult);
-
-            foreach (var pk in pkResult)
-            {
-                var entityId = EntityId.FromRaw(pk);
-                if (MaskTestByRouting(entityId.ArchetypeId))
-                {
-                    sink.Add(entityId);
-                }
-            }
+            ThrowHelper.ThrowInvalidOp(
+                $"Query on '{ct?.Definition?.Name}' matched an archetype with no per-archetype index for the where-component. There is no longer a shared "
+                + "index home to fall back to, and answering from the cluster scan alone would silently omit that archetype's entities.");
         }
     }
 
@@ -1370,7 +1315,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     private void ScanPerArchetypeBTree<TSink>(FieldEvaluator[] evaluators, ArchetypeClusterState clusterState, ArchetypeMetadata meta, ref TSink result)
         where TSink : struct, IEntityIdSink
     {
-        int ixSlotIdx = FindClusterIndexSlot(clusterState, meta, out bool transientHome);
+        var ixSlotIdx = FindClusterIndexSlot(clusterState, meta, out var transientHome);
         if (ixSlotIdx < 0)
         {
             return;
@@ -1436,23 +1381,23 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     {
         ref var matchSlot = ref ixSlots[ixSlotIdx];
         var layout = clusterState.Layout;
-        int compSlot = matchSlot.Slot;
-        int compSize = layout.ComponentSize(compSlot);
-        int compOffset = layout.ComponentOffset(compSlot);
+        var compSlot = matchSlot.Slot;
+        var compSize = layout.ComponentSize(compSlot);
+        var compOffset = layout.ComponentOffset(compSlot);
 
         // Pre-compute zone map query bounds for each evaluator (zone map pruning).
         // Bounds stored on stack; zone map references accessed via field iteration (no ref-type array allocation).
-        int evalCount = evaluators.Length;
+        var evalCount = evaluators.Length;
         var zoneMapMins = evalCount <= 8 ? stackalloc long[evalCount] : new long[evalCount];
         var zoneMapMaxs = evalCount <= 8 ? stackalloc long[evalCount] : new long[evalCount];
         // Track which evaluators have zone map bounds (bit per evaluator, fits in ulong for ≤64 evaluators)
         ulong zoneMapEvalMask = 0;
-        bool hasZoneMaps = false;
+        var hasZoneMaps = false;
 
-        for (int e = 0; e < evalCount && e < 64; e++)
+        for (var e = 0; e < evalCount && e < 64; e++)
         {
             ref var eval = ref evaluators[e];
-            for (int fi = 0; fi < matchSlot.Fields.Length; fi++)
+            for (var fi = 0; fi < matchSlot.Fields.Length; fi++)
             {
                 ref var field = ref matchSlot.Fields[fi];
                 if (field.FieldOffset == eval.FieldOffset && field.FieldSize == eval.FieldSize && field.ZoneMap != null)
@@ -1471,29 +1416,29 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         }
 
         // Pre-determine SIMD eligibility for each evaluator (once, before cluster loop)
-        bool anySimd = false;
-        Span<bool> simdEligible = evalCount <= 8 ? stackalloc bool[8] : new bool[evalCount];
+        var anySimd = false;
+        var simdEligible = evalCount <= 8 ? stackalloc bool[8] : new bool[evalCount];
         if (Avx2.IsSupported)
         {
-            for (int e = 0; e < evalCount; e++)
+            for (var e = 0; e < evalCount; e++)
             {
                 simdEligible[e] = SimdPredicateEvaluator.IsSimdEligible(evaluators[e].KeyType);
                 anySimd |= simdEligible[e];
             }
         }
 
-        int clusterSize = layout.ClusterSize;
+        var clusterSize = layout.ClusterSize;
 
-        for (int c = 0; c < clusterState.ActiveClusterCount; c++)
+        for (var c = 0; c < clusterState.ActiveClusterCount; c++)
         {
-            int clusterChunkId = clusterState.ActiveClusterIds[c];
+            var clusterChunkId = clusterState.ActiveClusterIds[c];
 
             // Zone map pruning: skip cluster if any predicate's range doesn't overlap the cluster's [min, max].
             // Iterates fields to find zone maps, then checks matching evaluators — avoids ref-type array allocation.
             if (hasZoneMaps)
             {
-                bool skip = false;
-                for (int fi = 0; fi < matchSlot.Fields.Length && !skip; fi++)
+                var skip = false;
+                for (var fi = 0; fi < matchSlot.Fields.Length && !skip; fi++)
                 {
                     ref var field = ref matchSlot.Fields[fi];
                     if (field.ZoneMap == null)
@@ -1501,7 +1446,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                         continue;
                     }
 
-                    for (int e = 0; e < evalCount && !skip; e++)
+                    for (var e = 0; e < evalCount && !skip; e++)
                     {
                         if ((zoneMapEvalMask & (1UL << e)) == 0)
                         {
@@ -1524,8 +1469,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 }
             }
 
-            byte* clusterBase = primaryAccessor.GetChunkAddress(clusterChunkId);
-            ulong occupancy = *(ulong*)clusterBase;
+            var clusterBase = primaryAccessor.GetChunkAddress(clusterChunkId);
+            var occupancy = *(ulong*)clusterBase;
             if (occupancy == 0)
             {
                 continue;
@@ -1533,15 +1478,15 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
             // The component column can live in a DIFFERENT segment from the occupancy word — a Transient slot on a mixed archetype. Chunk ids are held in
             // lockstep between the two segments, so the same clusterChunkId addresses both.
-            byte* compBase = dataAccessor.GetChunkAddress(clusterChunkId) + compOffset;
+            var compBase = dataAccessor.GetChunkAddress(clusterChunkId) + compOffset;
 
             if (anySimd)
             {
                 // SIMD path: batch-evaluate SIMD-eligible evaluators, then scalar-verify the rest
-                ulong matchBits = occupancy;
+                var matchBits = occupancy;
 
                 // Phase 1: SIMD evaluators narrow the match set
-                for (int e = 0; e < evalCount; e++)
+                for (var e = 0; e < evalCount; e++)
                 {
                     if (!simdEligible[e])
                     {
@@ -1558,12 +1503,12 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 // Phase 2: scalar-verify non-SIMD evaluators on remaining matches
                 while (matchBits != 0)
                 {
-                    int slotIndex = System.Numerics.BitOperations.TrailingZeroCount(matchBits);
+                    var slotIndex = System.Numerics.BitOperations.TrailingZeroCount(matchBits);
                     matchBits &= matchBits - 1;
 
-                    byte* entityComp = compBase + slotIndex * compSize;
-                    bool pass = true;
-                    for (int e = 0; e < evalCount; e++)
+                    var entityComp = compBase + slotIndex * compSize;
+                    var pass = true;
+                    for (var e = 0; e < evalCount; e++)
                     {
                         if (simdEligible[e])
                         {
@@ -1587,12 +1532,12 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 // Scalar path (unchanged): evaluate each occupied entity against all field predicates
                 while (occupancy != 0)
                 {
-                    int slotIndex = System.Numerics.BitOperations.TrailingZeroCount(occupancy);
+                    var slotIndex = System.Numerics.BitOperations.TrailingZeroCount(occupancy);
                     occupancy &= occupancy - 1;
 
-                    byte* entityComp = compBase + slotIndex * compSize;
-                    bool allMatch = true;
-                    for (int e = 0; e < evaluators.Length; e++)
+                    var entityComp = compBase + slotIndex * compSize;
+                    var allMatch = true;
+                    for (var e = 0; e < evaluators.Length; e++)
                     {
                         ref var eval = ref evaluators[e];
                         if (!FieldEvaluator.Evaluate(ref eval, entityComp + eval.FieldOffset))
@@ -1626,14 +1571,14 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         // EstimatedCounts[0] = estimated match count for the most selective predicate.
         // This estimate comes from the shared per-ComponentTable B+Tree, which may have 0 entries
         // for cluster archetypes (all entities in per-archetype B+Trees). Treat 0 as "unknown" → Path B.
-        long estimated = plan.EstimatedCounts[0];
+        var estimated = plan.EstimatedCounts[0];
         if (estimated <= 0)
         {
             return 0.5f;
         }
 
         // Total entity estimate: ActiveClusterCount * ClusterSize (upper bound)
-        long total = (long)clusterState.ActiveClusterCount * clusterState.Layout.ClusterSize;
+        var total = (long)clusterState.ActiveClusterCount * clusterState.Layout.ClusterSize;
         if (total <= 0)
         {
             return 0.5f;
@@ -1660,7 +1605,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var ixSlots = clusterState.IndexSlots;
         if (ixSlots != null)
         {
-            for (int s = 0; s < ixSlots.Length; s++)
+            for (var s = 0; s < ixSlots.Length; s++)
             {
                 if (engineState.SlotToComponentTable[ixSlots[s].Slot] == _whereComponentTable)
                 {
@@ -1673,7 +1618,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var trSlots = clusterState.TransientIndexSlots;
         if (trSlots != null)
         {
-            for (int s = 0; s < trSlots.Length; s++)
+            for (var s = 0; s < trSlots.Length; s++)
             {
                 if (engineState.SlotToComponentTable[trSlots[s].Slot] == _whereComponentTable)
                 {
@@ -1728,22 +1673,22 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// </summary>
     private static void IntersectEvaluatorBounds(FieldEvaluator[] evaluators, int fieldIdx, KeyType keyType, ref long scanMin, ref long scanMax)
     {
-        for (int e = 0; e < evaluators.Length; e++)
+        for (var e = 0; e < evaluators.Length; e++)
         {
             if (evaluators[e].FieldIndex != fieldIdx || evaluators[e].CompareOp == CompareOp.NotEqual)
             {
                 continue;
             }
 
-            long thr = evaluators[e].Threshold;
+            var thr = evaluators[e].Threshold;
 
             if (keyType == KeyType.Float)
             {
                 // Float: convert bit patterns to float, compare, convert back.
                 // Math.Max/Min on signed long bit patterns gives wrong results for negative floats.
-                float fMin = BitConverter.Int32BitsToSingle((int)scanMin);
-                float fMax = BitConverter.Int32BitsToSingle((int)scanMax);
-                float fThr = BitConverter.Int32BitsToSingle((int)thr);
+                var fMin = BitConverter.Int32BitsToSingle((int)scanMin);
+                var fMax = BitConverter.Int32BitsToSingle((int)scanMax);
+                var fThr = BitConverter.Int32BitsToSingle((int)thr);
                 switch (evaluators[e].CompareOp)
                 {
                     case CompareOp.Equal:
@@ -1765,9 +1710,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
             else if (keyType == KeyType.Double)
             {
-                double dMin = BitConverter.Int64BitsToDouble(scanMin);
-                double dMax = BitConverter.Int64BitsToDouble(scanMax);
-                double dThr = BitConverter.Int64BitsToDouble(thr);
+                var dMin = BitConverter.Int64BitsToDouble(scanMin);
+                var dMax = BitConverter.Int64BitsToDouble(scanMax);
+                var dThr = BitConverter.Int64BitsToDouble(thr);
                 switch (evaluators[e].CompareOp)
                 {
                     case CompareOp.Equal:
@@ -1792,9 +1737,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 // Unsigned types: compare as ulong to avoid sign issues.
                 // Threshold values are stored as signed long but represent unsigned values —
                 // e.g. ulong.MaxValue is stored as -1L. Math.Min/Max on signed longs gives wrong results.
-                ulong uMin = (ulong)scanMin;
-                ulong uMax = (ulong)scanMax;
-                ulong uThr = (ulong)thr;
+                var uMin = (ulong)scanMin;
+                var uMax = (ulong)scanMax;
+                var uThr = (ulong)thr;
                 switch (evaluators[e].CompareOp)
                 {
                     case CompareOp.Equal:
@@ -1852,7 +1797,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     {
         // Persistent home only: the range scan below is typed to BTreeBase<PersistentStore>. ScanAllArchetypes never routes a Transient home here, so this is
         // a guard against a future caller rather than a live branch (#655).
-        int ixSlotIdx = FindClusterIndexSlot(clusterState, meta, out bool transientHome);
+        var ixSlotIdx = FindClusterIndexSlot(clusterState, meta, out var transientHome);
         if (ixSlotIdx < 0 || transientHome)
         {
             return;
@@ -1862,9 +1807,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
         ref var matchSlot = ref ixSlots[ixSlotIdx];
         var layout = clusterState.Layout;
-        int compSlot = matchSlot.Slot;
-        int compSize = layout.ComponentSize(compSlot);
-        int compOffset = layout.ComponentOffset(compSlot);
+        var compSlot = matchSlot.Slot;
+        var compSize = layout.ComponentSize(compSlot);
+        var compOffset = layout.ComponentOffset(compSlot);
 
         // Find the primary field's B+Tree matching the plan's PrimaryFieldIndex
         if (plan.PrimaryFieldIndex < 0 || plan.PrimaryFieldIndex >= matchSlot.Fields.Length)
@@ -1879,12 +1824,12 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
         // Step 1: Range scan B+Tree → collect ClusterLocations grouped by clusterChunkId.
         // Use a flat array indexed by clusterChunkId (bounded by segment ChunkCapacity, typically small).
-        int chunkCapacity = clusterState.ClusterSegment.ChunkCapacity;
+        var chunkCapacity = clusterState.ClusterSegment.ChunkCapacity;
         var matchBitsArr = System.Buffers.ArrayPool<ulong>.Shared.Rent(chunkCapacity);
         try
         {
             Array.Clear(matchBitsArr, 0, chunkCapacity);
-            bool hasAny = false;
+            var hasAny = false;
 
             CollectClusterLocationsFromBTree(primaryIndex, plan.PrimaryKeyType, plan.PrimaryScanMin, plan.PrimaryScanMax, primaryField.AllowMultiple, 
                 matchBitsArr, ref hasAny);
@@ -1895,50 +1840,50 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
 
             // Pre-determine SIMD eligibility for each evaluator (once, before cluster loop)
-            int evalCount = evaluators.Length;
-            bool anySimd = false;
-            Span<bool> simdEligible = evalCount <= 8 ? stackalloc bool[8] : new bool[evalCount];
+            var evalCount = evaluators.Length;
+            var anySimd = false;
+            var simdEligible = evalCount <= 8 ? stackalloc bool[8] : new bool[evalCount];
             if (Avx2.IsSupported)
             {
-                for (int e = 0; e < evalCount; e++)
+                for (var e = 0; e < evalCount; e++)
                 {
                     simdEligible[e] = SimdPredicateEvaluator.IsSimdEligible(evaluators[e].KeyType);
                     anySimd |= simdEligible[e];
                 }
             }
 
-            int clusterSize = layout.ClusterSize;
+            var clusterSize = layout.ClusterSize;
 
             // Step 2: For each active cluster with matches, verify ALL evaluators on matched entities
             var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
             try
             {
-                for (int c = 0; c < clusterState.ActiveClusterCount; c++)
+                for (var c = 0; c < clusterState.ActiveClusterCount; c++)
                 {
-                    int clusterChunkId = clusterState.ActiveClusterIds[c];
-                    ulong candidateBits = matchBitsArr[clusterChunkId];
+                    var clusterChunkId = clusterState.ActiveClusterIds[c];
+                    var candidateBits = matchBitsArr[clusterChunkId];
                     if (candidateBits == 0)
                     {
                         continue;
                     }
 
-                    byte* clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId);
-                    ulong occupancy = *(ulong*)clusterBase;
-                    ulong remaining = candidateBits & occupancy; // intersection with live entities
+                    var clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId);
+                    var occupancy = *(ulong*)clusterBase;
+                    var remaining = candidateBits & occupancy; // intersection with live entities
 
                     if (remaining == 0)
                     {
                         continue;
                     }
 
-                    byte* compBase = clusterBase + compOffset;
+                    var compBase = clusterBase + compOffset;
 
                     if (anySimd)
                     {
                         // SIMD path: batch-evaluate SIMD-eligible evaluators, then scalar-verify the rest
-                        ulong matchBits = remaining;
+                        var matchBits = remaining;
 
-                        for (int e = 0; e < evalCount; e++)
+                        for (var e = 0; e < evalCount; e++)
                         {
                             if (!simdEligible[e])
                             {
@@ -1954,12 +1899,12 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
                         while (matchBits != 0)
                         {
-                            int slotIndex = System.Numerics.BitOperations.TrailingZeroCount(matchBits);
+                            var slotIndex = System.Numerics.BitOperations.TrailingZeroCount(matchBits);
                             matchBits &= matchBits - 1;
 
-                            byte* entityComp = compBase + slotIndex * compSize;
-                            bool pass = true;
-                            for (int e = 0; e < evalCount; e++)
+                            var entityComp = compBase + slotIndex * compSize;
+                            var pass = true;
+                            for (var e = 0; e < evalCount; e++)
                             {
                                 if (simdEligible[e])
                                 {
@@ -1983,12 +1928,12 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                         // Scalar path (unchanged)
                         while (remaining != 0)
                         {
-                            int slotIndex = System.Numerics.BitOperations.TrailingZeroCount(remaining);
+                            var slotIndex = System.Numerics.BitOperations.TrailingZeroCount(remaining);
                             remaining &= remaining - 1;
 
-                            byte* entityComp = compBase + slotIndex * compSize;
-                            bool allMatch = true;
-                            for (int e = 0; e < evaluators.Length; e++)
+                            var entityComp = compBase + slotIndex * compSize;
+                            var allMatch = true;
+                            for (var e = 0; e < evaluators.Length; e++)
                             {
                                 ref var eval = ref evaluators[e];
                                 if (!FieldEvaluator.Evaluate(ref eval, entityComp + eval.FieldOffset))
@@ -2081,11 +2026,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 do
                 {
                     var values = enumerator.CurrentValues;
-                    for (int i = 0; i < values.Length; i++)
+                    for (var i = 0; i < values.Length; i++)
                     {
-                        int clusterLocation = values[i];
-                        int chunkId = clusterLocation >> 6;
-                        int slotIdx = clusterLocation & 0x3F;
+                        var clusterLocation = values[i];
+                        var chunkId = clusterLocation >> 6;
+                        var slotIdx = clusterLocation & 0x3F;
                         matchBitsArr[chunkId] |= 1UL << slotIdx;
                         hasAny = true;
                     }
@@ -2098,9 +2043,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             while (enumerator.MoveNext())
             {
                 var item = enumerator.Current;
-                int clusterLocation = item.Value;
-                int chunkId = clusterLocation >> 6;
-                int slotIdx = clusterLocation & 0x3F;
+                var clusterLocation = item.Value;
+                var chunkId = clusterLocation >> 6;
+                var slotIdx = clusterLocation & 0x3F;
                 matchBitsArr[chunkId] |= 1UL << slotIdx;
                 hasAny = true;
             }
@@ -2133,7 +2078,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         // adding Ray/Frustum on cluster archetypes is tracked as a follow-up sub-issue of #228.
         if (state.ClusterArchetypes != null)
         {
-            SpatialGrid grid = _tx.DBE.SpatialGrid;
+            var grid = _tx.DBE.SpatialGrid;
             foreach (var cs in state.ClusterArchetypes)
             {
                 if (!cs.SpatialSlot.HasSpatialIndex)
@@ -2144,8 +2089,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 {
                     // New path: per-cell cluster index AABB query. Extract the 2D/3D query bounds from _spatialParams (same layout as in QuerySingleTree's
                     // AABB case: 6 doubles stored as [minX, minY, minZ, maxX, maxY, maxZ], with the 3D slots ignored for 2D archetypes).
-                    float qMinX = (float)_spatialParams[0];
-                    float qMinY = (float)_spatialParams[1];
+                    var qMinX = (float)_spatialParams[0];
+                    var qMinY = (float)_spatialParams[1];
                     float qMinZ;
                     float qMaxX;
                     float qMaxY;
@@ -2180,10 +2125,10 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     // Per-cell cluster index Radius query (issue #230 Phase 3). Parameter layout matches QuerySingleTree's Radius case:
                     // _spatialParams[0..halfCoord] is the center, _spatialParams[3] is the radius (regardless of dimension — a quirk of the existing
                     // parameter packing for the per-entity tree).
-                    float cX = (float)_spatialParams[0];
-                    float cY = (float)_spatialParams[1];
-                    float cZ = state.Descriptor.CoordCount == 6 ? (float)_spatialParams[2] : 0f;
-                    float radius = (float)_spatialParams[3];
+                    var cX = (float)_spatialParams[0];
+                    var cY = (float)_spatialParams[1];
+                    var cZ = state.Descriptor.CoordCount == 6 ? (float)_spatialParams[2] : 0f;
+                    var radius = (float)_spatialParams[3];
 
                     using var guard = EpochGuard.Enter(_tx.DBE.EpochManager);
                     foreach (var hit in cs.QueryRadius(grid, cX, cY, cZ, radius))
@@ -2233,7 +2178,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             case SpatialQueryType.AABB:
             {
                 Span<double> coords = stackalloc double[6];
-                for (int i = 0; i < 6; i++) coords[i] = _spatialParams[i];
+                for (var i = 0; i < 6; i++) coords[i] = _spatialParams[i];
                 var coordSlice = coords[..state.Descriptor.CoordCount];
 
                 using var guard = EpochGuard.Enter(tx.DBE.EpochManager);
@@ -2249,9 +2194,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
             case SpatialQueryType.Radius:
             {
-                int halfCoord = state.Descriptor.CoordCount / 2;
+                var halfCoord = state.Descriptor.CoordCount / 2;
                 Span<double> center = stackalloc double[halfCoord];
-                for (int i = 0; i < halfCoord; i++) center[i] = _spatialParams[i];
+                for (var i = 0; i < halfCoord; i++) center[i] = _spatialParams[i];
 
                 using var guard = EpochGuard.Enter(tx.DBE.EpochManager);
                 foreach (var hit in tree.QueryRadius(center, _spatialParams[3]))
@@ -2266,10 +2211,10 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
             case SpatialQueryType.Ray:
             {
-                int halfCoord = state.Descriptor.CoordCount / 2;
+                var halfCoord = state.Descriptor.CoordCount / 2;
                 Span<double> origin = stackalloc double[halfCoord];
                 Span<double> dir = stackalloc double[halfCoord];
-                for (int i = 0; i < halfCoord; i++) { origin[i] = _spatialParams[i]; dir[i] = _spatialParams[3 + i]; }
+                for (var i = 0; i < halfCoord; i++) { origin[i] = _spatialParams[i]; dir[i] = _spatialParams[3 + i]; }
 
                 using var guard = EpochGuard.Enter(tx.DBE.EpochManager);
                 foreach (var hit in tree.QueryRay(origin, dir, _spatialParams[6]))
@@ -2302,7 +2247,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         }
 
         var destroys = tx.PendingDestroys;
-        for (int i = 0; i < pending.Count; i++)
+        for (var i = 0; i < pending.Count; i++)
         {
             var entry = pending[i];
             if (destroys != null && destroys.Contains(entry.Id))
@@ -2353,38 +2298,14 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 return spatialCount;
             }
 
-            // Targeted count via PipelineExecutor — avoids allocating result collections
+            // Targeted count through the per-archetype scan. The PipelineExecutor alternative that used to sit here read the shared ComponentTable index and is
+            // gone with it (#629); ScanAllArchetypes raises if an archetype has no per-archetype index, so this no longer needs a fallback of its own.
             if (HasFieldPredicates)
             {
-                // If any matching archetypes use cluster storage, fall through to Execute().Count (cluster scan path handles counting correctly)
-                bool anyCluster = false;
-                foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
-                {
-                    if (MaskTest(meta.ArchetypeId) && meta.HasClusterIndexes)
-                    {
-                        anyCluster = true;
-                        break;
-                    }
-                }
-
-                if (anyCluster)
-                {
-                    var targetedCount = ExecuteTargeted().Count;
-                    scope.ScanMode = EcsQueryScanMode.TargetedCluster;
-                    scope.ResultCount = targetedCount;
-                    return targetedCount;
-                }
-
-                var ct = _whereComponentTable;
-                var evaluators = QueryResolverHelper.ResolveEvaluators(SingleBranchOrThrow("Count()"), ct, 0);
-                var plan = PlanBuilder.Instance.BuildPlanAttributed(evaluators, ct, PlannerStats(ct), AdvancedSelectivityEstimator.Instance, null,
-                    queryInstanceKind: 1, queryInstanceLocalId: (uint)EcsQueryId,
-                    definitionSourceFile: SourceFile, definitionSourceLine: SourceLine, definitionSourceMethod: SourceMethod,
-                    executionSourceFile: callerFile, executionSourceLine: callerLine, executionSourceMethod: callerMethod);
-                var scanCount = _whereFieldReader.CountScan(plan, plan.OrderedEvaluators, ct, _tx);
-                scope.ScanMode = EcsQueryScanMode.Targeted;
-                scope.ResultCount = scanCount;
-                return scanCount;
+                var targetedCount = ExecuteTargeted().Count;
+                scope.ScanMode = EcsQueryScanMode.TargetedCluster;
+                scope.ResultCount = targetedCount;
+                return targetedCount;
             }
 
             // If WHERE filter, use Execute (which applies post-filter) then count
@@ -2398,7 +2319,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
             // Aggregation broad scan: count matches in place via the map's optimistic, copy-free CountEntries (no per-entity snapshot copy, no delegate) —
             // recovers the pre-#374 scan speed while keeping the OLC concurrency guarantee. Pending spawns (read-your-own-writes) are folded in by CountMatching.
-            int count = CountMatching();
+            var count = CountMatching();
             scope.ScanMode = EcsQueryScanMode.Broad;
             scope.ResultCount = count;
             return count;
@@ -2443,16 +2364,12 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
             if (HasFieldPredicates)
             {
-                var ct = _whereComponentTable;
-                var evaluators = QueryResolverHelper.ResolveEvaluators(SingleBranchOrThrow("Any()"), ct, 0);
-                var plan = PlanBuilder.Instance.BuildPlanAttributed(evaluators, ct, PlannerStats(ct), AdvancedSelectivityEstimator.Instance, null,
-                    queryInstanceKind: 1, queryInstanceLocalId: (uint)EcsQueryId,
-                    definitionSourceFile: SourceFile, definitionSourceLine: SourceLine, definitionSourceMethod: SourceMethod,
-                    executionSourceFile: callerFile, executionSourceLine: callerLine, executionSourceMethod: callerMethod);
-                var hasMatch = _whereFieldReader.CountScan(plan, plan.OrderedEvaluators, ct, _tx) > 0;
-                scope.ScanMode = EcsQueryScanMode.Targeted;
-                scope.Found = hasMatch;
-                return hasMatch;
+                // Was the one terminal missing Count()'s cluster guard, so it answered FALSE for every cluster-backed archetype (#629). Now that the shared
+                // ComponentTable home is gone there is nothing left to guard against — the per-archetype scan is the only path.
+                var targetedFound = ExecuteTargeted().Count > 0;
+                scope.ScanMode = EcsQueryScanMode.TargetedCluster;
+                scope.Found = targetedFound;
+                return targetedFound;
             }
 
             if (_whereFilter != null)
@@ -2464,7 +2381,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
 
             // Existence broad scan: short-circuit via the map's optimistic, copy-free AnyEntry (mirrors CountMatching; folds in pending spawns).
-            bool found = AnyMatching();
+            var found = AnyMatching();
             scope.ScanMode = EcsQueryScanMode.Broad;
             scope.Found = found;
             return found;
@@ -2534,12 +2451,12 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// </summary>
     private int CountMatching()
     {
-        int total = _useLargeMask ? CountMatchingCore(_maskLarge) : CountMatchingCore(_mask256);
+        var total = _useLargeMask ? CountMatchingCore(_maskLarge) : CountMatchingCore(_mask256);
 
         var pending = _tx.PendingSpawns;
         if (pending != null && pending.Count > 0)
         {
-            int pendingCount = 0;
+            var pendingCount = 0;
             if (_useLargeMask)
             {
                 CollectPendingSpawns(_maskLarge, (_, _) => pendingCount++, false);
@@ -2568,7 +2485,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var pending = _tx.PendingSpawns;
         if (pending != null && pending.Count > 0)
         {
-            bool found = false;
+            var found = false;
             if (_useLargeMask)
             {
                 CollectPendingSpawns(_maskLarge, (_, _) => found = true, true);
@@ -2612,9 +2529,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
         var destroys = _tx.PendingDestroys;
         var enableDisable = _tx.PendingEnableDisable;
-        bool hasT2 = HasT2;
+        var hasT2 = HasT2;
 
-        for (int i = 0; i < pending.Count; i++)
+        for (var i = 0; i < pending.Count; i++)
         {
             var entry = pending[i];
 
@@ -2631,8 +2548,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
 
             // Resolve EnabledBits (may have been overridden by Enable/Disable in same tx)
-            ushort enabledBits = entry.EnabledBits;
-            if (enableDisable != null && enableDisable.TryGetValue(entry.Id, out ushort overrideBits))
+            var enabledBits = entry.EnabledBits;
+            if (enableDisable != null && enableDisable.TryGetValue(entry.Id, out var overrideBits))
             {
                 enabledBits = overrideBits;
             }
@@ -2641,7 +2558,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             if (hasT2)
             {
                 var meta = _tx.DBE.GetMetaByRouting(entry.Id.ArchetypeId);
-                if (meta == null || !ResolveT2Masks(meta, out ushort reqEnabled, out ushort reqDisabled))
+                if (meta == null || !ResolveT2Masks(meta, out var reqEnabled, out var reqDisabled))
                 {
                     continue;
                 }
@@ -2675,9 +2592,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
         var destroys = _tx.PendingDestroys;
         var enableDisable = _tx.PendingEnableDisable;
-        bool hasT2 = HasT2;
+        var hasT2 = HasT2;
 
-        for (int i = 0; i < pending.Count; i++)
+        for (var i = 0; i < pending.Count; i++)
         {
             var entry = pending[i];
 
@@ -2691,8 +2608,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 continue;
             }
 
-            ushort enabledBits = entry.EnabledBits;
-            if (enableDisable != null && enableDisable.TryGetValue(entry.Id, out ushort overrideBits))
+            var enabledBits = entry.EnabledBits;
+            if (enableDisable != null && enableDisable.TryGetValue(entry.Id, out var overrideBits))
             {
                 enabledBits = overrideBits;
             }
@@ -2705,7 +2622,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
             if (hasT2)
             {
-                if (!ResolveT2Masks(meta, out ushort reqEnabled, out ushort reqDisabled))
+                if (!ResolveT2Masks(meta, out var reqEnabled, out var reqDisabled))
                 {
                     continue;
                 }
@@ -2721,7 +2638,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
             // Copy locations from SpawnEntry into EntityLocations
             var locs = new EntityLocations();
-            for (int s = 0; s < meta.ComponentCount; s++)
+            for (var s = 0; s < meta.ComponentCount; s++)
             {
                 locs.Values[s] = entry.Loc[s];
             }
@@ -2736,11 +2653,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// </summary>
     private void CollectMatchingCore<TMask>(TMask mask, Action<EntityId, ushort> onMatch, bool stopOnFirst) where TMask : struct, IArchetypeMask<TMask>
     {
-        long txTsn = _tx.TSN;
+        var txTsn = _tx.TSN;
         var dbe = _tx.DBE;
-        bool hasT2 = HasT2;
+        var hasT2 = HasT2;
 
-        for (int archBit = 0; archBit <= mask.MaxId; archBit++)
+        for (var archBit = 0; archBit <= mask.MaxId; archBit++)
         {
             if (!mask.Test((ushort)archBit))
             {
@@ -2796,12 +2713,12 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// </summary>
     private int CountMatchingCore<TMask>(TMask mask) where TMask : struct, IArchetypeMask<TMask>
     {
-        long txTsn = _tx.TSN;
+        var txTsn = _tx.TSN;
         var dbe = _tx.DBE;
-        bool hasT2 = HasT2;
-        int total = 0;
+        var hasT2 = HasT2;
+        var total = 0;
 
-        for (int archBit = 0; archBit <= mask.MaxId; archBit++)
+        for (var archBit = 0; archBit <= mask.MaxId; archBit++)
         {
             if (!mask.Test((ushort)archBit))
             {
@@ -2851,11 +2768,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// </summary>
     private bool AnyMatchingCore<TMask>(TMask mask) where TMask : struct, IArchetypeMask<TMask>
     {
-        long txTsn = _tx.TSN;
+        var txTsn = _tx.TSN;
         var dbe = _tx.DBE;
-        bool hasT2 = HasT2;
+        var hasT2 = HasT2;
 
-        for (int archBit = 0; archBit <= mask.MaxId; archBit++)
+        for (var archBit = 0; archBit <= mask.MaxId; archBit++)
         {
             if (!mask.Test((ushort)archBit))
             {
@@ -2892,7 +2809,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 PendingEnableDisable = _tx.PendingEnableDisable,
                 PendingDestroys = _tx.PendingDestroys,
             };
-            bool found = engineState.EntityMap.AnyEntry(ref accessor, ref pred);
+            var found = engineState.EntityMap.AnyEntry(ref accessor, ref pred);
             accessor.Dispose();
 
             if (found)
@@ -2907,11 +2824,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// <summary>JIT-specialized variant for full entity data collection (foreach enumeration).</summary>
     private void CollectMatchingFullCore<TMask>(TMask mask, List<(EntityId, ArchetypeMetadata, ushort, EntityLocations)> results) where TMask : struct, IArchetypeMask<TMask>
     {
-        long txTsn = _tx.TSN;
+        var txTsn = _tx.TSN;
         var dbe = _tx.DBE;
-        bool hasT2 = HasT2;
+        var hasT2 = HasT2;
 
-        for (int archBit = 0; archBit <= mask.MaxId; archBit++)
+        for (var archBit = 0; archBit <= mask.MaxId; archBit++)
         {
             if (!mask.Test((ushort)archBit))
             {
@@ -2996,8 +2913,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
 
             // Resolve EnabledBits: MVCC overrides first, then pending enable/disable overlay
-            ushort bits = EnabledBitsOverrides.ResolveEnabledBits(key, header.EnabledBits, TxTsn);
-            if (PendingEnableDisable != null && PendingEnableDisable.TryGetValue(entityId, out ushort pendingBits))
+            var bits = EnabledBitsOverrides.ResolveEnabledBits(key, header.EnabledBits, TxTsn);
+            if (PendingEnableDisable != null && PendingEnableDisable.TryGetValue(entityId, out var pendingBits))
             {
                 bits = pendingBits;
             }
@@ -3067,8 +2984,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
 
             // Resolve EnabledBits: MVCC overrides first, then pending enable/disable overlay
-            ushort bits = EnabledBitsOverrides.ResolveEnabledBits(key, header.EnabledBits, TxTsn);
-            if (PendingEnableDisable != null && PendingEnableDisable.TryGetValue(entityId, out ushort pendingBits))
+            var bits = EnabledBitsOverrides.ResolveEnabledBits(key, header.EnabledBits, TxTsn);
+            if (PendingEnableDisable != null && PendingEnableDisable.TryGetValue(entityId, out var pendingBits))
             {
                 bits = pendingBits;
             }
@@ -3125,8 +3042,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
 
             // Resolve EnabledBits: MVCC overrides first, then pending enable/disable overlay
-            ushort bits = EnabledBitsOverrides.ResolveEnabledBits(key, header.EnabledBits, TxTsn);
-            if (PendingEnableDisable != null && PendingEnableDisable.TryGetValue(entityId, out ushort pendingBits))
+            var bits = EnabledBitsOverrides.ResolveEnabledBits(key, header.EnabledBits, TxTsn);
+            if (PendingEnableDisable != null && PendingEnableDisable.TryGetValue(entityId, out var pendingBits))
             {
                 bits = pendingBits;
             }
@@ -3244,7 +3161,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         private static bool ArchetypeHasVersionedSlot(ArchetypeEngineState engineState, int componentCount)
         {
             var tables = engineState.SlotToComponentTable;
-            for (int slot = 0; slot < componentCount; slot++)
+            for (var slot = 0; slot < componentCount; slot++)
             {
                 if (tables[slot].StorageMode == StorageMode.Versioned)
                 {

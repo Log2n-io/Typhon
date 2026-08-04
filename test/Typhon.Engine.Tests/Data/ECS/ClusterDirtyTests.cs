@@ -207,18 +207,24 @@ class ClusterDirtyTests : TestBase<ClusterDirtyTests>
     // Coexistence Tests
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// AC: writing one archetype's entities does not disturb another archetype's dirty state.
+    /// </summary>
+    /// <remarks>
+    /// Renamed from <c>DirtyTracking_ClusterAndLegacy_Independent</c>: there is no "legacy" side left to contrast with, since the eligibility flip (#629) put
+    /// every archetype on cluster storage. What the test still proves — and what the change-filtered dispatch depends on — is that dirty tracking is per
+    /// archetype, so a write to a pure-Versioned archetype does not mark an unrelated one dirty.
+    /// </remarks>
     [Test]
-    public void DirtyTracking_ClusterAndLegacy_Independent()
+    public void DirtyTracking_AcrossArchetypes_Independent()
     {
         using var dbe = SetupEngine();
 
         var clusterState = dbe._archetypeStates[Archetype<ClAnt>.Metadata.ArchetypeId].ClusterState;
-        var healthTable = dbe.GetComponentTable<ClVHealth>();
 
         Assert.That(clusterState, Is.Not.Null, "ClAnt should use cluster storage");
-        // ClUnit has Versioned component → NOT cluster-eligible
-        Assert.That(dbe._archetypeStates[Archetype<ClUnit>.Metadata.ArchetypeId]?.ClusterState, Is.Null,
-            "ClUnit should NOT use cluster storage (Versioned component)");
+        Assert.That(dbe._archetypeStates[Archetype<ClUnit>.Metadata.ArchetypeId]?.ClusterState, Is.Not.Null,
+            "ClUnit is cluster-backed too since #629 — a Versioned-only composition is no longer a disqualifier");
 
         EntityId antId, unitId;
         using (var tx = dbe.CreateQuickTransaction())

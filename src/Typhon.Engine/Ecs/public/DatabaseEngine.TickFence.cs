@@ -211,20 +211,9 @@ public partial class DatabaseEngine
                 }
             }
 
-            // Deferred index maintenance: process shadowed old field values for non-Versioned indexed fields.
-            // Must run even without WAL (indexes are in-memory structures independent of WAL).
-            if (hasShadow)
-            {
-                var shadowScope = TyphonEvent.BeginWriteTickFenceShadow(table.WalTypeId, table.IndexedFieldInfos?.Length ?? 0);
-                try
-                {
-                    shadowScope.TotalShadowEntries = ProcessShadowEntries(table, changeSet);
-                }
-                finally
-                {
-                    shadowScope.Dispose();
-                }
-            }
+            // The deferred shadow pass that used to run here maintained the per-ComponentTable indexes for non-Versioned components. Those indexes are gone
+            // (#629) — a cluster-backed archetype maintains its own trees through the cluster shadow bitmap — and instrumenting this branch across the full
+            // suite showed it was never entered. `hasShadow` is still reported on the tick-fence span below.
 
             // Spatial index maintenance: iterate dirty entities, update R-Tree positions.
             // Uses dirtyBits snapshot (still in scope from DirtyBitmap.Snapshot above).

@@ -194,8 +194,7 @@ internal sealed class DiagnosticCommandExecutor
         {
             Collect($"{name}.Data", table.ComponentSegment);
             Collect($"{name}.RevTable", table.CompRevTableSegment);
-            Collect($"{name}.PK_Index", table.DefaultIndexSegment);
-            Collect($"{name}.Str64_Index", table.String64IndexSegment);
+            // The per-ComponentTable index segments are gone (#629). Index storage is reported per ARCHETYPE below, where the trees now live.
         }
 
         var totalFill = totalChunksCap > 0 ? (double)totalChunksUsed / totalChunksCap : 0.0;

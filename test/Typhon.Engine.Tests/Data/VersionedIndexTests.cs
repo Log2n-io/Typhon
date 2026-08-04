@@ -4,8 +4,7 @@ using NUnit.Framework;
 namespace Typhon.Engine.Tests;
 
 /// <summary>
-/// Secondary-index behaviour for a Versioned component on a NON-cluster (pure-Versioned) archetype — the population that still lives on the
-/// per-ComponentTable index home.
+/// Secondary-index behaviour for a Versioned component on a pure-Versioned archetype — cluster-backed like every other since #629.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -137,38 +136,36 @@ class VersionedIndexTests : TestBase<VersionedIndexTests>
     }
 
     /// <summary>
-    /// AC: the per-ComponentTable secondary index is what ANSWERS a field query on a pure-Versioned archetype — established by breaking the index and watching
-    /// the query lose exactly the broken entity, not by reading the planner and trusting it.
+    /// AC: on a cluster-backed archetype an unordered field query does NOT read the B+Tree — established by breaking the tree and watching the query answer
+    /// correctly anyway, rather than by reading the planner and trusting it.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// #670 left this open. Its fix changed what the backfill writes into this index, yet the query returned the right entities whether the backfill was
-    /// correct or corrupt — so nothing there proved the query consults the index at all. Content chunk ids recycle into the same small-integer range as
-    /// revision chunk ids, so a wrong leaf value ALIASES a valid chain root and resolves to a plausible entity instead of failing. Removal cannot alias: an
-    /// absent key is absent, whatever the id spaces do.
+    /// The assertion is inverted from what it was, and the inversion is the finding. Before #629 this archetype was flat and the shared index really did answer
+    /// the query, so removing a key lost exactly that entity. Now every archetype is cluster-backed and <c>ScanAllArchetypes</c> routes unordered field
+    /// predicates to Path B — a zone-map-pruned scan over the cluster SoA — which never touches a tree. The index is still maintained and still load-bearing,
+    /// but for ORDERED queries, FK reverse lookup and <c>EnumerateIndex</c>, not for this one.
     /// </para>
     /// <para>
-    /// The corruption is deliberately one-sided. Only the index entry goes; the entity, its revision chain and its component data are all untouched and still
-    /// hold <c>B == 20</c>. So anything that finds it afterwards — a component scan, a zone map, a fallback — is by construction not reading this index.
+    /// Worth keeping as a test rather than a comment, because it is the only direct evidence for it: the two paths return identical entities, so no ordinary
+    /// assertion can tell them apart. Breaking the tree is what makes the routing observable. The same technique will catch the reverse regression — a change
+    /// that quietly puts unordered queries back on the tree would start failing here.
     /// </para>
     /// <para>
-    /// Unique field (<c>CompD.B</c>) rather than <c>AllowMultiple</c>: a unique key's leaf value is a single entity, so the removal unlinks exactly one and the
-    /// entities sharing the fixture are an untouched control.
-    /// </para>
-    /// <para>
-    /// This is the coverage #666's remaining step leans on. When pure-Versioned archetypes move onto per-archetype trees, the migration's correctness argument
-    /// is that this read path keeps working — and until now no test would have failed if it silently stopped consulting an index altogether.
+    /// The corruption is deliberately one-sided. Only the index entry goes; the entity, its revision chain and its cluster slot are untouched and still hold
+    /// <c>B == 20</c>. And removal cannot alias: chunk ids recycle into overlapping small-integer ranges, so a wrong leaf value resolves to a plausible entity
+    /// instead of failing, whereas an absent key is absent whatever the id spaces do.
     /// </para>
     /// </remarks>
     [Test]
-    public void UniqueIndexEntryRemoved_PureVersionedFieldQuery_LosesExactlyThatEntity()
+    public void UniqueIndexEntryRemoved_ClusterFieldQuery_StillAnswersFromTheSoaScan()
     {
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         RegisterComponents(dbe);
         dbe.InitializeArchetypes();
 
-        Assert.That(ArchetypeRegistry.GetMetadata<CompDArch>().IsClusterEligible, Is.False,
-            "premise: CompDArch is pure-Versioned, so its queries route to the per-ComponentTable index home and not to a per-archetype tree");
+        Assert.That(ArchetypeRegistry.GetMetadata<CompDArch>().IsClusterEligible, Is.True,
+            "premise: CompDArch is cluster-backed since #629, so its field queries scan cluster data rather than the index");
 
         EntityId target, keepLow, keepHigh;
         {
@@ -189,18 +186,24 @@ class VersionedIndexTests : TestBase<VersionedIndexTests>
         }
 
         var table = dbe.GetComponentTable<CompD>();
-        RemoveIndexKey<int>(table, 20);
+        RemoveIndexKey<int>(dbe, table, 20);
 
         using (var t = dbe.CreateQuickTransaction())
         {
             Assert.Multiple(() =>
             {
-                Assert.That(t.Query<CompDArch>().WhereField<CompD>(d => d.B == 20).Execute(), Is.Empty,
-                    "the entity is unreachable once its index entry is gone — the index, not a component scan, is what answered the first query");
+                Assert.That(t.Query<CompDArch>().WhereField<CompD>(d => d.B == 20).Execute(), Is.EquivalentTo(new[] { target }),
+                    "the entity survives the loss of its index entry — the cluster SoA scan, not the tree, is what answers an unordered field query");
                 Assert.That(t.Query<CompDArch>().WhereField<CompD>(d => d.B == 10).Execute(), Is.EquivalentTo(new[] { keepLow }),
-                    "the removal took only its own key (low control)");
+                    "and the untouched keys are unaffected either way (low control)");
                 Assert.That(t.Query<CompDArch>().WhereField<CompD>(d => d.B == 30).Execute(), Is.EquivalentTo(new[] { keepHigh }),
-                    "the removal took only its own key (high control)");
+                    "and the untouched keys are unaffected either way (high control)");
+
+                // The other half of the claim: the tree IS what an ORDERED query reads, so the same corruption is visible there. Without this the test would
+                // only show that one path ignores the index, not that the index is still doing a job.
+                Assert.That(t.Query<CompDArch>().WhereField<CompD>(d => d.B > 0).OrderByField<CompD, int>(d => d.B).ExecuteOrdered(),
+                    Is.EquivalentTo(new[] { keepLow, keepHigh }),
+                    "the ordered path merges the per-archetype B+Trees, so the unlinked entity is genuinely missing there");
             });
         }
     }
@@ -215,7 +218,7 @@ class VersionedIndexTests : TestBase<VersionedIndexTests>
     /// <c>Remove(key)</c> to unlink one entity.
     /// </remarks>
     [Test]
-    public void MultiValueIndexKeyRemoved_PureVersionedFieldQuery_LosesEveryEntityUnderThatKey()
+    public void MultiValueIndexKeyRemoved_ClusterFieldQuery_StillAnswersFromTheSoaScan()
     {
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         RegisterComponents(dbe);
@@ -240,16 +243,23 @@ class VersionedIndexTests : TestBase<VersionedIndexTests>
         }
 
         var table = dbe.GetComponentTable<CompD>();
-        RemoveIndexKey<float>(table, 1.0f);
+        RemoveIndexKey<float>(dbe, table, 1.0f);
 
         using (var t = dbe.CreateQuickTransaction())
         {
             Assert.Multiple(() =>
             {
-                Assert.That(t.Query<CompDArch>().WhereField<CompD>(d => d.A == 1.0f).Execute(), Is.Empty,
-                    "dropping the key's buffer takes every entity under it — so that buffer is what the query was reading");
+                Assert.That(t.Query<CompDArch>().WhereField<CompD>(d => d.A == 1.0f).Execute(), Is.EquivalentTo(new[] { shared1, shared2 }),
+                    "dropping the whole buffer changes nothing for an unordered query — it reads the cluster SoA, not the tree");
                 Assert.That(t.Query<CompDArch>().WhereField<CompD>(d => d.A == 5.0f).Execute(), Is.EquivalentTo(new[] { alone }),
                     "and no other key was disturbed");
+
+                // Ordered BY THE CORRUPTED FIELD — the ordered path merges the tree belonging to the OrderBy field, so ordering by B here would read B's intact
+                // tree and prove nothing. Both entities under the dropped key vanish together, which is also why the write path must never use Remove(key) to
+                // unlink a single entity from an AllowMultiple index.
+                Assert.That(t.Query<CompDArch>().WhereField<CompD>(d => d.A > 0.0f).OrderByField<CompD, float>(d => d.A).ExecuteOrdered(),
+                    Is.EquivalentTo(new[] { alone }),
+                    "the ordered path lost both entities whose shared key buffer was dropped, and kept the untouched key");
             });
         }
     }
@@ -259,15 +269,25 @@ class VersionedIndexTests : TestBase<VersionedIndexTests>
     /// untouched.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// <c>CompD</c> indexes one field per key type — <c>float A</c>, <c>int B</c>, <c>double C</c> — so the key type selects the field unambiguously without
     /// depending on field order or storage offsets.
+    /// </para>
+    /// <para>
+    /// Searches the archetype's OWN trees, not <c>table.IndexedFieldInfos</c> (#629). Removing from the shared per-ComponentTable tree stopped proving
+    /// anything the moment every archetype became cluster-backed: that tree holds no entries, so the removal would find nothing to unlink and the query would
+    /// keep answering correctly — the test would fail on its own premise rather than demonstrate what the query reads.
+    /// </para>
     /// </remarks>
-    private static void RemoveIndexKey<TKey>(ComponentTable table, TKey key) where TKey : unmanaged
+    private static void RemoveIndexKey<TKey>(DatabaseEngine dbe, ComponentTable table, TKey key) where TKey : unmanaged
     {
+        // Resolved through CompDArch by name, not by searching for "whichever archetype indexes CompD". Three archetypes hold this component, each with its own
+        // tree, and a search returns the first — which is not the one these tests spawn into, so the removal would land in an empty tree and the premise assert
+        // below would fire instead of the behaviour being tested.
         BTree<TKey, PersistentStore> index = null;
-        for (var i = 0; i < table.IndexedFieldInfos.Length; i++)
+        for (var f = 0; f < table.IndexedFieldInfos.Length; f++)
         {
-            if (table.IndexedFieldInfos[i].Index is BTree<TKey, PersistentStore> typed)
+            if (IndexTestHelpers.ArchetypeIndex<CompDArch>(dbe, table, f) is BTree<TKey, PersistentStore> typed)
             {
                 index = typed;
                 break;

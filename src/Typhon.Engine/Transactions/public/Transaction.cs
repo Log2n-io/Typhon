@@ -1198,12 +1198,23 @@ public unsafe partial class Transaction : EntityAccessor
 
         int recordSize = meta._entityRecordSize;
         byte* buf = stackalloc byte[recordSize];
-        if (es.EntityMap.TryGet(entityId.EntityKey, buf, ref _entityMapCacheAccessor))
+        if (!es.EntityMap.TryGet(entityId.EntityKey, buf, ref _entityMapCacheAccessor))
         {
-            return EntityRecordAccessor.GetLocation(buf, slot);
+            return 0;
         }
 
-        return 0;
+        // The two record shapes put DIFFERENT things at offset 14, so the shape has to be decided before the record is read, not after. A flat record has
+        // Location[0] there; a cluster record has ClusterChunkId, with the chain roots starting at CompRevOffset (19) and indexed by VERSIONED ordinal rather
+        // than by component slot. Reading a cluster record with the flat accessor therefore returns the cluster chunk id as if it were a chain root — which is
+        // the same value for every entity sharing that cluster, so all of them resolve to whichever entity's content that chunk id happens to name. Same
+        // condition as the EntityRef resolve path in Transaction.ECS.cs, deliberately (#629).
+        if (meta.IsClusterEligible && es.ClusterState != null)
+        {
+            int versionedIndex = es.ClusterState.Layout.SlotToVersionedIndex[slot];
+            return versionedIndex < 0 ? 0 : ClusterEntityRecordAccessor.GetCompRevFirstChunkId(buf, versionedIndex);
+        }
+
+        return EntityRecordAccessor.GetLocation(buf, slot);
     }
 
     /// <summary>
@@ -1574,54 +1585,20 @@ public unsafe partial class Transaction : EntityAccessor
             byte slotIndex = 0;
             byte compSlot = 0;
 
-            if (!isClusterEntity)
+            // The per-ComponentTable branch that used to sit here — IndexMaintainer.UpdateIndices / RemoveSecondaryIndices plus the matching
+            // SpatialMaintainer calls — is gone (#629). Every archetype is cluster-backed, so a Versioned commit always maintains the per-ARCHETYPE
+            // B+Trees. Established by instrumenting the branch and running the full suite: it was never entered once.
+            if (CheckConfig.Enabled && !isClusterEntity)
             {
-                // Legacy path: per-ComponentTable index/spatial maintenance (unchanged)
-                if (compRevInfo.CurCompContentChunkId != 0)
-                {
-                    if (_batchIndexActive)
-                    {
-                        IndexMaintainer.UpdateIndices(pk, info, compRevInfo, readCompChunkId, _changeSet, TSN, _batchIndexAccessors);
-                    }
-                    else
-                    {
-                        IndexMaintainer.UpdateIndices(pk, info, compRevInfo, readCompChunkId, _changeSet, TSN);
-                    }
-                }
-                else if (readCompChunkId != 0)
-                {
-                    if (_batchIndexActive)
-                    {
-                        IndexMaintainer.RemoveSecondaryIndices(pk, info, readCompChunkId, compRevInfo.CompRevTableFirstChunkId, _changeSet, TSN,
-                            _batchIndexAccessors);
-                    }
-                    else
-                    {
-                        IndexMaintainer.RemoveSecondaryIndices(pk, info, readCompChunkId, compRevInfo.CompRevTableFirstChunkId, _changeSet, TSN);
-                    }
-                }
+                ThrowHelper.ThrowInvalidOp(
+                    $"Versioned commit reached a non-cluster archetype ({commitMeta?.Name}) — the per-ComponentTable index home no longer exists");
+            }
 
-                // Versioned spatial index maintenance — after B+Tree indices are updated
-                if (info.ComponentTable.SpatialIndex != null)
-                {
-                    if (compRevInfo.CurCompContentChunkId != 0)
-                    {
-                        SpatialMaintainer.UpdateSpatial(pk, compRevInfo.CurCompContentChunkId, info.ComponentTable, ref info.CompContentAccessor, _changeSet);
-                    }
-                    else if (readCompChunkId != 0)
-                    {
-                        SpatialMaintainer.RemoveFromSpatial(pk, readCompChunkId, info.ComponentTable, _changeSet);
-                    }
-                }
-            }
-            else
-            {
-                // Cluster path — Phase A only here (per-archetype B+Tree index updates + view notify). Phase B (HEAD→cluster slot copy) is the
-                // visibility act, deferred to PublishComponent. copyToCluster is false for spawns (FinalizeSpawns handles cluster copy for those).
-                bool copyToCluster = (compRevInfo.Operations & ComponentInfo.OperationType.Created) == 0;
-                PrepareClusterVersionedSlot(pk, commitMeta, compRevInfo, readCompChunkId, info.ComponentTable, info.ComponentTypeId, copyToCluster,
-                    out clusterCopyPending, out clusterChunkId, out slotIndex, out compSlot);
-            }
+            // Cluster path — Phase A only here (per-archetype B+Tree index updates + view notify). Phase B (HEAD→cluster slot copy) is the
+            // visibility act, deferred to PublishComponent. copyToCluster is false for spawns (FinalizeSpawns handles cluster copy for those).
+            bool copyToCluster = (compRevInfo.Operations & ComponentInfo.OperationType.Created) == 0;
+            PrepareClusterVersionedSlot(pk, commitMeta, compRevInfo, readCompChunkId, info.ComponentTable, info.ComponentTypeId, copyToCluster,
+                out clusterCopyPending, out clusterChunkId, out slotIndex, out compSlot);
 
             // Periodic flush: bound dirty counter inflation for large transactions
             if (_batchIndexActive && (++_batchEntityCount & 0x3FF) == 0)
@@ -2160,11 +2137,13 @@ public unsafe partial class Transaction : EntityAccessor
         byte* staged = _commitStagingBuffer + stagedSlot.Offset;
         var clusterState = es?.ClusterState;
 
-        // Non-cluster (flat) archetype: publish to the entity's content chunk HEAD instead of a cluster SoA slot (Location = content chunkId).
+        // The flat publish this used to dispatch to is gone with the per-ComponentTable home (#629). Everything below assumes a cluster, so a null ClusterState
+        // must fail here rather than NRE three lines down inside EnsureClusterCommitAccessors.
         if (clusterState == null || !meta.IsClusterEligible)
         {
-            PublishStagedFlatEntry(info, stagedSlot.Location, entityId, staged);
-            return;
+            ThrowHelper.ThrowInvalidOp(
+                $"Commit-discipline publish for archetype '{meta?.Name}' found no cluster state. Every archetype is cluster-backed since #629, so there is no "
+                + "flat HEAD to publish to.");
         }
 
         // Lazy-cache the per-archetype cluster accessor (reused across consecutive same-archetype staged entries; map/content accessors kept for parity
@@ -2190,91 +2169,6 @@ public unsafe partial class Transaction : EntityAccessor
         // Visibility act: publish the staged value to the cluster HEAD, then mark dirty (CM-03: memcpy THEN dirty).
         Unsafe.CopyBlockUnaligned(headPtr, staged, (uint)compSize);
         clusterState.SetDirty(clusterChunkId, slotIndex);
-    }
-
-    /// <summary>
-    /// Publishes one Commit-discipline staged write to a non-cluster entity's content chunk HEAD using the chunkId captured at stage time (no EntityMap
-    /// re-lookup): reconciles the table's exact B+Tree index(es) (old key from the still-unpublished HEAD, new key from the staged slot — CM-05/AC-11),
-    /// copies the staged value into the chunk HEAD (the visibility act), then marks the chunk dirty for the tick fence.
-    /// </summary>
-    private void PublishStagedFlatEntry(ComponentInfo info, int chunkId, EntityId entityId, byte* staged)
-    {
-        if (chunkId == 0)
-        {
-            return;
-        }
-
-        var table = info.ComponentTable;
-        byte* headPtr = info.CompContentAccessor.GetChunkAddress(chunkId, true) + info.ComponentOverhead;
-
-        // Exact-index reconcile BEFORE the HEAD memcpy: old key still lives in the chunk HEAD, new key in the staged slot.
-        if (table.HasShadowableIndexes)
-        {
-            ReconcileFlatIndexAndViews(table, chunkId, entityId, headPtr, staged);
-        }
-
-        // Visibility act: publish the staged value to the chunk HEAD, then mark dirty (CM-03: memcpy THEN dirty).
-        Unsafe.CopyBlockUnaligned(headPtr, staged, (uint)table.ComponentStorageSize);
-        table.DirtyBitmap?.Set(chunkId);
-    }
-
-    /// <summary>
-    /// Flat (non-cluster) counterpart of <see cref="ReconcileClusterIndexAndViews"/>: updates each indexed field's table B+Tree from <paramref name="oldComp"/>
-    /// (the chunk HEAD field base, pre-publish) to <paramref name="newComp"/> (the staged slot) and notifies views. Mirrors the fence-time
-    /// <c>ProcessShadowFieldEntries</c> Move branch, but runs at commit (the Commit-discipline write skips shadow capture). The B+Tree value is the entity's
-    /// content chunkId; for an AllowMultiple index the element id (in the chunk overhead, untouched by the value memcpy) is moved and written back.
-    /// </summary>
-    private void ReconcileFlatIndexAndViews(ComponentTable table, int chunkId, EntityId entityId, byte* oldComp, byte* newComp)
-    {
-        var fields = table.IndexedFieldInfos;
-        for (int fi = 0; fi < fields.Length; fi++)
-        {
-            ref var ifi = ref fields[fi];
-            // oldComp/newComp point at the component DATA (the chunk HEAD past its overhead, and the staging slot — both
-            // data-relative). IndexedFieldInfo.OffsetToField, however, is measured from the CHUNK BASE so it INCLUDES the
-            // overhead (matching the fence path ProcessShadowFieldEntries, which reads at GetChunkAddress(chunkId) + OffsetToField).
-            // Rebase to a data-relative offset before indexing into the two data pointers — adding the chunk-base OffsetToField
-            // directly would double-count ComponentOverhead and read the key from the wrong location.
-            int dataFieldOffset = ifi.OffsetToField - table.ComponentOverhead;
-            var oldKey = KeyBytes8.FromPointer(oldComp + dataFieldOffset, ifi.Size);
-            byte* newFieldPtr = newComp + dataFieldOffset;
-            var newKey = KeyBytes8.FromPointer(newFieldPtr, ifi.Size);
-            if (oldKey.RawValue == newKey.RawValue)
-            {
-                continue;
-            }
-
-            var index = ifi.PersistentIndex;
-            var idxAccessor = index.Segment.CreateChunkAccessor(_changeSet);
-            try
-            {
-                if (index.AllowMultiple)
-                {
-                    // Element id lives in the chunk overhead (chunk base = HEAD field base − ComponentOverhead); the value memcpy never touches it.
-                    int* elementIdPtr = (int*)(oldComp - table.ComponentOverhead + ifi.OffsetToIndexElementId);
-                    *elementIdPtr = index.MoveValue(&oldKey, newFieldPtr, *elementIdPtr, chunkId, ref idxAccessor, out _, out _);
-                }
-                else
-                {
-                    index.Move(&oldKey, newFieldPtr, chunkId, ref idxAccessor);
-                }
-
-                var views = table.ViewRegistry.GetViewsForField(fi);
-                for (int v = 0; v < views.Length; v++)
-                {
-                    var reg = views[v];
-                    if (reg.View.IsDisposed)
-                    {
-                        continue;
-                    }
-                    reg.DeltaBuffer.TryAppend(entityId, oldKey, newKey, TSN, (byte)(fi & 0x3F), reg.ComponentTag);
-                }
-            }
-            finally
-            {
-                idxAccessor.Dispose();
-            }
-        }
     }
 
     /// <summary>
@@ -2738,13 +2632,9 @@ public unsafe partial class Transaction : EntityAccessor
                 try
                 {
 
-                    // Hoist accessor creation for batch index maintenance
-                    var indexedFieldInfos = info.ComponentTable.IndexedFieldInfos;
-                    _batchIndexAccessors = new ChunkAccessor<PersistentStore>[indexedFieldInfos.Length];
-                    for (int i = 0; i < indexedFieldInfos.Length; i++)
-                    {
-                        _batchIndexAccessors[i] = indexedFieldInfos[i].PersistentIndex.Segment.CreateChunkAccessor(_changeSet);
-                    }
+                    // The hoisted per-ComponentTable index accessors that used to be built here are gone with those indexes (#629). Batch mode itself stays:
+                    // it still bounds dirty-page inflation for the component and revision segments over a large transaction.
+                    _batchIndexAccessors = [];
                     _batchIndexActive = true;
                     _batchEntityCount = 0;
                     ChunkBasedSegment<PersistentStore>.EnterBatchMode();

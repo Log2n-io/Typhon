@@ -451,9 +451,12 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
             CreateAndCommitCompD(dbe, 1.0f, i, 1.0);
         }
 
-        // Set both above threshold
-        ctStr.MutationsSinceRebuild = 2000;
-        ctD.MutationsSinceRebuild = 2000;
+        // Drive the counters the worker actually reads. Its ComponentTable sweep is gone (#629); the surviving sweep is per ARCHETYPE, so the threshold has to
+        // be crossed on each archetype's ClusterState.
+        // Resolved BY ARCHETYPE, not by searching for "whichever archetype indexes CompD" — three of them do, and a search returns the first, which is not
+        // the one this test spawns into.
+        dbe._archetypeStates[Archetype<CompStr64Arch>.Metadata.ArchetypeId].ClusterState.MutationsSinceRebuild = 2000;
+        dbe._archetypeStates[Archetype<CompDArch>.Metadata.ArchetypeId].ClusterState.MutationsSinceRebuild = 2000;
 
         var options = new StatisticsOptions
         {
@@ -466,17 +469,21 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
         worker.Start();
         worker.ForceRebuild();
 
-        // Wait for rebuild to complete on CompD (the non-String64 table)
+        // Wait for the per-ARCHETYPE rebuild on CompD. The worker's ComponentTable sweep is gone (#629): it scanned ComponentSegment, where a cluster-backed
+        // archetype keeps no entities, into an array no estimator reads — and it could never fire anyway, since ComponentTable.MutationsSinceRebuild was
+        // never incremented by any write path. What the test still proves is the thing it was written for: a String64 table in the same engine does not kill
+        // the worker before it reaches the others.
+        var statsD = IndexTestHelpers.ArchetypeIndexStats<CompDArch>(dbe, ctD);
+        Assert.That(statsD, Is.Not.Null, "premise: CompDArch owns statistics for CompD");
+
         var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (ctD.IndexStats[1].HyperLogLog == null && DateTime.UtcNow < deadline)
+        while (statsD[1].HyperLogLog == null && DateTime.UtcNow < deadline)
         {
             System.Threading.Thread.Sleep(1);
         }
 
-        // Worker must still be running (not killed by String64 table)
         Assert.That(worker.IsRunning, Is.True, "Worker should survive String64 table processing");
-        // CompD statistics should be rebuilt despite CompStr64 being in the same engine
-        Assert.That(ctD.IndexStats[1].HyperLogLog, Is.Not.Null, "CompD stats should be rebuilt");
+        Assert.That(statsD[1].HyperLogLog, Is.Not.Null, "CompD stats should be rebuilt");
     }
 
     // ═══════════════════════════════════════════════════════════════

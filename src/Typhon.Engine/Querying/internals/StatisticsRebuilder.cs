@@ -22,114 +22,13 @@ namespace Typhon.Engine.Internals;
 internal static class StatisticsRebuilder
 {
     /// <summary>
-    /// Rebuilds HLL, MCV, and Histogram for ALL indexed fields of a ComponentTable in a single chunk-based scan with page-granularity sampling.
-    /// </summary>
-    /// <param name="table">The ComponentTable to scan.</param>
-    /// <param name="epochManager">Epoch manager for page access protection.</param>
-    /// <param name="pageInterval">Page sampling interval: 1 = full scan, N = every Nth page.</param>
-    internal static unsafe void RebuildAll(ComponentTable table, EpochManager epochManager, int pageInterval = 1)
-    {
-        var indexedFieldInfos = table.IndexedFieldInfos;
-        var indexStats = table.IndexStats;
-        int fieldCount = indexedFieldInfos.Length;
-        if (fieldCount == 0)
-        {
-            return;
-        }
-
-        var acc = new Accumulators(indexStats);
-
-        var segment = table.ComponentSegment;
-        int totalPages = segment.Length;
-        int stride = segment.Stride;
-        int rootChunkCount = segment.ChunkCountRootPage;
-        int otherChunkCount = segment.ChunkCountPerPage;
-        int bitmapLongsRoot = (rootChunkCount + 63) >> 6;
-        int bitmapLongsOther = (otherChunkCount + 63) >> 6;
-        int rootDataOffset = segment.RootChunkDataOffset;
-        int otherDataOffset = segment.OtherChunkDataOffset;
-
-        // Single epoch guard for the entire scan
-        using var guard = EpochGuard.Enter(epochManager);
-        var epoch = guard.Epoch;
-
-        // Directory-only root (v4): the root page (index 0) holds no chunks, so start sampling at the first DATA page. This
-        // keeps the very first sample from being wasted on the empty directory page and — critically under sampling — keeps the
-        // page stride aligned to where the data actually lives (otherwise a small segment whose entities all sit on page 1 is
-        // entirely skipped by an even stride starting at page 0).
-        int firstDataPage = rootChunkCount > 0 ? 0 : Math.Min(1, totalPages - 1);
-        for (int pageIndex = firstDataPage; pageIndex < totalPages; pageIndex += pageInterval)
-        {
-            bool isRoot = (pageIndex == 0);
-            int maxChunks = isRoot ? rootChunkCount : otherChunkCount;
-            int bitmapLongs = isRoot ? bitmapLongsRoot : bitmapLongsOther;
-            int dataOffset = isRoot ? rootDataOffset : otherDataOffset;
-
-            // Global chunk 0 is the reserved null sentinel; it sits on the page holding the segment's first chunk — the root when
-            // the root carries chunks (legacy), else data page 1 under the v4 directory-only root. Hoisted out of the inner loop so
-            // the sentinel is skipped with a single per-page bool instead of recomputing the global chunk id for every sampled chunk.
-            bool pageHoldsChunkZero = rootChunkCount > 0 ? isRoot : (pageIndex == 1);
-
-            var page = segment.GetPage(pageIndex, epoch, out _);
-            var bitmap = page.MetadataReadOnly<long>();
-
-            for (int w = 0; w < bitmapLongs; w++)
-            {
-                long word = bitmap[w];
-                while (word != 0)
-                {
-                    int bit = BitOperations.TrailingZeroCount(word);
-                    int chunkInPage = w * 64 + bit;
-                    word &= word - 1; // Clear lowest set bit
-
-                    if (chunkInPage >= maxChunks)
-                    {
-                        break;
-                    }
-
-                    // Skip the reserved chunk 0 (null sentinel). Sampling the uninitialized sentinel would feed a garbage key below
-                    // the computed min. Under the v4 directory-only root chunk 0 lives on data page 1, not the root (see pageHoldsChunkZero).
-                    if (pageHoldsChunkZero && chunkInPage == 0)
-                    {
-                        continue;
-                    }
-
-                    // Get pointer to chunk raw data
-                    var chunkData = page.RawData<byte>(dataOffset + chunkInPage * stride, stride);
-                    acc.CountEntity();
-
-                    fixed (byte* ptr = chunkData)
-                    {
-                        for (int f = 0; f < fieldCount; f++)
-                        {
-                            if (!acc.Supports(f))
-                            {
-                                continue;
-                            }
-
-                            acc.Observe(ExtractKeyAsLong(ptr, indexedFieldInfos[f].OffsetToField, indexStats[f].KeyType), f);
-                        }
-                    }
-                }
-            }
-        }
-
-        acc.Finish(indexStats, table.EstimatedEntityCount, pageInterval);
-    }
-
-    /// <summary>
-    /// Convenience API: full scan (no sampling). Suitable for tests and explicit rebuilds.
-    /// </summary>
-    internal static void RebuildStatistics(ComponentTable table, EpochManager epochManager) => RebuildAll(table, epochManager);
-
-    /// <summary>
-    /// The cluster counterpart of <see cref="RebuildAll"/> (#665): rebuilds statistics for every per-archetype index home by walking the archetype's active
+    /// The cluster counterpart of <see cref="RebuildClusterAll"/> (#665): rebuilds statistics for every per-archetype index home by walking the archetype's active
     /// clusters instead of a ComponentSegment's occupancy bitmaps.
     /// </summary>
     /// <remarks>
     /// <para>
     /// Needed because a cluster-backed archetype's entities are not in <see cref="ComponentTable.ComponentSegment"/> at all: pointing
-    /// <see cref="RebuildAll"/> at it would sample nothing and publish statistics built from an empty scan — worse than leaving them stale, which is why
+    /// <see cref="RebuildClusterAll"/> at it would sample nothing and publish statistics built from an empty scan — worse than leaving them stale, which is why
     /// <see cref="StatisticsWorker"/> must route these archetypes here rather than merely counting their mutations.
     /// </para>
     /// <para>
@@ -305,7 +204,7 @@ internal static class StatisticsRebuilder
     /// Per-indexed-field HLL / MCV / histogram accumulators for one statistics rebuild, plus the scaling and atomic-swap that finishes it.
     /// </summary>
     /// <remarks>
-    /// Extracted from <see cref="RebuildAll"/> (#665) so the cluster scan below can reuse it. Only the SCAN differs between the two homes — a page walk over
+    /// Extracted from <see cref="RebuildClusterAll"/> (#665) so the cluster scan below can reuse it. Only the SCAN differs between the two homes — a page walk over
     /// the ComponentSegment's occupancy bitmaps versus a walk of the archetype's active clusters — while the ~150 lines of accumulation, sample scaling and
     /// publication are identical, and a second copy of them is a second thing to keep in step.
     /// </remarks>

@@ -256,6 +256,45 @@ struct EvoIndexV2
 
 #endregion
 
+#region Second index on an already-indexed component
+
+// Already carries an index, so its archetype OWNS a persisted index segment on reopen — the precondition that makes the second index dangerous.
+[Component("Typhon.Schema.UnitTest.EvoSecondIdx", 1)]
+[StructLayout(LayoutKind.Sequential)]
+struct EvoSecondIdxV1
+{
+    [Index(AllowMultiple = true)] public int Bucket;
+    public int Code;
+
+    public EvoSecondIdxV1(int bucket, int code) { Bucket = bucket; Code = code; }
+}
+
+// Adds a UNIQUE index on Code. Unique indexes do not contribute to ComponentStorageOverhead, so the stride is unchanged, so no migration runs — which is
+// exactly what leaves the persisted index segment in place to be loaded.
+[Component("Typhon.Schema.UnitTest.EvoSecondIdx", 1)]
+[StructLayout(LayoutKind.Sequential)]
+struct EvoSecondIdxV2
+{
+    [Index(AllowMultiple = true)] public int Bucket;
+    [Index] public int Code;
+
+    public EvoSecondIdxV2(int bucket, int code) { Bucket = bucket; Code = code; }
+}
+
+[Archetype]
+class EvoSecondIdxArch : Archetype<EvoSecondIdxArch>
+{
+    public static readonly Comp<EvoSecondIdxV1> Comp = Register<EvoSecondIdxV1>();
+}
+
+[Archetype]
+class EvoSecondIdxV2Arch : Archetype<EvoSecondIdxV2Arch>
+{
+    public static readonly Comp<EvoSecondIdxV2> Comp = Register<EvoSecondIdxV2>();
+}
+
+#endregion
+
 // ── Archetypes for V1 components (used for Spawn in first scope) ──
 
 [Archetype]
@@ -738,37 +777,109 @@ class SchemaEvolutionTests : TestBase<SchemaEvolutionTests>
             dbe.InitializeArchetypes();
 
             var table = dbe.GetComponentTable<EvoIndexV2>();
-            var indexedEntities = IndexedChainRoots(table, bucket: 7);
+            var indexedEntities = IndexedEntities(table, bucket: 7);
 
             Assert.Multiple(() =>
             {
-                // Half 1 — the VALUE. Every leaf value must be a live CompRev chain root; a content chunk id is not one.
+                // Half 1 — the VALUE. Every leaf value must name an occupied cluster slot holding one of the expected entities.
                 Assert.That(indexedEntities, Is.EquivalentTo(expectedInBucket7),
-                    "each leaf value must be the chain root of an entity whose CURRENT Bucket is 7");
+                    "each leaf value must name the cluster slot of an entity whose CURRENT Bucket is 7");
 
                 // Half 2 — the POPULATION. Distinct keys must be the set of current values {7, 3}, not every value any
                 // revision ever held. Backfilling per revision resurrects superseded keys as though they were current.
-                Assert.That(table.IndexStats[0].EntryCount, Is.EqualTo(2),
+                Assert.That(IndexTestHelpers.OwningStats(dbe, table)[0].EntryCount, Is.EqualTo(2),
                     "exactly two distinct keys — one per CURRENT value, not one per revision-value");
 
-                Assert.That(IndexedChainRoots(table, bucket: 3), Has.Count.EqualTo(3),
+                Assert.That(IndexedEntities(table, bucket: 3), Has.Count.EqualTo(3),
                     "the three entities whose final value is 3, exactly once each");
-                Assert.That(IndexedChainRoots(table, bucket: 1), Is.Empty,
+                Assert.That(IndexedEntities(table, bucket: 1), Is.Empty,
                     "bucket 1 was only ever a superseded revision's value");
             });
         }
     }
 
     /// <summary>
-    /// Every entity indexed under <paramref name="bucket"/>, resolved by treating each leaf value as a CompRev chain root and reading that chain's owning
-    /// entity — which is precisely the contract #670 was violating, so a wrong value fails to resolve rather than resolving to something plausible.
+    /// AC: adding a SECOND index to a component whose archetype already owns a persisted index segment must open, and the new index must answer queries.
     /// </summary>
-    private static unsafe HashSet<EntityId> IndexedChainRoots(ComponentTable table, int bucket)
+    /// <remarks>
+    /// The dangerous shape, and the one no existing fixture covered. <c>BuildIndexSlot</c> passes ONE <c>load</c> flag for every indexed field of a component,
+    /// so a field indexed for the first time has no entry in the persisted B+Tree directory and <c>FindInDirectory</c> throws — the database simply fails to
+    /// open. The deleted <c>ComponentTable.BuildIndexedFieldInfo</c> had per-field granularity; the per-archetype home does not, so it clears and rebuilds the
+    /// segment instead (#629).
+    /// <para>
+    /// A UNIQUE second index is load-bearing here: unique indexes add nothing to <c>ComponentStorageOverhead</c>, so the stride is unchanged, so no migration
+    /// runs — and it is precisely the no-migration path that keeps the persisted segment around to be loaded. An <c>AllowMultiple</c> index would change the
+    /// stride, force a migration, and allocate everything fresh, hiding the bug.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void AddSecondIndexToAlreadyIndexedComponent_OpensAndAnswersQueries()
     {
-        using var epoch = EpochGuard.Enter(table.DBE.EpochManager);
-        var index = (BTree<int, PersistentStore>)table.IndexedFieldInfos[0].Index;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<EvoSecondIdxV1>();
+            dbe.InitializeArchetypes();
+
+            using var t = dbe.CreateQuickTransaction(DurabilityMode.Immediate);
+            for (var i = 0; i < 6; i++)
+            {
+                t.Spawn<EvoSecondIdxArch>(EvoSecondIdxArch.Comp.Set(new EvoSecondIdxV1(i % 2, 100 + i)));
+            }
+
+            t.Commit();
+        }
+
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+
+            // Before the fix this threw "BTree with key (...) not found in directory" — the reopen itself was the failure.
+            Assert.That(() => dbe.RegisterComponentFromAccessor<EvoSecondIdxV2>(), Throws.Nothing,
+                "a component gaining a second index must still open");
+            dbe.InitializeArchetypes();
+
+            // Asserted on the trees directly, not through a query: the entities belong to EvoSecondIdxArch (the V1 archetype), and a query would have to name
+            // an archetype, which across the V1/V2 fixture split is a different one. The trees are what the fix is about.
+            var clusterState = dbe._archetypeStates[Archetype<EvoSecondIdxArch>.Metadata.ArchetypeId].ClusterState;
+            Assert.That(clusterState?.IndexSlots, Is.Not.Null, "premise: the archetype carrying the data owns per-archetype index slots");
+
+            var fields = clusterState.IndexSlots[0].Fields;
+            Assert.That(fields, Has.Length.EqualTo(2), "both fields are indexed after the change");
+
+            var bucketEntries = fields[0].Index.EntryCount;
+            var codeEntries = fields[1].Index.EntryCount;
+            Assert.Multiple(() =>
+            {
+                Assert.That(bucketEntries, Is.EqualTo(2),
+                    "the pre-existing AllowMultiple index must survive the clear-and-rebuild — two distinct Bucket values, not four from double-insertion");
+                Assert.That(codeEntries, Is.EqualTo(6),
+                    "the NEW unique index must be populated from existing data — one entry per entity, not left empty");
+            });
+        }
+    }
+
+    /// <summary>
+    /// Every entity indexed under <paramref name="bucket"/>, resolved by treating each leaf value as a packed <c>ClusterLocation</c> and reading the entity id
+    /// out of that cluster slot's id tail.
+    /// </summary>
+    /// <remarks>
+    /// The leaf VALUE changed with the index home (#629). It used to be a CompRev chain root, which is what #670 was getting wrong, and the old oracle checked
+    /// the chunk was an allocated revision chunk so a content-chunk id would fail rather than resolve to something plausible. A per-archetype tree stores a
+    /// cluster position instead — <c>clusterChunkId * 64 + slotIndex</c> — so the equivalent check is that the slot is occupied and names a live entity.
+    /// </remarks>
+    private static unsafe HashSet<EntityId> IndexedEntities(ComponentTable table, int bucket)
+    {
+        var dbe = table.DBE;
+        using var epoch = EpochGuard.Enter(dbe.EpochManager);
+
+        var clusterState = IndexTestHelpers.OwningCluster(dbe, table);
+        Assert.That(clusterState, Is.Not.Null, "premise: an archetype owns a per-archetype index for this component");
+
+        var index = (BTree<int, PersistentStore>)IndexTestHelpers.OwningIndex(dbe, table, 0);
+        var layout = clusterState.Layout;
         var idxAccessor = index.Segment.CreateChunkAccessor();
-        var revAccessor = table.CompRevTableSegment.CreateChunkAccessor();
+        var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
         var result = new HashSet<EntityId>();
         try
         {
@@ -782,12 +893,18 @@ class SchemaEvolutionTests : TestBase<SchemaEvolutionTests>
                         var values = e.CurrentValues;
                         for (var i = 0; i < values.Length; i++)
                         {
-                            var rootChunkId = values[i];
-                            Assert.That(table.CompRevTableSegment.IsChunkAllocated(rootChunkId), Is.True,
-                                $"leaf value {rootChunkId} must be an allocated revision-chain chunk — a content chunk id is not");
+                            var location = values[i];
+                            var clusterChunkId = location >> 6;
+                            var slotIndex = location & 0x3F;
 
-                            ref var hdr = ref revAccessor.GetChunk<CompRevStorageHeader>(rootChunkId);
-                            result.Add(EntityId.FromRaw(hdr.EntityPK));
+                            var clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId);
+                            var occupancy = *(ulong*)clusterBase;
+                            Assert.That((occupancy & (1UL << slotIndex)) != 0, Is.True,
+                                $"leaf value {location} must name an OCCUPIED cluster slot ({clusterChunkId}:{slotIndex})");
+
+                            var entityPK = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
+                            Assert.That(entityPK, Is.Not.Zero, $"cluster slot {clusterChunkId}:{slotIndex} must carry an entity id");
+                            result.Add(EntityId.FromRaw(entityPK));
                         }
                     }
                     while (e.NextChunk());
@@ -800,7 +917,7 @@ class SchemaEvolutionTests : TestBase<SchemaEvolutionTests>
         }
         finally
         {
-            revAccessor.Dispose();
+            clusterAccessor.Dispose();
             idxAccessor.Dispose();
         }
 

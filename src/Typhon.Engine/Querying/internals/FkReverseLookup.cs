@@ -139,13 +139,18 @@ internal static unsafe class FkReverseLookup
     internal static void ForEachSource<TAction>(DatabaseEngine dbe, ComponentTable sourceCT, in FkCandidates candidates, int fkFieldOrdinal, long targetPK,
         ref TAction action) where TAction : struct, IFkSourceAction
     {
-        // Phase 1 — the shared ComponentTable tree, once for all non-cluster archetypes.
-        if (candidates.HasNonCluster && !ScanComponentTable(dbe, sourceCT, fkFieldOrdinal, targetPK, ref action))
+        // There used to be a phase 1 here scanning the shared ComponentTable FK tree for non-cluster candidates. That home is gone (#629) and the branch was
+        // never entered — instrumented and confirmed across the full suite — so the per-archetype walk below is the whole lookup.
+        //
+        // A candidate that owns no per-archetype tree therefore has no way to be searched. Raising beats skipping it: a reverse lookup that quietly omits an
+        // archetype under-reports referrers, which for cascade delete means orphaned children rather than an error.
+        if (candidates.HasNonCluster)
         {
-            return;
+            ThrowHelper.ThrowInvalidOp(
+                $"FK reverse lookup on '{sourceCT?.Definition?.Name}' has a candidate archetype with no per-archetype FK index, and there is no longer a "
+                + "shared index home to search. Its referrers would be silently missing from the result.");
         }
 
-        // Phase 2 — one per-archetype tree per cluster-backed candidate.
         var clusterArchetypes = candidates.ClusterArchetypes;
         for (var i = 0; i < clusterArchetypes.Length; i++)
         {
@@ -155,54 +160,6 @@ internal static unsafe class FkReverseLookup
                 return;
             }
         }
-    }
-
-    /// <summary>Phase 1: the per-ComponentTable FK tree. Values are chunk ids; <see cref="FkSourcePkResolver"/> maps each to the owning entity's PK.</summary>
-    private static bool ScanComponentTable<TAction>(DatabaseEngine dbe, ComponentTable sourceCT, int fkFieldOrdinal, long targetPK, ref TAction action)
-        where TAction : struct, IFkSourceAction
-    {
-        var fkIndex = sourceCT.IndexedFieldInfos[fkFieldOrdinal].Index as BTree<long, PersistentStore>;
-        if (fkIndex == null)
-        {
-            return true;
-        }
-
-        var pkResolver = FkSourcePkResolver.Create(sourceCT);
-        try
-        {
-            var enumerator = fkIndex.EnumerateRangeMultiple(targetPK, targetPK);
-            try
-            {
-                while (enumerator.MoveNextKey())
-                {
-                    do
-                    {
-                        var values = enumerator.CurrentValues;
-                        for (var j = 0; j < values.Length; j++)
-                        {
-                            var sourcePK = pkResolver.Resolve(values[j]);
-                            // This tree spans archetypes, so the owning archetype is only known per entity — unlike phase 2, which knows it up front.
-                            var meta = dbe.GetMetaByRouting(EntityId.FromRaw(sourcePK).ArchetypeId);
-                            if (!action.Process(sourcePK, meta))
-                            {
-                                return false;
-                            }
-                        }
-                    }
-                    while (enumerator.NextChunk());
-                }
-            }
-            finally
-            {
-                enumerator.Dispose();
-            }
-        }
-        finally
-        {
-            pkResolver.Dispose();
-        }
-
-        return true;
     }
 
     /// <summary>

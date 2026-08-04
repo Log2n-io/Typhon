@@ -797,10 +797,6 @@ internal abstract class EcsViewFieldReader
     public abstract bool CheckOtherFields(long pk, FieldEvaluator[] evaluators, int skipFieldIndex, Transaction tx);
     public abstract bool CheckOtherFieldsInBranch(long pk, FieldEvaluator[] branchEvals, int skipFieldIndex, Transaction tx);
     public abstract bool EvaluateAllFields(long pk, FieldEvaluator[] evaluators, Transaction tx);
-    public abstract void ExecuteFullScan(ExecutionPlan plan, FieldEvaluator[] evaluators, ComponentTable table, Transaction tx, HashMap<long> result);
-    public abstract void ExecuteOrderedScan(ExecutionPlan plan, FieldEvaluator[] evaluators, ComponentTable table, Transaction tx, List<long> result,
-        int skip = 0, int take = int.MaxValue);
-    public abstract int CountScan(ExecutionPlan plan, FieldEvaluator[] evaluators, ComponentTable table, Transaction tx);
 }
 
 /// <summary>
@@ -889,13 +885,4 @@ internal sealed unsafe class EcsViewFieldReader<T> : EcsViewFieldReader where T 
         return true;
     }
 
-    public override void ExecuteFullScan(ExecutionPlan plan, FieldEvaluator[] evaluators, ComponentTable table, Transaction tx, HashMap<long> result) =>
-        PipelineExecutor.Instance.Execute(plan, evaluators, table, tx, result);
-
-    public override void ExecuteOrderedScan(ExecutionPlan plan, FieldEvaluator[] evaluators, ComponentTable table, Transaction tx, List<long> result,
-        int skip = 0, int take = int.MaxValue) =>
-        PipelineExecutor.Instance.ExecuteOrdered(plan, evaluators, table, tx, result, skip, take);
-
-    public override int CountScan(ExecutionPlan plan, FieldEvaluator[] evaluators, ComponentTable table, Transaction tx) =>
-        PipelineExecutor.Instance.Count(plan, evaluators, table, tx);
 }

@@ -40,8 +40,8 @@ class StatsArch : Archetype<StatsArch>
     public static readonly Comp<StatsTag> Tag = Register<StatsTag>();
 }
 
-// Pure-Versioned, so NOT cluster-eligible — it shares StatsRanked's ComponentTable with StatsArch while keeping its index on the legacy home. The shape the
-// planner must still fall back to.
+// Pure-Versioned, and cluster-backed like everything else since #629. It still earns its place here for the reason it was added: it shares StatsRanked's
+// ComponentTable with StatsArch, so the two archetypes must be planned from separate statistics for the same component type.
 [Archetype]
 class StatsFlatArch : Archetype<StatsFlatArch>
 {
@@ -125,8 +125,9 @@ class ClusterIndexStatisticsTests : TestBase<ClusterIndexStatisticsTests>
             Assert.That(archetypeStats, Is.Not.Null.And.Length.EqualTo(clusterState.IndexSlots[0].Fields.Length),
                 "the archetype's statistics array must be parallel to its index fields");
             Assert.That(archetypeStats[0].EntryCount, Is.EqualTo(4), "the per-archetype tree holds the four distinct tiers");
-            Assert.That(RankedTable(dbe).IndexStats[0].EntryCount, Is.Zero,
-                "the ComponentTable's tree is empty for a cluster-backed archetype — estimating from it is estimating from nothing");
+
+            // The companion assertion — that the ComponentTable's array read 0 — is gone with the array itself (#629). It existed to show the planner had been
+            // estimating from nothing; there is now no second array to estimate from, which is the stronger version of the same statement.
         });
     }
 
@@ -211,7 +212,6 @@ class ClusterIndexStatisticsTests : TestBase<ClusterIndexStatisticsTests>
 
         var estimator = AdvancedSelectivityEstimator.Instance;
         var archetypeStats = clusterState.IndexSlots[0].Stats;
-        var tableStats = RankedTable(dbe).IndexStats;
 
         var hot = estimator.EstimateCardinality(archetypeStats, 0, CompareOp.Equal, 0);
         var cold = estimator.EstimateCardinality(archetypeStats, 0, CompareOp.Equal, 2);
@@ -220,8 +220,6 @@ class ClusterIndexStatisticsTests : TestBase<ClusterIndexStatisticsTests>
         {
             Assert.That(hot, Is.GreaterThan(cold), "tier 0 holds half the entities; a rarer tier must estimate lower");
             Assert.That(hot, Is.GreaterThan(0));
-            Assert.That(estimator.EstimateCardinality(tableStats, 0, CompareOp.Equal, 0), Is.Zero,
-                "the same predicate through the ComponentTable's array returns 0 — the planner's input before #665");
         });
     }
 
@@ -234,13 +232,20 @@ class ClusterIndexStatisticsTests : TestBase<ClusterIndexStatisticsTests>
     /// same entities — so no observable behaviour distinguishes a good plan from a bad one, and a test that went through <c>Execute()</c> would pass either
     /// way. What the estimate feeds is <c>EstimateClusterSelectivity</c>, which reads a 0 count as "unknown" and takes Path B every time.
     /// </remarks>
+    /// <remarks>
+    /// The second assertion used to check the FALLBACK — <c>StatsFlatArch</c> was pure-Versioned, so it had no cluster state and the planner had to keep
+    /// reading the shared array. Since #629 it is cluster-backed too, and the property that matters is stronger: two archetypes sharing one ComponentTable
+    /// must each be planned from THEIR OWN statistics. Estimating either from the other is what makes the planner pick a scan sized for the wrong population,
+    /// and the shared array — which no longer receives any entries — would read as 0, i.e. "unknown", for both.
+    /// </remarks>
     [Test]
-    public void PlannerStats_PicksTheArchetypeArray_AndFallsBackForNonClusterArchetypes()
+    public void PlannerStats_PicksEachArchetypesOwnArray()
     {
         using var dbe = SetupEngine();
         SpawnMany(dbe, 20, i => i % 4);
 
         var clusterState = ClusterState(dbe);
+        var flatState = dbe._archetypeStates[Archetype<StatsFlatArch>.Metadata.ArchetypeId].ClusterState;
         var ct = RankedTable(dbe);
 
         using var tx = dbe.CreateQuickTransaction();
@@ -251,8 +256,10 @@ class ClusterIndexStatisticsTests : TestBase<ClusterIndexStatisticsTests>
         {
             Assert.That(clusterQuery.PlannerStats(ct), Is.SameAs(clusterState.IndexSlots[0].Stats),
                 "a query resolving to one cluster-backed archetype must be planned from that archetype's own statistics");
-            Assert.That(flatQuery.PlannerStats(ct), Is.SameAs(ct.IndexStats),
-                "an archetype with no cluster state keeps the shared array — its entities really are in the ComponentTable");
+            Assert.That(flatQuery.PlannerStats(ct), Is.SameAs(flatState.IndexSlots[0].Stats),
+                "the second archetype sharing this ComponentTable must be planned from ITS statistics, not the first one's and not the empty shared array");
+            Assert.That(flatState.IndexSlots[0].Stats, Is.Not.SameAs(clusterState.IndexSlots[0].Stats),
+                "premise: the two archetypes really do own separate statistics arrays");
         });
     }
 }

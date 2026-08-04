@@ -137,16 +137,17 @@ internal struct IndexedFieldInfo
     public int Size;
 
     public int OffsetToIndexElementId;
-    public IBTreeIndex Index;
 
-    /// <summary>Cached from <see cref="IBTreeIndex.AllowMultiple"/> — avoids interface dispatch on hot path.</summary>
+    /// <summary>
+    /// Whether the field's index admits duplicate keys. Read from the field DEFINITION, not from a tree.
+    /// </summary>
+    /// <remarks>
+    /// This struct describes an indexed field; it no longer owns the index. The trees live on the archetype
+    /// (<c>ArchetypeClusterState.IndexSlots[s].Fields[f].Index</c>) and the ComponentTable holds none (#629). What survives here is the METADATA the
+    /// per-archetype code is built from — offsets, sizes, the element-id slot — most visibly <c>ArchetypeClusterState.BuildIndexSlot</c> and
+    /// <c>PipelineExecutor.FindFKIndexOrdinal</c>.
+    /// </remarks>
     public bool AllowMultiple;
-
-    /// <summary>Returns the index cast to <see cref="BTreeBase{TStore}"/> for PersistentStore operations (Versioned and SingleVersion paths).</summary>
-    internal BTreeBase<PersistentStore> PersistentIndex => (BTreeBase<PersistentStore>)Index;
-
-    /// <summary>Returns the index cast to <see cref="BTreeBase{TStore}"/> for Transient storage operations.</summary>
-    internal BTreeBase<TransientStore> TransientIndex => (BTreeBase<TransientStore>)Index;
 }
 
 /// <summary>Bit flags describing optional storage features enabled on a <see cref="ComponentTable"/>.</summary>
@@ -197,12 +198,6 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
 
     /// <summary>Segment holding the MVCC revision chains. Non-null only for <see cref="StorageMode.Versioned"/> storage.</summary>
     public ChunkBasedSegment<PersistentStore> CompRevTableSegment { get; private set; }
-
-    /// <summary>Segment backing the primary-key B+Tree and every non-<see cref="String64"/> secondary index.</summary>
-    public ChunkBasedSegment<PersistentStore> DefaultIndexSegment { get; private set; }
-
-    /// <summary>Segment backing the <see cref="String64"/>-keyed secondary indexes.</summary>
-    public ChunkBasedSegment<PersistentStore> String64IndexSegment { get; private set; }
 
     /// <summary>
     /// Surfaces the entity count as <see cref="IResource.Count"/> so the Workbench can render a
@@ -313,7 +308,6 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     /// </summary>
     internal ushort WalTypeId { get; set; }
     internal IndexedFieldInfo[] IndexedFieldInfos { get; private set; }
-    internal IndexStatistics[] IndexStats { get; private set; }
     internal ViewRegistry ViewRegistry { get; private set; }
 
     internal Dictionary<int, VariableSizedBufferSegmentBase<PersistentStore>> ComponentCollectionVSBSByOffset { get; private set; }
@@ -327,12 +321,6 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
 
     private ComponentTableFlags _flags;
 
-    /// <summary>
-    /// Approximate mutation count since last statistics rebuild. Non-atomic — intentional races are acceptable since this is only used as a threshold
-    /// trigger by <see cref="StatisticsWorker"/>. Reset to zero by the worker after initiating a rebuild.
-    /// </summary>
-    internal int MutationsSinceRebuild;
-
     #region IMetricSource Implementation
 
     /// <inheritdoc />
@@ -343,9 +331,7 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
             (ComponentSegment?.AllocatedChunkCount ?? 0) +
             (TransientComponentSegment?.AllocatedChunkCount ?? 0) +
             (CompRevTableSegment?.AllocatedChunkCount ?? 0) +
-            (DefaultIndexSegment?.AllocatedChunkCount ?? 0) +
             (TransientDefaultIndexSegment?.AllocatedChunkCount ?? 0) +
-            (String64IndexSegment?.AllocatedChunkCount ?? 0) +
             (TransientString64IndexSegment?.AllocatedChunkCount ?? 0);
 
 
@@ -353,9 +339,7 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
             (ComponentSegment?.ChunkCapacity ?? 0) +
             (TransientComponentSegment?.ChunkCapacity ?? 0) +
             (CompRevTableSegment?.ChunkCapacity ?? 0) +
-            (DefaultIndexSegment?.ChunkCapacity ?? 0) +
             (TransientDefaultIndexSegment?.ChunkCapacity ?? 0) +
-            (String64IndexSegment?.ChunkCapacity ?? 0) +
             (TransientString64IndexSegment?.ChunkCapacity ?? 0);
 
 
@@ -392,18 +376,6 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         {
             props["CompRevTableSegment.AllocatedChunks"] = CompRevTableSegment.AllocatedChunkCount;
             props["CompRevTableSegment.Capacity"] = CompRevTableSegment.ChunkCapacity;
-        }
-
-        if (DefaultIndexSegment != null)
-        {
-            props["DefaultIndexSegment.AllocatedChunks"] = DefaultIndexSegment.AllocatedChunkCount;
-            props["DefaultIndexSegment.Capacity"] = DefaultIndexSegment.ChunkCapacity;
-        }
-
-        if (String64IndexSegment != null)
-        {
-            props["String64IndexSegment.AllocatedChunks"] = String64IndexSegment.AllocatedChunkCount;
-            props["String64IndexSegment.Capacity"] = String64IndexSegment.ChunkCapacity;
         }
 
         // Transient segments
@@ -453,10 +425,6 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         var mmf = DBE.MMF;
         ComponentSegment    = mmf.AllocateChunkBasedSegment(PageBlockType.None, ComponentSegmentStartingSize, ComponentTotalSize, changeSet, 
             StorageSegmentKind.Component);
-        DefaultIndexSegment  = mmf.AllocateChunkBasedSegment(PageBlockType.None, MainIndexSegmentStartingSize, sizeof(Index64Chunk), changeSet, 
-            StorageSegmentKind.Index);
-        String64IndexSegment = mmf.AllocateChunkBasedSegment(PageBlockType.None, MainIndexSegmentStartingSize, sizeof(IndexString64Chunk), changeSet, 
-            StorageSegmentKind.Index);
 
         // Versioned only: allocate revision chain segment for MVCC
         if (storageMode == StorageMode.Versioned)
@@ -491,8 +459,6 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     /// <param name="parent">Resource-tree parent (the owning <see cref="DatabaseEngine"/>).</param>
     /// <param name="componentSPI">Persisted root-page index (SPI) of the component data segment to reload.</param>
     /// <param name="versionSPI">Persisted SPI of the MVCC revision-chain segment; used only for <see cref="StorageMode.Versioned"/>.</param>
-    /// <param name="defaultIndexSPI">Persisted SPI of the default index segment (primary key and non-<see cref="String64"/> secondary indexes).</param>
-    /// <param name="string64IndexSPI">Persisted SPI of the <see cref="String64"/> index segment.</param>
     /// <param name="storageMode">Storage mode from persisted ComponentR1 metadata.</param>
     /// <param name="exhaustionPolicy">Resource-exhaustion policy forwarded to the base <see cref="ResourceNode"/>.</param>
     /// <param name="newIndexFieldIds">Optional set of FieldIds for newly added indexes that need creating instead of loading.
@@ -500,8 +466,8 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     /// <param name="changeSet">Change set threading segment-load dirty marks through the allocation; may be <c>null</c>.</param>
     /// <param name="restoreCollectionInfo">When <c>true</c>, reconnect the component-collection buffer map to the persisted segments (user tables); when
     /// <c>false</c>, start with an empty map (system tables, which re-derive their collection info from runtime registration).</param>
-    internal ComponentTable(DatabaseEngine dbe, DBComponentDefinition definition, IResource parent, int componentSPI, int versionSPI, int defaultIndexSPI,
-        int string64IndexSPI, StorageMode storageMode = StorageMode.Versioned, ExhaustionPolicy exhaustionPolicy = ExhaustionPolicy.None,
+    internal ComponentTable(DatabaseEngine dbe, DBComponentDefinition definition, IResource parent, int componentSPI, int versionSPI,
+        StorageMode storageMode = StorageMode.Versioned, ExhaustionPolicy exhaustionPolicy = ExhaustionPolicy.None,
         HashSet<int> newIndexFieldIds = null, ChangeSet changeSet = null, bool restoreCollectionInfo = false) :
         base($"ComponentTable_{definition.Name}", ResourceType.ComponentTable, parent, exhaustionPolicy)
     {
@@ -520,8 +486,6 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         var mmf = DBE.MMF;
 
         ComponentSegment     = mmf.LoadChunkBasedSegment(componentSPI, ComponentTotalSize);
-        DefaultIndexSegment  = mmf.LoadChunkBasedSegment(defaultIndexSPI, sizeof(Index64Chunk));
-        String64IndexSegment = mmf.LoadChunkBasedSegment(string64IndexSPI, sizeof(IndexString64Chunk));
 
         // Versioned only: load revision chain segment
         if (storageMode == StorageMode.Versioned)
@@ -557,7 +521,7 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     /// Only valid for Versioned components.
     /// </summary>
     internal ComponentTable(DatabaseEngine dbe, DBComponentDefinition definition, IResource parent, ChunkBasedSegment<PersistentStore> componentSegment,
-        ChunkBasedSegment<PersistentStore> revisionSegment, int defaultIndexSPI, int string64IndexSPI,
+        ChunkBasedSegment<PersistentStore> revisionSegment,
         ExhaustionPolicy exhaustionPolicy = ExhaustionPolicy.None, HashSet<int> newIndexFieldIds = null, ChangeSet changeSet = null, bool restoreCollectionInfo = false) :
         base($"ComponentTable_{definition.Name}", ResourceType.ComponentTable, parent, exhaustionPolicy)
     {
@@ -569,8 +533,6 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
 
         ComponentSegment = componentSegment;
         CompRevTableSegment = revisionSegment;
-        DefaultIndexSegment = mmf.LoadChunkBasedSegment(defaultIndexSPI, sizeof(Index64Chunk));
-        String64IndexSegment = mmf.LoadChunkBasedSegment(string64IndexSPI, sizeof(IndexString64Chunk));
 
         BuildIndexedFieldInfo(true, changeSet, newIndexFieldIds);
         ViewRegistry = new ViewRegistry(IndexedFieldInfos.Length);
@@ -647,8 +609,6 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         // trees are recreated EMPTY here. Phase-5 (DatabaseEngine.RebuildSecondaryIndexes, after apply+scrub) repopulates them from the final HEAD data.
         if (load && DBE.WalFilesPresentAtOpen)
         {
-            BTreeBase<PersistentStore>.ClearSharedSegment(DefaultIndexSegment, changeSet);
-            BTreeBase<PersistentStore>.ClearSharedSegment(String64IndexSegment, changeSet);
             newIndexFieldIds = CollectAllIndexedFieldIds(newIndexFieldIds);
         }
 
@@ -684,13 +644,11 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
             // During schema evolution: newly added indexes use create mode; existing indexes use load mode
             var useLoad = load && (newIndexFieldIds == null || !newIndexFieldIds.Contains(f.FieldId));
 
-            var index = CreateIndexForField(f, (short)f.FieldId, useLoad, changeSet);
             var fi = new IndexedFieldInfo
             {
                 OffsetToField = ro + f.OffsetInComponentStorage,
                 Size          = f.SizeInComponentStorage,
-                Index         = index,
-                AllowMultiple = index.AllowMultiple,
+                AllowMultiple = f.IndexAllowMultiple,
             };
             fi.OffsetToIndexElementId = fi.AllowMultiple ? (Definition.EntityPKOverheadSize + j++ * sizeof(int)) : 0;
             l.Add(fi);
@@ -698,12 +656,6 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
 
         IndexedFieldInfos = l.ToArray();
         _indexLayoutVersion++;
-
-        IndexStats = new IndexStatistics[IndexedFieldInfos.Length];
-        for (var i = 0; i < IndexedFieldInfos.Length; i++)
-        {
-            IndexStats[i] = new IndexStatistics(IndexedFieldInfos[i].Index);
-        }
     }
 
 
@@ -722,97 +674,6 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         }
 
         return all;
-    }
-
-    // Per-index-segment accessor box for the Phase-5 rebuild: a class field gives a stable `ref box.Accessor` (a Dictionary value can't be passed by ref), and
-    // several indexed fields can share one index segment, so one accessor per segment matches the live commit's hoisted-accessor pattern.
-    private sealed class IndexAccessorBox
-    {
-        public ChunkAccessor<PersistentStore> Accessor;
-    }
-
-    /// <summary>
-    /// Phase-5 crash-recovery rebuild (03-recovery.md §7, RB-01) of this Versioned table's secondary indexes. For each chain head <c>(EntityPK → rootChunkId)</c>
-    /// in <paramref name="heads"/>, reads the head's content chunk (root element[0].ComponentChunkId) and re-inserts <c>key → rootChunkId</c> into every secondary
-    /// index — the index value for a Versioned component is the chain ROOT (queries resolve it through CompRevTable), never the content chunk. A tombstone head
-    /// (ComponentChunkId == 0, a deleted entity) carries no index entry. Called once per containing archetype on an index that was emptied at open
-    /// (<see cref="BuildIndexedFieldInfo"/> crash path), so the union across archetypes forms the complete index. Multi-value writes the element id back to the
-    /// component tail so later removals resolve. Reads only — never parses a persisted index node page (the precondition for retiring FPI on index pages).
-    /// </summary>
-    internal void RebuildSecondaryIndexEntriesFromHeads(Dictionary<long, int> heads, ChangeSet changeSet)
-    {
-        if (IndexedFieldInfos.Length == 0 || heads.Count == 0 || StorageMode != StorageMode.Versioned)
-        {
-            return;
-        }
-
-        // A multi-value index writes the returned elementId back into the component tail, so the content chunk must be dirty-marked (and committed) — but only when
-        // some field is AllowMultiple; a unique-only table reads the content read-only.
-        var anyMultiValue = false;
-        for (var i = 0; i < IndexedFieldInfos.Length; i++)
-        {
-            if (IndexedFieldInfos[i].AllowMultiple)
-            {
-                anyMultiValue = true;
-                break;
-            }
-        }
-
-        using var guard = EpochGuard.Enter(DBE.EpochManager);
-        var revAccessor = CompRevTableSegment.CreateChunkAccessor(changeSet);
-        var contentAccessor = ComponentSegment.CreateChunkAccessor(changeSet);
-        var idxAccessors = new Dictionary<ChunkBasedSegment<PersistentStore>, IndexAccessorBox>();
-        try
-        {
-            foreach (var kv in heads)
-            {
-                var rootChunkId = kv.Value;
-                revAccessor.GetChunkAsSpan(rootChunkId).Split(out Span<CompRevStorageHeader> _, out Span<CompRevStorageElement> els);
-                var contentChunkId = els[0].ComponentChunkId;
-                if (contentChunkId == 0)
-                {
-                    continue; // tombstone head (deleted entity) — no index entry
-                }
-
-                var contentBase = contentAccessor.GetChunkAddress(contentChunkId, anyMultiValue);
-                for (var i = 0; i < IndexedFieldInfos.Length; i++)
-                {
-                    ref var ifi = ref IndexedFieldInfos[i];
-                    var index = ifi.PersistentIndex;
-                    if (!idxAccessors.TryGetValue(index.Segment, out var box))
-                    {
-                        box = new IndexAccessorBox { Accessor = index.Segment.CreateChunkAccessor(changeSet) };
-                        idxAccessors[index.Segment] = box;
-                    }
-
-                    var keyAddr = contentBase + ifi.OffsetToField;
-                    if (ifi.AllowMultiple)
-                    {
-                        *(int*)(contentBase + ifi.OffsetToIndexElementId) = index.Add(keyAddr, rootChunkId, ref box.Accessor, out _);
-                    }
-                    else
-                    {
-                        index.Add(keyAddr, rootChunkId, ref box.Accessor);
-                    }
-                }
-            }
-        }
-        finally
-        {
-            foreach (var box in idxAccessors.Values)
-            {
-                box.Accessor.CommitChanges();
-                box.Accessor.Dispose();
-            }
-
-            if (anyMultiValue)
-            {
-                contentAccessor.CommitChanges(); // persist the elementId back-writes
-            }
-
-            contentAccessor.Dispose();
-            revAccessor.Dispose();
-        }
     }
 
     /// <summary>
@@ -891,163 +752,6 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     }
 
     /// <summary>
-    /// Populates newly created secondary indexes from data already on disk. Called after schema migration adds an <c>[Index]</c> to an existing field, which
-    /// creates the tree empty.
-    /// </summary>
-    /// <remarks>
-    /// Dispatches on <see cref="StorageMode"/> because the two storage shapes disagree on both what an index entry is worth indexing and what its VALUE must
-    /// be — see <see cref="PopulateNewIndexesVersioned"/> (#670).
-    /// </remarks>
-    internal void PopulateNewIndexes(HashSet<int> newIndexFieldIds, ChangeSet changeSet)
-    {
-        if (newIndexFieldIds == null || newIndexFieldIds.Count == 0)
-        {
-            return;
-        }
-
-        if (StorageMode == StorageMode.Versioned)
-        {
-            PopulateNewIndexesVersioned(newIndexFieldIds, changeSet);
-            return;
-        }
-
-        // SingleVersion (and Transient, which never reaches migration — its data does not survive a restart): one chunk per live entity, and the index value
-        // IS that chunk id, so the segment scan is both complete and correctly valued.
-        using var guard = EpochGuard.Enter(DBE.EpochManager);
-        var accessor = ComponentSegment.CreateChunkAccessor(changeSet);
-        try
-        {
-            var capacity = ComponentSegment.ChunkCapacity;
-            for (int chunkId = 1; chunkId < capacity; chunkId++)
-            {
-                if (!ComponentSegment.IsChunkAllocated(chunkId))
-                {
-                    continue;
-                }
-
-                // Insert into each new index
-                foreach (var ifi in IndexedFieldInfos)
-                {
-                    if (!newIndexFieldIds.Contains(GetFieldIdForIndex(ifi)))
-                    {
-                        continue;
-                    }
-
-                    var chunkAddr = accessor.GetChunkAddress(chunkId);
-                    var keyAddr = chunkAddr + ifi.OffsetToField;
-                    ifi.PersistentIndex.Add(keyAddr, chunkId, ref accessor);
-                }
-            }
-        }
-        finally
-        {
-            accessor.Dispose();
-        }
-    }
-
-    /// <summary>
-    /// The <see cref="StorageMode.Versioned"/> half of <see cref="PopulateNewIndexes"/>: walks this table's revision-chain heads and inserts
-    /// <c>key → rootChunkId</c> for each live entity, exactly as the Phase-5 crash rebuild does (#670).
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// The segment scan the other branch uses is wrong here in two independent ways, and both were live before #670.
-    /// </para>
-    /// <para>
-    /// <b>The value.</b> A Versioned secondary index stores the CompRev chain ROOT, never a content chunk id —
-    /// <see cref="RebuildSecondaryIndexEntriesFromHeads"/> inserts <c>rootChunkId</c>, and the query path walks the revision chain starting from whatever the
-    /// leaf holds. Backfilling a content chunk id hands the reader a meaningless start, so every lookup on the new index resolves to nothing.
-    /// </para>
-    /// <para>
-    /// <b>The population.</b> Every allocated chunk in a Versioned component segment is a retained REVISION, not an entity. A repeatedly-updated entity
-    /// contributed one entry per revision, each keyed on whatever value that revision happened to hold — resurrecting superseded keys as though they were
-    /// current.
-    /// </para>
-    /// <para>
-    /// Unlike the crash rebuild this takes no archetype filter: a ComponentTable's index is shared by every archetype holding the component, so the backfill
-    /// must cover all of them. Tombstone heads (a deleted entity) carry no entry, and a multi-value insert writes the element id back to the content tail so
-    /// later removals resolve — both matching the crash rebuild exactly.
-    /// </para>
-    /// </remarks>
-    private void PopulateNewIndexesVersioned(HashSet<int> newIndexFieldIds, ChangeSet changeSet)
-    {
-        // Epoch first: EnumerateVersionedChainHeads opens its own accessor over the revision segment, and every accessor must be created inside a scope.
-        using var guard = EpochGuard.Enter(DBE.EpochManager);
-
-        var heads = ComponentRevisionManager.EnumerateVersionedChainHeads(this);
-        if (heads.Count == 0)
-        {
-            return;
-        }
-
-        var anyMultiValue = false;
-        for (var i = 0; i < IndexedFieldInfos.Length; i++)
-        {
-            if (IndexedFieldInfos[i].AllowMultiple && newIndexFieldIds.Contains(GetFieldIdForIndex(IndexedFieldInfos[i])))
-            {
-                anyMultiValue = true;
-                break;
-            }
-        }
-
-        var revAccessor = CompRevTableSegment.CreateChunkAccessor(changeSet);
-        var contentAccessor = ComponentSegment.CreateChunkAccessor(changeSet);
-        var idxAccessors = new Dictionary<ChunkBasedSegment<PersistentStore>, IndexAccessorBox>();
-        try
-        {
-            foreach (var kv in heads)
-            {
-                var rootChunkId = kv.Value;
-                revAccessor.GetChunkAsSpan(rootChunkId).Split(out Span<CompRevStorageHeader> _, out Span<CompRevStorageElement> els);
-                var contentChunkId = els[0].ComponentChunkId;
-                if (contentChunkId == 0)
-                {
-                    continue; // tombstone head (deleted entity) — no index entry
-                }
-
-                var contentBase = contentAccessor.GetChunkAddress(contentChunkId, anyMultiValue);
-                for (var i = 0; i < IndexedFieldInfos.Length; i++)
-                {
-                    ref var ifi = ref IndexedFieldInfos[i];
-                    if (!newIndexFieldIds.Contains(GetFieldIdForIndex(ifi)))
-                    {
-                        continue;
-                    }
-
-                    var index = ifi.PersistentIndex;
-                    if (!idxAccessors.TryGetValue(index.Segment, out var box))
-                    {
-                        box = new IndexAccessorBox { Accessor = index.Segment.CreateChunkAccessor(changeSet) };
-                        idxAccessors[index.Segment] = box;
-                    }
-
-                    var keyAddr = contentBase + ifi.OffsetToField;
-                    if (ifi.AllowMultiple)
-                    {
-                        *(int*)(contentBase + ifi.OffsetToIndexElementId) = index.Add(keyAddr, rootChunkId, ref box.Accessor, out _);
-                    }
-                    else
-                    {
-                        index.Add(keyAddr, rootChunkId, ref box.Accessor);
-                    }
-                }
-            }
-        }
-        finally
-        {
-            foreach (var box in idxAccessors.Values)
-            {
-                box.Accessor.CommitChanges();
-                box.Accessor.Dispose();
-            }
-
-            contentAccessor.CommitChanges();
-            contentAccessor.Dispose();
-            revAccessor.Dispose();
-        }
-    }
-
-    /// <summary>
     /// Returns the FieldId associated with an IndexedFieldInfo by reverse lookup.
     /// </summary>
     private int GetFieldIdForIndex(IndexedFieldInfo ifi)
@@ -1079,29 +783,6 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
             _flags |= ComponentTableFlags.HasCollections;
         }
     }
-
-    /// <summary>
-    /// Creates a B+Tree index for a field on the given segment. Used by schema evolution to pre-create indexes
-    /// on existing segments before the ComponentTable is fully loaded.
-    /// </summary>
-    internal static BTreeBase<PersistentStore> CreateIndexForFieldStatic(DBComponentDefinition.Field field, BTreeStableKey key, bool load,
-        ChunkBasedSegment<PersistentStore> segment, ChangeSet changeSet = null)
-        => CreateIndexForFieldCore(field, key, load, segment, changeSet);
-
-    private IBTreeIndex CreateIndexForField(DBComponentDefinition.Field field, BTreeStableKey key, bool load = false, ChangeSet changeSet = null)
-    {
-        if (StorageMode == StorageMode.Transient)
-        {
-            return CreateIndexForFieldTransient(field, key);
-        }
-
-        var s = field.Type == FieldType.String64 ? String64IndexSegment : DefaultIndexSegment;
-        return CreateIndexForFieldCore(field, key, load, s, changeSet);
-    }
-
-    private BTreeBase<TransientStore> CreateIndexForFieldTransient(DBComponentDefinition.Field field, BTreeStableKey key)
-        => CreateIndexForFieldCore(field, key, false, field.Type == FieldType.String64 ? TransientString64IndexSegment : TransientDefaultIndexSegment);
-
 
     /// <summary>
     /// Creates one field's B+Tree in <paramref name="s"/>, picking the variant from the field's key type and multiplicity.
@@ -1157,6 +838,14 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         return index;
     }
 
+    /// <summary>
+    /// Creates a B+Tree index for a field on the given segment. Used by schema evolution to pre-create indexes
+    /// on existing segments before the ComponentTable is fully loaded.
+    /// </summary>
+    internal static BTreeBase<PersistentStore> CreateIndexForFieldStatic(DBComponentDefinition.Field field, BTreeStableKey key, bool load,
+        ChunkBasedSegment<PersistentStore> segment, ChangeSet changeSet = null)
+        => CreateIndexForFieldCore(field, key, load, segment, changeSet);
+
     /// <summary>Releases the table's owned persistent and transient segments (and the heap-backed transient stores). Idempotent — a second call is a no-op.</summary>
     /// <param name="disposing"><c>true</c> when disposing deterministically; <c>false</c> when running from the finalizer.</param>
     protected override void Dispose(bool disposing)
@@ -1169,9 +858,7 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         if (disposing)
         {
             // Persistent segments
-            String64IndexSegment?.Dispose();
-            DefaultIndexSegment?.Dispose();
-            CompRevTableSegment?.Dispose();
+                    CompRevTableSegment?.Dispose();
             ComponentSegment?.Dispose();
 
             // Transient segments

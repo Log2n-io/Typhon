@@ -533,8 +533,8 @@ internal sealed unsafe class ArchetypeClusterState
     public DirtyBitmap ClusterShadowBitmap;
 
     /// <summary>
-    /// Approximate count of index mutations across BOTH homes since the last statistics rebuild — the per-archetype counterpart of
-    /// <see cref="ComponentTable.MutationsSinceRebuild"/>, and the threshold <see cref="StatisticsWorker"/> trips on for a cluster-backed archetype (#665).
+    /// Approximate count of index mutations since the last statistics rebuild, and the threshold <see cref="StatisticsWorker"/> trips on (#665). The only such
+    /// counter now — its per-ComponentTable counterpart went with that index home (#629), never having been incremented by any write path.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -3204,8 +3204,8 @@ internal struct ClusterIndexSlot<TStore> where TStore : struct, IPageStore
     public FieldShadowBuffer[] ShadowBuffers;
 
     /// <summary>
-    /// Per-indexed-field selectivity statistics, parallel to <see cref="Fields"/> — the per-archetype counterpart of
-    /// <see cref="ComponentTable.IndexStats"/> (#665).
+    /// Per-indexed-field selectivity statistics, parallel to <see cref="Fields"/> — the only such array since the per-ComponentTable one was removed with
+    /// that index home (#665, #629).
     /// </summary>
     /// <remarks>
     /// Not shared with the ComponentTable's array on purpose. Statistics describe a key DISTRIBUTION, and a ComponentTable is shared across every archetype

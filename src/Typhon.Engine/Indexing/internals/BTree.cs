@@ -498,7 +498,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     private SpinLock _deferredLock = new(false);
 
     // Per-instance count and root tracking used for ALL runtime operations.
-    // Multiple BTrees can share the same ChunkBasedSegment<TStore> (e.g., PK index and secondary indexes share DefaultIndexSegment). Runtime code MUST use these
+    // Multiple BTrees can share the same ChunkBasedSegment<TStore> (an archetype's indexed fields share its index segment). Runtime code MUST use these
     // per-instance fields instead of reading from a single shared offset, which would cause cross-BTree corruption.
     // Each BTree has a unique entry in the chunk 0 directory, keyed by its BTreeStableKey (key + component slot).
     private int _count;

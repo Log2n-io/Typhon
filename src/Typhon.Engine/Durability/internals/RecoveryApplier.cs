@@ -200,6 +200,13 @@ internal sealed unsafe class RecoveryApplier : IDisposable
             }
         }
 
+        if (slots != null)
+        {
+            foreach (var sd in slots)
+            {
+                var t = sd.SlotIndex < _metadata.ComponentCount ? _engineState.SlotToComponentTable[sd.SlotIndex] : null;
+            }
+        }
         _engineState.EntityMap.InsertNew(key, recordPtr, ref _mapAccessor, _changeSet);
     }
 

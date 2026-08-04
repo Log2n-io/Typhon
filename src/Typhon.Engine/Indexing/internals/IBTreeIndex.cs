@@ -8,9 +8,9 @@ namespace Typhon.Engine.Internals;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <see cref="BTreeBase{TStore}"/> implements this interface, allowing <see cref="IndexedFieldInfo.Index"/>
-/// to hold indexes backed by either <see cref="PersistentStore"/> or <see cref="TransientStore"/> without
-/// making IndexedFieldInfo generic. Only cold-path properties are exposed here; hot-path operations
+/// <see cref="BTreeBase{TStore}"/> implements this interface, allowing a holder to keep indexes backed by either <see cref="PersistentStore"/> or
+/// <see cref="TransientStore"/> without becoming generic itself — today that holder is <c>ClusterIndexField&lt;TStore&gt;</c> on the archetype; it was
+/// <c>IndexedFieldInfo</c> on the ComponentTable until that home was removed (#629). Only cold-path properties are exposed here; hot-path operations
 /// (Add, Remove, RangeScan, etc.) require casting to the concrete <see cref="BTreeBase{TStore}"/> type.
 /// </para>
 /// </remarks>

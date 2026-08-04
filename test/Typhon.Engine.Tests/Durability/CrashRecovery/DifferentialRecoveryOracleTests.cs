@@ -667,9 +667,14 @@ internal sealed class DifferentialRecoveryOracleTests
 
     /// <summary>Resolves the on-disk file page index of an allocated CompD secondary-index node chunk that lives on a NON-root segment page (so tearing it leaves the
     /// chunk-0 BTree directory intact). Returns 0 if none exists (index fits on the root page).</summary>
+    /// <remarks>
+    /// Reads <c>CompDArch</c>'s OWN index segment rather than <c>ComponentTable.DefaultIndexSegment</c> (#629). The shared segment has no allocated node chunks
+    /// left to tear, so this returned 0 and the test failed on its premise assert — which at least failed loudly. Had the locator instead found some unrelated
+    /// allocated page, the test would have torn the wrong thing and passed while proving nothing.
+    /// </remarks>
     private static int ResolveNonRootIndexNodeFilePage(DatabaseEngine dbe)
     {
-        var seg = dbe.GetComponentTable<CompD>().DefaultIndexSegment;
+        var seg = dbe._archetypeStates[ArchetypeRegistry.GetMetadata<CompDArch>().ArchetypeId].ClusterState.IndexSegment;
         for (var chunkId = seg.ChunkCapacity - 1; chunkId >= BTreeBase<PersistentStore>.DirectoryChunkCount; chunkId--)
         {
             if (!seg.IsChunkAllocated(chunkId))

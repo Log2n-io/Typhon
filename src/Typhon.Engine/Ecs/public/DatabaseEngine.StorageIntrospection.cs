@@ -633,7 +633,7 @@ public partial class DatabaseEngine
     /// <summary>
     /// Locates a B-tree index segment by its root page across both storage paths: the per-archetype cluster-storage indexes
     /// (<c>ClusterState.IndexSegment</c>, for cluster-eligible SingleVersion archetypes) and the component-table indexes
-    /// (<c>DefaultIndexSegment</c> / <c>String64IndexSegment</c>, for the Versioned / legacy path). Returns <see langword="null"/> when
+    /// Returns <see langword="null"/> when
     /// no live segment matches.
     /// </summary>
     private ChunkBasedSegment<PersistentStore> FindIndexSegment(int rootPage)
@@ -651,17 +651,7 @@ public partial class DatabaseEngine
             }
         }
 
-        foreach (var table in GetAllComponentTables())
-        {
-            if (table.DefaultIndexSegment?.RootPageIndex == rootPage)
-            {
-                return table.DefaultIndexSegment;
-            }
-            if (table.String64IndexSegment?.RootPageIndex == rootPage)
-            {
-                return table.String64IndexSegment;
-            }
-        }
+        // The per-ComponentTable index segments this used to scan after the cluster ones no longer exist (#629); every index page belongs to an archetype.
 
         return null;
     }

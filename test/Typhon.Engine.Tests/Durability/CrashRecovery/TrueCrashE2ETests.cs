@@ -5,6 +5,7 @@ using System;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests;
 
@@ -666,4 +667,122 @@ internal sealed class TrueCrashE2ETests
             }
         }
     }
+
+    /// <summary>
+    /// The seal must consolidate a Versioned component held by a CLUSTER-backed archetype, exactly as it does for a flat one.
+    /// </summary>
+    /// <remarks>
+    /// Scoping probe for the failure in <see cref="RecoveredState_IsConsolidatedToDataFile_BySeal"/>. That test uses <c>CompAArch</c>, which is pure-Versioned
+    /// and therefore flat before the #629 eligibility flip and cluster-backed after — so on its own it cannot say whether the seal was always blind to cluster
+    /// storage or whether the flip broke something. This archetype carries an SV slot, so it is cluster-backed on BOTH sides of the flip: if it fails with the
+    /// flip reverted, the gap predates #629 and the flip merely widened the population it affects.
+    /// </remarks>
+    [Test]
+    [CancelAfter(15_000)]
+    public void SealConsolidation_MixedClusterArchetype_VersionedDataSurvives()
+    {
+        const int count = 10;
+        var entityIds = new EntityId[count];
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<SealPos>();
+            dbe.RegisterComponentFromAccessor<SealScore>();
+            dbe.InitializeArchetypes();
+
+            Assert.That(ArchetypeRegistry.GetMetadata<SealMixedArch>().IsClusterEligible, Is.True,
+                "premise: the SV slot makes this archetype cluster-backed on both sides of the #629 flip");
+
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    using var tx = uow.CreateTransaction();
+                    entityIds[i] = tx.Spawn<SealMixedArch>(
+                        SealMixedArch.Pos.Set(new SealPos(i, i)),
+                        SealMixedArch.Score.Set(new SealScore(i + 1)));
+                    tx.Commit();
+                }
+
+                uow.Flush();
+            }
+
+            dbe.SimulateHardCrash();
+        }
+
+        // Reopen: recovery replays the WAL and the seal consolidates it to the data file. Crash again so only persisted content can survive.
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<SealPos>();
+            dbe.RegisterComponentFromAccessor<SealScore>();
+            dbe.InitializeArchetypes();
+
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                Assert.That(tx.IsAlive(entityIds[0]), Is.True, "sanity: recovery restored the entity before the seal test");
+            }
+
+            dbe.SimulateHardCrash();
+        }
+
+        foreach (var wal in Directory.GetFiles(_walDir, "*.wal"))
+        {
+            File.Delete(wal);
+        }
+
+        using (var scope3 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope3.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<SealPos>();
+            dbe.RegisterComponentFromAccessor<SealScore>();
+            dbe.InitializeArchetypes();
+
+            using var tx = dbe.CreateQuickTransaction();
+            for (int i = 0; i < count; i++)
+            {
+                Assert.That(tx.IsAlive(entityIds[i]), Is.True, $"entity {i} must survive with NO WAL");
+                Assert.That(tx.Open(entityIds[i]).Read(SealMixedArch.Score).Value, Is.EqualTo(i + 1),
+                    $"entity {i}: the Versioned component must survive the seal — its revision carries the ORIGINAL TSN, so the seal has to persist the "
+                    + "TSN watermark alongside the data or every reader snapshots below it");
+
+                // SealPos is deliberately NOT asserted. It is SingleVersion on the plain TickFence discipline, whose spawn value is checkpoint-durable only —
+                // never WAL-logged — so a hard crash before any checkpoint loses it by design. That is D5 / CM-06 in
+                // claude/design/Durability/MinimalWal/03-recovery.md: "A plain TickFence spawn stays checkpoint-durable only — the documented non-guarantee
+                // (D5), not a bug." Only a Commit-discipline SV component logs its spawn value. Asserting it here would test the engine against a promise the
+                // design explicitly declines to make.
+
+            }
+        }
+    }
+}
+
+/// <summary>SingleVersion — makes <see cref="SealMixedArch"/> cluster-backed regardless of the #629 flip.</summary>
+[Component("Typhon.Test.Seal.Pos", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+struct SealPos
+{
+    public int X;
+    public int Y;
+
+    public SealPos(int x, int y) { X = x; Y = y; }
+}
+
+/// <summary>Versioned — the half whose revision chain the seal must consolidate.</summary>
+[Component("Typhon.Test.Seal.Score", 1)]
+[StructLayout(LayoutKind.Sequential)]
+struct SealScore
+{
+    public int Value;
+    public int _pad;
+
+    public SealScore(int value) { Value = value; _pad = 0; }
+}
+
+[Archetype]
+class SealMixedArch : Archetype<SealMixedArch>
+{
+    public static readonly Comp<SealPos> Pos = Register<SealPos>();
+    public static readonly Comp<SealScore> Score = Register<SealScore>();
 }

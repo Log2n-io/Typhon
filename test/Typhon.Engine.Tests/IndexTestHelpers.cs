@@ -64,6 +64,49 @@ static class IndexTestHelpers
         return null;
     }
 
+    /// <summary>
+    /// The B+Tree for one indexed field of <paramref name="table"/>, on whichever archetype owns an index slot for it — resolved by search, not by name.
+    /// </summary>
+    /// <remarks>
+    /// For call sites that only have the <see cref="ComponentTable"/>. Prefer <see cref="ArchetypeIndex{TArchetype}"/> when the archetype is known: a search
+    /// returns the FIRST owner, which is the wrong one the moment a second archetype holds the same component.
+    /// </remarks>
+    public static IBTreeIndex OwningIndex(DatabaseEngine dbe, ComponentTable table, int fieldIndex)
+    {
+        var clusterState = OwningCluster(dbe, table);
+        if (clusterState == null)
+        {
+            return null;
+        }
+
+        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        {
+            var engineState = dbe._archetypeStates[meta.ArchetypeId];
+            if (!ReferenceEquals(engineState?.ClusterState, clusterState))
+            {
+                continue;
+            }
+
+            for (var slot = 0; slot < meta.ComponentCount; slot++)
+            {
+                if (!ReferenceEquals(engineState.SlotToComponentTable[slot], table))
+                {
+                    continue;
+                }
+
+                for (var i = 0; i < clusterState.IndexSlots.Length; i++)
+                {
+                    if (clusterState.IndexSlots[i].Slot == slot && clusterState.IndexSlots[i].Fields != null)
+                    {
+                        return clusterState.IndexSlots[i].Fields[fieldIndex].Index;
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
     /// <summary>Per-archetype statistics for <paramref name="table"/>, or <see langword="null"/> when no archetype indexes it.</summary>
     public static IndexStatistics[] OwningStats(DatabaseEngine dbe, ComponentTable table)
     {

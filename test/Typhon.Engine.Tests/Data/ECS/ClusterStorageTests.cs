@@ -161,13 +161,16 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
     }
 
     [Test]
-    public void ClusterEligible_VersionedArchetype_NoClusterState()
+    public void ClusterEligible_VersionedArchetype_HasClusterState()
     {
         using var dbe = SetupClusterEngine();
         var meta = ArchetypeRegistry.GetMetadata<ClUnit>();
-        Assert.That(meta.IsClusterEligible, Is.False);
+
+        // Inverted by #629: a Versioned-only archetype is cluster-backed like every other. The cluster holds the HEAD in its slot and the history stays in the
+        // revision chain — the arrangement mixed SV+Versioned archetypes had used since Phase 5, so composition was never the obstacle.
+        Assert.That(meta.IsClusterEligible, Is.True);
         var es = dbe._archetypeStates[meta.ArchetypeId];
-        Assert.That(es.ClusterState, Is.Null);
+        Assert.That(es.ClusterState, Is.Not.Null);
     }
 
     // ═══════════════════════════════════════════════════════════════════════

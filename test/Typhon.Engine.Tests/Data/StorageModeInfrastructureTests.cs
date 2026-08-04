@@ -102,7 +102,6 @@ class StorageModeInfrastructureTests : TestBase<StorageModeInfrastructureTests>
         Assert.That(table.StorageMode, Is.EqualTo(StorageMode.Versioned));
         Assert.That(table.ComponentSegment, Is.Not.Null);
         Assert.That(table.CompRevTableSegment, Is.Not.Null);
-        Assert.That(table.DefaultIndexSegment, Is.Not.Null);
         Assert.That(table.TransientComponentSegment, Is.Null);
     }
 
@@ -118,7 +117,6 @@ class StorageModeInfrastructureTests : TestBase<StorageModeInfrastructureTests>
         Assert.That(table.StorageMode, Is.EqualTo(StorageMode.SingleVersion));
         Assert.That(table.ComponentSegment, Is.Not.Null, "SV uses PersistentStore (MMF checkpoint)");
         Assert.That(table.CompRevTableSegment, Is.Null, "SV has no revision chains");
-        Assert.That(table.DefaultIndexSegment, Is.Not.Null);
         Assert.That(table.TransientComponentSegment, Is.Null);
     }
 
@@ -136,7 +134,6 @@ class StorageModeInfrastructureTests : TestBase<StorageModeInfrastructureTests>
         // Persistent segments should be null
         Assert.That(table.ComponentSegment, Is.Null);
         Assert.That(table.CompRevTableSegment, Is.Null);
-        Assert.That(table.DefaultIndexSegment, Is.Null);
 
         // Transient segments should be non-null
         Assert.That(table.TransientComponentSegment, Is.Not.Null);

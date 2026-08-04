@@ -257,15 +257,23 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Non-cluster (flat) Commit path — large component ⇒ not cluster-eligible
+    // Commit path on a second archetype shape — pure-Versioned
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// Guards the premise for the tests below: <c>CmFlatEntity</c> is a distinct, pure-Versioned archetype.
+    /// </summary>
+    /// <remarks>
+    /// Asserted <c>IsClusterEligible == False</c> until #629, when it was the last flat shape and these tests were the flat Commit path's only coverage. There
+    /// is no flat shape now, so what the fixture still contributes is a SECOND archetype composition for the Commit discipline — pure-Versioned alongside the
+    /// SV-bearing one — which is worth keeping even though both take the same storage path.
+    /// </remarks>
     [Test]
-    public void NonCluster_ArchetypeIsFlat()
+    public void PureVersionedArchetype_IsClusterBackedLikeEveryOther()
     {
         using var dbe = SetupEngine();
-        Assert.That(Archetype<CmFlatEntity>.Metadata.IsClusterEligible, Is.False,
-            "CmFlatEntity must NOT be cluster-eligible for these tests to exercise the flat Commit path — pure-Versioned is the only flat shape left (#655)");
+        Assert.That(Archetype<CmFlatEntity>.Metadata.IsClusterEligible, Is.True,
+            "pure-Versioned is cluster-backed since #629 — the flat Commit path it used to exercise no longer exists");
     }
 
     private static EntityId SpawnFlat(DatabaseEngine dbe, int tag)

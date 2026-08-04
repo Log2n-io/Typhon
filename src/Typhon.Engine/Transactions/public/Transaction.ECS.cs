@@ -1144,6 +1144,7 @@ public unsafe partial class Transaction
                         }
 
 
+
                         // Deferred-insert: do NOT cache the read (commit/rollback/WAL would iterate dead Read entries). First write re-resolves
                         // via the chain root above and inserts then (EcsVersionedCopyOnWrite).
                         result.SetLocation(slot, chainResult.Value.CurCompContentChunkId);
@@ -1805,11 +1806,12 @@ public unsafe partial class Transaction
                         }
                     }
 
-                    // Insert Transient indexed fields into per-ComponentTable TransientIndex.
-                    // Note: archetypes with Transient indexed fields are excluded from cluster eligibility (see DatabaseEngine.InitializeArchetypes) because
-                    // write-time index maintenance for cluster-backed Transient data would require reading old/new values from the cluster SoA slot and
-                    // calling TransientIndex.Move — which conflicts with the ref-return pattern of Write<T>.
-                    // This code path handles the theoretical case where eligibility rules are relaxed in the future.
+                    // The per-ComponentTable TransientIndex insert that used to follow is gone (#629). Its own comment said Transient-indexed archetypes were
+                    // "excluded from cluster eligibility" and that the block only covered "the theoretical case where eligibility rules are relaxed in the
+                    // future" — the flip relaxed exactly that, so the block had quietly become live and was double-indexing: the per-archetype transient tree
+                    // is maintained above by InsertClusterIndexEntries(ClusterState.TransientIndexSlots, …), and that is the one reads consult.
+                    //
+                    // The entity-PK write into the chunk overhead stays: it is a layout invariant of an indexed non-Versioned component, not part of the tree.
                     if (ctx.TrSlotCount > 0 && ctx.TrCompAccessors != null)
                     {
                         for (int si = 0; si < ctx.TrSlotCount; si++)
@@ -1817,32 +1819,12 @@ public unsafe partial class Transaction
                             int trSlot = trSlots[si];
                             var table = ctx.EngineState.SlotToComponentTable[trSlot];
                             int srcChunkId = entry.Loc[trSlot];
-                            if (srcChunkId == 0)
+                            if (srcChunkId == 0 || table.Definition.EntityPKOverheadSize == 0)
                             {
                                 continue;
                             }
-                            byte* chunkAddr = ctx.TrCompAccessors[si].GetChunkAddress(srcChunkId, true);
 
-                            // Write EntityPK into the chunk's overhead area (TransientIndex expects it there)
-                            if (table.Definition.EntityPKOverheadSize > 0)
-                            {
-                                *(long*)chunkAddr = (long)entry.Id.RawValue;
-                            }
-                            var indexedFieldInfos = table.IndexedFieldInfos;
-                            for (int i = 0; i < indexedFieldInfos.Length; i++)
-                            {
-                                ref var ifi = ref indexedFieldInfos[i];
-                                var index = ifi.TransientIndex;
-                                if (ifi.AllowMultiple)
-                                {
-                                    *(int*)&chunkAddr[ifi.OffsetToIndexElementId] =
-                                        index.Add(&chunkAddr[ifi.OffsetToField], srcChunkId, ref ctx.TrIdxAccessors[trIdxAccessorBase[si] + i], out _);
-                                }
-                                else
-                                {
-                                    index.Add(&chunkAddr[ifi.OffsetToField], srcChunkId, ref ctx.TrIdxAccessors[trIdxAccessorBase[si] + i]);
-                                }
-                            }
+                            *(long*)ctx.TrCompAccessors[si].GetChunkAddress(srcChunkId, true) = (long)entry.Id.RawValue;
                         }
                     }
                 }
@@ -1865,134 +1847,12 @@ public unsafe partial class Transaction
                 // Cluster entities use per-archetype B+Trees (inserted in the cluster path above).
                 // Accessors are hoisted: created once when archetype changes (alongside mapAccessor),
                 // reused across all entities of the same archetype.
-                if (!ctx.UseCluster)
-                {
-                    for (int si = 0; si < ctx.SvSlotCount; si++)
-                    {
-                        int slot = svSlots[si];
-                        var table = ctx.EngineState.SlotToComponentTable[slot];
-                        int chunkId = entry.Loc[slot];
-                        if (chunkId == 0)
-                        {
-                            continue;
-                        }
-
-                        byte* chunkAddr = ctx.SvCompAccessors[si].GetChunkAddress(chunkId, true);
-
-                        // Write inline entityPK at offset 0 (SV indexed components store entityPK in overhead to enable chunkId → entityPK resolution during
-                        // index-based queries).
-                        if (table.Definition.EntityPKOverheadSize > 0)
-                        {
-                            *(long*)chunkAddr = (long)entry.Id.RawValue;
-                        }
-
-                        var indexedFieldInfos = table.IndexedFieldInfos;
-
-                        for (int i = 0; i < indexedFieldInfos.Length; i++)
-                        {
-                            ref var ifi = ref indexedFieldInfos[i];
-                            var index = ifi.PersistentIndex;
-                            if (ifi.AllowMultiple)
-                            {
-                                *(int*)&chunkAddr[ifi.OffsetToIndexElementId] =
-                                    index.Add(&chunkAddr[ifi.OffsetToField], chunkId, ref ctx.SvIdxAccessors[svIdxAccessorBase[si] + i], out _);
-                            }
-                            else
-                            {
-                                index.Add(&chunkAddr[ifi.OffsetToField], chunkId, ref ctx.SvIdxAccessors[svIdxAccessorBase[si] + i]);
-                            }
-                        }
-                    }
-                }
-
                 // Insert Transient secondary indexes (hoisted accessors, same pattern as SV).
                 // Cluster archetypes are always all-SV, so trSlotCount == 0. Guard for safety.
-                if (!ctx.UseCluster)
-                {
-                    for (int si = 0; si < ctx.TrSlotCount; si++)
-                    {
-                        int slot = trSlots[si];
-                        var table = ctx.EngineState.SlotToComponentTable[slot];
-                        int chunkId = entry.Loc[slot];
-                        if (chunkId == 0)
-                        {
-                            continue;
-                        }
-
-                        byte* chunkAddr = ctx.TrCompAccessors[si].GetChunkAddress(chunkId, true);
-
-                        if (table.Definition.EntityPKOverheadSize > 0)
-                        {
-                            *(long*)chunkAddr = (long)entry.Id.RawValue;
-                        }
-
-                        var indexedFieldInfos = table.IndexedFieldInfos;
-
-                        for (int i = 0; i < indexedFieldInfos.Length; i++)
-                        {
-                            ref var ifi = ref indexedFieldInfos[i];
-                            var index = ifi.TransientIndex;
-                            if (ifi.AllowMultiple)
-                            {
-                                *(int*)&chunkAddr[ifi.OffsetToIndexElementId] =
-                                    index.Add(&chunkAddr[ifi.OffsetToField], chunkId, ref ctx.TrIdxAccessors[trIdxAccessorBase[si] + i], out _);
-                            }
-                            else
-                            {
-                                index.Add(&chunkAddr[ifi.OffsetToField], chunkId, ref ctx.TrIdxAccessors[trIdxAccessorBase[si] + i]);
-                            }
-                        }
-                    }
-                }
-
                 // Insert SV spatial indexes (Transient excluded by schema validation).
                 // Must iterate all component slots (not just svSlots) because spatial-only components
                 // without B+Tree indexes are not in the svSlots array.
                 // Skip for cluster entities — per-archetype R-Tree is used instead.
-                if (!ctx.UseCluster)
-                {
-                    for (int slot = 0; slot < ctx.ComponentCount; slot++)
-                    {
-                        if ((ctx.VersionedMask & (1 << slot)) != 0)
-                        {
-                            continue; // Versioned — handled by CommitComponentCore
-                        }
-                        var table = ctx.EngineState.SlotToComponentTable[slot];
-                        if (table.SpatialIndex == null)
-                        {
-                            continue;
-                        }
-                        int chunkId = entry.Loc[slot];
-                        if (chunkId == 0)
-                        {
-                            continue;
-                        }
-
-                        // Zero the back-pointer chunk before InsertSpatial. Guarantees "not inserted" state (LeafChunkId=0)
-                        // even if InsertSpatial skips due to degenerate bounds. Without this, the CBS chunk may contain
-                        // garbage from a reused page, which UpdateSpatial would misinterpret as a valid leaf position.
-                        var bpAccessor = table.SpatialIndex.BackPointerSegment.CreateChunkAccessor(_changeSet);
-                        try
-                        {
-                            SpatialBackPointerHelper.Clear(ref bpAccessor, chunkId);
-                        }
-                        finally
-                        {
-                            bpAccessor.Dispose();
-                        }
-
-                        // Create a temporary component accessor for reading spatial field data
-                        var compAccessor = table.ComponentSegment.CreateChunkAccessor(_changeSet);
-                        try
-                        {
-                            SpatialMaintainer.InsertSpatial((long)entry.Id.RawValue, chunkId, table, ref compAccessor, _changeSet);
-                        }
-                        finally
-                        {
-                            compAccessor.Dispose();
-                        }
-                    }
-                }
             }
         }
         finally
@@ -2250,10 +2110,6 @@ public unsafe partial class Transaction
             svSlots[ctx.SvSlotCount] = slot;
             ctx.SvCompAccessors[ctx.SvSlotCount] = table.ComponentSegment.CreateChunkAccessor(_changeSet);
             svIdxAccessorBase[ctx.SvSlotCount] = ctx.SvIdxAccessorTotal;
-            for (int i = 0; i < indexedFieldInfos.Length; i++)
-            {
-                ctx.SvIdxAccessors[ctx.SvIdxAccessorTotal++] = indexedFieldInfos[i].PersistentIndex.Segment.CreateChunkAccessor(_changeSet);
-            }
             ctx.SvSlotCount++;
         }
 
@@ -2307,10 +2163,6 @@ public unsafe partial class Transaction
             trSlots[ctx.TrSlotCount] = slot;
             ctx.TrCompAccessors[ctx.TrSlotCount] = table.TransientComponentSegment.CreateChunkAccessor();
             trIdxAccessorBase[ctx.TrSlotCount] = ctx.TrIdxAccessorTotal;
-            for (int i = 0; i < indexedFieldInfos.Length; i++)
-            {
-                ctx.TrIdxAccessors[ctx.TrIdxAccessorTotal++] = indexedFieldInfos[i].TransientIndex.Segment.CreateChunkAccessor();
-            }
             ctx.TrSlotCount++;
         }
     }
@@ -2723,12 +2575,8 @@ public unsafe partial class Transaction
                         int chunkId = EntityRecordAccessor.GetLocation(readBuf, slot);
                         table.TrackDestroyedChunkId(chunkId);
 
-                        // If entity was NOT written this tick (no shadow), remove index entries now using current component data value (which matches the index).
-                        // If entity WAS written (shadow exists), ProcessShadowEntries handles removal using the shadow's old key (which matches the index).
-                        if (table.HasShadowableIndexes && !table.ShadowBitmap.Test(chunkId))
-                        {
-                            RemoveNonVersionedIndexEntries(table, chunkId);
-                        }
+                        // The per-ComponentTable index removal that stood here is gone (#629). Destroy removes per-archetype entries — including the view
+                        // deletion delta — through FlushPendingDestroys / RemoveClusterIndexEntries, for both the persistent and the transient home.
 
                         // Remove from spatial index immediately (no shadow needed — back-pointer provides O(1) lookup).
                         if (table.SpatialIndex != null)
@@ -2744,122 +2592,6 @@ public unsafe partial class Transaction
             if (hasEmAccessor)
             {
                 emAccessor.Dispose();
-            }
-        }
-    }
-
-    /// <summary>
-    /// Remove all secondary index entries for a non-Versioned component at the given chunkId.
-    /// Used at destroy time when the entity was NOT mutated this tick (index key = current data value).
-    /// Dispatches to the correct store type (PersistentStore for SV, TransientStore for Transient).
-    /// </summary>
-    private void RemoveNonVersionedIndexEntries(ComponentTable table, int chunkId)
-    {
-        if (table.StorageMode == StorageMode.Transient)
-        {
-            var compAccessor = table.TransientComponentSegment.CreateChunkAccessor();
-            try
-            {
-                RemoveIndexEntriesCore(table, chunkId, ref compAccessor);
-            }
-            finally
-            {
-                compAccessor.Dispose();
-            }
-        }
-        else
-        {
-            var compAccessor = table.ComponentSegment.CreateChunkAccessor();
-            try
-            {
-                RemoveIndexEntriesCore(table, chunkId, ref compAccessor);
-            }
-            finally
-            {
-                compAccessor.Dispose();
-            }
-        }
-    }
-
-    /// <summary>
-    /// Inner loop for <see cref="RemoveNonVersionedIndexEntries"/>. Generic over TStore so the JIT generates
-    /// specialized code for each store type. The <c>typeof(TStore)</c> branches are JIT-time constants —
-    /// dead code is eliminated, so only the matching path survives in each instantiation.
-    /// </summary>
-    private static void RemoveIndexEntriesCore<TStore>(ComponentTable table, int chunkId, ref ChunkAccessor<TStore> compAccessor) where TStore : struct, IPageStore
-    {
-        var fields = table.IndexedFieldInfos;
-        byte* ptr = compAccessor.GetChunkAddress(chunkId);
-
-        // View deltas are keyed on the ENTITY, not the chunk (issue #660 — this site used to publish the raw chunkId, which consumers
-        // then reinterpreted as an EntityId and mask-tested on its low 16 bits, silently discarding every deletion notification).
-        // An indexed SV/Transient component always carries the owning entity's PK inline at offset 0 of its chunk — written at spawn
-        // precisely so a chunk id can be resolved back to an entity (see FinalizeSpawns).
-        Debug.Assert(table.Definition.EntityPKOverheadSize > 0,
-            $"Indexed component '{table.Name}' has no inline entity-PK overhead; view deletion deltas cannot name their entity.");
-        var entityId = EntityId.FromRaw(*(long*)ptr);
-
-        for (int i = 0; i < fields.Length; i++)
-        {
-            ref var ifi = ref fields[i];
-            byte* fieldPtr = ptr + ifi.OffsetToField;
-
-            if (typeof(TStore) == typeof(TransientStore))
-            {
-                var index = ifi.TransientIndex;
-                var idxAccessor = index.Segment.CreateChunkAccessor();
-                try
-                {
-                    if (ifi.AllowMultiple)
-                    {
-                        int elementId = *(int*)(ptr + ifi.OffsetToIndexElementId);
-                        index.RemoveValue(fieldPtr, elementId, chunkId, ref idxAccessor);
-                    }
-                    else
-                    {
-                        index.Remove(fieldPtr, out _, ref idxAccessor);
-                    }
-                }
-                finally
-                {
-                    idxAccessor.Dispose();
-                }
-            }
-            else
-            {
-                var index = ifi.PersistentIndex;
-                var idxAccessor = index.Segment.CreateChunkAccessor();
-                try
-                {
-                    if (ifi.AllowMultiple)
-                    {
-                        int elementId = *(int*)(ptr + ifi.OffsetToIndexElementId);
-                        index.RemoveValue(fieldPtr, elementId, chunkId, ref idxAccessor);
-                    }
-                    else
-                    {
-                        index.Remove(fieldPtr, out _, ref idxAccessor);
-                    }
-                }
-                finally
-                {
-                    idxAccessor.Dispose();
-                }
-            }
-
-            // Notify views of deletion
-            var views = table.ViewRegistry.GetViewsForField(i);
-            for (int v = 0; v < views.Length; v++)
-            {
-                var reg = views[v];
-                if (reg.View.IsDisposed)
-                {
-                    continue;
-                }
-
-                var key = KeyBytes8.FromPointer(fieldPtr, ifi.Size);
-                byte flags = (byte)((i & 0x3F) | 0x80); // isDeletion flag
-                reg.DeltaBuffer.TryAppend(entityId, key, default, 0, flags, reg.ComponentTag);
             }
         }
     }

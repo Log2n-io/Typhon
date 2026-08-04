@@ -123,7 +123,12 @@ class ClusterViewPopulationTests : TestBase<ClusterViewPopulationTests>
         return dbe;
     }
 
-    /// <summary>Guards the premise: if the fixture archetype is not cluster-backed, none of these tests exercise #663.</summary>
+    /// <summary>Guards the premise: if the fixture archetypes are not cluster-backed, none of these tests exercise #663.</summary>
+    /// <remarks>
+    /// <c>VpSharedArchA</c> asserted the ComponentTable home until the eligibility flip (#629). It is cluster-backed now like everything else, which makes the
+    /// shared-component case MORE interesting rather than less: the component is held by two archetypes, so it has two per-archetype trees and no shared one,
+    /// which is precisely the shape #663 was about.
+    /// </remarks>
     [Test]
     public void Fixture_ArchetypesAreClusterBacked()
     {
@@ -131,7 +136,7 @@ class ClusterViewPopulationTests : TestBase<ClusterViewPopulationTests>
 
         Assert.That(Archetype<VpSvArch>.Metadata.HasClusterIndexes, Is.True, "the pure-SV fixture must be cluster-backed");
         Assert.That(Archetype<VpMixedArch>.Metadata.HasClusterIndexes, Is.True, "the mixed fixture must be cluster-backed");
-        Assert.That(Archetype<VpSharedArchA>.Metadata.HasClusterIndexes, Is.False, "the shared-component fixture must stay on the ComponentTable index");
+        Assert.That(Archetype<VpSharedArchA>.Metadata.HasClusterIndexes, Is.True, "the shared-component fixture is cluster-backed too — there is one home now");
     }
 
     [Test]
