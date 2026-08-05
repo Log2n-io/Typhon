@@ -3985,6 +3985,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 ref var header = ref ClusterEntityRecordAccessor.GetHeader(recordBuf);
                 header.BornTSN = 0;   // committed before this open → visible at every snapshot
                 header.DiedTSN = 0;   // live: it has a chain head
+                clusterState.NoteClusterBorn(clusterChunkId, 0);   // H1: establishes the summary as "all genesis" so a reopened DB starts on the fast path
 
                 // The pre-migration position, resolved BEFORE the enabled-bits loop so that loop can consult the old cluster's own bits.
                 (int ChunkId, int SlotIndex) oldPos = default;
@@ -4476,6 +4477,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     ref var header = ref ClusterEntityRecordAccessor.GetHeader(recordBuf);
                     header.BornTSN = 0; // committed before checkpoint → always visible
                     header.DiedTSN = 0; // live (occupancy bit set)
+                    clusterState.NoteClusterBorn(chunkId, 0);   // H1: reopened clusters are all-genesis, so seed the summary rather than leaving it unknown
 
                     // Prefer the preserved (non-derivable) EnabledBits from the persisted EntityMap; otherwise reconstruct the per-entity 16-bit mask from
                     // the cluster's per-component EnabledBits[c] (bit slotIndex set ⇒ component c enabled), written by EntityRef.Enable/Disable. NOTE: the

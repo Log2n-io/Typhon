@@ -388,9 +388,10 @@ public partial class DatabaseEngine
     /// <summary>
     /// In-place ClusterEntityRecord field updater consumed by <see cref="RawValuePagedHashMap{TKey,TStore}.TryUpdateInPlace"/>
     /// during migration. Patches the 4-byte ClusterChunkId and 1-byte SlotIndex fields without rewriting the rest of the record.
-    /// Struct (not ref struct) so it can sit on the stack as a local in <see cref="ExecuteMigrations"/> and pass through `ref`.
+    /// Struct (not ref struct) so it can sit on the stack as a local in <see cref="ExecuteMigrations"/> and pass through `ref`. NOT <c>readonly</c>: it also
+    /// carries the record's own BornTSN/DiedTSN back out, read under the same bucket write lock that performs the patch (H1).
     /// </summary>
-    private readonly unsafe struct ClusterLocationUpdater : IRawValueUpdater
+    private unsafe struct ClusterLocationUpdater : IRawValueUpdater
     {
         private readonly int _chunkId;
         private readonly byte _slotIndex;
@@ -401,9 +402,22 @@ public partial class DatabaseEngine
             _slotIndex = slotIndex;
         }
 
+        /// <summary>
+        /// The migrated entity's own BornTSN, captured while the record is under the bucket's write lock. A migration moves an entity BETWEEN clusters of one
+        /// archetype without changing its BornTSN, so the destination cluster's H1 visibility summary has to absorb it — otherwise a cluster that was "clean"
+        /// silently acquires an entity younger than a live reader's snapshot, and the scan skips the probe that would have hidden it.
+        /// </summary>
+        public long ObservedBornTsn;
+
+        /// <summary>The migrated entity's DiedTSN (0 = alive). Non-zero forces the destination cluster back onto the per-entity probe.</summary>
+        public long ObservedDiedTsn;
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Update(byte* valueBytes)
         {
+            ref var header = ref ClusterEntityRecordAccessor.GetHeader(valueBytes);
+            ObservedBornTsn = header.BornTSN;
+            ObservedDiedTsn = header.DiedTSN;
             ClusterEntityRecordAccessor.SetClusterChunkId(valueBytes, _chunkId);
             ClusterEntityRecordAccessor.SetSlotIndex(valueBytes, _slotIndex);
         }
@@ -740,6 +754,16 @@ public partial class DatabaseEngine
                 var entityKey = EntityId.FromRaw(entityPK).EntityKey;
                 var clusterLocationUpdater = new ClusterLocationUpdater(dstChunkId, (byte)dstSlot);
                 var updated = engineState.EntityMap.TryUpdateInPlace(entityKey, ref clusterLocationUpdater, ref emAccessor);
+                if (updated)
+                {
+                    // H1: the destination cluster now holds this entity, so its visibility summary must bound the entity's own TSNs. Folded AFTER the record
+                    // update so the summary can never be relaxed on the strength of a move that did not happen.
+                    clusterState.NoteClusterBorn(dstChunkId, clusterLocationUpdater.ObservedBornTsn);
+                    if (clusterLocationUpdater.ObservedDiedTsn != 0)
+                    {
+                        clusterState.NoteClusterDied(dstChunkId);
+                    }
+                }
                 if (!updated)
                 {
                     // EntityMap doesn't have this entity — was committed-destroyed before fence ran. We've already copied data to (dstChunkId, dstSlot), so the

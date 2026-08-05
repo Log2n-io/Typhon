@@ -1706,6 +1706,10 @@ public unsafe partial class Transaction
                     ClusterEntityRecordAccessor.InitializeRecord(recordPtr, ctx.Meta.VersionedSlotCount);
                     ref var clusterHeader = ref ClusterEntityRecordAccessor.GetHeader(recordPtr);
                     clusterHeader.BornTSN = TSN;
+                    // H1 visibility summary: fold this entity's BornTSN into its cluster's maximum so a scan can skip the per-match EntityMap probe for
+                    // clusters that were entirely committed before the reader's snapshot. Must sit with the BornTSN write, not near ClaimSlot — the summary
+                    // has to bound the value the gate will actually read.
+                    ctx.ClusterState.NoteClusterBorn(clusterChunkId, TSN);
                     clusterHeader.EnabledBits = enabledBits;
                     ClusterEntityRecordAccessor.SetClusterChunkId(recordPtr, clusterChunkId);
                     ClusterEntityRecordAccessor.SetSlotIndex(recordPtr, (byte)slotIdx);
@@ -2436,6 +2440,14 @@ public unsafe partial class Transaction
 
                     // Set DiedTSN (header layout is the same for both cluster and legacy records)
                     EntityRecordAccessor.GetHeader(readBuf).DiedTSN = TSN;
+                    // H1: a tombstone in this cluster means a reader older than TSN must still see the entity, and one newer must not — only the per-entity
+                    // probe can tell them apart, so drop the cluster off the fast path. Never cleared: proving no tombstone remains needs a full re-scan.
+                    // The chunk id comes from the record rather than the local above, which is scoped to the cluster-backed branch; the null check is what
+                    // establishes that this record IS a ClusterEntityRecord and so has that field at all.
+                    if (destroyClusterState != null)
+                    {
+                        destroyClusterState.NoteClusterDied(ClusterEntityRecordAccessor.GetClusterChunkId(readBuf));
+                    }
                     engineState.EntityMap.Upsert(entityId.EntityKey, readBuf, ref accessor, _changeSet);
 
                     // Enqueue for deferred GC (LinearHash removal + chunk freeing when MinTSN advances past DiedTSN)

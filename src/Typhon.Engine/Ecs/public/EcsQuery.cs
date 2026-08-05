@@ -1553,6 +1553,14 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     continue;
                 }
 
+                // H1 — cluster-granularity visibility. The per-match EntityMap probe below costs 166-241 ns/entity against ~27 ns for the whole rest of the
+                // scan, because the map's full-avalanche hash scatters consecutive keys into unrelated buckets. One sequential read of the cluster's summary
+                // answers "was every entity here committed before this snapshot, and has none died?" — and in steady state that is true of almost every
+                // cluster, so the probe count collapses to ~0. A cluster that fails the summary keeps the exact per-entity check, so correctness is unchanged.
+                // Read AFTER the occupancy word on purpose: the summary is published by the same commit that sets the occupancy bit, so a reader that cannot
+                // see the bit cannot be misled by a summary that predates it.
+                var clusterVisGated = visGated && !clusterState.IsClusterFullyVisibleAt(clusterChunkId, txTsn);
+
                 // The component column can live in a DIFFERENT segment from the occupancy word — a Transient slot on a mixed archetype. Chunk ids are held in
                 // lockstep between the two segments, so the same clusterChunkId addresses both.
                 var compBase = dataAccessor.GetChunkAddress(clusterChunkId) + compOffset;
@@ -1601,7 +1609,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                         if (pass)
                         {
                             var rawId = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
-                            if (IsVisibleAtSnapshot(rawId, visGated, visState, visBuf, visRecordSize, txTsn, ref visAccessor))
+                            if (IsVisibleAtSnapshot(rawId, clusterVisGated, visState, visBuf, visRecordSize, txTsn, ref visAccessor))
                             {
                                 result.Add(EntityId.FromRaw(rawId));
                             }
@@ -1631,7 +1639,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                         if (allMatch)
                         {
                             var rawId = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
-                            if (IsVisibleAtSnapshot(rawId, visGated, visState, visBuf, visRecordSize, txTsn, ref visAccessor))
+                            if (IsVisibleAtSnapshot(rawId, clusterVisGated, visState, visBuf, visRecordSize, txTsn, ref visAccessor))
                             {
                                 result.Add(EntityId.FromRaw(rawId));
                             }
@@ -1848,6 +1856,10 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                         continue;
                     }
 
+                    // H1 — same cluster-granularity visibility as the SoA scan (see ScanClusterSoa). Path A raised the stake rather than lowering it: the
+                    // tree has already narrowed the candidate set, so the per-match probe is a LARGER share of what remains than it is on a full scan.
+                    var clusterVisGated = visGated && !clusterState.IsClusterFullyVisibleAt(clusterChunkId, txTsn);
+
                     var compBase = clusterBase + compOffset;
 
                     if (anySimd)
@@ -1892,7 +1904,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                             if (pass)
                             {
                                 var rawId = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
-                                if (IsVisibleAtSnapshot(rawId, visGated, visState, visBuf, visRecordSize, txTsn, ref visAccessor))
+                                if (IsVisibleAtSnapshot(rawId, clusterVisGated, visState, visBuf, visRecordSize, txTsn, ref visAccessor))
                                 {
                                     result.Add(EntityId.FromRaw(rawId));
                                 }
@@ -1922,7 +1934,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                             if (allMatch)
                             {
                                 var rawId = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
-                                if (IsVisibleAtSnapshot(rawId, visGated, visState, visBuf, visRecordSize, txTsn, ref visAccessor))
+                                if (IsVisibleAtSnapshot(rawId, clusterVisGated, visState, visBuf, visRecordSize, txTsn, ref visAccessor))
                                 {
                                     result.Add(EntityId.FromRaw(rawId));
                                 }
