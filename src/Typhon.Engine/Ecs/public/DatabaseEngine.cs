@@ -404,6 +404,25 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private Dictionary<ushort, (ChunkBasedSegment<PersistentStore> Segment, ArchetypeClusterInfo Layout)> _preMigrationClusters;
 
     /// <summary>
+    /// Every segment this open decided to ABANDON because a schema migration invalidated it, as <c>(root page index, the stride it was written at)</c>. Freed
+    /// by <see cref="ReleaseAbandonedMigrationSegments"/> once the migration rebuild has finished reading them.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A migration changes component sizes, which changes the cluster geometry, which invalidates the cluster AND the EntityMap laid out over it; a component
+    /// that gains an index invalidates the index segment's tree directory. Each of those is replaced by a freshly allocated segment and the old one used to be
+    /// left behind — occupancy bits still set, no segment claiming them, so the NEXT open reported them as
+    /// <see cref="StorageIntegrityIssueKind.PopcountOrphan"/> and the pages never came back. Measured at 52 leaked pages for a one-field migration of two
+    /// archetypes (review M9).
+    /// </para>
+    /// <para>
+    /// Orthogonal to <see cref="_preMigrationClusters"/> on purpose. That dictionary answers "which old cluster still holds bytes I need to copy"; this list
+    /// answers "which pages must go back". A cluster is in both; an EntityMap only in this one.
+    /// </para>
+    /// </remarks>
+    private List<(int RootPageIndex, int Stride)> _abandonedMigrationSegments;
+
+    /// <summary>
     /// Components that gained a secondary index this session, so the archetypes holding them must repopulate their per-archetype trees from existing data.
     /// </summary>
     /// <remarks>
@@ -2931,6 +2950,16 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
             else
             {
+                // A migration invalidated the persisted EntityMap (the branch above is skipped on hasMigratedSlot), so the fresh allocation below REPLACES it
+                // and nothing will reference the old segment again. Record it for release — otherwise its pages stay bit-set in the occupancy map with no
+                // claimant forever, which is the largest of the three leaks review M9 describes (it never even named this one: 21 of the 26 pages per
+                // archetype). Deliberately not recorded when the load merely FAILED: a segment whose page directory could not be read must not have its page
+                // list trusted for a free — that is RB-01's rebuild path, not segment lifetime.
+                if (hasMigratedSlot && hasPersisted && persisted.Arch.EntityMapSPI > 0)
+                {
+                    (_abandonedMigrationSegments ??= []).Add((persisted.Arch.EntityMapSPI, stride));
+                }
+
                 // Fresh allocation (new archetype or legacy database without SPI)
                 // n0=256 avoids excessive linear hash splits during bulk entity insertion
                 // (256 buckets × ~9 entries/bucket × 0.75 load = ~1728 entities before first split)
@@ -3038,13 +3067,20 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         // Try to load persisted per-archetype index segments from this archetype's ArchetypeR1 row (#661). The row is matched by NAME, which
                         // is the durable identity; the previous home was a bootstrap key built from the per-process catalog id, which is not. Absent row or
                         // zero SPI ⇒ allocate fresh and rebuild, exactly as EntityMapSPI/ClusterSegmentSPI behave.
-                        var indexSPI = 0;
-                        var s64SPI = 0;
-                        if (!isFreshAllocation && TryGetPersistedArchetype(meta, out var indexPersisted))
+                        var persistedIndexSPI = 0;
+                        var persistedS64SPI = 0;
+                        if (TryGetPersistedArchetype(meta, out var indexPersisted))
                         {
-                            indexSPI = indexPersisted.Arch.ClusterIndexSPI;
-                            s64SPI = indexPersisted.Arch.ClusterString64IndexSPI;
+                            persistedIndexSPI = indexPersisted.Arch.ClusterIndexSPI;
+                            persistedS64SPI = indexPersisted.Arch.ClusterString64IndexSPI;
                         }
+
+                        // isFreshAllocation is about the ENTITY MAP — it is set when a schema migration forced a new one. The index segments are read
+                        // separately from it because "we are not reusing this" and "nobody owes these pages back" are different statements: the SPIs below
+                        // stay zero so the load decision is byte-identical to before, while the `persisted*` pair keeps the address the release pass needs.
+                        // Without that split the migrating open could not even see the segment it was abandoning (review M9).
+                        var indexSPI = isFreshAllocation ? 0 : persistedIndexSPI;
+                        var s64SPI = isFreshAllocation ? 0 : persistedS64SPI;
 
                         // RB-01, crash path (#656): a persisted secondary index is DERIVED and is never trusted after a crash. The segment is still loaded —
                         // tolerating a torn page, as the cluster and EntityMap loads do — so its pages are reclaimed rather than leaked, but the trees are
@@ -3055,12 +3091,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         var crashPath = WalFilesPresentAtOpen;
                         var loadIndexes = false;
                         ChunkBasedSegment<PersistentStore> indexSegment;
-                        // A component that GAINED an index cannot be loaded: BuildIndexSlot passes one `load` flag for every indexed field of the component,
-                        // and a field indexed for the first time has no entry in the persisted B+Tree directory — FindInDirectory throws rather than creating
-                        // it. The deleted ComponentTable.BuildIndexedFieldInfo had per-field granularity (`useLoad = load && !newIndexFieldIds.Contains(...)`);
-                        // this home does not, so the whole segment is cleared and rebuilt from cluster data instead. That is also the only correct choice:
-                        // RebuildIndexesFromData does bare Adds with no clear, so running it over loaded trees would double-insert every existing key and
-                        // overwrite the AllowMultiple element-id tail, orphaning the original entries (#629).
+                        // A component that GAINED an index cannot have its TREES loaded: BuildIndexSlot passes one `load` flag for every indexed field of the
+                        // component, and a field indexed for the first time has no entry in the persisted B+Tree directory — FindInDirectory throws rather
+                        // than creating it. The deleted ComponentTable.BuildIndexedFieldInfo had per-field granularity (`useLoad = load &&
+                        // !newIndexFieldIds.Contains(...)`); this home does not, so every tree is rebuilt from cluster data instead. That is also the only
+                        // correct choice: RebuildIndexesFromData does bare Adds with no clear, so running it over loaded trees would double-insert every
+                        // existing key and overwrite the AllowMultiple element-id tail, orphaning the original entries (#629).
+                        //
+                        // The SEGMENT is a different question, and conflating the two used to leak it: `hasNewIndex` sat in the load condition below, so the
+                        // persisted segment was never even registered and a fresh one was allocated beside it — occupancy bits set, no claimant, gone for
+                        // good (review M9). It belongs on `loadIndexes` instead. Loading and clearing reaches the identical end state as a fresh allocation
+                        // (ClearSharedSegment frees every node chunk and zeroes the directory header) while recycling the pages, and it is exactly what the
+                        // crash path below already does.
                         var hasNewIndex = false;
                         if (_componentsWithNewIndexes != null)
                         {
@@ -3070,13 +3112,21 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                             }
                         }
 
-                        if (indexSPI > 0 && !hasNewIndex && MMF.TryLoadChunkBasedSegment(indexSPI, 256 /* sizeof(Index64Chunk) */, out var loadedIdx, crashPath))
+                        if (indexSPI > 0 && MMF.TryLoadChunkBasedSegment(indexSPI, 256 /* sizeof(Index64Chunk) */, 
+                                out var loadedIdx, crashPath))
                         {
                             indexSegment = loadedIdx;
-                            loadIndexes = !crashPath;
+                            loadIndexes = !crashPath && !hasNewIndex;
                         }
                         else
                         {
+                            // Recorded only when the load was never ATTEMPTED (indexSPI == 0, i.e. a migration reallocated around it). An attempt that failed
+                            // means a torn directory, and a page list read out of one of those must not drive a free — same rule as the EntityMap.
+                            if (persistedIndexSPI > 0 && indexSPI == 0)
+                            {
+                                (_abandonedMigrationSegments ??= []).Add((persistedIndexSPI, 256 /* sizeof(Index64Chunk) */));
+                            }
+
                             indexSegment = MMF.AllocateChunkBasedSegment(PageBlockType.None, 20, 256 /* sizeof(Index64Chunk) */, null,
                                 StorageSegmentKind.Index);
                         }
@@ -3093,6 +3143,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                             }
                             else
                             {
+                                if (persistedS64SPI > 0 && s64SPI == 0)
+                                {
+                                    (_abandonedMigrationSegments ??= []).Add((persistedS64SPI, Unsafe.SizeOf<IndexString64Chunk>()));
+                                }
+
                                 string64IndexSegment = MMF.AllocateChunkBasedSegment(PageBlockType.None, 20, Unsafe.SizeOf<IndexString64Chunk>(), null,
                                     StorageSegmentKind.Index);
                                 // A half-loaded pair would rebuild one segment's trees and trust the other's. Rebuild both together.
@@ -3273,6 +3328,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // Drain the cluster head rebuilds deferred above — the EntityMap they read is now freshly derived, not the untrusted loaded one.
         versionedHeadTicks += DrainDeferredVersionedHeadRebuilds();
+
+        // Give back the pages of every segment a schema migration replaced. Last legal moment: the rebuild above is the only reader of a pre-migration cluster
+        // (review M9).
+        ReleaseAbandonedMigrationSegments();
 
         // Persist any new archetypes not yet in the database
         PersistNewArchetypes();
@@ -3818,16 +3877,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
 
         // Only SingleVersion is unrecoverable without the old cluster. A Versioned slot's chain survives the migration and RebuildVersionedHeadFromChain
-        // refills its cluster slot; a Transient slot has no persisted bytes at all. So an archetype with no SV slot needs nothing captured.
+        // refills its cluster slot; a Transient slot has no persisted bytes at all. So an archetype with no SV slot needs nothing RETAINED — but its old
+        // segment is abandoned all the same, and a segment that is never loaded can never be freed (ManagedPagedMMF.DeleteSegment works off the registry).
+        // Hence the load below is unconditional and `hasSv` decides only what happens to the result: kept for the byte copy, or loaded purely so its pages
+        // can go back (review M9).
         var hasSv = false;
         for (var slot = 0; slot < meta.ComponentCount && !hasSv; slot++)
         {
             hasSv = slotToTable[slot]?.StorageMode == StorageMode.SingleVersion;
-        }
-
-        if (!hasSv)
-        {
-            return;
         }
 
         if (!hasPersisted || persisted.Arch.ClusterSegmentSPI <= 0)
@@ -3860,7 +3917,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // A migration that also changed the index set moves the AllowMultiple element-id tail, and the tail's size is not recorded per archetype — so the old
         // stride cannot be reconstructed and every offset read out of the old cluster would be wrong. Refuse rather than copy garbage into SV components.
-        if (_componentsWithNewIndexes != null && _componentsWithNewIndexes.Count > 0)
+        // SV-only: without an SV slot nothing is read out of the old cluster, so a wrong stride costs nothing (the load below is for the page list, which the
+        // segment's own directory supplies) and there is nothing to refuse.
+        if (hasSv && _componentsWithNewIndexes != null && _componentsWithNewIndexes.Count > 0)
         {
             ThrowHelper.ThrowInvalidOp(
                 $"Archetype '{meta.Name}' has a SingleVersion component and a migration that ALSO adds an index. The added index resizes the cluster's "
@@ -3870,6 +3929,19 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
 
         var oldLayout = ArchetypeClusterInfo.Compute(meta.ComponentCount, oldSizes, multipleIndexedFieldCount, meta.VersionedSlotMask, meta.TransientSlotMask);
+
+        // The fresh cluster the caller allocates replaces this one, so its pages are owed back whether or not anything reads it first (review M9).
+        (_abandonedMigrationSegments ??= []).Add((persisted.Arch.ClusterSegmentSPI, oldLayout.ClusterStride));
+
+        if (!hasSv)
+        {
+            // Nothing to copy out, so nothing is loaded here. ReleaseAbandonedMigrationSegments does the load, and it does it where a failure is survivable:
+            // oldLayout reconstructs the OLD component sizes but counts AllowMultiple fields from the NEW schema, so a migration that DROPS an AllowMultiple
+            // index yields a stride narrower than the segment was written at. That over-estimates chunks-per-page, which is harmless for the page list we
+            // actually want but can fault the bitmap walk — and a page-reclaim optimisation must never be able to fail an open.
+            return;
+        }
+
         if (!MMF.TryLoadChunkBasedSegment(persisted.Arch.ClusterSegmentSPI, oldLayout.ClusterStride, out var oldSegment, WalFilesPresentAtOpen))
         {
             ThrowHelper.ThrowInvalidOp(
@@ -3878,7 +3950,79 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 + "bytes have no second copy and opening would silently zero them. See https://github.com/Log2n-io/Typhon/issues/671.");
         }
 
-        (_preMigrationClusters ??= [])[meta.ArchetypeId] = (oldSegment, oldLayout);
+        _preMigrationClusters ??= [];
+        _preMigrationClusters[meta.ArchetypeId] = (oldSegment, oldLayout);
+    }
+
+    /// <summary>
+    /// Frees every segment this open abandoned to a schema migration, once the migration rebuild has finished reading them.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Runs after <see cref="RebuildClusterFromChains"/> has consumed the pre-migration clusters and before the archetype rows are re-persisted. Uses
+    /// <c>ManagedPagedMMF.DeleteSegment</c> rather than a raw page free because the CK-05 directory twins and the map-extension pages are bit-set in the
+    /// occupancy map but live in no segment's <c>Pages</c> list — freeing only <c>Pages</c> would leave them set forever, which is the very leak this method
+    /// exists to close. Its "no concurrent reader" precondition holds by construction: this is the single-threaded open path.
+    /// </para>
+    /// <para>
+    /// A cluster whose <see cref="StorageMode.SingleVersion"/> bytes were needed is already registered
+    /// (<see cref="CapturePreMigrationCluster"/> loaded it), so it deletes directly. Everything else — the EntityMap, and the cluster of an archetype with no
+    /// SV slot — was never loaded, so it is loaded here first, purely to obtain its page list. That load is best-effort and every failure is swallowed: the
+    /// reconstructed stride can be wrong (see <see cref="CapturePreMigrationCluster"/>), and reclaiming pages must never be able to fail an open that would
+    /// otherwise succeed. The cost of giving up is the orphan we already had.
+    /// </para>
+    /// <para>
+    /// <b>Crash window, accepted deliberately.</b> The replacement SPI does not reach <c>ArchetypeR1</c> until the first checkpoint
+    /// (<see cref="PersistArchetypeState"/>, armed at the end of this open), so a crash between here and there leaves the persisted row naming pages that are
+    /// now free. This is the same window <c>SchemaEvolutionEngine.cs:418</c> already accepts when it deletes the old component and revision segments
+    /// ("best-effort cleanup"); closing it is migration atomicity, a larger problem than segment lifetime.
+    /// </para>
+    /// </remarks>
+    private void ReleaseAbandonedMigrationSegments()
+    {
+        var abandoned = _abandonedMigrationSegments;
+        _abandonedMigrationSegments = null;
+        _preMigrationClusters = null; // the rebuild is done with them; the loop below frees the segments themselves
+
+        if (abandoned == null)
+        {
+            return;
+        }
+
+        var cs = MMF.CreateChangeSet();
+        try
+        {
+            for (var i = 0; i < abandoned.Count; i++)
+            {
+                var (rootPageIndex, stride) = abandoned[i];
+                if (MMF.DeleteSegment(rootPageIndex, cs))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    // tolerateTorn: true unconditionally, not gated on WalFilesPresentAtOpen like every other load in this file. Those loads gate on it because
+                    // they go on to READ the segment and a torn one must not be trusted; this one wants nothing but the page list, and a segment we are about
+                    // to delete has no content left to be wrong about.
+                    if (MMF.TryLoadChunkBasedSegment(rootPageIndex, stride, out _, tolerateTornForRebuild: true))
+                    {
+                        MMF.DeleteSegment(rootPageIndex, cs);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Broad on purpose, and the one place in this file where that is right: the only thing lost is a page reclaim, and the alternative is an
+                    // engine that refuses to open a perfectly readable database because it could not tidy up after itself. The pages stay orphaned, which is
+                    // exactly the state this method was written to improve on — never a state it can make worse.
+                    LogAbandonedSegmentReleaseFailed(rootPageIndex, stride, ex.GetType().Name, ex.Message);
+                }
+            }
+        }
+        finally
+        {
+            cs.SaveChanges();
+        }
     }
 
     /// <summary>
@@ -4892,6 +5036,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     [LoggerMessage(LogLevel.Information, "Open: WAL recovery {walMs:F0} ms over {walBytes} WAL bytes")]
     internal partial void LogWalRecoveryTiming(double walMs, long walBytes);
+
+    // Review M9. Warning, not Error: the open succeeds and the data is intact — what was lost is a page reclaim, so the file keeps a block of pages that no
+    // segment will ever claim. Visible so a database that accumulates them across migrations can be recognised as such rather than as mysterious growth.
+    [LoggerMessage(LogLevel.Warning,
+        "Open: could not reclaim a segment replaced by a schema migration (root page {rootPageIndex}, stride {stride}); its pages stay allocated and will "
+        + "report as PopcountOrphan — {exceptionType}: {message}")]
+    private partial void LogAbandonedSegmentReleaseFailed(int rootPageIndex, int stride, string exceptionType, string message);
 
     // LOG-03 / REC-01. Warning, not Information: the scan ending early is indistinguishable from a clean end in every other
     // counter, and the difference is whether the log was cut short by corruption. Everything after the boundary was discarded.

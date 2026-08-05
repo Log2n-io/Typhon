@@ -304,6 +304,11 @@ class SchemaEvolutionStorageModeTests : TestBase<SchemaEvolutionStorageModeTests
                 // The two modes recover by DIFFERENT routes in the same pass — SV is copied from the old cluster, Versioned is refilled from its chain. This
                 // asserts the SV copy did not overwrite the neighbour's slot, and that re-placing entities kept both slots pointing at the same entity.
                 Assert.That(ver.V, Is.EqualTo(0xABCDEF), "the untouched Versioned neighbour must be refilled from its chain at the entity's NEW cluster slot");
+
+                // Review §5 C.4: the canonical migration fixture also has to say the migration left the FILE consistent, not just the data readable. A
+                // migration replaces the cluster, the EntityMap and (when an index is added) the index segment; each replacement used to abandon the old
+                // segment's pages (M9). MigrationSegmentReclaimTests covers the shapes; this is the guard on the fixture everyone edits.
+                Assert.That(dbe.RunStorageIntegrityCheck().IsHealthy, Is.True, "the migrating open must not leave pages allocated to no segment");
             });
         }
     }
