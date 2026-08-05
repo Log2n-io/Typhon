@@ -1,4 +1,4 @@
-﻿using JetBrains.Annotations;
+using JetBrains.Annotations;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Concurrent;
@@ -393,7 +393,15 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private bool _unregisteredFromRegistry;
 
     /// <summary>Component schema names that underwent migration during this engine session. Used to invalidate stale EntityMaps.</summary>
-    private HashSet<string> _migratedComponents;
+    private Dictionary<string, MigrationResult> _migratedComponents;
+
+    /// <summary>
+    /// Per archetype, the cluster segment as it stood BEFORE this open's schema migration, together with the geometry it was written at. A migration changes
+    /// component sizes, which changes <c>ClusterSize</c>, which moves every offset in the cluster — so the old bytes can only be read through the old layout.
+    /// Captured before the fresh cluster is allocated and consumed by <see cref="RebuildClusterFromChains"/>, which is the only thing that can still reach
+    /// <c>SingleVersion</c> data: it has no revision chain, so the cluster slot is its only copy (#671).
+    /// </summary>
+    private Dictionary<ushort, (ChunkBasedSegment<PersistentStore> Segment, ArchetypeClusterInfo Layout)> _preMigrationClusters;
 
     /// <summary>
     /// Components that gained a secondary index this session, so the archetypes holding them must repopulate their per-archetype trees from existing data.
@@ -2455,19 +2463,25 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         if (SchemaEvolutionEngine.NeedsMigration(diff, oldStride, newStride))
                         {
                             // A SingleVersion component keeps its bytes ONLY in its archetype's cluster slot — its ComponentSegment is never populated, and
-                            // every archetype is cluster-backed since #629. Migrate would load that empty segment at the old stride and fail with a storage
-                            // error that says nothing about the real problem. Reject with the actual reason instead. Cluster-aware SV migration — read the old
-                            // cluster at the old geometry and copy each slot through the field map — is the remaining half of #671.
+                            // every archetype is cluster-backed since #629. Running the ComponentTable migration would load that empty segment at the old
+                            // stride and fail with a storage error that says nothing about the real problem. There is nothing for it to move, so skip it and
+                            // publish just the remap: CapturePreMigrationCluster reads the old cluster at its own geometry and CopyPreMigrationSlot replays
+                            // this field map slot by slot (#671). The component's own segments are untouched, so their SPIs carry over unchanged.
                             if (definition.StorageMode == StorageMode.SingleVersion)
                             {
-                                ThrowHelper.ThrowInvalidOp(
-                                    $"Component '{schemaName}' is SingleVersion and its schema changed. Its data lives only in the cluster slot of each "
-                                    + "archetype holding it, which the migration cannot yet rewrite, so migrating would lose it. Tracked by "
-                                    + "https://github.com/Log2n-io/Typhon/issues/671.");
+                                migrationResult = new MigrationResult
+                                {
+                                    NewComponentSPI = persisted.Comp.ComponentSPI,
+                                    NewVersionSPI = persisted.Comp.VersionSPI,
+                                    FieldMap = SchemaEvolutionEngine.BuildFieldMap(persistedFields, definition),
+                                    OldCompSize = persisted.Comp.CompSize,
+                                };
                             }
-
-                            migrationResult = SchemaEvolutionEngine.Migrate(MMF, EpochManager, diff, persistedFields, persisted.Comp, definition, Logger,
-                                RaiseMigrationProgress);
+                            else
+                            {
+                                migrationResult = SchemaEvolutionEngine.Migrate(MMF, EpochManager, diff, persistedFields, persisted.Comp, definition, Logger,
+                                    RaiseMigrationProgress);
+                            }
                         }
                     }
 
@@ -2504,7 +2518,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 // Load path: use migration constructor if migration ran, otherwise standard load from persisted SPIs
                 var migrationChangeSet = (migrationResult.HasValue || newIndexFieldIds != null) ? MMF.CreateChangeSet() : null;
 
-                if (migrationResult.HasValue)
+                // The migration constructor adopts segments the migration just built, and is Versioned-only by construction. A SingleVersion migration builds
+                // none — its bytes move cluster-to-cluster later (#671), so its result carries only the field map and the segments are the persisted ones.
+                // Discriminate on the segment, not on HasValue, or SV takes a constructor that asserts its own storage mode away.
+                if (migrationResult.HasValue && migrationResult.Value.NewComponentSegment != null)
                 {
                     componentTable = new ComponentTable(this, definition, this, migrationResult.Value.NewComponentSegment, migrationResult.Value.NewRevisionSegment,
                         newIndexFieldIds: newIndexFieldIds, changeSet: migrationChangeSet, restoreCollectionInfo: true);
@@ -2536,7 +2553,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             if (migrationResult.HasValue)
             {
                 _migratedComponents ??= [];
-                _migratedComponents.Add(schemaName);
+                _migratedComponents[schemaName] = migrationResult.Value;
             }
 
             // Persist schema changes if the resolver detected changes or migration ran
@@ -2879,19 +2896,22 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             {
                 for (var slot = 0; slot < meta.ComponentCount && !hasMigratedSlot; slot++)
                 {
-                    hasMigratedSlot = _migratedComponents.Contains(slotToTable[slot].Definition.Name);
+                    hasMigratedSlot = _migratedComponents.ContainsKey(slotToTable[slot].Definition.Name);
                 }
-            }
-
-            if (hasMigratedSlot)
-            {
-                RejectUnrecoverableClusterMigration(meta, slotToTable);
             }
 
             // Reopen re-match by name (claude/design/Ecs/SourceGeneratedRegistry/04-solution-design.md §7.1):
             // restore this archetype's persisted routing id, or assign a fresh one for a newly-added archetype.
             var hasPersisted = TryGetPersistedArchetype(meta, out var persisted);
             var routingId = hasPersisted ? persisted.Arch.RoutingId : _nextRoutingId++;
+
+            // A migration invalidates the cluster (new component sizes => new geometry), so the fresh one is allocated below and the old bytes would be
+            // orphaned. Capture the old segment at its OWN layout first: for a SingleVersion slot those bytes are the ONLY copy of the data (#671). Anything
+            // this cannot reconstruct faithfully still fails loudly rather than opening with silently zeroed components.
+            if (hasMigratedSlot)
+            {
+                CapturePreMigrationCluster(meta, slotToTable, isClusterEligible, hasPersisted, persisted);
+            }
             _metaByRouting[routingId] = meta;
             _routingByCatalog[meta.ArchetypeId] = routingId;
 
@@ -3685,23 +3705,180 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// open is the only honest option: the alternative is a database that opens cleanly with every SingleVersion component silently zeroed.
     /// </para>
     /// </remarks>
-    private static void RejectUnrecoverableClusterMigration(ArchetypeMetadata meta, ComponentTable[] slotToTable)
+    /// <summary>
+    /// Walks the pre-migration cluster's occupancy bitmaps and returns each live entity's old <c>(chunkId, slotIndex)</c>, adding every entity found to
+    /// <paramref name="allEntityPKs"/> so a pure-<see cref="StorageMode.SingleVersion"/> archetype — which has no revision chains to enumerate — still
+    /// contributes its membership to the rebuild.
+    /// </summary>
+    private static unsafe Dictionary<long, (int ChunkId, int SlotIndex)> CollectPreMigrationPositions(ChunkBasedSegment<PersistentStore> oldSegment,
+        ArchetypeClusterInfo oldLayout, HashSet<long> allEntityPKs, ChangeSet cs)
     {
-        if (!meta.IsClusterEligible)
+        var positions = new Dictionary<long, (int ChunkId, int SlotIndex)>();
+        var accessor = oldSegment.CreateChunkAccessor(cs);
+        try
+        {
+            for (var chunkId = 0; chunkId < oldSegment.ChunkCapacity; chunkId++)
+            {
+                if (!oldSegment.IsChunkAllocated(chunkId))
+                {
+                    continue;
+                }
+
+                var chunkBase = accessor.GetChunkAddress(chunkId);
+                var occupancy = *(ulong*)chunkBase;
+                while (occupancy != 0)
+                {
+                    var slotIndex = BitOperations.TrailingZeroCount(occupancy);
+                    occupancy &= occupancy - 1;
+
+                    var entityPK = *(long*)(chunkBase + oldLayout.EntityIdsOffset + slotIndex * 8);
+                    if (entityPK == 0)
+                    {
+                        continue; // an occupied slot with no entity id is not addressable; skip rather than fabricate one
+                    }
+
+                    positions[entityPK] = (chunkId, slotIndex);
+                    allEntityPKs.Add(entityPK);
+                }
+            }
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+
+        return positions;
+    }
+
+    /// <summary>
+    /// Copies one entity's <see cref="StorageMode.SingleVersion"/> component bytes out of the pre-migration cluster into its newly claimed slot, applying the
+    /// migration's field map when that component's layout changed and a straight copy when it did not.
+    /// </summary>
+    /// <remarks>
+    /// Only SingleVersion is copied. A Versioned slot is refilled by <c>RebuildVersionedHeadFromChain</c> from the authoritative chain, and a Transient slot has
+    /// no persisted bytes in either cluster. Fields dropped by the migration are simply not copied, and fields added land on the zeroed new slot — the same
+    /// add/remove semantics <c>SchemaEvolutionEngine</c> gives the ComponentTable path.
+    /// </remarks>
+    private unsafe void CopyPreMigrationSlot(ArchetypeMetadata meta, ArchetypeEngineState state, ChunkBasedSegment<PersistentStore> oldSegment,
+        ArchetypeClusterInfo oldLayout, (int ChunkId, int SlotIndex) oldPos, ArchetypeClusterInfo newLayout, byte* newClusterBase, int newSlotIndex,
+        ChangeSet cs)
+    {
+        var accessor = oldSegment.CreateChunkAccessor(cs);
+        try
+        {
+            var oldChunkBase = accessor.GetChunkAddress(oldPos.ChunkId);
+            for (var slot = 0; slot < meta.ComponentCount; slot++)
+            {
+                var table = state.SlotToComponentTable[slot];
+                if (table?.StorageMode != StorageMode.SingleVersion)
+                {
+                    continue;
+                }
+
+                var src = oldChunkBase + oldLayout.ComponentOffset(slot) + oldPos.SlotIndex * oldLayout.ComponentSize(slot);
+                var dst = newClusterBase + newLayout.ComponentOffset(slot) + newSlotIndex * newLayout.ComponentSize(slot);
+
+                if (_migratedComponents == null || !_migratedComponents.TryGetValue(table.Definition.Name, out var mr) || mr.FieldMap == null)
+                {
+                    // Untouched by this migration: same layout on both sides, so the bytes move verbatim. The sizes can still differ if a DIFFERENT component
+                    // resized the cluster, but this component's own size did not change — copy the smaller of the two to stay in bounds either way.
+                    var n = Math.Min(oldLayout.ComponentSize(slot), newLayout.ComponentSize(slot));
+                    Buffer.MemoryCopy(src, dst, n, n);
+                    continue;
+                }
+
+                for (var f = 0; f < mr.FieldMap.Length; f++)
+                {
+                    ref var entry = ref mr.FieldMap[f];
+                    var srcField = src + entry.OldOffset;
+                    var dstField = dst + entry.NewOffset;
+                    if (entry.NeedsWidening)
+                    {
+                        SchemaEvolutionEngine.ApplyWidening(srcField, dstField, entry.OldType, entry.NewType, entry.OldSize, entry.NewSize);
+                    }
+                    else
+                    {
+                        Buffer.MemoryCopy(srcField, dstField, entry.NewSize, entry.OldSize);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+    }
+
+    private void CapturePreMigrationCluster(ArchetypeMetadata meta, ComponentTable[] slotToTable, bool isClusterEligible, bool hasPersisted,
+        (int ChunkId, ArchetypeR1 Arch) persisted)
+    {
+        if (!isClusterEligible)
         {
             return;
         }
 
+        // Only SingleVersion is unrecoverable without the old cluster. A Versioned slot's chain survives the migration and RebuildVersionedHeadFromChain
+        // refills its cluster slot; a Transient slot has no persisted bytes at all. So an archetype with no SV slot needs nothing captured.
+        var hasSv = false;
+        for (var slot = 0; slot < meta.ComponentCount && !hasSv; slot++)
+        {
+            hasSv = slotToTable[slot]?.StorageMode == StorageMode.SingleVersion;
+        }
+
+        if (!hasSv)
+        {
+            return;
+        }
+
+        if (!hasPersisted || persisted.Arch.ClusterSegmentSPI <= 0)
+        {
+            return; // nothing persisted to recover from — the archetype is new, so there are no old bytes to lose
+        }
+
+        // Reconstruct the geometry the old cluster was written at: the migrated components at their PRE-migration size, everything else unchanged.
+        var oldSizes = new int[meta.ComponentCount];
+        var multipleIndexedFieldCount = 0;
         for (var slot = 0; slot < meta.ComponentCount; slot++)
         {
-            if (slotToTable[slot]?.StorageMode == StorageMode.SingleVersion)
+            var table = slotToTable[slot];
+            oldSizes[slot] = _migratedComponents != null && _migratedComponents.TryGetValue(table.Definition.Name, out var mr) && mr.OldCompSize > 0 ? 
+                mr.OldCompSize : table.Definition.ComponentStorageSize;
+
+            if (table.IndexedFieldInfos == null)
             {
-                ThrowHelper.ThrowInvalidOp(
-                    $"Archetype '{meta.Name}' has a schema migration and a SingleVersion component ('{slotToTable[slot].Name}'). The migration invalidates the "
-                    + "cluster those bytes live in, and SingleVersion keeps no revision chain to rebuild them from, so opening would silently zero them. "
-                    + "Cluster-aware migration of SingleVersion data is tracked by https://github.com/Log2n-io/Typhon/issues/671.");
+                continue;
+            }
+
+            for (var fi = 0; fi < table.IndexedFieldInfos.Length; fi++)
+            {
+                if (table.IndexedFieldInfos[fi].AllowMultiple)
+                {
+                    multipleIndexedFieldCount++;
+                }
             }
         }
+
+        // A migration that also changed the index set moves the AllowMultiple element-id tail, and the tail's size is not recorded per archetype — so the old
+        // stride cannot be reconstructed and every offset read out of the old cluster would be wrong. Refuse rather than copy garbage into SV components.
+        if (_componentsWithNewIndexes != null && _componentsWithNewIndexes.Count > 0)
+        {
+            ThrowHelper.ThrowInvalidOp(
+                $"Archetype '{meta.Name}' has a SingleVersion component and a migration that ALSO adds an index. The added index resizes the cluster's "
+                + "element-id tail, and the pre-migration tail size is not recorded, so the old cluster's offsets cannot be reconstructed to copy the "
+                + "SingleVersion bytes out. Apply the field change and the index addition in separate steps. See "
+                + "https://github.com/Log2n-io/Typhon/issues/671.");
+        }
+
+        var oldLayout = ArchetypeClusterInfo.Compute(meta.ComponentCount, oldSizes, multipleIndexedFieldCount, meta.VersionedSlotMask, meta.TransientSlotMask);
+        if (!MMF.TryLoadChunkBasedSegment(persisted.Arch.ClusterSegmentSPI, oldLayout.ClusterStride, out var oldSegment, WalFilesPresentAtOpen))
+        {
+            ThrowHelper.ThrowInvalidOp(
+                $"Archetype '{meta.Name}' has a SingleVersion component and a schema migration, but its pre-migration cluster segment (SPI "
+                + $"{persisted.Arch.ClusterSegmentSPI}, stride {oldLayout.ClusterStride}) could not be loaded. SingleVersion keeps no revision chain, so those "
+                + "bytes have no second copy and opening would silently zero them. See https://github.com/Log2n-io/Typhon/issues/671.");
+        }
+
+        (_preMigrationClusters ??= [])[meta.ArchetypeId] = (oldSegment, oldLayout);
     }
 
     /// <summary>
@@ -3721,8 +3898,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// method writes.
     /// </para>
     /// <para>
-    /// <b>SingleVersion and Transient slots are not recoverable this way</b> and the caller is expected to have rejected that case: their only home is the
-    /// cluster slot itself, so a cluster rebuilt from chains has nothing to restore them from. See <see cref="RejectUnrecoverableClusterMigration"/>.
+    /// <b>A SingleVersion slot cannot be rebuilt from chains</b> — it has none, the cluster slot IS its data. When a migration invalidated the cluster,
+    /// <see cref="CapturePreMigrationCluster"/> kept the old segment and its geometry, and this method copies those bytes across through the migration's field
+    /// map. Membership then comes from the union of the chain heads and the old cluster's occupancy, so a PURE-SingleVersion archetype (no chains at all)
+    /// migrates too. A Transient slot has no persisted bytes in either home and is simply re-enabled (#671).
     /// </para>
     /// </remarks>
     private unsafe void RebuildClusterFromChains(ArchetypeMetadata meta, ArchetypeEngineState state, ChangeSet cs)
@@ -3730,7 +3909,16 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         var clusterState = state.ClusterState;
         var layout = clusterState.Layout;
         var slotToVi = layout.SlotToVersionedIndex;
-        if (clusterState.ClusterSegment == null || meta.VersionedSlotMask == 0 || slotToVi == null)
+        if (clusterState.ClusterSegment == null)
+        {
+            return;
+        }
+
+        // The pre-migration cluster, when this open migrated a schema. It is the only surviving copy of every SingleVersion slot's bytes, and its occupancy is
+        // the only record of a pure-SingleVersion archetype's membership — such an archetype has no chains, so the head scan below finds nothing.
+        (ChunkBasedSegment<PersistentStore> Segment, ArchetypeClusterInfo Layout) oldCluster = default;
+        var hasOldCluster = _preMigrationClusters != null && _preMigrationClusters.TryGetValue(meta.ArchetypeId, out oldCluster);
+        if (!hasOldCluster && (meta.VersionedSlotMask == 0 || slotToVi == null))
         {
             return;
         }
@@ -3738,7 +3926,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Chain heads per Versioned slot: EntityPK -> compRevFirstChunkId. Same source the flat and crash rebuilds use.
         var chainHeads = new Dictionary<long, int>[meta.ComponentCount];
         var allEntityPKs = new HashSet<long>();
-        for (var slot = 0; slot < meta.ComponentCount; slot++)
+        for (var slot = 0; slot < meta.ComponentCount && slotToVi != null; slot++)
         {
             if (slotToVi[slot] < 0)
             {
@@ -3758,6 +3946,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             {
                 allEntityPKs.Add(pk);
             }
+        }
+
+        // Union in the old cluster's membership. An entity whose only components are SingleVersion has no chain head, so without this it would be dropped.
+        Dictionary<long, (int ChunkId, int SlotIndex)> oldPositions = null;
+        if (hasOldCluster)
+        {
+            oldPositions = CollectPreMigrationPositions(oldCluster.Segment, oldCluster.Layout, allEntityPKs, cs);
         }
 
         if (allEntityPKs.Count == 0)
@@ -3794,7 +3989,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 ushort enabledMask = 0;
                 for (var slot = 0; slot < meta.ComponentCount; slot++)
                 {
-                    var vi = slotToVi[slot];
+                    var vi = slotToVi == null ? -1 : slotToVi[slot];
                     if (vi < 0)
                     {
                         enabledMask |= (ushort)(1 << slot);
@@ -3812,6 +4007,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         enabledMask |= (ushort)(1 << slot);
                         *(ulong*)(clusterBase + layout.EnabledBitsOffset(slot)) |= 1UL << slotIndex;
                     }
+                }
+
+                // SingleVersion bytes have no other home: carry them over from the old cluster, remapped field by field when the component's layout changed.
+                if (oldPositions != null && oldPositions.TryGetValue(entityPK, out var oldPos))
+                {
+                    CopyPreMigrationSlot(meta, state, oldCluster.Segment, oldCluster.Layout, oldPos, layout, clusterBase, slotIndex, cs);
                 }
 
                 header.EnabledBits = enabledMask;

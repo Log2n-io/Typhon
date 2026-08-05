@@ -63,19 +63,22 @@ class SchemaEvolutionProbeTests : TestBase<SchemaEvolutionProbeTests>
             t.Commit();
         }
 
-        // The Versioned half of cluster-aware migration is implemented (#671): the cluster is discarded, entities are re-placed from their revision chains and
-        // the HEADs refilled. SingleVersion has no chain, so its bytes exist only in the cluster slot the migration invalidates — and reconstructing them needs
-        // the OLD cluster geometry, read at the OLD stride, copied through the field map. Until that lands the engine must REFUSE to open rather than present a
-        // silently zeroed component, which is what it did before this assertion existed.
+        // Cluster-aware migration of SingleVersion data (#671): the migration invalidates the cluster geometry, so the old segment is loaded at its OWN stride
+        // and each SV slot's bytes are copied across through the migration's field map. A is the surviving field, C is added and must land zeroed.
         using (var scope = ServiceProvider.CreateScope())
         {
             using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<EvoSvProbeV2>();
+            dbe.InitializeArchetypes();
 
-            Assert.That(() => dbe.RegisterComponentFromAccessor<EvoSvProbeV2>(),
-                Throws.InstanceOf<System.InvalidOperationException>().With.Message.Contains("671"),
-                "a SingleVersion schema change must fail loudly with the reason, not lose the data or surface a raw storage error");
+            using var t = dbe.CreateQuickTransaction();
+            var got = t.Open(entityId).Read(EvoSvProbeV2Arch.Comp);
+            Assert.Multiple(() =>
+            {
+                Assert.That(got.A, Is.EqualTo(42), "surviving int field must carry over — SingleVersion has no chain, so the old cluster slot is its only copy");
+                Assert.That(got.B, Is.EqualTo(3.14f).Within(0.0001f), "surviving float field must carry over");
+                Assert.That(got.C, Is.EqualTo(0), "field added by the migration must be zero-filled");
+            });
         }
-
-        _ = entityId;
     }
 }
