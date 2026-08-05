@@ -14,7 +14,10 @@ namespace Typhon.Engine.Tests;
 [StructLayout(LayoutKind.Sequential)]
 struct ClIdxHealth
 {
-    [Index]
+    // AllowMultiple because a health total is not an identity: two units at 100 HP is the normal case, not a conflict. It was declared unique, which made the
+    // engine's index unrepresentable the moment two entities shared a value — the defect behind #675. The engine now rejects that at write time, so this
+    // declaration has to say what the data actually is.
+    [Index(AllowMultiple = true)]
     public int Current;
 
     public int Max;

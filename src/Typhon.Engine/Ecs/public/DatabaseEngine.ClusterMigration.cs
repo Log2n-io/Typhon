@@ -1079,6 +1079,10 @@ public partial class DatabaseEngine
                             }
                             else
                             {
+                                // The SV mutation path. A SingleVersion component has no revision chain, so its index maintenance happens HERE, at the
+                                // tick-fence shadow drain, rather than on the commit path — which is why guarding only the commit sites left the collision
+                                // reachable (#675).
+                                Transaction.RejectUniqueIndexCollision(ref field, fieldPtr, clusterLocation, ref idxAccessor);
                                 field.Index.Move(&oldKey, fieldPtr, clusterLocation, ref idxAccessor);
                             }
 

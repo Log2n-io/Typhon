@@ -1,4 +1,4 @@
-﻿// unset
+// unset
 
 using JetBrains.Annotations;
 using System;
@@ -1937,6 +1937,45 @@ public unsafe partial class Transaction : EntityAccessor
         8 => *(long*)a == *(long*)b,
         _ => new ReadOnlySpan<byte>(a, size).SequenceEqual(new ReadOnlySpan<byte>(b, size)),
     };
+    /// <summary>
+    /// Refuses to write a key into a UNIQUE per-archetype index when a DIFFERENT entity already holds it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A unique B+Tree stores one value per key, and the underlying primitive is <c>AddOrUpdate</c> — so admitting a duplicate does not fail, it silently
+    /// OVERWRITES the incumbent. The loser then exists in the data but is unreachable through the index, and the two disagree permanently: a scan of the data
+    /// finds it, an index lookup does not. That is the defect behind #675, and it is why the index could be wrong while ~4 000 tests passed — queries take the
+    /// SoA scan, which reads component data and never consults the tree.
+    /// </para>
+    /// <para>
+    /// Rejecting is the only honest option of the three available. Silently overwriting corrupts. Auto-promoting the field to <c>AllowMultiple</c> would change
+    /// a declared constraint at run time and cost every unique index 4 bytes per entity plus a buffer indirection. So the engine enforces what the attribute
+    /// promises: <c>[Index]</c> without <c>AllowMultiple</c> is documented as "one entity per key" (<c>IndexAttribute.AllowMultiple</c>), and a field whose
+    /// values genuinely collide — a health total, a category, a bucket — must say <c>[Index(AllowMultiple = true)]</c>.
+    /// </para>
+    /// <para>
+    /// Cost is one extra optimistic descent per unique-index write. That is not free on a commit path, and it can be removed later by surfacing the
+    /// <c>InsertArguments.Added</c> flag that <c>AddOrUpdateCore</c> already computes — the check is here rather than inside <c>Add</c> because that method's
+    /// body is contractually throw-free (see its PROFILING-SPAN-NO-THROW markers).
+    /// </para>
+    /// </remarks>
+    internal static unsafe void RejectUniqueIndexCollision<TStore>(ref ClusterIndexField<TStore> field, byte* newKeyPtr, int clusterLocation,
+        ref ChunkAccessor<TStore> idxAccessor)
+        where TStore : struct, IPageStore
+    {
+        var existing = field.Index.TryGet(newKeyPtr, ref idxAccessor);
+        if (!existing.IsSuccess || existing.Value == clusterLocation)
+        {
+            return;
+        }
+
+        ThrowHelper.ThrowInvalidOp(
+            $"unique index collision: cluster location {clusterLocation} is being indexed under a key already held by the entity at cluster location "
+            + $"{existing.Value}. A unique index stores one entity per key, so writing this would make the incumbent unreachable through the index while it "
+            + "remains present in the data. Declare the field [Index(AllowMultiple = true)] if its values are meant to repeat. See "
+            + "https://github.com/Log2n-io/Typhon/issues/675.");
+    }
+
 
     /// <summary>
     /// Reconciles the per-archetype B+Tree index(es) and view delta buffers for one component slot of one cluster entity, given the field-value
@@ -2002,6 +2041,7 @@ public unsafe partial class Transaction : EntityAccessor
                     }
                     else
                     {
+                        RejectUniqueIndexCollision(ref field, newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
                         field.Index.Move(oldComp + field.FieldOffset, newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
                     }
                 }
@@ -2009,6 +2049,11 @@ public unsafe partial class Transaction : EntityAccessor
                 {
                     // Insert (first commit after spawn): Add returns the per-entity element id for an AllowMultiple index, which must be recorded in the
                     // cluster tail slot so destroy/update can target this entity's entry (mirrors FinalizeSpawns).
+                    if (!field.AllowMultiple)
+                    {
+                        RejectUniqueIndexCollision(ref field, newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
+                    }
+
                     int elementId = field.Index.Add(newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
                     if (field.AllowMultiple)
                     {
