@@ -138,8 +138,7 @@ internal static unsafe class IndexDataOracle
                 var slotIndex = System.Numerics.BitOperations.TrailingZeroCount(occupancy);
                 occupancy &= occupancy - 1;
 
-                long key = 0;
-                Buffer.MemoryCopy(clusterBase + compOffset + slotIndex * compSize + field.FieldOffset, &key, sizeof(long), field.FieldSize);
+                var key = ReadKey(clusterBase + compOffset + slotIndex * compSize + field.FieldOffset, field.Index);
                 var location = chunkId * 64 + slotIndex;
                 (expected.TryGetValue(key, out var list) ? list : expected[key] = []).Add(location);
                 locationToEntity[location] = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
@@ -212,8 +211,7 @@ internal static unsafe class IndexDataOracle
                         continue;
                     }
 
-                    long actual = 0;
-                    Buffer.MemoryCopy(clusterBase + compOffset + slotIndex * compSize + field.FieldOffset, &actual, sizeof(long), field.FieldSize);
+                    var actual = ReadKey(clusterBase + compOffset + slotIndex * compSize + field.FieldOffset, field.Index);
                     if (actual != e.CurrentKey)
                     {
                         problems.Add($"{label}: leaf key {e.CurrentKey} names cluster slot {chunkId}:{slotIndex}, but the entity there currently holds "
@@ -248,4 +246,26 @@ internal static unsafe class IndexDataOracle
             idxAccessor.Dispose();
         }
     }
+
+    /// <summary>Read an indexed field as the long the tree's own key type would compare — sign, width and float-bit encoding included.</summary>
+    /// <remarks>
+    /// This used to be a <see cref="Buffer.MemoryCopy"/> of <c>FieldSize</c> bytes into a zeroed <c>long</c>, which ZERO-extends. Every fixture that existed
+    /// used non-negative keys, so it never mattered; the first fixture with negative ones reported all 240 entities as mis-pointed leaves, because the data
+    /// side read <c>int</c> -120 as 4294967176 while the tree side read it as -120. An oracle whose own reader disagrees with the structure it audits reports
+    /// the whole index as broken, and the next person to see that will assume the oracle is noise and delete it.
+    /// </remarks>
+    private static long ReadKey(byte* p, IBTreeIndex index) =>
+        index switch
+        {
+            BTree<sbyte, PersistentStore> => *(sbyte*)p,
+            BTree<byte, PersistentStore> => *p,
+            BTree<short, PersistentStore> => *(short*)p,
+            BTree<ushort, PersistentStore> => *(ushort*)p,
+            BTree<int, PersistentStore> => *(int*)p,
+            BTree<uint, PersistentStore> => *(uint*)p,
+            BTree<long, PersistentStore> => *(long*)p,
+            BTree<float, PersistentStore> => BitConverter.SingleToInt32Bits(*(float*)p),
+            BTree<double, PersistentStore> => BitConverter.DoubleToInt64Bits(*(double*)p),
+            _ => *(long*)p
+        };
 }

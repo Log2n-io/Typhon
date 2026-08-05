@@ -233,30 +233,50 @@ internal class PlanBuilder
     /// from range selection. This does not make the scan selective; it makes it <i>execute</i>. The alternative is the pre-#591 behaviour, where the plan named
     /// a PK index that no longer exists and the query silently produced an empty result.
     /// <para>
-    /// A populated index is preferred purely so the common case scans real data; every index on a component table carries one entry per entity, so the choice
-    /// does not affect the result set — only which B+Tree is walked.
+    /// <b>No emptiness test, deliberately.</b> The pre-#629 version skipped a field whose tree held no entries. That is no longer a fact a PLAN can know: the
+    /// trees live on the archetype and a plan is built per <see cref="ComponentTable"/>, so one field is empty in one matching archetype and full in the next
+    /// — and <see cref="IndexedFieldInfo"/> no longer carries an <c>Index</c> to ask. The plan PROPOSES a field and each archetype's scan disposes;
+    /// <c>EcsQuery.ScanPerArchetypeBTreeSelective</c> already falls back to the SoA scan when the proposal does not resolve there (#675).
     /// </para>
     /// <para>
     /// Returns -1 when ordering forbids a substitution: <c>orderByFieldIndex == -1</c> is order-by-PK, and when an OrderBy field is set only that field's index
-    /// yields the required iteration order, so an OrderBy on a field absent from the predicate still has no enumerable stream here. That is the remaining half
-    /// of #591, deliberately left alone: serving it needs a full-range scan bound for the OrderBy field, and for <c>Float</c>/<c>Double</c> the raw IEEE-bit
-    /// endpoints that <c>TypeMinAsLong</c>/<c>TypeMaxAsLong</c> return do not bracket negative values — <c>-1.0f</c> encodes to <c>-1082130432</c>, outside
-    /// <c>[float.MinValue bits, float.MaxValue bits]</c> = <c>[-8388609, 2139095039]</c>. Substituting a stream there silently drops negative keys, so that
-    /// half is blocked on the float key-range question rather than on plumbing.
+    /// yields the required iteration order, so an OrderBy on a field absent from the predicate still has no enumerable stream here (the remaining half of
+    /// #591).
     /// </para>
     /// </remarks>
     private static (int FieldIndex, KeyType KeyType, long ScanMin, long ScanMax) SelectFullScanStream(FieldEvaluator[] orderedEvaluators, ComponentTable table,
         int orderByFieldIndex)
     {
-        // No stream to select: the shared per-ComponentTable B+Trees this scanned are gone (#629), and every archetype keeps its indexes on the ARCHETYPE.
-        //
-        // Returning -1 is not a simplification, it is the behaviour that was already in force. Both loops here rejected every candidate on
-        // `ifi.Index.EntryCount == 0`, and that tree has been empty since the eligibility flip — so PrimaryFieldIndex was ALREADY permanently -1. Two consumers
-        // depend on it: ExecuteOrderedClustered keys off -1 to run its own K-way merge, and ScanAllArchetypes reads UsesSecondaryIndex to choose between the
-        // selective B+Tree scan and the SoA scan. Letting a stream be selected here would change both, so the value is pinned rather than recomputed.
-        //
-        // The cost is that the selective cluster scan stays unreachable — a real optimisation, lost to the sentinel meaning two things at once. Untangling that
-        // is #22, and it is where this method earns a real implementation against the per-archetype trees.
+        // OrderBy PK — a secondary index cannot reproduce PK order.
+        if (orderByFieldIndex == -1)
+        {
+            return (-1, default, 0, 0);
+        }
+
+        var indexedFieldInfos = table.IndexedFieldInfos;
+        if (indexedFieldInfos == null)
+        {
+            return (-1, default, 0, 0);
+        }
+
+        for (var i = 0; i < orderedEvaluators.Length; i++)
+        {
+            ref var eval = ref orderedEvaluators[i];
+
+            if (eval.FieldIndex >= indexedFieldInfos.Length || !KeyRange.IsStreamable(eval.KeyType))
+            {
+                continue;
+            }
+
+            // With an OrderBy set, only that field's index preserves the required iteration order.
+            if (orderByFieldIndex != int.MinValue && orderByFieldIndex != eval.FieldIndex)
+            {
+                continue;
+            }
+
+            return (eval.FieldIndex, eval.KeyType, KeyRange.TypeMin(eval.KeyType), KeyRange.TypeMax(eval.KeyType));
+        }
+
         return (-1, default, 0, 0);
     }
 
@@ -271,18 +291,58 @@ internal class PlanBuilder
     /// Prevents using a secondary index when OrderBy requires a different iteration order.
     /// int.MinValue = no OrderBy constraint, -1 = OrderBy PK (forces PK scan).
     /// </param>
+    /// <remarks>
+    /// The returned field index addresses <see cref="ComponentTable.IndexedFieldInfos"/>, and <c>ArchetypeClusterState.BuildIndexSlot</c> builds each
+    /// archetype's <c>Fields</c> array in that same stable order — which is what makes a plan-time index transferable to a per-archetype tree even though the
+    /// plan cannot see one. See <see cref="SelectFullScanStream"/> for why there is no emptiness test.
+    /// </remarks>
     private static (int FieldIndex, KeyType KeyType, long ScanMin, long ScanMax) SelectPrimaryStream(FieldEvaluator[] orderedEvaluators, ComponentTable table,
         int orderByFieldIndex)
     {
-        // No stream to select: the shared per-ComponentTable B+Trees this scanned are gone (#629), and every archetype keeps its indexes on the ARCHETYPE.
-        //
-        // Returning -1 is not a simplification, it is the behaviour that was already in force. Both loops here rejected every candidate on
-        // `ifi.Index.EntryCount == 0`, and that tree has been empty since the eligibility flip — so PrimaryFieldIndex was ALREADY permanently -1. Two consumers
-        // depend on it: ExecuteOrderedClustered keys off -1 to run its own K-way merge, and ScanAllArchetypes reads UsesSecondaryIndex to choose between the
-        // selective B+Tree scan and the SoA scan. Letting a stream be selected here would change both, so the value is pinned rather than recomputed.
-        //
-        // The cost is that the selective cluster scan stays unreachable — a real optimisation, lost to the sentinel meaning two things at once. Untangling that
-        // is #22, and it is where this method earns a real implementation against the per-archetype trees.
+        // OrderBy PK → must use PK scan
+        if (orderByFieldIndex == -1)
+        {
+            return (-1, default, 0, 0);
+        }
+
+        var indexedFieldInfos = table.IndexedFieldInfos;
+        if (indexedFieldInfos == null)
+        {
+            return (-1, default, 0, 0);
+        }
+
+        // Evaluators arrive sorted by ascending estimated cardinality, so the first acceptable candidate is the most selective one.
+        for (var i = 0; i < orderedEvaluators.Length; i++)
+        {
+            ref var eval = ref orderedEvaluators[i];
+
+            // NE cannot narrow a range
+            if (eval.CompareOp == CompareOp.NotEqual)
+            {
+                continue;
+            }
+
+            if (eval.FieldIndex >= indexedFieldInfos.Length || !KeyRange.IsStreamable(eval.KeyType))
+            {
+                continue;
+            }
+
+            // If OrderBy is specified, only select this field if it matches
+            if (orderByFieldIndex != int.MinValue && orderByFieldIndex != eval.FieldIndex)
+            {
+                continue;
+            }
+
+            // Full type extent, then narrowed by EVERY predicate on this field (B >= 5 && B < 15 → their intersection). KeyRange owns the comparison: this
+            // loop used to intersect with signed `long` operators, and on raw IEEE bit patterns that is how `>= -20f && <= 20f` came out as
+            // [float.MinValue, 20f] — 71 rows where 41 are correct (#675).
+            var scanMin = KeyRange.TypeMin(eval.KeyType);
+            var scanMax = KeyRange.TypeMax(eval.KeyType);
+            KeyRange.Intersect(orderedEvaluators, eval.FieldIndex, eval.KeyType, ref scanMin, ref scanMax);
+
+            return (eval.FieldIndex, eval.KeyType, scanMin, scanMax);
+        }
+
         return (-1, default, 0, 0);
     }
 
@@ -341,71 +401,4 @@ internal class PlanBuilder
         }
     }
 
-    private static bool IsIntegerKeyType(KeyType kt) => kt is KeyType.Bool or KeyType.Byte or KeyType.SByte or KeyType.Short or 
-                                                        KeyType.UShort or KeyType.Int or KeyType.UInt or KeyType.Long or KeyType.ULong;
-
-    private static long TypeMaxAsLong(KeyType keyType)
-    {
-        switch (keyType)
-        {
-            case KeyType.Bool: return 1L;
-            case KeyType.SByte: return sbyte.MaxValue;
-            case KeyType.Byte: return byte.MaxValue;
-            case KeyType.Short: return short.MaxValue;
-            case KeyType.UShort: return ushort.MaxValue;
-            case KeyType.Int: return int.MaxValue;
-            case KeyType.UInt: return uint.MaxValue;
-            case KeyType.Long: return long.MaxValue;
-            case KeyType.ULong: return unchecked((long)ulong.MaxValue);
-            case KeyType.Float:
-            {
-                var f = float.MaxValue;
-                return Unsafe.As<float, int>(ref f);
-            }
-            case KeyType.Double:
-            {
-                var d = double.MaxValue;
-                return Unsafe.As<double, long>(ref d);
-            }
-            default: return long.MaxValue;
-        }
-    }
-
-    private static long TypeMinAsLong(KeyType keyType)
-    {
-        switch (keyType)
-        {
-            case KeyType.Bool: return 0L;
-            case KeyType.SByte: return sbyte.MinValue;
-            case KeyType.Byte: return 0L;
-            case KeyType.Short: return short.MinValue;
-            case KeyType.UShort: return 0L;
-            case KeyType.Int: return int.MinValue;
-            case KeyType.UInt: return 0L;
-            case KeyType.Long: return long.MinValue;
-            case KeyType.ULong: return 0L;
-            case KeyType.Float:
-            {
-                var f = float.MinValue;
-                return Unsafe.As<float, int>(ref f);
-            }
-            case KeyType.Double:
-            {
-                var d = double.MinValue;
-                return Unsafe.As<double, long>(ref d);
-            }
-            default: return long.MinValue;
-        }
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static (long Min, long Max) ComputeBounds(ref FieldEvaluator eval, long typeMin, long typeMax, bool isInteger) => eval.CompareOp switch
-    {
-        CompareOp.Equal => (eval.Threshold, eval.Threshold),
-        CompareOp.GreaterThan => (isInteger ? eval.Threshold + 1 : eval.Threshold, typeMax),
-        CompareOp.GreaterThanOrEqual => (eval.Threshold, typeMax),
-        CompareOp.LessThan => (typeMin, isInteger ? eval.Threshold - 1 : eval.Threshold),
-        CompareOp.LessThanOrEqual => (typeMin, eval.Threshold),
-        _ => (typeMin, typeMax)
-    };
 }

@@ -964,23 +964,32 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 }
                 else
                 {
-                    // Plan fell back to PK scan — compute bounds from evaluators for this field.
+                    // Plan selected nothing — compute bounds from the evaluator that names this field.
                     keyType = KeyType.Int;
-                    scanMin = long.MinValue;
-                    scanMax = long.MaxValue;
+                    var keyTypeKnown = false;
                     for (var e = 0; e < evaluators.Length; e++)
                     {
                         if (evaluators[e].FieldIndex == fieldIdx)
                         {
                             keyType = evaluators[e].KeyType;
-                            scanMin = GetTypeMinAsLong(keyType);
-                            scanMax = GetTypeMaxAsLong(keyType);
+                            keyTypeKnown = true;
                             break;
                         }
                     }
 
+                    // No predicate names the ordering field, so its tree cannot be typed. This used to fall through with keyType = Int and the bounds left at
+                    // long.MinValue/MaxValue, which the typed scan truncates to (int)0..(int)-1 — an INVERTED range that enumerates nothing. Skipping says the
+                    // same thing without pretending a stream was built.
+                    if (!keyTypeKnown || !KeyRange.IsStreamable(keyType))
+                    {
+                        continue;
+                    }
+
+                    scanMin = KeyRange.TypeMin(keyType);
+                    scanMax = KeyRange.TypeMax(keyType);
+
                     // Intersect bounds with all evaluators on this field (e.g., Score >= 50 narrows scanMin)
-                    IntersectEvaluatorBounds(evaluators, fieldIdx, keyType, ref scanMin, ref scanMax);
+                    KeyRange.Intersect(evaluators, fieldIdx, keyType, ref scanMin, ref scanMax);
                 }
 
                 // Grow rented array if needed (rare — most queries match 1-3 archetypes)
@@ -1119,9 +1128,31 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
             ref var field = ref clusterState.IndexSlots[ixSlotIdx].Fields[orderByFieldIdx];
 
+            // The stream runs over the ORDER BY field's tree, so its key type AND its bounds must both describe that field. They used to come from
+            // plan.PrimaryKeyType and evaluators[0].KeyType — two different fields the moment stream selection is live. Worse, while selection was pinned off
+            // PrimaryKeyType was `default`, i.e. Bool, which no typed tree matches: Create fell out of its switch, the stream came back EMPTY, entityKeyMap
+            // stayed empty and every entity silently sorted by EntityKey instead of by the ordered field (#675).
+            var orderKeyType = KeyType.Bool;
+            var orderKeyKnown = false;
+            for (var e = 0; e < evaluators.Length; e++)
+            {
+                if (evaluators[e].FieldIndex == orderByFieldIdx)
+                {
+                    orderKeyType = evaluators[e].KeyType;
+                    orderKeyKnown = true;
+                    break;
+                }
+            }
+
+            // No predicate names the OrderBy field, so nothing here knows how to type its tree. Skipping leaves this archetype's entities sorting by EntityKey
+            // — the same degradation as before, but now a stated one rather than the accidental result of an empty stream (#591's remaining half).
+            if (!orderKeyKnown || !KeyRange.IsStreamable(orderKeyType))
+            {
+                continue;
+            }
+
             // Scan the full B+Tree to build PK→key mapping for entities in our result set
-            var stream = ArchetypeSortedStream.Create(field.Index, plan.PrimaryKeyType, GetTypeMinAsLong(evaluators[0].KeyType), 
-                GetTypeMaxAsLong(evaluators[0].KeyType),
+            var stream = ArchetypeSortedStream.Create(field.Index, orderKeyType, KeyRange.TypeMin(orderKeyType), KeyRange.TypeMax(orderKeyType),
                 field.AllowMultiple, false, clusterState, clusterState.Layout);
             try
             {
@@ -1267,12 +1298,14 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 // A Transient home always takes Path B. Path A range-scans the tree, and the collector is typed to BTreeBase<PersistentStore>; Path B never
                 // touches a tree at all, so it is correct for either home. Selecting it here costs a full SoA scan instead of a selective one — a performance
                 // gap, not a correctness one, and one that #665 revisits when it unfreezes cluster selectivity statistics (#655).
-                if (!transientHome && plan.UsesSecondaryIndex && EstimateClusterSelectivity(plan, clusterState) < 0.05f)
+                if (ChooseSelectivePath(plan, clusterState, transientHome))
                 {
+                    QueryPathProbe.SelectiveScans++;
                     ScanPerArchetypeBTreeSelective(plan, evaluators, clusterState, meta, ref sink);
                 }
                 else
                 {
+                    QueryPathProbe.FullScans++;
                     ScanPerArchetypeBTree(evaluators, clusterState, meta, ref sink);
                 }
             }
@@ -1618,6 +1651,29 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     }
 
     /// <summary>
+    /// Whether this archetype should be scanned via Path A (selective B+Tree range scan) rather than Path B (zone map + SoA evaluation).
+    /// </summary>
+    /// <remarks>
+    /// The two hard preconditions come first and are not overridable, because they are not preferences: a Transient home has no
+    /// <c>BTreeBase&lt;PersistentStore&gt;</c> for the collector to walk, and without a primary field there is no range to scan. Only the selectivity
+    /// judgement — the part that is an estimate — answers to <see cref="QueryPathProbe.Forced"/>.
+    /// </remarks>
+    private static bool ChooseSelectivePath(ExecutionPlan plan, ArchetypeClusterState clusterState, bool transientHome)
+    {
+        if (transientHome || !plan.UsesSecondaryIndex)
+        {
+            return false;
+        }
+
+        return QueryPathProbe.Forced switch
+        {
+            ClusterScanPath.Selective => true,
+            ClusterScanPath.FullScan => false,
+            _ => EstimateClusterSelectivity(plan, clusterState) < 0.05f
+        };
+    }
+
+    /// <summary>
     /// Estimate selectivity for the primary predicate of a cluster query. Returns a value in [0, 1] where lower = more selective.
     /// Uses the plan's EstimatedCounts (from selectivity estimator) divided by total entity count in this archetype's clusters.
     /// Falls back to 0.5 (moderate selectivity → Path B) when estimates are unavailable.
@@ -1693,162 +1749,6 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         return -1;
     }
 
-    /// <summary>Get the maximum value for a KeyType encoded as a long (same encoding as PlanBuilder scan bounds).</summary>
-    private static long GetTypeMaxAsLong(KeyType keyType) =>
-        keyType switch
-        {
-            KeyType.SByte => sbyte.MaxValue,
-            KeyType.Byte => byte.MaxValue,
-            KeyType.Short => short.MaxValue,
-            KeyType.UShort => ushort.MaxValue,
-            KeyType.Int => int.MaxValue,
-            KeyType.UInt => uint.MaxValue,
-            KeyType.Long => long.MaxValue,
-            KeyType.ULong => unchecked((long)ulong.MaxValue),
-            KeyType.Float => BitConverter.SingleToInt32Bits(float.MaxValue),
-            KeyType.Double => BitConverter.DoubleToInt64Bits(double.MaxValue),
-            _ => long.MaxValue
-        };
-
-    /// <summary>Get the minimum value for a KeyType encoded as a long.</summary>
-    private static long GetTypeMinAsLong(KeyType keyType) =>
-        keyType switch
-        {
-            KeyType.SByte => sbyte.MinValue,
-            KeyType.Byte => 0L,
-            KeyType.Short => short.MinValue,
-            KeyType.UShort => 0L,
-            KeyType.Int => int.MinValue,
-            KeyType.UInt => 0L,
-            KeyType.Long => long.MinValue,
-            KeyType.ULong => 0L,
-            KeyType.Float => BitConverter.SingleToInt32Bits(float.MinValue),
-            KeyType.Double => BitConverter.DoubleToInt64Bits(double.MinValue),
-            _ => long.MinValue
-        };
-
-    /// <summary>
-    /// Intersect scan bounds with evaluator predicates on a specific field.
-    /// For float/double: converts to typed values for correct comparison (IEEE 754 bit patterns don't sort as signed longs for negatives).
-    /// For integers: uses direct long comparison (preserves ordering).
-    /// </summary>
-    private static void IntersectEvaluatorBounds(FieldEvaluator[] evaluators, int fieldIdx, KeyType keyType, ref long scanMin, ref long scanMax)
-    {
-        for (var e = 0; e < evaluators.Length; e++)
-        {
-            if (evaluators[e].FieldIndex != fieldIdx || evaluators[e].CompareOp == CompareOp.NotEqual)
-            {
-                continue;
-            }
-
-            var thr = evaluators[e].Threshold;
-
-            if (keyType == KeyType.Float)
-            {
-                // Float: convert bit patterns to float, compare, convert back.
-                // Math.Max/Min on signed long bit patterns gives wrong results for negative floats.
-                var fMin = BitConverter.Int32BitsToSingle((int)scanMin);
-                var fMax = BitConverter.Int32BitsToSingle((int)scanMax);
-                var fThr = BitConverter.Int32BitsToSingle((int)thr);
-                switch (evaluators[e].CompareOp)
-                {
-                    case CompareOp.Equal:
-                        fMin = Math.Max(fMin, fThr);
-                        fMax = Math.Min(fMax, fThr);
-                        break;
-                    case CompareOp.GreaterThan:
-                    case CompareOp.GreaterThanOrEqual:
-                        fMin = Math.Max(fMin, fThr);
-                        break;
-                    case CompareOp.LessThan:
-                    case CompareOp.LessThanOrEqual:
-                        fMax = Math.Min(fMax, fThr);
-                        break;
-                }
-
-                scanMin = BitConverter.SingleToInt32Bits(fMin);
-                scanMax = BitConverter.SingleToInt32Bits(fMax);
-            }
-            else if (keyType == KeyType.Double)
-            {
-                var dMin = BitConverter.Int64BitsToDouble(scanMin);
-                var dMax = BitConverter.Int64BitsToDouble(scanMax);
-                var dThr = BitConverter.Int64BitsToDouble(thr);
-                switch (evaluators[e].CompareOp)
-                {
-                    case CompareOp.Equal:
-                        dMin = Math.Max(dMin, dThr);
-                        dMax = Math.Min(dMax, dThr);
-                        break;
-                    case CompareOp.GreaterThan:
-                    case CompareOp.GreaterThanOrEqual:
-                        dMin = Math.Max(dMin, dThr);
-                        break;
-                    case CompareOp.LessThan:
-                    case CompareOp.LessThanOrEqual:
-                        dMax = Math.Min(dMax, dThr);
-                        break;
-                }
-
-                scanMin = BitConverter.DoubleToInt64Bits(dMin);
-                scanMax = BitConverter.DoubleToInt64Bits(dMax);
-            }
-            else if (keyType is KeyType.UInt or KeyType.ULong or KeyType.UShort or KeyType.Byte)
-            {
-                // Unsigned types: compare as ulong to avoid sign issues.
-                // Threshold values are stored as signed long but represent unsigned values —
-                // e.g. ulong.MaxValue is stored as -1L. Math.Min/Max on signed longs gives wrong results.
-                var uMin = (ulong)scanMin;
-                var uMax = (ulong)scanMax;
-                var uThr = (ulong)thr;
-                switch (evaluators[e].CompareOp)
-                {
-                    case CompareOp.Equal:
-                        uMin = Math.Max(uMin, uThr);
-                        uMax = Math.Min(uMax, uThr);
-                        break;
-                    case CompareOp.GreaterThan:
-                        uMin = Math.Max(uMin, uThr + 1);
-                        break;
-                    case CompareOp.GreaterThanOrEqual:
-                        uMin = Math.Max(uMin, uThr);
-                        break;
-                    case CompareOp.LessThan:
-                        uMax = Math.Min(uMax, uThr - 1);
-                        break;
-                    case CompareOp.LessThanOrEqual:
-                        uMax = Math.Min(uMax, uThr);
-                        break;
-                }
-                scanMin = (long)uMin;
-                scanMax = (long)uMax;
-            }
-            else
-            {
-                // Signed integer types: direct long comparison preserves ordering.
-                switch (evaluators[e].CompareOp)
-                {
-                    case CompareOp.Equal:
-                        scanMin = Math.Max(scanMin, thr);
-                        scanMax = Math.Min(scanMax, thr);
-                        break;
-                    case CompareOp.GreaterThan:
-                        scanMin = Math.Max(scanMin, thr + 1);
-                        break;
-                    case CompareOp.GreaterThanOrEqual:
-                        scanMin = Math.Max(scanMin, thr);
-                        break;
-                    case CompareOp.LessThan:
-                        scanMax = Math.Min(scanMax, thr - 1);
-                        break;
-                    case CompareOp.LessThanOrEqual:
-                        scanMax = Math.Min(scanMax, thr);
-                        break;
-                }
-            }
-        }
-    }
-
     /// <summary>
     /// Path A selective query: scan per-archetype B+Tree for the primary predicate range, collect ClusterLocations,
     /// then verify remaining predicates only on matched entities. Optimal for highly selective queries (&lt;5% match).
@@ -1915,6 +1815,17 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
             var clusterSize = layout.ClusterSize;
 
+            // MVCC born/died gate — the same one Path B applies in ScanClusterSoa, for the same reason: the B+Tree leaf names the committed HEAD's slot and
+            // the occupancy word is CURRENT, so neither knows the reader's snapshot. Path A carried NO gate while it was unreachable, so un-pinning stream
+            // selection without this would have re-opened on Path A exactly the phantom read #674 closed on Path B — and silently, since the two paths answer
+            // the same query and the planner picks between them on an estimate (#675).
+            var visGated = meta.VersionedSlotMask != 0;
+            var txTsn = _tx.TSN;
+            var visState = visGated ? _tx.DBE._archetypeStates[meta.ArchetypeId] : null;
+            var visRecordSize = meta._entityRecordSize;
+            byte* visBuf = stackalloc byte[visRecordSize];
+            var visAccessor = visState != null ? visState.EntityMap.Segment.CreateChunkAccessor() : default;
+
             // Step 2: For each active cluster with matches, verify ALL evaluators on matched entities
             var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
             try
@@ -1980,7 +1891,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
                             if (pass)
                             {
-                                result.Add(EntityId.FromRaw(*(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8)));
+                                var rawId = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
+                                if (IsVisibleAtSnapshot(rawId, visGated, visState, visBuf, visRecordSize, txTsn, ref visAccessor))
+                                {
+                                    result.Add(EntityId.FromRaw(rawId));
+                                }
                             }
                         }
                     }
@@ -2006,7 +1921,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
                             if (allMatch)
                             {
-                                result.Add(EntityId.FromRaw(*(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8)));
+                                var rawId = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
+                                if (IsVisibleAtSnapshot(rawId, visGated, visState, visBuf, visRecordSize, txTsn, ref visAccessor))
+                                {
+                                    result.Add(EntityId.FromRaw(rawId));
+                                }
                             }
                         }
                     }
@@ -2015,6 +1934,10 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             finally
             {
                 clusterAccessor.Dispose();
+                if (visState != null)
+                {
+                    visAccessor.Dispose();
+                }
             }
         }
         finally
@@ -2069,6 +1992,14 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 break;
             case KeyType.ULong:
                 CollectTyped((BTree<long, PersistentStore>)index, scanMin, scanMax, allowMultiple, matchBitsArr, ref hasAny);
+                break;
+            default:
+                // Bool and String64 have no typed tree here. Falling out of the switch would leave `hasAny` false and the query would answer EMPTY — the #663
+                // shape, and undetectable from the outside. PlanBuilder must not propose them (KeyRange.IsStreamable); this is the assertion that the two
+                // stay in agreement.
+                ThrowHelper.ThrowInvalidOp(
+                    $"Query plan selected key type {keyType} as its primary scan stream, but no B+Tree range scan exists for it. KeyRange.IsStreamable must "
+                    + "reject this type so the query takes the SoA scan instead.");
                 break;
         }
     }
