@@ -1,4 +1,4 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -122,7 +122,7 @@ class TickBoundaryIndexTests : TestBase<TickBoundaryIndexTests>
 
         // Control for the oracle: this mutation moves onto an EMPTY key, and the index tracks it correctly. Pairing it with the colliding case in
         // ClusterIndexTests.TargetedQuery_AfterMutation_ReturnsUpdatedResults is what localises the defect to the collision, not to updates in general.
-        IndexTestHelpers.AssertIndexMatchesData<TbSvArch>(dbe, "after an SV mutation onto a previously-unused key");
+        IndexDataOracle.AssertIndexAgreesWithData<TbSvArch>(dbe, "after an SV mutation onto a previously-unused key");
     }
 
     // ═══════════════════════════════════════════════════════════════════════

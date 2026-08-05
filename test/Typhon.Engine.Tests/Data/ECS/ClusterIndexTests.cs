@@ -1,4 +1,4 @@
-﻿using System.Linq;
+using System.Linq;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
@@ -556,7 +556,7 @@ class ClusterIndexTests : TestBase<ClusterIndexTests>
 
         // The two assertions above pass through the SoA scan, which reads component DATA and never consults the tree — so they say nothing about the index.
         // This is what actually checks it, and it is why the index could be wrong here for as long as it has been.
-        IndexTestHelpers.AssertIndexMatchesData<ClIdxUnit>(dbe, "after mutating an indexed field onto a value another entity already holds");
+        IndexDataOracle.AssertIndexAgreesWithData<ClIdxUnit>(dbe, "after mutating an indexed field onto a value another entity already holds");
     }
 
     // ═══════════════════════════════════════════════════════════════════════
