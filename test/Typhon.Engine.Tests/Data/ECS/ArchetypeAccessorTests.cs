@@ -240,6 +240,54 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         accessor.Dispose();
     }
 
+    /// <summary>
+    /// The commit-time Versioned publish must record WHICH component it wrote, so the tick fence emits that column instead of every column (review M31).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>PublishClusterVersionedSlot</c> called the FAIL-SAFE two-argument <c>SetDirty</c> — the one whose own documentation says it is for callers that do
+    /// not know the component — with <c>e.CompSlot</c> sitting in a local two lines above it. That poisons the mask to <c>AllSlotsWritten</c>, which defeats
+    /// #559 §4.5's narrowing for every archetype in the engine.
+    /// </para>
+    /// <para>
+    /// Nothing caught it because over-emission is not a wrong answer: the fence writes more columns than it needed to and every assertion about VALUES still
+    /// holds. It has to be asserted on the mask itself. <see cref="MixedUnit"/> is the right archetype for that — two slots, so "narrowed" and "gave up" are
+    /// distinguishable; on a one-component archetype every mask is the full mask.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void VersionedPublish_RecordsTheComponentSlot_NotAllSlots()
+    {
+        using var dbe = SetupEngine();
+
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            id = tx.Spawn<MixedUnit>(MixedUnit.Position.Set(new MixedSvPos(1, 2)), MixedUnit.Data.Set(new MixedVData(10)));
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(1);
+        var clusterState = dbe._archetypeStates[Archetype<MixedUnit>.Metadata.ArchetypeId].ClusterState;
+
+        // Written through the ArchetypeAccessor, which is what defers the HEAD-to-cluster copy to the publish drain (AP-01) and so reaches the site at all;
+        // the EntityRef path writes the slot in place and already passes its component slot.
+        using (var writeTx = dbe.CreateQuickTransaction())
+        {
+            var accessor = writeTx.For<MixedUnit>();
+            accessor.OpenMut(id).Write(MixedUnit.Data).Score = 99;
+            accessor.Dispose();
+            writeTx.Commit();
+        }
+
+        var mask = clusterState.WrittenSlotUnion;
+        Assert.That(mask, Is.Not.EqualTo(ArchetypeClusterState.AllSlotsWritten),
+            "a commit that wrote ONE component must not tell the fence to emit every column");
+
+        dbe.WriteTickFence(2);
+        Assert.That(clusterState.FenceWrittenSlots, Is.EqualTo(mask), "and the value the fence reads is the union prep snapshotted");
+    }
+
     [Test]
     public void Versioned_OpenMut_WritesPersist()
     {
