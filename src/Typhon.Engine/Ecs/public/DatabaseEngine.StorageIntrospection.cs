@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Threading;
 
 namespace Typhon.Engine;
 
@@ -874,6 +875,9 @@ public partial class DatabaseEngine
     /// the page-allocator machinery. Any orphan (bit set, no claimant) or phantom (claimant, bit clear) is reported as a hard durability/structural bug.</item>
     /// <item><b>Chunk-segment capacity</b> — for every <see cref="ChunkBasedSegment{TStore}"/>, <c>AllocatedChunkCount + FreeChunkCount</c> must equal
     /// <c>ChunkCapacity</c>. Desync indicates the segment's chunk free-list drifted from its on-page chunk bitmaps.</item>
+    /// <item><b>Cluster MVCC visibility summary</b> — every cluster's <c>ClusterMaxBornTsn</c> / <c>ClusterAnyDied</c> pair, recomputed from the archetype's
+    /// EntityMap and compared against the maintained one. A summary that claims more visibility than its entities justify makes the SoA scan skip its
+    /// per-entity probe and emit a phantom; see <see cref="StorageIntegrityIssueKind.ClusterVisibilitySummaryUnsound"/>.</item>
     /// </list>
     /// </remarks>
     public StorageIntegrityReport RunStorageIntegrityCheck()
@@ -992,6 +996,9 @@ public partial class DatabaseEngine
             }
         }
 
+        // ─── Cluster MVCC visibility summary ─
+        CheckClusterVisibilitySummaries(issues, out var visibilityClustersChecked);
+
         return new StorageIntegrityReport
         {
             Issues = issues,
@@ -999,7 +1006,165 @@ public partial class DatabaseEngine
             PhantomPageCount = phantomCount,
             OccupancyBitsSet = bitsSet,
             SegmentClaimedPages = segClaimedTotal,
+            VisibilitySummaryClustersChecked = visibilityClustersChecked,
         };
+    }
+
+    /// <summary>Sentinel for "no EntityMap record named this cluster" in the recomputed born-TSN array; a real <c>BornTSN</c> is never negative.</summary>
+    private const long NoEntityInCluster = -1;
+
+    /// <summary>
+    /// Recomputes every cluster archetype's MVCC visibility summary from its EntityMap and reports each cluster whose maintained summary claims MORE
+    /// visibility than the entities present justify. O(entities); read-only.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why this exists.</b> The summary (<c>ClusterMaxBornTsn</c> / <c>ClusterAnyDied</c> on <see cref="ArchetypeClusterState"/>) lets the SoA scan skip its
+    /// per-entity EntityMap probe for a whole cluster. It is maintained by five sites — spawn commit, WAL replay, both reopen rebuilds, and spatial cluster
+    /// migration — and a sixth site added later that forgets to fold produces a phantom rather than a failure. Enumerating the sites is the weaker move;
+    /// checking the invariant is the stronger one.
+    /// </para>
+    /// <para>
+    /// <b>One-directional by design.</b> The summary is a conservative approximation: it may say "probe" when probing was unnecessary (slower, still correct)
+    /// and must never say "clean" when an entity could be invisible. Only the unsound direction is reported — a pessimistic summary is a legal state, not a
+    /// defect, so asserting equality would fail on healthy engines.
+    /// </para>
+    /// <para>
+    /// <b>Safe on a live engine, and no false positives.</b> Both maintenance sites publish the summary BEFORE the EntityMap entry the recompute reads it
+    /// from (<c>NoteClusterBorn</c> precedes <c>EntityMap.InsertNew</c> on the spawn path; <c>NoteClusterDied</c> precedes the tombstone <c>Upsert</c> on the
+    /// destroy path). Pairing that with reading the summary AFTER the walk makes the compared summary at least as new as every record it is compared against,
+    /// so a concurrent spawn cannot be reported as a phantom. A false positive here would be worse than no check at all — it is how an invariant check gets
+    /// switched off.
+    /// </para>
+    /// <para>
+    /// <b>What it does not cover.</b> The oracle is the EntityMap — the same structure the gate's per-entity probe reads — so an entity occupying a cluster
+    /// slot whose EntityMap record names a DIFFERENT cluster is attributed to the record's cluster, not the slot's. That divergence is a location-consistency
+    /// defect of its own class, outside the summary invariant checked here.
+    /// </para>
+    /// </remarks>
+    private void CheckClusterVisibilitySummaries(List<StorageIntegrityIssue> issues, out int clustersChecked)
+    {
+        clustersChecked = 0;
+        var states = _archetypeStates;
+        if (states == null)
+        {
+            return;
+        }
+
+        using var guard = EpochGuard.Enter(EpochManager);
+        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        {
+            if (meta.ArchetypeId >= states.Length)
+            {
+                continue;
+            }
+
+            var state = states[meta.ArchetypeId];
+            var clusterState = state?.ClusterState;
+            if (clusterState == null || state.EntityMap == null)
+            {
+                continue;
+            }
+
+            var sizing = Volatile.Read(ref clusterState.ClusterMaxBornTsn);
+            if (sizing == null)
+            {
+                continue;   // no site has established anything for this archetype; every cluster takes the per-entity probe
+            }
+
+            var clusterCount = sizing.Length;
+            var recompute = new ClusterVisibilityRecomputeAction
+            {
+                ClusterCount = clusterCount,
+                MaxBorn = new long[clusterCount],
+                AnyDied = new ulong[(clusterCount + 63) >> 6],
+            };
+            Array.Fill(recompute.MaxBorn, NoEntityInCluster);
+
+            var accessor = state.EntityMap.Segment.CreateChunkAccessor();
+            state.EntityMap.ForEachEntry(ref accessor, ref recompute);
+            accessor.Dispose();
+
+            // Re-read the summary AFTER the walk, and in IsClusterFullyVisibleAt's order (maxBorn, then died — never the reverse, or a new born can pair with
+            // a stale short died array). Because every site folds BEFORE publishing the EntityMap entry, a summary read after the walk is at least as new as
+            // every record the walk compared against it. Reading it before instead would race with a concurrent spawn that grows and replaces the array, and
+            // report a phantom that was never there — a false positive is how an invariant check gets disabled.
+            var maxBorn = Volatile.Read(ref clusterState.ClusterMaxBornTsn);
+            var died = Volatile.Read(ref clusterState.ClusterAnyDied);
+
+            var rootPage = clusterState.ClusterSegment?.RootPageIndex ?? 0;
+            for (var c = 0; c < clusterCount && c < maxBorn.Length; c++)
+            {
+                var actualBorn = recompute.MaxBorn[c];
+                if (actualBorn == NoEntityInCluster)
+                {
+                    continue;   // no EntityMap record names this cluster — nothing the gate could be asked about
+                }
+
+                clustersChecked++;
+
+                // VisibilityUnknown needs no special case: it is long.MaxValue, so it can never compare below a real BornTSN — an unestablished summary is
+                // maximally pessimistic and the gate rejects it outright.
+                var claimedBorn = maxBorn[c];
+                if (claimedBorn < actualBorn)
+                {
+                    issues.Add(new StorageIntegrityIssue(
+                        StorageIntegrityIssueKind.ClusterVisibilitySummaryUnsound, rootPage, -1, 0,
+                        $"archetype '{meta.Name}' cluster {c}: ClusterMaxBornTsn={claimedBorn} but an entity in it was born at {actualBorn} — a reader at " +
+                        $"any snapshot in [{claimedBorn}..{actualBorn - 1}] passes the cluster gate, skips the per-entity probe and emits an unborn entity"));
+                }
+
+                // A died array that is absent or too short reads as "cannot tell" at the gate, which is conservative — only a CLEAR bit inside a sized array
+                // is unsound.
+                var word = c >> 6;
+                var bit = 1UL << (c & 63);
+                if ((recompute.AnyDied[word] & bit) != 0 && died != null && (uint)word < (uint)died.Length && (died[word] & bit) == 0)
+                {
+                    issues.Add(new StorageIntegrityIssue(
+                        StorageIntegrityIssueKind.ClusterVisibilitySummaryUnsound, rootPage, -1, 0,
+                        $"archetype '{meta.Name}' cluster {c}: ClusterAnyDied bit is clear but an entity in it carries a non-zero DiedTSN — a reader whose " +
+                        "snapshot postdates the death passes the cluster gate, skips the per-entity probe and emits a tombstone"));
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// EntityMap walk that recomputes one archetype's per-cluster visibility summary from the very records the gate's per-entity probe would have read.
+    /// </summary>
+    private struct ClusterVisibilityRecomputeAction : RawValuePagedHashMap<long, PersistentStore>.IEntryAction<long>
+    {
+        /// <summary>Length of the maintained summary; records naming a cluster at or beyond it are ignored (the gate range-checks and probes there).</summary>
+        public int ClusterCount;
+
+        /// <summary>Recomputed maximum <c>BornTSN</c> per cluster, <see cref="NoEntityInCluster"/> where no record named the cluster.</summary>
+        public long[] MaxBorn;
+
+        /// <summary>Recomputed "any entity here carries a non-zero DiedTSN" bitmap, same word/bit layout as the maintained one.</summary>
+        public ulong[] AnyDied;
+
+        public unsafe bool Process(long key, byte* value)
+        {
+            var chunkId = ClusterEntityRecordAccessor.GetClusterChunkId(value);
+            if ((uint)chunkId >= (uint)ClusterCount)
+            {
+                return true;
+            }
+
+            ref readonly var header = ref ClusterEntityRecordAccessor.GetHeader(value);
+            var born = header.BornTSN;
+            if (born > MaxBorn[chunkId])
+            {
+                MaxBorn[chunkId] = born;
+            }
+
+            if (header.DiedTSN != 0)
+            {
+                AnyDied[chunkId >> 6] |= 1UL << (chunkId & 63);
+            }
+
+            return true;
+        }
     }
 
     private static StoragePageType ToPageType(StorageSegmentKind kind) => kind switch
