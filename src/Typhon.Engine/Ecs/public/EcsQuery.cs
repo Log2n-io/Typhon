@@ -1270,13 +1270,24 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 {
                     continue;
                 }
+
+                var engineState = dbe._archetypeStates[meta.ArchetypeId];
+
+                // An archetype that does not carry the where-component AT ALL cannot match a predicate on one of its fields, so it contributes nothing and is
+                // skipped silently. This is not the #663 shape below: that one is an archetype which HAS the component and should have contributed. The mask is
+                // the queried archetype's whole subtree and WhereField never narrows it, so a component declared on only part of a subtree — one descendant
+                // or several — put an archetype with no such component in front of the guard and turned a legitimate polymorphic query into a hard throw.
+                if (!ArchetypeCarries(engineState, ct))
+                {
+                    continue;
+                }
+
                 if (!meta.HasClusterIndexes)
                 {
                     hasNonClusterArchetypes = true;
                     continue;
                 }
 
-                var engineState = dbe._archetypeStates[meta.ArchetypeId];
                 var clusterState = engineState?.ClusterState;
                 // A where-component indexed in NEITHER home routes to the cross-archetype scan, which evaluates predicates against component DATA and is
                 // therefore correct whichever home owns the index. Without this, FindClusterIndexSlot returns -1 inside ScanPerArchetypeBTree and it returns
@@ -1318,9 +1329,33 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         if (hasNonClusterArchetypes)
         {
             ThrowHelper.ThrowInvalidOp(
-                $"Query on '{ct?.Definition?.Name}' matched an archetype with no per-archetype index for the where-component. There is no longer a shared "
-                + "index home to fall back to, and answering from the cluster scan alone would silently omit that archetype's entities.");
+                $"Query on '{ct?.Definition?.Name}' matched an archetype that CARRIES the where-component but has no per-archetype index for it. There is no "
+                + "longer a shared index home to fall back to, and answering from the cluster scan alone would silently omit that archetype's entities.");
         }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="engineState"/>'s archetype has <paramref name="ct"/> among its component slots at all — the same reference-identity test
+    /// <see cref="FindClusterIndexSlot"/> uses, asked one level earlier so "this archetype cannot match" is separated from "this archetype should have matched
+    /// and has no index home".
+    /// </summary>
+    private static bool ArchetypeCarries(ArchetypeEngineState engineState, ComponentTable ct)
+    {
+        var tables = engineState?.SlotToComponentTable;
+        if (tables == null)
+        {
+            return false;
+        }
+
+        for (var slot = 0; slot < tables.Length; slot++)
+        {
+            if (tables[slot] == ct)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

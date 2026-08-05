@@ -95,6 +95,19 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
         ).Where(static m => m != null).Collect();
 
         context.RegisterSourceOutput(cascadePipeline, static (spc, models) => ValidateCascades(spc, models));
+
+        // Component-declaration validation as a BUILD-TIME diagnostic (#678 step 1). Two rules, both about WHERE a component is declared:
+        //   TPH1003 — a unique [Index] is scoped to the declaring archetype's subtree, so it admits exactly one declaring archetype.
+        //   TPH1004 — a component may be declared once per inheritance chain; re-declaring an inherited one silently burns a second slot.
+        // Same shape as the cascade diagnostics above and for the same reason: the runtime equivalent throws from Freeze(), which no test can exercise with a
+        // real archetype (the generated [ModuleInitializer] registers every archetype in the assembly at load, so a throw there fails ALL of them).
+        var declarationPipeline = context.SyntaxProvider.ForAttributeWithMetadataName(
+            fullyQualifiedMetadataName: ArchetypeAttributeFqn,
+            predicate: static (node, _) => node is ClassDeclarationSyntax,
+            transform: static (ctx, ct) => TransformDeclaration(ctx, ct)
+        ).Where(static m => m != null).Collect();
+
+        context.RegisterSourceOutput(declarationPipeline, static (spc, models) => ValidateDeclarations(spc, models));
     }
 
     // ── Cascade-delete build-time diagnostics (#514 phase 6) ──
@@ -1012,6 +1025,313 @@ public partial class ArchetypeAccessorGenerator
     {
         int i = fqn.LastIndexOf('.');
         return i >= 0 ? fqn.Substring(i + 1) : fqn;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Component-declaration validation (#678 step 1) — mirrors runtime ArchetypeRegistry.ValidateComponentDeclarations
+// ═══════════════════════════════════════════════════════════════════════
+
+public partial class ArchetypeAccessorGenerator
+{
+    private static readonly DiagnosticDescriptor AmbiguousUniqueIndexScopeDescriptor = new(
+        id: "TPH1003",
+        title: "Unique index with an ambiguous scope",
+        messageFormat: "Component '{0}' declares a unique [Index] on field '{1}', but {2} archetypes in the same tree (rooted at '{3}') declare it: {4}. "
+                       + "The index is stored per archetype, so each of these owns a separate B+Tree and enforcing uniqueness between them would mean probing "
+                       + "every sibling tree on each insert. Declare the component on their common ancestor instead, so one tree covers the whole subtree, or "
+                       + "use [Index(AllowMultiple = true)]. Archetypes in UNRELATED trees may each declare it — each already has its own tree, so their "
+                       + "constraints are independent and cost nothing.",
+        category: "Typhon.Schema",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    private static readonly DiagnosticDescriptor DuplicateComponentDeclarationDescriptor = new(
+        id: "TPH1004",
+        title: "Component declared twice in one inheritance chain",
+        messageFormat: "Archetype '{0}' declares component '{1}', which it already inherits from '{2}'. A component may be declared once per inheritance "
+                       + "chain — the re-declaration consumes a second of the 16 component slots, and a whole cluster column, that nothing can address. "
+                       + "Remove the Register call; the inherited slot is already there.",
+        category: "Typhon.Schema",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    private static DeclArchModel TransformDeclaration(GeneratorAttributeSyntaxContext ctx, CancellationToken ct)
+    {
+        var symbol = (INamedTypeSymbol)ctx.TargetSymbol;
+
+        var own = new List<DeclComponent>();
+        CollectDeclaredComponents(symbol, own, ct);
+
+        var inherited = new List<DeclComponent>();
+        var inheritedOwner = new List<string>();
+        var baseArch = ParentArchetypeOf(symbol);
+        while (baseArch != null)
+        {
+            var atThisLevel = new List<DeclComponent>();
+            CollectDeclaredComponents(baseArch, atThisLevel, ct);
+            var ownerName = Display(baseArch);
+            foreach (var c in atThisLevel)
+            {
+                inherited.Add(c);
+                inheritedOwner.Add(ownerName);
+            }
+
+            baseArch = ParentArchetypeOf(baseArch);
+        }
+
+        // The tree this archetype belongs to. Two archetypes share an ancestor iff they share a root, which is what makes a unique index unenforceable
+        // between them: a query names an archetype and matches its whole subtree, so only archetypes under one root can ever be searched together.
+        var root = symbol;
+        for (var next = ParentArchetypeOf(root); next != null; next = ParentArchetypeOf(root))
+        {
+            root = next;
+        }
+
+        return new DeclArchModel(Display(symbol), Display(root), own.ToArray(), inherited.ToArray(), inheritedOwner.ToArray());
+    }
+
+    /// <summary>The archetype this one derives from (<c>Archetype&lt;TSelf, TParent&gt;</c>), or <see langword="null"/> for a root archetype.</summary>
+    private static INamedTypeSymbol ParentArchetypeOf(INamedTypeSymbol archetypeType)
+    {
+        var baseType = archetypeType.BaseType;
+        if (baseType != null && baseType.IsGenericType && baseType.TypeArguments.Length == 2 && baseType.TypeArguments[1] is INamedTypeSymbol parent)
+        {
+            return parent;
+        }
+
+        return null;
+    }
+
+    /// <summary>The components THIS archetype declares itself — its own static readonly <c>Comp&lt;T&gt;</c> fields, not the ones it inherits.</summary>
+    private static void CollectDeclaredComponents(INamedTypeSymbol archetypeType, List<DeclComponent> result, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+
+        foreach (var member in archetypeType.GetMembers())
+        {
+            if (!(member is IFieldSymbol field) || !field.IsStatic || !field.IsReadOnly)
+            {
+                continue;
+            }
+            if (!(field.Type is INamedTypeSymbol comp) || comp.Name != "Comp" || comp.TypeArguments.Length != 1
+                || !(comp.TypeArguments[0] is INamedTypeSymbol compType))
+            {
+                continue;
+            }
+
+            result.Add(new DeclComponent(Display(compType), UniqueIndexFieldOf(compType)));
+        }
+    }
+
+    /// <summary>
+    /// Name of the first field carrying a UNIQUE <c>[Index]</c> (<c>AllowMultiple</c> absent or false), or <see langword="null"/> when the component has none.
+    /// <c>[SpatialIndex]</c> is a different attribute and never matches.
+    /// </summary>
+    private static string UniqueIndexFieldOf(INamedTypeSymbol compType)
+    {
+        foreach (var member in compType.GetMembers())
+        {
+            if (!(member is IFieldSymbol field) || field.IsStatic)
+            {
+                continue;
+            }
+
+            foreach (var ad in field.GetAttributes())
+            {
+                if (ad.AttributeClass?.Name != "IndexAttribute")
+                {
+                    continue;
+                }
+
+                bool allowMultiple = false;
+                foreach (var na in ad.NamedArguments)
+                {
+                    if (na.Key == "AllowMultiple" && na.Value.Value is bool b)
+                    {
+                        allowMultiple = b;
+                    }
+                }
+
+                if (!allowMultiple)
+                {
+                    return field.Name;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static void ValidateDeclarations(SourceProductionContext spc, ImmutableArray<DeclArchModel> models)
+    {
+        // TPH1004 first: a re-declaration also shows up as a second "declarer" below, and reporting the duplicate is the more actionable of the two messages.
+        foreach (var m in models)
+        {
+            if (m == null)
+            {
+                continue;
+            }
+
+            for (int i = 0; i < m.Own.Length; i++)
+            {
+                for (int j = 0; j < m.Inherited.Length; j++)
+                {
+                    if (m.Own[i].ComponentName == m.Inherited[j].ComponentName)
+                    {
+                        spc.ReportDiagnostic(Diagnostic.Create(
+                            DuplicateComponentDeclarationDescriptor, Location.None, m.ArchetypeName, m.Own[i].ComponentName, m.InheritedOwner[j]));
+                        return;   // first issue only, matching the cascade diagnostics and the runtime throw
+                    }
+                }
+            }
+        }
+
+        // TPH1003: count DECLARING archetypes per (component, TREE). Inheriting a component does not declare it, so a whole subtree under one declarer is the
+        // shape the rule exists to bless. Grouping by TREE is the rule itself, and the reason is storage: there is one B+Tree per (archetype, indexed field),
+        // so two declarers under one root own two trees with nothing spanning them — enforcing uniqueness would mean probing every sibling tree on each
+        // insert (O(K) descents, and racy). Two declarers in unrelated trees already have their own trees: independent constraints, nothing to coordinate.
+        var declarers = new Dictionary<(string Component, string Root), List<string>>();
+        var uniqueField = new Dictionary<string, string>();
+        foreach (var m in models)
+        {
+            if (m == null)
+            {
+                continue;
+            }
+
+            foreach (var c in m.Own)
+            {
+                if (c.UniqueIndexField == null)
+                {
+                    continue;   // no unique index — any number of declarers is fine, anywhere
+                }
+
+                uniqueField[c.ComponentName] = c.UniqueIndexField;
+                var key = (c.ComponentName, m.RootName);
+                if (!declarers.TryGetValue(key, out var list))
+                {
+                    list = new List<string>();
+                    declarers[key] = list;
+                }
+                if (!list.Contains(m.ArchetypeName))
+                {
+                    list.Add(m.ArchetypeName);
+                }
+            }
+        }
+
+        foreach (var kvp in declarers)
+        {
+            if (kvp.Value.Count < 2)
+            {
+                continue;
+            }
+
+            kvp.Value.Sort(StringComparer.Ordinal);   // deterministic message across compilations
+            spc.ReportDiagnostic(Diagnostic.Create(
+                AmbiguousUniqueIndexScopeDescriptor, Location.None,
+                kvp.Key.Component, uniqueField[kvp.Key.Component], kvp.Value.Count, kvp.Key.Root, string.Join(", ", kvp.Value)));
+            return;
+        }
+    }
+
+    private static string Display(INamedTypeSymbol symbol)
+    {
+        var fqn = symbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+        return fqn.StartsWith("global::", StringComparison.Ordinal) ? fqn.Substring("global::".Length) : fqn;
+    }
+}
+
+/// <summary>One component a given archetype declares, plus the unique-index field that constrains where it may be declared.</summary>
+internal readonly struct DeclComponent : IEquatable<DeclComponent>
+{
+    public string ComponentName { get; }
+
+    /// <summary>Field carrying a unique <c>[Index]</c>, or <see langword="null"/> — which is what makes multiple declarers legal.</summary>
+    public string UniqueIndexField { get; }
+
+    public DeclComponent(string componentName, string uniqueIndexField)
+    {
+        ComponentName = componentName;
+        UniqueIndexField = uniqueIndexField;
+    }
+
+    public bool Equals(DeclComponent other) => ComponentName == other.ComponentName && UniqueIndexField == other.UniqueIndexField;
+
+    public override bool Equals(object obj) => obj is DeclComponent other && Equals(other);
+
+    public override int GetHashCode()
+    {
+        unchecked
+        {
+            return ((ComponentName?.GetHashCode() ?? 0) * 31) + (UniqueIndexField?.GetHashCode() ?? 0);
+        }
+    }
+}
+
+/// <summary>One archetype's declaration shape: what it declares itself, and what it inherits (with the ancestor each inherited component came from).</summary>
+internal sealed class DeclArchModel : IEquatable<DeclArchModel>
+{
+    public string ArchetypeName { get; }
+
+    /// <summary>Root of this archetype's tree — itself when it has no parent. Two archetypes share an ancestor iff they share this.</summary>
+    public string RootName { get; }
+
+    public DeclComponent[] Own { get; }
+    public DeclComponent[] Inherited { get; }
+
+    /// <summary>Parallel to <see cref="Inherited"/>: the ancestor archetype that declares that component, for the TPH1004 message.</summary>
+    public string[] InheritedOwner { get; }
+
+    public DeclArchModel(string archetypeName, string rootName, DeclComponent[] own, DeclComponent[] inherited, string[] inheritedOwner)
+    {
+        ArchetypeName = archetypeName;
+        RootName = rootName;
+        Own = own;
+        Inherited = inherited;
+        InheritedOwner = inheritedOwner;
+    }
+
+    public bool Equals(DeclArchModel other)
+    {
+        if (other is null || ArchetypeName != other.ArchetypeName || RootName != other.RootName || Own.Length != other.Own.Length
+            || Inherited.Length != other.Inherited.Length)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < Own.Length; i++)
+        {
+            if (!Own[i].Equals(other.Own[i]))
+            {
+                return false;
+            }
+        }
+
+        for (int i = 0; i < Inherited.Length; i++)
+        {
+            if (!Inherited[i].Equals(other.Inherited[i]) || InheritedOwner[i] != other.InheritedOwner[i])
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    public override bool Equals(object obj) => obj is DeclArchModel other && Equals(other);
+
+    public override int GetHashCode()
+    {
+        unchecked
+        {
+            int hash = 17;
+            hash = (hash * 31) + (ArchetypeName?.GetHashCode() ?? 0);
+            hash = (hash * 31) + Own.Length;
+            hash = (hash * 31) + Inherited.Length;
+            return hash;
+        }
     }
 }
 

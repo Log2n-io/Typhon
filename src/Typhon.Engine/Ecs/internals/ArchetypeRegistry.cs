@@ -754,7 +754,185 @@ internal static class ArchetypeRegistry
         // two engines concurrently clearing + re-adding CascadeTargets on the shared metadata produced a spurious "cascade diamond". #514 Phase 3.
         BuildAndValidateCascadeGraph();
 
+        // #678 step 1. Validated HERE and not in FinalizeArchetypeInternal on purpose: finalization runs inside the generated [ModuleInitializer] barrier, and
+        // a throw there fails EVERY registration in the assembly (see EnsureFinalized's remarks) rather than the one schema at fault.
+        ValidateComponentDeclarations(GetAllArchetypes());
+
         Frozen = true;
+    }
+
+    /// <summary>
+    /// Rejects a schema whose component declarations make a unique <c>[Index]</c> unenforceable, or that wastes a component slot on a duplicate declaration.
+    /// The open-world backstop for the build-time <c>TPH1003</c> / <c>TPH1004</c> diagnostics (#678 step 1, design §2.1).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Two rules, both about where a component is declared.</b> A unique index is scoped to the declaring archetype's subtree, so a component carrying one
+    /// may be declared at most once <i>per archetype tree</i>. And a component may be declared once per inheritance chain: re-declaring an inherited one
+    /// appends a second slot for the same component type, which <see cref="ArchetypeMetadata.TryGetSlot"/> can never return, while it still consumes one of
+    /// the 16 slots and a full cluster column.
+    /// </para>
+    /// <para>
+    /// <b>Per tree, because that is where the index is stored.</b> There is one B+Tree per (archetype, indexed field), so a unique field gets one tree per
+    /// archetype tree and the duplicate check is a single descent. Two declarers <i>inside one tree</i> would put two trees under one root with nothing
+    /// spanning them, so enforcement would mean probing every sibling tree on each insert — O(K) descents, and racy, since probe and insert are not atomic.
+    /// Two declarers in <i>unrelated</i> trees already have their own trees: two independent constraints over disjoint populations, nothing to span, nothing
+    /// to coordinate — and no query can compare them either, since no subtree contains two roots. The consequence is worth stating: the same key value may
+    /// exist once per tree, so "unique" means unique within a tree, not database-wide.
+    /// </para>
+    /// <para>
+    /// <b>The second rule is what makes the first one's reasoning valid.</b> Counting declarers per tree relies on no declarer being an ancestor of another —
+    /// otherwise the two would be in one chain and the count would be meaningless. That held only by author discipline until now. The duplicate check runs
+    /// first for the same reason: a re-declaration would otherwise surface as the less actionable "two declarers" message.
+    /// </para>
+    /// <para>
+    /// Takes the archetype list explicitly so it can be exercised without registering a schema that would poison the module-init barrier for a whole assembly.
+    /// </para>
+    /// </remarks>
+    /// <param name="archetypes">Every archetype to validate together — normally the whole process-global catalog.</param>
+    /// <exception cref="InvalidOperationException">
+    /// A component is declared twice in one chain, or a unique-indexed component has more than one declarer in a single tree.
+    /// </exception>
+    internal static void ValidateComponentDeclarations(IEnumerable<ArchetypeMetadata> archetypes)
+    {
+        // Keyed by (componentTypeId, tree root) — the rule is per TREE, not per catalog. Component identity is the type id rather than the CLR type, because
+        // that is what the index home is keyed by: two CLR structs sharing one [Component("name")] (the V1/V2 evolution pattern) are ONE component here.
+        var declarers = new Dictionary<(int TypeId, ushort Root), List<ArchetypeMetadata>>();
+
+        foreach (var meta in archetypes)
+        {
+            if (meta?._componentTypeIds == null)
+            {
+                continue;
+            }
+
+            var root = RootArchetypeIdOf(meta);
+
+            // Slots [0, inheritedCount) are copied from the parent; everything after is what THIS archetype declares (FinalizeArchetypeInternal appends own
+            // components after the parent's).
+            var inheritedCount = meta.ParentArchetypeId != ArchetypeMetadata.NoParent && Archetypes[meta.ParentArchetypeId] != null
+                ? Archetypes[meta.ParentArchetypeId].ComponentCount : 0;
+
+            for (var slot = inheritedCount; slot < meta.ComponentCount; slot++)
+            {
+                var typeId = meta._componentTypeIds[slot];
+
+                for (var prior = 0; prior < slot; prior++)
+                {
+                    if (meta._componentTypeIds[prior] != typeId)
+                    {
+                        continue;
+                    }
+
+                    var compName = meta._slotToComponentType?[slot]?.FullName ?? $"componentTypeId {typeId}";
+
+                    // Two shapes reach here and they need different advice: the component came from an ancestor, or the archetype simply called Register<T>()
+                    // twice for it. Both burn a second slot nothing can address; only the first has an inherited slot to point at.
+                    var where = prior < inheritedCount
+                        ? $"which it already inherits from '{DeclaringAncestorName(meta, typeId)}'. Remove the Register call; the inherited slot is "
+                          + "already there"
+                        : "twice. Remove the duplicate Register call";
+
+                    throw new InvalidOperationException(
+                        $"Archetype '{meta.ArchetypeType?.FullName}' declares component '{compName}' {where}. A component may be declared once per inheritance "
+                        + "chain — the re-declaration consumes a second of the 16 component slots, and a whole cluster column, that nothing can address.");
+                }
+
+                var key = (typeId, root);
+                if (!declarers.TryGetValue(key, out var list))
+                {
+                    list = [];
+                    declarers[key] = list;
+                }
+                list.Add(meta);
+            }
+        }
+
+        foreach (var (key, list) in declarers)
+        {
+            if (list.Count < 2)
+            {
+                continue;
+            }
+
+            var compType = list[0]._slotToComponentType?[list[0]._typeIdToSlot[key.TypeId]];
+            var uniqueField = UniqueIndexFieldOf(compType);
+            if (uniqueField == null)
+            {
+                continue;   // no unique index — any number of declarers is fine, anywhere, and sharing a component is ordinary composition
+            }
+
+            var names = new List<string>(list.Count);
+            foreach (var m in list)
+            {
+                names.Add(m.ArchetypeType?.FullName);
+            }
+            names.Sort(StringComparer.Ordinal);
+
+            var rootName = Archetypes[key.Root]?.ArchetypeType?.FullName;
+            throw new InvalidOperationException(
+                $"Component '{compType?.FullName}' declares a unique [Index] on field '{uniqueField}', but {list.Count} archetypes in the same tree (rooted at "
+                + $"'{rootName}') declare it: {string.Join(", ", names)}. The index is stored per archetype, so each of these owns a separate B+Tree and "
+                + "enforcing uniqueness between them would mean probing every sibling tree on each insert. Declare the component on their common ancestor "
+                + "instead, so one tree covers the whole subtree, or use [Index(AllowMultiple = true)]. Archetypes in UNRELATED trees may each declare it — "
+                + "each already has its own tree, so their constraints are independent and cost nothing.");
+        }
+    }
+
+    /// <summary>
+    /// Root of <paramref name="meta"/>'s archetype tree — itself when it has no parent. Two archetypes share a common ancestor if and only if they share
+    /// this, which is the whole test behind the per-tree scope of a unique <c>[Index]</c>.
+    /// </summary>
+    private static ushort RootArchetypeIdOf(ArchetypeMetadata meta)
+    {
+        var current = meta;
+        while (current.ParentArchetypeId != ArchetypeMetadata.NoParent && Archetypes[current.ParentArchetypeId] != null)
+        {
+            current = Archetypes[current.ParentArchetypeId];
+        }
+
+        return current.ArchetypeId;
+    }
+
+    /// <summary>Nearest ancestor of <paramref name="meta"/> declaring <paramref name="componentTypeId"/>, for the duplicate diagnostic.</summary>
+    private static string DeclaringAncestorName(ArchetypeMetadata meta, int componentTypeId)
+    {
+        var parentId = meta.ParentArchetypeId;
+        while (parentId != ArchetypeMetadata.NoParent && Archetypes[parentId] != null)
+        {
+            var parent = Archetypes[parentId];
+            if (parent.TryGetSlot(componentTypeId, out _))
+            {
+                return parent.ArchetypeType?.FullName;
+            }
+
+            parentId = parent.ParentArchetypeId;
+        }
+
+        return "an ancestor";
+    }
+
+    /// <summary>
+    /// Name of the first field carrying a UNIQUE <c>[Index]</c> (<c>AllowMultiple</c> false), or <see langword="null"/> when the component has none.
+    /// <c>[SpatialIndex]</c> is a different attribute and never matches. Same reflection shape as <see cref="BuildCascadeGraph"/>.
+    /// </summary>
+    private static string UniqueIndexFieldOf(Type compType)
+    {
+        if (compType == null)
+        {
+            return null;
+        }
+
+        foreach (var field in compType.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+        {
+            var indexAttr = field.GetCustomAttribute<IndexAttribute>();
+            if (indexAttr != null && !indexAttr.AllowMultiple)
+            {
+                return field.Name;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>

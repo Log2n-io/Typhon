@@ -54,6 +54,44 @@ class QPathVerUnit : Archetype<QPathVerUnit>
     public static readonly Comp<QPathVer> Data = Register<QPathVer>();
 }
 
+// ── A tree whose indexed component is declared by only PART of the subtree ─────────────────────────────────────────────────────────────────────────────────
+// The root carries no Loot; both children do. A query over the root must answer from the children and ignore the root, rather than throwing because the root
+// has no index for a component it does not have.
+
+[Component("Typhon.Test.QPath.Base", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+struct QPathCreature
+{
+    [Index(AllowMultiple = true)] public int Hp;
+    public QPathCreature(int hp) { Hp = hp; }
+}
+
+[Component("Typhon.Test.QPath.Loot", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+struct QPathLoot
+{
+    [Index(AllowMultiple = true)] public int Rarity;
+    public QPathLoot(int rarity) { Rarity = rarity; }
+}
+
+[Archetype]
+class QPathCreatureUnit : Archetype<QPathCreatureUnit>
+{
+    public static readonly Comp<QPathCreature> Body = Register<QPathCreature>();
+}
+
+[Archetype]
+class QPathMonsterUnit : Archetype<QPathMonsterUnit, QPathCreatureUnit>
+{
+    public static readonly Comp<QPathLoot> Loot = Register<QPathLoot>();
+}
+
+[Archetype]
+class QPathCritterUnit : Archetype<QPathCritterUnit, QPathCreatureUnit>
+{
+    public static readonly Comp<QPathLoot> Loot = Register<QPathLoot>();
+}
+
 #endregion
 
 /// <summary>
@@ -316,6 +354,51 @@ class QueryPathEquivalenceTests : TestBase<QueryPathEquivalenceTests>
             $"{path}: the reader's snapshot predates the second commit, so those 50 entities must stay invisible to it");
     }
 
+    // ── A component declared by only part of the subtree ───────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A polymorphic query over an archetype whose subtree carries the where-component only on SOME descendants must answer from those descendants, not throw.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The archetype mask is the queried archetype's whole subtree and <c>WhereField</c> never narrows it, so the root — which has no <see cref="QPathLoot"/>
+    /// at all — reached the guard that exists for an archetype whose component has no index home, and the query died with
+    /// <c>InvalidOperationException</c>. The guard's own comment recorded it as unreachable ("instrumenting the old fallthrough and running the full suite
+    /// showed it was never entered"), which held only because no test queried a supertype on a component declared below it.
+    /// </para>
+    /// <para>
+    /// The two cases are now distinguished: an archetype that does not CARRY the component is skipped (it cannot match a predicate on a field it does not
+    /// have); an archetype that carries it but has no index home still throws, because answering that one from the cluster scan alone would silently omit its
+    /// entities — the #663 shape the guard was built for.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void QueryOverAncestor_WhenOnlyDescendantsDeclareTheComponent_AnswersFromThem()
+    {
+        using var dbe = SetupEngine();
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Spawn<QPathCreatureUnit>(QPathCreatureUnit.Body.Set(new QPathCreature(1)));
+            tx.Spawn<QPathMonsterUnit>(QPathCreatureUnit.Body.Set(new QPathCreature(2)), QPathMonsterUnit.Loot.Set(new QPathLoot(9)));
+            tx.Spawn<QPathCritterUnit>(QPathCreatureUnit.Body.Set(new QPathCreature(3)), QPathCritterUnit.Loot.Set(new QPathLoot(9)));
+            tx.Spawn<QPathCritterUnit>(QPathCreatureUnit.Body.Set(new QPathCreature(4)), QPathCritterUnit.Loot.Set(new QPathLoot(1)));
+            tx.Commit();
+        }
+
+        using var q = dbe.CreateQuickTransaction();
+
+        var hits = q.Query<QPathCreatureUnit>().WhereField<QPathLoot>(l => l.Rarity == 9).Execute();
+        Assert.That(hits, Has.Count.EqualTo(2), "both descendants that declare the component must contribute; the root carries no Loot and cannot match");
+
+        // Controls: the leaf query is unchanged, and a component the WHOLE subtree carries still answers over all three archetypes.
+        var leafHits = q.Query<QPathMonsterUnit>().WhereField<QPathLoot>(l => l.Rarity == 9).Execute();
+        Assert.That(leafHits, Has.Count.EqualTo(1), "querying the declaring archetype directly is unaffected");
+
+        var wholeSubtree = q.Query<QPathCreatureUnit>().WhereField<QPathCreature>(b => b.Hp >= 1).Execute();
+        Assert.That(wholeSubtree, Has.Count.EqualTo(4), "a component the whole subtree carries still spans every archetype in it");
+    }
+
     // ── Machinery ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     private DatabaseEngine SetupEngine()
@@ -323,6 +406,8 @@ class QueryPathEquivalenceTests : TestBase<QueryPathEquivalenceTests>
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<QPathData>();
         dbe.RegisterComponentFromAccessor<QPathVer>();
+        dbe.RegisterComponentFromAccessor<QPathCreature>();
+        dbe.RegisterComponentFromAccessor<QPathLoot>();
         dbe.InitializeArchetypes();
         return dbe;
     }
