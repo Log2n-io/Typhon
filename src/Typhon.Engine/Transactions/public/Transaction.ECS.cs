@@ -1356,6 +1356,16 @@ public unsafe partial class Transaction
                         continue;
                     }
 
+                    // Width guard, mirroring the twin at the update site below. KeyBytes8 is 8 bytes and FromPointer is a raw CopyBlockUnaligned of
+                    // FieldSize — 64 for an indexed String64 field — so building one from a wider field smashes the stack over whatever locals follow it.
+                    // That is the same defect fixed on the tick-fence migration path (#629 review, C4); this is its insert-side sibling. A view delta cannot
+                    // carry a key it has no room for, so the honest behaviour is to skip the delta rather than truncate the key to its first eight bytes and
+                    // emit a notification that names the wrong value.
+                    if (field.FieldSize > sizeof(long))
+                    {
+                        continue;
+                    }
+
                     var newKey = KeyBytes8.FromPointer(fieldPtr, field.FieldSize);
                     byte flags = (byte)((fi & 0x3F) | 0x40); // isCreation
                     reg.DeltaBuffer.TryAppend(entityId, default, newKey, TSN, flags, reg.ComponentTag);

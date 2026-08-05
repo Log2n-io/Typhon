@@ -3698,21 +3698,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     }
 
     /// <summary>
-    /// Refuses a schema migration on a cluster-backed archetype that owns a <see cref="StorageMode.SingleVersion"/> slot, because its data cannot be recovered.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Migration reallocates a component's segments and invalidates the cluster laid out for the old sizes. A <c>Versioned</c> slot survives that: its revision
-    /// chain is migrated and re-headed, so <see cref="RebuildClusterFromChains"/> can re-place the entity and refill the slot. A <c>SingleVersion</c> slot has
-    /// no second copy anywhere — the cluster slot IS the data — so once the cluster is discarded there is nothing to rebuild it from.
-    /// </para>
-    /// <para>
-    /// Recovering it is possible and is the remaining half of #671: reconstruct the OLD <c>ArchetypeClusterInfo</c> from the persisted per-component sizes, load
-    /// the old cluster segment at that stride, and copy each slot's bytes through the same field map the component migration uses. Until that exists, failing at
-    /// open is the only honest option: the alternative is a database that opens cleanly with every SingleVersion component silently zeroed.
-    /// </para>
-    /// </remarks>
-    /// <summary>
     /// Walks the pre-migration cluster's occupancy bitmaps and returns each live entity's old <c>(chunkId, slotIndex)</c>, adding every entity found to
     /// <paramref name="allEntityPKs"/> so a pure-<see cref="StorageMode.SingleVersion"/> archetype — which has no revision chains to enumerate — still
     /// contributes its membership to the rebuild.
