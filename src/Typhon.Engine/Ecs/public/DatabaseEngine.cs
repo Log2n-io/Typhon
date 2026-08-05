@@ -753,13 +753,29 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
             if (found)
             {
-                // Free component chunks
-                for (var slot = 0; slot < meta.ComponentCount; slot++)
+                // Free each Versioned slot's revision chain root.
+                //
+                // This used to read the record with EntityRecordAccessor.GetLocation, which resolves to *(int*)(rec + 14 + slot*4). In a
+                // ClusterEntityRecord byte 14 is ClusterChunkId — and since #629 every archetype is cluster-backed, so EVERY record is that shape and the
+                // read was unconditionally wrong rather than occasionally wrong. It then handed the resulting integer to ComponentSegment.FreeChunk, freeing
+                // an arbitrary component CONTENT chunk belonging to some other live entity (review M7). Two errors compounding: the wrong accessor, and then
+                // the wrong segment.
+                //
+                // A non-Versioned slot is skipped rather than missed: SingleVersion and Transient bytes live in the cluster slot itself, which ReleaseSlot
+                // reclaims on destroy, so there is no chain to free here.
+                var layout = meta.ClusterLayout;
+                for (var slot = 0; slot < meta.ComponentCount && engineState.SlotToComponentTable != null; slot++)
                 {
-                    var chunkId = EntityRecordAccessor.GetLocation(readBuf, slot);
-                    if (chunkId != 0 && engineState.SlotToComponentTable != null)
+                    var vi = layout.SlotToVersionedIndex[slot];
+                    if (vi < 0)
                     {
-                        engineState.SlotToComponentTable[slot].ComponentSegment.FreeChunk(chunkId);
+                        continue;
+                    }
+
+                    var chainRoot = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(readBuf, vi);
+                    if (chainRoot != 0)
+                    {
+                        engineState.SlotToComponentTable[slot].CompRevTableSegment?.FreeChunk(chainRoot);
                     }
                 }
 
