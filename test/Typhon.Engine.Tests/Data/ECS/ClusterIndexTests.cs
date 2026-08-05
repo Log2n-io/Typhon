@@ -553,6 +553,10 @@ class ClusterIndexTests : TestBase<ClusterIndexTests>
         using var tx2 = dbe.CreateQuickTransaction();
         Assert.That(tx2.Query<ClIdxUnit>().WhereField<ClIdxHealth>(h => h.Current == 1).Count(), Is.EqualTo(0), "No entities with old value");
         Assert.That(tx2.Query<ClIdxUnit>().WhereField<ClIdxHealth>(h => h.Current == 2).Count(), Is.EqualTo(2), "Both entities now have value 2");
+
+        // The two assertions above pass through the SoA scan, which reads component DATA and never consults the tree — so they say nothing about the index.
+        // This is what actually checks it, and it is why the index could be wrong here for as long as it has been.
+        IndexTestHelpers.AssertIndexMatchesData<ClIdxUnit>(dbe, "after mutating an indexed field onto a value another entity already holds");
     }
 
     // ═══════════════════════════════════════════════════════════════════════

@@ -119,6 +119,10 @@ class TickBoundaryIndexTests : TestBase<TickBoundaryIndexTests>
 
         Assert.That(IndexContainsKey(dbe, 20), Is.True, "New value in index");
         Assert.That(IndexContainsKey(dbe, 10), Is.False, "Old value removed from index");
+
+        // Control for the oracle: this mutation moves onto an EMPTY key, and the index tracks it correctly. Pairing it with the colliding case in
+        // ClusterIndexTests.TargetedQuery_AfterMutation_ReturnsUpdatedResults is what localises the defect to the collision, not to updates in general.
+        IndexTestHelpers.AssertIndexMatchesData<TbSvArch>(dbe, "after an SV mutation onto a previously-unused key");
     }
 
     // ═══════════════════════════════════════════════════════════════════════

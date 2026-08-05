@@ -3659,7 +3659,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // a lossy map). This runs before WAL apply (RunWalV2Recovery), so every downstream consumer sees a freshly-derived map. (Mixed cluster archetypes:
             // RebuildVersionedHeadFromChain in InitializeArchetypes runs earlier and reads the not-yet-rebuilt EntityMap — harmless on the common
             // no-prior-shutdown crash, where the map is fresh and that pass no-ops; a prior-shutdown mixed-cluster ordering refinement is a documented residual.)
-            if (WillRebuildEntityMapOnCrash(meta))
+            // ...EXCEPT when this open migrated a schema. A migration allocates a FRESH EntityMap and a FRESH cluster, so there is nothing stale to discard —
+            // and the crash rebuild derives its entries from cluster occupancy, which on that fresh cluster is empty. It would "rebuild" the map to nothing and
+            // `continue` past RebuildClusterFromChains below, the only pass that re-places the entities. Every entity of the archetype would be gone.
+            //
+            // This is not a crash-only path: WalFilesPresentAtOpen is true whenever *.wal files exist, and they survive a CLEAN shutdown — so it is every
+            // reopen after a schema change on a disk-backed WAL, i.e. every production one. It stayed invisible because TestBase defaults to InMemoryWalFileIO,
+            // which leaves the WAL directory empty and the whole branch unentered (regression test: MigratingReopen_OnDiskWal_PreservesEntities).
+            if (WillRebuildEntityMapOnCrash(meta) && !HasMigratedSlot(state))
             {
                 RebuildEntityMapOnCrash(meta, state);
                 continue;
@@ -3734,7 +3741,23 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     var entityPK = *(long*)(chunkBase + oldLayout.EntityIdsOffset + slotIndex * 8);
                     if (entityPK == 0)
                     {
-                        continue; // an occupied slot with no entity id is not addressable; skip rather than fabricate one
+                        // A live slot ALWAYS carries its entity id — spawn and the rebuild both write the tail. Reading zero therefore does not mean "empty
+                        // slot" (the occupancy bit says otherwise), it means the geometry this cluster is being read through is WRONG, so EntityIdsOffset
+                        // points at something else entirely. That happens whenever the reconstructed pre-migration layout disagrees with what the cluster was
+                        // written at: a component's old size unavailable (which silently zeroed SingleVersion data until the OldCompSize fix), or the
+                        // AllowMultiple element-id tail having a different width because the index set changed.
+                        //
+                        // Skipping was the dangerous choice: every slot gets skipped, positions comes back empty, CopyPreMigrationSlot never runs, and the
+                        // database opens with every SingleVersion component silently zeroed. Failing here converts that entire class — not merely the causes
+                        // enumerated above — into a loud error, and it VALIDATES the reconstruction instead of trying to predict what can invalidate it.
+                        // Nothing else can: TryLoadChunkBasedSegment takes the stride from its caller and never checks it against the segment on disk.
+                        ThrowHelper.ThrowCorruption(
+                            "ClusterSegment",
+                            chunkId,
+                            $"pre-migration cluster chunk {chunkId} slot {slotIndex} is occupied but its entity id reads 0 at offset "
+                            + $"{oldLayout.EntityIdsOffset + slotIndex * 8} (stride {oldLayout.ClusterStride}, cluster size {oldLayout.ClusterSize}). The "
+                            + "reconstructed pre-migration cluster geometry does not match what this cluster was written at, so its SingleVersion bytes cannot "
+                            + "be copied out. Refusing to open rather than zeroing those components. See https://github.com/Log2n-io/Typhon/issues/671.");
                     }
 
                     positions[entityPK] = (chunkId, slotIndex);
@@ -4263,6 +4286,29 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         _deferredVersionedHeadRebuilds = null;
         return Stopwatch.GetTimestamp() - start;
+    }
+
+    /// <summary>
+    /// True when any of this archetype's component tables was migrated by THIS open, which means its EntityMap and cluster were both freshly allocated and
+    /// must be re-populated from the chains + the pre-migration cluster rather than treated as recoverable state.
+    /// </summary>
+    private bool HasMigratedSlot(ArchetypeEngineState state)
+    {
+        if (_migratedComponents == null || state?.SlotToComponentTable == null)
+        {
+            return false;
+        }
+
+        for (var slot = 0; slot < state.SlotToComponentTable.Length; slot++)
+        {
+            var table = state.SlotToComponentTable[slot];
+            if (table != null && _migratedComponents.ContainsKey(table.Definition.Name))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

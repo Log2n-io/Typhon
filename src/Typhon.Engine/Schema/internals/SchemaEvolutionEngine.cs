@@ -553,6 +553,12 @@ internal static class SchemaEvolutionEngine
             NewRevisionSegment = newRevSeg,
             EntitiesMigrated = entitiesMigrated,
             ElapsedMs = sw.ElapsedMilliseconds,
+            // No FieldMap — a user function, not a field remap — but OldCompSize is still REQUIRED, and omitting it silently destroyed SingleVersion data.
+            // The cluster pass reconstructs the pre-migration cluster geometry from every component's OLD size; when this one is absent it falls back to the
+            // NEW size, computes a wrong ClusterStride, and TryLoadChunkBasedSegment does not validate stride — so the old cluster loads at the wrong geometry,
+            // entity PKs read as 0, no positions are collected, and the SingleVersion components sitting NEXT TO the migrated one come back zeroed with no
+            // error. This value is about the archetype's geometry, not about this component's own migration strategy.
+            OldCompSize = persistedComp.CompSize,
         };
     }
 

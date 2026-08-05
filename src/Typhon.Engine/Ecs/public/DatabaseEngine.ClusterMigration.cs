@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
@@ -625,7 +625,11 @@ public partial class DatabaseEngine
                         {
                             ref var field = ref ixSlot.Fields[fi];
                             var fieldPtr = dstCompBase + field.FieldOffset;
-                            var key = KeyBytes8.FromPointer(fieldPtr, field.FieldSize);
+                            // The B+Tree takes the key by raw pointer, so pass fieldPtr straight through. Building a KeyBytes8 first (an 8-byte struct) and
+                            // taking its address memcpy'd FieldSize bytes into it — 64 for a String64 indexed field — smashing 56 bytes of stack over the
+                            // ChunkAccessor locals sitting next to it, and crashing the host. Same defect and same fix as the destroy twin
+                            // (Transaction.ECS.cs:1393). fieldPtr already holds the key: the component copy in step 4 is src -> dst, so the destination bytes
+                            // are the entity's current value, which is exactly the key being removed from the tree before the re-add.
                             // For non-unique (AllowMultiple) cluster indexes, read the srcBase elementId from the
                             // source cluster's tail and call RemoveValue — Remove(key) would wipe the entire buffer
                             // at the key and corrupt siblings. srcBase is still the source cluster's bytes (the
@@ -638,12 +642,12 @@ public partial class DatabaseEngine
                                 int newElementId;
                                 if (useS64)
                                 {
-                                    field.Index.RemoveValue(&key, elementId, oldClusterLocation, ref idxAccessorS64);
+                                    field.Index.RemoveValue(fieldPtr, elementId, oldClusterLocation, ref idxAccessorS64);
                                     newElementId = field.Index.Add(fieldPtr, newClusterLocation, ref idxAccessorS64);
                                 }
                                 else
                                 {
-                                    field.Index.RemoveValue(&key, elementId, oldClusterLocation, ref idxAccessor);
+                                    field.Index.RemoveValue(fieldPtr, elementId, oldClusterLocation, ref idxAccessor);
                                     newElementId = field.Index.Add(fieldPtr, newClusterLocation, ref idxAccessor);
                                 }
                                 *(int*)(dstBase + layout.IndexElementIdOffset(field.MultiFieldIndex, dstSlot)) = newElementId;
@@ -652,12 +656,12 @@ public partial class DatabaseEngine
                             {
                                 if (hasIdxAccessorS64 && ReferenceEquals(field.Index.Segment, clusterState.IndexSegmentString64))
                                 {
-                                    field.Index.Remove(&key, out _, ref idxAccessorS64);
+                                    field.Index.Remove(fieldPtr, out _, ref idxAccessorS64);
                                     field.Index.Add(fieldPtr, newClusterLocation, ref idxAccessorS64);
                                 }
                                 else
                                 {
-                                    field.Index.Remove(&key, out _, ref idxAccessor);
+                                    field.Index.Remove(fieldPtr, out _, ref idxAccessor);
                                     field.Index.Add(fieldPtr, newClusterLocation, ref idxAccessor);
                                 }
                             }
