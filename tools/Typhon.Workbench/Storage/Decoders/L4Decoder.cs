@@ -324,7 +324,7 @@ internal static class L4Decoder
     /// </list>
     /// </summary>
     public static StorageContentCellDto[] DecodeIndex(ReadOnlySpan<byte> chunkBytes, int chunkId, int directoryChunkCount,
-        (short StableId, int RootChunkId, int EntryCount)[] trees)
+        (short StableId, short Slot, int RootChunkId, int EntryCount)[] trees)
     {
         if (chunkId < directoryChunkCount)
         {
@@ -337,8 +337,11 @@ internal static class L4Decoder
             {
                 foreach (var t in trees)
                 {
+                    // On a per-archetype segment several component slots share the directory and their field ids restart at 0, so the slot is part of the
+                    // tree's identity and must be shown — otherwise two distinct trees render identically (#657).
                     var label = t.StableId == -1 ? "Primary key" : t.StableId == 0 ? "Standalone" : $"Field #{t.StableId}";
-                    dirCells.Add(new(label, $"root #{t.RootChunkId} · {t.EntryCount} entries", "indexTree", 0, 12, t.RootChunkId));
+                    var detail = $"root #{t.RootChunkId} · {t.EntryCount} entries";
+                    dirCells.Add(new(t.Slot == 0 ? label : $"{label} (slot {t.Slot})", detail, "indexTree", 0, 12, t.RootChunkId));
                 }
             }
             return dirCells.ToArray();

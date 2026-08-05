@@ -1,4 +1,4 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -232,6 +232,31 @@ class PipelineExecutorCombinedPathTests : TestBase<PipelineExecutorCombinedPathT
             Assert.That(tx.Query<CompDArch>().WhereField<CompD>(d => d.B == 5).Count(), Is.EqualTo(0), "Deleted entity invisible");
             Assert.That(tx.Query<CompDArch>().WhereField<CompD>(d => d.B >= 0).Count(), Is.EqualTo(9), "Total minus deleted");
         }
+    }
+
+    // The value half of snapshot isolation, still open as #674. ScanClusterSoa evaluates predicates against the cluster slot column, which holds the committed
+    // Versioned HEAD, so a value committed after this reader's snapshot changes its result — a non-repeatable read, which 04-data.md "Isolation guarantees"
+    // says the fixed snapshot prevents. The BornTSN/DiedTSN gate added alongside this test fixes the PHANTOM half (Versioned_ConcurrentSnapshot_IsolatedView
+    // below) but cannot fix this one: it decides whether an entity is visible, not which version of its data the predicate should see. Ignored rather than
+    // deleted so the gap stays visible in the suite; #674 carries the design decision (candidate-filter + chain verify vs routing vs amending the spec).
+    [Test]
+    [Ignore("#674 — cluster SoA scan evaluates the committed HEAD, not the snapshot-visible version")]
+    public void Versioned_SnapshotHidesLaterUpdate()
+    {
+        using var dbe = SetupEngine();
+        var spawned = SpawnCompDEntities(dbe, 10);
+        var ids5 = spawned[5];
+        using var txRead = dbe.CreateQuickTransaction();
+        int before = txRead.Query<CompDArch>().WhereField<CompD>(d => d.B == 5).Count();
+
+        using (var txWrite = dbe.CreateQuickTransaction())
+        {
+            txWrite.OpenMut(ids5).Write(CompDArch.D).B = 999;
+            txWrite.Commit();
+        }
+
+        int after = txRead.Query<CompDArch>().WhereField<CompD>(d => d.B == 5).Count();
+        Assert.That(after, Is.EqualTo(before), $"non-repeatable read: before={before} after={after}");
     }
 
     [Test]

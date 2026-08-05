@@ -122,15 +122,11 @@ class OwnerAggregatesTests : TestBase<OwnerAggregatesTests>
         // Calculate expected totals from individual segments
         long expectedAllocated =
             componentTable.ComponentSegment.AllocatedChunkCount +
-            componentTable.CompRevTableSegment.AllocatedChunkCount +
-            componentTable.DefaultIndexSegment.AllocatedChunkCount +
-            (componentTable.String64IndexSegment?.AllocatedChunkCount ?? 0);
+            componentTable.CompRevTableSegment.AllocatedChunkCount;
 
         long expectedCapacity =
             componentTable.ComponentSegment.ChunkCapacity +
-            componentTable.CompRevTableSegment.ChunkCapacity +
-            componentTable.DefaultIndexSegment.ChunkCapacity +
-            (componentTable.String64IndexSegment?.ChunkCapacity ?? 0);
+            componentTable.CompRevTableSegment.ChunkCapacity;
 
         var writer = new TestMetricWriter();
         ((IMetricSource)componentTable).ReadMetrics(writer);
@@ -195,9 +191,6 @@ class OwnerAggregatesTests : TestBase<OwnerAggregatesTests>
 
         Assert.That(props.ContainsKey("CompRevTableSegment.AllocatedChunks"), Is.True);
         Assert.That(props.ContainsKey("CompRevTableSegment.Capacity"), Is.True);
-
-        Assert.That(props.ContainsKey("DefaultIndexSegment.AllocatedChunks"), Is.True);
-        Assert.That(props.ContainsKey("DefaultIndexSegment.Capacity"), Is.True);
     }
 
     [Test]
@@ -220,33 +213,6 @@ class OwnerAggregatesTests : TestBase<OwnerAggregatesTests>
             Is.EqualTo(componentTable.CompRevTableSegment.AllocatedChunkCount));
         Assert.That(props["CompRevTableSegment.Capacity"],
             Is.EqualTo(componentTable.CompRevTableSegment.ChunkCapacity));
-
-        Assert.That(props["DefaultIndexSegment.AllocatedChunks"],
-            Is.EqualTo(componentTable.DefaultIndexSegment.AllocatedChunkCount));
-        Assert.That(props["DefaultIndexSegment.Capacity"],
-            Is.EqualTo(componentTable.DefaultIndexSegment.ChunkCapacity));
-    }
-
-    [Test]
-    public void ComponentTable_GetDebugProperties_IncludesString64Segment_WhenPresent()
-    {
-        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
-        RegisterComponents(dbe);
-
-        // CompC has a String64 field, so it should have a String64IndexSegment
-        var componentTable = dbe.GetComponentTable<CompC>();
-        var debugProvider = (IDebugPropertiesProvider)componentTable;
-
-        var props = debugProvider.GetDebugProperties();
-
-        // CompC uses String64 but doesn't have an [Index] on it,
-        // but String64IndexSegment is always allocated for tables that might need it
-        if (componentTable.String64IndexSegment != null)
-        {
-            Assert.That(props.ContainsKey("String64IndexSegment.AllocatedChunks"), Is.True,
-                "Should include String64IndexSegment when present");
-            Assert.That(props.ContainsKey("String64IndexSegment.Capacity"), Is.True);
-        }
     }
 
     #endregion
@@ -288,16 +254,11 @@ class OwnerAggregatesTests : TestBase<OwnerAggregatesTests>
         // Debug properties should match aggregated metrics
         var debugProps = ((IDebugPropertiesProvider)componentTable).GetDebugProperties();
 
+        // Index segments dropped out of this sum with the per-ComponentTable index home (#629) — a ComponentTable now owns component data and, for a
+        // Versioned component, its revision chains. Index storage is reported per ARCHETYPE.
         long debugTotal =
             (int)debugProps["ComponentSegment.AllocatedChunks"] +
-            (int)debugProps["CompRevTableSegment.AllocatedChunks"] +
-            (int)debugProps["DefaultIndexSegment.AllocatedChunks"];
-
-        // Include String64IndexSegment if present
-        if (debugProps.ContainsKey("String64IndexSegment.AllocatedChunks"))
-        {
-            debugTotal += (int)debugProps["String64IndexSegment.AllocatedChunks"];
-        }
+            (int)debugProps["CompRevTableSegment.AllocatedChunks"];
 
         Assert.That(writer.CapacityCurrent, Is.EqualTo(debugTotal),
             "Aggregated capacity should equal sum of debug property values");

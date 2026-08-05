@@ -19,6 +19,17 @@ internal readonly struct MigrationResult
     public ChunkBasedSegment<PersistentStore> NewRevisionSegment { get; init; }
     public int EntitiesMigrated { get; init; }
     public long ElapsedMs { get; init; }
+
+    /// <summary>
+    /// The surviving-field remap this migration applied, and the component's size BEFORE it. Retained because a cluster-backed archetype has to redo the same
+    /// remap against a second copy of the data: a <c>SingleVersion</c> component lives only in the cluster slot, so migrating its ComponentTable segments does
+    /// not touch its bytes at all (#671). The cluster pass reconstructs the OLD cluster geometry from <see cref="OldCompSize"/> and replays
+    /// <see cref="FieldMap"/> slot by slot. Null / 0 for a migration that produced no field map.
+    /// </summary>
+    public FieldMapEntry[] FieldMap { get; init; }
+
+    /// <inheritdoc cref="FieldMap"/>
+    public int OldCompSize { get; init; }
 }
 
 /// <summary>
@@ -427,6 +438,8 @@ internal static class SchemaEvolutionEngine
             NewRevisionSegment = newRevSeg,
             EntitiesMigrated = entitiesMigrated,
             ElapsedMs = sw.ElapsedMilliseconds,
+            FieldMap = fieldMap,
+            OldCompSize = persistedComp.CompSize,
         };
     }
 
@@ -540,6 +553,12 @@ internal static class SchemaEvolutionEngine
             NewRevisionSegment = newRevSeg,
             EntitiesMigrated = entitiesMigrated,
             ElapsedMs = sw.ElapsedMilliseconds,
+            // No FieldMap — a user function, not a field remap — but OldCompSize is still REQUIRED, and omitting it silently destroyed SingleVersion data.
+            // The cluster pass reconstructs the pre-migration cluster geometry from every component's OLD size; when this one is absent it falls back to the
+            // NEW size, computes a wrong ClusterStride, and TryLoadChunkBasedSegment does not validate stride — so the old cluster loads at the wrong geometry,
+            // entity PKs read as 0, no positions are collected, and the SingleVersion components sitting NEXT TO the migrated one come back zeroed with no
+            // error. This value is about the archetype's geometry, not about this component's own migration strategy.
+            OldCompSize = persistedComp.CompSize,
         };
     }
 

@@ -1,4 +1,4 @@
-﻿// unset
+// unset
 
 using JetBrains.Annotations;
 using System;
@@ -63,7 +63,6 @@ public unsafe partial class Transaction : EntityAccessor
 
     // Hoisted accessors for batch index maintenance (set per component type during Commit)
     private ChunkAccessor<PersistentStore>[] _batchIndexAccessors;
-    private ChunkAccessor<PersistentStore> _batchTailAccessor;
     private bool _batchIndexActive;
     private int _batchEntityCount;
 
@@ -71,7 +70,19 @@ public unsafe partial class Transaction : EntityAccessor
     private ushort _clusterCommitArchId;
     private ChunkAccessor<PersistentStore> _clusterCommitMapAccessor;
     private ChunkAccessor<PersistentStore> _clusterCommitContentAccessor;
+
+    /// <summary>
+    /// The segment <see cref="_clusterCommitContentAccessor"/> was opened on. The other cluster-commit accessors belong to the ARCHETYPE, but content
+    /// chunks belong to the COMPONENT, and one archetype can carry several Versioned components — so caching the content accessor on the archetype alone
+    /// hands the second component's chunk id to the first component's segment.
+    /// </summary>
+    private ChunkBasedSegment<PersistentStore> _clusterCommitContentSegment;
     private ChunkAccessor<PersistentStore> _clusterCommitClusterAccessor;
+    // Per-archetype index segments, cached on the same archetype key as the three above (#665). Before this the reconcile created and disposed an accessor
+    // per entity PER FIELD; every field of an archetype shares one of these two segments, so all but the first were redundant. Two rather than one because
+    // a segment serves exactly one node size and String64 nodes are wider — the same split ComponentTable has always had.
+    private ChunkAccessor<PersistentStore> _clusterCommitIndexAccessor;
+    private ChunkAccessor<PersistentStore> _clusterCommitIndexAccessorS64;
     private bool _hasClusterCommitAccessors;
 
     // AP-01 (Append-before-publish): the commit pipeline splits each component entry into a PREPARE half (all fallible work — conflict
@@ -272,10 +283,11 @@ public unsafe partial class Transaction : EntityAccessor
     {
         // Dispose transient batch accessors first — safe even on double-dispose or if never created
         // (ChunkAccessor<PersistentStore>.Dispose() is idempotent: no-op when _segment==null).
-        _batchTailAccessor.Dispose();
         _clusterCommitMapAccessor.Dispose();
         _clusterCommitContentAccessor.Dispose();
         _clusterCommitClusterAccessor.Dispose();
+        _clusterCommitIndexAccessor.Dispose();
+        _clusterCommitIndexAccessorS64.Dispose();
         _hasClusterCommitAccessors = false;
 
         if (_isDisposed)
@@ -450,6 +462,24 @@ public unsafe partial class Transaction : EntityAccessor
     /// <summary>
     /// Returns an enumerator that streams entities via a secondary index in key order, filtered by MVCC visibility at this transaction's snapshot.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Fans out across every archetype holding the component (#666).</b> Indexes live per-archetype, so a component-keyed <see cref="IndexRef"/> names K
+    /// trees rather than one. Fanning out is what preserves the semantics the single shared tree used to give — the alternative, making the handle name one
+    /// archetype, would silently narrow every existing caller's result set. ADR-045 §2 accepted the K-way merge when it chose per-archetype trees.
+    /// </para>
+    /// <para>
+    /// <b>Index entries are materialised; entity resolution stays lazy.</b> The B+Tree range cursors are <c>ref struct</c>s, so K of them cannot be held side
+    /// by side for a streaming merge — the language has no way to store them. Each tree's <c>(key, location)</c> pairs are therefore drained into one pooled
+    /// buffer and sorted once, which costs 12 bytes per matching index entry. The expensive half — chain walks, page faults, component reads — remains
+    /// per-<see cref="IndexEntityEnumerator{T,TKey}.MoveNext"/>, so this bounds memory by the number of index entries in range, not by the data behind them.
+    /// Stated rather than hidden: for K == 1 the buffer holds exactly what a single-tree scan would have walked anyway.
+    /// </para>
+    /// <para>
+    /// Transient components are not reachable here and never were: their trees are <c>BTree&lt;TKey, TransientStore&gt;</c>, which fails the cast below
+    /// exactly as it did against the shared home.
+    /// </para>
+    /// </remarks>
     public IndexEntityEnumerator<T, TKey> EnumerateIndex<T, TKey>(IndexRef indexRef, TKey minKey, TKey maxKey) where T : unmanaged where TKey : unmanaged
     {
         AssertThreadAffinity();
@@ -462,58 +492,308 @@ public unsafe partial class Transaction : EntityAccessor
             throw new InvalidOperationException("PK B+Tree has been removed. Use ECS queries with EntityMap instead.");
         }
 
-        var ifi = ct.IndexedFieldInfos[indexRef.FieldIndex];
-        if (ifi.Index is not BTree<TKey, PersistentStore> skIndex)
+        var fieldIndex = indexRef.FieldIndex;
+        var sources = new List<IndexArchetypeSource>();
+        var trees = new List<BTree<TKey, PersistentStore>>();
+        var multi = new List<bool>();
+
+        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
         {
-            throw new InvalidOperationException(
-                $"TKey type mismatch: index uses '{ifi.Index.GetType().GenericTypeArguments[0].Name}', caller specified '{typeof(TKey).Name}'.");
+            var es = _dbe._archetypeStates[meta.ArchetypeId];
+            var clusterState = es?.ClusterState;
+            if (clusterState?.IndexSlots == null)
+            {
+                continue;
+            }
+
+            // The archetype's slot for THIS component table. A component type can sit at a different slot in each archetype, and the index slots are keyed on
+            // the archetype's own slot numbering, so the table identity is the only reliable join.
+            var compSlot = -1;
+            for (var slot = 0; slot < meta.ComponentCount; slot++)
+            {
+                if (ReferenceEquals(es.SlotToComponentTable[slot], ct))
+                {
+                    compSlot = slot;
+                    break;
+                }
+            }
+
+            if (compSlot < 0)
+            {
+                continue;
+            }
+
+            var ixSlotIdx = -1;
+            for (var s = 0; s < clusterState.IndexSlots.Length; s++)
+            {
+                if (clusterState.IndexSlots[s].Fields != null && clusterState.IndexSlots[s].Slot == compSlot)
+                {
+                    ixSlotIdx = s;
+                    break;
+                }
+            }
+
+            if (ixSlotIdx < 0 || fieldIndex >= clusterState.IndexSlots[ixSlotIdx].Fields.Length)
+            {
+                continue;
+            }
+
+            ref var field = ref clusterState.IndexSlots[ixSlotIdx].Fields[fieldIndex];
+            if (field.Index is not BTree<TKey, PersistentStore> typedIndex)
+            {
+                throw new InvalidOperationException(
+                    $"TKey type mismatch: index uses '{field.Index.GetType().GenericTypeArguments[0].Name}', caller specified '{typeof(TKey).Name}'.");
+            }
+
+            var layout = clusterState.Layout;
+            sources.Add(new IndexArchetypeSource
+            {
+                ClusterState = clusterState,
+                EngineState = es,
+                RecordSize = meta._entityRecordSize,
+                CompOffset = layout.ComponentOffset(compSlot),
+                CompSize = layout.ComponentSize(compSlot),
+                VersionedIndex = layout.SlotToVersionedIndex != null ? layout.SlotToVersionedIndex[compSlot] : -1,
+            });
+
+            trees.Add(typedIndex);
+            multi.Add(field.AllowMultiple);
         }
 
-        BTree<TKey, PersistentStore> typedIndex = skIndex;
+        // ONE archetype holds this component — the common case, and the one an early-terminating caller depends on. Stream straight off its cursor and
+        // materialise nothing: a caller that breaks after N entries must pay for N entries, not for the whole range. Draining up front turns
+        // EnumerateIndex(startKey, MaxValue) + break-at-100 from O(100) into O(everything at or after startKey), which is what a YCSB-style scan does.
+        if (trees.Count == 1)
+        {
+            return new IndexEntityEnumerator<T, TKey>(trees[0], multi[0], minKey, maxKey, sources[0], ct, this, _changeSet);
+        }
 
-        return new IndexEntityEnumerator<T, TKey>(typedIndex, ct, this, minKey, maxKey, _changeSet);
+        // Genuine fan-out: K cursors cannot be held side by side (they are ref structs), so the entries are merged eagerly. Early termination degrades here
+        // and that is a known limit of the multi-archetype path, recorded rather than hidden.
+        var runs = new List<List<IndexMergeEntry<TKey>>>(trees.Count);
+        for (var i = 0; i < trees.Count; i++)
+        {
+            var run = new List<IndexMergeEntry<TKey>>();
+            CollectIndexEntries(trees[i], multi[i], minKey, maxKey, i, run);
+            runs.Add(run);
+        }
+
+        return new IndexEntityEnumerator<T, TKey>(MergeRuns(runs), sources.ToArray(), ct, this, _changeSet);
     }
 
     /// <summary>
-    /// MVCC-correct streaming enumerator over any index B+Tree leaf chain.
+    /// Merges K already-ordered per-archetype runs into one ascending sequence.
+    /// </summary>
+    /// <remarks>
+    /// A B+Tree range scan emits its keys in order, so each run arrives sorted and the combined order is a K-way MERGE — linear in the total, with one
+    /// comparison per output element. Concatenating and calling <see cref="Array.Sort{T}(T[], Comparison{T})"/> instead throws that ordering away and pays
+    /// O(n log n) delegate-dispatched comparisons to rediscover it; measured at 40 000 entries that mistake cost 8.1 ms of pure set-up before a single entity
+    /// was read. The single-run case — one archetype holds the component, which is the common one — returns the run untouched and does no merging at all.
+    /// </remarks>
+    private static IndexMergeEntry<TKey>[] MergeRuns<TKey>(List<List<IndexMergeEntry<TKey>>> runs) where TKey : unmanaged
+    {
+        if (runs.Count == 0)
+        {
+            return [];
+        }
+
+        if (runs.Count == 1)
+        {
+            return runs[0].ToArray();
+        }
+
+        var total = 0;
+        for (var r = 0; r < runs.Count; r++)
+        {
+            total += runs[r].Count;
+        }
+
+        var result = new IndexMergeEntry<TKey>[total];
+        var cursors = new int[runs.Count];
+        var comparer = Comparer<TKey>.Default;
+
+        for (var outIdx = 0; outIdx < total; outIdx++)
+        {
+            var best = -1;
+            for (var r = 0; r < runs.Count; r++)
+            {
+                if (cursors[r] >= runs[r].Count)
+                {
+                    continue;
+                }
+
+                // Ties break on source order so a repeated run over an unchanged index yields the same sequence.
+                if (best < 0 || comparer.Compare(runs[r][cursors[r]].Key, runs[best][cursors[best]].Key) < 0)
+                {
+                    best = r;
+                }
+            }
+
+            result[outIdx] = runs[best][cursors[best]++];
+        }
+
+        return result;
+    }
+
+    /// <summary>Drains one archetype's B+Tree over <paramref name="minKey"/>..<paramref name="maxKey"/> into <paramref name="sink"/>.</summary>
+    /// <remarks>
+    /// Separated so the <c>ref struct</c> range cursors live and die inside one stack frame. That is the whole reason the merge materialises: two of these
+    /// cannot be alive in the same object at the same time.
+    /// </remarks>
+    private static void CollectIndexEntries<TKey>(BTree<TKey, PersistentStore> index, bool allowMultiple, TKey minKey, TKey maxKey, int sourceIndex,
+        List<IndexMergeEntry<TKey>> sink) where TKey : unmanaged
+    {
+        if (allowMultiple)
+        {
+            var e = index.EnumerateRangeMultiple(minKey, maxKey);
+            try
+            {
+                while (e.MoveNextKey())
+                {
+                    var key = e.CurrentKey;
+                    do
+                    {
+                        var values = e.CurrentValues;
+                        for (var i = 0; i < values.Length; i++)
+                        {
+                            sink.Add(new IndexMergeEntry<TKey> { Key = key, Location = values[i], SourceIndex = sourceIndex });
+                        }
+                    }
+                    while (e.NextChunk());
+                }
+            }
+            finally
+            {
+                e.Dispose();
+            }
+
+            return;
+        }
+
+        var u = index.EnumerateRange(minKey, maxKey);
+        try
+        {
+            while (u.MoveNext())
+            {
+                var kv = u.Current;
+                sink.Add(new IndexMergeEntry<TKey> { Key = kv.Key, Location = kv.Value, SourceIndex = sourceIndex });
+            }
+        }
+        finally
+        {
+            u.Dispose();
+        }
+    }
+
+    /// <summary>One index entry pulled from an archetype's tree, carrying the source it came from so resolution can find its cluster again.</summary>
+    internal struct IndexMergeEntry<TKey> where TKey : unmanaged
+    {
+        public TKey Key;
+
+        /// <summary>Packed <c>ClusterLocation</c> — <c>clusterChunkId * 64 + slotIndex</c>.</summary>
+        public int Location;
+
+        public int SourceIndex;
+    }
+
+    /// <summary>Everything needed to turn a <c>ClusterLocation</c> from one archetype's index back into an entity and its component bytes.</summary>
+    internal sealed class IndexArchetypeSource
+    {
+        public ArchetypeClusterState ClusterState;
+        public ArchetypeEngineState EngineState;
+        public int RecordSize;
+        public int CompOffset;
+        public int CompSize;
+
+        /// <summary>Position among the archetype's Versioned slots, or -1 when this component is SingleVersion here.</summary>
+        public int VersionedIndex;
+    }
+
+    /// <summary>
+    /// MVCC-correct streaming enumerator over the per-archetype index B+Trees backing one component.
     /// Use <see cref="CurrentComponent"/> for zero-copy ref access into page memory, or <see cref="Current"/> for a convenience copy.
-    /// Supports both unique and AllowMultiple indexes (including PK).
+    /// Supports both unique and AllowMultiple indexes.
     /// </summary>
     [PublicAPI]
     public ref struct IndexEntityEnumerator<T, TKey> where T : unmanaged where TKey : unmanaged
     {
-        // Unique index path
+        private readonly IndexMergeEntry<TKey>[] _entries;
+        private readonly IndexArchetypeSource[] _sources;
+        private readonly ChunkAccessor<PersistentStore>[] _clusterAccessors;
+        private readonly ChunkAccessor<PersistentStore>[] _mapAccessors;
+        private int _entryIndex;
+
+        /// <summary>Largest EntityMap record across the sources — the one buffer size that serves every archetype this enumerator spans.</summary>
+        private readonly int _maxRecordSize;
+
+        // Streaming mode (single archetype): one live B+Tree cursor, nothing materialised. A ref struct can hold ONE of these; it is holding K of them that
+        // the language forbids, which is why the fan-out path materialises instead.
+        private readonly bool _streaming;
+        private readonly bool _isAllowMultiple;
         private BTree<TKey, PersistentStore>.RangeEnumerator _innerUnique;
-        // AllowMultiple index path
         private BTree<TKey, PersistentStore>.RangeMultipleEnumerator _innerMultiple;
         private ReadOnlySpan<int> _currentValues;
         private int _currentValueIndex;
+        private bool _multipleStarted;
 
         private ChunkAccessor<PersistentStore> _compRevAccessor;
         private ChunkAccessor<PersistentStore> _compContentAccessor;
         private readonly Transaction _tx;
         private readonly long _transactionTSN;
         private readonly int _componentOverhead;
-        private readonly bool _isAllowMultiple;
         private int _entityCount;
         private long _currentPK;
         private TKey _currentKey;
         private ReadOnlySpan<byte> _currentComponentSpan;
         private bool _disposed;
 
-        internal IndexEntityEnumerator(BTree<TKey, PersistentStore> index, ComponentTable ct, Transaction tx, TKey minKey, TKey maxKey, ChangeSet changeSet)
+        /// <summary>Streaming constructor — one archetype, one cursor, no materialisation.</summary>
+        internal IndexEntityEnumerator(BTree<TKey, PersistentStore> index, bool allowMultiple, TKey minKey, TKey maxKey, IndexArchetypeSource source,
+            ComponentTable ct, Transaction tx, ChangeSet changeSet) : this([], [source], ct, tx, changeSet)
         {
-            _isAllowMultiple = index.AllowMultiple;
-            if (_isAllowMultiple)
+            _streaming = true;
+            _isAllowMultiple = allowMultiple;
+            if (allowMultiple)
             {
                 _innerMultiple = index.EnumerateRangeMultiple(minKey, maxKey);
-                _innerUnique = default;
             }
             else
             {
                 _innerUnique = index.EnumerateRange(minKey, maxKey);
-                _innerMultiple = default;
             }
+        }
+
+        internal IndexEntityEnumerator(IndexMergeEntry<TKey>[] entries, IndexArchetypeSource[] sources, ComponentTable ct, Transaction tx, ChangeSet changeSet)
+        {
+            _entries = entries;
+            _sources = sources;
+            _entryIndex = 0;
+            _streaming = false;
+            _isAllowMultiple = false;
+            _innerUnique = default;
+            _innerMultiple = default;
+            _currentValues = default;
+            _currentValueIndex = 0;
+            _multipleStarted = false;
+
+            _clusterAccessors = new ChunkAccessor<PersistentStore>[sources.Length];
+            _mapAccessors = new ChunkAccessor<PersistentStore>[sources.Length];
+            for (var i = 0; i < sources.Length; i++)
+            {
+                _clusterAccessors[i] = sources[i].ClusterState.ClusterSegment.CreateChunkAccessor(changeSet);
+                _mapAccessors[i] = sources[i].EngineState.EntityMap.Segment.CreateChunkAccessor(changeSet);
+            }
+
+            var maxRecord = 0;
+            for (var i = 0; i < sources.Length; i++)
+            {
+                if (sources[i].RecordSize > maxRecord)
+                {
+                    maxRecord = sources[i].RecordSize;
+                }
+            }
+
+            _maxRecordSize = maxRecord;
 
             _compRevAccessor = ct.CompRevTableSegment.CreateChunkAccessor(changeSet);
             _compContentAccessor = ct.ComponentSegment.CreateChunkAccessor(changeSet);
@@ -524,8 +804,6 @@ public unsafe partial class Transaction : EntityAccessor
             _currentPK = 0;
             _currentKey = default;
             _currentComponentSpan = default;
-            _currentValues = default;
-            _currentValueIndex = 0;
             _disposed = false;
         }
 
@@ -548,37 +826,75 @@ public unsafe partial class Transaction : EntityAccessor
         /// Advances to the next index entry visible at this transaction's snapshot (skipping entries hidden by MVCC), positioning <see cref="Current"/> /
         /// <see cref="CurrentComponent"/>. Returns <see langword="false"/> when the range is exhausted.
         /// </summary>
+        /// <remarks>
+        /// Two resolutions, chosen by how the component is stored in THIS archetype. A SingleVersion slot's bytes are the cluster slot itself, so the span
+        /// points straight into the SoA. A Versioned slot's cluster bytes are only the HEAD; a transaction reading at an older TSN must go through the chain,
+        /// so the entity's record supplies the chain root and <c>RevisionChainReader.WalkChain</c> picks the visible revision. Reading the SoA for a
+        /// Versioned slot would return the newest value to every snapshot — visible only as a subtly wrong read, never as an error.
+        /// </remarks>
         public bool MoveNext()
         {
-            if (_isAllowMultiple)
+            // Hoisted out of the loop DELIBERATELY. `stackalloc` inside the body allocates on EVERY iteration and the stack pointer is not restored
+            // until the method returns, so one MoveNext that skips n entries — freed slots, tombstones, revisions invisible at this snapshot — grows
+            // the frame by n * RecordSize. Over a mostly-invisible range that is unbounded, and a stack overflow cannot be caught: it takes the
+            // process down instead of surfacing as an error. One buffer per call, sized for the largest archetype, costs nothing and cannot grow.
+            var recordBuf = stackalloc byte[_maxRecordSize];
+
+            while (TryNextEntry(out var key, out var location, out var sourceIndex))
             {
-                return MoveNextMultiple();
-            }
+                var src = _sources[sourceIndex];
 
-            return MoveNextUnique();
-        }
+                var clusterChunkId = location >> 6;
+                var slotIndex = location & 63;
 
-        private bool MoveNextUnique()
-        {
-            while (_innerUnique.MoveNext())
-            {
-                var kv = _innerUnique.Current;
-                int compRevFirstChunkId = kv.Value;
+                var clusterBase = _clusterAccessors[sourceIndex].GetChunkAddress(clusterChunkId);
+                var occupancy = *(ulong*)clusterBase;
+                if ((occupancy & (1UL << slotIndex)) == 0)
+                {
+                    continue;   // slot freed since the entry was written — a destroyed entity, not a visible one
+                }
 
-                // MVCC visibility check
-                var result = RevisionChainReader.WalkChain(ref _compRevAccessor, compRevFirstChunkId, _transactionTSN);
-                if (result.IsFailure || result.Value.CurCompContentChunkId == 0)
+                var layout = src.ClusterState.Layout;
+                var entityRaw = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
+                if (entityRaw == 0)
                 {
                     continue;
                 }
 
-                // Recover EntityPK from CompRevStorageHeader
-                _currentPK = _compRevAccessor.GetChunk<CompRevStorageHeader>(compRevFirstChunkId).EntityPK;
-                _currentKey = kv.Key;
 
-                // Store span into page memory — no copy
-                var src = _compContentAccessor.GetChunkAsReadOnlySpan(result.Value.CurCompContentChunkId);
-                _currentComponentSpan = src.Slice(_componentOverhead);
+                if (src.VersionedIndex < 0)
+                {
+                    // SingleVersion in this archetype: the cluster slot IS the component.
+                    _currentComponentSpan = new ReadOnlySpan<byte>(clusterBase + src.CompOffset + slotIndex * src.CompSize, src.CompSize);
+                }
+                else
+                {
+                    // Hinted, not plain TryGet: entity keys are dense, so the location-hint cache resolves in one bucket visit instead of a full
+                    // hash + directory + chain walk. Identical semantics — the hint is a pure accelerator that falls back on any mismatch.
+                    if (!src.EngineState.EntityMap.TryGetWithHint(EntityId.FromRaw(entityRaw).EntityKey, recordBuf, ref _mapAccessors[sourceIndex]))
+                    {
+                        continue;
+                    }
+
+                    var chainRoot = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(recordBuf, src.VersionedIndex);
+                    if (chainRoot == 0)
+                    {
+                        continue;
+                    }
+
+
+                    var walked = RevisionChainReader.WalkChain(ref _compRevAccessor, chainRoot, _transactionTSN);
+                    if (walked.IsFailure || walked.Value.CurCompContentChunkId == 0)
+                    {
+                        continue;   // not visible at this snapshot, or tombstoned
+                    }
+
+
+                    _currentComponentSpan = _compContentAccessor.GetChunkAsReadOnlySpan(walked.Value.CurCompContentChunkId).Slice(_componentOverhead);
+                }
+
+                _currentPK = entityRaw;
+                _currentKey = key;
 
                 if (++_entityCount % EpochRefreshInterval == 0)
                 {
@@ -591,57 +907,79 @@ public unsafe partial class Transaction : EntityAccessor
             return false;
         }
 
-        private bool MoveNextMultiple()
+        /// <summary>
+        /// Pulls the next <c>(key, location)</c> from whichever source this enumerator has: a live B+Tree cursor when one archetype holds the component, or
+        /// the pre-merged array when several do. Keeping the two shapes behind one call is what lets the resolution below stay single-bodied.
+        /// </summary>
+        private bool TryNextEntry(out TKey key, out int location, out int sourceIndex)
         {
-            while (true)
+            if (!_streaming)
             {
-                // Try to consume remaining values from current key's VSBS buffer
-                while (_currentValueIndex < _currentValues.Length)
+                if (_entryIndex >= _entries.Length)
                 {
-                    int compRevFirstChunkId = _currentValues[_currentValueIndex++];
+                    key = default;
+                    location = 0;
+                    sourceIndex = 0;
+                    return false;
+                }
 
-                    var result = RevisionChainReader.WalkChain(ref _compRevAccessor, compRevFirstChunkId, _transactionTSN);
-                    if (result.IsFailure || result.Value.CurCompContentChunkId == 0)
-                    {
-                        continue;
-                    }
+                ref var entry = ref _entries[_entryIndex++];
+                key = entry.Key;
+                location = entry.Location;
+                sourceIndex = entry.SourceIndex;
+                return true;
+            }
 
-                    _currentPK = _compRevAccessor.GetChunk<CompRevStorageHeader>(compRevFirstChunkId).EntityPK;
+            sourceIndex = 0;
 
-                    // Store span into page memory — no copy
-                    var src = _compContentAccessor.GetChunkAsReadOnlySpan(result.Value.CurCompContentChunkId);
-                    _currentComponentSpan = src.Slice(_componentOverhead);
-
-                    if (++_entityCount % EpochRefreshInterval == 0)
-                    {
-                        _tx.EnumerateRefreshEpoch();
-                    }
-
+            if (!_isAllowMultiple)
+            {
+                if (_innerUnique.MoveNext())
+                {
+                    var kv = _innerUnique.Current;
+                    key = kv.Key;
+                    location = kv.Value;
                     return true;
                 }
 
-                // Try next chunk of the same key's VSBS buffer (guard: _currentValues.Length > 0 prevents calling NextChunk before the first MoveNextKey,
-                // when no VSBS buffer is open yet)
-                if (_currentValues.Length > 0 && _innerMultiple.NextChunk())
+                key = default;
+                location = 0;
+                return false;
+            }
+
+            while (true)
+            {
+                if (_currentValueIndex < _currentValues.Length)
+                {
+                    key = _currentKey;
+                    location = _currentValues[_currentValueIndex++];
+                    return true;
+                }
+
+                // Remaining chunks of the current key's buffer before advancing the key. The guard mirrors the pre-#666 enumerator: NextChunk must not be
+                // called before the first MoveNextKey, when no buffer is open yet.
+                if (_multipleStarted && _innerMultiple.NextChunk())
                 {
                     _currentValues = _innerMultiple.CurrentValues;
                     _currentValueIndex = 0;
                     continue;
                 }
 
-                // Advance to the next key
                 if (!_innerMultiple.MoveNextKey())
                 {
+                    key = default;
+                    location = 0;
                     return false;
                 }
 
+                _multipleStarted = true;
                 _currentKey = _innerMultiple.CurrentKey;
                 _currentValues = _innerMultiple.CurrentValues;
                 _currentValueIndex = 0;
             }
         }
 
-        /// <summary>Releases the underlying B+Tree range enumerator and its accessors (unpins accessed pages). Idempotent.</summary>
+        /// <summary>Releases the per-archetype and component accessors (unpins accessed pages). Idempotent.</summary>
         public void Dispose()
         {
             if (_disposed)
@@ -650,13 +988,23 @@ public unsafe partial class Transaction : EntityAccessor
             }
 
             _disposed = true;
-            if (_isAllowMultiple)
+
+            for (var i = 0; i < _clusterAccessors.Length; i++)
             {
-                _innerMultiple.Dispose();
+                _clusterAccessors[i].Dispose();
+                _mapAccessors[i].Dispose();
             }
-            else
+
+            if (_streaming)
             {
-                _innerUnique.Dispose();
+                if (_isAllowMultiple)
+                {
+                    _innerMultiple.Dispose();
+                }
+                else
+                {
+                    _innerUnique.Dispose();
+                }
             }
 
             _compRevAccessor.Dispose();
@@ -850,12 +1198,23 @@ public unsafe partial class Transaction : EntityAccessor
 
         int recordSize = meta._entityRecordSize;
         byte* buf = stackalloc byte[recordSize];
-        if (es.EntityMap.TryGet(entityId.EntityKey, buf, ref _entityMapCacheAccessor))
+        if (!es.EntityMap.TryGet(entityId.EntityKey, buf, ref _entityMapCacheAccessor))
         {
-            return EntityRecordAccessor.GetLocation(buf, slot);
+            return 0;
         }
 
-        return 0;
+        // The two record shapes put DIFFERENT things at offset 14, so the shape has to be decided before the record is read, not after. A flat record has
+        // Location[0] there; a cluster record has ClusterChunkId, with the chain roots starting at CompRevOffset (19) and indexed by VERSIONED ordinal rather
+        // than by component slot. Reading a cluster record with the flat accessor therefore returns the cluster chunk id as if it were a chain root — which is
+        // the same value for every entity sharing that cluster, so all of them resolve to whichever entity's content that chunk id happens to name. Same
+        // condition as the EntityRef resolve path in Transaction.ECS.cs, deliberately (#629).
+        if (meta.IsClusterEligible && es.ClusterState != null)
+        {
+            int versionedIndex = es.ClusterState.Layout.SlotToVersionedIndex[slot];
+            return versionedIndex < 0 ? 0 : ClusterEntityRecordAccessor.GetCompRevFirstChunkId(buf, versionedIndex);
+        }
+
+        return EntityRecordAccessor.GetLocation(buf, slot);
     }
 
     /// <summary>
@@ -1226,54 +1585,20 @@ public unsafe partial class Transaction : EntityAccessor
             byte slotIndex = 0;
             byte compSlot = 0;
 
-            if (!isClusterEntity)
+            // The per-ComponentTable branch that used to sit here — IndexMaintainer.UpdateIndices / RemoveSecondaryIndices plus the matching
+            // SpatialMaintainer calls — is gone (#629). Every archetype is cluster-backed, so a Versioned commit always maintains the per-ARCHETYPE
+            // B+Trees. Established by instrumenting the branch and running the full suite: it was never entered once.
+            if (CheckConfig.Enabled && !isClusterEntity)
             {
-                // Legacy path: per-ComponentTable index/spatial maintenance (unchanged)
-                if (compRevInfo.CurCompContentChunkId != 0)
-                {
-                    if (_batchIndexActive)
-                    {
-                        IndexMaintainer.UpdateIndices(pk, info, compRevInfo, readCompChunkId, _changeSet, TSN, _batchIndexAccessors, ref _batchTailAccessor);
-                    }
-                    else
-                    {
-                        IndexMaintainer.UpdateIndices(pk, info, compRevInfo, readCompChunkId, _changeSet, TSN);
-                    }
-                }
-                else if (readCompChunkId != 0)
-                {
-                    if (_batchIndexActive)
-                    {
-                        IndexMaintainer.RemoveSecondaryIndices(pk, info, readCompChunkId, compRevInfo.CompRevTableFirstChunkId, _changeSet, TSN,
-                            _batchIndexAccessors, ref _batchTailAccessor);
-                    }
-                    else
-                    {
-                        IndexMaintainer.RemoveSecondaryIndices(pk, info, readCompChunkId, compRevInfo.CompRevTableFirstChunkId, _changeSet, TSN);
-                    }
-                }
+                ThrowHelper.ThrowInvalidOp(
+                    $"Versioned commit reached a non-cluster archetype ({commitMeta?.Name}) — the per-ComponentTable index home no longer exists");
+            }
 
-                // Versioned spatial index maintenance — after B+Tree indices are updated
-                if (info.ComponentTable.SpatialIndex != null)
-                {
-                    if (compRevInfo.CurCompContentChunkId != 0)
-                    {
-                        SpatialMaintainer.UpdateSpatial(pk, compRevInfo.CurCompContentChunkId, info.ComponentTable, ref info.CompContentAccessor, _changeSet);
-                    }
-                    else if (readCompChunkId != 0)
-                    {
-                        SpatialMaintainer.RemoveFromSpatial(pk, readCompChunkId, info.ComponentTable, _changeSet);
-                    }
-                }
-            }
-            else
-            {
-                // Cluster path — Phase A only here (per-archetype B+Tree index updates + view notify). Phase B (HEAD→cluster slot copy) is the
-                // visibility act, deferred to PublishComponent. copyToCluster is false for spawns (FinalizeSpawns handles cluster copy for those).
-                bool copyToCluster = (compRevInfo.Operations & ComponentInfo.OperationType.Created) == 0;
-                PrepareClusterVersionedSlot(pk, commitMeta, compRevInfo, readCompChunkId, info.ComponentTable, info.ComponentTypeId, copyToCluster,
-                    out clusterCopyPending, out clusterChunkId, out slotIndex, out compSlot);
-            }
+            // Cluster path — Phase A only here (per-archetype B+Tree index updates + view notify). Phase B (HEAD→cluster slot copy) is the
+            // visibility act, deferred to PublishComponent. copyToCluster is false for spawns (FinalizeSpawns handles cluster copy for those).
+            bool copyToCluster = (compRevInfo.Operations & ComponentInfo.OperationType.Created) == 0;
+            PrepareClusterVersionedSlot(pk, commitMeta, compRevInfo, readCompChunkId, info.ComponentTable, info.ComponentTypeId, copyToCluster,
+                out clusterCopyPending, out clusterChunkId, out slotIndex, out compSlot);
 
             // Periodic flush: bound dirty counter inflation for large transactions
             if (_batchIndexActive && (++_batchEntityCount & 0x3FF) == 0)
@@ -1281,10 +1606,6 @@ public unsafe partial class Transaction : EntityAccessor
                 for (int i = 0; i < _batchIndexAccessors.Length; i++)
                 {
                     _batchIndexAccessors[i].CommitChanges();
-                }
-                if (info.ComponentTable.TailVSBS != null)
-                {
-                    _batchTailAccessor.CommitChanges();
                 }
 
                 // Flush warm accessors: exit+enter cycle performs a single CommitChanges per cache
@@ -1469,21 +1790,15 @@ public unsafe partial class Transaction : EntityAccessor
         outCompSlot = compSlotByte;
 
         // Lazy-cache accessors by archetype — reused across all entities in the same commit batch
-        if (!_hasClusterCommitAccessors || _clusterCommitArchId != archId)
-        {
-            DisposeClusterCommitAccessors();
-            _clusterCommitMapAccessor = es.EntityMap.Segment.CreateChunkAccessor();
-            _clusterCommitContentAccessor = table.ComponentSegment.CreateChunkAccessor();
-            _clusterCommitClusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
-            _clusterCommitArchId = archId;
-            _hasClusterCommitAccessors = true;
-        }
+        EnsureClusterCommitAccessors(archId, es, table.ComponentSegment, clusterState);
 
         // Read entity's cluster location from EntityMap (once)
         int recordSize = meta._entityRecordSize;
         byte* recordBuf = stackalloc byte[recordSize];
 
-        long entityKey = EntityId.FromRaw(pk).EntityKey;
+        var entityId = EntityId.FromRaw(pk);
+        // The EntityMap is keyed on the bare 48-bit key; view deltas are keyed on the full EntityId (#660). Both are needed here.
+        long entityKey = entityId.EntityKey;
         if (!es.EntityMap.TryGet(entityKey, recordBuf, ref _clusterCommitMapAccessor))
         {
             return;
@@ -1507,7 +1822,7 @@ public unsafe partial class Transaction : EntityAccessor
             byte* oldComp = readCompChunkId != 0 ?
                 _clusterCommitContentAccessor.GetChunkAddress(readCompChunkId) + table.ComponentOverhead : null;
 
-            ReconcileClusterIndexAndViews(es, clusterState, compSlot, clusterChunkId, clusterLocation, entityKey, oldComp, newComp);
+            ReconcileClusterIndexAndViews(es, clusterState, compSlot, clusterChunkId, clusterLocation, entityId, oldComp, newComp);
         }
 
         // Phase B (HEAD→cluster slot copy) is deferred to PublishClusterVersionedSlot (AP-01). The cluster dirty bit it sets is what later drives
@@ -1527,15 +1842,7 @@ public unsafe partial class Transaction : EntityAccessor
         var table = e.Info.ComponentTable;
 
         // Re-establish lazy-cached accessors by archetype — reused across consecutive same-archetype entries in the publish drain.
-        if (!_hasClusterCommitAccessors || _clusterCommitArchId != archId)
-        {
-            DisposeClusterCommitAccessors();
-            _clusterCommitMapAccessor = es.EntityMap.Segment.CreateChunkAccessor();
-            _clusterCommitContentAccessor = table.ComponentSegment.CreateChunkAccessor();
-            _clusterCommitClusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
-            _clusterCommitArchId = archId;
-            _hasClusterCommitAccessors = true;
-        }
+        EnsureClusterCommitAccessors(archId, es, table.ComponentSegment, clusterState);
 
         var layout = clusterState.Layout;
         byte* srcAddr = _clusterCommitContentAccessor.GetChunkAddress(e.CurCompContentChunkId);
@@ -1555,9 +1862,120 @@ public unsafe partial class Transaction : EntityAccessor
             _clusterCommitMapAccessor.Dispose();
             _clusterCommitContentAccessor.Dispose();
             _clusterCommitClusterAccessor.Dispose();
+            _clusterCommitIndexAccessor.Dispose();
+            _clusterCommitIndexAccessorS64.Dispose();
+            _clusterCommitContentSegment = null;
             _hasClusterCommitAccessors = false;
         }
     }
+
+    /// <summary>
+    /// Establishes the per-archetype commit accessors, reused across every entity of that archetype in the batch. Idempotent for the archetype already
+    /// cached; switching archetypes disposes the previous set first.
+    /// </summary>
+    /// <remarks>
+    /// One method rather than the three byte-identical blocks it replaced (#665) — the set has to stay in step with
+    /// <see cref="DisposeClusterCommitAccessors"/>, and three copies is three chances for it not to. An index segment the archetype does not own leaves its
+    /// accessor <c>default</c>, which disposes as a no-op.
+    /// </remarks>
+    private void EnsureClusterCommitAccessors(ushort archId, ArchetypeEngineState es, ChunkBasedSegment<PersistentStore> contentSegment,
+        ArchetypeClusterState clusterState)
+    {
+        if (_hasClusterCommitAccessors && _clusterCommitArchId == archId)
+        {
+            // Archetype unchanged, so the map / cluster / index accessors stand. The CONTENT accessor may not: it is scoped to the component, and a drain
+            // covering several Versioned components of one archetype passes a different segment each time. Swapping just that one keeps the common case
+            // (consecutive entries of the same component) free while making the mixed case correct.
+            if (!ReferenceEquals(_clusterCommitContentSegment, contentSegment))
+            {
+                _clusterCommitContentAccessor.Dispose();
+                _clusterCommitContentAccessor = contentSegment.CreateChunkAccessor();
+                _clusterCommitContentSegment = contentSegment;
+            }
+
+            return;
+        }
+
+        DisposeClusterCommitAccessors();
+        _clusterCommitMapAccessor = es.EntityMap.Segment.CreateChunkAccessor();
+        _clusterCommitContentAccessor = contentSegment.CreateChunkAccessor();
+        _clusterCommitContentSegment = contentSegment;
+        _clusterCommitClusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
+        _clusterCommitIndexAccessor = clusterState.IndexSegment?.CreateChunkAccessor(_changeSet) ?? default;
+        _clusterCommitIndexAccessorS64 = clusterState.IndexSegmentString64?.CreateChunkAccessor(_changeSet) ?? default;
+        _clusterCommitArchId = archId;
+        _hasClusterCommitAccessors = true;
+    }
+
+    /// <summary>
+    /// The cached commit accessor for whichever per-archetype index segment <paramref name="segment"/> is. Returned by reference — the B+Tree mutation
+    /// methods take <c>ref ChunkAccessor</c> and record page state in it.
+    /// </summary>
+    /// <remarks>
+    /// Passing an accessor built on the other segment resolves node chunks at the wrong stride and corrupts neighbouring nodes (#658), so this is a
+    /// reference comparison rather than a guess from the field type. When the archetype has no String64 segment the comparison is against <c>null</c>, which
+    /// a live tree's segment never equals — no extra guard needed.
+    /// </remarks>
+    private ref ChunkAccessor<PersistentStore> ClusterCommitIndexAccessor(ArchetypeClusterState clusterState, ChunkBasedSegment<PersistentStore> segment)
+        => ref ReferenceEquals(segment, clusterState.IndexSegmentString64) ? ref _clusterCommitIndexAccessorS64 : ref _clusterCommitIndexAccessor;
+
+    /// <summary>
+    /// Whether <paramref name="size"/> bytes at <paramref name="a"/> and <paramref name="b"/> are identical — the unchanged-field guard's test.
+    /// </summary>
+    /// <remarks>
+    /// Scalar compares for the widths an index key actually has, with <see cref="MemoryExtensions.SequenceEqual{T}(ReadOnlySpan{T},ReadOnlySpan{T})"/> only
+    /// for the <c>String64</c> tail. Measured, not assumed: going through spans for every width cost ~2.9 % on the path where the key DOES change (95.4 µs
+    /// against a 92.7 µs baseline, reproduced twice) — the guard has to pay for itself on both sides, not just the one it optimises. The comparison must
+    /// stay width-exact: an 8-byte shortcut for a 64-byte key silently skips a real move (#665).
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool FieldBytesEqual(byte* a, byte* b, int size) => size switch
+    {
+        1 => *a == *b,
+        2 => *(short*)a == *(short*)b,
+        4 => *(int*)a == *(int*)b,
+        8 => *(long*)a == *(long*)b,
+        _ => new ReadOnlySpan<byte>(a, size).SequenceEqual(new ReadOnlySpan<byte>(b, size)),
+    };
+    /// <summary>
+    /// Refuses to write a key into a UNIQUE per-archetype index when a DIFFERENT entity already holds it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A unique B+Tree stores one value per key, and the underlying primitive is <c>AddOrUpdate</c> — so admitting a duplicate does not fail, it silently
+    /// OVERWRITES the incumbent. The loser then exists in the data but is unreachable through the index, and the two disagree permanently: a scan of the data
+    /// finds it, an index lookup does not. That is the defect behind #675, and it is why the index could be wrong while ~4 000 tests passed — queries take the
+    /// SoA scan, which reads component data and never consults the tree.
+    /// </para>
+    /// <para>
+    /// Rejecting is the only honest option of the three available. Silently overwriting corrupts. Auto-promoting the field to <c>AllowMultiple</c> would change
+    /// a declared constraint at run time and cost every unique index 4 bytes per entity plus a buffer indirection. So the engine enforces what the attribute
+    /// promises: <c>[Index]</c> without <c>AllowMultiple</c> is documented as "one entity per key" (<c>IndexAttribute.AllowMultiple</c>), and a field whose
+    /// values genuinely collide — a health total, a category, a bucket — must say <c>[Index(AllowMultiple = true)]</c>.
+    /// </para>
+    /// <para>
+    /// Cost is one extra optimistic descent per unique-index write. That is not free on a commit path, and it can be removed later by surfacing the
+    /// <c>InsertArguments.Added</c> flag that <c>AddOrUpdateCore</c> already computes — the check is here rather than inside <c>Add</c> because that method's
+    /// body is contractually throw-free (see its PROFILING-SPAN-NO-THROW markers).
+    /// </para>
+    /// </remarks>
+    internal static unsafe void RejectUniqueIndexCollision<TStore>(ref ClusterIndexField<TStore> field, byte* newKeyPtr, int clusterLocation,
+        ref ChunkAccessor<TStore> idxAccessor)
+        where TStore : struct, IPageStore
+    {
+        var existing = field.Index.TryGet(newKeyPtr, ref idxAccessor);
+        if (!existing.IsSuccess || existing.Value == clusterLocation)
+        {
+            return;
+        }
+
+        ThrowHelper.ThrowInvalidOp(
+            $"unique index collision: cluster location {clusterLocation} is being indexed under a key already held by the entity at cluster location "
+            + $"{existing.Value}. A unique index stores one entity per key, so writing this would make the incumbent unreachable through the index while it "
+            + "remains present in the data. Declare the field [Index(AllowMultiple = true)] if its values are meant to repeat. See "
+            + "https://github.com/Log2n-io/Typhon/issues/675.");
+    }
+
 
     /// <summary>
     /// Reconciles the per-archetype B+Tree index(es) and view delta buffers for one component slot of one cluster entity, given the field-value
@@ -1567,7 +1985,7 @@ public unsafe partial class Transaction : EntityAccessor
     /// (<see cref="PublishStagedCommitWrites"/>, old = cluster HEAD, new = staging buffer).
     /// </summary>
     private void ReconcileClusterIndexAndViews(ArchetypeEngineState es, ArchetypeClusterState clusterState, int compSlot, int clusterChunkId,
-        int clusterLocation, long entityKey, byte* oldComp, byte* newComp)
+        int clusterLocation, EntityId entityId, byte* oldComp, byte* newComp)
     {
         var layout = clusterState.Layout;
         int slotIndex = clusterLocation & 63;
@@ -1587,109 +2005,123 @@ public unsafe partial class Transaction : EntityAccessor
             for (int fi = 0; fi < ixSlot.Fields.Length; fi++)
             {
                 ref var field = ref ixSlot.Fields[fi];
-                var idxAccessor = field.Index.Segment.CreateChunkAccessor(_changeSet);
-                try
+
+                // Unchanged-field guard (#665). An update that leaves an indexed field alone — the common shape: index the classification, write the value
+                // that churns — used to pay two optimistic B+Tree descents, a leaf write-lock and a dirtied index page per field per commit, plus a dirtied
+                // CLUSTER page for an AllowMultiple field, to move a key onto itself. The legacy path has short-circuited here since it was written
+                // (IndexMaintainer.cs:29) and so does the flat twin below (ReconcileFlatIndexAndViews); only the per-archetype path never got it.
+                //
+                // Compared as raw bytes over FieldSize, NOT through KeyBytes8: a Versioned component may index a String64 field (64 bytes), and comparing
+                // the first 8 would silently skip a real key move. Skipping the view notification with it is correct — nothing changed — and so is skipping
+                // the zone-map Widen, since an unchanged value is already inside the bounds that admitted it.
+                if (newComp != null && oldComp != null && FieldBytesEqual(oldComp + field.FieldOffset, newComp + field.FieldOffset, field.FieldSize))
                 {
+                    continue;
+                }
+
+                ref var idxAccessor = ref ClusterCommitIndexAccessor(clusterState, field.Index.Segment);
+                clusterState.MutationsSinceRebuild++;   // past the guard, so this is real tree work (#665)
+                if (newComp != null && oldComp != null)
+                {
+                    // Update: move this entity's entry from the old key to the new key.
+                    if (field.AllowMultiple)
+                    {
+                        // The leaf value for an AllowMultiple index is a VSBS buffer-root id, NOT the clusterLocation — the entity's location lives
+                        // inside the buffer. Plain Move() is unique-only: it overwrites the leaf value with the raw clusterLocation, which the read path
+                        // then treats as a buffer id (finds nothing → the entity vanishes from every scan of that key). Use MoveValue with this entity's
+                        // element id (kept in the cluster tail slot exactly as spawn/destroy do) and write the returned new element id back so a later
+                        // update/destroy still targets the right buffer entry. Mirrors ReconcileFlatIndexAndViews / IndexMaintainer.UpdateIndices.
+                        if (clusterBase == null)
+                        {
+                            clusterBase = _clusterCommitClusterAccessor.GetChunkAddress(clusterChunkId, true);
+                        }
+                        int* elementIdPtr = (int*)(clusterBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
+                        *elementIdPtr = field.Index.MoveValue(oldComp + field.FieldOffset, newComp + field.FieldOffset, *elementIdPtr, clusterLocation,
+                            ref idxAccessor, out _, out _);
+                    }
+                    else
+                    {
+                        RejectUniqueIndexCollision(ref field, newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
+                        field.Index.Move(oldComp + field.FieldOffset, newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
+                    }
+                }
+                else if (newComp != null)
+                {
+                    // Insert (first commit after spawn): Add returns the per-entity element id for an AllowMultiple index, which must be recorded in the
+                    // cluster tail slot so destroy/update can target this entity's entry (mirrors FinalizeSpawns).
+                    if (!field.AllowMultiple)
+                    {
+                        RejectUniqueIndexCollision(ref field, newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
+                    }
+
+                    int elementId = field.Index.Add(newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
+                    if (field.AllowMultiple)
+                    {
+                        if (clusterBase == null)
+                        {
+                            clusterBase = _clusterCommitClusterAccessor.GetChunkAddress(clusterChunkId, true);
+                        }
+                        *(int*)(clusterBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex)) = elementId;
+                    }
+                }
+                else if (oldComp != null)
+                {
+                    // Delete: for an AllowMultiple index, RemoveValue removes only this entity's (key, clusterLocation) entry — Remove(key) would wipe the
+                    // whole buffer and drop siblings sharing the value (the same rule the cluster destroy path follows).
+                    if (field.AllowMultiple)
+                    {
+                        if (clusterBase == null)
+                        {
+                            clusterBase = _clusterCommitClusterAccessor.GetChunkAddress(clusterChunkId, true);
+                        }
+                        int elementId = *(int*)(clusterBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
+                        field.Index.RemoveValue(oldComp + field.FieldOffset, elementId, clusterLocation, ref idxAccessor);
+                    }
+                    else
+                    {
+                        field.Index.Remove(oldComp + field.FieldOffset, out _, ref idxAccessor);
+                    }
+                }
+
+                // Widen zone map with new value
+                if (newComp != null)
+                {
+                    field.ZoneMap?.Widen(clusterChunkId, newComp + field.FieldOffset);
+                }
+
+                // Notify views of index change (delta buffer for incremental views)
+                var viewTable = es.SlotToComponentTable[ixSlot.Slot];
+                var views = viewTable.ViewRegistry.GetViewsForField(fi);
+                for (int v = 0; v < views.Length; v++)
+                {
+                    var reg = views[v];
+                    if (reg.View.IsDisposed)
+                    {
+                        continue;
+                    }
+
                     if (newComp != null && oldComp != null)
                     {
-                        // Update: move this entity's entry from the old key to the new key.
-                        if (field.AllowMultiple)
-                        {
-                            // The leaf value for an AllowMultiple index is a VSBS buffer-root id, NOT the clusterLocation — the entity's location lives
-                            // inside the buffer. Plain Move() is unique-only: it overwrites the leaf value with the raw clusterLocation, which the read path
-                            // then treats as a buffer id (finds nothing → the entity vanishes from every scan of that key). Use MoveValue with this entity's
-                            // element id (kept in the cluster tail slot exactly as spawn/destroy do) and write the returned new element id back so a later
-                            // update/destroy still targets the right buffer entry. Mirrors ReconcileFlatIndexAndViews / IndexMaintainer.UpdateIndices.
-                            if (clusterBase == null)
-                            {
-                                clusterBase = _clusterCommitClusterAccessor.GetChunkAddress(clusterChunkId, true);
-                            }
-                            int* elementIdPtr = (int*)(clusterBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
-                            *elementIdPtr = field.Index.MoveValue(oldComp + field.FieldOffset, newComp + field.FieldOffset, *elementIdPtr, clusterLocation,
-                                ref idxAccessor, out _, out _);
-                        }
-                        else
-                        {
-                            field.Index.Move(oldComp + field.FieldOffset, newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
-                        }
+                        // Move: emit old and new keys
+                        var oldKey = KeyBytes8.FromPointer(oldComp + field.FieldOffset, field.FieldSize);
+                        var newKey = KeyBytes8.FromPointer(newComp + field.FieldOffset, field.FieldSize);
+                        byte flags = (byte)(fi & 0x3F);
+                        reg.DeltaBuffer.TryAppend(entityId, oldKey, newKey, TSN, flags, reg.ComponentTag);
                     }
                     else if (newComp != null)
                     {
-                        // Insert (first commit after spawn): Add returns the per-entity element id for an AllowMultiple index, which must be recorded in the
-                        // cluster tail slot so destroy/update can target this entity's entry (mirrors FinalizeSpawns).
-                        int elementId = field.Index.Add(newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
-                        if (field.AllowMultiple)
-                        {
-                            if (clusterBase == null)
-                            {
-                                clusterBase = _clusterCommitClusterAccessor.GetChunkAddress(clusterChunkId, true);
-                            }
-                            *(int*)(clusterBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex)) = elementId;
-                        }
+                        // Add: isCreation flag
+                        var newKey = KeyBytes8.FromPointer(newComp + field.FieldOffset, field.FieldSize);
+                        byte flags = (byte)((fi & 0x3F) | 0x40); // isCreation
+                        reg.DeltaBuffer.TryAppend(entityId, default, newKey, TSN, flags, reg.ComponentTag);
                     }
                     else if (oldComp != null)
                     {
-                        // Delete: for an AllowMultiple index, RemoveValue removes only this entity's (key, clusterLocation) entry — Remove(key) would wipe the
-                        // whole buffer and drop siblings sharing the value (the same rule the cluster destroy path follows).
-                        if (field.AllowMultiple)
-                        {
-                            if (clusterBase == null)
-                            {
-                                clusterBase = _clusterCommitClusterAccessor.GetChunkAddress(clusterChunkId, true);
-                            }
-                            int elementId = *(int*)(clusterBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
-                            field.Index.RemoveValue(oldComp + field.FieldOffset, elementId, clusterLocation, ref idxAccessor);
-                        }
-                        else
-                        {
-                            field.Index.Remove(oldComp + field.FieldOffset, out _, ref idxAccessor);
-                        }
+                        // Remove: isDeletion flag
+                        var oldKey = KeyBytes8.FromPointer(oldComp + field.FieldOffset, field.FieldSize);
+                        byte flags = (byte)((fi & 0x3F) | 0x80); // isDeletion
+                        reg.DeltaBuffer.TryAppend(entityId, oldKey, default, TSN, flags, reg.ComponentTag);
                     }
-
-                    // Widen zone map with new value
-                    if (newComp != null)
-                    {
-                        field.ZoneMap?.Widen(clusterChunkId, newComp + field.FieldOffset);
-                    }
-
-                    // Notify views of index change (delta buffer for incremental views)
-                    var viewTable = es.SlotToComponentTable[ixSlot.Slot];
-                    var views = viewTable.ViewRegistry.GetViewsForField(fi);
-                    for (int v = 0; v < views.Length; v++)
-                    {
-                        var reg = views[v];
-                        if (reg.View.IsDisposed)
-                        {
-                            continue;
-                        }
-
-                        if (newComp != null && oldComp != null)
-                        {
-                            // Move: emit old and new keys
-                            var oldKey = KeyBytes8.FromPointer(oldComp + field.FieldOffset, field.FieldSize);
-                            var newKey = KeyBytes8.FromPointer(newComp + field.FieldOffset, field.FieldSize);
-                            byte flags = (byte)(fi & 0x3F);
-                            reg.DeltaBuffer.TryAppend(entityKey, oldKey, newKey, TSN, flags, reg.ComponentTag);
-                        }
-                        else if (newComp != null)
-                        {
-                            // Add: isCreation flag
-                            var newKey = KeyBytes8.FromPointer(newComp + field.FieldOffset, field.FieldSize);
-                            byte flags = (byte)((fi & 0x3F) | 0x40); // isCreation
-                            reg.DeltaBuffer.TryAppend(entityKey, default, newKey, TSN, flags, reg.ComponentTag);
-                        }
-                        else if (oldComp != null)
-                        {
-                            // Remove: isDeletion flag
-                            var oldKey = KeyBytes8.FromPointer(oldComp + field.FieldOffset, field.FieldSize);
-                            byte flags = (byte)((fi & 0x3F) | 0x80); // isDeletion
-                            reg.DeltaBuffer.TryAppend(entityKey, oldKey, default, TSN, flags, reg.ComponentTag);
-                        }
-                    }
-                }
-                finally
-                {
-                    idxAccessor.Dispose();
                 }
             }
             break; // Found the matching index slot
@@ -1750,24 +2182,18 @@ public unsafe partial class Transaction : EntityAccessor
         byte* staged = _commitStagingBuffer + stagedSlot.Offset;
         var clusterState = es?.ClusterState;
 
-        // Non-cluster (flat) archetype: publish to the entity's content chunk HEAD instead of a cluster SoA slot (Location = content chunkId).
+        // The flat publish this used to dispatch to is gone with the per-ComponentTable home (#629). Everything below assumes a cluster, so a null ClusterState
+        // must fail here rather than NRE three lines down inside EnsureClusterCommitAccessors.
         if (clusterState == null || !meta.IsClusterEligible)
         {
-            PublishStagedFlatEntry(info, stagedSlot.Location, entityId.EntityKey, staged);
-            return;
+            ThrowHelper.ThrowInvalidOp(
+                $"Commit-discipline publish for archetype '{meta?.Name}' found no cluster state. Every archetype is cluster-backed since #629, so there is no "
+                + "flat HEAD to publish to.");
         }
 
         // Lazy-cache the per-archetype cluster accessor (reused across consecutive same-archetype staged entries; map/content accessors kept for parity
         // with the Versioned publish that shares these fields).
-        if (!_hasClusterCommitAccessors || _clusterCommitArchId != archId)
-        {
-            DisposeClusterCommitAccessors();
-            _clusterCommitMapAccessor = es.EntityMap.Segment.CreateChunkAccessor();
-            _clusterCommitContentAccessor = es.SlotToComponentTable[compSlot].ComponentSegment.CreateChunkAccessor();
-            _clusterCommitClusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
-            _clusterCommitArchId = archId;
-            _hasClusterCommitAccessors = true;
-        }
+        EnsureClusterCommitAccessors(archId, es, es.SlotToComponentTable[compSlot].ComponentSegment, clusterState);
 
         // Coords captured at stage time — no per-component EntityMap re-lookup (Location = clusterChunkId*64 + slotIndex).
         int clusterLocation = stagedSlot.Location;
@@ -1782,97 +2208,12 @@ public unsafe partial class Transaction : EntityAccessor
         // Exact-index reconcile BEFORE the HEAD memcpy: old key still lives in the HEAD slot, new key in the staged slot (CM-05/AC-11).
         if (clusterState.IndexSlots != null)
         {
-            ReconcileClusterIndexAndViews(es, clusterState, compSlot, clusterChunkId, clusterLocation, entityId.EntityKey, headPtr, staged);
+            ReconcileClusterIndexAndViews(es, clusterState, compSlot, clusterChunkId, clusterLocation, entityId, headPtr, staged);
         }
 
         // Visibility act: publish the staged value to the cluster HEAD, then mark dirty (CM-03: memcpy THEN dirty).
         Unsafe.CopyBlockUnaligned(headPtr, staged, (uint)compSize);
         clusterState.SetDirty(clusterChunkId, slotIndex);
-    }
-
-    /// <summary>
-    /// Publishes one Commit-discipline staged write to a non-cluster entity's content chunk HEAD using the chunkId captured at stage time (no EntityMap
-    /// re-lookup): reconciles the table's exact B+Tree index(es) (old key from the still-unpublished HEAD, new key from the staged slot — CM-05/AC-11),
-    /// copies the staged value into the chunk HEAD (the visibility act), then marks the chunk dirty for the tick fence.
-    /// </summary>
-    private void PublishStagedFlatEntry(ComponentInfo info, int chunkId, long entityKey, byte* staged)
-    {
-        if (chunkId == 0)
-        {
-            return;
-        }
-
-        var table = info.ComponentTable;
-        byte* headPtr = info.CompContentAccessor.GetChunkAddress(chunkId, true) + info.ComponentOverhead;
-
-        // Exact-index reconcile BEFORE the HEAD memcpy: old key still lives in the chunk HEAD, new key in the staged slot.
-        if (table.HasShadowableIndexes)
-        {
-            ReconcileFlatIndexAndViews(table, chunkId, entityKey, headPtr, staged);
-        }
-
-        // Visibility act: publish the staged value to the chunk HEAD, then mark dirty (CM-03: memcpy THEN dirty).
-        Unsafe.CopyBlockUnaligned(headPtr, staged, (uint)table.ComponentStorageSize);
-        table.DirtyBitmap?.Set(chunkId);
-    }
-
-    /// <summary>
-    /// Flat (non-cluster) counterpart of <see cref="ReconcileClusterIndexAndViews"/>: updates each indexed field's table B+Tree from <paramref name="oldComp"/>
-    /// (the chunk HEAD field base, pre-publish) to <paramref name="newComp"/> (the staged slot) and notifies views. Mirrors the fence-time
-    /// <c>ProcessShadowFieldEntries</c> Move branch, but runs at commit (the Commit-discipline write skips shadow capture). The B+Tree value is the entity's
-    /// content chunkId; for an AllowMultiple index the element id (in the chunk overhead, untouched by the value memcpy) is moved and written back.
-    /// </summary>
-    private void ReconcileFlatIndexAndViews(ComponentTable table, int chunkId, long entityKey, byte* oldComp, byte* newComp)
-    {
-        var fields = table.IndexedFieldInfos;
-        for (int fi = 0; fi < fields.Length; fi++)
-        {
-            ref var ifi = ref fields[fi];
-            // oldComp/newComp point at the component DATA (the chunk HEAD past its overhead, and the staging slot — both
-            // data-relative). IndexedFieldInfo.OffsetToField, however, is measured from the CHUNK BASE so it INCLUDES the
-            // overhead (matching the fence path ProcessShadowFieldEntries, which reads at GetChunkAddress(chunkId) + OffsetToField).
-            // Rebase to a data-relative offset before indexing into the two data pointers — adding the chunk-base OffsetToField
-            // directly would double-count ComponentOverhead and read the key from the wrong location.
-            int dataFieldOffset = ifi.OffsetToField - table.ComponentOverhead;
-            var oldKey = KeyBytes8.FromPointer(oldComp + dataFieldOffset, ifi.Size);
-            byte* newFieldPtr = newComp + dataFieldOffset;
-            var newKey = KeyBytes8.FromPointer(newFieldPtr, ifi.Size);
-            if (oldKey.RawValue == newKey.RawValue)
-            {
-                continue;
-            }
-
-            var index = ifi.PersistentIndex;
-            var idxAccessor = index.Segment.CreateChunkAccessor(_changeSet);
-            try
-            {
-                if (index.AllowMultiple)
-                {
-                    // Element id lives in the chunk overhead (chunk base = HEAD field base − ComponentOverhead); the value memcpy never touches it.
-                    int* elementIdPtr = (int*)(oldComp - table.ComponentOverhead + ifi.OffsetToIndexElementId);
-                    *elementIdPtr = index.MoveValue(&oldKey, newFieldPtr, *elementIdPtr, chunkId, ref idxAccessor, out _, out _);
-                }
-                else
-                {
-                    index.Move(&oldKey, newFieldPtr, chunkId, ref idxAccessor);
-                }
-
-                var views = table.ViewRegistry.GetViewsForField(fi);
-                for (int v = 0; v < views.Length; v++)
-                {
-                    var reg = views[v];
-                    if (reg.View.IsDisposed)
-                    {
-                        continue;
-                    }
-                    reg.DeltaBuffer.TryAppend(entityKey, oldKey, newKey, TSN, (byte)(fi & 0x3F), reg.ComponentTag);
-                }
-            }
-            finally
-            {
-                idxAccessor.Dispose();
-            }
-        }
     }
 
     /// <summary>
@@ -2336,15 +2677,9 @@ public unsafe partial class Transaction : EntityAccessor
                 try
                 {
 
-                    // Hoist accessor creation for batch index maintenance
-                    var indexedFieldInfos = info.ComponentTable.IndexedFieldInfos;
-                    _batchIndexAccessors = new ChunkAccessor<PersistentStore>[indexedFieldInfos.Length];
-                    for (int i = 0; i < indexedFieldInfos.Length; i++)
-                    {
-                        _batchIndexAccessors[i] = indexedFieldInfos[i].PersistentIndex.Segment.CreateChunkAccessor(_changeSet);
-                    }
-                    var tailVSBS = info.ComponentTable.TailVSBS;
-                    _batchTailAccessor = tailVSBS != null ? tailVSBS.Segment.CreateChunkAccessor(_changeSet) : default;
+                    // The hoisted per-ComponentTable index accessors that used to be built here are gone with those indexes (#629). Batch mode itself stays:
+                    // it still bounds dirty-page inflation for the component and revision segments over a large transaction.
+                    _batchIndexAccessors = [];
                     _batchIndexActive = true;
                     _batchEntityCount = 0;
                     ChunkBasedSegment<PersistentStore>.EnterBatchMode();
@@ -2361,10 +2696,6 @@ public unsafe partial class Transaction : EntityAccessor
                         for (int i = 0; i < _batchIndexAccessors.Length; i++)
                         {
                             _batchIndexAccessors[i].Dispose();
-                        }
-                        if (tailVSBS != null)
-                        {
-                            _batchTailAccessor.Dispose();
                         }
                         _batchIndexAccessors = null;
 

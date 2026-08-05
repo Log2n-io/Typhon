@@ -59,7 +59,19 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     // directory, never live data. The occupancy genesis therefore reserves one extra page (the occupancy bitmap's first
     // data page) and segments always span >= 2 pages. v3 (segment-directory twins, occupancy reserve = Int3) and earlier
     // are refused — no backward compat.
-    internal const int DatabaseFormatRevision   = 4;
+    //
+    // v5 (#629): every archetype is cluster-backed, so the on-disk shape changed in three ways that a v4 file cannot
+    // satisfy. Archetypes that were FLAT now carry a cluster segment; their EntityMap records changed shape (flat
+    // header 14 + Location[slot]*4 vs cluster 19 = header 14 + ClusterChunkId 4 + SlotIndex 1, then chain roots indexed
+    // by VERSIONED ordinal); and secondary-index leaf VALUES changed meaning, from a CompRev chain root to a packed
+    // ClusterLocation (clusterChunkId*64 + slotIndex). The four per-ComponentTable index segments are gone and the
+    // three system tables shrank from FromInt4 to FromInt2.
+    //
+    // The bump is what makes the break HONEST. None of the above is self-describing: a v4 EntityMap record read as a
+    // cluster record finds ClusterChunkId where Location[0] lived, and a v4 index leaf read as a ClusterLocation
+    // resolves to a plausible-looking but wrong cluster slot. Both silently serve corrupt data rather than failing.
+    // Pre-alpha means no migration is owed — it does NOT mean a stale file may open and answer wrongly.
+    internal const int DatabaseFormatRevision   = 5;
     internal const ulong MinimumCacheSize       = MinimumMemPageCount * PageSize;      // 8 MiB — the hard floor (see Validate)
     internal const ulong DefaultDatabaseCacheSize   = 256UL * 1024 * 1024;             // 256 MiB — the shipped production default
     internal const ulong RecommendedMinimumCacheSize = 64UL * 1024 * 1024;             // 64 MiB — warn below this (unless TestMode)

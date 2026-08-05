@@ -432,13 +432,12 @@ public unsafe partial class EntityAccessor
 
         var fields = table.IndexedFieldInfos;
         var buffers = table.FieldShadowBuffers;
-        long pk = (long)entityId.RawValue;
 
         for (int i = 0; i < fields.Length; i++)
         {
             ref var ifi = ref fields[i];
             var oldKey = KeyBytes8.FromPointer(ptr + ifi.OffsetToField, ifi.Size);
-            buffers[i].Append(chunkId, pk, oldKey);
+            buffers[i].Append(chunkId, entityId, oldKey);
         }
     }
 

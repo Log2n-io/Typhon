@@ -1,4 +1,4 @@
-// unset
+﻿// unset
 
 using System;
 using System.Runtime.CompilerServices;
@@ -20,13 +20,13 @@ internal sealed class AdvancedSelectivityEstimator : ISelectivityEstimator
 
     private AdvancedSelectivityEstimator() { }
 
-    public long EstimateCardinality(ComponentTable table, int fieldIndex, CompareOp op, long threshold)
+    public long EstimateCardinality(IndexStatistics[] fieldStats, int fieldIndex, CompareOp op, long threshold)
     {
         // Phase 7: Query:Estimate span — covers selectivity estimation for one predicate.
         var estimateScope = TyphonEvent.BeginQueryEstimate((ushort)Math.Min(fieldIndex, ushort.MaxValue), 0);
         try
         {
-            var result = EstimateCardinalityCore(table, fieldIndex, op, threshold);
+            var result = EstimateCardinalityCore(fieldStats, fieldIndex, op, threshold);
             estimateScope.Cardinality = result;
             return result;
         }
@@ -36,9 +36,9 @@ internal sealed class AdvancedSelectivityEstimator : ISelectivityEstimator
         }
     }
 
-    private static long EstimateCardinalityCore(ComponentTable table, int fieldIndex, CompareOp op, long threshold)
+    private static long EstimateCardinalityCore(IndexStatistics[] fieldStats, int fieldIndex, CompareOp op, long threshold)
     {
-        var stats = table.IndexStats[fieldIndex];
+        var stats = fieldStats[fieldIndex];
         var entryCount = stats.EntryCount;
         if (entryCount == 0)
         {

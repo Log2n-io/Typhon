@@ -1,4 +1,4 @@
----
+﻿---
 uid: feature-indexing-secondary-index-storage-modes-index
 title: 'Secondary Index Storage Modes'
 description: 'Unique vs AllowMultiple: the per-field choice that decides an index''s on-disk value shape and per-entity storage cost.'
@@ -71,5 +71,5 @@ storage footprint and commit cost.
 - See also: [Indexed Field Predicates (WhereField)](../../Querying/fluent-query-api/wherefield-indexed-predicate.md) — the query-planner path for `Transient`-indexed fields
 - Sub-features: [Unique (single-value) secondary index](./unique-secondary-index.md), [Multi-value secondary index (AllowMultiple)](./multi-value-secondary-index.md)
 
-<!-- Deep dive: claude/overview/04-data.md §4.7 B+Tree Indexes — Single vs Multiple, Versioned Secondary Indexes (HEAD/TAIL) -->
+<!-- Deep dive: claude/overview/04-data.md §4.7 B+Tree Indexes — Single vs Multiple, Versioned Secondary Indexes -->
 <!-- Deep dive: claude/design/Indexing/public-api.md -->

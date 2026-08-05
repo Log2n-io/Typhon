@@ -59,9 +59,10 @@ public unsafe class EcsNavigationQueryBuilder<TSourceArch, TSource, TTarget> whe
         var (sourceCT, _, fkField, sourceEvals, targetEvals) = _inner.ResolveForExternalExecution();
         var result = new HashSet<EntityId>();
 
-        // Find the FK index on the source table
-        var fkIndexInfo = PipelineExecutor.FindFKIndex(sourceCT, fkField.OffsetInComponentStorage);
-        var fkIndex = (BTree<long, PersistentStore>)fkIndexInfo.Index;
+        // The FK field's position among the source's indexed fields — indexes both index homes (see FindFKIndexOrdinal).
+        var fkFieldOrdinal = PipelineExecutor.FindFKIndexOrdinal(sourceCT, fkField.OffsetInComponentStorage);
+        // Resolved once for the whole query, not per target PK.
+        var candidates = FkReverseLookup.ResolveCandidates(_tx.DBE, ArchetypeRegistry.GetComponentTypeId<TSource>());
 
         // Collect target entity PKs by scanning all archetype EntityMaps that include TTarget.
         // Use a separate scope for the EntityMap scan (avoids nested epoch guard issues with FK lookup).
@@ -96,63 +97,55 @@ public unsafe class EcsNavigationQueryBuilder<TSourceArch, TSource, TTarget> whe
 
         // FK reverse lookup on collected target PKs
         using var guard = EpochGuard.Enter(_tx.DBE.EpochManager);
-        // Issue #623: the FK index value addresses a CompRev chunk for Versioned sources and a component chunk for
-        // SingleVersion ones (which have no CompRev table at all). FkSourcePkResolver owns that distinction.
-        var pkResolver = FkSourcePkResolver.Create(sourceCT);
 
-        try
+        var sourceCollector = new SourceMatchCollector
         {
-            foreach (var targetPK in targetPKs)
+            Query = _query,
+            Tx = _tx,
+            SourceEvals = sourceEvals,
+            Result = result,
+        };
+
+        foreach (var targetPK in targetPKs)
+        {
+            // Evaluate target predicates
+            if (targetEvals.Length > 0 && !PipelineExecutor.EvaluateFilters<TTarget>(targetEvals, _tx, targetPK))
             {
-                // Evaluate target predicates
-                if (targetEvals.Length > 0 && !PipelineExecutor.EvaluateFilters<TTarget>(targetEvals, _tx, targetPK))
-                {
-                    continue;
-                }
-
-                // Reverse lookup: find source entities that have FK == targetPK
-                var enumerator = fkIndex.EnumerateRangeMultiple(targetPK, targetPK);
-                try
-                {
-                    while (enumerator.MoveNextKey())
-                    {
-                        do
-                        {
-                            var values = enumerator.CurrentValues;
-                            for (var j = 0; j < values.Length; j++)
-                            {
-                                var sourcePK = pkResolver.Resolve(values[j]);
-                                var sourceEntityId = EntityId.FromRaw(sourcePK);
-
-                                // Archetype mask filter (mask is catalog-space; translate the entity's routing id → catalog id)
-                                if (!_query.MaskTestPublic(_tx.DBE.GetMetaByRouting(sourceEntityId.ArchetypeId).ArchetypeId))
-                                {
-                                    continue;
-                                }
-
-                                // Evaluate source predicates
-                                if (sourceEvals.Length > 0 && !PipelineExecutor.EvaluateFilters<TSource>(sourceEvals, _tx, sourcePK))
-                                {
-                                    continue;
-                                }
-
-                                result.Add(sourceEntityId);
-                            }
-                        } while (enumerator.NextChunk());
-                    }
-                }
-                finally
-                {
-                    enumerator.Dispose();
-                }
+                continue;
             }
-        }
-        finally
-        {
-            pkResolver.Dispose();
+
+            // Reverse lookup across BOTH index homes: the shared ComponentTable tree AND each cluster-backed archetype's own tree. Scanning only the first
+            // returned nothing for a cluster-backed source archetype (#662).
+            FkReverseLookup.ForEachSource(_tx.DBE, sourceCT, in candidates, fkFieldOrdinal, targetPK, ref sourceCollector);
         }
 
         return result;
+    }
+
+    /// <summary>Applies the archetype mask and the source predicates, collecting survivors.</summary>
+    private struct SourceMatchCollector : IFkSourceAction
+    {
+        public EcsQuery<TSourceArch> Query;
+        public Transaction Tx;
+        public FieldEvaluator[] SourceEvals;
+        public HashSet<EntityId> Result;
+
+        public bool Process(long sourcePK, ArchetypeMetadata meta)
+        {
+            // Mask is catalog-space; `meta` is already the owning archetype, so no routing-id translation is needed here.
+            if (!Query.MaskTestPublic(meta.ArchetypeId))
+            {
+                return true;
+            }
+
+            if (SourceEvals.Length > 0 && !PipelineExecutor.EvaluateFilters<TSource>(SourceEvals, Tx, sourcePK))
+            {
+                return true;
+            }
+
+            Result.Add(EntityId.FromRaw(sourcePK));
+            return true;
+        }
     }
 
     /// <summary>Collects visible entity PKs from EntityMap enumeration.</summary>

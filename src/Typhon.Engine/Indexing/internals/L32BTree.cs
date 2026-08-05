@@ -915,14 +915,16 @@ internal abstract class L32BTree<TKey, TStore> : BTree<TKey, TStore> where TStor
 
     protected override BaseNodeStorage GetStorage() => new L32NodeStorage();
     public override bool AllowMultiple => false;
-    protected L32BTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    protected L32BTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }
 
 internal class L32MultipleBTree<TKey, TStore> : L32BTree<TKey, TStore> where TStore : struct, IPageStore where TKey : unmanaged
 {
-    public L32MultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public L32MultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 
@@ -936,7 +938,7 @@ internal class L32MultipleBTree<TKey, TStore> : L32BTree<TKey, TStore> where TSt
         internal override void Initialize(BTree<TKey, TStore> owner, ChunkBasedSegment<TStore> segment)
         {
             base.Initialize(owner, segment);
-            _valueStore = new VariableSizedBufferSegment<int, IndexBufferExtraHeader, TStore>(segment);
+            _valueStore = new VariableSizedBufferSegment<int, TStore>(segment);
 
         }
 
@@ -954,21 +956,24 @@ internal class L32MultipleBTree<TKey, TStore> : L32BTree<TKey, TStore> where TSt
 
 internal class IntSingleBTree<TStore> : L32BTree<int, TStore> where TStore : struct, IPageStore
 {
-    public IntSingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public IntSingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }
 
 internal class IntMultipleBTree<TStore> : L32MultipleBTree<int, TStore> where TStore : struct, IPageStore
 {
-    public IntMultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public IntMultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }
 
 internal class UIntSingleBTree<TStore> : L32BTree<uint, TStore> where TStore : struct, IPageStore
 {
-    public UIntSingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public UIntSingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 
@@ -976,21 +981,24 @@ internal class UIntSingleBTree<TStore> : L32BTree<uint, TStore> where TStore : s
 
 internal class UIntMultipleBTree<TStore> : L32MultipleBTree<uint, TStore> where TStore : struct, IPageStore
 {
-    public UIntMultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public UIntMultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }
 
 internal class FloatSingleBTree<TStore> : L32BTree<float, TStore> where TStore : struct, IPageStore
 {
-    public FloatSingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public FloatSingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }
 
 internal class FloatMultipleBTree<TStore> : L32MultipleBTree<float, TStore> where TStore : struct, IPageStore
 {
-    public FloatMultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, short stableId = 0, ChangeSet changeSet = null) : base(segment, load, stableId, changeSet)
+    public FloatMultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+        : base(segment, load, key, changeSet)
     {
     }
 }

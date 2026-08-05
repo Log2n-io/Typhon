@@ -10,6 +10,10 @@ namespace Typhon.Engine.Tests;
 [TestFixture]
 public class ViewDeltaRingBufferTests
 {
+    // #660: the buffer is now typed on EntityId. These keep the synthetic ids in these mechanics tests readable.
+    private static EntityId E(long raw) => EntityId.FromRaw(raw);
+    private static long PK(ViewDeltaEntry e) => (long)e.EntityPK.RawValue;
+
     private ServiceProvider _sp;
     private IMemoryAllocator _allocator;
     private IResource _parent;
@@ -89,11 +93,11 @@ public class ViewDeltaRingBufferTests
 
         var before = KeyBytes8.FromInt(42);
         var after = KeyBytes8.FromInt(99);
-        Assert.That(buffer.TryAppend(1L, before, after, 105, 0x01), Is.True);
+        Assert.That(buffer.TryAppend(E(1L), before, after, 105, 0x01), Is.True);
         Assert.That(buffer.Count, Is.EqualTo(1));
 
         Assert.That(buffer.TryPeek(200, out var entry, out var flags, out var tsn, out var componentTag), Is.True);
-        Assert.That(entry.EntityPK, Is.EqualTo(1L));
+        Assert.That(PK(entry), Is.EqualTo(1L));
         Assert.That(entry.BeforeKey.AsInt(), Is.EqualTo(42));
         Assert.That(entry.AfterKey.AsInt(), Is.EqualTo(99));
         Assert.That(flags, Is.EqualTo(0x01));
@@ -116,22 +120,22 @@ public class ViewDeltaRingBufferTests
     {
         using var buffer = CreateBuffer(64);
 
-        Assert.That(buffer.TryAppend(1L, default, default, 1, 0x01, componentTag: 0), Is.True);
-        Assert.That(buffer.TryAppend(2L, default, default, 2, 0x02, componentTag: 1), Is.True);
-        Assert.That(buffer.TryAppend(3L, default, default, 3, 0x03, componentTag: 255), Is.True);
+        Assert.That(buffer.TryAppend(E(1L), default, default, 1, 0x01, componentTag: 0), Is.True);
+        Assert.That(buffer.TryAppend(E(2L), default, default, 2, 0x02, componentTag: 1), Is.True);
+        Assert.That(buffer.TryAppend(E(3L), default, default, 3, 0x03, componentTag: 255), Is.True);
 
         Assert.That(buffer.TryPeek(long.MaxValue, out var e1, out _, out _, out var tag1), Is.True);
-        Assert.That(e1.EntityPK, Is.EqualTo(1L));
+        Assert.That(PK(e1), Is.EqualTo(1L));
         Assert.That(tag1, Is.EqualTo(0));
         buffer.Advance();
 
         Assert.That(buffer.TryPeek(long.MaxValue, out var e2, out _, out _, out var tag2), Is.True);
-        Assert.That(e2.EntityPK, Is.EqualTo(2L));
+        Assert.That(PK(e2), Is.EqualTo(2L));
         Assert.That(tag2, Is.EqualTo(1));
         buffer.Advance();
 
         Assert.That(buffer.TryPeek(long.MaxValue, out var e3, out _, out _, out var tag3), Is.True);
-        Assert.That(e3.EntityPK, Is.EqualTo(3L));
+        Assert.That(PK(e3), Is.EqualTo(3L));
         Assert.That(tag3, Is.EqualTo(255));
         buffer.Advance();
     }
@@ -149,7 +153,7 @@ public class ViewDeltaRingBufferTests
     {
         using var buffer = CreateBuffer(64, baseTSN: 1_000_000);
 
-        buffer.TryAppend(1, default, default, 1_000_042, 0);
+        buffer.TryAppend(E(1), default, default, 1_000_042, 0);
         Assert.That(buffer.TryPeek(long.MaxValue, out _, out _, out var tsn, out _), Is.True);
         Assert.That(tsn, Is.EqualTo(1_000_042));
         buffer.Advance();
@@ -171,11 +175,11 @@ public class ViewDeltaRingBufferTests
 
         for (var i = 0; i < capacity; i++)
         {
-            Assert.That(buffer.TryAppend(i, default, default, i, 0), Is.True);
+            Assert.That(buffer.TryAppend(E(i), default, default, i, 0), Is.True);
         }
 
         Assert.That(buffer.HasOverflow, Is.False);
-        Assert.That(buffer.TryAppend(999, default, default, 999, 0), Is.False);
+        Assert.That(buffer.TryAppend(E(999), default, default, 999, 0), Is.False);
         Assert.That(buffer.HasOverflow, Is.True);
 
         // Overflow is sticky — consuming entries doesn't clear it
@@ -196,13 +200,13 @@ public class ViewDeltaRingBufferTests
 
         for (var i = 0; i < 10; i++)
         {
-            buffer.TryAppend(i, default, default, i, 0);
+            buffer.TryAppend(E(i), default, default, i, 0);
         }
 
         // Force overflow
         for (var i = 0; i < capacity; i++)
         {
-            buffer.TryAppend(i, default, default, i, 0);
+            buffer.TryAppend(E(i), default, default, i, 0);
         }
 
         buffer.Reset();
@@ -241,13 +245,13 @@ public class ViewDeltaRingBufferTests
     {
         using var buffer = CreateBuffer(64, baseTSN: 100);
 
-        buffer.TryAppend(1, default, default, 110, 0);
-        buffer.TryAppend(2, default, default, 120, 0);
-        buffer.TryAppend(3, default, default, 130, 0);
+        buffer.TryAppend(E(1), default, default, 110, 0);
+        buffer.TryAppend(E(2), default, default, 120, 0);
+        buffer.TryAppend(E(3), default, default, 130, 0);
 
         // Target = 115: should see entry with TSN 110 but not 120 or 130
         Assert.That(buffer.TryPeek(115, out var entry, out _, out _, out _), Is.True);
-        Assert.That(entry.EntityPK, Is.EqualTo(1));
+        Assert.That(PK(entry), Is.EqualTo(1));
         buffer.Advance();
 
         // Now head is at TSN 120, which is > 115
@@ -255,7 +259,7 @@ public class ViewDeltaRingBufferTests
 
         // But with higher target, we can see it
         Assert.That(buffer.TryPeek(125, out var entry2, out _, out _, out _), Is.True);
-        Assert.That(entry2.EntityPK, Is.EqualTo(2));
+        Assert.That(PK(entry2), Is.EqualTo(2));
     }
 
     // ========================================
@@ -269,10 +273,10 @@ public class ViewDeltaRingBufferTests
 
         Assert.That(buffer.Count, Is.EqualTo(0));
 
-        buffer.TryAppend(1, default, default, 0, 0);
+        buffer.TryAppend(E(1), default, default, 0, 0);
         Assert.That(buffer.Count, Is.EqualTo(1));
 
-        buffer.TryAppend(2, default, default, 1, 0);
+        buffer.TryAppend(E(2), default, default, 1, 0);
         Assert.That(buffer.Count, Is.EqualTo(2));
 
         buffer.TryPeek(long.MaxValue, out _, out _, out _, out _);
@@ -305,7 +309,7 @@ public class ViewDeltaRingBufferTests
             {
                 if (buffer.TryPeek(long.MaxValue, out var entry, out _, out _, out _))
                 {
-                    received.Add(entry.EntityPK);
+                    received.Add(PK(entry));
                     buffer.Advance();
                     consumed++;
                 }
@@ -317,7 +321,7 @@ public class ViewDeltaRingBufferTests
                         break;
                     }
 
-                    received.Add(entry.EntityPK);
+                    received.Add(PK(entry));
                     buffer.Advance();
                     consumed++;
                 }
@@ -339,7 +343,7 @@ public class ViewDeltaRingBufferTests
                 for (var i = 0; i < entriesPerProducer; i++)
                 {
                     var entityPK = producerId * entriesPerProducer + i;
-                    while (!buffer.TryAppend(entityPK, default, default, entityPK, 0))
+                    while (!buffer.TryAppend(E(entityPK), default, default, entityPK, 0))
                     {
                         Thread.SpinWait(10);
                     }
@@ -384,7 +388,7 @@ public class ViewDeltaRingBufferTests
                 startBarrier.Wait();
                 for (var i = 0; i < entriesPerProducer; i++)
                 {
-                    if (buffer.TryAppend(producerId * entriesPerProducer + i, default, default, i, 0))
+                    if (buffer.TryAppend(E(producerId * entriesPerProducer + i), default, default, i, 0))
                     {
                         Interlocked.Increment(ref appendedCount);
                     }
@@ -428,11 +432,11 @@ public class ViewDeltaRingBufferTests
             {
                 if (buffer.TryPeek(long.MaxValue, out var entry, out _, out _, out _))
                 {
-                    if (entry.EntityPK <= lastPK)
+                    if (PK(entry) <= lastPK)
                     {
                         orderViolation = true;
                     }
-                    lastPK = entry.EntityPK;
+                    lastPK = PK(entry);
                     buffer.Advance();
                     consumed++;
                 }
@@ -447,7 +451,7 @@ public class ViewDeltaRingBufferTests
         // Single producer
         for (var i = 0; i < entryCount; i++)
         {
-            while (!buffer.TryAppend(i, default, default, i, 0))
+            while (!buffer.TryAppend(E(i), default, default, i, 0))
             {
                 Thread.SpinWait(10);
             }

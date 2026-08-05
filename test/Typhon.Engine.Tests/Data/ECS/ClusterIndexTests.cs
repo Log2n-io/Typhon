@@ -1,4 +1,4 @@
-﻿using System.Linq;
+using System.Linq;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
@@ -14,7 +14,10 @@ namespace Typhon.Engine.Tests;
 [StructLayout(LayoutKind.Sequential)]
 struct ClIdxHealth
 {
-    [Index]
+    // AllowMultiple because a health total is not an identity: two units at 100 HP is the normal case, not a conflict. It was declared unique, which made the
+    // engine's index unrepresentable the moment two entities shared a value — the defect behind #675. The engine now rejects that at write time, so this
+    // declaration has to say what the data actually is.
+    [Index(AllowMultiple = true)]
     public int Current;
 
     public int Max;
@@ -98,13 +101,21 @@ class ClusterIndexTests : TestBase<ClusterIndexTests>
             "a page owned by no cluster index must not resolve");
     }
 
+    /// <summary>
+    /// A Versioned-only archetype is cluster-backed like every other (#629).
+    /// </summary>
+    /// <remarks>
+    /// This asserted the opposite until the eligibility flip. A cluster keeps the Versioned HEAD in the slot and the history in the revision chain, which is
+    /// exactly what a mixed SV+Versioned archetype had been doing since Phase 5 — so composition never was the obstacle, and there is no longer any archetype
+    /// whose indexes live on the shared ComponentTable. <c>HasClusterIndexes</c> stays false only because <c>ClUnit</c> has no indexed field.
+    /// </remarks>
     [Test]
-    public void ClusterEligible_VersionedArchetype_NoClusterIndexes()
+    public void ClusterEligible_VersionedArchetype_IsClusterBacked()
     {
         using var dbe = SetupEngine();
         var meta = Archetype<ClUnit>.Metadata;
-        Assert.That(meta.IsClusterEligible, Is.False, "Versioned archetype should not be cluster-eligible");
-        Assert.That(meta.HasClusterIndexes, Is.False);
+        Assert.That(meta.IsClusterEligible, Is.True, "every archetype is cluster-eligible, Versioned-only included");
+        Assert.That(meta.HasClusterIndexes, Is.False, "ClUnit declares no indexed field, so it owns no per-archetype B+Tree");
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -511,12 +522,13 @@ class ClusterIndexTests : TestBase<ClusterIndexTests>
             tx.Commit();
         }
 
-        // The shared ComponentTable B+Tree should have 0 entries from ClIdxUnit
+        // Asserted that the SHARED ComponentTable B+Tree stayed empty for a cluster archetype. There is no shared tree any more (#629) — the ComponentTable
+        // keeps only indexed-field METADATA — so the strongest remaining statement is that the archetype's own tree holds the entries.
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
         var table = dbe.GetComponentTable<ClIdxHealth>();
-        var ifi = table.IndexedFieldInfos[0];
-        Assert.That(ifi.PersistentIndex.EntryCount, Is.EqualTo(0),
-            "Shared ComponentTable B+Tree should have 0 entries for cluster archetype (entries go to per-archetype tree)");
+        Assert.That(table.IndexedFieldInfos, Has.Length.GreaterThan(0), "the component still declares an indexed field");
+        Assert.That(IndexTestHelpers.ArchetypeIndex<ClIdxUnit>(dbe, table, 0).EntryCount, Is.GreaterThan(0),
+            "the entries live in the per-archetype tree");
     }
 
     [Test]
@@ -544,6 +556,10 @@ class ClusterIndexTests : TestBase<ClusterIndexTests>
         using var tx2 = dbe.CreateQuickTransaction();
         Assert.That(tx2.Query<ClIdxUnit>().WhereField<ClIdxHealth>(h => h.Current == 1).Count(), Is.EqualTo(0), "No entities with old value");
         Assert.That(tx2.Query<ClIdxUnit>().WhereField<ClIdxHealth>(h => h.Current == 2).Count(), Is.EqualTo(2), "Both entities now have value 2");
+
+        // The two assertions above pass through the SoA scan, which reads component DATA and never consults the tree — so they say nothing about the index.
+        // This is what actually checks it, and it is why the index could be wrong here for as long as it has been.
+        IndexDataOracle.AssertIndexAgreesWithData<ClIdxUnit>(dbe, "after mutating an indexed field onto a value another entity already holds");
     }
 
     // ═══════════════════════════════════════════════════════════════════════

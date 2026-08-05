@@ -153,6 +153,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         ref var header = ref ClusterEntityRecordAccessor.GetHeader(recordPtr);
         header.BornTSN = bornTsn;
         header.EnabledBits = enabledBits;
+        clusterState.NoteClusterBorn(clusterChunkId, bornTsn);   // H1: replay must bound the cluster too, or a recovered entity is invisible to the summary
         ClusterEntityRecordAccessor.SetClusterChunkId(recordPtr, clusterChunkId);
         ClusterEntityRecordAccessor.SetSlotIndex(recordPtr, (byte)slotIdx);
 
@@ -200,6 +201,13 @@ internal sealed unsafe class RecoveryApplier : IDisposable
             }
         }
 
+        if (slots != null)
+        {
+            foreach (var sd in slots)
+            {
+                var t = sd.SlotIndex < _metadata.ComponentCount ? _engineState.SlotToComponentTable[sd.SlotIndex] : null;
+            }
+        }
         _engineState.EntityMap.InsertNew(key, recordPtr, ref _mapAccessor, _changeSet);
     }
 
@@ -223,6 +231,8 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         }
 
         EntityRecordAccessor.GetHeader(readBuf).DiedTSN = tsn;
+        // H1: same reasoning as the commit-path tombstone — the replayed death has to take its cluster off the visibility fast path.
+        _engineState.ClusterState?.NoteClusterDied(ClusterEntityRecordAccessor.GetClusterChunkId(readBuf));
         _engineState.EntityMap.Upsert(key, readBuf, ref _mapAccessor, _changeSet);
     }
 

@@ -19,9 +19,13 @@ unsafe class SchemaVersioningTests : TestBase<SchemaVersioningTests>
     [Test]
     public void ArchetypeR1_SizeOf_Compact()
     {
-        // 64B Name + 2B ArchetypeId + 2B ParentArchetypeId + 1B ComponentCount + 3B pad + 4B Revision + 4B ComponentNames + 4B EntityMapSPI + 4B ClusterSegmentSPI
-        // + 8B NextEntityKey = 96B, then + 2B AssemblyId rounds up to the struct's 8B alignment (it contains a long) → 104B.
-        Assert.That(sizeof(ArchetypeR1), Is.EqualTo(104));
+        // 64B Name + 2B ArchetypeId + 2B RoutingId + 2B ParentArchetypeId + 1B ComponentCount + 1B _pad0 + 4B Revision + 4B ComponentNames + 4B EntityMapSPI
+        // + 4B ClusterSegmentSPI + 8B NextEntityKey = 96B, + 2B AssemblyId, then 2B of alignment padding before 4B ClusterIndexSPI + 4B ClusterString64IndexSPI
+        // (#661), and the struct rounds up to its 8B alignment (it contains a long) → 112B.
+        //
+        // The prior comment attributed 3B to padding where the struct actually carries RoutingId (2B) + _pad0 (1B) — RoutingId is persisted, and is the
+        // durable anchor every EntityId's routing resolves through.
+        Assert.That(sizeof(ArchetypeR1), Is.EqualTo(112));
     }
 
     [Test]

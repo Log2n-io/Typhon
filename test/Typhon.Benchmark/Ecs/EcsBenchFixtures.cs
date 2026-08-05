@@ -15,9 +15,10 @@ namespace Typhon.Benchmark;
 // The set deliberately spans the storage-mode × storage-shape matrix, because op cost depends on BOTH:
 //   • StorageMode  — Versioned (MVCC chain) / SingleVersion (in-place) / Transient (heap, non-persisted).
 //   • Storage SHAPE — cluster (SoA) vs legacy/flat, branched on `_clusterBase != null`. An archetype is
-//     cluster-eligible unless (a) a Transient component carries indexed fields, or (b) it is pure-Versioned.
-//     So a pure-Versioned archetype takes the LEGACY path while a Versioned component inside a mixed cluster
-//     takes the CLUSTER path — the same StorageMode, different code. Benchmarks must state which shape they run.
+//     cluster-eligible unless it is pure-Versioned — that is the whole rule since #655 removed the exclusion on
+//     archetypes carrying an indexed Transient component. So a pure-Versioned archetype takes the LEGACY path while
+//     a Versioned component inside a mixed cluster takes the CLUSTER path — same StorageMode, different code.
+//     Benchmarks must state which shape they run.
 //
 // Component names are globally unique and StorageMode is pinned per (name, revision) — never re-register the same
 // name with a different mode; add a distinctly-named twin instead.
@@ -112,6 +113,32 @@ partial class AaBenchMixedCluster : Archetype<AaBenchMixedCluster>
     public static readonly Comp<AaBenchPosition> Position = Register<AaBenchPosition>();  // SV
     public static readonly Comp<AaBenchMovement> Movement = Register<AaBenchMovement>();  // SV
     public static readonly Comp<AaVcHealth> Health = Register<AaVcHealth>();              // Versioned
+}
+
+// ── Indexed VERSIONED component — the commit-time index path ────────────────────────────────────────────────────────
+// AaVcHealth above carries no index, so nothing in the suite exercised ReconcileClusterIndexAndViews' field loop: the per-archetype B+Tree maintenance that
+// runs at COMMIT rather than at the tick fence. That is the path #665 guards, and the path Phase 4 of the index-ownership consolidation migrates the rest of
+// the population onto. AllowMultiple + a low-cardinality Tier is the shape the unchanged-field guard exists for: index the classification, write the value
+// that churns.
+[Component("Typhon.Bench.AA.VcRanked", 1, StorageMode = StorageMode.Versioned)]
+[StructLayout(LayoutKind.Sequential)]
+struct AaVcRanked
+{
+    [Index(AllowMultiple = true)]
+    public int Tier;
+    public int Score;
+    public AaVcRanked(int tier, int score) { Tier = tier; Score = score; }
+}
+
+/// <summary>
+/// Mixed SV + <b>indexed</b> Versioned cluster archetype. The SV <c>Position</c> makes it cluster-eligible, which is what moves <c>AaVcRanked</c>'s index onto
+/// the archetype; writes to it reconcile the B+Tree at commit.
+/// </summary>
+[Archetype]
+partial class AaBenchIdxVersionedCluster : Archetype<AaBenchIdxVersionedCluster>
+{
+    public static readonly Comp<AaBenchPosition> Position = Register<AaBenchPosition>();  // SV — makes it cluster-eligible
+    public static readonly Comp<AaVcRanked> Ranked = Register<AaVcRanked>();              // Versioned, indexed
 }
 
 // ── Transient components — completes the StorageMode axis ───────────────────────────────────────────────────────────

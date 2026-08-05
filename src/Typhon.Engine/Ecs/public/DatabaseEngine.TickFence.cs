@@ -211,20 +211,9 @@ public partial class DatabaseEngine
                 }
             }
 
-            // Deferred index maintenance: process shadowed old field values for non-Versioned indexed fields.
-            // Must run even without WAL (indexes are in-memory structures independent of WAL).
-            if (hasShadow)
-            {
-                var shadowScope = TyphonEvent.BeginWriteTickFenceShadow(table.WalTypeId, table.IndexedFieldInfos?.Length ?? 0);
-                try
-                {
-                    shadowScope.TotalShadowEntries = ProcessShadowEntries(table, changeSet);
-                }
-                finally
-                {
-                    shadowScope.Dispose();
-                }
-            }
+            // The deferred shadow pass that used to run here maintained the per-ComponentTable indexes for non-Versioned components. Those indexes are gone
+            // (#629) — a cluster-backed archetype maintains its own trees through the cluster shadow bitmap — and instrumenting this branch across the full
+            // suite showed it was never entered. `hasShadow` is still reported on the tick-fence span below.
 
             // Spatial index maintenance: iterate dirty entities, update R-Tree positions.
             // Uses dirtyBits snapshot (still in scope from DirtyBitmap.Snapshot above).
@@ -483,6 +472,22 @@ public partial class DatabaseEngine
             var clusterScopeT = TyphonEvent.BeginWriteTickFenceCluster(meta.ArchetypeId);
             try
             {
+                // Drain the archetype's own index shadow buffers (#655). This branch had none: a pure-Transient archetype could not carry per-archetype
+                // indexes at all, so an in-place write to an indexed field captured a shadow entry that nothing ever consumed — the index would keep the
+                // pre-mutation key forever. Runs before the dormancy sweep, matching the ordering of the cluster branch below.
+                if (clusterState.TransientIndexSlots != null)
+                {
+                    var transientShadowScope = TyphonEvent.BeginWriteTickFenceShadow(meta.ArchetypeId, clusterState.TransientIndexSlots.Length);
+                    try
+                    {
+                        transientShadowScope.TotalShadowEntries = ProcessClusterShadowEntries(clusterState, engineState, null);
+                    }
+                    finally
+                    {
+                        transientShadowScope.Dispose();
+                    }
+                }
+
                 if (clusterState.ClusterDirtyBitmap.HasDirty)
                 {
                     var transientDirtyBits = clusterState.ClusterDirtyBitmap.Snapshot();
@@ -493,6 +498,13 @@ public partial class DatabaseEngine
                         transientDirtyClusterCount += BitOperations.PopCount((ulong)transientDirtyBits[i]);
                     }
                     clusterScopeT.DirtyClusterCount = transientDirtyClusterCount;
+
+                    // Zone maps, same as the cluster branch below (#655). Without this a pure-Transient archetype's maps keep the bounds spawn widened them
+                    // to, so Path B prunes away any cluster whose indexed field was later mutated OUT of that range — a silently empty query, not a stale
+                    // count. Spawn widens eagerly, which is why the miss only shows after an in-place write.
+                    clusterState.FenceWrittenSlots = Interlocked.Exchange(ref clusterState.WrittenSlotUnion, 0);
+                    RecomputeClusterZoneMaps(clusterState, transientDirtyBits);
+
                     for (var slot = 0; slot < clusterState.Layout.ComponentCount; slot++)
                     {
                         engineState.SlotToComponentTable[slot].PreviousTickHadDirtyEntities = true;
@@ -603,7 +615,9 @@ public partial class DatabaseEngine
 
                 // Shadow + zone-maps: runs in Prep so the per-archetype B+Tree Move calls happen before any Migrate-phase Remove+Add calls reorder the index.
                 // B+Tree itself is OLC-safe across concurrent archetypes (each runs in its own Prep chunk).
-                if (clusterState.IndexSlots != null)
+                // Gated on EITHER home (#655): an archetype whose only indexed component is Transient has an empty IndexSlots and would otherwise skip both
+                // the drain and the zone-map recompute entirely. Both callees dispatch over the two homes themselves.
+                if (clusterState.IndexSlots != null || clusterState.TransientIndexSlots != null)
                 {
                     clusterScope.HasShadow = 1;
                     var shadowScope = TyphonEvent.BeginWriteTickFenceClusterShadow(meta.ArchetypeId, dirtyClusterCount);

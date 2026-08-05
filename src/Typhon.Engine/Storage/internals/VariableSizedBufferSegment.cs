@@ -506,21 +506,6 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
 }
 
 /// <summary>
-/// Extended VSBS that appends a typed extra header after the standard <see cref="VariableSizedBufferRootHeader"/>.
-/// The extra header is automatically zeroed on buffer allocation.
-/// </summary>
-/// <typeparam name="T">The unmanaged element type stored in the buffer.</typeparam>
-/// <typeparam name="TExtraHeader">The unmanaged struct appended after the root header in the root chunk.</typeparam>
-/// <typeparam name="TStore">The <see cref="IPageStore"/> implementation backing the segment's chunks (persistent or transient).</typeparam>
-[PublicAPI]
-public class VariableSizedBufferSegment<T, TExtraHeader, TStore> : VariableSizedBufferSegment<T, TStore> where T : unmanaged where TExtraHeader : unmanaged where TStore : struct, IPageStore
-{
-    public unsafe VariableSizedBufferSegment(ChunkBasedSegment<TStore> segment) : base(segment, sizeof(VariableSizedBufferRootHeader) + sizeof(TExtraHeader))
-    {
-    }
-}
-
-/// <summary>
 /// Zero-allocation enumerator for iterating over all elements in a variable-sized buffer.
 /// This is a ref struct to ensure stack allocation and zero GC pressure.
 /// </summary>

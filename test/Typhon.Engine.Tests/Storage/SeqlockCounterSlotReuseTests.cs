@@ -65,8 +65,14 @@ class SeqlockCounterSlotReuseTests
                 .AddScopedDatabaseEngine(o => TestWalProfile.Apply(o, dir));
             sc.AddScoped<IWalFileIO>(_ => new InMemoryWalFileIO());
 
-            using (var sp = sc.BuildServiceProvider())
+            // The cleanup MUST be in a finally. Anything thrown below — an assertion failure, or a storage error out of InitializeArchetypes — used to skip it
+            // and leave a half-written database at this path. The next run's EnsureFileDeleted swallows every exception (PagedMMFOptions.cs) and waits only
+            // 500 ms for the NTFS pending-delete, so a file still mapped by the wreckage of the previous run is silently NOT deleted — and the run after that
+            // opens the stale database and fails with a CRC mismatch that looks exactly like a torn-write bug in the engine. That phantom cost real debugging
+            // time chasing a page-cache defect that did not exist; residue from a failing test must not become the next run's input.
+            try
             {
+                using var sp = sc.BuildServiceProvider();
                 sp.EnsureFileDeleted<ManagedPagedMMFOptions>();
                 var dbe = sp.GetRequiredService<DatabaseEngine>();
                 RegisterPressureComponents(dbe);
@@ -76,9 +82,11 @@ class SeqlockCounterSlotReuseTests
                 Assert.That(violations, Is.Empty,
                     $"iteration {iter}: {violations.Count} Idle page(s) carry an odd seqlock counter:\n  {string.Join("\n  ", violations)}");
             }
-
-            try { Directory.Delete(dir, recursive: true); }
-            catch { /* best-effort cleanup */ }
+            finally
+            {
+                try { Directory.Delete(dir, recursive: true); }
+                catch { /* best-effort cleanup */ }
+            }
         }
     }
 }

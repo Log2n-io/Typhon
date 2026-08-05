@@ -1,4 +1,4 @@
----
+﻿---
 uid: feature-index
 title: 'Typhon Feature Catalog'
 description: 'Documentation for every feature in src/Typhon.Engine, tagged Public (usable by application developers embedding Typhon) or Internal (engine machinery, for…'
@@ -130,7 +130,7 @@ Every Public feature, one line each — the application-facing surface, complete
 | &nbsp;&nbsp;↳ Multi-Value Secondary Index (AllowMultiple) | Many entities share one key — the B+Tree value is a growable HEAD buffer of chunk-ids, at a fixed +4-byte-per-entity cost. | ✅ Implemented | 🔵 Core | [→](Indexing/secondary-index-storage-modes/multi-value-secondary-index.md) |
 | Lookup and Range-Scan Operations | Lock-free point lookups and ordered range scans over any secondary index, MVCC-correct at your transaction's snapshot. | ✅ Implemented | 🔵 Core | [→](Indexing/lookup-and-range-scan.md) |
 | Index Handle Resolution (IndexRef) | Opaque, zero-allocation handle to a PK or secondary index, resolved once on the cold path via GetPKIndexRef/GetIndexRef and reused on the hot path with O(1) schema-evolution staleness checks. | ✅ Implemented | 🟣 Advanced | [→](Indexing/index-ref-resolution.md) |
-| Versioned (HEAD/TAIL) Secondary Indexes for MVCC | AllowMultiple indexes maintain a HEAD buffer (current set) plus an append-only TAIL of version transitions so index membership stays correct across updates and deletes. | ✅ Implemented | 🟣 Advanced | [→](Indexing/versioned-secondary-indexes.md) |
+| Element-Precise Secondary Indexes for MVCC | AllowMultiple index mutations address the entity's own element inside the key's buffer, so a value change or delete never strands the entity between keys nor evicts its siblings. | ✅ Implemented | 🟣 Advanced | [→](Indexing/versioned-secondary-indexes.md) |
 | Transaction-Local Index Overlay (Read-Your-Own-Writes) | Planned per-transaction overlay so index lookups see that transaction's own uncommitted writes. | 📋 Planned | 🟣 Advanced | [→](Indexing/transaction-local-index-overlay.md) |
 
 ### Spatial
@@ -385,8 +385,6 @@ Every Internal feature, one line each — engine machinery with no direct applic
 |---|---|---|---|
 | Specialized B+Tree Key-Size Variants | Four key-width-specialized B+Tree implementations (16/32/64-bit and String64), automatically selected by an indexed field's CLR type. | ✅ Implemented | [→](Indexing/btree-key-variants.md) |
 | Compound Move/MoveValue (field-update fast path) | Atomic remove+insert for indexed-field updates — one traversal, one lock on the common same-leaf case. | ✅ Implemented | [→](Indexing/compound-move-operations.md) |
-| Temporal (Point-in-Time) Index Query | Reconstructs which entities held a key's value at a past TSN by replaying the index's append-only TAIL history. | 🚧 Partial | [→](Indexing/temporal-index-query.md) |
-| TAIL Retention / Garbage Collection | Bounds TAIL version-history growth via boundary-sentinel-preserving pruning — built and tested, not yet auto-triggered. | 🚧 Partial | [→](Indexing/tail-garbage-collection.md) |
 | Optimistic Lock Coupling (per-node concurrency) | Per-node OLC version latches give lock-free optimistic readers and leaf-only write latching for B+Tree/R-Tree index operations. | ✅ Implemented | [→](Indexing/olc-concurrency.md) |
 | Index Diagnostics & Consistency Checking | Always-on per-instance contention counters plus an on-demand tsh structural walk to diagnose B+Tree contention and validate integrity. | ✅ Implemented | [→](Indexing/btree-diagnostics.md) |
 | B+Tree Node Layout and Capacity Tuning | Cache-line-aware 256-byte B+Tree node layout with per-key-type capacities, tuned through a multi-phase profiling effort. | ✅ Implemented | [→](Indexing/btree-node-layout-tuning.md) |

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
@@ -604,7 +604,8 @@ public partial class DatabaseEngine
     /// Returns <see langword="false"/> when no live component table owns that index segment. Read-only; reads the resident directory chunks under an epoch guard
     /// (zero data-page I/O).
     /// </summary>
-    internal bool TryGetIndexLayout(int indexSegmentRootPage, out int directoryChunkCount, out (short StableId, int RootChunkId, int EntryCount)[] trees)
+    internal bool TryGetIndexLayout(int indexSegmentRootPage, out int directoryChunkCount,
+        out (short StableId, short Slot, int RootChunkId, int EntryCount)[] trees)
     {
         directoryChunkCount = 0;
         trees = [];
@@ -632,7 +633,7 @@ public partial class DatabaseEngine
     /// <summary>
     /// Locates a B-tree index segment by its root page across both storage paths: the per-archetype cluster-storage indexes
     /// (<c>ClusterState.IndexSegment</c>, for cluster-eligible SingleVersion archetypes) and the component-table indexes
-    /// (<c>DefaultIndexSegment</c> / <c>String64IndexSegment</c> / <c>TailIndexSegment</c>, for the Versioned / legacy path). Returns <see langword="null"/> when
+    /// Returns <see langword="null"/> when
     /// no live segment matches.
     /// </summary>
     private ChunkBasedSegment<PersistentStore> FindIndexSegment(int rootPage)
@@ -650,21 +651,7 @@ public partial class DatabaseEngine
             }
         }
 
-        foreach (var table in GetAllComponentTables())
-        {
-            if (table.DefaultIndexSegment?.RootPageIndex == rootPage)
-            {
-                return table.DefaultIndexSegment;
-            }
-            if (table.String64IndexSegment?.RootPageIndex == rootPage)
-            {
-                return table.String64IndexSegment;
-            }
-            if (table.TailIndexSegment?.RootPageIndex == rootPage)
-            {
-                return table.TailIndexSegment;
-            }
-        }
+        // The per-ComponentTable index segments this used to scan after the cluster ones no longer exist (#629); every index page belongs to an archetype.
 
         return null;
     }
@@ -672,9 +659,10 @@ public partial class DatabaseEngine
     /// <summary>
     /// Reads the B-tree directory (chunk 0, overflowing into chunks 1-3) into one named tuple per registered tree. Mirrors
     /// <see cref="BTree{TKey,TStore}"/>'s <c>ComputeEntryLocation</c>: chunk 0 holds <c>(stride − headerSize) / entrySize</c> entries after the 2-byte header, the rest tile across
-    /// chunks 1-3. Cost is O(registered trees) (≤ 20), no node walk.
+    /// chunks 1-3. Cost is O(registered trees) (see <c>BTree.MaxDirectoryEntriesFor</c> — 84 at the 256-byte stride), no node walk.
     /// </summary>
-    private static unsafe (short StableId, int RootChunkId, int EntryCount)[] ReadIndexDirectory(ref ChunkAccessor<PersistentStore> accessor, int stride)
+    private static unsafe (short StableId, short Slot, int RootChunkId, int EntryCount)[] ReadIndexDirectory(ref ChunkAccessor<PersistentStore> accessor, 
+        int stride)
     {
         ref readonly var header = ref accessor.GetChunkReadOnly<BTreeDirectoryHeader>(0);
         var count = header.EntryCount;
@@ -688,7 +676,7 @@ public partial class DatabaseEngine
         var entriesInChunk0 = (stride - headerSize) / entrySize;
         var entriesPerChunk = stride / entrySize;
 
-        var result = new (short StableId, int RootChunkId, int EntryCount)[count];
+        var result = new (short StableId, short Slot, int RootChunkId, int EntryCount)[count];
         for (var i = 0; i < count; i++)
         {
             int chunkId, offset;
@@ -706,7 +694,7 @@ public partial class DatabaseEngine
 
             var addr = accessor.GetChunkAddress(chunkId);
             ref readonly var entry = ref Unsafe.AsRef<BTreeDirectoryEntry>(addr + offset);
-            result[i] = (entry.StableId, entry.RootChunkId, entry.Count);
+            result[i] = (entry.StableId, entry.Slot, entry.RootChunkId, entry.Count);
         }
 
         return result;

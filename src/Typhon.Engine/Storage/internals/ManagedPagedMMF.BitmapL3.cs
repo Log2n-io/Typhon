@@ -1,4 +1,4 @@
-﻿// CS1591: this file declares public-accessibility types that live in the internal namespace (Phase 2b entanglement, see
+// CS1591: this file declares public-accessibility types that live in the internal namespace (Phase 2b entanglement, see
 // claude/research/PublicVsInternalApiClassification.md). They are excluded from the published API reference, so consumer-facing
 // doc coverage is not enforced here.
 #pragma warning disable 1591
@@ -113,9 +113,31 @@ public partial class ManagedPagedMMF
         /// allocations pass <c>null</c>), the bit would otherwise be set in memory only — and since the directory-only root (v4)
         /// moved the L0 words off the always-resident segment root onto a plain data page, that page can be evicted between
         /// allocations and reload stale, dropping the bit so the same pages get handed out twice (and losing the bit across a
-        /// reopen). <see cref="IPageStore.EnsureDirtyAtLeast"/> holds it dirty until the next checkpoint persists it, then it is
-        /// safely evictable again (disk now carries the bit).
+        /// reopen).
         /// </summary>
+        /// <remarks>
+        /// The floor is TWO, not one, and that is the whole fix for the lost-bit race (#30).
+        /// <para>
+        /// A flush is not atomic with respect to the counter: <c>SavePages</c> copies the page content, fsyncs, and only THEN calls
+        /// <c>DecrementDirty</c>. A bit set inside that window is not in the bytes that reached disk, so the mark protecting it must
+        /// survive the decrement. At a floor of one it cannot — <see cref="IPageStore.EnsureDirtyAtLeast"/> is a no-op while the
+        /// counter already reads 1, so the flush's decrement drops it to 0, the page becomes evictable while holding an unwritten
+        /// bit, and the next allocation reloads it stale and hands the same pages out twice. That is exactly what was observed:
+        /// the same occupancy page came back in a different cache slot with the bits missing.
+        /// </para>
+        /// <para>
+        /// A floor of two leaves ≥1 after a single in-flight flush's decrement, so the page stays dirty and un-evictable until a
+        /// flush that actually captured the bit. It drains normally afterwards (2 → 1 → 0 across later flushes, each of which did
+        /// write the current content), so nothing is pinned permanently. Plain <c>IncrementDirty</c> would also close the race but
+        /// is unbounded here — with no ChangeSet there is no owner to release the marks, so the counter would climb with every
+        /// allocation and the page would never become evictable again.
+        /// </para>
+        /// <para>
+        /// This rests on flushes of a GIVEN page being serialized (the checkpoint thread runs cycles one at a time). Two concurrent
+        /// flushes of the same page could still double-decrement; if that ever becomes possible the floor is no longer sufficient
+        /// and this needs a write-generation stamp instead of a counter.
+        /// </para>
+        /// </remarks>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void MarkOccupancyPageDurable(int memPageIdx, ChangeSet changeSet)
         {
@@ -125,7 +147,7 @@ public partial class ManagedPagedMMF
             }
             else
             {
-                _segment.Store.EnsureDirtyAtLeast(memPageIdx, 1);
+                _segment.Store.EnsureDirtyAtLeast(memPageIdx, 2);
             }
         }
 

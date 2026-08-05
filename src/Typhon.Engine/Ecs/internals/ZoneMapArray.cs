@@ -43,10 +43,23 @@ internal sealed unsafe class ZoneMapArray
     /// Called at tick fence for each dirty cluster.
     /// </summary>
     public void Recompute(int clusterChunkId, byte* clusterBase, ArchetypeClusterInfo layout, int compSlot, int fieldOffset)
+        => Recompute(clusterChunkId, clusterBase, clusterBase, layout, compSlot, fieldOffset);
+
+    /// <summary>
+    /// <see cref="Recompute(int,byte*,ArchetypeClusterInfo,int,int)"/> for a slot whose component bytes do NOT live in the same segment as the occupancy word:
+    /// a <see cref="Typhon.Schema.Definition.StorageMode.Transient"/> slot on a mixed archetype (#655).
+    /// </summary>
+    /// <param name="clusterChunkId">Chunk id, identical in both segments — allocation is lockstep.</param>
+    /// <param name="primaryBase">Chunk holding the occupancy word: the cluster segment, or the Transient segment on a pure-Transient archetype.</param>
+    /// <param name="dataBase">Chunk holding this slot's component column, in whichever segment matches its storage mode.</param>
+    /// <param name="layout">Cluster layout — shared by both segments, which is what makes one set of offsets address either.</param>
+    /// <param name="compSlot">Per-archetype component slot to scan.</param>
+    /// <param name="fieldOffset">Byte offset of the indexed field within the component.</param>
+    public void Recompute(int clusterChunkId, byte* primaryBase, byte* dataBase, ArchetypeClusterInfo layout, int compSlot, int fieldOffset)
     {
         EnsureCapacity(clusterChunkId);
 
-        ulong occupancy = *(ulong*)clusterBase;
+        ulong occupancy = *(ulong*)primaryBase;
         if (occupancy == 0)
         {
             _valid[clusterChunkId] = false;
@@ -54,7 +67,7 @@ internal sealed unsafe class ZoneMapArray
         }
 
         int compSize = layout.ComponentSize(compSlot);
-        byte* compBase = clusterBase + layout.ComponentOffset(compSlot);
+        byte* compBase = dataBase + layout.ComponentOffset(compSlot);
 
         long min = long.MaxValue;
         long max = long.MinValue;
@@ -182,18 +195,36 @@ internal sealed unsafe class ZoneMapArray
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static long FloatToOrderedLong(float value)
     {
-        int bits = BitConverter.SingleToInt32Bits(value);
+        // Normalise -0.0f to +0.0f BEFORE reading the bits. They are numerically EQUAL, but their bit patterns are not adjacent-and-equal — they encode one
+        // apart (2147483647 vs 2147483648). Zone-map pruning compares encoded values for overlap, so a cluster holding only -0.0f did not overlap the bounds
+        // of `field == 0.0f` and was skipped entirely, dropping rows that match. The B+Tree itself is unaffected: it compares floats, where the two ARE equal.
+        int bits = value == 0f ? 0 : BitConverter.SingleToInt32Bits(value);
+
         // Cast to long BEFORE XOR/NOT to avoid sign-extension of int result to long.
         // Without cast: (0 ^ int.MinValue) = int -2147483648, sign-extends to long -2147483648 (wrong ordering).
         // With cast: (0L ^ (long)(uint)int.MinValue) = long 2147483648 (correct ordering).
         return bits < 0 ? ~(long)bits : (uint)(bits ^ int.MinValue);
     }
 
+    // Double ordering: the "flip all bits if negative, else flip the sign bit" trick above CANNOT be reused here, and using it was a wrong-answer bug.
+    //
+    // That trick produces a value that is ordered under UNSIGNED comparison. FloatToOrderedLong gets away with it because a 32-bit result widens into the
+    // positive half of a long, where signed and unsigned order coincide — which is exactly what the cast in its body is for. A 64-bit result has nowhere to
+    // widen into: `bits ^ long.MinValue` sets the sign bit of every POSITIVE double, so positives came out negative and sorted BELOW every negative value.
+    //
+    // The consequence was silent and not small. Zone-map pruning compares these as signed longs, so a cluster holding only positive doubles failed to overlap
+    // the query range for `d > negative` and was skipped entirely — the SoA scan dropped 93 of 143 matching rows in the fixture that found this. The K-way
+    // merge uses the same encoding to order its streams, so an OrderBy on a double column was mis-sorted the same way. Any double column whose values straddle
+    // zero was affected; the suite had no double-indexed cluster query, so nothing caught it.
+    //
+    // This mapping is monotone under SIGNED comparison, which is what every consumer actually does: positive doubles keep their bit pattern (already ascending
+    // in [0, 2^63)), and negative doubles map to [long.MinValue + 1, 0] ascending, because their bit patterns run DESCENDING as the value grows.
+    // -0.0 maps to 0, the same as +0.0, which is correct — they compare equal.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static long DoubleToOrderedLong(double value)
     {
-        long bits = BitConverter.DoubleToInt64Bits(value);
-        return bits < 0 ? ~bits : bits ^ long.MinValue;
+        var bits = BitConverter.DoubleToInt64Bits(value);
+        return bits >= 0 ? bits : long.MinValue - bits;
     }
 
     /// <summary>

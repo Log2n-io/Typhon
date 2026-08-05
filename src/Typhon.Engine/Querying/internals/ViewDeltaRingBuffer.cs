@@ -96,7 +96,7 @@ internal sealed unsafe class ViewDeltaRingBuffer : IDisposable
     /// </summary>
     /// <returns>True if the entry was appended; false if the buffer is full (overflow).</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool TryAppend(long entityPK, KeyBytes8 beforeKey, KeyBytes8 afterKey, long tsn, byte flags, byte componentTag = 0)
+    public bool TryAppend(EntityId entityPK, KeyBytes8 beforeKey, KeyBytes8 afterKey, long tsn, byte flags, byte componentTag = 0)
     {
         while (true)
         {

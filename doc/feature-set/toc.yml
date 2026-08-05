@@ -1,4 +1,4 @@
-- name: Overview
+﻿- name: Overview
   href: README.md
 - name: Durability
   href: Durability/README.md
@@ -170,13 +170,9 @@
       href: Indexing/lookup-and-range-scan.md
     - name: Optimistic Lock Coupling (per-node concurrency)
       href: Indexing/olc-concurrency.md
-    - name: TAIL Retention / Garbage Collection
-      href: Indexing/tail-garbage-collection.md
-    - name: Temporal (Point-in-Time) Index Query
-      href: Indexing/temporal-index-query.md
     - name: Transaction-Local Index Overlay (Read-Your-Own-Writes)
       href: Indexing/transaction-local-index-overlay.md
-    - name: Versioned (HEAD/TAIL) Secondary Indexes for MVCC
+    - name: Element-Precise Secondary Indexes for MVCC
       href: Indexing/versioned-secondary-indexes.md
     - name: Secondary Index Storage Modes
       href: Indexing/secondary-index-storage-modes/README.md

@@ -13,6 +13,7 @@ namespace Typhon.Benchmark;
 //   AaBenchAnt (510):          SV Position + SV Movement
 //   AaBenchMixedCluster (516): SV Position + SV Movement + Versioned Health
 //   AaBenchIdxUnit (512):      SV Position + Indexed IdxData
+//   AaBenchIdxVersionedCluster: SV Position + Indexed VERSIONED Ranked — the commit-time index path (#665)
 // ═══════════════════════════════════════════════════════════════════════
 
 [SimpleJob(warmupCount: 2, iterationCount: 5)]
@@ -30,6 +31,7 @@ public class ClusterRegressionBenchmarks : IDisposable
     private EntityId[] _svIds;
     private EntityId[] _mixedIds;
     private EntityId[] _idxIds;
+    private EntityId[] _idxVersionedIds;
 
     // Pre-selected random-access subset (100 entries from _mixedIds)
     private EntityId[] _randomAccessIds;
@@ -62,6 +64,7 @@ public class ClusterRegressionBenchmarks : IDisposable
         _dbe.RegisterComponentFromAccessor<AaBenchMovement>();
         _dbe.RegisterComponentFromAccessor<AaVcHealth>();
         _dbe.RegisterComponentFromAccessor<AaBenchIdxData>();
+        _dbe.RegisterComponentFromAccessor<AaVcRanked>();
         _dbe.InitializeArchetypes();
 
         var rng = new Random(42);
@@ -97,6 +100,19 @@ public class ClusterRegressionBenchmarks : IDisposable
             var pos = new AaBenchPosition(i, 0);
             var data = new AaBenchIdxData(i, 0); // Sequential Score 0..9999
             _idxIds[i] = tx.Spawn<AaBenchIdxUnit>(AaBenchIdxUnit.Position.Set(in pos), AaBenchIdxUnit.Data.Set(in data));
+        });
+
+        // ── Spawn Indexed VERSIONED entities (AaBenchIdxVersionedCluster) ──
+        // Tier is low-cardinality on purpose: an AllowMultiple index over 8 keys is the classification shape the
+        // unchanged-field guard targets, and it makes the two commit benchmarks below differ only in whether the key moves.
+        _idxVersionedIds = new EntityId[RandomAccessCount];
+        SpawnInBatches(RandomAccessCount, (tx, i) =>
+        {
+            var pos = new AaBenchPosition(i, 0);
+            var ranked = new AaVcRanked(i % 8, i);
+            _idxVersionedIds[i] = tx.Spawn<AaBenchIdxVersionedCluster>(
+                AaBenchIdxVersionedCluster.Position.Set(in pos),
+                AaBenchIdxVersionedCluster.Ranked.Set(in ranked));
         });
 
         // Tick fence to populate zone maps and cluster indexes
@@ -258,5 +274,46 @@ public class ClusterRegressionBenchmarks : IDisposable
         accessor.Dispose();
         tx.Commit();
         return _randomAccessIds.Length;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 7-8. Indexed Versioned write + commit — the per-archetype B+Tree reconcile that runs at COMMIT (#665).
+    //
+    // The pair is the measurement: both write the same component through the same path and differ only in whether the
+    // INDEXED field changes. Their ratio is what the unchanged-field guard buys — without it the two are the same
+    // work, because a key is moved onto itself.
+    // ═══════════════════════════════════════════════════════════════════
+
+    [Benchmark]
+    public int IndexedVersionedCommit_KeyChanges()
+    {
+        using var tx = _dbe.CreateQuickTransaction();
+        var accessor = tx.For<AaBenchIdxVersionedCluster>();
+        for (int i = 0; i < _idxVersionedIds.Length; i++)
+        {
+            var entity = accessor.OpenMut(_idxVersionedIds[i]);
+            ref var r = ref entity.Write(AaBenchIdxVersionedCluster.Ranked);
+            r.Tier = (r.Tier + 1) & 7;   // the indexed field moves — real B+Tree work
+            r.Score++;
+        }
+        accessor.Dispose();
+        tx.Commit();
+        return _idxVersionedIds.Length;
+    }
+
+    [Benchmark]
+    public int IndexedVersionedCommit_KeyUnchanged()
+    {
+        using var tx = _dbe.CreateQuickTransaction();
+        var accessor = tx.For<AaBenchIdxVersionedCluster>();
+        for (int i = 0; i < _idxVersionedIds.Length; i++)
+        {
+            var entity = accessor.OpenMut(_idxVersionedIds[i]);
+            ref var r = ref entity.Write(AaBenchIdxVersionedCluster.Ranked);
+            r.Score++;                   // Tier untouched — the guard must make this free of index work
+        }
+        accessor.Dispose();
+        tx.Commit();
+        return _idxVersionedIds.Length;
     }
 }

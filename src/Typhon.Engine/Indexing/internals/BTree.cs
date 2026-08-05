@@ -64,10 +64,10 @@ internal struct BTreeDirectoryHeader
 }
 
 /// <summary>
-/// One entry in the BTree directory (chunk 0). Each BTree on the segment gets a unique entry, keyed by <see cref="StableId"/> (FieldId for secondary
-/// indexes, -1 for PK, 0 for standalone).
+/// One entry in the BTree directory (chunk 0). Each BTree on the segment gets a unique entry, keyed by the <see cref="BTreeStableKey"/> pair
+/// (<see cref="StableId"/>, <see cref="Slot"/>).
 /// </summary>
-/// <remarks>12 bytes: short StableId + short Reserved + int RootChunkId + int Count.</remarks>
+/// <remarks>12 bytes: short StableId + short Slot + int RootChunkId + int Count.</remarks>
 [StructLayout(LayoutKind.Sequential, Pack = 2)]
 internal struct BTreeDirectoryEntry
 {
@@ -75,9 +75,55 @@ internal struct BTreeDirectoryEntry
 
     /// <summary>Stable key: -1 for PK, Field.FieldId for secondary indexes, 0 for standalone/test BTrees.</summary>
     public short StableId;
-    public short Reserved;
+
+    /// <summary>
+    /// Component slot within the archetype, for the per-archetype index segments that several component slots share; 0 on a per-ComponentTable segment,
+    /// which hosts one component's trees only. See <see cref="BTreeStableKey"/> for why the slot is part of the key (#657).
+    /// </summary>
+    public short Slot;
+
     public int RootChunkId;
     public int Count;
+}
+
+/// <summary>
+/// Identity of one B+Tree within a shared segment's chunk-0 directory: the pair (<see cref="StableId"/>, <see cref="Slot"/>).
+/// </summary>
+/// <remarks>
+/// <para>
+/// <see cref="StableId"/> alone is NOT unique on a per-archetype index segment. Field ids restart at 0 for every component, so two components in the same
+/// archetype that each index their field #0 both register with StableId 0. Creation appends two distinct entries and works, but on reopen
+/// <c>FindInDirectory</c> returns the FIRST match for both trees — they end up sharing one root, and one component's index silently resolves the other's
+/// entities (#657). <see cref="Slot"/> — the component's slot in the archetype — disambiguates them.
+/// </para>
+/// <para>
+/// Per-ComponentTable segments host a single component's trees, so they use slot 0 via the implicit conversion from <see cref="short"/>.
+/// </para>
+/// </remarks>
+internal readonly struct BTreeStableKey : IEquatable<BTreeStableKey>
+{
+    /// <summary>-1 for PK, Field.FieldId for secondary indexes, 0 for standalone/test BTrees.</summary>
+    public readonly short StableId;
+
+    /// <summary>Component slot within the archetype; 0 when the segment is not shared across slots.</summary>
+    public readonly short Slot;
+
+    public BTreeStableKey(short stableId, short slot)
+    {
+        StableId = stableId;
+        Slot = slot;
+    }
+
+    /// <summary>A tree on a segment it does not share with other component slots — the per-ComponentTable case.</summary>
+    public static implicit operator BTreeStableKey(short stableId) => new(stableId, 0);
+
+    public bool Equals(BTreeStableKey other) => StableId == other.StableId && Slot == other.Slot;
+
+    public override bool Equals(object obj) => obj is BTreeStableKey other && Equals(other);
+
+    public override int GetHashCode() => (Slot << 16) | (ushort)StableId;
+
+    public override string ToString() => $"stableId {StableId}, slot {Slot}";
 }
 
 #region Misc Helpers
@@ -452,9 +498,9 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     private SpinLock _deferredLock = new(false);
 
     // Per-instance count and root tracking used for ALL runtime operations.
-    // Multiple BTrees can share the same ChunkBasedSegment<TStore> (e.g., PK index and secondary indexes share DefaultIndexSegment). Runtime code MUST use these
+    // Multiple BTrees can share the same ChunkBasedSegment<TStore> (an archetype's indexed fields share its index segment). Runtime code MUST use these
     // per-instance fields instead of reading from a single shared offset, which would cause cross-BTree corruption.
-    // Each BTree has a unique entry in the chunk 0 directory, keyed by stableId.
+    // Each BTree has a unique entry in the chunk 0 directory, keyed by its BTreeStableKey (key + component slot).
     private int _count;
 
     // Cached last key for append fast-path: avoids reading ReverseLinkList chunk on sequential inserts.
@@ -614,9 +660,6 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     private int _dirEntryOffset;
 
     // DirectoryChunkCount hoisted to BTreeBase<TStore> (inherited here) so the torn-safe ClearSharedSegment helper can reference it without a TKey.
-
-    /// <summary>Hard cap on secondary indexes per segment (could be raised later).</summary>
-    internal const int MaxDirectoryEntries = 20;
 
     public bool IsEmpty() => _count == 0;
 
@@ -943,7 +986,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     
     public override ChunkBasedSegment<TStore> Segment => _segment;
 
-    protected BTree(ChunkBasedSegment<TStore> segment, bool load, short stableId = 0, ChangeSet changeSet = null)
+    protected BTree(ChunkBasedSegment<TStore> segment, bool load, BTreeStableKey key = default, ChangeSet changeSet = null)
     {
         Comparer = Comparer<TKey>.Default;
         _segment = segment;
@@ -974,7 +1017,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
             var accessor = _segment.CreateChunkAccessor(changeSet);
             try
             {
-                RegisterInDirectory(stableId, ref accessor);
+                RegisterInDirectory(key, ref accessor);
             }
             finally
             {
@@ -983,11 +1026,11 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         }
         else
         {
-            // Load path: find our entry in the directory by stableId, reconstruct per-instance state.
+            // Load path: find our entry in the directory by key, reconstruct per-instance state.
             var accessor = _segment.CreateChunkAccessor();
             try
             {
-                FindInDirectory(stableId, ref accessor);
+                FindInDirectory(key, ref accessor);
 
                 if (_count > 0)
                 {
@@ -1025,24 +1068,36 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     /// Appends a new entry to the chunk 0 directory for this BTree.
     /// Sets <c>_dirChunkId</c> and <c>_dirEntryOffset</c> for subsequent <see cref="SyncHeader"/> calls.
     /// </summary>
-    private unsafe void RegisterInDirectory(short stableId, ref ChunkAccessor<TStore> accessor)
+    /// <remarks>
+    /// Rejects a key already present rather than appending a second entry for it. A duplicate would create fine — each instance caches its own entry
+    /// location — and only surface on reopen, where <see cref="FindInDirectory"/> hands both trees the first entry's root. Failing at registration turns
+    /// that latent, data-losing bug into an immediate, obvious one (#657).
+    /// </remarks>
+    private unsafe void RegisterInDirectory(BTreeStableKey key, ref ChunkAccessor<TStore> accessor)
     {
         var chunk0Addr = accessor.GetChunkAddress(0, true);
         ref var header = ref Unsafe.AsRef<BTreeDirectoryHeader>(chunk0Addr);
 
         // Directory chunks are zeroed on first reservation, so EntryCount is reliably 0 for a fresh segment.
         int entryIndex = header.EntryCount;
-        if (entryIndex >= MaxDirectoryEntries)
+        int stride = _segment.Stride;
+        var maxEntries = MaxDirectoryEntriesFor(stride);
+        if (entryIndex >= maxEntries)
         {
-            throw new InvalidOperationException($"Maximum number of BTree indexes per segment exceeded ({MaxDirectoryEntries})");
+            throw new InvalidOperationException($"Maximum number of BTree indexes per segment exceeded ({maxEntries} at stride {stride})");
         }
 
-        (_dirChunkId, _dirEntryOffset) = ComputeEntryLocation(entryIndex, _segment.Stride);
+        if (TryFindEntry(key, entryIndex, stride, ref accessor, out _, out _))
+        {
+            throw new InvalidOperationException($"A BTree with key ({key}) is already registered in this segment's directory");
+        }
+
+        (_dirChunkId, _dirEntryOffset) = ComputeEntryLocation(entryIndex, stride);
 
         var entryChunkAddr = accessor.GetChunkAddress(_dirChunkId, true);
         ref var entry = ref Unsafe.AsRef<BTreeDirectoryEntry>(entryChunkAddr + _dirEntryOffset);
-        entry.StableId = stableId;
-        entry.Reserved = 0;
+        entry.StableId = key.StableId;
+        entry.Slot = key.Slot;
         entry.RootChunkId = 0;
         entry.Count = 0;
 
@@ -1050,44 +1105,63 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     }
 
     /// <summary>
-    /// Scans the chunk 0 directory for the entry matching <paramref name="stableId"/>.
+    /// Scans the chunk 0 directory for the entry matching <paramref name="key"/>.
     /// Populates <c>_dirChunkId</c>, <c>_dirEntryOffset</c>, <c>_count</c>, and <c>Root</c>.
     /// </summary>
-    private unsafe void FindInDirectory(short stableId, ref ChunkAccessor<TStore> accessor)
+    private unsafe void FindInDirectory(BTreeStableKey key, ref ChunkAccessor<TStore> accessor)
     {
         var chunk0Addr = accessor.GetChunkAddress(0);
         ref var header = ref Unsafe.AsRef<BTreeDirectoryHeader>(chunk0Addr);
 
         int totalEntries = header.EntryCount;
-        int stride = _segment.Stride;
+        if (!TryFindEntry(key, totalEntries, _segment.Stride, ref accessor, out var chunkId, out var offset))
+        {
+            throw new InvalidOperationException($"BTree with key ({key}) not found in directory (entries: {totalEntries})");
+        }
 
+        _dirChunkId = chunkId;
+        _dirEntryOffset = offset;
+
+        var entryChunkAddr = accessor.GetChunkAddress(chunkId);
+        ref var entry = ref Unsafe.AsRef<BTreeDirectoryEntry>(entryChunkAddr + offset);
+        _count = entry.Count;
+
+        var rootChunkId = entry.RootChunkId;
+        if (_count > 0 && rootChunkId > 0)
+        {
+            Root = new NodeWrapper(_storage, rootChunkId);
+        }
+    }
+
+    /// <summary>
+    /// Linear scan of the first <paramref name="totalEntries"/> directory entries for <paramref name="key"/>. O(trees on the segment) — bounded by
+    /// <see cref="BTreeBase{TStore}.MaxDirectoryEntriesFor"/> and only ever walked at registration / load time, never on a data path.
+    /// </summary>
+    private static unsafe bool TryFindEntry(BTreeStableKey key, int totalEntries, int stride, ref ChunkAccessor<TStore> accessor,
+        out int chunkId, out int offsetInChunk)
+    {
         for (var i = 0; i < totalEntries; i++)
         {
-            var (chunkId, offset) = ComputeEntryLocation(i, stride);
-            var entryChunkAddr = accessor.GetChunkAddress(chunkId);
-            ref var entry = ref Unsafe.AsRef<BTreeDirectoryEntry>(entryChunkAddr + offset);
+            var (candidateChunkId, candidateOffset) = ComputeEntryLocation(i, stride);
+            var entryChunkAddr = accessor.GetChunkAddress(candidateChunkId);
+            ref var entry = ref Unsafe.AsRef<BTreeDirectoryEntry>(entryChunkAddr + candidateOffset);
 
-            if (entry.StableId == stableId)
+            if (entry.StableId == key.StableId && entry.Slot == key.Slot)
             {
-                _dirChunkId = chunkId;
-                _dirEntryOffset = offset;
-                _count = entry.Count;
-
-                var rootChunkId = entry.RootChunkId;
-                if (_count > 0 && rootChunkId > 0)
-                {
-                    Root = new NodeWrapper(_storage, rootChunkId);
-                }
-                return;
+                chunkId = candidateChunkId;
+                offsetInChunk = candidateOffset;
+                return true;
             }
         }
 
-        throw new InvalidOperationException($"BTree with stableId {stableId} not found in directory (entries: {totalEntries})");
+        chunkId = 0;
+        offsetInChunk = 0;
+        return false;
     }
 
     /// <summary>
     /// Computes which directory chunk and byte offset a given entry index maps to.
-    /// Chunk 0 has a 4-byte header; chunks 1-3 are pure entry storage.
+    /// Chunk 0 gives up <see cref="BTreeDirectoryHeader"/> (2 bytes) to its header; chunks 1-3 are pure entry storage.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static (int chunkId, int offsetInChunk) ComputeEntryLocation(int entryIndex, int stride)
@@ -1110,16 +1184,16 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         => Remove(Unsafe.AsRef<TKey>(keyAddr), out value, ref accessor);
     public override unsafe Result<int, BTreeLookupStatus> TryGet(void* keyAddr, ref ChunkAccessor<TStore> accessor)
         => TryGet(Unsafe.AsRef<TKey>(keyAddr), ref accessor);
-    public override unsafe bool RemoveValue(void* keyAddr, int elementId, int value, ref ChunkAccessor<TStore> accessor, bool preserveEmptyBuffer = false)
-        => RemoveValue(Unsafe.AsRef<TKey>(keyAddr), elementId, value, ref accessor, preserveEmptyBuffer);
+    public override unsafe bool RemoveValue(void* keyAddr, int elementId, int value, ref ChunkAccessor<TStore> accessor)
+        => RemoveValue(Unsafe.AsRef<TKey>(keyAddr), elementId, value, ref accessor);
     public override unsafe VariableSizedBufferAccessor<int, TStore> TryGetMultiple(void* keyAddr, ref ChunkAccessor<TStore> accessor)
         => TryGetMultiple(Unsafe.AsRef<TKey>(keyAddr), ref accessor);
     public override unsafe bool Move(void* oldKeyAddr, void* newKeyAddr, int value, ref ChunkAccessor<TStore> accessor)
         => Move(Unsafe.AsRef<TKey>(oldKeyAddr), Unsafe.AsRef<TKey>(newKeyAddr), value, ref accessor);
     public override unsafe int MoveValue(void* oldKeyAddr, void* newKeyAddr, int elementId, int value,
-        ref ChunkAccessor<TStore> accessor, out int oldHeadBufferId, out int newHeadBufferId, bool preserveEmptyBuffer = false)
+        ref ChunkAccessor<TStore> accessor, out int oldHeadBufferId, out int newHeadBufferId)
         => MoveValue(Unsafe.AsRef<TKey>(oldKeyAddr), Unsafe.AsRef<TKey>(newKeyAddr), elementId, value,
-            ref accessor, out oldHeadBufferId, out newHeadBufferId, preserveEmptyBuffer);
+            ref accessor, out oldHeadBufferId, out newHeadBufferId);
 
     public int Add(TKey key, int value, ref ChunkAccessor<TStore> accessor) => Add(key, value, ref accessor, out _);
 
@@ -1351,7 +1425,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         }
     }
 
-    public bool RemoveValue(TKey key, int elementId, int value, ref ChunkAccessor<TStore> accessor, bool preserveEmptyBuffer = false)
+    public bool RemoveValue(TKey key, int elementId, int value, ref ChunkAccessor<TStore> accessor)
     {
         var scope = TyphonEvent.BeginBTreeDelete();
 
@@ -1394,11 +1468,9 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
                     {
                         result = false;
                     }
-                    else if (res == 0 && !preserveEmptyBuffer)
+                    else if (res == 0)
                     {
                         // Remove the key if we no longer have values stored there.
-                        // When preserveEmptyBuffer is true, keep the BTree key and empty HEAD buffer alive so that linked TAIL version-history buffers
-                        // remain reachable for temporal queries.
                         var args = new RemoveArguments(key, Comparer, ref opAccessor, ref sibAccessor);
                         RemoveCorePessimistic(ref args);
 

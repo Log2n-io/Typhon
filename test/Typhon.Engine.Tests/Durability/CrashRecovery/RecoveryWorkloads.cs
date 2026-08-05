@@ -221,14 +221,17 @@ internal sealed class ClusterAllSvWorkload : IRecoveryWorkload
 {
     private readonly int _count;
     private readonly DurabilityDiscipline _discipline;
+    private readonly int _keyBase;
 
     // discipline TickFence (default): the SV spawn values are checkpoint-durable only (a hard crash before a checkpoint recovers them alive-but-default
     // — by design, #395 Face B's "non-guarantee"). discipline Commit: the spawn WAL-logs its SV values per-commit (#395 Face B fix / D5), so they
     // survive a hard crash with NO checkpoint — the per-commit-durable mode the differential oracle's "SurvivesCrash" assertion needs.
-    public ClusterAllSvWorkload(int count = 10, DurabilityDiscipline discipline = DurabilityDiscipline.TickFence)
+    // keyBase offsets K so two phases (before / after a checkpoint) don't collide on SvIndexed.K's UNIQUE index — same role as IndexedFlatWorkload's.
+    public ClusterAllSvWorkload(int count = 10, DurabilityDiscipline discipline = DurabilityDiscipline.TickFence, int keyBase = 0)
     {
         _count = count;
         _discipline = discipline;
+        _keyBase = keyBase;
     }
 
     public string Name => "ClusterAllSv";
@@ -243,8 +246,46 @@ internal sealed class ClusterAllSvWorkload : IRecoveryWorkload
         using var tx = uow.CreateTransaction(_discipline);
         for (int i = 0; i < _count; i++)
         {
-            var s = new SvIndexed(i * 7, i);
+            var k = i + _keyBase;
+            var s = new SvIndexed(k * 7, k);
             var id = tx.Spawn<SvIndexedArch>(SvIndexedArch.S.Set(in s));
+            shadow.RecordSpawn(id);
+        }
+
+        tx.Commit();
+    }
+}
+
+/// <summary>
+/// The cluster counterpart of <see cref="MultiValueDupKeyWorkload"/> (#656): N entities of a cluster-backed archetype whose indexed field is
+/// <c>AllowMultiple</c>, spread over <c>groups</c> duplicate keys. Commit discipline, so the SV spawn values are WAL-durable per commit and the crash needs no
+/// checkpoint to be meaningful.
+/// </summary>
+internal sealed class ClusterMultiValueDupKeyWorkload : IRecoveryWorkload
+{
+    private readonly int _count;
+    private readonly int _groups;
+
+    public ClusterMultiValueDupKeyWorkload(int count, int groups)
+    {
+        _count = count;
+        _groups = groups;
+    }
+
+    public string Name => "ClusterMultiValueDupKey";
+
+    public void Register(DatabaseEngine dbe)
+    {
+        dbe.RegisterComponentFromAccessor<SvMultiIndexed>();
+    }
+
+    public void Execute(UnitOfWork uow, RecoveryShadowModel shadow)
+    {
+        using var tx = uow.CreateTransaction(DurabilityDiscipline.Commit);
+        for (var i = 0; i < _count; i++)
+        {
+            var s = new SvMultiIndexed(i % _groups, i);
+            var id = tx.Spawn<SvMultiIndexedArch>(SvMultiIndexedArch.S.Set(in s));
             shadow.RecordSpawn(id);
         }
 
@@ -370,6 +411,30 @@ public struct SvIndexed
 internal class SvIndexedArch : Archetype<SvIndexedArch>
 {
     public static readonly Comp<SvIndexed> S = Register<SvIndexed>();
+}
+
+// ── The cluster twin of CompD's multi-value axis (#656). AllowMultiple keys store a VSBS buffer root in the leaf rather than the location itself, so a
+//    rebuild that handles the unique case can still lose every entity but one per key — and only a duplicate-key workload can tell the difference. ──
+
+[Component("Typhon.Schema.UnitTest.SvMultiIndexed", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct SvMultiIndexed
+{
+    [Index(AllowMultiple = true)]
+    public int G;
+    public int V;
+
+    public SvMultiIndexed(int g, int v)
+    {
+        G = g;
+        V = v;
+    }
+}
+
+[Archetype]
+internal class SvMultiIndexedArch : Archetype<SvMultiIndexedArch>
+{
+    public static readonly Comp<SvMultiIndexed> S = Register<SvMultiIndexed>();
 }
 
 // ── The rare NON-rebuildable EntityMap residual: a non-cluster archetype that still owns a SingleVersion slot. An archetype is forced off the cluster path when it has a

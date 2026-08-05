@@ -45,7 +45,7 @@ public class ViewDeltaEntryTests
     public void Default_HasZeroEntityPKAndKeys()
     {
         var entry = new ViewDeltaEntry();
-        Assert.That(entry.EntityPK, Is.EqualTo(0));
+        Assert.That(entry.EntityPK.IsNull, Is.True);  // #660: EntityPK is a typed EntityId; default is EntityId.Null
         Assert.That(entry.BeforeKey.IsZero, Is.True);
         Assert.That(entry.AfterKey.IsZero, Is.True);
     }

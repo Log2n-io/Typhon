@@ -15,6 +15,9 @@ namespace Typhon.Engine.Tests;
 [TestFixture]
 internal sealed class FieldShadowBufferTests
 {
+    // #660: ShadowEntry.EntityPK is now a typed EntityId.
+    private static long PK(ShadowEntry e) => (long)e.EntityPK.RawValue;
+
     private const int BlockSize = 4096;   // must track FieldShadowBuffer.BlockShift
 
     private static KeyBytes8 Key(long v)
@@ -58,7 +61,7 @@ internal sealed class FieldShadowBufferTests
                 {
                     // Encode (thread, sequence) so every appended entry is globally unique and attributable.
                     long tag = ((long)threadId << 32) | (uint)i;
-                    buffer.Append(threadId, tag, Key(tag));
+                    buffer.Append(threadId, EntityId.FromRaw(tag), Key(tag));
                 }
             });
         }
@@ -72,9 +75,9 @@ internal sealed class FieldShadowBufferTests
         for (var i = 0; i < buffer.Count; i++)
         {
             ref var e = ref buffer[i];
-            Assert.That(seen.Add(e.EntityPK), Is.True, $"duplicate entry at index {i} (pk {e.EntityPK})");
-            Assert.That(KeyValue(e.OldKey), Is.EqualTo(e.EntityPK), $"entry {i} is torn — key does not match its pk");
-            Assert.That(e.ChunkId, Is.EqualTo((int)(e.EntityPK >> 32)), $"entry {i} is torn — chunkId does not match its pk");
+            Assert.That(seen.Add(PK(e)), Is.True, $"duplicate entry at index {i} (pk {PK(e)})");
+            Assert.That(KeyValue(e.OldKey), Is.EqualTo(PK(e)), $"entry {i} is torn — key does not match its pk");
+            Assert.That(e.ChunkId, Is.EqualTo((int)(PK(e) >> 32)), $"entry {i} is torn — chunkId does not match its pk");
         }
 
         Assert.That(seen, Has.Count.EqualTo(threads * perThread), "no entry may be lost");
@@ -89,13 +92,13 @@ internal sealed class FieldShadowBufferTests
 
         for (var i = 0; i < total; i++)
         {
-            buffer.Append(i, i, Key(i));
+            buffer.Append(i, EntityId.FromRaw(i), Key(i));
         }
 
         Assert.That(buffer.Count, Is.EqualTo(total));
         for (var i = 0; i < total; i++)
         {
-            Assert.That(buffer[i].EntityPK, Is.EqualTo(i), $"entry {i} survived growth");
+            Assert.That(PK(buffer[i]), Is.EqualTo(i), $"entry {i} survived growth");
         }
     }
 
@@ -118,7 +121,7 @@ internal sealed class FieldShadowBufferTests
                 for (var i = 0; i < perThread; i++)
                 {
                     long tag = ((long)threadId << 32) | (uint)i;
-                    buffer.Append(threadId, tag, Key(tag));
+                    buffer.Append(threadId, EntityId.FromRaw(tag), Key(tag));
                 }
             });
         }
@@ -132,7 +135,7 @@ internal sealed class FieldShadowBufferTests
         var seen = new HashSet<long>();
         for (var i = 0; i < buffer.Count; i++)
         {
-            Assert.That(seen.Add(buffer[i].EntityPK), Is.True, $"duplicate at {i}");
+            Assert.That(seen.Add(PK(buffer[i])), Is.True, $"duplicate at {i}");
         }
     }
 
@@ -142,7 +145,7 @@ internal sealed class FieldShadowBufferTests
         var buffer = new FieldShadowBuffer();
         for (var i = 0; i < BlockSize + 100; i++)
         {
-            buffer.Append(i, i, Key(i));
+            buffer.Append(i, EntityId.FromRaw(i), Key(i));
         }
 
         buffer.Reset();
@@ -151,11 +154,11 @@ internal sealed class FieldShadowBufferTests
         // Re-filling past the old high-water mark must not fault: blocks are retained, so this allocates nothing.
         for (var i = 0; i < BlockSize + 100; i++)
         {
-            buffer.Append(i, i * 2, Key(i * 2));
+            buffer.Append(i, EntityId.FromRaw(i * 2), Key(i * 2));
         }
 
         Assert.That(buffer.Count, Is.EqualTo(BlockSize + 100));
-        Assert.That(buffer[BlockSize + 99].EntityPK, Is.EqualTo((BlockSize + 99) * 2));
+        Assert.That(PK(buffer[BlockSize + 99]), Is.EqualTo((BlockSize + 99) * 2));
     }
 
     [Test]
@@ -164,13 +167,13 @@ internal sealed class FieldShadowBufferTests
         var buffer = new FieldShadowBuffer();
         for (var i = 0; i < BlockSize + 8; i++)
         {
-            buffer.Append(i, i, Key(i));
+            buffer.Append(i, EntityId.FromRaw(i), Key(i));
         }
 
         // Straddle the boundary explicitly — an off-by-one in the block/slot split would only show here.
         foreach (var i in new[] { 0, 1, BlockSize - 2, BlockSize - 1, BlockSize, BlockSize + 1, BlockSize + 7 })
         {
-            Assert.That(buffer[i].EntityPK, Is.EqualTo(i), $"index {i}");
+            Assert.That(PK(buffer[i]), Is.EqualTo(i), $"index {i}");
             Assert.That(buffer[i].ChunkId, Is.EqualTo(i), $"index {i}");
         }
     }
@@ -180,7 +183,7 @@ internal sealed class FieldShadowBufferTests
     {
         // The drain path takes `ref var entry = ref buffer[e]` — the indexer must hand back a real reference, not a copy.
         var buffer = new FieldShadowBuffer();
-        buffer.Append(1, 42, Key(42));
+        buffer.Append(1, EntityId.FromRaw(42), Key(42));
 
         ref var entry = ref buffer[0];
         entry.ChunkId = 99;

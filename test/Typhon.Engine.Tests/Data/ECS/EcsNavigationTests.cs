@@ -226,22 +226,23 @@ class EcsNavigationTests : TestBase<EcsNavigationTests>
         view.Refresh(txR);
 
         Assert.That(view.Count, Is.EqualTo(2));
+        // #660: assert the IDENTITY, not just the count. A delta published in the wrong PK space still bumps Count — it inserts a
+        // key that no reverse lookup can ever match or evict — so a Count-only assertion passes while the view is quietly corrupt.
+        Assert.That(view.Contains((long)player2.RawValue), Is.True, "the incremental entry must be keyed on the full EntityId");
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Issue #623 — SingleVersion source components
+    // Issues #623 / #662 — SingleVersion source components
     //
-    // A SingleVersion component has no CompRevTableSegment (ComponentTable allocates it only for Versioned), so the FK
-    // index value addresses a component chunk rather than a CompRev chunk. Navigation used to dereference the CompRev
-    // segment unconditionally and died with a bare NullReferenceException from engine internals.
+    // Two defects stacked here. A SingleVersion component has no CompRevTableSegment (ComponentTable allocates it only for
+    // Versioned), so the FK index value addresses a component chunk rather than a CompRev chunk — navigation used to
+    // dereference the CompRev segment unconditionally and died with a bare NullReferenceException (#623, fixed by
+    // FkSourcePkResolver). Underneath that: a pure-SingleVersion archetype is CLUSTER-BACKED, so its field indexes live on
+    // the archetype and the ComponentTable tree navigation scanned was empty. These tests stayed [Ignore]d until
+    // FkReverseLookup gave the reverse lookup both index homes (#662).
     // ═══════════════════════════════════════════════════════════════════════
 
     [Test]
-    [Ignore("#623: blocked beyond the storage-mode read paths. A pure-SingleVersion archetype is cluster-backed, so its "
-        + "field indexes live on the archetype (values = packed ClusterLocation), not on the ComponentTable. "
-        + "PipelineExecutor.FindFKIndex resolves the ComponentTable index, which is empty (0 entries) for such an archetype — "
-        + "verified by dumping the tree while WhereField on the same field returned a match via the cluster index. "
-        + "Navigation needs a cluster-aware FK path; the CompRev and QueryRead fixes in this change are necessary but not sufficient.")]
     public void NavigateField_Execute_SingleVersionSource_FindsPlayersInHighLevelGuild()
     {
         using var dbe = SetupEngine();
@@ -276,8 +277,6 @@ class EcsNavigationTests : TestBase<EcsNavigationTests>
     }
 
     [Test]
-    [Ignore("#623: see NavigateField_Execute_SingleVersionSource_FindsPlayersInHighLevelGuild — cluster-backed archetypes "
-        + "keep field indexes on the archetype, not the ComponentTable, so the FK reverse lookup finds nothing.")]
     public void NavigateField_Execute_SingleVersionSource_CombinesSourceAndTargetPredicates()
     {
         using var dbe = SetupEngine();
@@ -308,8 +307,6 @@ class EcsNavigationTests : TestBase<EcsNavigationTests>
     }
 
     [Test]
-    [Ignore("#623: see NavigateField_Execute_SingleVersionSource_FindsPlayersInHighLevelGuild — cluster-backed archetypes "
-        + "keep field indexes on the archetype, not the ComponentTable, so the FK reverse lookup finds nothing.")]
     public void NavigateField_ToView_SingleVersionSource_RefreshesOnSourceAndTargetChanges()
     {
         using var dbe = SetupEngine();
@@ -356,9 +353,12 @@ class EcsNavigationTests : TestBase<EcsNavigationTests>
         // path (NavigationView.ReverseLookupAndUpdate) — the second of the two sites that dereferenced CompRev.
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.Open(guild).Write(SvNavGuildArch.Guild).Level = 5;
+            tx.OpenMut(guild).Write(SvNavGuildArch.Guild).Level = 5;
             tx.Commit();
         }
+        // SingleVersion components are mutated IN PLACE, so the old key is parked in a shadow buffer and both the index update and the view delta are
+        // emitted at the tick fence, not at commit. Without this the target-side delta never reaches the view.
+        dbe.WriteTickFence(1);
 
         using (var txR = dbe.CreateQuickTransaction())
         {
@@ -367,37 +367,5 @@ class EcsNavigationTests : TestBase<EcsNavigationTests>
 
         Assert.That(view.Count, Is.EqualTo(0), "guild dropped below Level 30 — both players evicted via reverse lookup");
         Assert.That(view.Contains((long)player2.RawValue), Is.False);
-    }
-
-    [Test]
-    public void NavigateField_SingleVersionSource_ThrowsActionableError()
-    {
-        using var dbe = SetupEngine();
-
-        EntityId guild;
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            guild = tx.Spawn<SvNavGuildArch>(SvNavGuildArch.Guild.Set(new SvNavGuild(50, 100)));
-            tx.Commit();
-        }
-
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            tx.Spawn<SvNavPlayerArch>(SvNavPlayerArch.Player.Set(new SvNavPlayer((long)guild.RawValue, 90)));
-            tx.Commit();
-        }
-
-        using var txQ = dbe.CreateQuickTransaction();
-
-        // Must fail loudly rather than return an empty set: the FK index navigation scans lives on the archetype for a
-        // SingleVersion source, so the component-table index it reads is empty and a silent 0 would be a wrong answer.
-        var ex = Assert.Throws<NotSupportedException>(() =>
-            txQ.Query<SvNavPlayerArch>()
-                .NavigateField<SvNavPlayer, SvNavGuild>(p => p.GuildId)
-                .Where((p, g) => g.Level >= 30)
-                .Execute());
-
-        Assert.That(ex.Message, Does.Contain("SingleVersion"));
-        Assert.That(ex.Message, Does.Contain("623"), "the error must point at the tracking issue");
     }
 }

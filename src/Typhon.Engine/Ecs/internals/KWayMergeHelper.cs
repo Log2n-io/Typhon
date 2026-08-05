@@ -107,6 +107,13 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
                 FillTypedUnique((BTree<long, PersistentStore>)tree, scanMin, scanMax, allowMultiple, descending, keyType, ref stream, clusterState, layout,
                     maxEntries);
                 break;
+            default:
+                // Bool and String64 have no typed tree. Falling out of the switch would return an EMPTY stream, which the K-way merge cannot distinguish from
+                // an archetype that genuinely matched nothing — so the ordered query would silently drop that archetype's entities (#663 shape, #675).
+                ThrowHelper.ThrowInvalidOp(
+                    $"Ordered query requested a sorted stream over key type {keyType}, which has no B+Tree range scan. KeyRange.IsStreamable must reject this "
+                    + "type so the query sorts from the SoA scan instead.");
+                break;
         }
 
         return stream;

@@ -73,7 +73,7 @@ class ViewChangeCaptureTests : TestBase<ViewChangeCaptureTests>
         }
 
         Assert.That(view.DeltaBuffer.TryPeek(long.MaxValue, out var entry, out var flags, out var tsn, out _), Is.True);
-        Assert.That(entry.EntityPK, Is.EqualTo(entityPk));
+        Assert.That((long)entry.EntityPK.RawValue, Is.EqualTo(entityPk));  // #660: EntityPK is a typed EntityId; its raw value is the full PK
         Assert.That(entry.BeforeKey.AsInt(), Is.EqualTo(10));
         Assert.That(entry.AfterKey.AsInt(), Is.EqualTo(20));
         Assert.That(tsn, Is.EqualTo(updateTsn));
@@ -105,7 +105,7 @@ class ViewChangeCaptureTests : TestBase<ViewChangeCaptureTests>
         var entityPk = (long)entityId.RawValue;
 
         Assert.That(view.DeltaBuffer.TryPeek(long.MaxValue, out var entry, out var flags, out var tsn, out _), Is.True);
-        Assert.That(entry.EntityPK, Is.EqualTo(entityPk));
+        Assert.That((long)entry.EntityPK.RawValue, Is.EqualTo(entityPk));  // #660: EntityPK is a typed EntityId; its raw value is the full PK
         Assert.That(entry.BeforeKey.IsZero, Is.True, "BeforeKey should be zeroed for creation");
         Assert.That(entry.AfterKey.AsInt(), Is.EqualTo(42));
         Assert.That(tsn, Is.EqualTo(createTsn));
@@ -147,7 +147,7 @@ class ViewChangeCaptureTests : TestBase<ViewChangeCaptureTests>
         }
 
         Assert.That(view.DeltaBuffer.TryPeek(long.MaxValue, out var entry, out var flags, out var tsn, out _), Is.True);
-        Assert.That(entry.EntityPK, Is.EqualTo(entityPk));
+        Assert.That((long)entry.EntityPK.RawValue, Is.EqualTo(entityPk));  // #660: EntityPK is a typed EntityId; its raw value is the full PK
         Assert.That(entry.BeforeKey.AsInt(), Is.EqualTo(99), "BeforeKey should be old value");
         Assert.That(entry.AfterKey.IsZero, Is.True, "AfterKey should be zeroed for deletion");
         Assert.That(tsn, Is.EqualTo(deleteTsn));

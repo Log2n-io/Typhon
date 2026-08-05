@@ -79,7 +79,13 @@ tx.Commit();   // accessor-reuse batching (Phase A) already applies transparentl
 
 ## 🔗 Related
 
-- Source (Phase A, shipped): `src/Typhon.Engine/Transactions/public/Transaction.cs` (`_batchIndexActive`), `src/Typhon.Engine/Transactions/internals/IndexMaintainer.cs`, `src/Typhon.Engine/Storage/internals/ChunkBasedSegment.cs` (`EnterBatchMode`/`ExitBatchMode`)
+- Source (Phase A, shipped): `src/Typhon.Engine/Transactions/public/Transaction.cs` (`ReconcileClusterIndexAndViews`), `src/Typhon.Engine/Ecs/public/DatabaseEngine.TickFence.cs` (shadow-slot drain), `src/Typhon.Engine/Storage/internals/ChunkBasedSegment.cs` (`EnterBatchMode`/`ExitBatchMode`)
+
+> **Historical note (#629).** This page previously cited `Transactions/internals/IndexMaintainer.cs`. That file is gone: it
+> maintained the per-`ComponentTable` index home, and #629 consolidated all secondary indexes onto the archetype
+> (`ArchetypeClusterState.IndexSlots[s].Fields[f].Index`). The batching described here still applies — the batch-mode
+> hooks on `ChunkBasedSegment` are unchanged — but the maintenance itself now runs through the cluster commit path in
+> `Transaction.cs` and the tick-fence shadow drain, not through a separate maintainer type.
 - Related feature: [Secondary Index Storage Modes](./secondary-index-storage-modes/README.md) — the indexes this optimization maintains
 
 <!-- Deep dive: claude/design/Indexing/batched-index-maintenance.md — full design, ItemData case study, Phase A/B breakdown -->

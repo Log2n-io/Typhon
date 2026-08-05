@@ -47,9 +47,12 @@ partial class CmIdxEntity : Archetype<CmIdxEntity>
     public static readonly Comp<CmTeam> Team = Register<CmTeam>();
 }
 
-// Indexed SV component written under Commit on the FLAT (non-cluster) path. The archetype is forced non-cluster-eligible by pairing it with a
-// Transient+indexed component (engine rule: a Transient indexed field keeps the whole archetype on the legacy per-entity path).
-[Component("Typhon.Test.Committed.CmFlatVal", 1, StorageMode = StorageMode.SingleVersion)]
+// Indexed component written under Commit on the FLAT (non-cluster) path.
+//
+// This used to be a SingleVersion component paired with a Transient+indexed one, relying on the rule that a Transient indexed field kept the whole archetype
+// off the cluster path. #655 removed that rule, and with it the ONLY way to build a flat archetype holding a SingleVersion slot — the same shape RB-01/RB-04
+// carried as their "non-rebuildable EntityMap" residual. A pure-Versioned archetype is now the only flat one there is, so that is what this fixture uses.
+[Component("Typhon.Test.Committed.CmFlatVal", 1, StorageMode = StorageMode.Versioned)]
 [StructLayout(LayoutKind.Sequential)]
 struct CmFlatVal
 {
@@ -70,7 +73,6 @@ struct CmTransIdx
 partial class CmFlatEntity : Archetype<CmFlatEntity>
 {
     public static readonly Comp<CmFlatVal> Val = Register<CmFlatVal>();
-    public static readonly Comp<CmTransIdx> Idx = Register<CmTransIdx>();
 }
 
 [TestFixture]
@@ -255,22 +257,29 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Non-cluster (flat) Commit path — large component ⇒ not cluster-eligible
+    // Commit path on a second archetype shape — pure-Versioned
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// Guards the premise for the tests below: <c>CmFlatEntity</c> is a distinct, pure-Versioned archetype.
+    /// </summary>
+    /// <remarks>
+    /// Asserted <c>IsClusterEligible == False</c> until #629, when it was the last flat shape and these tests were the flat Commit path's only coverage. There
+    /// is no flat shape now, so what the fixture still contributes is a SECOND archetype composition for the Commit discipline — pure-Versioned alongside the
+    /// SV-bearing one — which is worth keeping even though both take the same storage path.
+    /// </remarks>
     [Test]
-    public void NonCluster_ArchetypeIsFlat()
+    public void PureVersionedArchetype_IsClusterBackedLikeEveryOther()
     {
         using var dbe = SetupEngine();
-        Assert.That(Archetype<CmFlatEntity>.Metadata.IsClusterEligible, Is.False,
-            "CmFlatEntity must NOT be cluster-eligible for these tests to exercise the flat Commit path");
+        Assert.That(Archetype<CmFlatEntity>.Metadata.IsClusterEligible, Is.True,
+            "pure-Versioned is cluster-backed since #629 — the flat Commit path it used to exercise no longer exists");
     }
 
     private static EntityId SpawnFlat(DatabaseEngine dbe, int tag)
     {
         using var tx = dbe.CreateQuickTransaction();
-        // CmTransIdx is a unique Transient index — its Key must be distinct per entity. Derive it from tag.
-        var id = tx.Spawn<CmFlatEntity>(CmFlatEntity.Val.Set(new CmFlatVal { Tag = tag }), CmFlatEntity.Idx.Set(new CmTransIdx { Key = tag + 1000 }));
+        var id = tx.Spawn<CmFlatEntity>(CmFlatEntity.Val.Set(new CmFlatVal { Tag = tag }));
         tx.Commit();
         return id;
     }
@@ -324,8 +333,8 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         EntityId id;
         using (var tx = dbe.CreateQuickTransaction())
         {
-            id = tx.Spawn<CmFlatEntity>(CmFlatEntity.Val.Set(new CmFlatVal { Tag = 1 }), CmFlatEntity.Idx.Set(new CmTransIdx { Key = 1001 }));
-            tx.Spawn<CmFlatEntity>(CmFlatEntity.Val.Set(new CmFlatVal { Tag = 2 }), CmFlatEntity.Idx.Set(new CmTransIdx { Key = 1002 }));
+            id = tx.Spawn<CmFlatEntity>(CmFlatEntity.Val.Set(new CmFlatVal { Tag = 1 }));
+            tx.Spawn<CmFlatEntity>(CmFlatEntity.Val.Set(new CmFlatVal { Tag = 2 }));
             tx.Commit();
         }
         dbe.WriteTickFence(1);

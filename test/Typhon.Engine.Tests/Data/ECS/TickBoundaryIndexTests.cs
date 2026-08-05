@@ -1,4 +1,4 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -76,12 +76,13 @@ class TickBoundaryIndexTests : TestBase<TickBoundaryIndexTests>
             }
         }
 
+        // Reads the ARCHETYPE's tree — the ComponentTable owns none since #629.
         var table = dbe.GetComponentTable<TbSvData>();
-        var ifi = table.IndexedFieldInfos[0]; // Category is the first (only) indexed field
-        var accessor2 = ifi.PersistentIndex.Segment.CreateChunkAccessor();
+        var index = (BTreeBase<PersistentStore>)IndexTestHelpers.ArchetypeIndex<TbSvArch>(dbe, table, 0); // Category is the first (only) indexed field
+        var accessor2 = index.Segment.CreateChunkAccessor();
         try
         {
-            var result2 = ifi.PersistentIndex.TryGet(&category, ref accessor2);
+            var result2 = index.TryGet(&category, ref accessor2);
             return result2.IsSuccess;
         }
         finally
@@ -118,6 +119,10 @@ class TickBoundaryIndexTests : TestBase<TickBoundaryIndexTests>
 
         Assert.That(IndexContainsKey(dbe, 20), Is.True, "New value in index");
         Assert.That(IndexContainsKey(dbe, 10), Is.False, "Old value removed from index");
+
+        // Control for the oracle: this mutation moves onto an EMPTY key, and the index tracks it correctly. Pairing it with the colliding case in
+        // ClusterIndexTests.TargetedQuery_AfterMutation_ReturnsUpdatedResults is what localises the defect to the collision, not to updates in general.
+        IndexDataOracle.AssertIndexAgreesWithData<TbSvArch>(dbe, "after an SV mutation onto a previously-unused key");
     }
 
     // ═══════════════════════════════════════════════════════════════════════

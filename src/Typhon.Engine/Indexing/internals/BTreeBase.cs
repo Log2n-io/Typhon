@@ -1,4 +1,4 @@
-// unset
+﻿// unset
 
 using System.Runtime.CompilerServices;
 
@@ -24,7 +24,7 @@ internal abstract class BTreeBase<TStore> : IBTreeIndex where TStore : struct, I
     public abstract unsafe int Add(void* keyAddr, int value, ref ChunkAccessor<TStore>accessor, out int bufferRootId);
     public abstract unsafe bool Remove(void* keyAddr, out int value, ref ChunkAccessor<TStore>accessor);
     public abstract unsafe Result<int, BTreeLookupStatus> TryGet(void* keyAddr, ref ChunkAccessor<TStore>accessor);
-    public abstract unsafe bool RemoveValue(void* keyAddr, int elementId, int value, ref ChunkAccessor<TStore>accessor, bool preserveEmptyBuffer = false);
+    public abstract unsafe bool RemoveValue(void* keyAddr, int elementId, int value, ref ChunkAccessor<TStore>accessor);
     public abstract unsafe VariableSizedBufferAccessor<int, TStore> TryGetMultiple(void* keyAddr, ref ChunkAccessor<TStore>accessor);
 
     /// <summary>
@@ -39,8 +39,8 @@ internal abstract class BTreeBase<TStore> : IBTreeIndex where TStore : struct, I
     /// from <paramref name="oldKeyAddr"/>'s buffer and appends <paramref name="value"/> under <paramref name="newKeyAddr"/>.
     /// Returns the new element ID and both HEAD buffer IDs for inline TAIL tracking.
     /// </summary>
-    public abstract unsafe int MoveValue(void* oldKeyAddr, void* newKeyAddr, int elementId, int value, ref ChunkAccessor<TStore>accessor, out int oldHeadBufferId,
-        out int newHeadBufferId, bool preserveEmptyBuffer = false);
+    public abstract unsafe int MoveValue(void* oldKeyAddr, void* newKeyAddr, int elementId, int value, ref ChunkAccessor<TStore>accessor, 
+        out int oldHeadBufferId, out int newHeadBufferId);
 
     public abstract void CheckConsistency(ref ChunkAccessor<TStore>accessor);
 
@@ -63,9 +63,18 @@ internal abstract class BTreeBase<TStore> : IBTreeIndex where TStore : struct, I
     /// </summary>
     public abstract long GetMaxKeyAsLong();
 
-    /// <summary>Number of preallocated directory chunks (0-3) every shared index segment reserves for its chunk-0 BTree directory. Up to 20 index slots for
-    /// 64-byte chunks. Node chunks live at chunkId &gt;= this.</summary>
+    /// <summary>Number of preallocated directory chunks (0-3) every shared index segment reserves for its chunk-0 BTree directory. How many trees that holds
+    /// depends on the stride — see <see cref="MaxDirectoryEntriesFor"/>. Node chunks live at chunkId &gt;= this.</summary>
     internal const int DirectoryChunkCount = 4;
+
+    /// <summary>
+    /// Hard cap on B+Trees per segment: how many <see cref="BTreeDirectoryEntry"/> fit in the <see cref="DirectoryChunkCount"/> reserved directory chunks at
+    /// <paramref name="stride"/>. Chunk 0 loses <see cref="BTreeDirectoryHeader"/> to its header; chunks 1..n-1 are pure entry storage. 84 at the 256-byte
+    /// node stride. Entry <c>MaxDirectoryEntriesFor(stride)</c> would land in the first NODE chunk, so this must stay exactly what those chunks hold — never
+    /// a looser round number (#657, which replaced a hardcoded 20).
+    /// </summary>
+    internal static int MaxDirectoryEntriesFor(int stride)
+        => (stride - BTreeDirectoryHeader.Size) / BTreeDirectoryEntry.Size + (DirectoryChunkCount - 1) * (stride / BTreeDirectoryEntry.Size);
 
     /// <summary>
     /// Torn-safe reset of a shared index segment to empty — used by crash recovery before fresh index trees are (re)built (RB-01). Frees every node chunk
@@ -90,6 +99,12 @@ internal abstract class BTreeBase<TStore> : IBTreeIndex where TStore : struct, I
             {
                 segment.FreeChunk(chunkId);
             }
+        }
+
+        // A segment that has never hosted a tree has no reserved directory chunk yet — the first BTree ctor reserves 0-3. Nothing to clear.
+        if (!segment.IsChunkAllocated(0))
+        {
+            return;
         }
 
         // Zero the directory header (chunk 0) so the directory reads as empty; fresh trees re-register from slot 0, overwriting the stale entries.

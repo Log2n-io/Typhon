@@ -461,6 +461,132 @@ internal sealed unsafe class ArchetypeClusterState
     internal int[] ClusterSpatialIndexSlot;
 
     // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // MVCC visibility summary (H1). The SoA scan's born/died gate does an EntityMap point-read PER MATCH — measured at 166-241 ns/entity against 27 ns for the
+    // entire rest of the scan, because XxHash32 full avalanche scatters consecutive keys into unrelated buckets. These two arrays answer "can any entity in
+    // this cluster be invisible to a reader at txTsn?" from one sequential read, letting a clean cluster skip the probe for every slot it holds.
+    //
+    // The summary is CONSERVATIVE in one direction only: it may say "probe" when probing was unnecessary (slower, still correct), and must never say "clean"
+    // when an entity could be invisible. Every value therefore starts at the pessimistic end and is only relaxed by a site that knows the true TSN.
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Per-cluster maximum <c>BornTSN</c> over the entities it holds, or <see cref="VisibilityUnknown"/> when no site has established it. Indexed by
+    /// clusterChunkId. A reader at snapshot <c>txTsn</c> may skip the per-entity born check for this cluster iff the value is <see cref="VisibilityUnknown"/>
+    /// -free and <c>&lt;= txTsn</c>.
+    /// </summary>
+    /// <remarks>
+    /// In-memory only, like <see cref="ClusterAabbs"/> — a reopen rewrites every record with <c>BornTSN = 0</c> (committed before this open, visible at every
+    /// snapshot), so the rebuild seeds 0 rather than persisting anything.
+    /// </remarks>
+    internal long[] ClusterMaxBornTsn;
+
+    /// <summary>
+    /// One bit per cluster — set when any entity in it has ever had a non-zero <c>DiedTSN</c>. Indexed by clusterChunkId; word at <c>i / 64</c>, bit
+    /// <c>i % 64</c>. Never cleared while the cluster lives: a set bit only costs the per-entity probe, and clearing it would need a full re-scan to prove no
+    /// tombstone remains.
+    /// </summary>
+    internal ulong[] ClusterAnyDied;
+
+    /// <summary>Sentinel for "no site has established this cluster's maximum BornTSN" — forces the per-entity probe.</summary>
+    internal const long VisibilityUnknown = long.MaxValue;
+
+    /// <summary>
+    /// Record that an entity whose <c>BornTSN</c> is <paramref name="bornTsn"/> now occupies <paramref name="clusterChunkId"/>. Called by EVERY site that
+    /// associates an entity with a cluster — spawn commit, WAL replay, chain rebuild, and spatial cluster migration — because the summary is only sound if it
+    /// bounds every entity actually present.
+    /// </summary>
+    internal void NoteClusterBorn(int clusterChunkId, long bornTsn)
+    {
+        EnsureClusterVisibilityCapacity(clusterChunkId + 1);
+        var current = ClusterMaxBornTsn[clusterChunkId];
+        if (current == VisibilityUnknown || bornTsn > current)
+        {
+            // Plain store: the reader consumes this only after an acquire-ordered read of the cluster's occupancy word, and the occupancy bit for this entity
+            // is published by the same commit that runs this call. A reader that cannot see the occupancy bit cannot emit the entity either way.
+            ClusterMaxBornTsn[clusterChunkId] = bornTsn;
+        }
+    }
+
+    /// <summary>Record that an entity in <paramref name="clusterChunkId"/> carries a non-zero <c>DiedTSN</c>, forcing the per-entity probe for that cluster.</summary>
+    internal void NoteClusterDied(int clusterChunkId)
+    {
+        EnsureClusterVisibilityCapacity(clusterChunkId + 1);
+        ClusterAnyDied[clusterChunkId >> 6] |= 1UL << (clusterChunkId & 63);
+    }
+
+    /// <summary>
+    /// True when every entity in <paramref name="clusterChunkId"/> is visible to a reader at <paramref name="txTsn"/>, so the scan may skip the per-entity
+    /// EntityMap probe for the whole cluster. False whenever the answer is not certain — an unsized array, an unestablished maximum, or any recorded death.
+    /// </summary>
+    internal bool IsClusterFullyVisibleAt(int clusterChunkId, long txTsn)
+    {
+
+
+        // Acquire loads, and in THIS order. The growth path publishes the resized ClusterAnyDied before release-storing ClusterMaxBornTsn, so a reader that
+        // reads maxBorn first is guaranteed the died array it then reads is at least as new. Reading them the other way round could pair a new maxBorn with a
+        // stale short died array — and a missing died bit reads as "clean", which is a phantom.
+        var maxBorn = Volatile.Read(ref ClusterMaxBornTsn);
+        if (maxBorn == null || (uint)clusterChunkId >= (uint)maxBorn.Length)
+        {
+            return false;
+        }
+
+        var born = maxBorn[clusterChunkId];
+        if (born == VisibilityUnknown || born > txTsn)
+        {
+            return false;
+        }
+
+        // A died array that is absent or too short is NOT evidence of "nobody died" — it is evidence that this reader cannot tell. Fall back to the probe.
+        var died = Volatile.Read(ref ClusterAnyDied);
+        var word = clusterChunkId >> 6;
+        if (died == null || (uint)word >= (uint)died.Length)
+        {
+            return false;
+        }
+
+        return (died[word] & (1UL << (clusterChunkId & 63))) == 0;
+    }
+
+    /// <summary>
+    /// Grow both visibility arrays to hold at least <paramref name="requiredLength"/> clusters, seeding new entries at the pessimistic end
+    /// (<see cref="VisibilityUnknown"/>, no deaths recorded). Mirrors <see cref="EnsureClusterSpatialIndexSlotCapacity"/>.
+    /// </summary>
+    internal void EnsureClusterVisibilityCapacity(int requiredLength)
+    {
+        if (ClusterMaxBornTsn == null)
+        {
+            var initial = Math.Max(16, requiredLength);
+            var fresh = new long[initial];
+            Array.Fill(fresh, VisibilityUnknown);
+            Volatile.Write(ref ClusterAnyDied, new ulong[(initial + 63) >> 6]);
+            // Publish the sized-and-filled array as one store: a reader that sees a non-null reference must see it fully initialized, or it would read a
+            // default 0 as "clean" and skip the probe. See M3/M4/M5 in the pre-merge review for the same hazard in ZoneMapArray.
+            Volatile.Write(ref ClusterMaxBornTsn, fresh);
+            return;
+        }
+        if (ClusterMaxBornTsn.Length >= requiredLength)
+        {
+            return;
+        }
+
+        var newLen = Math.Max(ClusterMaxBornTsn.Length, 1);
+        while (newLen < requiredLength)
+        {
+            newLen *= 2;
+        }
+
+        var oldLen = ClusterMaxBornTsn.Length;
+        var grown = new long[newLen];
+        Array.Copy(ClusterMaxBornTsn, grown, oldLen);
+        Array.Fill(grown, VisibilityUnknown, oldLen, newLen - oldLen);
+        var grownDied = new ulong[(newLen + 63) >> 6];
+        Array.Copy(ClusterAnyDied, grownDied, ClusterAnyDied.Length);
+        Volatile.Write(ref ClusterAnyDied, grownDied);
+        Volatile.Write(ref ClusterMaxBornTsn, grown);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     // Write-time spatial bookkeeping. Populated by ClusterRef.WriteSpatial(...) at the write site. Consumed by the fence-time sparse-iteration pass — only
     // clusters with bits set here do any work at fence time. See claude/design/spatial/write-time-spatial.md.
     // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -508,8 +634,18 @@ internal sealed unsafe class ArchetypeClusterState
     // Per-archetype B+Tree indexes. Null if archetype has no indexed fields.
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// <summary>Per-archetype B+Tree index slots, one per component slot with indexed fields. Null if no indexed fields.</summary>
-    public ClusterIndexSlot[] IndexSlots;
+    /// <summary>Per-archetype B+Tree index slots for SingleVersion / Versioned components. Null if no such slot has indexed fields.</summary>
+    public ClusterIndexSlot<PersistentStore>[] IndexSlots;
+
+    /// <summary>
+    /// The same, for <see cref="StorageMode.Transient"/> component slots. Null when the archetype has no indexed Transient field.
+    /// </summary>
+    /// <remarks>
+    /// A separate array rather than entries in <see cref="IndexSlots"/> because the two are different closed generic types: a slot's trees live in the store
+    /// its component's data lives in. Every consumer walks whichever array it has an accessor for, and the generic drain / capture / query paths are
+    /// instantiated once per store. Transient slots were excluded from cluster storage entirely until #655.
+    /// </remarks>
+    public ClusterIndexSlot<TransientStore>[] TransientIndexSlots;
 
     /// <summary>
     /// Per-slot SingleVersion <see cref="ComponentCollection{T}"/> descriptors — the buffers to release when a slot is freed on
@@ -522,8 +658,60 @@ internal sealed unsafe class ArchetypeClusterState
     /// <summary>Shadow guard bitmap. Guards first-write-per-tick shadow capture. Same index semantics as <see cref="ClusterDirtyBitmap"/>.</summary>
     public DirtyBitmap ClusterShadowBitmap;
 
+    /// <summary>
+    /// Approximate count of index mutations since the last statistics rebuild, and the threshold <see cref="StatisticsWorker"/> trips on (#665). The only such
+    /// counter now — its per-ComponentTable counterpart went with that index home (#629), never having been incremented by any write path.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Non-atomic on purpose, exactly as the ComponentTable field is: it only gates a background refresh, so a lost increment under contention costs at most
+    /// a delayed rebuild. Reset to zero by the worker after a successful rebuild.
+    /// </para>
+    /// <para>
+    /// Counted only where the index actually changed. An update that leaves every indexed field alone does no tree work (the unchanged-field guards), so it
+    /// must not push the statistics toward a rebuild either — and that makes "no work" directly observable in a test, which no other counter here is.
+    /// </para>
+    /// </remarks>
+    internal int MutationsSinceRebuild;
+
     /// <summary>Shared <see cref="ChunkBasedSegment{TStore}"/> backing all per-archetype B+Trees for this archetype.</summary>
     public ChunkBasedSegment<PersistentStore> IndexSegment;
+
+    /// <summary>
+    /// Second per-archetype index segment, striped for <see cref="String64"/> B+Tree nodes. Null when the archetype indexes no
+    /// <c>String64</c> field.
+    /// </summary>
+    /// <remarks>
+    /// A segment serves exactly one node size — every B+Tree variant asserts <c>segment.Stride == sizeof(its node)</c>. The
+    /// <c>Index16/32/64Chunk</c> layouts are all 256 bytes (they differ only in key width, hence capacity 38/29/19), so one segment
+    /// covers every numeric key type. <c>IndexString64Chunk</c> is larger, so it needs its own — exactly the split
+    /// <c>ComponentTable</c> has always had between <c>DefaultIndexSegment</c> and <c>String64IndexSegment</c>. The cluster path
+    /// originally allocated only the 256-byte segment and handed it to every field type, so indexing a <c>String64</c> field on a
+    /// cluster-backed archetype tripped the stride assert in Debug and would have written past the chunk in Release (issue #658).
+    /// </remarks>
+    public ChunkBasedSegment<PersistentStore> IndexSegmentString64;
+
+    /// <summary>
+    /// Index segment backing the archetype's <see cref="StorageMode.Transient"/> B+Trees. Null when no Transient field is indexed.
+    /// </summary>
+    /// <remarks>
+    /// Allocated from <see cref="TransientClusterStore"/>, so it is heap-backed, never checkpointed and **never given an SPI** — a Transient tree recorded in
+    /// a persisted segment would be reloaded on the next open pointing at data that no longer exists. Transient data does not survive the process, so its
+    /// index must not either: the correct state after a reopen is an empty tree, not a restored one (#655).
+    /// </remarks>
+    public ChunkBasedSegment<TransientStore> TransientIndexSegment;
+
+    /// <summary>
+    /// The <see cref="String64"/>-stride counterpart of <see cref="TransientIndexSegment"/>; null unless a Transient String64 field is indexed.
+    /// </summary>
+    public ChunkBasedSegment<TransientStore> TransientIndexSegmentString64;
+
+    /// <summary>Backing store for <see cref="TransientIndexSegment"/>, held so it stays alive for the segment's lifetime. One store per segment, as
+    /// <c>ComponentTable.CreateTransientSegments</c> does.</summary>
+    internal TransientStore? TransientIndexStore;
+
+    /// <summary>Backing store for <see cref="TransientIndexSegmentString64"/>.</summary>
+    internal TransientStore? TransientIndexStoreString64;
 
     // ═══════════════════════════════════════════════════════════════════════
     // Per-archetype Spatial R-Tree. Null if archetype has no spatial fields.
@@ -2735,86 +2923,70 @@ internal sealed unsafe class ArchetypeClusterState
     /// Initialize per-archetype B+Tree index infrastructure from the component tables.
     /// Called after cluster state creation for archetypes with <see cref="ArchetypeMetadata.HasClusterIndexes"/>.
     /// </summary>
-    public void InitializeIndexes(ComponentTable[] slotToTable, ChunkBasedSegment<PersistentStore> indexSegment, bool load, ChangeSet changeSet)
+    /// <param name="slotToTable">This archetype's component tables, by slot.</param>
+    /// <param name="indexSegment">Persisted 256-byte-stride segment for SingleVersion / Versioned trees.</param>
+    /// <param name="string64IndexSegment">Persisted String64-stride segment; null unless a non-Transient String64 field is indexed.</param>
+    /// <param name="transientIndexSegment">Heap-backed 256-byte-stride segment for Transient trees; null unless a Transient field is indexed (#655).</param>
+    /// <param name="transientString64IndexSegment">Heap-backed String64-stride segment; null unless a Transient String64 field is indexed.</param>
+    /// <param name="load">Reopen a persisted directory rather than creating trees. Never applies to the Transient segments — nothing persisted them.</param>
+    /// <param name="changeSet">Change set for the persisted segments' page writes.</param>
+    public void InitializeIndexes(ComponentTable[] slotToTable, ChunkBasedSegment<PersistentStore> indexSegment,
+        ChunkBasedSegment<PersistentStore> string64IndexSegment, ChunkBasedSegment<TransientStore> transientIndexSegment,
+        ChunkBasedSegment<TransientStore> transientString64IndexSegment, bool load, ChangeSet changeSet)
     {
         IndexSegment = indexSegment;
+        IndexSegmentString64 = string64IndexSegment;
+        TransientIndexSegment = transientIndexSegment;
+        TransientIndexSegmentString64 = transientString64IndexSegment;
 
         int slotCount = 0;
+        int transientSlotCount = 0;
         for (int slot = 0; slot < slotToTable.Length; slot++)
         {
-            // Skip Transient slots — their indexes use per-ComponentTable TransientIndex (BTree<TransientStore>)
-            if (slotToTable[slot].StorageMode == StorageMode.Transient)
+            var infos = slotToTable[slot].IndexedFieldInfos;
+            if (infos == null || infos.Length == 0)
             {
                 continue;
             }
-            var infos = slotToTable[slot].IndexedFieldInfos;
-            if (infos != null && infos.Length > 0)
+            if (slotToTable[slot].StorageMode == StorageMode.Transient)
+            {
+                transientSlotCount++;
+            }
+            else
             {
                 slotCount++;
             }
         }
 
-        IndexSlots = new ClusterIndexSlot[slotCount];
+        Debug.Assert(transientSlotCount == 0 || transientIndexSegment != null,
+            "An archetype with an indexed Transient field needs its heap-backed index segment — eligibility detection and allocation have diverged (#655).");
+
+        IndexSlots = new ClusterIndexSlot<PersistentStore>[slotCount];
+        TransientIndexSlots = transientSlotCount > 0 ? new ClusterIndexSlot<TransientStore>[transientSlotCount] : null;
         int idx = 0;
+        int transientIdx = 0;
         // Sequential counter for AllowMultiple indexed fields across ALL component slots in this archetype.
         // Drives each field's MultiFieldIndex, which selects the corresponding section in the cluster layout's elementId tail
         // (see ArchetypeClusterInfo.IndexElementIdOffset). Must match the flat count passed to ArchetypeClusterInfo.Compute at archetype registration time.
+        // Transient slots participate too since #655 — the tail is per-entity in the cluster, and a Transient entity occupies the same ClusterLocation.
         int multiFieldCounter = 0;
         for (int slot = 0; slot < slotToTable.Length; slot++)
         {
             var table = slotToTable[slot];
-            // Skip Transient slots — indexes maintained per-ComponentTable, not per-archetype
-            if (table.StorageMode == StorageMode.Transient)
-            {
-                continue;
-            }
             var infos = table.IndexedFieldInfos;
             if (infos == null || infos.Length == 0)
             {
                 continue;
             }
 
-            var fields = new ClusterIndexField[infos.Length];
-            var shadowBuffers = new FieldShadowBuffer[infos.Length];
-
-            // Iterate component definition fields to find indexed ones (in stable order matching IndexedFieldInfos)
-            int fi = 0;
-            for (int i = 0; i < table.Definition.MaxFieldId && fi < infos.Length; i++)
+            if (table.StorageMode == StorageMode.Transient)
             {
-                var fieldDef = table.Definition[i];
-                if (fieldDef == null || !fieldDef.HasIndex)
-                {
-                    continue;
-                }
-
-                ref var ifi = ref infos[fi];
-                // FieldOffset in cluster = field offset within pure component data (no ComponentOverhead in clusters)
-                int clusterFieldOffset = ifi.OffsetToField - table.ComponentOverhead;
-                var btree = ComponentTable.CreateIndexForFieldCore(fieldDef, (short)fieldDef.FieldId, load, indexSegment, changeSet);
-                // AllowMultiple fields claim the next sequential slot in the cluster's elementId tail.
-                // Single-value fields don't allocate tail space and use MultiFieldIndex = -1.
-                int multiFieldIndex = ifi.AllowMultiple ? multiFieldCounter++ : -1;
-                fields[fi] = new ClusterIndexField
-                {
-                    FieldOffset = clusterFieldOffset,
-                    FieldSize = ifi.Size,
-                    Index = btree,
-                    AllowMultiple = ifi.AllowMultiple,
-                    ZoneMap = new ZoneMapArray(PrimarySegmentCapacity, ifi.Size,
-                        fieldDef.Type == FieldType.Float, fieldDef.Type == FieldType.Double,
-                        (fieldDef.Type & FieldType.Unsigned) != 0),
-                    MultiFieldIndex = multiFieldIndex,
-                };
-                shadowBuffers[fi] = new FieldShadowBuffer();
-                fi++;
+                TransientIndexSlots[transientIdx++] = BuildIndexSlot(table, slot, TransientIndexSegment, TransientIndexSegmentString64, load: false,
+                    changeSet: null, ref multiFieldCounter);
+                continue;
             }
 
-            IndexSlots[idx++] = new ClusterIndexSlot
-            {
-                Slot = slot,
-                Fields = fields,
-                ShadowBuffers = shadowBuffers,
-            };
+            IndexSlots[idx++] = BuildIndexSlot(table, slot, indexSegment, string64IndexSegment, load, changeSet, ref multiFieldCounter);
         }
 
         // Sanity: the MultiFieldIndex counter must match the count supplied to ArchetypeClusterInfo.Compute.
@@ -2824,6 +2996,78 @@ internal sealed unsafe class ArchetypeClusterState
 
         ClusterShadowBitmap = new DirtyBitmap(Math.Max(64, PrimarySegmentCapacity * 64));
     }
+
+    /// <summary>
+    /// Builds one component slot's index metadata + B+Trees against <paramref name="defaultSegment"/> / <paramref name="string64Segment"/>.
+    /// </summary>
+    /// <remarks>
+    /// Generic over the store so the SingleVersion/Versioned and Transient walks are the same code rather than a copy that drifts (#655). The only asymmetry
+    /// is at the call site: Transient trees are always created, never loaded, because nothing persisted them.
+    /// </remarks>
+    private ClusterIndexSlot<TStore> BuildIndexSlot<TStore>(ComponentTable table, int slot, ChunkBasedSegment<TStore> defaultSegment,
+        ChunkBasedSegment<TStore> string64Segment, bool load, ChangeSet changeSet, ref int multiFieldCounter)
+        where TStore : struct, IPageStore
+    {
+        var infos = table.IndexedFieldInfos;
+        var fields = new ClusterIndexField<TStore>[infos.Length];
+        var shadowBuffers = new FieldShadowBuffer[infos.Length];
+        var stats = new IndexStatistics[infos.Length];
+
+        // Iterate component definition fields to find indexed ones (in stable order matching IndexedFieldInfos)
+        int fi = 0;
+        for (int i = 0; i < table.Definition.MaxFieldId && fi < infos.Length; i++)
+        {
+            var fieldDef = table.Definition[i];
+            if (fieldDef == null || !fieldDef.HasIndex)
+            {
+                continue;
+            }
+
+            ref var ifi = ref infos[fi];
+            // FieldOffset in cluster = field offset within pure component data (no ComponentOverhead in clusters)
+            int clusterFieldOffset = ifi.OffsetToField - table.ComponentOverhead;
+            // Node stride is per key type: String64 nodes don't fit the 256-byte segment (#658). Mirrors ComponentTable.CreateIndexForField.
+            var fieldSegment = fieldDef.Type == FieldType.String64 ? string64Segment : defaultSegment;
+            Debug.Assert(fieldSegment != null,
+                $"Archetype index segment missing for field '{fieldDef.Name}' of type {fieldDef.Type} — the String64 segment is allocated only when a "
+                + "String64 field is indexed, so eligibility detection and allocation have diverged.");
+            // Key on (fieldId, slot), NOT fieldId alone: this segment is shared by every component slot in the archetype and field ids restart at 0 per
+            // component, so two components each indexing their field #0 would otherwise register two entries with the same key — and on reopen both
+            // trees would resolve to the first one's root (#657).
+            var indexKey = new BTreeStableKey((short)fieldDef.FieldId, (short)slot);
+            var btree = ComponentTable.CreateIndexForFieldCore(fieldDef, indexKey, load, fieldSegment, changeSet);
+            // AllowMultiple fields claim the next sequential slot in the cluster's elementId tail.
+            // Single-value fields don't allocate tail space and use MultiFieldIndex = -1.
+            int multiFieldIndex = ifi.AllowMultiple ? multiFieldCounter++ : -1;
+            fields[fi] = new ClusterIndexField<TStore>
+            {
+                FieldOffset = clusterFieldOffset,
+                FieldSize = ifi.Size,
+                Index = btree,
+                AllowMultiple = ifi.AllowMultiple,
+                // Zone maps are a numeric min/max per cluster used to prune Path-B scans; a 64-byte String64 key has no such summary,
+                // so it gets none. Every producer uses `ZoneMap?.` and both consumers null-check, so a null map simply means
+                // "no cluster pruning for this field" — the correct behaviour rather than a special case (#658).
+                ZoneMap = fieldDef.Type == FieldType.String64 ? null
+                    : new ZoneMapArray(PrimarySegmentCapacity, ifi.Size,
+                        fieldDef.Type == FieldType.Float, fieldDef.Type == FieldType.Double,
+                        (fieldDef.Type & FieldType.Unsigned) != 0),
+                MultiFieldIndex = multiFieldIndex,
+            };
+            shadowBuffers[fi] = new FieldShadowBuffer();
+            stats[fi] = new IndexStatistics(btree);
+            fi++;
+        }
+
+        return new ClusterIndexSlot<TStore>
+        {
+            Slot = slot,
+            Fields = fields,
+            ShadowBuffers = shadowBuffers,
+            Stats = stats,
+        };
+    }
+
 
     /// <summary>
     /// Rebuild per-archetype B+Tree indexes from cluster data (scan all occupied entities).
@@ -2839,6 +3083,9 @@ internal sealed unsafe class ArchetypeClusterState
         // Index rebuild reads from primary segment (SV/V data — Transient excluded from IndexSlots)
         var clusterAccessor = ClusterSegment.CreateChunkAccessor();
         var idxAccessor = IndexSegment.CreateChunkAccessor(changeSet);
+        // A field's nodes live in whichever segment its stride requires, so rebuild needs an accessor per segment, not per archetype (#658).
+        var hasString64 = IndexSegmentString64 != null;
+        var idxAccessorS64 = hasString64 ? IndexSegmentString64.CreateChunkAccessor(changeSet) : default;
         try
         {
             for (int c = 0; c < ActiveClusterCount; c++)
@@ -2862,7 +3109,9 @@ internal sealed unsafe class ArchetypeClusterState
                         {
                             ref var field = ref ixSlot.Fields[f];
                             byte* fieldPtr = compBase + slotIndex * compSize + field.FieldOffset;
-                            int elementId = field.Index.Add(fieldPtr, clusterLocation, ref idxAccessor);
+                            int elementId = hasString64 && ReferenceEquals(field.Index.Segment, IndexSegmentString64)
+                                ? field.Index.Add(fieldPtr, clusterLocation, ref idxAccessorS64)
+                                : field.Index.Add(fieldPtr, clusterLocation, ref idxAccessor);
                             // Rebuild writes a fresh elementId into the cluster tail, overwriting any stale
                             // value from the previous (torn-down) BTree state. Issue #229 Phase 3.
                             if (field.AllowMultiple)
@@ -2876,6 +3125,10 @@ internal sealed unsafe class ArchetypeClusterState
         }
         finally
         {
+            if (hasString64)
+            {
+                idxAccessorS64.Dispose();
+            }
             idxAccessor.Dispose();
             clusterAccessor.Dispose();
         }
@@ -3059,16 +3312,34 @@ internal sealed unsafe class ArchetypeClusterState
 /// <summary>
 /// Per-component-slot index state for a cluster-eligible archetype. One per component slot that has indexed fields.
 /// </summary>
-internal struct ClusterIndexSlot
+/// <remarks>
+/// Generic over the page store since #655. A component slot has exactly one storage mode, so a slot's trees are either all
+/// <see cref="PersistentStore"/>-backed (SingleVersion / Versioned, in the persisted index segments) or all <see cref="TransientStore"/>-backed (Transient, in
+/// the heap segment that is never persisted). The generic parameter is what lets one drain, one capture and one query path serve both instead of two
+/// hand-written copies — <c>BTreeBase&lt;TStore&gt;</c> was already generic; only this metadata was pinned to one instantiation.
+/// </remarks>
+internal struct ClusterIndexSlot<TStore> where TStore : struct, IPageStore
 {
     /// <summary>Component slot index within the archetype.</summary>
     public int Slot;
 
     /// <summary>Per-indexed-field B+Tree instances (per-archetype ownership).</summary>
-    public ClusterIndexField[] Fields;
+    public ClusterIndexField<TStore>[] Fields;
 
     /// <summary>Per-indexed-field shadow buffers for old value capture before mutation.</summary>
     public FieldShadowBuffer[] ShadowBuffers;
+
+    /// <summary>
+    /// Per-indexed-field selectivity statistics, parallel to <see cref="Fields"/> — the only such array since the per-ComponentTable one was removed with
+    /// that index home (#665, #629).
+    /// </summary>
+    /// <remarks>
+    /// Not shared with the ComponentTable's array on purpose. Statistics describe a key DISTRIBUTION, and a ComponentTable is shared across every archetype
+    /// holding that component: folding several archetypes into one array blends their distributions, so a predicate that is highly selective within one
+    /// archetype reads as unselective and the planner picks the wrong path. <see cref="IndexStatistics"/> wraps the store-agnostic
+    /// <see cref="IBTreeIndex"/>, so the same type serves either index home with no generic surgery.
+    /// </remarks>
+    public IndexStatistics[] Stats;
 }
 
 /// <summary>
@@ -3101,7 +3372,7 @@ internal struct ClusterSpatialSlot
 /// <summary>
 /// Per-indexed-field B+Tree state within a cluster-eligible archetype.
 /// </summary>
-internal struct ClusterIndexField
+internal struct ClusterIndexField<TStore> where TStore : struct, IPageStore
 {
     /// <summary>Byte offset of this field within the pure component data (no ComponentOverhead — clusters have no overhead).</summary>
     public int FieldOffset;
@@ -3110,7 +3381,7 @@ internal struct ClusterIndexField
     public int FieldSize;
 
     /// <summary>Per-archetype B+Tree instance. Value = ClusterLocation (clusterChunkId * 64 + slotIndex).</summary>
-    public BTreeBase<PersistentStore> Index;
+    public BTreeBase<TStore> Index;
 
     /// <summary>Whether index allows multiple values per key.</summary>
     public bool AllowMultiple;

@@ -266,10 +266,10 @@ public sealed class StorageDecoderTests
     [Test]
     public void IndexDecoder_DirectoryChunk_ListsTrees()
     {
-        var trees = new (short StableId, int RootChunkId, int EntryCount)[]
+        var trees = new (short StableId, short Slot, int RootChunkId, int EntryCount)[]
         {
-            ((short)-1, 10, 5000),  // PK
-            ((short)42, 15, 2000),  // secondary on field 42
+            ((short)-1, (short)0, 10, 5000),  // PK
+            ((short)42, (short)0, 15, 2000),  // secondary on field 42
         };
 
         var cells = L4Decoder.DecodeIndex(new byte[256], chunkId: 0, directoryChunkCount: 4, trees);
@@ -278,6 +278,25 @@ public sealed class StorageDecoderTests
         Assert.That(Array.Find(cells, c => c.Label == "Primary key")!.Value, Does.Contain("root #10"));
         Assert.That(Array.Find(cells, c => c.Label == "Primary key")!.Value, Does.Contain("5000"));
         Assert.That(Array.Find(cells, c => c.Label == "Field #42")!.Value, Does.Contain("root #15"));
+    }
+
+    /// <summary>
+    /// On a per-archetype index segment several component slots share one directory and their field ids restart at 0, so two trees can carry the same
+    /// StableId. The decoder must keep them apart or the file map renders one row twice (#657).
+    /// </summary>
+    [Test]
+    public void IndexDecoder_DirectoryChunk_DisambiguatesSameStableIdOnDifferentSlots()
+    {
+        var trees = new (short StableId, short Slot, int RootChunkId, int EntryCount)[]
+        {
+            ((short)1, (short)0, 10, 100),
+            ((short)1, (short)3, 15, 200),
+        };
+
+        var cells = L4Decoder.DecodeIndex(new byte[256], chunkId: 0, directoryChunkCount: 4, trees);
+
+        Assert.That(Array.Find(cells, c => c.Label == "Field #1")!.Value, Does.Contain("root #10"));
+        Assert.That(Array.Find(cells, c => c.Label == "Field #1 (slot 3)")!.Value, Does.Contain("root #15"));
     }
 
     [Test]

@@ -1,10 +1,10 @@
 ---
 uid: feature-indexing-versioned-secondary-indexes
-title: 'Versioned (HEAD/TAIL) Secondary Indexes for MVCC'
+title: 'Element-Precise Secondary Indexes for MVCC'
 description: 'The mechanism that keeps AllowMultiple index membership correct across updates and deletes on Versioned components.'
 ---
 
-# Versioned (HEAD/TAIL) Secondary Indexes for MVCC
+# Element-Precise Secondary Indexes for MVCC
 > The mechanism that keeps `AllowMultiple` index membership correct across updates and deletes on `Versioned` components.
 
 **Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Indexing](./README.md)
@@ -15,18 +15,29 @@ Naively maintained secondary indexes are destructive: when an indexed field chan
 is unlinked from A and linked to B, and when an entity is deleted its index entries must be cleaned up too. Done
 carelessly, both steps break MVCC guarantees — a value change can leave a brief window where the entity is in
 neither key's result set, and a deleted entity's stale entries can linger and get handed back to callers, who then
-dereference a chain that's gone. On `Versioned` components, every `[Index(AllowMultiple = true)]` field is
-protected against both failure modes by construction, as part of ordinary commit processing.
+dereference a chain that's gone.
+
+There is a sharper failure mode specific to `AllowMultiple`. The leaf value under a multi-value key is not an
+entity location but a *buffer* holding many of them. Removing an entity with a key-level `Remove(key)` deletes the
+whole buffer, silently evicting every sibling that happened to share the value. Every mutation path therefore has
+to operate on the entity's own element within the buffer, never on the key.
 
 ## ⚙️ How it works (in brief)
 
-Each `AllowMultiple` key holds two buffers. The HEAD buffer is the current entity set — unchanged from a plain
-multi-value index, and what `Transaction.EnumerateIndex` reads. The TAIL buffer is an append-only log of
-`(ChainId, TSN, Active/Tombstone)` entries: one Active entry whenever an entity gains the key's value (create, or
-update into it), one Tombstone whenever it loses it (update away, or delete). TAIL is allocated lazily on a key's
-first mutation and linked from the HEAD buffer's header, so a key that's never been touched costs nothing extra.
-Both HEAD and TAIL are updated together, automatically, inside `Transaction.Commit` — there is no separate API to
-call and no way to opt out for an `AllowMultiple` field on a `Versioned` component.
+Each `AllowMultiple` key owns one buffer: the current entity set, which is what `Transaction.EnumerateIndex`
+reads. Entities are addressed inside it by an **element id**, stored alongside the entity so a later mutation can
+find its own entry again.
+
+Two compound operations do the work, each in a single tree traversal:
+
+- `MoveValue(oldKey, newKey, elementId, …)` — removes this entity's element from the old key's buffer and inserts
+  it under the new one atomically, returning the new element id. There is no window in which the entity belongs to
+  neither key.
+- `RemoveValue(key, elementId, …)` — removes exactly this entity's element, leaving every sibling under that key
+  in place.
+
+Both run inside `Transaction.Commit` as part of ordinary commit processing. There is no separate API to call and
+no way to opt out for an `AllowMultiple` field.
 
 ## 💻 Usage
 
@@ -54,8 +65,8 @@ using (var tx = dbe.CreateQuickTransaction())
     tx.Commit();
 }
 
-// Move Aria to guild 9 — HEAD(7) loses her, HEAD(9) gains her, and TAIL records both transitions
-// with this commit's TSN. No extra calls: it happens as part of Write + Commit.
+// Move Aria to guild 9 — one traversal removes her element from key 7 and inserts it under key 9.
+// Any other member of guild 7 is untouched. No extra calls: it happens as part of Write + Commit.
 using (var tx = dbe.CreateQuickTransaction())
 {
     ref var m = ref tx.OpenMut(aria).Write(MemberArchetype.M);
@@ -63,41 +74,38 @@ using (var tx = dbe.CreateQuickTransaction())
     tx.Commit();
 }
 
-// Current-state membership is exactly the HEAD set — guild 7 is now empty, guild 9 has Aria.
 using var tx2 = dbe.CreateQuickTransaction();
-using var g7 = tx2.EnumerateIndex<GuildMember, long>(guildIndex, 7, 7); // empty
+using var g7 = tx2.EnumerateIndex<GuildMember, long>(guildIndex, 7, 7); // Aria gone; her guild-mates remain
 using var g9 = tx2.EnumerateIndex<GuildMember, long>(guildIndex, 9, 9); // Aria
 ```
 
 ## ⚠️ Guarantees & limits
 
-- HEAD/TAIL maintenance applies only to `[Index(AllowMultiple = true)]` fields on `Versioned` components.
-  `SingleVersion` and `Transient` `AllowMultiple` indexes keep the HEAD set only — without a revision chain there
-  is no history to append, so TAIL is never allocated for them.
 - Maintenance is unconditional and automatic for every create, update-into/out-of a value, and delete on a
   qualifying field — there is no method to call, no flag to set, and no way for a commit to skip it.
-- `Transaction.EnumerateIndex` reads HEAD only, at the same O(K) cost as a non-versioned `AllowMultiple` index —
-  adopting `Versioned` storage for the extra correctness costs nothing on this read path.
-- Delete is first-class: the HEAD entry is removed and a TAIL Tombstone is appended in the same commit, so a
-  deleted entity never reappears in a current-state `EnumerateIndex` result and never requires a follow-up cleanup
-  pass.
-- Each TAIL entry is 12 bytes and is written once per value transition, not once per entity — cost scales with how
-  often the field changes, not with how many entities currently hold the value.
-- TAIL is what powers [point-in-time reconstruction](./temporal-index-query.md) ("who held this value at TSN T")
-  and is bounded by a not-yet-auto-triggered [pruning algorithm](./tail-garbage-collection.md) — today the
-  directly usable guarantee is that current-state `EnumerateIndex` results are always accurate, including
-  immediately after deletes and value changes.
+- A value change is a single compound traversal, so the entity is never absent from both keys, and never present
+  in both.
+- Delete is first-class and element-precise: the entity's element is removed from the key's buffer in the same
+  commit, so a deleted entity never reappears in an `EnumerateIndex` result, never requires a follow-up cleanup
+  pass, and never takes its siblings with it.
+- `Transaction.EnumerateIndex` reflects committed current state at the same O(K) cost as a non-versioned
+  `AllowMultiple` index.
+- **Current state only.** Typhon does not reconstruct past index membership: there is no "who held this value at
+  TSN T" query, and no API ever exposed one. An append-only version-history TAIL was built for this and removed in
+  #666 — nothing called it, nothing pruned it, and it charged every `AllowMultiple` mutation on a `Versioned`
+  component for a capability no caller could reach. Point-in-time reads work through the revision chain (see the
+  related temporal-query feature), not through the index.
 
 ## 🧪 Tests
 
-- [VersionedIndexTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/VersionedIndexTests.cs) — Phase 1 (`AllocateTailBuffer_AddAndReadEntry`, lazy TAIL allocation) and Phase 2 (`Update_IndexedField_TailHasTombstoneAndActive`, `Delete_Entity_TailHasTombstone`, `Update_BackfillsTail_AllEntriesPresent`): HEAD+TAIL maintenance on create/update/delete
+- [VersionedIndexTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/VersionedIndexTests.cs) — spawn/update/read on a `Versioned` component with `AllowMultiple` indexed fields, and a key move that must leave siblings in place
 
 ## 🔗 Related
 
 - Sibling feature: [Multi-value secondary index (AllowMultiple)](./secondary-index-storage-modes/multi-value-secondary-index.md)
 - Sibling feature: [Secondary Index Storage Modes](./secondary-index-storage-modes/README.md)
-- Sibling feature: [Temporal (Point-in-Time) Index Query](./temporal-index-query.md) — reads this feature's TAIL history to answer point-in-time queries
+- Sibling feature: [Compound Move Operations](./compound-move-operations.md) — the single-traversal `MoveValue` this feature relies on
 
 <!-- Deep dive: claude/design/Indexing/VersionedSecondaryIndexes.md -->
 <!-- ADR: claude/adr/039-versioned-secondary-index-architecture.md -->
-<!-- Deep dive: claude/overview/04-data.md §Versioned Secondary Indexes (HEAD/TAIL Architecture) -->
+<!-- Deep dive: claude/overview/04-data.md §Versioned Secondary Indexes -->

@@ -374,22 +374,25 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
         }
 
         // Check archetype mask: only process entities from matching archetypes
-        var entityId = EntityId.FromRaw(entry.EntityPK);
+        var entityId = entry.EntityPK;
         if (!_query.MaskTestPublicByRouting(entityId.ArchetypeId))
         {
             return;
         }
+
+        // The view's entity set is keyed on the raw EntityId value (see PopulateFromEntityMaps / _entityIds).
+        var pk = (long)entityId.RawValue;
 
         var wasInView = !isCreation && EvaluateKey(ref eval, ref entry.BeforeKey);
         var shouldBeInView = !isDeletion && EvaluateKey(ref eval, ref entry.AfterKey);
 
         if (Evaluators.Length == 1)
         {
-            ApplyDelta(entry.EntityPK, wasInView, shouldBeInView);
+            ApplyDelta(pk, wasInView, shouldBeInView);
         }
         else
         {
-            ProcessMultiField(entry.EntityPK, fieldIndex, wasInView, shouldBeInView, tx);
+            ProcessMultiField(pk, fieldIndex, wasInView, shouldBeInView, tx);
         }
     }
 
@@ -444,8 +447,10 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
             var requeryStart = Stopwatch.GetTimestamp();
             if (HasCachedPlanInternal && _fieldReader != null)
             {
-                // Use PipelineExecutor with cached plan for fast re-population
-                _fieldReader.ExecuteFullScan(CachedPlan, CachedPlan.OrderedEvaluators, _componentTable, tx, _entityIds);
+                // Cross-archetype scan with the cached plan. The `else` branch below already went through EcsQuery.Execute() and was therefore correct for
+                // cluster-backed archetypes; this branch bypassed it and re-populated to empty (#663) — correctness depended on whether a plan was cached.
+                _query.UpdateTransaction(tx);
+                _query.ExecuteFullScanAcrossArchetypes(CachedPlan, CachedPlan.OrderedEvaluators, _componentTable, _entityIds);
             }
             else if (_fieldReader != null)
             {
@@ -495,10 +500,13 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
         var plans = CachedPlans;
         if (plans == null) return;
 
+        _query.UpdateTransaction(tx);
         for (var b = 0; b < plans.Length; b++)
         {
             var branchResult = new HashMap<long>();
-            _fieldReader.ExecuteFullScan(plans[b], plans[b].OrderedEvaluators, _componentTable, tx, branchResult);
+            // Cross-archetype: a cluster-backed archetype's indexes live on the archetype, so scanning only the ComponentTable tree leaves every OR branch
+            // empty (#663).
+            _query.ExecuteFullScanAcrossArchetypes(plans[b], plans[b].OrderedEvaluators, _componentTable, branchResult);
             var bit = (ushort)(1 << b);
             foreach (var pk in branchResult)
             {
@@ -518,13 +526,13 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void ProcessEntryOr(ref ViewDeltaEntry entry, int fieldIndex, bool isCreation, bool isDeletion, Transaction tx)
     {
-        var entityId = EntityId.FromRaw(entry.EntityPK);
+        var entityId = entry.EntityPK;
         if (!_query.MaskTestPublicByRouting(entityId.ArchetypeId))
         {
             return;
         }
 
-        var pk = entry.EntityPK;
+        var pk = (long)entityId.RawValue;
         _branchBitmaps.TryGetValue(pk, out var oldBitmap);
         if (isCreation)
         {
@@ -615,10 +623,12 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
 
             if (plans != null)
             {
+                _query.UpdateTransaction(tx);
                 for (var b = 0; b < plans.Length; b++)
                 {
                     var branchResult = new HashMap<long>();
-                    _fieldReader.ExecuteFullScan(plans[b], plans[b].OrderedEvaluators, _componentTable, tx, branchResult);
+                    // Cross-archetype — same reason as PopulateInitialOr (#663).
+                    _query.ExecuteFullScanAcrossArchetypes(plans[b], plans[b].OrderedEvaluators, _componentTable, branchResult);
                     var bit = (ushort)(1 << b);
                     foreach (var pk in branchResult)
                     {
@@ -787,10 +797,6 @@ internal abstract class EcsViewFieldReader
     public abstract bool CheckOtherFields(long pk, FieldEvaluator[] evaluators, int skipFieldIndex, Transaction tx);
     public abstract bool CheckOtherFieldsInBranch(long pk, FieldEvaluator[] branchEvals, int skipFieldIndex, Transaction tx);
     public abstract bool EvaluateAllFields(long pk, FieldEvaluator[] evaluators, Transaction tx);
-    public abstract void ExecuteFullScan(ExecutionPlan plan, FieldEvaluator[] evaluators, ComponentTable table, Transaction tx, HashMap<long> result);
-    public abstract void ExecuteOrderedScan(ExecutionPlan plan, FieldEvaluator[] evaluators, ComponentTable table, Transaction tx, List<long> result,
-        int skip = 0, int take = int.MaxValue);
-    public abstract int CountScan(ExecutionPlan plan, FieldEvaluator[] evaluators, ComponentTable table, Transaction tx);
 }
 
 /// <summary>
@@ -879,13 +885,4 @@ internal sealed unsafe class EcsViewFieldReader<T> : EcsViewFieldReader where T 
         return true;
     }
 
-    public override void ExecuteFullScan(ExecutionPlan plan, FieldEvaluator[] evaluators, ComponentTable table, Transaction tx, HashMap<long> result) =>
-        PipelineExecutor.Instance.Execute(plan, evaluators, table, tx, result);
-
-    public override void ExecuteOrderedScan(ExecutionPlan plan, FieldEvaluator[] evaluators, ComponentTable table, Transaction tx, List<long> result,
-        int skip = 0, int take = int.MaxValue) =>
-        PipelineExecutor.Instance.ExecuteOrdered(plan, evaluators, table, tx, result, skip, take);
-
-    public override int CountScan(ExecutionPlan plan, FieldEvaluator[] evaluators, ComponentTable table, Transaction tx) =>
-        PipelineExecutor.Instance.Count(plan, evaluators, table, tx);
 }

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
@@ -194,9 +194,7 @@ internal sealed class DiagnosticCommandExecutor
         {
             Collect($"{name}.Data", table.ComponentSegment);
             Collect($"{name}.RevTable", table.CompRevTableSegment);
-            Collect($"{name}.PK_Index", table.DefaultIndexSegment);
-            Collect($"{name}.Str64_Index", table.String64IndexSegment);
-            Collect($"{name}.Tail_Index", table.TailIndexSegment);
+            // The per-ComponentTable index segments are gone (#629). Index storage is reported per ARCHETYPE below, where the trees now live.
         }
 
         var totalFill = totalChunksCap > 0 ? (double)totalChunksUsed / totalChunksCap : 0.0;
@@ -892,12 +890,32 @@ internal sealed class DiagnosticCommandExecutor
             // Match by field name → find the corresponding IndexedFieldInfo
             if (table.Definition.FieldsByName.TryGetValue(fieldName, out var field))
             {
-                foreach (var info in table.IndexedFieldInfos)
+                for (var i = 0; i < table.IndexedFieldInfos.Length; i++)
                 {
-                    if (info.OffsetToField == field.OffsetInComponentStorage)
+                    if (table.IndexedFieldInfos[i].OffsetToField != field.OffsetInComponentStorage)
                     {
-                        return (info.PersistentIndex, null);
+                        continue;
                     }
+
+                    // The archetype-owned tree, not the shared one: for a cluster-backed archetype the shared tree is empty, so btree-dump / btree-validate
+                    // were inspecting an empty structure and reporting it healthy.
+                    var views = ResolveArchetypeIndexViews(table, i);
+                    if (views.Count == 0)
+                    {
+                        return (null, $"Error: no archetype owns an index for '{fieldName}' on component '{componentName}'.");
+                    }
+
+                    // The B+Tree commands walk pages through PersistentStore. A Transient component's tree is a different closed generic living in heap
+                    // memory, so it is reported rather than silently skipped — "not found" would be a lie about a tree that exists.
+                    foreach (var view in views)
+                    {
+                        if (view.Index is BTreeBase<PersistentStore> persistent)
+                        {
+                            return (persistent, null);
+                        }
+                    }
+
+                    return (null, $"Error: '{fieldName}' on '{componentName}' is indexed only on Transient storage, which these commands cannot walk.");
                 }
             }
         }
@@ -1087,10 +1105,20 @@ internal sealed class DiagnosticCommandExecutor
         for (var i = 0; i < table.IndexedFieldInfos.Length; i++)
         {
             var info = table.IndexedFieldInfos[i];
-            var stats = table.IndexStats[i];
             var fieldName = ResolveFieldName(table, info.OffsetToField);
             var qualifiedName = $"{componentName}.{fieldName}";
-            AppendSingleIndexStats(sb, qualifiedName, stats, info.Index);
+            var views = ResolveArchetypeIndexViews(table, i);
+
+            if (views.Count == 0)
+            {
+                sb.AppendLine($"  [cyan]{Markup.Escape(qualifiedName)}[/]  [dim](no archetype owns an index for this field)[/]");
+                continue;
+            }
+
+            foreach (var view in views)
+            {
+                AppendSingleIndexStats(sb, $"{qualifiedName} [[{view.Archetype}]]", view.Stats, view.Index);
+            }
         }
 
         sb.AppendLine();
@@ -1199,28 +1227,106 @@ internal sealed class DiagnosticCommandExecutor
         var count = 0;
         for (var i = 0; i < table.IndexedFieldInfos.Length; i++)
         {
-            var info = table.IndexedFieldInfos[i];
-            var stats = table.IndexStats[i];
-            var fieldName = ResolveFieldName(table, info.OffsetToField);
+            var fieldName = ResolveFieldName(table, table.IndexedFieldInfos[i].OffsetToField);
 
-            var sw = Stopwatch.StartNew();
-            stats.RebuildHistogram();
-            sw.Stop();
-
-            var multiStr = info.Index.AllowMultiple ? " [yellow]multi[/]" : "";
-            if (stats.Histogram != null)
+            // One histogram per ARCHETYPE, not per component: each archetype's tree holds its own entities, and blending their distributions is the very
+            // thing that made the planner estimate from an empty array.
+            foreach (var view in ResolveArchetypeIndexViews(table, i))
             {
-                sb.AppendLine($"    [cyan]{Markup.Escape(fieldName)}[/]{multiStr}  [white]{stats.Histogram.TotalCount:N0} entities[/], range [[{stats.Histogram.MinValue:N0}..{stats.Histogram.MaxValue:N0}]]  [green]{FormatElapsed(sw.Elapsed)}[/]");
-            }
-            else
-            {
-                sb.AppendLine($"    [cyan]{Markup.Escape(fieldName)}[/]{multiStr}  [dim](empty)[/]  [green]{FormatElapsed(sw.Elapsed)}[/]");
-            }
+                var sw = Stopwatch.StartNew();
+                view.Stats.RebuildHistogram();
+                sw.Stop();
 
-            count++;
+                var multiStr = view.Index.AllowMultiple ? " [yellow]multi[/]" : "";
+                var label = $"{fieldName} [[{view.Archetype}]]";
+                if (view.Stats.Histogram != null)
+                {
+                    sb.AppendLine($"    [cyan]{Markup.Escape(label)}[/]{multiStr}  [white]{view.Stats.Histogram.TotalCount:N0} entities[/], range [[{view.Stats.Histogram.MinValue:N0}..{view.Stats.Histogram.MaxValue:N0}]]  [green]{FormatElapsed(sw.Elapsed)}[/]");
+                }
+                else
+                {
+                    sb.AppendLine($"    [cyan]{Markup.Escape(label)}[/]{multiStr}  [dim](empty)[/]  [green]{FormatElapsed(sw.Elapsed)}[/]");
+                }
+
+                count++;
+            }
         }
 
         return count;
+    }
+
+    /// <summary>
+    /// One archetype's index for a component field. Indexes live per archetype, so a component shared by K archetypes has K of them — and a diagnostic that
+    /// prints a single number is printing at most one of them.
+    /// </summary>
+    private readonly record struct ArchetypeIndexView(string Archetype, IndexStatistics Stats, IBTreeIndex Index);
+
+    /// <summary>
+    /// Every archetype-owned index for the given indexed-field position of <paramref name="table"/>.
+    /// </summary>
+    /// <remarks>
+    /// Replaces the <c>table.IndexStats</c> / <c>table.IndexedFieldInfos[i].Index</c> reads every index diagnostic used to make. Those describe the shared
+    /// per-ComponentTable tree, which holds no entries for a cluster-backed archetype — so <c>index-stats</c> reported <c>Entries: 0</c> against a fully
+    /// populated index, and <c>stats-rebuild</c> reported <c>(empty)</c>. The shell had no index tests at all, which is why it went unreported.
+    /// </remarks>
+    private List<ArchetypeIndexView> ResolveArchetypeIndexViews(ComponentTable table, int fieldIndex)
+    {
+        var views = new List<ArchetypeIndexView>();
+        var dbe = _session.Engine;
+
+        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        {
+            var es = dbe._archetypeStates[meta.ArchetypeId];
+            var clusterState = es?.ClusterState;
+            if (clusterState == null)
+            {
+                continue;
+            }
+
+            // A component sits at a different slot in each archetype, and index slots are keyed on the archetype's own numbering, so table identity is the
+            // only reliable join.
+            var compSlot = -1;
+            for (var slot = 0; slot < meta.ComponentCount; slot++)
+            {
+                if (ReferenceEquals(es.SlotToComponentTable[slot], table))
+                {
+                    compSlot = slot;
+                    break;
+                }
+            }
+
+            if (compSlot < 0)
+            {
+                continue;
+            }
+
+            var archetypeName = meta.ArchetypeType?.Name ?? $"Archetype#{meta.ArchetypeId}";
+            AppendViewFor(clusterState.IndexSlots, compSlot, fieldIndex, archetypeName, views);
+            AppendViewFor(clusterState.TransientIndexSlots, compSlot, fieldIndex, archetypeName, views);
+        }
+
+        return views;
+    }
+
+    /// <summary>Adds the matching slot's view, if this store's array carries one for the component slot. Both index homes are walked by the caller.</summary>
+    private static void AppendViewFor<TStore>(ClusterIndexSlot<TStore>[] slots, int compSlot, int fieldIndex, string archetypeName,
+        List<ArchetypeIndexView> into) where TStore : struct, IPageStore
+    {
+        if (slots == null)
+        {
+            return;
+        }
+
+        for (var i = 0; i < slots.Length; i++)
+        {
+            if (slots[i].Slot != compSlot || slots[i].Fields == null || fieldIndex >= slots[i].Fields.Length)
+            {
+                continue;
+            }
+
+            into.Add(new ArchetypeIndexView(archetypeName, slots[i].Stats[fieldIndex], slots[i].Fields[fieldIndex].Index));
+            return;
+        }
     }
 
     private (IndexStatistics Stats, IBTreeIndex Index, string Error) ResolveIndexStats(string name)
@@ -1258,10 +1364,20 @@ internal sealed class DiagnosticCommandExecutor
 
         for (var i = 0; i < table.IndexedFieldInfos.Length; i++)
         {
-            if (table.IndexedFieldInfos[i].OffsetToField == field.OffsetInComponentStorage)
+            if (table.IndexedFieldInfos[i].OffsetToField != field.OffsetInComponentStorage)
             {
-                return (table.IndexStats[i], table.IndexedFieldInfos[i].Index, null);
+                continue;
             }
+
+            var views = ResolveArchetypeIndexViews(table, i);
+            if (views.Count == 0)
+            {
+                return (null, null, $"Error: no archetype owns an index for '{fieldName}' on component '{componentName}'.");
+            }
+
+            // Single-index callers get the first archetype's. Reporting which one matters: the alternative — summing across archetypes — would invent a
+            // distribution that describes no actual tree.
+            return (views[0].Stats, views[0].Index, null);
         }
 
         return (null, null, $"Error: Field '{fieldName}' on component '{componentName}' is not indexed.");

@@ -1,4 +1,4 @@
-// unset
+﻿// unset
 
 using System;
 using System.Runtime.CompilerServices;
@@ -14,9 +14,9 @@ internal class BasicSelectivityEstimator : ISelectivityEstimator
 
     private BasicSelectivityEstimator() { }
 
-    public long EstimateCardinality(ComponentTable table, int fieldIndex, CompareOp op, long threshold)
+    public long EstimateCardinality(IndexStatistics[] fieldStats, int fieldIndex, CompareOp op, long threshold)
     {
-        var stats = table.IndexStats[fieldIndex];
+        var stats = fieldStats[fieldIndex];
         var entryCount = stats.EntryCount;
         if (entryCount == 0)
         {
