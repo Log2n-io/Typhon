@@ -1994,6 +1994,10 @@ public unsafe partial class Transaction : EntityAccessor
         // (re)established _clusterCommitClusterAccessor for this archetype before calling.
         byte* clusterBase = null;
 
+        // One shared write per commit instead of one per indexed field (review M4). Accumulated locally and added once below: the counter is read by the
+        // StatisticsWorker thread, so every increment is a store other cores may be watching, and N of them per commit bought nothing over one.
+        var mutations = 0;
+
         for (int ixs = 0; ixs < clusterState.IndexSlots.Length; ixs++)
         {
             ref var ixSlot = ref clusterState.IndexSlots[ixs];
@@ -2020,7 +2024,7 @@ public unsafe partial class Transaction : EntityAccessor
                 }
 
                 ref var idxAccessor = ref ClusterCommitIndexAccessor(clusterState, field.Index.Segment);
-                clusterState.MutationsSinceRebuild++;   // past the guard, so this is real tree work (#665)
+                mutations++;   // past the guard, so this is real tree work (#665)
                 if (newComp != null && oldComp != null)
                 {
                     // Update: move this entity's entry from the old key to the new key.
@@ -2126,6 +2130,8 @@ public unsafe partial class Transaction : EntityAccessor
             }
             break; // Found the matching index slot
         }
+
+        clusterState.MutationsSinceRebuild += mutations;
     }
 
     /// <summary>

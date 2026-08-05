@@ -1320,6 +1320,10 @@ public unsafe partial class Transaction
             return;
         }
 
+        // One shared write per commit instead of one per indexed field (review M4): the counter is read by the StatisticsWorker thread, so each
+        // increment is a store other cores may be watching.
+        var mutations = 0;
+
         for (int ixs = 0; ixs < ixSlots.Length; ixs++)
         {
             ref var ixSlot = ref ixSlots[ixs];
@@ -1331,7 +1335,7 @@ public unsafe partial class Transaction
                 byte* fieldPtr = compBase + field.FieldOffset;
                 // Pick the accessor matching this field's segment — passing one built on the other segment resolves node chunks
                 // at the wrong stride and corrupts neighbouring nodes (#658).
-                ctx.ClusterState.MutationsSinceRebuild++;   // (#665)
+                mutations++;   // (#665)
                 int elementId = s64Segment != null && ReferenceEquals(field.Index.Segment, s64Segment)
                     ? field.Index.Add(fieldPtr, clusterLocation, ref idxAccessorS64)
                     : field.Index.Add(fieldPtr, clusterLocation, ref idxAccessor);
@@ -1372,6 +1376,8 @@ public unsafe partial class Transaction
                 }
             }
         }
+
+        ctx.ClusterState.MutationsSinceRebuild += mutations;
     }
 
     /// <summary>
@@ -1391,6 +1397,10 @@ public unsafe partial class Transaction
             return;
         }
 
+        // One shared write per commit instead of one per indexed field (review M4): the counter is read by the StatisticsWorker thread, so each
+        // increment is a store other cores may be watching.
+        var mutations = 0;
+
         for (int s = 0; s < ixSlots.Length; s++)
         {
             ref var ixSlot = ref ixSlots[s];
@@ -1409,7 +1419,7 @@ public unsafe partial class Transaction
                 // sibling entities sharing the same field value. Issue #229 Phase 3.
                 // Regression test: ClusterIndex_NonUniqueField_DestroyOneEntity_PreservesSiblingsInIndex.
                 var useS64 = s64Segment != null && ReferenceEquals(field.Index.Segment, s64Segment);
-                engineState.ClusterState.MutationsSinceRebuild++;   // (#665)
+                mutations++;   // (#665)
                 if (field.AllowMultiple)
                 {
                     int elementId = *(int*)(primaryBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
@@ -1454,6 +1464,8 @@ public unsafe partial class Transaction
                 }
             }
         }    
+
+        engineState.ClusterState.MutationsSinceRebuild += mutations;
     }
 
     private ref struct SpawnContext
