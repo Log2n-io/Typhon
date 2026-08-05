@@ -3782,14 +3782,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// no persisted bytes in either cluster. Fields dropped by the migration are simply not copied, and fields added land on the zeroed new slot — the same
     /// add/remove semantics <c>SchemaEvolutionEngine</c> gives the ComponentTable path.
     /// </remarks>
-    private unsafe void CopyPreMigrationSlot(ArchetypeMetadata meta, ArchetypeEngineState state, ChunkBasedSegment<PersistentStore> oldSegment,
-        ArchetypeClusterInfo oldLayout, (int ChunkId, int SlotIndex) oldPos, ArchetypeClusterInfo newLayout, byte* newClusterBase, int newSlotIndex,
-        ChangeSet cs)
+    private unsafe void CopyPreMigrationSlot(ArchetypeMetadata meta, ArchetypeEngineState state, byte* oldChunkBase, ArchetypeClusterInfo oldLayout,
+        (int ChunkId, int SlotIndex) oldPos, ArchetypeClusterInfo newLayout, byte* newClusterBase, int newSlotIndex)
     {
-        var accessor = oldSegment.CreateChunkAccessor(cs);
-        try
         {
-            var oldChunkBase = accessor.GetChunkAddress(oldPos.ChunkId);
             for (var slot = 0; slot < meta.ComponentCount; slot++)
             {
                 var table = state.SlotToComponentTable[slot];
@@ -3825,10 +3821,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     }
                 }
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
     }
 
@@ -3986,6 +3978,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         var recordBuf = stackalloc byte[ClusterEntityRecordAccessor.RecordSize(meta.VersionedSlotCount)];
         var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor(cs);
         var mapAccessor = state.EntityMap.Segment.CreateChunkAccessor(cs);
+        // One accessor for the whole pass. It used to be created per entity inside the copy, which is O(entities) accessor construction on a path that already
+        // walks every entity — cheap per call, but pure waste at scale and easy to hoist since every entity reads the same segment.
+        var oldClusterAccessor = hasOldCluster ? oldCluster.Segment.CreateChunkAccessor(cs) : default;
         long maxEntityKey = 0;
 
         try
@@ -4006,17 +4001,30 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 header.BornTSN = 0;   // committed before this open → visible at every snapshot
                 header.DiedTSN = 0;   // live: it has a chain head
 
-                // Only a VERSIONED slot's presence is derivable from a chain. A Transient slot has no chain and no persisted bytes, and leaving its bit clear
-                // would reopen the database with that component permanently disabled — so every non-Versioned slot is enabled, matching what the flat rebuild
-                // does for all slots.
+                // The pre-migration position, resolved BEFORE the enabled-bits loop so that loop can consult the old cluster's own bits.
+                (int ChunkId, int SlotIndex) oldPos = default;
+                var hasOldPos = oldPositions != null && oldPositions.TryGetValue(entityPK, out oldPos);
+                byte* oldChunkBase = hasOldCluster && hasOldPos ? oldClusterAccessor.GetChunkAddress(oldPos.ChunkId) : null;
+
+                // Only a VERSIONED slot's presence is derivable from a chain, so a non-Versioned slot has to get its bit from somewhere else. Defaulting it to
+                // ENABLED is right when there is nothing better — a Transient slot has no chain and no persisted bytes, and leaving it clear would reopen the
+                // database with that component permanently disabled. But when the pre-migration cluster IS available it is the authority: a slot the caller had
+                // explicitly DISABLED must stay disabled, and re-deriving would silently re-enable it. This was unreachable until the C1 fix, because the crash
+                // branch swallowed this whole pass on precisely the migrating opens where an old cluster exists.
                 ushort enabledMask = 0;
                 for (var slot = 0; slot < meta.ComponentCount; slot++)
                 {
                     var vi = slotToVi == null ? -1 : slotToVi[slot];
                     if (vi < 0)
                     {
-                        enabledMask |= (ushort)(1 << slot);
-                        *(ulong*)(clusterBase + layout.EnabledBitsOffset(slot)) |= 1UL << slotIndex;
+                        var enabled = oldChunkBase == null
+                            || (*(ulong*)(oldChunkBase + oldCluster.Layout.EnabledBitsOffset(slot)) & (1UL << oldPos.SlotIndex)) != 0;
+                        if (enabled)
+                        {
+                            enabledMask |= (ushort)(1 << slot);
+                            *(ulong*)(clusterBase + layout.EnabledBitsOffset(slot)) |= 1UL << slotIndex;
+                        }
+
                         continue;
                     }
 
@@ -4033,9 +4041,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 }
 
                 // SingleVersion bytes have no other home: carry them over from the old cluster, remapped field by field when the component's layout changed.
-                if (oldPositions != null && oldPositions.TryGetValue(entityPK, out var oldPos))
+                if (oldChunkBase != null)
                 {
-                    CopyPreMigrationSlot(meta, state, oldCluster.Segment, oldCluster.Layout, oldPos, layout, clusterBase, slotIndex, cs);
+                    CopyPreMigrationSlot(meta, state, oldChunkBase, oldCluster.Layout, oldPos, layout, clusterBase, slotIndex);
                 }
 
                 header.EnabledBits = enabledMask;
@@ -4052,6 +4060,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
         finally
         {
+            if (hasOldCluster)
+            {
+                oldClusterAccessor.Dispose();
+            }
+
             mapAccessor.Dispose();
             clusterAccessor.Dispose();
         }
