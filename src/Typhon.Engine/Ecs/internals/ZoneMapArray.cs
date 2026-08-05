@@ -2,6 +2,8 @@ using System;
 using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace Typhon.Engine.Internals;
 
@@ -13,14 +15,78 @@ namespace Typhon.Engine.Internals;
 /// <para>Zone maps are NOT persisted — rebuilt from cluster data on reopen/recovery.</para>
 /// <para>Maintenance: lazy full recompute at tick fence for dirty clusters; eager widen on spawn.</para>
 /// <para>Staleness: between tick fences, bounds may be wider than actual data (destroyed boundary entity lingers).
-/// False positives acceptable (cluster checked but no match). False negatives impossible.</para>
+/// False positives acceptable (cluster checked but no match).</para>
+/// <para>
+/// <b>False negatives</b> — a cluster pruned out of a query it should have matched — are what this type must not produce, because they lose rows silently.
+/// Growth can no longer cause one: the arrays and their capacity are replaced as a single <see cref="Store"/> under a latch that element writers hold shared,
+/// so no write can land in a generation that is being copied away (review M5). <b>One window remains, and it is not growth:</b> two concurrent
+/// <see cref="Widen"/> calls on the SAME cluster are a plain read-compare-write, so the wider of the two bounds can be lost. That one is bounded by the
+/// tick-fence recompute, which re-derives the cluster's true min/max within the tick.
+/// </para>
 /// </remarks>
 internal sealed unsafe class ZoneMapArray
 {
-    private long[] _mins;       // [clusterChunkId] → min value (ordered long, sign-flipped for float/unsigned ordering)
-    private long[] _maxs;       // [clusterChunkId] → max value (ordered long, sign-flipped for float/unsigned ordering)
-    private bool[] _valid;      // [clusterChunkId] → true if min/max are initialized
-    private int _capacity;
+    /// <summary>
+    /// The three arrays and the capacity that describes them, as one immutable unit. Replaced wholesale on growth, never resized in place.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The four used to be four fields, grown by three <c>Array.Resize</c> calls and a capacity assignment with no lock and no ordering — which broke in two
+    /// ways at once (review M5). Publication: a reader could see the new capacity against an old array, or a min from one generation against a max from
+    /// another; on arm64 the stores can be observed out of order outright. Worse, and reachable on x64 today: <c>Array.Resize(ref _mins, …)</c> RE-READS the
+    /// field, so two concurrent growers could leave the three arrays at different lengths — a thread holding a small <c>newCap</c> shrinks the array the
+    /// other one just grew, and the next element write runs off the end of it.
+    /// </para>
+    /// <para>
+    /// Bundling them means a reader's single <see cref="Volatile.Read{T}"/> either sees a generation whole or does not see it at all. Three separately
+    /// published fields would need every reader to load them in a fixed order to be sound, and nothing in the type system makes that hold. Same reasoning as
+    /// <c>ArchetypeClusterState.EnsureClusterVisibilityCapacity</c>, whose comment cites this finding.
+    /// </para>
+    /// </remarks>
+    private sealed class Store
+    {
+        internal readonly long[] Mins;      // [clusterChunkId] → min value (ordered long, sign-flipped for float/unsigned ordering)
+        internal readonly long[] Maxs;      // [clusterChunkId] → max value (ordered long, sign-flipped for float/unsigned ordering)
+        internal readonly bool[] Valid;     // [clusterChunkId] → true if min/max are initialized
+        internal readonly int Capacity;
+
+        internal Store(long[] mins, long[] maxs, bool[] valid, int capacity)
+        {
+            Mins = mins;
+            Maxs = maxs;
+            Valid = valid;
+            Capacity = capacity;
+        }
+    }
+
+    private Store _store;
+
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // Growth latch. Element writers take it SHARED, the grower takes it EXCLUSIVE — so a generation is only ever copied when no writer is inside one.
+    //
+    // The snapshot alone is not enough, and the test that proves it is ConcurrentGrowth_KeepsEveryWrittenValueInBounds. Publishing atomically stops a reader
+    // seeing a mixed triple, but it does nothing about this:
+    //
+    //     writer:  resolves store = gen1, about to write Mins[5]
+    //     grower:  copies gen1 -> gen2 and publishes gen2
+    //     writer:  writes into gen1, which nobody will ever read again
+    //
+    // — a LOST WIDEN, which is a false negative: the planner prunes a cluster out of an indexed range query and rows silently vanish until the tick fence
+    // recomputes. The class contract says false negatives are impossible, so "bounded by the fence" is not good enough. A retry (write, re-read _store, redo if
+    // it moved) does NOT close it either: if the grower's publish lands after the writer's re-read, the writer concludes it is current and the write is still
+    // lost. Excluding the copy is the only version that makes the contract true.
+    //
+    // Cost: one uncontended shared acquire per Widen, i.e. per indexed field per commit. That is an Interlocked CAS — tens of cycles — next to the B+Tree
+    // descent it accompanies, which costs hundreds of nanoseconds. Padded for the same reason PaddedFinalizeLock is (rule MD-03).
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    [StructLayout(LayoutKind.Explicit, Size = 64)]
+    private struct PaddedGrowLatch
+    {
+        [FieldOffset(0)] public AccessControlSmall Lock;
+    }
+
+    private PaddedGrowLatch _growLatch;
     private readonly int _fieldSize;
     private readonly bool _isFloat;
     private readonly bool _isDouble;
@@ -28,10 +94,8 @@ internal sealed unsafe class ZoneMapArray
 
     internal ZoneMapArray(int initialCapacity, int fieldSize, bool isFloat, bool isDouble, bool isUnsigned = false)
     {
-        _capacity = Math.Max(16, initialCapacity);
-        _mins = new long[_capacity];
-        _maxs = new long[_capacity];
-        _valid = new bool[_capacity];
+        var capacity = Math.Max(16, initialCapacity);
+        _store = new Store(new long[capacity], new long[capacity], new bool[capacity], capacity);
         _fieldSize = fieldSize;
         _isFloat = isFloat;
         _isDouble = isDouble;
@@ -57,12 +121,21 @@ internal sealed unsafe class ZoneMapArray
     /// <param name="fieldOffset">Byte offset of the indexed field within the component.</param>
     public void Recompute(int clusterChunkId, byte* primaryBase, byte* dataBase, ArchetypeClusterInfo layout, int compSlot, int fieldOffset)
     {
-        EnsureCapacity(clusterChunkId);
-
+        // The scan runs OUTSIDE the latch and only the three stores are inside it: holding shared access across a 64-slot scan would stall every grower for
+        // no benefit, since the scan reads cluster memory, not this object.
         ulong occupancy = *(ulong*)primaryBase;
         if (occupancy == 0)
         {
-            _valid[clusterChunkId] = false;
+            var empty = AcquireForWrite(clusterChunkId);
+            try
+            {
+                empty.Valid[clusterChunkId] = false;
+            }
+            finally
+            {
+                ReleaseAfterWrite();
+            }
+
             return;
         }
 
@@ -89,9 +162,17 @@ internal sealed unsafe class ZoneMapArray
             }
         }
 
-        _mins[clusterChunkId] = min;
-        _maxs[clusterChunkId] = max;
-        _valid[clusterChunkId] = true;
+        var store = AcquireForWrite(clusterChunkId);
+        try
+        {
+            store.Mins[clusterChunkId] = min;
+            store.Maxs[clusterChunkId] = max;
+            store.Valid[clusterChunkId] = true;
+        }
+        finally
+        {
+            ReleaseAfterWrite();
+        }
     }
 
     /// <summary>
@@ -100,24 +181,32 @@ internal sealed unsafe class ZoneMapArray
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Widen(int clusterChunkId, byte* fieldPtr)
     {
-        EnsureCapacity(clusterChunkId);
+        // Decoded before taking the latch — it dereferences cluster memory, which the latch has nothing to do with.
         long val = ReadFieldAsOrderedLong(fieldPtr);
 
-        if (!_valid[clusterChunkId])
+        var store = AcquireForWrite(clusterChunkId);
+        try
         {
-            _mins[clusterChunkId] = val;
-            _maxs[clusterChunkId] = val;
-            _valid[clusterChunkId] = true;
-            return;
-        }
+            if (!store.Valid[clusterChunkId])
+            {
+                store.Mins[clusterChunkId] = val;
+                store.Maxs[clusterChunkId] = val;
+                store.Valid[clusterChunkId] = true;
+                return;
+            }
 
-        if (val < _mins[clusterChunkId])
-        {
-            _mins[clusterChunkId] = val;
+            if (val < store.Mins[clusterChunkId])
+            {
+                store.Mins[clusterChunkId] = val;
+            }
+            if (val > store.Maxs[clusterChunkId])
+            {
+                store.Maxs[clusterChunkId] = val;
+            }
         }
-        if (val > _maxs[clusterChunkId])
+        finally
         {
-            _maxs[clusterChunkId] = val;
+            ReleaseAfterWrite();
         }
     }
 
@@ -128,13 +217,16 @@ internal sealed unsafe class ZoneMapArray
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool MayContain(int clusterChunkId, long queryMin, long queryMax)
     {
-        if ((uint)clusterChunkId >= (uint)_capacity || !_valid[clusterChunkId])
+        // One acquire load for the whole check. The capacity and the three arrays come from the same generation by construction, so the bounds check below
+        // cannot be validated against one generation and then indexed into another.
+        var store = Volatile.Read(ref _store);
+        if ((uint)clusterChunkId >= (uint)store.Capacity || !store.Valid[clusterChunkId])
         {
             return true; // Unknown → don't skip (conservative)
         }
 
         // Standard interval overlap: !(clusterMax < queryMin || clusterMin > queryMax)
-        return _maxs[clusterChunkId] >= queryMin && _mins[clusterChunkId] <= queryMax;
+        return store.Maxs[clusterChunkId] >= queryMin && store.Mins[clusterChunkId] <= queryMax;
     }
 
     /// <summary>
@@ -142,9 +234,20 @@ internal sealed unsafe class ZoneMapArray
     /// </summary>
     public void Invalidate(int clusterChunkId)
     {
-        if ((uint)clusterChunkId < (uint)_capacity)
+        // A write, so it takes the latch like the other two — but never grows: an index past the current capacity has no bounds recorded, which is already
+        // what "invalid" means.
+        _growLatch.Lock.EnterSharedAccess(ref WaitContext.Null);
+        try
         {
-            _valid[clusterChunkId] = false;
+            var store = _store;
+            if ((uint)clusterChunkId < (uint)store.Capacity)
+            {
+                store.Valid[clusterChunkId] = false;
+            }
+        }
+        finally
+        {
+            _growLatch.Lock.ExitSharedAccess();
         }
     }
 
@@ -301,15 +404,63 @@ internal sealed unsafe class ZoneMapArray
         }
     }
 
-    private void EnsureCapacity(int index)
+    /// <summary>
+    /// Takes SHARED access and returns the generation to write through, growing first if <paramref name="index"/> does not fit. The caller <b>must</b> call
+    /// <see cref="ReleaseAfterWrite"/> when it has finished writing, in a <c>finally</c>.
+    /// </summary>
+    /// <remarks>
+    /// Growth cannot happen while shared access is held, so the returned generation is guaranteed to still be current when the caller writes into it. The
+    /// grow releases shared first — taking exclusive while holding shared would deadlock against its own wait for the shared count to drain — and then
+    /// loops, because another grower may have covered the index in between.
+    /// </remarks>
+    private Store AcquireForWrite(int index)
     {
-        if (index >= _capacity)
+        while (true)
         {
-            int newCap = Math.Max(_capacity * 2, index + 1);
-            Array.Resize(ref _mins, newCap);
-            Array.Resize(ref _maxs, newCap);
-            Array.Resize(ref _valid, newCap);
-            _capacity = newCap;
+            _growLatch.Lock.EnterSharedAccess(ref WaitContext.Null);
+            var store = _store;
+            if (index < store.Capacity)
+            {
+                return store;
+            }
+
+            _growLatch.Lock.ExitSharedAccess();
+            Grow(index);
+        }
+    }
+
+    private void ReleaseAfterWrite() => _growLatch.Lock.ExitSharedAccess();
+
+    /// <summary>
+    /// Replaces the current generation with one large enough for <paramref name="index"/>, under EXCLUSIVE access so no element write is in flight.
+    /// </summary>
+    private void Grow(int index)
+    {
+        _growLatch.Lock.EnterExclusiveAccess(ref WaitContext.Null);
+        try
+        {
+            // Re-check under the latch: another grower may have covered this index while we waited.
+            var store = _store;
+            if (index < store.Capacity)
+            {
+                return;
+            }
+
+            var newCap = Math.Max(store.Capacity * 2, index + 1);
+            var mins = new long[newCap];
+            var maxs = new long[newCap];
+            var valid = new bool[newCap];
+            Array.Copy(store.Mins, mins, store.Capacity);
+            Array.Copy(store.Maxs, maxs, store.Capacity);
+            Array.Copy(store.Valid, valid, store.Capacity);
+
+            // Release: a reader acquires this reference without the latch, so it must not be able to observe the object before its arrays are copied — it
+            // would read a default 0 as a real bound and prune a cluster that matches.
+            Volatile.Write(ref _store, new Store(mins, maxs, valid, newCap));
+        }
+        finally
+        {
+            _growLatch.Lock.ExitExclusiveAccess();
         }
     }
 }
