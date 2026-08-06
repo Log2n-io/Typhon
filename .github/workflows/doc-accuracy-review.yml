@@ -75,8 +75,12 @@ name: Doc-Accuracy Review (nightly)
 
 on:
   schedule:
-    - cron: "0 5 * * *"   # 05:00 UTC nightly — one hour before the Monday Layer-3 audit, so on Mondays
-                          # this runs first and the weekly sweep dedups against whatever it just filed.
+    - cron: "0 2 * * *"   # 02:00 UTC nightly — four hours before the Monday Layer-3 audit (06:00 UTC), so on Mondays
+                          # this still runs FIRST and the weekly sweep dedups against whatever it just filed. That
+                          # ordering is the load-bearing part, not the size of the gap.
+                          # Moved 3 h earlier (was 05:00) so the result is in place before the European morning, with
+                          # room for GitHub's scheduled-workflow queueing delay. Cron is UTC and never follows
+                          # CET/CEST, so the local hour shifts by one across DST: 04:00 France in summer, 03:00 in winter.
   workflow_dispatch:
     inputs:
       since_hours:

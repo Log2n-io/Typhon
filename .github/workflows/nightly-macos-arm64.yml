@@ -20,7 +20,10 @@ name: Nightly arm64 (macOS)
 
 on:
   schedule:
-    - cron: "0 3 * * *"     # 03:00 UTC daily — off-peak; results are waiting by European morning.
+    - cron: "0 0 * * *"     # 00:00 UTC daily — off-peak; results are waiting well before the European morning.
+                            # Moved 3 h earlier (was 03:00) so the run, plus GitHub's scheduled-workflow queueing delay,
+                            # still lands before anyone starts reading. Cron is UTC and never follows CET/CEST, so the
+                            # local hour shifts by one across DST: 02:00 France in summer, 01:00 in winter.
   workflow_dispatch: {}
   # Self-validation: the workflow runs on any PR that touches THIS FILE, and only then. Scheduled workflows and
   # workflow_dispatch only exist once the file is on the default branch, so without this a change here could not
