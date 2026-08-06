@@ -6,16 +6,57 @@ using System.Runtime.CompilerServices;
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// A sorted stream of (orderedKey, entityPK) pairs from a single archetype's per-archetype B+Tree.
-/// Collects all matching entries in a single pass (B+Tree enumerator is a ref struct that can't be stored).
-/// The orderedKey uses the same sign-flip encoding as <see cref="ZoneMapArray"/> for universal comparison.
+/// One archetype's contribution to an ordered query: a live B+Tree range cursor, plus one leaf's worth of
+/// (orderedKey, ClusterLocation) pairs buffered ahead of it.
 /// </summary>
+/// <remarks>
+/// <para>
+/// <b>This used to drain its whole range up front</b>, because <c>BTree.RangeEnumerator</c> is a <c>ref struct</c> and K
+/// of them cannot be held at once. Draining is bounded by <c>Skip+Take</c>, so the cost was not unbounded — it was
+/// <c>K·(Skip+Take)</c> entries built to emit <c>Skip+Take</c> of them, and the waste grew linearly with the number of
+/// archetypes a polymorphic query happens to span.
+/// </para>
+/// <para>
+/// <b>Now it holds a <see cref="LeafPageCursorState"/></b>, which is a plain struct and therefore array-storable, and
+/// refills one B+Tree leaf at a time. Read-ahead is bounded by the page, never by <c>Skip+Take</c>, so a stream that
+/// loses every comparison in the merge reads one leaf and stops. The page starts at
+/// <see cref="InitialPageCapacity"/> and doubles only while fills keep coming back full — that is, only for a stream
+/// the merge is demonstrably draining, which is what lets a deep <c>Skip</c> amortise without handing the same budget
+/// to the streams that contribute one row.
+/// </para>
+/// <para>
+/// <b>Rows are resolved to entity keys only when the merge emits them.</b> Resolution is a cluster chunk lookup whose
+/// locality is uncorrelated with key order (the index yields keys in order; the entities sit wherever they were
+/// spawned), so it is a cold lookup on essentially every row. Charging it to candidates instead of winners was the
+/// single largest cost in the old fill.
+/// </para>
+/// </remarks>
 internal unsafe struct ArchetypeSortedStream : IDisposable
 {
+    /// <summary>
+    /// Read-ahead budget for the first fill, in entries. Sized so a stream the merge abandons after one row has read
+    /// about one B+Tree leaf (19-29 entries) and stopped.
+    /// </summary>
+    private const int InitialPageCapacity = 64;
+
+    /// <summary>
+    /// Ceiling on the read-ahead budget. Reached only by a stream that has already supplied thousands of rows, at which
+    /// point the merge is plainly consuming it and the per-fill overhead is worth amortising.
+    /// </summary>
+    private const int MaxPageCapacity = 8192;
+
     private long[] _orderedKeys;    // Rented from ArrayPool
-    private long[] _entityPKs;      // Rented from ArrayPool
-    private int _count;
+    private int[] _locations;       // Rented from ArrayPool — packed ClusterLocation, resolved to an EntityPK on demand
+    private int _count;             // entries currently buffered
     private int _pos;
+    private int _pageCapacity;      // grows geometrically while the merge keeps draining this stream
+
+    private BTreeBase<PersistentStore> _tree;
+    private LeafPageCursorState _cursor;
+    private ChunkAccessor<PersistentStore> _indexAccessor;
+    private ChunkAccessor<PersistentStore> _clusterAccessor;
+    private ArchetypeClusterInfo _layout;
+    private bool _hasAccessors;
 
     public bool HasCurrent
     {
@@ -29,161 +70,111 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
         get => _orderedKeys[_pos];
     }
 
+    /// <summary>Resolves this row's cluster location to its entity key. Costs one cluster chunk lookup, so only call it for rows you are keeping.</summary>
     public long CurrentEntityPK
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        get => _entityPKs[_pos];
-    }
-
-    public int Count => _count;
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool Advance()
-    {
-        _pos++;
-        return _pos < _count;
+        get => ResolveEntityPK(_locations[_pos], ref _clusterAccessor, _layout);
     }
 
     /// <summary>
-    /// Create and fill a sorted stream from a per-archetype B+Tree range scan.
-    /// Collects entries in the [scanMin, scanMax] range in key order.
-    /// When <paramref name="maxEntries"/> is greater than 0, stops after collecting that many entries
-    /// (the B+Tree enumerator yields in sort order, so early termination is correct for Skip/Take).
+    /// Opens a streaming cursor over <paramref name="tree"/> restricted to [<paramref name="scanMin"/>,
+    /// <paramref name="scanMax"/>] and buffers its first page.
     /// </summary>
-    public static ArchetypeSortedStream Create(BTreeBase<PersistentStore> tree, KeyType keyType, long scanMin, long scanMax, bool allowMultiple, bool descending,
-        ArchetypeClusterState clusterState, ArchetypeClusterInfo layout, int maxEntries = 0)
+    /// <remarks>
+    /// <paramref name="scanMin"/> / <paramref name="scanMax"/> carry the bound keys' RAW BITS widened to a
+    /// <see cref="long"/> — the same convention the typed dispatch used when it cast them back with
+    /// <c>(int)</c> / <c>BitConverter.Int32BitsToSingle</c> — not the order-preserving encoding the merge compares on.
+    /// </remarks>
+    public static ArchetypeSortedStream Create(BTreeBase<PersistentStore> tree, KeyType keyType, long scanMin, long scanMax, bool descending,
+        ArchetypeClusterState clusterState, ArchetypeClusterInfo layout)
     {
-        var stream = new ArchetypeSortedStream();
-        stream._pos = 0;
-        stream._count = 0;
-
-        // Initial capacity — use maxEntries as hint when available to avoid over-allocating
-        int initialCapacity = maxEntries > 0 ? Math.Min(maxEntries, 256) : 256;
-        stream._orderedKeys = ArrayPool<long>.Shared.Rent(initialCapacity);
-        stream._entityPKs = ArrayPool<long>.Shared.Rent(initialCapacity);
-
-        // Dispatch on KeyType to open the correct typed B+Tree enumerator
-        switch (keyType)
+        // Bool and String64 have no typed B+Tree. Dispatch is virtual now, so such a tree would not fall out of a switch
+        // — it would fill pages whose keys all encode to 0, comparing equal, and the merge would return this archetype's
+        // rows in an arbitrary order with nothing raised. KeyRange.IsStreamable is supposed to keep them off this path;
+        // this is the assertion that it did (#663 shape, #675).
+        if (!KeyRange.IsStreamable(keyType))
         {
-            case KeyType.Int:
-                FillTypedUnique((BTree<int, PersistentStore>)tree, (int)scanMin, (int)scanMax, allowMultiple, descending, keyType, ref stream, clusterState, layout,
-                    maxEntries);
-                break;
-            case KeyType.Long:
-                FillTypedUnique((BTree<long, PersistentStore>)tree, scanMin, scanMax, allowMultiple, descending, keyType, ref stream, clusterState, layout,
-                    maxEntries);
-                break;
-            case KeyType.Float:
-                FillTypedUnique((BTree<float, PersistentStore>)tree,
-                    BitConverter.Int32BitsToSingle((int)scanMin), BitConverter.Int32BitsToSingle((int)scanMax), allowMultiple, descending, keyType,
-                    ref stream, clusterState, layout, maxEntries);
-                break;
-            case KeyType.Double:
-                FillTypedUnique((BTree<double, PersistentStore>)tree, BitConverter.Int64BitsToDouble(scanMin), BitConverter.Int64BitsToDouble(scanMax),
-                    allowMultiple, descending, keyType, ref stream, clusterState, layout, maxEntries);
-                break;
-            case KeyType.Short:
-                FillTypedUnique((BTree<short, PersistentStore>)tree, (short)scanMin, (short)scanMax, allowMultiple, descending, keyType, ref stream,
-                    clusterState, layout, maxEntries);
-                break;
-            case KeyType.UShort:
-                FillTypedUnique((BTree<ushort, PersistentStore>)tree, (ushort)scanMin, (ushort)scanMax, allowMultiple, descending, keyType, ref stream,
-                    clusterState, layout, maxEntries);
-                break;
-            case KeyType.Byte:
-                FillTypedUnique((BTree<byte, PersistentStore>)tree, (byte)scanMin, (byte)scanMax, allowMultiple, descending, keyType, ref stream,
-                    clusterState, layout, maxEntries);
-                break;
-            case KeyType.SByte:
-                FillTypedUnique((BTree<sbyte, PersistentStore>)tree, (sbyte)scanMin, (sbyte)scanMax, allowMultiple, descending, keyType, ref stream,
-                    clusterState, layout, maxEntries);
-                break;
-            case KeyType.UInt:
-                FillTypedUnique((BTree<uint, PersistentStore>)tree, (uint)scanMin, (uint)scanMax, allowMultiple, descending, keyType, ref stream,
-                    clusterState, layout, maxEntries);
-                break;
-            case KeyType.ULong:
-                // ULong stored as BTree<long> (same convention as PipelineExecutor)
-                FillTypedUnique((BTree<long, PersistentStore>)tree, scanMin, scanMax, allowMultiple, descending, keyType, ref stream, clusterState, layout,
-                    maxEntries);
-                break;
-            default:
-                // Bool and String64 have no typed tree. Falling out of the switch would return an EMPTY stream, which the K-way merge cannot distinguish from
-                // an archetype that genuinely matched nothing — so the ordered query would silently drop that archetype's entities (#663 shape, #675).
-                ThrowHelper.ThrowInvalidOp(
-                    $"Ordered query requested a sorted stream over key type {keyType}, which has no B+Tree range scan. KeyRange.IsStreamable must reject this "
-                    + "type so the query sorts from the SoA scan instead.");
-                break;
+            ThrowHelper.ThrowInvalidOp(
+                $"Ordered query requested a sorted stream over key type {keyType}, which has no B+Tree range scan. KeyRange.IsStreamable must reject this "
+                + "type so the query sorts from the SoA scan instead.");
+        }
+
+        var stream = new ArchetypeSortedStream
+        {
+            _tree = tree,
+            _layout = layout,
+            _clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor(),
+            _indexAccessor = tree.Segment.CreateChunkAccessor(),
+            _hasAccessors = true,
+            _orderedKeys = ArrayPool<long>.Shared.Rent(InitialPageCapacity),
+            _locations = ArrayPool<int>.Shared.Rent(InitialPageCapacity),
+            _pageCapacity = InitialPageCapacity,
+            _cursor = new LeafPageCursorState
+            {
+                MinKeyBits = scanMin,
+                MaxKeyBits = scanMax,
+                KeyType = keyType,
+                Reverse = descending
+            }
+        };
+
+        try
+        {
+            stream.Refill();
+        }
+        catch
+        {
+            stream.Dispose();
+            throw;
         }
 
         return stream;
     }
 
-    /// <summary>Fill the stream from a typed B+Tree (handles both unique and AllowMultiple).</summary>
-    private static void FillTypedUnique<TKey>(BTree<TKey, PersistentStore> tree, TKey minKey, TKey maxKey, bool allowMultiple, bool descending, KeyType keyType,
-        ref ArchetypeSortedStream stream, ArchetypeClusterState clusterState, ArchetypeClusterInfo layout, int maxEntries) where TKey : unmanaged
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool Advance()
     {
-        var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
-        try
+        _pos++;
+        if (_pos < _count)
         {
-            if (allowMultiple)
-            {
-                FillMultiple(tree, minKey, maxKey, descending, keyType, ref stream, ref clusterAccessor, layout, maxEntries);
-            }
-            else
-            {
-                FillUnique(tree, minKey, maxKey, descending, keyType, ref stream, ref clusterAccessor, layout, maxEntries);
-            }
+            return true;
         }
-        finally
-        {
-            clusterAccessor.Dispose();
-        }
+
+        Refill();
+        return _pos < _count;
     }
 
-    private static void FillUnique<TKey>(BTree<TKey, PersistentStore> tree, TKey minKey, TKey maxKey, bool descending, KeyType keyType,
-        ref ArchetypeSortedStream stream, ref ChunkAccessor<PersistentStore> clusterAccessor, ArchetypeClusterInfo layout, int maxEntries) where TKey : unmanaged
+    /// <summary>Pulls the next leaf's entries into the page buffer, growing it if one indivisible key needs more room.</summary>
+    /// <remarks>Kept out of line so <see cref="Advance"/> stays small enough to inline — the buffered step is the hot one by a factor of a leaf.</remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void Refill()
     {
-        using var enumerator = descending ? tree.EnumerateRangeDescending(minKey, maxKey) : tree.EnumerateRange(minKey, maxKey);
+        _pos = 0;
+        _count = 0;
 
-        while (enumerator.MoveNext())
+        // A fill can legitimately come back empty without the range being over — it walked leaves whose entries were all
+        // behind the cursor, or hit its per-call leaf budget. Only Exhausted ends the stream.
+        while (_count == 0 && !_cursor.Exhausted)
         {
-            var item = enumerator.Current;
-            long orderedKey = KeyToOrderedLong(item.Key, keyType);
-            long entityPK = ResolveEntityPK(item.Value, ref clusterAccessor, layout);
-
-            AppendEntry(ref stream, orderedKey, entityPK);
-
-            if (maxEntries > 0 && stream._count >= maxEntries)
+            var written = _tree.FillOrderedPage(ref _cursor, _orderedKeys.AsSpan(0, _pageCapacity), _locations.AsSpan(0, _pageCapacity), ref _indexAccessor);
+            if (written < 0)
             {
-                break;
+                // An AllowMultiple key whose value list is larger than the whole page. Grow and ask again; the cursor
+                // has not moved, so nothing is lost or repeated.
+                GrowBuffers(-written);
+                continue;
             }
+
+            _count = written;
         }
-    }
 
-    private static void FillMultiple<TKey>(BTree<TKey, PersistentStore> tree, TKey minKey, TKey maxKey, bool descending, KeyType keyType,
-        ref ArchetypeSortedStream stream, ref ChunkAccessor<PersistentStore> clusterAccessor, ArchetypeClusterInfo layout, int maxEntries) where TKey : unmanaged
-    {
-        using var enumerator = descending ? tree.EnumerateRangeMultipleDescending(minKey, maxKey) : tree.EnumerateRangeMultiple(minKey, maxKey);
-
-        while (enumerator.MoveNextKey())
+        // A page that came back completely full is a stream the merge is actually draining, so widen its read-ahead for
+        // next time. This is what keeps a deep Skip from paying a fresh leaf snapshot every 64 rows, without giving that
+        // budget to the streams that lose every comparison and are read once.
+        if (_count == _pageCapacity && _pageCapacity < MaxPageCapacity)
         {
-            long orderedKey = KeyToOrderedLong(enumerator.CurrentKey, keyType);
-            do
-            {
-                var values = enumerator.CurrentValues;
-                for (int i = 0; i < values.Length; i++)
-                {
-                    long entityPK = ResolveEntityPK(values[i], ref clusterAccessor, layout);
-                    AppendEntry(ref stream, orderedKey, entityPK);
-
-                    if (maxEntries > 0 && stream._count >= maxEntries)
-                    {
-                        return;
-                    }
-                }
-            }
-            while (enumerator.NextChunk());
+            GrowBuffers(_pageCapacity * 2, preserve: true);
         }
     }
 
@@ -198,68 +189,32 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
         return *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
     }
 
-    /// <summary>Append an entry to the stream, growing buffers if needed.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void AppendEntry(ref ArchetypeSortedStream stream, long orderedKey, long entityPK)
-    {
-        if (stream._count >= stream._orderedKeys.Length)
-        {
-            GrowBuffers(ref stream);
-        }
-
-        stream._orderedKeys[stream._count] = orderedKey;
-        stream._entityPKs[stream._count] = entityPK;
-        stream._count++;
-    }
-
-    private static void GrowBuffers(ref ArchetypeSortedStream stream)
-    {
-        int newCapacity = stream._orderedKeys.Length * 2;
-        var newKeys = ArrayPool<long>.Shared.Rent(newCapacity);
-        var newPKs = ArrayPool<long>.Shared.Rent(newCapacity);
-
-        Array.Copy(stream._orderedKeys, newKeys, stream._count);
-        Array.Copy(stream._entityPKs, newPKs, stream._count);
-
-        ArrayPool<long>.Shared.Return(stream._orderedKeys);
-        ArrayPool<long>.Shared.Return(stream._entityPKs);
-
-        stream._orderedKeys = newKeys;
-        stream._entityPKs = newPKs;
-    }
-
     /// <summary>
-    /// Convert a typed B+Tree key to the universal ordered-long encoding.
-    /// Same sign-flip logic as <see cref="ZoneMapArray.ReadFieldAsOrderedLong"/>.
+    /// Re-rents the page buffers at <paramref name="minimumCapacity"/>. Set <paramref name="preserve"/> when entries
+    /// already on the page must survive the growth; the "one key does not fit" path does not need it, because that page
+    /// is empty by definition.
     /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static long KeyToOrderedLong<TKey>(TKey key, KeyType keyType) where TKey : unmanaged
+    private void GrowBuffers(int minimumCapacity, bool preserve = false)
     {
-        switch (keyType)
+        var newKeys = ArrayPool<long>.Shared.Rent(minimumCapacity);
+        var newLocations = ArrayPool<int>.Shared.Rent(minimumCapacity);
+
+        if (preserve && _count > 0)
         {
-            case KeyType.Float:
-                return ZoneMapArray.FloatToOrderedLong(Unsafe.As<TKey, float>(ref key));
-            case KeyType.Double:
-                return ZoneMapArray.DoubleToOrderedLong(Unsafe.As<TKey, double>(ref key));
-            case KeyType.UShort:
-                return Unsafe.As<TKey, ushort>(ref key) ^ (1L << 15);
-            case KeyType.UInt:
-                return Unsafe.As<TKey, uint>(ref key) ^ (1L << 31);
-            case KeyType.ULong:
-                return Unsafe.As<TKey, long>(ref key) ^ long.MinValue;
-            case KeyType.Byte:
-                return Unsafe.As<TKey, byte>(ref key);
-            default:
-                // Signed integer types (sbyte, short, int, long): direct widening preserves order
-                return keyType switch
-                {
-                    KeyType.SByte => Unsafe.As<TKey, sbyte>(ref key),
-                    KeyType.Short => Unsafe.As<TKey, short>(ref key),
-                    KeyType.Int => Unsafe.As<TKey, int>(ref key),
-                    KeyType.Long => Unsafe.As<TKey, long>(ref key),
-                    _ => 0
-                };
+            Array.Copy(_orderedKeys, newKeys, _count);
+            Array.Copy(_locations, newLocations, _count);
         }
+
+        ArrayPool<long>.Shared.Return(_orderedKeys);
+        ArrayPool<int>.Shared.Return(_locations);
+        _orderedKeys = newKeys;
+        _locations = newLocations;
+
+        // Always take the whole rented array. Clamping to MaxPageCapacity here would be a livelock: a single
+        // AllowMultiple key holding more than that many values would demand a bigger page, get one, and then be told to
+        // fill a span that is still too small — forever. The ceiling belongs to the VOLUNTARY growth in Refill, which is
+        // an optimisation, not to the demanded growth, which is a requirement.
+        _pageCapacity = Math.Min(newKeys.Length, newLocations.Length);
     }
 
     public void Dispose()
@@ -270,10 +225,17 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
             _orderedKeys = null;
         }
 
-        if (_entityPKs != null)
+        if (_locations != null)
         {
-            ArrayPool<long>.Shared.Return(_entityPKs);
-            _entityPKs = null;
+            ArrayPool<int>.Shared.Return(_locations);
+            _locations = null;
+        }
+
+        if (_hasAccessors)
+        {
+            _hasAccessors = false;
+            _clusterAccessor.Dispose();
+            _indexAccessor.Dispose();
         }
     }
 }
@@ -336,8 +298,15 @@ internal struct KWayMergeState : IDisposable
     /// Pop the next entry from the merged stream.
     /// Returns false when all streams are exhausted.
     /// </summary>
+    /// <param name="entityPK">The row's entity key, or 0 when <paramref name="resolveEntity"/> is false.</param>
+    /// <param name="resolveEntity">
+    /// False for a row the caller is about to discard. Resolving costs a cluster chunk lookup whose locality is
+    /// uncorrelated with key order, and <c>Skip(n)</c> discards exactly n rows — this used to resolve all of them, so a
+    /// <c>Skip(2000).Take(50)</c> paid 2 050 lookups to return 50 rows. The stream defers resolution precisely so that
+    /// the merge can decline it; asking for it unconditionally here threw that away.
+    /// </param>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool MoveNext(out long entityPK)
+    public bool MoveNext(out long entityPK, bool resolveEntity = true)
     {
         if (_heapSize == 0)
         {
@@ -346,7 +315,7 @@ internal struct KWayMergeState : IDisposable
         }
 
         int topStream = _heap[0];
-        entityPK = _streams[topStream].CurrentEntityPK;
+        entityPK = resolveEntity ? _streams[topStream].CurrentEntityPK : 0;
 
         // Advance the stream that yielded the current entry
         if (_streams[topStream].Advance())

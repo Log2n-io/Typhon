@@ -1,4 +1,4 @@
-﻿// unset
+// unset
 
 using System.Runtime.CompilerServices;
 
@@ -43,6 +43,19 @@ internal abstract class BTreeBase<TStore> : IBTreeIndex where TStore : struct, I
         out int oldHeadBufferId, out int newHeadBufferId);
 
     public abstract void CheckConsistency(ref ChunkAccessor<TStore>accessor);
+
+    /// <summary>
+    /// Advances a parked range cursor by one leaf, writing that leaf's in-range entries as (ordered key, value) pairs.
+    /// See <see cref="BTree{TKey,TStore}.FillOrderedPage"/> for the contract, including the negative "grow the spans" return.
+    /// </summary>
+    /// <remarks>
+    /// This is the whole reason the streaming K-way merge does not have to be generic over the key type. The cursor state is non-generic, the output is
+    /// non-generic, and the typed override does the key comparison and the ordered encoding on its side of the call. Without it, holding K live cursors would
+    /// mean making <c>KWayMergeState</c>, <c>ArchetypeSortedStream</c> and everything they touch generic over <c>TKey</c> — for a merge whose entire job is
+    /// to compare keys that have already been normalised to <see cref="long"/>.
+    /// </remarks>
+    internal abstract int FillOrderedPage(ref LeafPageCursorState state, System.Span<long> orderedKeys, System.Span<int> values,
+        ref ChunkAccessor<TStore> accessor);
 
     // Deliberately NOT here: the OLC diagnostic counters (OptimisticRestarts, PessimisticFallbacks, SplitCount,
     // MergeCount, MoveRightCount, WriteLockFailures, ContentionSplitCount). Five of them were abstract on this base and

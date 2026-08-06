@@ -159,6 +159,12 @@ class Program
                 return;
             }
 
+            if (args.Contains("--profile-fanout"))
+            {
+                OrderedFanOutProfile.Run(args);
+                return;
+            }
+
             if (args.Contains("--parallel-dispatch"))
             {
                 ParallelDispatchBenchmark.Run();

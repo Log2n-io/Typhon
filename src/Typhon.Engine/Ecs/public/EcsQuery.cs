@@ -893,10 +893,6 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var streams = System.Buffers.ArrayPool<ArchetypeSortedStream>.Shared.Rent(8);
         var streamCount = 0;
 
-        // Early termination: each per-archetype stream only needs skip+take entries at most.
-        // The B+Tree enumerator yields in sort order, so stopping early is correct.
-        var maxPerStream = _take > 0 ? _skip + _take : 0;
-
         // The plan's PrimaryFieldIndex may be -1 when the shared B+Tree has 0 entries (cluster archetypes store entries in per-archetype B+Trees,
         // not the shared one). In that case, use the OrderBy field index directly and full type range for scan bounds.
         Debug.Assert(_orderBy.HasValue, "ExecuteOrderedClustered requires OrderBy to be set");
@@ -1001,8 +997,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     streams = newStreams;
                 }
 
-                streams[streamCount++] = ArchetypeSortedStream.Create(field.Index, keyType, scanMin, scanMax, field.AllowMultiple, descending,
-                    clusterState, clusterState.Layout, maxPerStream);
+                // No per-stream entry cap: the stream is a live cursor now, so a stream the merge stops consuming stops reading. The cap this used to pass
+                // (skip+take) was the bound on how much each stream drained EAGERLY, and it is what made an ordered Take cost K times what it emitted.
+                streams[streamCount++] = ArchetypeSortedStream.Create(field.Index, keyType, scanMin, scanMax, descending, clusterState, clusterState.Layout);
             }
 
             if (streamCount == 0)
@@ -1042,7 +1039,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var taken = 0;
         var take = _take > 0 ? _take : int.MaxValue;
 
-        while (merge.MoveNext(out var entityPK))
+        // Tell the merge up front whether this row is going to be kept: a skipped row needs its ORDER, which the merge
+        // already has, but never its entity key.
+        while (merge.MoveNext(out var entityPK, skipped >= _skip))
         {
             if (skipped < _skip)
             {
@@ -1152,8 +1151,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
 
             // Scan the full B+Tree to build PK→key mapping for entities in our result set
-            var stream = ArchetypeSortedStream.Create(field.Index, orderKeyType, KeyRange.TypeMin(orderKeyType), KeyRange.TypeMax(orderKeyType),
-                field.AllowMultiple, false, clusterState, clusterState.Layout);
+            var stream = ArchetypeSortedStream.Create(field.Index, orderKeyType, KeyRange.TypeMin(orderKeyType), KeyRange.TypeMax(orderKeyType), false,
+                clusterState, clusterState.Layout);
             try
             {
                 while (stream.HasCurrent)
