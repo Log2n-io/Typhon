@@ -352,6 +352,77 @@ public class DagSchedulerTests
             "No more ticks should execute after shutdown");
     }
 
+    // Regression: a scheduler lifecycle must not leave a thread running. Shutdown() bumps _tickGeneration — the same field workers use to detect a new tick —
+    // so a Shutdown landing on a tick dispatch made every worker take the shutdown exit WITHOUT processing a system. _systemsRemaining never reached 0, the
+    // timer thread's completion barrier span forever at ~100% of a core, and JoinWorkers() timed out, discarded its result and let Shutdown() report success.
+    // One core lost per occurrence, permanently, silently.
+    //
+    // Invisible on a dev box — 32 cores absorb it and the suite still passes in 50 s. On the 3-core arm64 nightly runner the spinners accumulated until the
+    // host could not answer VSTest's heartbeat and was killed as "Test host process crashed", after silently dropping ~160 tests. This asserts the property
+    // directly: threads created by the cycles below must all be gone or idle afterwards, because a leaked spinner burns a core forever.
+    // Sensitive: the assertion is a CPU-duty measurement, so it belongs in the gate's serial pass rather than beside 40 other fixtures competing for cores.
+    // 200 cycles is not padding — at 20 the race never fired on a 32-core box and the test passed with the bug still present, which is worse than no test.
+    [Test]
+    [CancelAfter(60_000)]
+    [NonParallelizable]
+    [Category("Sensitive")]
+    public void SchedulerLifecycle_RacingShutdownAgainstTick_LeavesNoRunningThread()
+    {
+        const int cycles = 200;
+
+        static Dictionary<int, TimeSpan> SnapshotThreads()
+        {
+            var map = new Dictionary<int, TimeSpan>();
+            foreach (System.Diagnostics.ProcessThread t in System.Diagnostics.Process.GetCurrentProcess().Threads)
+            {
+                // A thread can die between enumeration and access; it is then not one of ours to worry about.
+                try { map[t.Id] = t.TotalProcessorTime; } catch { /* exited */ }
+            }
+            return map;
+        }
+
+        var before = SnapshotThreads();
+
+        // Shutdown deliberately lands as close to a tick dispatch as possible — that is the race. 20 cycles at 1 kHz makes hitting it near-certain; before the
+        // fix this leaked roughly one spinner every few cycles.
+        for (var i = 0; i < cycles; i++)
+        {
+            using var registry = new ResourceRegistry(new ResourceRegistryOptions { Name = $"LeakProbe{i}" });
+            using var scheduler = NewDag(workerCount: 4)
+                .CallbackSystem("A", _ => { })
+                .CallbackSystem("B", _ => { }, after: "A")
+                .Build(registry.Runtime);
+            scheduler.Start();
+            SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= 1, TimeSpan.FromSeconds(5));
+            scheduler.Shutdown();
+        }
+
+        // Measure over a window with nothing of ours running: any thread born during the cycles that is still burning CPU is a leak. Duty, not total CPU, so a
+        // busy CI box running other fixtures cannot fail this — only a thread spinning on its own can.
+        var settle = SnapshotThreads();
+        Thread.Sleep(500);
+        var after = SnapshotThreads();
+
+        var spinners = new List<string>();
+        foreach (var (tid, cpuAfter) in after)
+        {
+            if (before.ContainsKey(tid) || !settle.TryGetValue(tid, out var cpuSettle))
+            {
+                continue; // pre-existing thread, or born during the measurement window itself
+            }
+
+            var duty = (cpuAfter - cpuSettle).TotalMilliseconds / 500.0;
+            if (duty >= 0.5)
+            {
+                spinners.Add($"tid {tid} at {duty * 100:F0}% duty");
+            }
+        }
+
+        Assert.That(spinners, Is.Empty,
+            "every thread created by a scheduler lifecycle must be stopped by Shutdown/Dispose — a survivor spins on a core for the life of the process: "
+            + string.Join(", ", spinners));
+    }
+
     [Test]
     public void SingleThreadedMode_Works()
     {

@@ -28,4 +28,17 @@ public sealed partial class DagScheduler
     [LoggerMessage(Level = LogLevel.Warning,
         Message = "Overload level changed: {PreviousLevel} -> {NewLevel} at tick {TickNumber}")]
     private partial void LogOverloadLevelChanged(OverloadLevel previousLevel, OverloadLevel newLevel, long tickNumber);
+
+    // Error, not Warning: the thread is still alive and still consuming CPU, and nothing will ever reclaim it. Silence here is what let stranded workers
+    // accumulate one per shutdown until the process was starved of cores.
+    [LoggerMessage(Level = LogLevel.Error,
+        Message = "Worker {WorkerId} (thread {ManagedThreadId}) did not exit within the shutdown join window and is still running — it will keep consuming CPU "
+                  + "for the lifetime of this process")]
+    private partial void LogWorkerJoinTimeout(int workerId, int managedThreadId);
+
+    // Expected only when Shutdown races a tick dispatch, which leaves systems nobody will ever run. The work of that tick is lost — say so, rather than
+    // letting a silently truncated tick look like a clean stop.
+    [LoggerMessage(Level = LogLevel.Warning,
+        Message = "Track {TrackIndex} was abandoned during shutdown with {SystemsRemaining} system(s) unfinished — that tick's work did not complete")]
+    private partial void LogTickDrainAbandonedOnShutdown(int trackIndex, int systemsRemaining);
 }

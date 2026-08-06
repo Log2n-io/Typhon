@@ -250,7 +250,21 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
     private int _tickGeneration;
     private int _tickInProgress;
+    /// <summary>
+    /// Set once to stop the worker pool. Every access goes through <see cref="Volatile"/> — this is the stop signal two SPIN loops key on (the worker's
+    /// within-tick dispatch loop and the timer thread's completion barrier in <c>DispatchTrackMultiThreaded</c>), and a plain read inside a spin loop may be
+    /// hoisted out of it by the JIT once tiered compilation optimises the method, after which the thread can never observe the store. On arm64 the plain
+    /// store carries no ordering guarantee either. Cheap: acquire/release are plain movs on x64, and this is read once per spin iteration, never per element.
+    /// </summary>
     private int _workerShutdown;
+
+    /// <summary>
+    /// How long the tick-completion barrier tolerates a STALL — no system completing at all — after shutdown has been requested, before abandoning the tick.
+    /// Not a cap on tick duration: the timer resets on every completion, so an actively-progressing tick is never cut short however slow its systems are.
+    /// Sits well under <c>JoinWorkers</c>'s 5 s join window on purpose — the barrier must give up FIRST so it can clear <c>_tickInProgress</c> and release
+    /// the workers, which then exit inside their own window.
+    /// </summary>
+    private static readonly TimeSpan ShutdownDrainGrace = TimeSpan.FromMilliseconds(250);
     private CacheLinePaddedInt _systemsRemaining;
     private long _nextTickTimestamp;       // Used by GetNextTick for metronome advancement
     private long _currentTickNumber;
@@ -362,7 +376,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     /// <inheritdoc />
     protected override long GetNextTick()
     {
-        if (_workerShutdown != 0)
+        if (Volatile.Read(ref _workerShutdown) != 0)
         {
             return long.MaxValue;
         }
@@ -379,7 +393,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     /// <inheritdoc />
     protected override void ExecuteCallbacks(long scheduledTick, long actualTick)
     {
-        if (_workerShutdown != 0)
+        if (Volatile.Read(ref _workerShutdown) != 0)
         {
             return;
         }
@@ -681,14 +695,23 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     }
 
     /// <summary>
-    /// Shuts down the scheduler: stops accepting new ticks, waits for the current tick to finish, joins worker threads, then stops the timer thread.
+    /// Stops the worker pool: signals shutdown, releases any worker parked between ticks, and joins them.
+    /// <para>
+    /// A tick already in flight is ABANDONED, not drained. That is not a choice so much as an admission: this method signals every worker to stop before it
+    /// waits, so the systems remaining in that tick have nobody left to run them, and "waiting for the current tick to finish" could only ever mean waiting
+    /// forever. A caller that needs the in-flight tick's work to land must stop dispatching and let the tick complete BEFORE calling this.
+    /// </para>
+    /// <para>
+    /// Does NOT stop the timer thread — <see cref="Dispose(bool)"/> does, via the base class. The thread stays alive but stops producing ticks, so
+    /// <see cref="CurrentTickNumber"/> is stable once this returns.
+    /// </para>
     /// </summary>
     public void Shutdown()
     {
         LogShutdownRequested();
 
         // Signal workers to exit
-        _workerShutdown = 1;
+        Volatile.Write(ref _workerShutdown, 1);
         Interlocked.Increment(ref _tickGeneration);
         _tickStartSignal.Set(); // Wake any blocked workers
 
@@ -707,7 +730,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         if (disposing)
         {
             // Ensure workers are signaled to stop
-            _workerShutdown = 1;
+            Volatile.Write(ref _workerShutdown, 1);
             Interlocked.Increment(ref _tickGeneration);
             _tickStartSignal.Set();
             JoinWorkers();
@@ -1125,7 +1148,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
         var lastGen = _tickGeneration;
 
-        while (_workerShutdown == 0)
+        while (Volatile.Read(ref _workerShutdown) == 0)
         {
             // ═══ Between-tick: kernel wait on signal ═══
             // Workers block here with zero CPU cost. The timer thread signals _tickStartSignal when the next tick fires. Wake latency is ~1-5µs
@@ -1134,7 +1157,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             var btStart = Stopwatch.GetTimestamp();
             while (_tickGeneration == lastGen)
             {
-                if (_workerShutdown != 0)
+                if (Volatile.Read(ref _workerShutdown) != 0)
                 {
                     betweenTickSpan.WakeReason = 1; // shutdown
                     var btEnd = Stopwatch.GetTimestamp();
@@ -1155,7 +1178,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                 TyphonEvent.EmitSchedulerWorkerWake((byte)workerId, (uint)Math.Min(btUs2, uint.MaxValue));
             }
 
-            if (_workerShutdown != 0)
+            if (Volatile.Read(ref _workerShutdown) != 0)
             {
                 return;
             }
@@ -1175,6 +1198,10 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             // Started when idleSpins first goes from 0 → 1; ended when work is found.
             var idleSpan = default(SchedulerWorkerIdleEvent);
             var idleSpellStart = 0L;
+            // Deliberately NOT gated on _workerShutdown: a worker that is mid-tick must finish the tick, or shutdown silently drops the work of the tick in
+            // flight (it cost a real regression to learn this — Telemetry_ReadyTick_NotInflatedBySibling went red with ReadyTick 0 because the last tick was
+            // abandoned). The escape hatch is _tickInProgress, which the completion barrier in DispatchTrackMultiThreaded now always clears — including when
+            // it gives up on a tick that can no longer complete. That is what stops this loop spinning forever.
             while (_tickInProgress == 1 && _systemsRemaining.Value > 0)
             {
                 var sysIdx = FindReadySystem();
@@ -1910,13 +1937,24 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     // Helpers
     // ═══════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// Joins the worker threads, bounded so a wedged worker cannot hang the caller forever. A worker that misses its join window is REPORTED: discarding
+    /// <see cref="Thread.Join(TimeSpan)"/>'s result is what turned a transient shutdown hang into permanent silent damage — the thread stays alive spinning
+    /// at ~100% of a core for the life of the process while Shutdown returns as though it had stopped cleanly, so the cost lands on whatever runs next.
+    /// </summary>
     private void JoinWorkers()
     {
-        foreach (var worker in _workers)
+        for (var i = 0; i < _workers.Length; i++)
         {
-            if ((worker.ThreadState & System.Threading.ThreadState.Unstarted) == 0)
+            var worker = _workers[i];
+            if ((worker.ThreadState & System.Threading.ThreadState.Unstarted) != 0)
             {
-                worker.Join(TimeSpan.FromSeconds(5));
+                continue;
+            }
+
+            if (!worker.Join(TimeSpan.FromSeconds(5)))
+            {
+                LogWorkerJoinTimeout(i, worker.ManagedThreadId);
             }
         }
     }
@@ -2056,11 +2094,42 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
         // Wait for the track's systems to complete. The timer thread must spin — Thread.Yield() on Windows can stall up to 15.6 ms, cascading into every
         // subsequent tick.
+        //
+        // This wait used to be UNBOUNDED, and there is a race that makes it unsatisfiable. Shutdown() bumps _tickGeneration — the same field workers use to
+        // detect a new tick — so a Shutdown landing between the Increment above and the workers waking makes every worker take the `_workerShutdown != 0`
+        // exit in WorkerLoop and return WITHOUT processing a single system. _systemsRemaining then never reaches 0, and this loop span forever at ~100% of a
+        // core for the remaining life of the process, while JoinWorkers() timed out, discarded its result, and let Shutdown() report success. On a machine
+        // with spare cores nobody noticed; pinned to the 3 cores of the arm64 nightly runner, each leaked spinner permanently removed a third of the box and
+        // the suite eventually failed VSTest's heartbeat and was killed as "Test host process crashed".
+        //
+        // Normal operation is untouched: nothing below runs until shutdown has been requested. After that the drain is bounded by STALL, not by elapsed time
+        // — the clock resets every time a system completes, so a tick that is still making progress is never cut short no matter how slow its systems are,
+        // while the unsatisfiable case (no worker left to decrement anything) gives up one grace period after the last completion. Bounding on elapsed time
+        // instead charged the full grace to every occurrence and cost ~2 s per race; bounding on stall charges it once, only when genuinely stuck.
+        var lastRemaining = -1;
+        var stallStart = 0L;
         while (_systemsRemaining.Value > 0)
         {
+            if (Volatile.Read(ref _workerShutdown) != 0)
+            {
+                var remaining = _systemsRemaining.Value;
+                if (remaining != lastRemaining)
+                {
+                    lastRemaining = remaining;
+                    stallStart = Stopwatch.GetTimestamp();
+                }
+                else if (Stopwatch.GetElapsedTime(stallStart) > ShutdownDrainGrace)
+                {
+                    LogTickDrainAbandonedOnShutdown(trackIndex, remaining);
+                    break;
+                }
+            }
+
             Thread.SpinWait(1);
         }
 
+        // Always cleared, including on the abandoned path above — this is the escape hatch the workers' within-tick dispatch loop keys on, so leaving it set
+        // would strand every worker still inside the tick.
         _tickInProgress = 0;
         _tickStartSignal.Reset();
     }
