@@ -350,6 +350,7 @@ public class AccessControlTests
 
         // Create single WaitContext with 500ms timeout
         var ctx = WaitContext.FromTimeout(TimeSpan.FromMilliseconds(500));
+        var deadlineAtEntry = ctx.Deadline;
 
         // First lock
         var r1 = control1.EnterExclusiveAccess(ref ctx);
@@ -362,8 +363,13 @@ public class AccessControlTests
         var r2 = control2.EnterExclusiveAccess(ref ctx);
         Assert.That(r2, Is.True);
 
-        // The total time used is ~100ms, remaining should be ~400ms
-        Assert.That(ctx.Remaining.TotalMilliseconds, Is.GreaterThan(300), "Remaining time should not restart");
+        // "Not accumulated" is an identity property of the deadline INSTANT, not a duration: restarting the deadline would push the expiry out by another
+        // 500 ms, so comparing the instants tests exactly the thing this fixture is named for, with zero dependence on how fast the machine is. The previous
+        // assertion (Remaining > 300 ms) was a LOWER bound on elapsed time, so it measured the OS scheduler rather than the subject — Thread.Sleep(100) is a
+        // floor, not a duration, and on the loaded 3-core nightly runner it overshot to ~211 ms, leaving 289.18 ms and failing a test whose subject had
+        // behaved perfectly (nightly arm64 run 31075437612, and again in run 30979273000).
+        Assert.That(ctx.Deadline, Is.EqualTo(deadlineAtEntry),
+            "nested Enters must share the original deadline instant — a restart would move the expiry out by another 500 ms");
 
         control2.ExitExclusiveAccess();
         control1.ExitExclusiveAccess();

@@ -223,32 +223,53 @@ public class DagSchedulerTests
         Assert.That(chunkCounter, Is.GreaterThanOrEqualTo(totalChunks));
     }
 
+    // Chunk dispatch is any-worker PULL: workers claim chunks by CAS, and the between-tick wait is a ManualResetEventSlim built with spinCount: 0, so a
+    // worker that is not already running starts from a kernel wait (overview/13-runtime.md §Fence-DAG, §Worker Thread Model). This test used to emit 100
+    // chunks of Thread.SpinWait(50) and assert that more than one thread had picked one up — but that entire workload costs less than a single thread wake,
+    // so ONE worker draining all 100 uncontended is the correct outcome of a pull model, not a scheduler fault. It only ever passed because a 16-core box
+    // happened to have peer workers already spinning; pinned to 3 cores it fails ~40% of the time, and it took the nightly red as a false "regression"
+    // (run 31075437612, previously flaked in run 30790280128 — reproduced locally 3x, Debug and Release).
+    //
+    // Assert the property the scheduler actually owes instead: a chunk queue is claimable by more than one worker. The first worker to arrive PARKS inside
+    // its chunk, so it cannot also drain the rest — the other 99 chunks stay on the queue and a second worker must claim one for the tick to finish. The
+    // park is bounded, so a scheduler that genuinely never dispatches to a second worker fails the assertion below instead of hanging the tick.
     [Test]
+    [CancelAfter(20_000)]
     public void PipelineSystem_MultiWorkerDistribution()
     {
-        var workerThreadIds = new ConcurrentBag<int>();
-        var captured = 0;
         const int totalChunks = 100;
+        const int requiredWorkers = 2;
+        const int rendezvousTimeoutMs = 5_000;
 
-        using var scheduler = NewDag(workerCount: 4)
-            .PipelineSystem("Physics", (chunk, total) =>
-            {
-                if (captured == 0)
-                {
-                    workerThreadIds.Add(Environment.CurrentManagedThreadId);
-                    Thread.SpinWait(50);
-                    if (chunk == total - 1)
-                    {
-                        Interlocked.Exchange(ref captured, 1);
-                    }
-                }
-            }, totalChunks)
-            .Build(_registry.Runtime);
-        RunOneTick(scheduler);
+        var seenWorkers = new ConcurrentDictionary<int, byte>();
+        using var enoughWorkers = new ManualResetEventSlim(false);
 
-        var distinctWorkers = new HashSet<int>(workerThreadIds);
-        Assert.That(distinctWorkers.Count, Is.GreaterThan(1),
-            "Multiple workers should have participated in chunk processing");
+        // Scoped so the scheduler is torn down before the event the system body captures.
+        using (var scheduler = NewDag(workerCount: 4)
+                   .PipelineSystem("Physics", (chunk, total) =>
+                   {
+                       if (enoughWorkers.IsSet)
+                       {
+                           return;
+                       }
+
+                       seenWorkers.TryAdd(Environment.CurrentManagedThreadId, 0);
+                       if (seenWorkers.Count >= requiredWorkers)
+                       {
+                           enoughWorkers.Set();
+                           return;
+                       }
+
+                       enoughWorkers.Wait(rendezvousTimeoutMs);
+                   }, totalChunks)
+                   .Build(_registry.Runtime))
+        {
+            RunOneTick(scheduler);
+        }
+
+        Assert.That(seenWorkers.Count, Is.GreaterThanOrEqualTo(requiredWorkers),
+            $"the first worker parked inside its chunk, leaving {totalChunks - 1} chunks claimable — a second worker must have taken one; seeing only one "
+            + "worker here means chunk dispatch never reaches the other workers at all");
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -288,8 +309,19 @@ public class DagSchedulerTests
         scheduler.Shutdown();
 
         var ticksCompleted = scheduler.CurrentTickNumber;
-        Assert.That(totalChunksProcessed, Is.EqualTo(chunksPerTick * ticksCompleted),
-            $"Each of {ticksCompleted} ticks should process exactly {chunksPerTick} chunks");
+
+        // The chunk counter and CurrentTickNumber are published by DIFFERENT threads — workers vs the tick driver — and the tick number only advances once a
+        // tick's chunks are done, so the pair cannot be sampled atomically: the final tick's chunks are counted while CurrentTickNumber still reads the
+        // previous value. Asserting the exact product therefore failed with "Expected: 70200 But was: 70220" — off by exactly ONE tick of chunks — on a
+        // core-starved box where the test thread was descheduled long enough for thousands of ticks to elapse before SpinUntil observed its condition.
+        // Assert what "chunks reset each tick" actually means, and tolerate exactly that one-tick sampling skew.
+        Assert.That(totalChunksProcessed % chunksPerTick, Is.EqualTo(0),
+            $"every tick must dispatch exactly {chunksPerTick} chunks — a partial tick's worth means chunks leaked across a tick boundary");
+
+        var ticksWorth = totalChunksProcessed / chunksPerTick;
+        Assert.That(ticksWorth, Is.InRange(ticksCompleted, ticksCompleted + 1),
+            $"chunk work must track the tick count — a per-tick reset failure shows up as runaway chunks; saw {ticksWorth} ticks' worth of chunks against "
+            + $"{ticksCompleted} completed ticks");
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -305,6 +337,13 @@ public class DagSchedulerTests
         scheduler.Start();
         SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= 3, TimeSpan.FromSeconds(5));
         scheduler.Shutdown();
+
+        // Shutdown() signals and JOINS the workers, but _currentTickNumber++ lives in the tick's telemetry finalizer, which runs on the TIMER thread — so the
+        // tick already in flight when Shutdown() was called can land its increment just after Shutdown() returns. Pinning the baseline immediately raced that
+        // last increment and failed with "Expected: 346 But was: 347" (1 run in 10 pinned to 3 cores). Let the in-flight tick's accounting settle, THEN pin
+        // the baseline. The property under test — that no FURTHER ticks execute — is unaffected and genuinely holds: a probe measured delta 0 across 9 trials
+        // even with a 1 s observation window, so the timer thread stops producing ticks even though only Dispose() actually stops the thread.
+        Thread.Sleep(50);
 
         // Verify the scheduler stopped (no more ticks)
         var tickAfterShutdown = scheduler.CurrentTickNumber;
