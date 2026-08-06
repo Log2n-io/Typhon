@@ -175,4 +175,75 @@ public sealed class UiCommandTests
         // With a database it is fine.
         Assert.That(UiCommand.ValidateOpenTargets(new UiCommand.Settings { Schema = "MyApp.dll", OpenDb = true }), Is.Null);
     }
+
+    // ── --open-latest (#621 AC13) ────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// <c>--open-latest</c> must find captures where they actually live.
+    /// </summary>
+    /// <remarks>
+    /// It searched <c>&lt;cwd&gt;/captures</c> until #621 — the location captures were written to before #616 moved them
+    /// into the database bundle. That change landed on the writer; this is the reader, in a different assembly, with no
+    /// test spanning the two, so the flag silently found nothing from the day captures moved. This fixture is that
+    /// missing test.
+    /// </remarks>
+    [Test]
+    public void FindLatestCapture_LooksInsideTheBundle_NotALegacyCapturesDirectory()
+    {
+        var bundle = Path.Combine(_tempDir, "world.typhon");
+        var profilings = Path.Combine(bundle, "profilings");
+        Directory.CreateDirectory(profilings);
+        var capture = Path.Combine(profilings, "20260803-120000-000.typhon-trace");
+        File.WriteAllBytes(capture, [0x54, 0x59, 0x54, 0x52]);
+
+        // A file in the pre-#616 location must NOT win — finding it would mean the reader is still looking there.
+        var legacyDir = Path.Combine(_tempDir, "captures");
+        Directory.CreateDirectory(legacyDir);
+        File.WriteAllBytes(Path.Combine(legacyDir, "legacy.typhon-trace"), [0x54, 0x59, 0x54, 0x52]);
+
+        Assert.That(UiCommand.FindLatestCaptureUnder(_tempDir), Is.EqualTo(capture));
+    }
+
+    [Test]
+    public void FindLatestCapture_PicksTheNewestAcrossEveryBundle()
+    {
+        var older = MakeCapture("alpha.typhon", "20260801-100000-000.typhon-trace", DateTime.UtcNow.AddHours(-2));
+        var newer = MakeCapture("beta.typhon", "20260803-100000-000.typhon-trace", DateTime.UtcNow);
+
+        Assert.That(UiCommand.FindLatestCaptureUnder(_tempDir), Is.EqualTo(newer), $"expected the newer capture, not {older}");
+    }
+
+    [Test]
+    public void FindLatestCapture_ReturnsNull_WhenNoBundleHasCaptures()
+    {
+        Directory.CreateDirectory(Path.Combine(_tempDir, "empty.typhon"));
+        Assert.That(UiCommand.FindLatestCaptureUnder(_tempDir), Is.Null, "null is what makes the CLI print a usable error rather than open something arbitrary");
+    }
+
+    [Test]
+    public void FindLatestCapture_IgnoresSidecarCaches()
+    {
+        // Sidecars sit beside captures and share the stem; picking one would open a derived file as if it were a recording.
+        var bundle = Path.Combine(_tempDir, "world.typhon");
+        var profilings = Path.Combine(bundle, "profilings");
+        Directory.CreateDirectory(profilings);
+        var capture = Path.Combine(profilings, "20260803-090000-000.typhon-trace");
+        File.WriteAllBytes(capture, [0x54, 0x59, 0x54, 0x52]);
+
+        var sidecar = Path.Combine(profilings, "20260803-090000-000.typhon-trace-cache");
+        File.WriteAllBytes(sidecar, [0x54, 0x50, 0x43, 0x48]);
+        File.SetLastWriteTimeUtc(sidecar, DateTime.UtcNow.AddHours(1)); // newer, so only the IsCapture filter can exclude it
+
+        Assert.That(UiCommand.FindLatestCaptureUnder(_tempDir), Is.EqualTo(capture));
+    }
+
+    private string MakeCapture(string bundleName, string captureName, DateTime writtenUtc)
+    {
+        var profilings = Path.Combine(_tempDir, bundleName, "profilings");
+        Directory.CreateDirectory(profilings);
+        var path = Path.Combine(profilings, captureName);
+        File.WriteAllBytes(path, [0x54, 0x59, 0x54, 0x52]);
+        File.SetLastWriteTimeUtc(path, writtenUtc);
+        return path;
+    }
 }

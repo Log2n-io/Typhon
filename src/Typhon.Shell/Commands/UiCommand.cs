@@ -331,41 +331,60 @@ internal sealed class UiCommand : Command<UiCommand.Settings>
             return null;
         }
 
-        // --open-latest: newest *.typhon-trace under <cwd>/captures.
-        var capturesDir = Path.Combine(Directory.GetCurrentDirectory(), "captures");
-        var latest = FindLatestTrace(capturesDir);
+        // --open-latest: the newest capture across every database bundle in the working directory.
+        //
+        // This used to look in <cwd>/captures — the location captures were written to before #616 moved them inside the bundle they belong to. That change
+        // landed on the WRITER; this is the READER, in another assembly, with no test spanning both, so the flag silently found nothing from the day captures
+        // moved. Deriving the search from TraceLocation means the two cannot drift again.
+        var cwd = Directory.GetCurrentDirectory();
+        var latest = FindLatestCaptureUnder(cwd);
         if (latest is null)
         {
-            error = $"No *.typhon-trace captures found under {capturesDir}. Record a trace first, or pass --trace <PATH>.";
+            error = $"No captures found in any *.typhon database under {cwd}. Record a trace first, or pass --trace <PATH>.";
             return null;
         }
 
         return latest;
     }
 
-    /// <summary>Returns the absolute path of the most-recently-written <c>*.typhon-trace</c> in <paramref name="capturesDir"/>, or null when none exist.</summary>
-    private static string FindLatestTrace(string capturesDir)
+    /// <summary>
+    /// The most-recently-written capture across every <c>*.typhon</c> database bundle directly under <paramref name="searchRoot"/>, or null when there are none.
+    /// </summary>
+    /// <remarks>
+    /// Scans one level deep only: bundles are where a project puts its databases, and a recursive walk of an arbitrary working directory would be both slow and
+    /// surprising — "latest capture" should not reach into an unrelated subproject's data. Every path question is delegated to <see cref="TraceLocation"/> so
+    /// the layout is known in one place rather than re-joined here.
+    /// </remarks>
+    internal static string FindLatestCaptureUnder(string searchRoot)
     {
-        if (!Directory.Exists(capturesDir))
+        if (string.IsNullOrEmpty(searchRoot) || !Directory.Exists(searchRoot))
         {
             return null;
         }
 
-        var files = new DirectoryInfo(capturesDir).GetFiles("*.typhon-trace");
-        if (files.Length == 0)
+        FileInfo newest = null;
+        foreach (var bundle in Directory.EnumerateDirectories(searchRoot, "*.typhon", SearchOption.TopDirectoryOnly))
         {
-            return null;
-        }
-
-        var newest = files[0];
-        for (var i = 1; i < files.Length; i++)
-        {
-            if (files[i].LastWriteTimeUtc > newest.LastWriteTimeUtc)
+            var profilings = TraceLocation.ProfilingsDirectoryOf(bundle);
+            if (!Directory.Exists(profilings))
             {
-                newest = files[i];
+                continue;
+            }
+
+            foreach (var file in new DirectoryInfo(profilings).GetFiles("*" + TraceLocation.TraceExtension))
+            {
+                // Sidecar caches live beside captures and share the stem; IsCapture is what tells them apart.
+                if (!TraceLocation.IsCapture(file.FullName))
+                {
+                    continue;
+                }
+                if (newest is null || file.LastWriteTimeUtc > newest.LastWriteTimeUtc)
+                {
+                    newest = file;
+                }
             }
         }
 
-        return newest.FullName;
+        return newest?.FullName;
     }
 }
