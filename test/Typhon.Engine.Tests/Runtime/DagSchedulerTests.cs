@@ -223,32 +223,53 @@ public class DagSchedulerTests
         Assert.That(chunkCounter, Is.GreaterThanOrEqualTo(totalChunks));
     }
 
+    // Chunk dispatch is any-worker PULL: workers claim chunks by CAS, and the between-tick wait is a ManualResetEventSlim built with spinCount: 0, so a
+    // worker that is not already running starts from a kernel wait (overview/13-runtime.md §Fence-DAG, §Worker Thread Model). This test used to emit 100
+    // chunks of Thread.SpinWait(50) and assert that more than one thread had picked one up — but that entire workload costs less than a single thread wake,
+    // so ONE worker draining all 100 uncontended is the correct outcome of a pull model, not a scheduler fault. It only ever passed because a 16-core box
+    // happened to have peer workers already spinning; pinned to 3 cores it fails ~40% of the time, and it took the nightly red as a false "regression"
+    // (run 31075437612, previously flaked in run 30790280128 — reproduced locally 3x, Debug and Release).
+    //
+    // Assert the property the scheduler actually owes instead: a chunk queue is claimable by more than one worker. The first worker to arrive PARKS inside
+    // its chunk, so it cannot also drain the rest — the other 99 chunks stay on the queue and a second worker must claim one for the tick to finish. The
+    // park is bounded, so a scheduler that genuinely never dispatches to a second worker fails the assertion below instead of hanging the tick.
     [Test]
+    [CancelAfter(20_000)]
     public void PipelineSystem_MultiWorkerDistribution()
     {
-        var workerThreadIds = new ConcurrentBag<int>();
-        var captured = 0;
         const int totalChunks = 100;
+        const int requiredWorkers = 2;
+        const int rendezvousTimeoutMs = 5_000;
 
-        using var scheduler = NewDag(workerCount: 4)
-            .PipelineSystem("Physics", (chunk, total) =>
-            {
-                if (captured == 0)
-                {
-                    workerThreadIds.Add(Environment.CurrentManagedThreadId);
-                    Thread.SpinWait(50);
-                    if (chunk == total - 1)
-                    {
-                        Interlocked.Exchange(ref captured, 1);
-                    }
-                }
-            }, totalChunks)
-            .Build(_registry.Runtime);
-        RunOneTick(scheduler);
+        var seenWorkers = new ConcurrentDictionary<int, byte>();
+        using var enoughWorkers = new ManualResetEventSlim(false);
 
-        var distinctWorkers = new HashSet<int>(workerThreadIds);
-        Assert.That(distinctWorkers.Count, Is.GreaterThan(1),
-            "Multiple workers should have participated in chunk processing");
+        // Scoped so the scheduler is torn down before the event the system body captures.
+        using (var scheduler = NewDag(workerCount: 4)
+                   .PipelineSystem("Physics", (chunk, total) =>
+                   {
+                       if (enoughWorkers.IsSet)
+                       {
+                           return;
+                       }
+
+                       seenWorkers.TryAdd(Environment.CurrentManagedThreadId, 0);
+                       if (seenWorkers.Count >= requiredWorkers)
+                       {
+                           enoughWorkers.Set();
+                           return;
+                       }
+
+                       enoughWorkers.Wait(rendezvousTimeoutMs);
+                   }, totalChunks)
+                   .Build(_registry.Runtime))
+        {
+            RunOneTick(scheduler);
+        }
+
+        Assert.That(seenWorkers.Count, Is.GreaterThanOrEqualTo(requiredWorkers),
+            $"the first worker parked inside its chunk, leaving {totalChunks - 1} chunks claimable — a second worker must have taken one; seeing only one "
+            + "worker here means chunk dispatch never reaches the other workers at all");
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -288,8 +309,19 @@ public class DagSchedulerTests
         scheduler.Shutdown();
 
         var ticksCompleted = scheduler.CurrentTickNumber;
-        Assert.That(totalChunksProcessed, Is.EqualTo(chunksPerTick * ticksCompleted),
-            $"Each of {ticksCompleted} ticks should process exactly {chunksPerTick} chunks");
+
+        // The chunk counter and CurrentTickNumber are published by DIFFERENT threads — workers vs the tick driver — and the tick number only advances once a
+        // tick's chunks are done, so the pair cannot be sampled atomically: the final tick's chunks are counted while CurrentTickNumber still reads the
+        // previous value. Asserting the exact product therefore failed with "Expected: 70200 But was: 70220" — off by exactly ONE tick of chunks — on a
+        // core-starved box where the test thread was descheduled long enough for thousands of ticks to elapse before SpinUntil observed its condition.
+        // Assert what "chunks reset each tick" actually means, and tolerate exactly that one-tick sampling skew.
+        Assert.That(totalChunksProcessed % chunksPerTick, Is.EqualTo(0),
+            $"every tick must dispatch exactly {chunksPerTick} chunks — a partial tick's worth means chunks leaked across a tick boundary");
+
+        var ticksWorth = totalChunksProcessed / chunksPerTick;
+        Assert.That(ticksWorth, Is.InRange(ticksCompleted, ticksCompleted + 1),
+            $"chunk work must track the tick count — a per-tick reset failure shows up as runaway chunks; saw {ticksWorth} ticks' worth of chunks against "
+            + $"{ticksCompleted} completed ticks");
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -306,11 +338,89 @@ public class DagSchedulerTests
         SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= 3, TimeSpan.FromSeconds(5));
         scheduler.Shutdown();
 
+        // Shutdown() signals and JOINS the workers, but _currentTickNumber++ lives in the tick's telemetry finalizer, which runs on the TIMER thread — so the
+        // tick already in flight when Shutdown() was called can land its increment just after Shutdown() returns. Pinning the baseline immediately raced that
+        // last increment and failed with "Expected: 346 But was: 347" (1 run in 10 pinned to 3 cores). Let the in-flight tick's accounting settle, THEN pin
+        // the baseline. The property under test — that no FURTHER ticks execute — is unaffected and genuinely holds: a probe measured delta 0 across 9 trials
+        // even with a 1 s observation window, so the timer thread stops producing ticks even though only Dispose() actually stops the thread.
+        Thread.Sleep(50);
+
         // Verify the scheduler stopped (no more ticks)
         var tickAfterShutdown = scheduler.CurrentTickNumber;
         Thread.Sleep(50);
         Assert.That(scheduler.CurrentTickNumber, Is.EqualTo(tickAfterShutdown),
             "No more ticks should execute after shutdown");
+    }
+
+    // Regression: a scheduler lifecycle must not leave a thread running. Shutdown() bumps _tickGeneration — the same field workers use to detect a new tick —
+    // so a Shutdown landing on a tick dispatch made every worker take the shutdown exit WITHOUT processing a system. _systemsRemaining never reached 0, the
+    // timer thread's completion barrier span forever at ~100% of a core, and JoinWorkers() timed out, discarded its result and let Shutdown() report success.
+    // One core lost per occurrence, permanently, silently.
+    //
+    // Invisible on a dev box — 32 cores absorb it and the suite still passes in 50 s. On the 3-core arm64 nightly runner the spinners accumulated until the
+    // host could not answer VSTest's heartbeat and was killed as "Test host process crashed", after silently dropping ~160 tests. This asserts the property
+    // directly: threads created by the cycles below must all be gone or idle afterwards, because a leaked spinner burns a core forever.
+    // Sensitive: the assertion is a CPU-duty measurement, so it belongs in the gate's serial pass rather than beside 40 other fixtures competing for cores.
+    // 200 cycles is not padding — at 20 the race never fired on a 32-core box and the test passed with the bug still present, which is worse than no test.
+    [Test]
+    [CancelAfter(60_000)]
+    [NonParallelizable]
+    [Category("Sensitive")]
+    public void SchedulerLifecycle_RacingShutdownAgainstTick_LeavesNoRunningThread()
+    {
+        const int cycles = 200;
+
+        static Dictionary<int, TimeSpan> SnapshotThreads()
+        {
+            var map = new Dictionary<int, TimeSpan>();
+            foreach (System.Diagnostics.ProcessThread t in System.Diagnostics.Process.GetCurrentProcess().Threads)
+            {
+                // A thread can die between enumeration and access; it is then not one of ours to worry about.
+                try { map[t.Id] = t.TotalProcessorTime; } catch { /* exited */ }
+            }
+            return map;
+        }
+
+        var before = SnapshotThreads();
+
+        // Shutdown deliberately lands as close to a tick dispatch as possible — that is the race. 20 cycles at 1 kHz makes hitting it near-certain; before the
+        // fix this leaked roughly one spinner every few cycles.
+        for (var i = 0; i < cycles; i++)
+        {
+            using var registry = new ResourceRegistry(new ResourceRegistryOptions { Name = $"LeakProbe{i}" });
+            using var scheduler = NewDag(workerCount: 4)
+                .CallbackSystem("A", _ => { })
+                .CallbackSystem("B", _ => { }, after: "A")
+                .Build(registry.Runtime);
+            scheduler.Start();
+            SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= 1, TimeSpan.FromSeconds(5));
+            scheduler.Shutdown();
+        }
+
+        // Measure over a window with nothing of ours running: any thread born during the cycles that is still burning CPU is a leak. Duty, not total CPU, so a
+        // busy CI box running other fixtures cannot fail this — only a thread spinning on its own can.
+        var settle = SnapshotThreads();
+        Thread.Sleep(500);
+        var after = SnapshotThreads();
+
+        var spinners = new List<string>();
+        foreach (var (tid, cpuAfter) in after)
+        {
+            if (before.ContainsKey(tid) || !settle.TryGetValue(tid, out var cpuSettle))
+            {
+                continue; // pre-existing thread, or born during the measurement window itself
+            }
+
+            var duty = (cpuAfter - cpuSettle).TotalMilliseconds / 500.0;
+            if (duty >= 0.5)
+            {
+                spinners.Add($"tid {tid} at {duty * 100:F0}% duty");
+            }
+        }
+
+        Assert.That(spinners, Is.Empty,
+            "every thread created by a scheduler lifecycle must be stopped by Shutdown/Dispose — a survivor spins on a core for the life of the process: "
+            + string.Join(", ", spinners));
     }
 
     [Test]

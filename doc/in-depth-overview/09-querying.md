@@ -348,7 +348,7 @@ The planner can't pick the most selective index without per-field cardinality es
 
 [`Querying/internals/StatisticsWorker.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/internals/StatisticsWorker.cs)
 
-Dedicated background thread. Wakes every `PollIntervalMs`. For each `ComponentTable`: if `MutationsSinceRebuild` exceeds `MutationThreshold` and entity count ≥ `MinEntitiesForRebuild`, it triggers a `StatisticsRebuilder.RebuildAll(...)` pass. Page-granularity sampling kicks in above `SamplingMinEntities`.
+Dedicated background thread. Wakes every `PollIntervalMs`. For each archetype with a `ClusterState`: if `ArchetypeClusterState.MutationsSinceRebuild` exceeds `MutationThreshold` and the estimated live entity count ≥ `MinEntitiesForRebuild`, it triggers a `StatisticsRebuilder.RebuildClusterAll(...)` pass. Page-granularity sampling kicks in above `SamplingMinEntities`. (The per-`ComponentTable` sweep was removed in #629 — cluster-backed archetypes store no entities in `ComponentSegment`, so that path scanned nothing useful.)
 
 ### `StatisticsOptions`
 

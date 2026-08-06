@@ -353,6 +353,7 @@ public sealed class TraceRecordChainTests
         // only have 1 byte; we encode a 4-byte sequence number into the record body to verify ordering.
         var producer = Task.Run(() =>
         {
+            var backoff = new SpinWait();
             for (var seq = 0; seq < recordCount; seq++)
             {
                 while (true)
@@ -362,10 +363,13 @@ public sealed class TraceRecordChainTests
                         BinaryPrimitives.WriteUInt16LittleEndian(dst, (ushort)recordSize);
                         BinaryPrimitives.WriteInt32LittleEndian(dst[12..], seq);
                         ringUsed.Publish();
+                        backoff = new SpinWait();
                         break;
                     }
-                    // Pool exhausted — back off briefly to let consumer recycle
-                    Thread.SpinWait(50);
+                    // Pool exhausted — only the CONSUMER can free a slot, so this back-off must hand the core over. Thread.SpinWait is a pause loop that
+                    // never yields the quantum: on a core-starved box the producer burned the whole budget spinning for a consumer that could not get
+                    // scheduled, and the 10 s cap fired (nightly arm64 run 31075437612). SpinWait escalates to Thread.Yield / Sleep(0) / Sleep(1).
+                    backoff.SpinOnce();
                 }
             }
         });
@@ -375,10 +379,12 @@ public sealed class TraceRecordChainTests
         var consumer = Task.Run(() =>
         {
             Span<byte> tmp = new byte[64 * 1024];
+            var backoff = new SpinWait();
             while (consumed.Count < recordCount)
             {
                 var head = slot.ChainHead;
-                if (head == null) { Thread.SpinWait(20); continue; }
+                if (head == null) { backoff.SpinOnce(); continue; }
+                backoff = new SpinWait();
                 int drained = head.Drain(tmp);
                 int pos = 0;
                 while (pos < drained)
@@ -405,8 +411,10 @@ public sealed class TraceRecordChainTests
             }
         });
 
-        Assert.That(Task.WaitAll(new[] { producer, consumer }, TimeSpan.FromSeconds(10)), Is.True,
-            "stress test should complete within 10 s");
+        // A CAP, not an expectation — this completes in well under a second on an idle box. It exists so a genuine producer/consumer livelock fails the test
+        // instead of hanging the run, and it is sized for the 3-core nightly runner rather than for a dev machine.
+        Assert.That(Task.WaitAll(new[] { producer, consumer }, TimeSpan.FromSeconds(60)), Is.True,
+            "stress test should complete within 60 s");
         Assert.That(consumed.Count, Is.EqualTo(recordCount));
         for (var i = 0; i < recordCount; i++)
         {
