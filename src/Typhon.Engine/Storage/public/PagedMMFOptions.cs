@@ -207,6 +207,29 @@ public class PagedMMFOptions
     }
     
     /// <summary>
+    /// Advertise this holder as willing to <b>release the database on request</b> (#621). Default <c>false</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>Set by long-lived read-only observers — the Workbench — and by nothing else. It is written into <c>db.lock</c> as <c>yieldable</c>, and it is the
+    /// <i>holder's</i> advertisement that enables handoff, never the claimant's configuration. That asymmetry is what makes the feature safe to have on by
+    /// default: two ordinary application instances contend exactly as they always did, because the incumbent advertised nothing.</para>
+    /// <para>Advertising it is a promise. A process that sets this must actually watch for <see cref="DatabaseLockFile.RequestFileName"/> and dispose its
+    /// engine when one appears; one that advertises and then ignores requests merely converts an immediate failure into a short wait followed by the same
+    /// failure.</para>
+    /// </remarks>
+    public bool YieldableLock { get; set; }
+
+    /// <summary>
+    /// How long to wait for a <i>yieldable</i> holder to release before giving up. Default 5 seconds.
+    /// </summary>
+    /// <remarks>
+    /// Only ever consumed when the incumbent advertised <see cref="YieldableLock"/>; a non-yieldable lock still fails instantly. Kept short deliberately — the
+    /// cost of the feature being on is that a <i>hung</i> observer turns an instant failure into this much waiting, so it must stay below the threshold where a
+    /// developer starts wondering whether their app has frozen. Set to <see cref="TimeSpan.Zero"/> to opt out and fail fast even against an observer.
+    /// </remarks>
+    public TimeSpan LockHandoffTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
     /// The database bundle directory — <c>{DatabaseDirectory}/{DatabaseName}.typhon</c>. A Typhon database <b>is</b> this
     /// single directory; the paged data file (<c>data</c>), the single-writer lock (<c>db.lock</c>), and the WAL segment
     /// directory (<c>wal/</c>) all live inside it. See <c>claude/design/Storage/typhon-bundle-format.md</c>.
