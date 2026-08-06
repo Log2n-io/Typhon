@@ -619,7 +619,7 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
     [Test]
     public void ReopenAfterMigration_RebuildsMappingFromNewPosition()
     {
-        var dbName = $"T_ClMigReopen_{Environment.ProcessId}";
+        var dbName = NewUniqueDatabaseName("T_ClMigReopen");
 
         int dstCellKey;
         int srcCellKey;

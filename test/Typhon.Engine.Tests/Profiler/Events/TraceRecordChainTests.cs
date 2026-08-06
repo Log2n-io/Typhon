@@ -384,7 +384,6 @@ public sealed class TraceRecordChainTests
             {
                 var head = slot.ChainHead;
                 if (head == null) { backoff.SpinOnce(); continue; }
-                backoff = new SpinWait();
                 int drained = head.Drain(tmp);
                 int pos = 0;
                 while (pos < drained)
@@ -395,6 +394,7 @@ public sealed class TraceRecordChainTests
                     pos += size;
                 }
                 // Walk: if head empty AND has Next, recycle and advance
+                var advanced = false;
                 if (head.IsEmpty)
                 {
                     var next = head.Next;
@@ -406,7 +406,22 @@ public sealed class TraceRecordChainTests
                         {
                             SpilloverRingPool.Release(spent);
                         }
+                        advanced = true;
                     }
+                }
+
+                // Back off only on a pass that made NO progress — nothing drained and no spillover retired. That case, not `head == null`, is the consumer's
+                // dominant wait: ChainHead is the primary buffer and non-null from the first iteration, so keying the back-off on null (and resetting the
+                // spinner every other iteration) left "the producer hasn't written yet" spinning hot with no yield at all — 8-10x slower under core
+                // contention, and invisible when the test runs alone with a core to spare, which is why it survived review. The back-off deliberately sits
+                // AFTER the recycle above: an empty head with a successor is progress, and skipping the advance to back off early would wedge the drain.
+                if (drained == 0 && !advanced)
+                {
+                    backoff.SpinOnce();
+                }
+                else
+                {
+                    backoff = new SpinWait();
                 }
             }
         });
