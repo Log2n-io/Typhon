@@ -1007,6 +1007,10 @@ public partial class DatabaseEngine
         where TData : struct, IPageStore
     {
         var totalShadowEntries = 0;
+
+        // One shared write per drain instead of one per shadow entry per field (review M4). The fence drains archetypes in parallel, so this counter is a
+        // store other cores may be watching; N of them bought nothing over one.
+        var mutations = 0;
             for (var s = 0; s < ixSlots.Length; s++)
             {
                 ref var ixSlot = ref ixSlots[s];
@@ -1041,7 +1045,7 @@ public partial class DatabaseEngine
                             if ((occupancy & (1UL << slotIndex)) == 0)
                             {
                                 // Entity destroyed — remove old index entry using shadow value
-                                clusterState.MutationsSinceRebuild++;   // (#665)
+                                mutations++;   // (#665)
                                 var destroyOldKey = entry.OldKey;
                                 if (field.AllowMultiple)
                                 {
@@ -1087,7 +1091,7 @@ public partial class DatabaseEngine
                                 continue; // Field didn't actually change
                             }
 
-                            clusterState.MutationsSinceRebuild++;   // past the guard, so this is real tree work (#665)
+                            mutations++;   // past the guard, so this is real tree work (#665)
 
                             // Update per-archetype B+Tree: remove old key, insert new key, same ClusterLocation value
                             var clusterLocation = entry.ChunkId; // entityIndex = clusterLocation
@@ -1137,6 +1141,7 @@ public partial class DatabaseEngine
                 }
             }
 
+        clusterState.MutationsSinceRebuild += mutations;
         return totalShadowEntries;
     }
 

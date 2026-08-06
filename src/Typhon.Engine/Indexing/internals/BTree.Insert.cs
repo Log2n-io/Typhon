@@ -97,7 +97,8 @@ internal abstract partial class BTree<TKey, TStore>
             }
             if (result == OlcInsertResult.LeafFull)
             {
-                Interlocked.Increment(ref _leafFullFromOlc);
+                // No counter here: the same signal is emitted a few lines below as
+                // Data:Index:BTree:RebalanceFallback with reason 0, which is the channel that actually has readers.
                 fallbackReason = 0;  // LeafFull
                 break; // Need pessimistic path for split/spill
             }

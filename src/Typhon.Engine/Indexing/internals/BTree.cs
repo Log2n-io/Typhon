@@ -1,4 +1,4 @@
-﻿// CS1591: this file declares public-accessibility types that live in the internal namespace (Phase 2b entanglement, see
+// CS1591: this file declares public-accessibility types that live in the internal namespace (Phase 2b entanglement, see
 // claude/research/PublicVsInternalApiClassification.md). They are excluded from the published API reference, so consumer-facing
 // doc coverage is not enforced here.
 #pragma warning disable 1591
@@ -114,7 +114,15 @@ internal readonly struct BTreeStableKey : IEquatable<BTreeStableKey>
         Slot = slot;
     }
 
-    /// <summary>A tree on a segment it does not share with other component slots — the per-ComponentTable case.</summary>
+    /// <summary>
+    /// A tree on a segment it does not share with other component slots, addressed by field id alone.
+    /// </summary>
+    /// <remarks>
+    /// The slot half of the key exists because one archetype's index segment hosts the trees of every component slot it
+    /// carries, so <c>(fieldId, slot)</c> is what disambiguates them. This conversion is for the segments where that is
+    /// not the case and slot 0 is the only occupant — it is NOT the "per-ComponentTable" case its previous summary
+    /// named, which no longer exists (#629).
+    /// </remarks>
     public static implicit operator BTreeStableKey(short stableId) => new(stableId, 0);
 
     public bool Equals(BTreeStableKey other) => StableId == other.StableId && Slot == other.Slot;
@@ -521,7 +529,6 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     internal long _pessimisticFallbacks;
     internal long _writeLockFailures;
     internal long _splitCount;
-    internal long _leafFullFromOlc;
     internal long _mergeCount;
     internal long _moveRightCount;
     internal long _contentionSplitCount;
@@ -668,22 +675,17 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     /// <summary>Number of deferred nodes pending reclamation (test visibility).</summary>
     internal int DeferredNodeCount => _deferredNodes.Count;
 
-    public override long Count => _count;
-
     /// <summary>Number of OLC optimistic read restarts (version validation failures).</summary>
-    public override long OptimisticRestarts => Interlocked.Read(ref _optimisticRestarts);
+    public long OptimisticRestarts => Interlocked.Read(ref _optimisticRestarts);
 
     /// <summary>Number of fallbacks from optimistic to pessimistic path.</summary>
-    public override long PessimisticFallbacks => Interlocked.Read(ref _pessimisticFallbacks);
+    public long PessimisticFallbacks => Interlocked.Read(ref _pessimisticFallbacks);
 
     /// <summary>Number of SpinWriteLock spin iterations (contention on write locks).</summary>
     public long WriteLockFailures => Interlocked.Read(ref _writeLockFailures);
 
     /// <summary>Number of node splits (leaf + internal).</summary>
-    public override long SplitCount => Interlocked.Read(ref _splitCount);
-
-    /// <summary>Number of times OLC insert returned LeafFull (expected: ~1 per leaf capacity inserts).</summary>
-    public override long LeafFullFromOlc => Interlocked.Read(ref _leafFullFromOlc);
+    public long SplitCount => Interlocked.Read(ref _splitCount);
 
     /// <summary>Number of node merges (leaf + internal).</summary>
     public long MergeCount => Interlocked.Read(ref _mergeCount);

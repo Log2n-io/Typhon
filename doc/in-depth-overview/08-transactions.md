@@ -158,7 +158,7 @@ Commit walks every modified component type and, per entity:
    - Optionally takes the per-entity revision chain exclusive lock when a `ConcurrencyConflictHandler` is provided.
    - Detects write-write conflicts via `CommitSequence` + invisible-commit TSN checks; with no handler, falls back to "last writer wins".
    - When a conflict fires, copies the read / committed / committing / to-commit pointers into a thread-local `ConcurrencyConflictSolver` and invokes the handler.
-   - Calls `CommitClusterVersionedSlot` for per-archetype B+Tree maintenance and to copy the committed value into the cluster slot. (`IndexMaintainer.UpdateIndices` / `RemoveSecondaryIndices` — the per-`ComponentTable` index path — was removed in #629; all archetypes are cluster-backed.)
+   - Calls `Transaction.ReconcileClusterIndexAndViews` for per-archetype B+Tree maintenance and View-delta publication, from `PrepareClusterVersionedSlot` (Versioned) and `PublishStagedEntry` (staged/Committed), which also copy the committed value into the cluster slot. (`IndexMaintainer.UpdateIndices` / `RemoveSecondaryIndices` — the per-`ComponentTable` index path — was removed in #629; all archetypes are cluster-backed. `CommitClusterVersionedSlot` is gone too, surviving only in a comment.)
    - Updates `LastCommitRevisionIndex`, increments `CommitSequence`, clears the revision element's `IsolationFlag`.
 4. `FlushEcsPendingOperations` → `FinalizeSpawns` — walks pending spawns from `Transaction.ECS.cs`, allocates final `EntityRecord`s, stamps `BornTSN = TSN`, copies into the cluster layout for cluster-eligible archetypes.
 5. `PersistAndFinalize`:

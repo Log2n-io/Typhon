@@ -187,6 +187,15 @@ public enum StorageIntegrityIssueKind : byte
     /// free-list desynced from the chunk-occupancy bitmaps on its pages.
     /// </summary>
     ChunkSegmentCapacity,
+
+    /// <summary>
+    /// A cluster's in-memory MVCC visibility summary claims MORE visibility than the entities it holds justify — its <c>ClusterMaxBornTsn</c> is below an
+    /// entity's actual <c>BornTSN</c>, or its <c>ClusterAnyDied</c> bit is clear while an entity carries a non-zero <c>DiedTSN</c>. The cluster-granularity
+    /// gate the SoA scan uses to skip its per-entity EntityMap probe would then pass, and the scan would emit a phantom — an entity committed after the
+    /// reader's snapshot, or a tombstone. Always a maintenance bug at a site that associates an entity with a cluster (spawn commit, WAL replay, either
+    /// reopen rebuild, spatial cluster migration) and failed to fold the entity's TSNs into the summary.
+    /// </summary>
+    ClusterVisibilitySummaryUnsound,
 }
 
 /// <summary>
@@ -229,6 +238,13 @@ public sealed class StorageIntegrityReport
 
     /// <summary>Sum of every segment's <c>Pages.Length</c> over the registered-segments registry.</summary>
     public int SegmentClaimedPages { get; init; }
+
+    /// <summary>
+    /// Number of clusters whose MVCC visibility summary was recomputed from the EntityMap and compared. Counts only clusters at least one entity record
+    /// names, so it is <c>0</c> on an engine with no cluster entities — and a non-zero value is what distinguishes "the audit found nothing" from "the audit
+    /// looked at nothing".
+    /// </summary>
+    public int VisibilitySummaryClustersChecked { get; init; }
 
     /// <summary><c>true</c> when <see cref="Issues"/> is empty.</summary>
     public bool IsHealthy => Issues.Count == 0;

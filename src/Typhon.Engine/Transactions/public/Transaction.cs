@@ -1852,7 +1852,10 @@ public unsafe partial class Transaction : EntityAccessor
         byte* dstSlot = clusterBase + layout.ComponentOffset(e.CompSlot) + e.SlotIndex * compSize;
         Unsafe.CopyBlockUnaligned(dstSlot, srcAddr + table.ComponentOverhead, (uint)compSize);
 
-        clusterState.SetDirty(e.ClusterChunkId, e.SlotIndex);
+        // Three-arg overload, not the fail-safe two-arg one: e.CompSlot is right there, and the component-less overload poisons WrittenSlotUnion to
+        // AllSlotsWritten, which tells the fence to emit every durable column of the cluster and undoes #559 §4.5's narrowing for the whole archetype
+        // (review M31). Over-emission is not a wrong answer, which is why nothing caught it — see VersionedPublish_RecordsTheComponentSlot_NotAllSlots.
+        clusterState.SetDirty(e.ClusterChunkId, e.SlotIndex, e.CompSlot);
     }
 
     private void DisposeClusterCommitAccessors()
@@ -1994,6 +1997,10 @@ public unsafe partial class Transaction : EntityAccessor
         // (re)established _clusterCommitClusterAccessor for this archetype before calling.
         byte* clusterBase = null;
 
+        // One shared write per commit instead of one per indexed field (review M4). Accumulated locally and added once below: the counter is read by the
+        // StatisticsWorker thread, so every increment is a store other cores may be watching, and N of them per commit bought nothing over one.
+        var mutations = 0;
+
         for (int ixs = 0; ixs < clusterState.IndexSlots.Length; ixs++)
         {
             ref var ixSlot = ref clusterState.IndexSlots[ixs];
@@ -2020,7 +2027,7 @@ public unsafe partial class Transaction : EntityAccessor
                 }
 
                 ref var idxAccessor = ref ClusterCommitIndexAccessor(clusterState, field.Index.Segment);
-                clusterState.MutationsSinceRebuild++;   // past the guard, so this is real tree work (#665)
+                mutations++;   // past the guard, so this is real tree work (#665)
                 if (newComp != null && oldComp != null)
                 {
                     // Update: move this entity's entry from the old key to the new key.
@@ -2126,6 +2133,8 @@ public unsafe partial class Transaction : EntityAccessor
             }
             break; // Found the matching index slot
         }
+
+        clusterState.MutationsSinceRebuild += mutations;
     }
 
     /// <summary>
@@ -2213,7 +2222,8 @@ public unsafe partial class Transaction : EntityAccessor
 
         // Visibility act: publish the staged value to the cluster HEAD, then mark dirty (CM-03: memcpy THEN dirty).
         Unsafe.CopyBlockUnaligned(headPtr, staged, (uint)compSize);
-        clusterState.SetDirty(clusterChunkId, slotIndex);
+        // Same as the Versioned publish above: compSlot is the component being published, so name it rather than falling back to "emit everything" (M31).
+        clusterState.SetDirty(clusterChunkId, slotIndex, compSlot);
     }
 
     /// <summary>

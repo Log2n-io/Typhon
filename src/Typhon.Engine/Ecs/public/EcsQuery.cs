@@ -893,10 +893,6 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var streams = System.Buffers.ArrayPool<ArchetypeSortedStream>.Shared.Rent(8);
         var streamCount = 0;
 
-        // Early termination: each per-archetype stream only needs skip+take entries at most.
-        // The B+Tree enumerator yields in sort order, so stopping early is correct.
-        var maxPerStream = _take > 0 ? _skip + _take : 0;
-
         // The plan's PrimaryFieldIndex may be -1 when the shared B+Tree has 0 entries (cluster archetypes store entries in per-archetype B+Trees,
         // not the shared one). In that case, use the OrderBy field index directly and full type range for scan bounds.
         Debug.Assert(_orderBy.HasValue, "ExecuteOrderedClustered requires OrderBy to be set");
@@ -1001,8 +997,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     streams = newStreams;
                 }
 
-                streams[streamCount++] = ArchetypeSortedStream.Create(field.Index, keyType, scanMin, scanMax, field.AllowMultiple, descending,
-                    clusterState, clusterState.Layout, maxPerStream);
+                // No per-stream entry cap: the stream is a live cursor now, so a stream the merge stops consuming stops reading. The cap this used to pass
+                // (skip+take) was the bound on how much each stream drained EAGERLY, and it is what made an ordered Take cost K times what it emitted.
+                streams[streamCount++] = ArchetypeSortedStream.Create(field.Index, keyType, scanMin, scanMax, descending, clusterState, clusterState.Layout);
             }
 
             if (streamCount == 0)
@@ -1042,7 +1039,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var taken = 0;
         var take = _take > 0 ? _take : int.MaxValue;
 
-        while (merge.MoveNext(out var entityPK))
+        // Tell the merge up front whether this row is going to be kept: a skipped row needs its ORDER, which the merge
+        // already has, but never its entity key.
+        while (merge.MoveNext(out var entityPK, skipped >= _skip))
         {
             if (skipped < _skip)
             {
@@ -1152,8 +1151,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
 
             // Scan the full B+Tree to build PK→key mapping for entities in our result set
-            var stream = ArchetypeSortedStream.Create(field.Index, orderKeyType, KeyRange.TypeMin(orderKeyType), KeyRange.TypeMax(orderKeyType),
-                field.AllowMultiple, false, clusterState, clusterState.Layout);
+            var stream = ArchetypeSortedStream.Create(field.Index, orderKeyType, KeyRange.TypeMin(orderKeyType), KeyRange.TypeMax(orderKeyType), false,
+                clusterState, clusterState.Layout);
             try
             {
                 while (stream.HasCurrent)
@@ -1241,19 +1240,23 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     }
 
     /// <summary>
-    /// The one place that knows secondary indexes live in two homes: per-archetype for cluster-backed archetypes (values are packed
-    /// <c>ClusterLocation</c>s) and per-ComponentTable for the rest (values are chunk ids). Scans every archetype this query's mask admits, from whichever
-    /// home owns it, and deposits the matches in <paramref name="sink"/>.
+    /// Scans every archetype this query's mask admits and deposits the matches in <paramref name="sink"/>.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// This used to be "the one place that knows secondary indexes live in two homes". There is one home now (#629):
+    /// every index is per-archetype and its values are packed <c>ClusterLocation</c>s. What survives of that job is
+    /// choosing, per archetype, between the selective B+Tree scan and the SoA scan — and raising if an archetype
+    /// carries the where-component but exposes no index at all, because there is nothing left to fall back to.
+    /// </para>
     /// <para>
     /// Shared deliberately. This loop used to exist only inside <see cref="ExecuteTargeted"/>, while the four view-population call sites passed the
     /// ComponentTable straight to <c>PipelineExecutor</c> — scanning a tree that is empty for a cluster-backed archetype, so <c>ToView()</c> came back
     /// permanently empty while <c>Execute()</c> on the same query was correct (#663). One copy cannot drift from the other.
     /// </para>
     /// <para>
-    /// The two homes filter by archetype at different points: the cluster loop tests the mask per ARCHETYPE before scanning, while the ComponentTable is
-    /// shared across every archetype holding that component, so its results are filtered per ENTITY by routing id.
+    /// Filtering is per ARCHETYPE, before scanning: the loop tests the query mask against each archetype and skips it whole. The deleted shared home could
+    /// not do that — one table served every archetype holding the component, so its results had to be filtered per ENTITY by routing id.
     /// </para>
     /// </remarks>
     private void ScanAllArchetypes<TSink>(ExecutionPlan plan, FieldEvaluator[] evaluators, ComponentTable ct, ref TSink sink)
@@ -1270,13 +1273,24 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 {
                     continue;
                 }
+
+                var engineState = dbe._archetypeStates[meta.ArchetypeId];
+
+                // An archetype that does not carry the where-component AT ALL cannot match a predicate on one of its fields, so it contributes nothing and is
+                // skipped silently. This is not the #663 shape below: that one is an archetype which HAS the component and should have contributed. The mask is
+                // the queried archetype's whole subtree and WhereField never narrows it, so a component declared on only part of a subtree — one descendant
+                // or several — put an archetype with no such component in front of the guard and turned a legitimate polymorphic query into a hard throw.
+                if (!ArchetypeCarries(engineState, ct))
+                {
+                    continue;
+                }
+
                 if (!meta.HasClusterIndexes)
                 {
                     hasNonClusterArchetypes = true;
                     continue;
                 }
 
-                var engineState = dbe._archetypeStates[meta.ArchetypeId];
                 var clusterState = engineState?.ClusterState;
                 // A where-component indexed in NEITHER home routes to the cross-archetype scan, which evaluates predicates against component DATA and is
                 // therefore correct whichever home owns the index. Without this, FindClusterIndexSlot returns -1 inside ScanPerArchetypeBTree and it returns
@@ -1318,9 +1332,33 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         if (hasNonClusterArchetypes)
         {
             ThrowHelper.ThrowInvalidOp(
-                $"Query on '{ct?.Definition?.Name}' matched an archetype with no per-archetype index for the where-component. There is no longer a shared "
-                + "index home to fall back to, and answering from the cluster scan alone would silently omit that archetype's entities.");
+                $"Query on '{ct?.Definition?.Name}' matched an archetype that CARRIES the where-component but has no per-archetype index for it. There is no "
+                + "longer a shared index home to fall back to, and answering from the cluster scan alone would silently omit that archetype's entities.");
         }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="engineState"/>'s archetype has <paramref name="ct"/> among its component slots at all — the same reference-identity test
+    /// <see cref="FindClusterIndexSlot"/> uses, asked one level earlier so "this archetype cannot match" is separated from "this archetype should have matched
+    /// and has no index home".
+    /// </summary>
+    private static bool ArchetypeCarries(ArchetypeEngineState engineState, ComponentTable ct)
+    {
+        var tables = engineState?.SlotToComponentTable;
+        if (tables == null)
+        {
+            return false;
+        }
+
+        for (var slot = 0; slot < tables.Length; slot++)
+        {
+            if (tables[slot] == ct)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -1693,9 +1731,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             return 0.5f;
         }
 
-        // EstimatedCounts[0] = estimated match count for the most selective predicate.
-        // This estimate comes from the shared per-ComponentTable B+Tree, which may have 0 entries
-        // for cluster archetypes (all entities in per-archetype B+Trees). Treat 0 as "unknown" → Path B.
+        // EstimatedCounts[0] = estimated match count for the most selective predicate. A plan is built per ComponentTable while the trees live per
+        // archetype, so the planner cannot know how many entries THIS archetype's tree holds — one may be empty and the next full. Treat 0 as "unknown"
+        // → Path B, which is correct whichever home the index is in.
         var estimated = plan.EstimatedCounts[0];
         if (estimated <= 0)
         {

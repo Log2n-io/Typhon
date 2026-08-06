@@ -671,8 +671,32 @@ internal sealed unsafe class ArchetypeClusterState
     /// Counted only where the index actually changed. An update that leaves every indexed field alone does no tree work (the unchanged-field guards), so it
     /// must not push the statistics toward a rebuild either — and that makes "no work" directly observable in a test, which no other counter here is.
     /// </para>
+    /// <para>
+    /// <b>Padded, and the increment is hoisted out of the per-field loop</b> (review M4). Measured before padding, this field sat 52 bytes from
+    /// <see cref="ActiveClusterCount"/> — and since objects are 8-byte aligned rather than 64, that put the two in one cache line for 2 of the 8 possible
+    /// alignments. Not "always" and not "never": decided per instance by where the GC happened to put the object, which is the one answer you cannot reason
+    /// about. Both cluster scans re-read <c>ActiveClusterCount</c> in their loop CONDITION, so an archetype that lost that dice roll had every commit
+    /// invalidating the scan's line. The 64-byte wrapper guarantees separation from the fields placed AFTER it — one-sided, exactly like
+    /// <c>PaddedFinalizeLock</c> above, and the same convention (rule MD-03).
+    /// </para>
     /// </remarks>
-    internal int MutationsSinceRebuild;
+    /// <remarks>
+    /// <c>internal</c> rather than private only so <c>ClusterIndexStatisticsTests</c> can take a <c>ref</c> to it and measure its distance from
+    /// <see cref="ActiveClusterCount"/> — the padding is invisible to every other kind of test, and un-padding it would otherwise be a silent regression.
+    /// Write through <see cref="MutationsSinceRebuild"/>.
+    /// </remarks>
+    internal CacheLinePaddedInt _mutationsSinceRebuild;
+
+    /// <inheritdoc cref="_mutationsSinceRebuild"/>
+    /// <remarks>
+    /// Kept as an <see cref="int"/> property over the padded field so every call site — including <c>x.MutationsSinceRebuild++</c>, which compiles to
+    /// get/add/set — reads exactly as it did before the padding, and stays as deliberately non-atomic as the field's own contract says.
+    /// </remarks>
+    internal int MutationsSinceRebuild
+    {
+        get => _mutationsSinceRebuild.Value;
+        set => _mutationsSinceRebuild.Value = value;
+    }
 
     /// <summary>Shared <see cref="ChunkBasedSegment{TStore}"/> backing all per-archetype B+Trees for this archetype.</summary>
     public ChunkBasedSegment<PersistentStore> IndexSegment;

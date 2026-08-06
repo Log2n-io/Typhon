@@ -173,6 +173,51 @@ class ClusterIndexStatisticsTests : TestBase<ClusterIndexStatisticsTests>
         Assert.That(clusterState.MutationsSinceRebuild, Is.GreaterThan(0), "and a real key move must still be counted");
     }
 
+    /// <summary>
+    /// The counter is accumulated in a local and written to the shared field once per commit rather than once per indexed field (review M4). That is only a
+    /// safe change if the TOTAL is identical, so this pins the exact number rather than "greater than zero" — an off-by-one in the hoist, or an early
+    /// <c>continue</c> that skips the local but not the field, would leave every existing assertion in this fixture green.
+    /// </summary>
+    [Test]
+    public void MutationCounter_CountsExactlyOncePerChangedIndexedField()
+    {
+        using var dbe = SetupEngine();
+        var clusterState = ClusterState(dbe);
+
+        // One indexed field on this archetype (StatsRanked.Tier), so a spawn is exactly one unit of index work.
+        EntityId id;
+        clusterState.MutationsSinceRebuild = 0;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            id = Spawn(tx, tier: 1, score: 10);
+            tx.Commit();
+        }
+        dbe.WriteTickFence(1);
+        Assert.That(clusterState.MutationsSinceRebuild, Is.EqualTo(1), "one spawn x one indexed field = one count");
+
+        clusterState.MutationsSinceRebuild = 0;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(id).Write(StatsArch.Ranked) = new StatsRanked(2, 10);
+            tx.Commit();
+        }
+        dbe.WriteTickFence(2);
+        Assert.That(clusterState.MutationsSinceRebuild, Is.EqualTo(1), "one key move x one indexed field = one count");
+
+        // Three spawns in one commit: the hoisted local must survive the whole commit, not reset per entity.
+        clusterState.MutationsSinceRebuild = 0;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            Spawn(tx, tier: 4, score: 1);
+            Spawn(tx, tier: 5, score: 2);
+            Spawn(tx, tier: 6, score: 3);
+            tx.Commit();
+        }
+        dbe.WriteTickFence(3);
+        Assert.That(clusterState.MutationsSinceRebuild, Is.EqualTo(3), "three spawns x one indexed field = three counts");
+    }
+
+
     /// <summary>AC: the cluster rebuilder populates the distribution structures the estimators read, by scanning the archetype's clusters.</summary>
     [Test]
     public void RebuildClusterAll_PopulatesTheDistribution()

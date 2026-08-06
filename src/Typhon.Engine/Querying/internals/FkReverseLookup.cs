@@ -32,7 +32,15 @@ internal readonly struct FkCandidates
     /// <summary>Cluster-backed archetypes holding the source component, with the component's slot in each.</summary>
     public readonly (ArchetypeMetadata Meta, int ComponentSlot)[] ClusterArchetypes;
 
-    /// <summary>True when at least one candidate archetype keeps its indexes on the ComponentTable, so phase 1 must run.</summary>
+    /// <summary>
+    /// True when at least one candidate archetype exposes no per-archetype FK index.
+    /// </summary>
+    /// <remarks>
+    /// This used to select a second lookup phase over the shared per-<c>ComponentTable</c> FK tree. That home is gone
+    /// (#629) and there is no phase to select any more, so the flag now means "this lookup cannot be answered" and the
+    /// caller raises. Skipping such an archetype instead would under-report referrers, and for cascade delete an
+    /// unreported referrer is an orphaned child.
+    /// </remarks>
     public readonly bool HasNonCluster;
 
     public FkCandidates((ArchetypeMetadata Meta, int ComponentSlot)[] clusterArchetypes, bool hasNonCluster)

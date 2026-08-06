@@ -1,4 +1,4 @@
-﻿// unset
+// unset
 
 using System.Runtime.CompilerServices;
 
@@ -44,12 +44,28 @@ internal abstract class BTreeBase<TStore> : IBTreeIndex where TStore : struct, I
 
     public abstract void CheckConsistency(ref ChunkAccessor<TStore>accessor);
 
-    // Diagnostic counters
-    public abstract long Count { get; }
-    public abstract long OptimisticRestarts { get; }
-    public abstract long PessimisticFallbacks { get; }
-    public abstract long LeafFullFromOlc { get; }
-    public abstract long SplitCount { get; }
+    /// <summary>
+    /// Advances a parked range cursor by one leaf, writing that leaf's in-range entries as (ordered key, value) pairs.
+    /// See <see cref="BTree{TKey,TStore}.FillOrderedPage"/> for the contract, including the negative "grow the spans" return.
+    /// </summary>
+    /// <remarks>
+    /// This is the whole reason the streaming K-way merge does not have to be generic over the key type. The cursor state is non-generic, the output is
+    /// non-generic, and the typed override does the key comparison and the ordered encoding on its side of the call. Without it, holding K live cursors would
+    /// mean making <c>KWayMergeState</c>, <c>ArchetypeSortedStream</c> and everything they touch generic over <c>TKey</c> — for a merge whose entire job is
+    /// to compare keys that have already been normalised to <see cref="long"/>.
+    /// </remarks>
+    internal abstract int FillOrderedPage(ref LeafPageCursorState state, System.Span<long> orderedKeys, System.Span<int> values,
+        ref ChunkAccessor<TStore> accessor);
+
+    // Deliberately NOT here: the OLC diagnostic counters (OptimisticRestarts, PessimisticFallbacks, SplitCount,
+    // MergeCount, MoveRightCount, WriteLockFailures, ContentionSplitCount). Five of them were abstract on this base and
+    // nothing ever read them through a BTreeBase reference — every caller holds the concrete BTree<TKey, TStore>, and
+    // four of their immediate neighbours were already plain members, so the split between "promoted to the polymorphic
+    // surface" and "not" tracked nothing. Put a counter here only when a caller genuinely has nothing but a BTreeBase.
+    //
+    // Removed outright rather than demoted: Count (a second name for EntryCount over the same field) and
+    // LeafFullFromOlc (incremented on the insert path, read by nobody, and not even reset by ResetDiagnostics — the
+    // signal it carried is emitted live as Data:Index:BTree:RebalanceFallback reason 0).
 
     /// <summary>
     /// Returns the minimum key encoded as a <see cref="long"/> using the same encoding as

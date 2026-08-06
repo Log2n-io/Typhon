@@ -510,8 +510,21 @@ internal sealed class DiagnosticCommandExecutor
                         return CommandResult.Error($"Error: Entity {entityId} not found in EntityMap.");
                     }
 
-                    // Get the CompRevTable first chunk ID from the EntityRecord location
-                    int compRevFirstChunkId = EntityRecordAccessor.GetLocation(ptr, slot);
+                    // Get the CompRevTable first chunk ID from the EntityRecord.
+                    //
+                    // Through the CLUSTER accessor, indexed by the slot's VERSIONED index. Reading it with EntityRecordAccessor.GetLocation resolved to
+                    // *(int*)(ptr + 14 + slot*4), which in a ClusterEntityRecord is ClusterChunkId — and since #629 every archetype is cluster-backed, this
+                    // dump walked a chain from a chunk id that is not a chain root, printing another entity's revisions or dereferencing an unallocated
+                    // chunk (review M8). An operator-facing command that quietly prints the wrong entity's history is worse than one that fails.
+                    int versionedIndex = meta.ClusterLayout.SlotToVersionedIndex[slot];
+                    if (versionedIndex < 0)
+                    {
+                        return CommandResult.Error(
+                            $"Error: Component '{componentName}' is {table.StorageMode} on archetype '{meta.ArchetypeType?.Name}', so it keeps no revision "
+                            + "chain — its value lives in the entity's cluster slot. Revision history exists only for Versioned components.");
+                    }
+
+                    int compRevFirstChunkId = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(ptr, versionedIndex);
                     if (compRevFirstChunkId == 0)
                     {
                         return CommandResult.Error($"Error: Entity {entityId} has no revision chain for '{componentName}' (ChunkId=0).");

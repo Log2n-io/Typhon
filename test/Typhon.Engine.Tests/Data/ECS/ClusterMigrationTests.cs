@@ -1125,6 +1125,83 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         Assert.That(cs.ClusterCellMap[postChunk], Is.EqualTo(dstCell));
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // Migration folds the migrant into the destination's MVCC visibility summary
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Migration is the born-site that is easiest to miss: it moves an entity between clusters of the same archetype WITHOUT changing its BornTSN, so a
+    /// destination cluster that was entirely committed before a live reader's snapshot silently acquires an entity that is not. If the fold is dropped, the
+    /// destination keeps claiming full visibility and the SoA scan emits a phantom for every reader in between.
+    /// </summary>
+    /// <remarks>
+    /// The residents are spawned in an EARLIER transaction than the migrant, which is what makes the fold observable: the destination summary must RISE to
+    /// the migrant's older-but-larger BornTSN. Spawning both in one transaction would leave the summary unchanged and the assertion vacuous.
+    /// </remarks>
+    [Test]
+    public void Migration_FoldsMigrantBornTsn_IntoDestinationVisibilitySummary()
+    {
+        using var dbe = SetupEngineWithGrid();
+
+        EntityId resident;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            resident = tx.Spawn<ClMigUnit>(
+                ClMigUnit.Pos.Set(PointAt(550f, 750f, tag: 2)),
+                ClMigUnit.Scratch.Set(ScratchOf(2, 0.2f)));
+            tx.Commit();
+        }
+
+        EntityId migrant;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            migrant = tx.Spawn<ClMigUnit>(
+                ClMigUnit.Pos.Set(PointAt(50f, 50f, tag: 1)),
+                ClMigUnit.Scratch.Set(ScratchOf(1, 0.1f)));
+            tx.Commit();
+        }
+
+        var meta = Archetype<ClMigUnit>.Metadata;
+        var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
+        var (dstChunk, _) = ReadLocation(dbe, resident);
+        var dstBornBefore = cs.ClusterMaxBornTsn[dstChunk];
+        var (srcChunk, _) = ReadLocation(dbe, migrant);
+        var migrantBorn = cs.ClusterMaxBornTsn[srcChunk];
+        Assert.That(migrantBorn, Is.GreaterThan(dstBornBefore),
+            "the migrant must be younger than the destination's residents, or the fold cannot be distinguished from doing nothing");
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var eref = tx.OpenMut(migrant);
+            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            pos.Bounds = new AABB2F { MinX = 560f, MinY = 760f, MaxX = 560f, MaxY = 760f };
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(1);
+
+        var (postChunk, _) = ReadLocation(dbe, migrant);
+        Assert.That(postChunk, Is.EqualTo(dstChunk), "the migrant is absorbed into the destination cell's existing cluster");
+
+        var report = dbe.RunStorageIntegrityCheck();
+        foreach (var issue in report.Issues)
+        {
+            TestContext.WriteLine($"ISSUE {issue.Kind}: {issue.Detail}");
+        }
+
+        // Both assertions, not the first that fails: the direct read says the fold happened, the audit says the summary is sound. Dropping the fold must be
+        // visible through the audit alone — that is the property this fixture is here to pin, since a future site has no direct assertion watching it.
+        Assert.Multiple(() =>
+        {
+            Assert.That(cs.ClusterMaxBornTsn[dstChunk], Is.GreaterThanOrEqualTo(migrantBorn),
+                "the destination summary must now bound the migrant's BornTSN — migration carries the entity's TSNs across unchanged");
+            Assert.That(report.Issues, Has.None.Matches<StorageIntegrityIssue>(i => i.Kind == StorageIntegrityIssueKind.ClusterVisibilitySummaryUnsound),
+                "the recomputed summary must match after migration");
+            Assert.That(report.VisibilitySummaryClustersChecked, Is.GreaterThan(0),
+                "GENUINENESS: the audit must have recomputed at least the destination cluster");
+        });
+    }
+
     private static DatabaseEngine CreateNamedEngineWithGrid(string dbName)
     {
         var sc = new ServiceCollection();
