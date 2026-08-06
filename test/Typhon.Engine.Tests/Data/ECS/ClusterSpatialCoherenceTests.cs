@@ -410,7 +410,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
     [Test]
     public void Reopen_RebuildsClusterCellMap_FromPersistedData()
     {
-        var dbName = $"T_ClusterCellRebuild_{Environment.ProcessId}";
+        var dbName = NewUniqueDatabaseName("T_ClusterCellRebuild");
 
         int cellKey1, cellKey2;
         int chunkId1, chunkId2;

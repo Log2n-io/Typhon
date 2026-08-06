@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using Serilog;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -429,6 +430,55 @@ abstract class TestBase<T> : TestBase
     /// </summary>
     protected virtual void ConfigureEngineOptions(DatabaseEngineOptions o) => TestWalProfile.Apply(o, _testDatabaseDir);
 
+    /// <summary>
+    /// A database name unique to this run, for the reopen fixtures that build their own engine by name (they need one name that is stable across the two
+    /// sessions of a single test, but never shared with any other run).
+    /// <para>
+    /// These names used to be keyed on <c>Environment.ProcessId</c>, which is not unique: the OS recycles PIDs, and nothing deleted the databases afterwards.
+    /// That was harmless while CI ran on ephemeral runners — a fresh workspace each run cannot collide with anything — and became a real failure once the gate
+    /// moved to the persistent self-hosted runner (#466), where <c>bin/Release/net10.0/</c> accumulates bundles across runs AND across engine format
+    /// versions. A recycled PID then finds not merely stale data but a file the current engine refuses to open:
+    /// <c>"Incompatible database format: file version 4, engine version 5"</c>, which is how this surfaced.
+    /// </para>
+    /// </summary>
+    protected string NewUniqueDatabaseName(string prefix)
+    {
+        var name = $"{prefix}_{Guid.NewGuid():N}";
+        _namedDatabases.Add(name);
+        return name;
+    }
+
+    /// <summary>Names handed out by <see cref="NewUniqueDatabaseName"/>, drained by <see cref="TearDown"/> so cleanup still happens when a test throws.</summary>
+    private readonly List<string> _namedDatabases = [];
+
+    /// <summary>
+    /// Removes both halves of a database created via <see cref="NewUniqueDatabaseName"/>: the bundle under
+    /// <see cref="PagedMMFOptions.DatabaseDirectory"/> (the process working directory, i.e. the test bin folder) and the separate WAL directory those
+    /// fixtures place under the temp path. Unique names alone stop the collisions; deleting stops the disk filling — 784 stale WAL directories had piled up
+    /// locally by the time this was found. Best-effort: a failure here must never fail a test that otherwise passed.
+    /// </summary>
+    private static void DeleteNamedDatabase(string dbName)
+    {
+        foreach (var path in new[]
+                 {
+                     Path.Combine(Environment.CurrentDirectory, dbName + ".typhon"),
+                     Path.Combine(Path.GetTempPath(), dbName)
+                 })
+        {
+            try
+            {
+                if (Directory.Exists(path))
+                {
+                    Directory.Delete(path, recursive: true);
+                }
+            }
+            catch
+            {
+                // ignored — leftover files are untidy, a failed cleanup masking a real result would be worse
+            }
+        }
+    }
+
     [TearDown]
     public virtual void TearDown()
     {
@@ -437,6 +487,14 @@ abstract class TestBase<T> : TestBase
 
         // Clean up the database file after each test to prevent accumulation
         CleanupDatabaseFile();
+
+        // Same for any by-name database a fixture built for itself — those bypass CleanupDatabaseFile entirely, which is how 784 stale WAL directories
+        // accumulated locally. Runs after the ServiceProvider dispose above, since an open data handle blocks the recursive delete.
+        foreach (var dbName in _namedDatabases)
+        {
+            DeleteNamedDatabase(dbName);
+        }
+        _namedDatabases.Clear();
     }
 
     private void CleanupDatabaseFile()

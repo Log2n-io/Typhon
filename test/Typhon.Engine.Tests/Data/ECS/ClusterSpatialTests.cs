@@ -638,7 +638,7 @@ class ClusterSpatialTests : TestBase<ClusterSpatialTests>
     [Test]
     public void Reopen_PerArchetypeSpatialLoaded_QueryWorks()
     {
-        var dbName = $"T_ClSpatialReopen_{Environment.ProcessId}";
+        var dbName = NewUniqueDatabaseName("T_ClSpatialReopen");
         EntityId id1, id2;
 
         // Session 1: create database, spawn entities
