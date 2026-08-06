@@ -38,6 +38,39 @@ public sealed class DataBrowserService
         _sessions = sessions;
     }
 
+    /// <summary>
+    /// Drops every cached snapshot for a session. <b>Must be called whenever the session's engine is replaced</b> — i.e. on pause and on resume (#621).
+    /// </summary>
+    /// <remarks>
+    /// <para>This is a correctness requirement, not housekeeping. <see cref="_snapshots"/> is keyed on the <see cref="OpenSession"/>, and the whole point of
+    /// pausing is that the session object <i>outlives</i> the engine. Without this call the entries stay reachable, so after the application has written to
+    /// the database and the Workbench has resumed, the Data Browser keeps serving the pre-pause entity list stamped with the pre-pause
+    /// <c>Revision</c> — silently wrong data that looks entirely plausible, which is the single worst outcome this feature could produce.</para>
+    /// <para><c>StorageMapService</c> needs no equivalent: its cache is keyed on the <c>DatabaseEngine</c> itself, so replacing the engine invalidates it by
+    /// construction.</para>
+    /// </remarks>
+    public void InvalidateSession(OpenSession session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        _snapshots.Remove(session);
+    }
+
+    /// <summary>
+    /// Whether this session currently has cached snapshots. Test-only introspection for the pause path (#621).
+    /// </summary>
+    /// <remarks>
+    /// The behaviour that matters — "a resumed session re-reads the database instead of replaying a pre-pause list" — cannot be observed from outside the
+    /// service: a surviving cache would answer without ever touching the new engine, which looks identical to a correct answer unless the data changed
+    /// underneath. Writing entities from a test would require the schema's static archetype types, which live in a collectible ALC precisely so they do not
+    /// leak into the default one. So the mechanism is pinned here directly, and the end-to-end version — browse, let the application write, resume, see the
+    /// new rows — is part of the live walk rather than pretended at in a unit test.
+    /// </remarks>
+    internal bool HasCachedSnapshots(OpenSession session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        return _snapshots.TryGetValue(session, out var perSession) && !perSession.IsEmpty;
+    }
+
     private sealed record ArchetypeSnapshot(EntityId[] Ids, long Revision);
 
     private readonly record struct PreviewSpec(string TypeName, int FieldId);
@@ -332,6 +365,14 @@ public sealed class DataBrowserService
         {
             // Trace / live-Attach sessions have no in-process engine to read entities from.
             throw new DataUnavailableException(sessionId, session.Kind.ToString());
+        }
+        if (open.IsPaused)
+        {
+            // Paused (#621): the engine is gone, so there are no entities to read. 409 rather than 400 — this resolves itself when the holder exits, and the
+            // client should retry rather than treat it as a permanent wrong-session-kind error.
+            throw new WorkbenchException(409, "database_paused",
+                "The Data Browser needs the database, which this session has released"
+                + (open.PausedBy is { } h ? $" to {h.Describe()}" : "") + ".");
         }
         if (open.Engine.State != SchemaCompatibility.State.Ready)
         {

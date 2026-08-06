@@ -205,7 +205,7 @@ describe('ProfilesPanel (#617)', () => {
   });
 
   it('explains itself rather than showing an empty table when the session has no database', () => {
-    useSessionStore.setState({ kind: 'trace', capabilities: ['profiler'] });
+    useSessionStore.setState({ kind: 'open', capabilities: ['profiler'] });
     hoisted.profiles = [];
     renderPanel();
     expect(screen.getByText(/Profile sessions live with a database/)).toBeTruthy();

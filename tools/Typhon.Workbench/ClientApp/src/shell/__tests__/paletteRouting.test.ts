@@ -37,7 +37,7 @@ describe('suite C — palette prefix routing', () => {
 
 describe('suite C — object resolution', () => {
   it('resolves each object type to the correct bus write (C.2)', () => {
-    const hits = buildObjectHits('', SOURCES, 'trace');
+    const hits = buildObjectHits('', SOURCES, 'open');
     const byType = (t: string) => hits.find((h) => h.type === t);
     expect(byType('component')?.ref).toBe('Position');
     expect(byType('archetype')?.ref).toBe('2002');
@@ -47,25 +47,25 @@ describe('suite C — object resolution', () => {
 
   it('emits groups in the canonical order (C.3)', () => {
     const groups = buildObjectHits('', SOURCES, 'open').map((h) => h.group);
-    // Open kind → Resources, Components, Archetypes (no Systems/Queries).
-    expect([...new Set(groups)]).toEqual(['Resources', 'Components', 'Archetypes']);
+    // #621 — an Open session reaches every group: its own storage objects, plus the systems and queries a capture
+    // attached to it contributes. The assertion is about ORDER, which is what C.3 is for.
+    expect([...new Set(groups)]).toEqual(['Resources', 'Components', 'Archetypes', 'Systems', 'Queries']);
   });
 
   it('filters by session kind (C.4)', () => {
     const openGroups = new Set(buildObjectHits('', SOURCES, 'open').map((h) => h.group));
+    // #621 — an Open session is now also how a capture is reached, so it spans both worlds: its own storage objects
+    // AND the systems/queries a capture contributes. The old split (Resources xor Systems) described a separation of
+    // session kinds that no longer exists.
     expect(openGroups.has('Resources')).toBe(true);
-    expect(openGroups.has('Systems')).toBe(false); // Systems absent in an Open session
-
-    const traceGroups = new Set(buildObjectHits('', SOURCES, 'trace').map((h) => h.group));
-    expect(traceGroups.has('Systems')).toBe(true);
-    expect(traceGroups.has('Resources')).toBe(false); // Resources absent in a Trace session
+    expect(openGroups.has('Systems')).toBe(true);
 
     const attachGroups = new Set(buildObjectHits('', SOURCES, 'attach').map((h) => h.group));
     expect(attachGroups).toEqual(new Set(['Systems', 'Queries']));
   });
 
   it('substring-filters within the query', () => {
-    const hits = buildObjectHits('Move', SOURCES, 'trace');
+    const hits = buildObjectHits('Move', SOURCES, 'open');
     expect(hits.map((h) => h.label)).toContain('Movement');
     expect(hits.map((h) => h.label)).not.toContain('Damage');
   });

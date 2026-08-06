@@ -18,6 +18,7 @@ import { registerDockApi, registerResetLayout, focusPanelBody } from './commands
 import { registerProfilerDockApi } from './commands/profilerCommands';
 import { isViewActive } from './viewRegistry';
 import MigrationRequiredBanner from './banners/MigrationRequiredBanner';
+import PausedBanner from './banners/PausedBanner';
 import IncompatibleBanner from './banners/IncompatibleBanner';
 import ReconnectBanner from './banners/ReconnectBanner';
 
@@ -404,6 +405,8 @@ export default function DockHost() {
 
   return (
     <div className="flex h-full flex-col">
+      {/* #621 — self-gating on session.isPaused, and owns the poll that notices the database coming back. */}
+      <PausedBanner />
       {showMigration && <MigrationRequiredBanner />}
       {showIncompatible && <IncompatibleBanner />}
       {/* Stage 4 P4 (#377) — reconnect / shutdown banner; self-gates on sessionKind === 'attach' &&

@@ -15,7 +15,7 @@ import { parseRowFilter, applyRowFilter } from '@/hooks/dataBrowser/rowFilter';
 import { useDataBrowserStore, DEFAULT_PAGE_SIZE, PAGE_SIZE_OPTIONS } from '@/stores/useDataBrowserStore';
 import { useDataBrowserPrefsStore, dataBrowserPrefsKey, type DataBrowserPrefs } from '@/stores/useDataBrowserPrefsStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
-import { useSessionStore } from '@/stores/useSessionStore';
+import { useSessionStore, useDatabasePaused } from '@/stores/useSessionStore';
 import { useDensityRowHeight } from '@/hooks/useDensityRowHeight';
 import EntityListContextMenu from './EntityListContextMenu';
 import EntityColumnPicker from './EntityColumnPicker';
@@ -101,6 +101,7 @@ export default function EntityListPanel(_props: IDockviewPanelProps) {
 
   const effectivePageSize = autoPageSize ? autoSize : pageSize;
   const offset = pageIndex * effectivePageSize;
+  const databasePaused = useDatabasePaused();
   const { rows, total, isLoading, isError, isFetching } = useEntityPage(
     archetypeId,
     offset,
@@ -287,7 +288,15 @@ export default function EntityListPanel(_props: IDockviewPanelProps) {
             <p className="text-fs-base text-muted-foreground">Select an archetype to browse its entities.</p>
           </div>
         )}
-        {archetypeId && isError && <p className="p-3 text-fs-base text-destructive">Failed to load entities.</p>}
+        {/* #621 — a released database is not a failure. The request 409s while paused, and rendering that as
+            "Failed to load" teaches the user to close and reopen the session, which is the exact dance pausing exists
+            to remove. Checked BEFORE isError because the error is the paused state's symptom, not a separate case. */}
+        {archetypeId && databasePaused && (
+          <p className="p-3 text-fs-base text-muted-foreground" data-testid="entity-list-paused">
+            Database released to another process. Entities reappear automatically when it is available again.
+          </p>
+        )}
+        {archetypeId && !databasePaused && isError && <p className="p-3 text-fs-base text-destructive">Failed to load entities.</p>}
         {archetypeId && isLoading && <p className="p-3 text-fs-base text-muted-foreground">Loading entities…</p>}
         {archetypeId && !isLoading && !isError && total === 0 && (
           <p className="p-3 text-fs-base text-muted-foreground">This archetype has no entities.</p>

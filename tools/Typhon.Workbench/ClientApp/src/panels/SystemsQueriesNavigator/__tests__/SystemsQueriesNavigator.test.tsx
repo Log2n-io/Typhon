@@ -48,7 +48,7 @@ beforeEach(() => {
   useSelectionStore.getState().clear();
   // sessionId null → the data hooks stay disabled (no network); the navigator reads systems from the
   // hydrated profiler-session store, exactly as it does once the metadata fetch has landed.
-  useSessionStore.setState({ kind: 'trace', sessionId: null });
+  useSessionStore.setState({ kind: 'open', sessionId: null });
   useProfilerSessionStore.setState({
     metadata: { systems: [sys(0, 'Movement'), sys(1, 'Damage')] } as unknown as ProfilerMetadataDto,
     buildError: null,

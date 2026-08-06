@@ -36,6 +36,9 @@ function makeMetadata(overrides: Partial<ProfilerMetadataDto> = {}): ProfilerMet
     postTickSummaries: [],
     queueIdToName: {},
     systemArchetypeTouches: [],
+    // Required by the DTO since #620's entity-lens work; the committed OpenAPI spec was stale and did not carry it, so
+    // this fixture compiled without it until the spec was refreshed from the live server.
+    entityLifecycleRuns: [],
     ...overrides,
   };
 }

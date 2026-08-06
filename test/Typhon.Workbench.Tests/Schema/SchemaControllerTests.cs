@@ -392,13 +392,13 @@ public sealed partial class SchemaControllerTests
     }
 
     /// <summary>
-    /// Test fake — schema provider is null AND <c>IsSchemaBuilding</c> is true. Mirrors a trace session whose
-    /// background cache build is still in flight (the controller must respond with 202 Accepted, not 404).
+    /// Test fake — schema provider is null AND <c>IsSchemaBuilding</c> is true. Mirrors a session whose freshly-attached
+    /// capture is still building its sidecar cache (the controller must respond with 202 Accepted, not 404).
     /// </summary>
     private sealed record FakeSchemaBuildingSession(Guid Id) : ISession
     {
-        public SessionKind Kind => SessionKind.Trace;
-        public SessionState State => SessionState.Trace;
+        public SessionKind Kind => SessionKind.Open;
+        public SessionState State => SessionState.Ready;
         public string FilePath => string.Empty;
         public Typhon.Workbench.Schema.IStaticSchemaProvider StaticSchemaProvider => null;
         public bool IsSchemaBuilding => true;

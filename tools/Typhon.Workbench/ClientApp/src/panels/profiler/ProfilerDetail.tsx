@@ -6,7 +6,7 @@ import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useProfilerStatsStore } from '@/stores/useProfilerStatsStore';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useSourceLocationStore } from '@/stores/useSourceLocationStore';
-import { useSessionStore } from '@/stores/useSessionStore';
+import { useSessionCapability, useSessionStore, useTraceBackedSession } from '@/stores/useSessionStore';
 import { useOptionsStore } from '@/stores/useOptionsStore';
 import { openSourcePreview } from '@/shell/commands/openSchemaBrowser';
 import { openViewCallTree, revealQueryExecutionInAnalyzer } from '@/shell/commands/profilerCommands';
@@ -79,12 +79,16 @@ function SpanDetail({ span }: { span: SpanData }): React.JSX.Element {
   const resolve = useSourceLocationStore((s) => s.resolve);
   const openInEditor = useOptionsStore((s) => s.openInEditor);
   const sessionId = useSessionStore((s) => s.sessionId);
-  const sessionKind = useSessionStore((s) => s.kind);
   const setCallTreeScope = useCallTreeScopeStore((s) => s.setScope);
+  // Two different questions, and #617/#621 gave each its own answer instead of both reading `kind === 'trace'`:
+  //   • the Call Tree needs a capture FILE on disk (CPU sampling is file-mode only) — `useTraceBackedSession`
+  //   • the query round-trips need only "is there a capture at all" — the profiler capability
+  // Under the old test both were false for an open database with a capture attached, so the database-hosted path
+  // silently lost call-tree scoping and per-span query attribution.
+  const canScopeCallTree = useTraceBackedSession();
+  const isProfilerSession = useSessionCapability('profiler');
   const [openError, setOpenError] = useState<string | null>(null);
   const loc = resolve(span.rawEvent?.sourceLocationId);
-  // CPU sampling is file-mode only — the Call Tree (and this scope command) exist for trace sessions.
-  const canScopeCallTree = sessionKind === 'trace';
 
   // Look up the per-tick QueryPlan execution(s) parented under this span. Returns empty for non-system
   // spans or sessions without a query catalog (Open mode). Two stages because parent linking is only
@@ -93,7 +97,6 @@ function SpanDetail({ span }: { span: SpanData }): React.JSX.Element {
   // (systemIdx, tickNumber) instead. Both endpoints stay cheap; staleTime: Infinity makes refetches
   // free across re-selections of the same span.
   const parentSpanIdNum = span.spanId ? Number(span.spanId) : 0;
-  const isProfilerSession = sessionKind === 'trace' || sessionKind === 'attach';
   const byParentQuery = useGetApiSessionsSessionIdProfilerExecutionsByParentParentSpanId(
     sessionId ?? '',
     parentSpanIdNum,
@@ -562,18 +565,21 @@ function ChunkDetail({ chunk }: { chunk: ChunkSpan }): React.JSX.Element {
   const resolveSystem = useSourceLocationStore((s) => s.resolveSystem);
   const openInEditor = useOptionsStore((s) => s.openInEditor);
   const sessionId = useSessionStore((s) => s.sessionId);
-  const sessionKind = useSessionStore((s) => s.kind);
   const setCallTreeScope = useCallTreeScopeStore((s) => s.setScope);
+  // Two different questions, and #617/#621 gave each its own answer instead of both reading `kind === 'trace'`:
+  //   • the Call Tree needs a capture FILE on disk (CPU sampling is file-mode only) — `useTraceBackedSession`
+  //   • the query round-trips need only "is there a capture at all" — the profiler capability
+  // Under the old test both were false for an open database with a capture attached, so the database-hosted path
+  // silently lost call-tree scoping and per-span query attribution.
+  const canScopeCallTree = useTraceBackedSession();
+  const isProfilerSession = useSessionCapability('profiler');
   // Look up which tick this chunk belongs to by binary-searching tick summaries against the chunk's startUs.
   // Required for the (systemIdx, tickIndex) round-trip key — ChunkSpan doesn't carry the tickNumber directly
   // because chunks are stored under their owning TickData.chunks array, not tagged individually.
   const tickNumber = useProfilerSessionStore((s) => findTickNumberForUs(s.metadata?.tickSummaries ?? undefined, chunk.startUs));
   const [openError, setOpenError] = useState<string | null>(null);
   const loc = resolveSystem(chunk.systemIndex);
-  // CPU sampling is file-mode only — the Call Tree (and this scope command) exist for trace sessions.
-  const canScopeCallTree = sessionKind === 'trace';
 
-  const isProfilerSession = sessionKind === 'trace' || sessionKind === 'attach';
   const execsQuery = useGetApiSessionsSessionIdProfilerExecutionsBySystemTickSystemIdxTickIndex(
     sessionId ?? '',
     chunk.systemIndex,

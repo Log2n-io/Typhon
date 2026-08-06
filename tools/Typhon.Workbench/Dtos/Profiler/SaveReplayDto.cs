@@ -16,4 +16,8 @@ public record SaveReplayRequest(string Path = "");
 /// <summary>
 /// Response body for a successful save. Echoes the resolved (absolute) target path and the resulting file size.
 /// </summary>
-public record SaveReplayResponse(string Path, long BytesWritten);
+/// <param name="ProfileId">
+/// The replay, attached back to this live session as its active profile (#621). Null when the save succeeded but the attach did not — the file on disk is the
+/// durable artefact, so a failed attach must not present as a failed save.
+/// </param>
+public record SaveReplayResponse(string Path, long BytesWritten, Guid? ProfileId = null);

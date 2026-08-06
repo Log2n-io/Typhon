@@ -127,7 +127,7 @@ describe('CohortsPanel (#620 §4.4)', () => {
   });
 
   it('without a database the survival section is ABSENT, not zeroed', () => {
-    useSessionStore.setState({ kind: 'trace', capabilities: ['profiler'] });
+    useSessionStore.setState({ kind: 'open', capabilities: ['profiler'] });
     renderPanel();
     selectTick();
 

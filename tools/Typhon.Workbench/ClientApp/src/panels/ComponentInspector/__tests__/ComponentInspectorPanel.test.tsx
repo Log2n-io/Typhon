@@ -244,8 +244,9 @@ describe('ComponentInspectorPanel', () => {
     expect(screen.queryByTestId('rel-runtime-banner')).toBeNull();
   });
 
-  it('Relationships tab (trace, runtime not hosted) shows the runtime-not-hosted gate', () => {
-    useSessionStore.setState({ kind: 'trace', capabilities: sessionCapabilitiesForKind('trace') });
+  it('Relationships tab (profiler session, no live database) shows the runtime-not-hosted gate', () => {
+    // #621 — the standalone trace session is gone; the session that profiles WITHOUT a hosted engine is now Attach.
+    useSessionStore.setState({ kind: 'attach', capabilities: sessionCapabilitiesForKind('attach') });
     useSelectionStore.getState().select('component', 'Position');
     render(<ComponentInspectorPanel {...PROPS} />);
     act(() => screen.getByRole('tab', { name: 'Relationships' }).focus());

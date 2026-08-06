@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Clock, Database, FileSearch, Plug, Sparkles } from 'lucide-react';
+import { Clock, Database, Plug, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { customFetch } from '@/api/client';
 import ConnectDialog, { type ConnectTab } from './dialogs/ConnectDialog';
@@ -48,15 +48,6 @@ export default function WelcomeScreen() {
  >
  <Database className="h-5 w-5" />
  <span>Open .typhon File</span>
- </Button>
-
- <Button
- variant="outline"
- className="flex h-auto flex-col items-center gap-2 px-6 py-4 text-fs-lg"
- onClick={() => openDialog('trace')}
- >
- <FileSearch className="h-5 w-5" />
- <span>Open .typhon-trace</span>
  </Button>
 
  <Button

@@ -3,7 +3,7 @@ import { Binary, Boxes, ChevronDown, ChevronRight, FolderOpen, HardDrive, Layers
 import { StatusBadge } from '@/components/ui/status-badge';
 import { simplifyTypeName } from '@/libs/simplifyTypeName';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
-import { useSessionStore } from '@/stores/useSessionStore';
+import { useSessionCapability, useSessionStore } from '@/stores/useSessionStore';
 import type { DbMapSelection } from '@/libs/dbmap/dbMapSelection';
 import { useDbMapOverlayStore } from '@/stores/useDbMapOverlayStore';
 import { useDbMap } from '@/hooks/dbmap/useDbMap';
@@ -57,8 +57,10 @@ import type { ProfilerSelection } from '@/libs/profiler/model/traceModel';
 export default function DetailPanel() {
   const leaf = useSelectionStore((s) => s.leaf);
   const profilerMetadata = useProfilerSessionStore((s) => s.metadata);
-  const sessionKind = useSessionStore((s) => s.kind);
-  const isProfilerSession = sessionKind === 'attach' || sessionKind === 'trace';
+  // #617 introduced capabilities to replace exactly this test; #621 finishes the job. `kind === 'trace' || 'attach'` is
+  // false for an open database with a capture attached — a session that can profile — so this panel was hiding profiler
+  // detail from the database-hosted path that F4 made the primary one.
+  const isProfilerSession = useSessionCapability('profiler');
 
   // Pin freezes the rail on the current object so clicking elsewhere doesn't re-target it (ephemeral).
   const [pinned, setPinned] = useState<SelectionLeaf | null>(null);

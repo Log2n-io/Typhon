@@ -34,6 +34,37 @@ public sealed class AttachSession : ISession, IDisposable
     /// </remarks>
     public IReadOnlySet<string> Capabilities { get; } = System.Collections.Immutable.ImmutableHashSet.Create(SessionCapability.Profiler);
 
+    // ── Profiles (#621) ──────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // An attach session can hold attached captures for one reason: "capture from the running app, then analyse it"
+    // (the capture-and-analyse command) saves a replay and must open it somewhere. With the standalone trace session
+    // removed, a capture is always attached TO a session — normally its database, but a replay taken over TCP has no
+    // database the Workbench can reach (B1), so it attaches to the live session it came from.
+
+    private readonly ProfileHost _profileHost = new();
+
+    /// <summary>Captures attached to this live session — replays saved from the stream.</summary>
+    public IReadOnlyDictionary<Guid, TraceSessionRuntime> Profiles => _profileHost.Profiles;
+
+    /// <inheritdoc />
+    public Guid? ActiveProfileId => _profileHost.ActiveProfileId;
+
+    /// <summary>The attached capture in focus, or <c>null</c> when the session is showing its live stream.</summary>
+    public TraceSessionRuntime ActiveProfile => _profileHost.ActiveProfile;
+
+    /// <summary>Attaches a saved replay and makes it the active profile.</summary>
+    public Guid AttachProfile(TraceSessionRuntime runtime) => _profileHost.Attach(runtime);
+
+    /// <summary>Detaches a replay; focus falls back to the live stream when none remain.</summary>
+    public bool DetachProfile(Guid profileId) => _profileHost.Detach(profileId);
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// An attached replay is exactly as "still building" as any capture is while its sidecar cache is assembled. Without this the not-ready window after a
+    /// capture-and-analyse comes back as 409 (permanent) instead of 202 (poll me).
+    /// </remarks>
+    public bool IsSchemaBuilding => ActiveProfile is { } active && !active.IsBuildComplete;
+
     public AttachSession(Guid id, string endpointAddress, AttachSessionRuntime runtime)
     {
         Id = id;
@@ -41,5 +72,9 @@ public sealed class AttachSession : ISession, IDisposable
         Runtime = runtime;
     }
 
-    public void Dispose() => Runtime.Dispose();
+    public void Dispose()
+    {
+        _profileHost.DetachAll();
+        Runtime.Dispose();
+    }
 }

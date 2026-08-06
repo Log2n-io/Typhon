@@ -19,8 +19,12 @@ namespace Typhon.Workbench.Controllers;
 [Tags("Profiler")]
 [RequireBootstrapToken]
 [RequireSession]
-public sealed class ProfilerController : WorkbenchControllerBase
+public sealed partial class ProfilerController : WorkbenchControllerBase
 {
+    private readonly ILogger<ProfilerController> _logger;
+
+    public ProfilerController(ILogger<ProfilerController> logger) => _logger = logger;
+
     /// <summary>
     /// Returns the full metadata DTO once the session is ready. For Trace sessions this means the sidecar cache build
     /// completed; for Attach sessions it means the first Init frame arrived. Returns 202 Accepted with an empty body
@@ -294,7 +298,24 @@ public sealed class ProfilerController : WorkbenchControllerBase
         try
         {
             var bytesWritten = await attach.Runtime.SaveSessionAsync(resolved, ct);
-            return Ok(new SaveReplayResponse(resolved, bytesWritten));
+
+            // #621 — attach the replay we just wrote as this session's active profile, and say so in the response.
+            //
+            // With the standalone trace session removed, a capture is always attached TO a session; a replay taken over TCP has no database the Workbench can
+            // reach (blocker B1), so it attaches back to the live session it came from. Doing it HERE rather than via a follow-up client call is what keeps the
+            // "attach a capture by path" hole closed: the only path ever attached is the one the server itself just produced, so nothing has to trust a
+            // client-supplied path. If attaching fails the save still succeeded and is reported — the file on disk is the durable artefact.
+            Guid? profileId = null;
+            try
+            {
+                profileId = attach.AttachProfile(TraceSessionRuntime.Start(resolved, _logger));
+            }
+            catch (Exception ex)
+            {
+                LogReplayAttachFailed(sessionId, resolved, ex.Message);
+            }
+
+            return Ok(new SaveReplayResponse(resolved, bytesWritten, profileId));
         }
         catch (InvalidOperationException ex)
         {
@@ -724,4 +745,7 @@ public sealed class ProfilerController : WorkbenchControllerBase
             Status = StatusCodes.Status409Conflict,
         });
     }
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Session {SessionId}: replay saved to '{Path}' but could not be attached as a profile: {Error}")]
+    private partial void LogReplayAttachFailed(Guid sessionId, string path, string error);
 }

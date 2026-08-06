@@ -42,9 +42,7 @@ public sealed class QueryProfilerControllerTests
     private async Task<SessionDto> CreateTraceSessionAsync()
     {
         var path = TraceFixtureBuilder.BuildMinimalTrace(_factory.DemoDirectory, tickCount: 3, instantsPerTick: 2);
-        var resp = await _client.PostAsJsonAsync("/api/sessions/trace", new CreateTraceSessionRequest(path));
-        resp.EnsureSuccessStatusCode();
-        return JsonSerializer.Deserialize<SessionDto>(await resp.Content.ReadAsStringAsync(), Json)!;
+        return await CaptureSessionFactory.OpenWithCaptureAsync(_client, _factory.DemoDirectory, path);
     }
 
     private async Task WaitForBuildAsync(Guid sessionId, TimeSpan timeout)
@@ -184,9 +182,7 @@ public sealed class QueryProfilerControllerTests
     private async Task<SessionDto> CreateQueryTraceSessionAsync()
     {
         var path = TraceFixtureBuilder.BuildTraceWithQueries(_factory.DemoDirectory);
-        var resp = await _client.PostAsJsonAsync("/api/sessions/trace", new CreateTraceSessionRequest(path));
-        resp.EnsureSuccessStatusCode();
-        return JsonSerializer.Deserialize<SessionDto>(await resp.Content.ReadAsStringAsync(), Json)!;
+        return await CaptureSessionFactory.OpenWithCaptureAsync(_client, _factory.DemoDirectory, path);
     }
 
     [Test]
@@ -251,13 +247,13 @@ public sealed class QueryProfilerControllerTests
     }
 
     /// <summary>
-    /// Test fake — mirrors a trace session whose background cache build is still in flight. Reports
+    /// Test fake — mirrors a session whose freshly-attached capture is still building its sidecar cache. Reports
     /// <c>IsSchemaBuilding=true</c> so the controller's <c>CatalogNotReadyResponse</c> returns 202 (not 409).
     /// </summary>
     private sealed record FakeBuildingSession(Guid Id) : ISession
     {
-        public SessionKind Kind => SessionKind.Trace;
-        public SessionState State => SessionState.Trace;
+        public SessionKind Kind => SessionKind.Open;
+        public SessionState State => SessionState.Ready;
         public string FilePath => string.Empty;
         public Typhon.Workbench.Schema.IStaticSchemaProvider StaticSchemaProvider => null;
         public bool IsSchemaBuilding => true;

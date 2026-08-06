@@ -58,14 +58,14 @@ describe('ContextBar (zone B)', () => {
   });
 
   it('shows the trace time-window scope from the profiler view range', () => {
-    useSessionStore.setState({ kind: 'trace', capabilities: ['profiler'] });
+    useSessionStore.setState({ kind: 'open', capabilities: ['profiler'] });
     useProfilerViewStore.getState().commitViewRange({ startUs: 1000, endUs: 5000 });
     renderBar();
     expect(screen.getByText(/1\.0ms–5\.0ms/)).toBeTruthy();
   });
 
   it('shows a link/unlink scope toggle in trace sessions and flips it on click (3B)', () => {
-    useSessionStore.setState({ kind: 'trace', capabilities: ['profiler'] });
+    useSessionStore.setState({ kind: 'open', capabilities: ['profiler'] });
     useProfilerViewStore.getState().commitViewRange({ startUs: 1000, endUs: 5000 });
     renderBar();
     const toggle = screen.getByRole('button', { name: /click to unlink/i });
@@ -173,7 +173,7 @@ describe('ContextBar — two coordinates with a capture attached (#618)', () => 
   });
 
   it('a bare trace session shows its window, no database coordinate and no drift (AC11)', () => {
-    useSessionStore.setState({ kind: 'trace', capabilities: ['profiler'], activeProfileId: null });
+    useSessionStore.setState({ kind: 'open', capabilities: ['profiler'], activeProfileId: null });
     useProfilerViewStore.getState().commitViewRange({ startUs: 1000, endUs: 5000 });
 
     renderBar();

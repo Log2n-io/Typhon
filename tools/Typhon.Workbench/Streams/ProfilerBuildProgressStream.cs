@@ -46,7 +46,15 @@ public static class ProfilerBuildProgressStream
             session = s2;
         }
 
-        if (session is not TraceSession trace)
+        // #621: the session no longer IS the capture — a capture is attached to a database (or to the live session a replay
+        // came from). The question is unchanged ("is there a capture whose cache is being built?"), only where to find it.
+        var trace = session switch
+        {
+            OpenSession { ActiveProfile: { } activeProfile } => activeProfile,
+            AttachSession { ActiveProfile: { } activeReplay } => activeReplay,
+            _ => null,
+        };
+        if (trace == null)
         {
             ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
             return;
@@ -87,9 +95,9 @@ public static class ProfilerBuildProgressStream
         // produced a race where a build transitioning to complete in between was observed as
         // "not complete" but the event fired before the handler was subscribed, leaving the
         // client hanging on an SSE connection that never emitted a terminal.
-        trace.Runtime.BuildProgressChanged += progressHandler;
-        trace.Runtime.BuildCompleted += completedHandler;
-        trace.Runtime.BuildFailed += failedHandler;
+        trace.BuildProgressChanged += progressHandler;
+        trace.BuildCompleted += completedHandler;
+        trace.BuildFailed += failedHandler;
 
         try
         {
@@ -97,9 +105,9 @@ public static class ProfilerBuildProgressStream
             // channel with the terminal event manually. The event was fired before subscription
             // so we'd never receive it via the handler — but we know the outcome from the runtime's
             // state, so we synthesize the equivalent frame here.
-            if (trace.Runtime.IsBuildComplete)
+            if (trace.IsBuildComplete)
             {
-                if (trace.Runtime.Metadata != null)
+                if (trace.Metadata != null)
                 {
                     channel.Writer.TryWrite(new Frame(DoneEvent, new BuildProgressDto()));
                 }
@@ -122,9 +130,9 @@ public static class ProfilerBuildProgressStream
         }
         finally
         {
-            trace.Runtime.BuildProgressChanged -= progressHandler;
-            trace.Runtime.BuildCompleted -= completedHandler;
-            trace.Runtime.BuildFailed -= failedHandler;
+            trace.BuildProgressChanged -= progressHandler;
+            trace.BuildCompleted -= completedHandler;
+            trace.BuildFailed -= failedHandler;
             channel.Writer.TryComplete();
         }
     }

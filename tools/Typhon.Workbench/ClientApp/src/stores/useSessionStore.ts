@@ -1,8 +1,9 @@
 import { create } from 'zustand';
 import type { SessionDto, SessionDiagnosticDto } from '@/api/generated/model';
 
-export type SessionKind = 'none' | 'open' | 'attach' | 'trace';
-export type SessionState = 'Ready' | 'MigrationRequired' | 'Incompatible' | 'Attached' | 'Trace';
+/** Two entry modes since #621: open a database, or attach to a live engine. A capture attaches TO one of those. */
+export type SessionKind = 'none' | 'open' | 'attach';
+export type SessionState = 'Ready' | 'MigrationRequired' | 'Incompatible' | 'Attached';
 
 /**
  * What a session can *do*, as opposed to what it *is* (#617, design D-10).
@@ -27,6 +28,17 @@ interface SessionStoreState {
   capabilities: SessionCapability[];
   /** Which attached profile is driving the profiler panels, or null when the session has none. */
   activeProfileId: string | null;
+  /**
+   * True while the session has released its database to another process (#621).
+   *
+   * Distinct from "loading" and from "failed", and the difference matters: a paused session is a *working* session whose
+   * profiler panels are fully usable, so rendering it as an error would teach the user to close and reopen — the exact
+   * dance pausing exists to remove. Read from the server rather than inferred from the absence of the `database`
+   * capability, which is also absent on Attach sessions that were never paused at all.
+   */
+  isPaused: boolean;
+  /** Human-readable explanation for the paused banner — names the holding process. Null when not paused. */
+  pausedReason: string | null;
   setSession: (dto: SessionDto) => void;
   clearSession: () => void;
 }
@@ -43,11 +55,15 @@ export const useSessionStore = create<SessionStoreState>()((set) => ({
   schemaDiagnostics: null,
   capabilities: [],
   activeProfileId: null,
+  isPaused: false,
+  pausedReason: null,
   setSession: (dto) =>
     set({
       kind: (dto.kind?.toLowerCase() ?? 'open') as SessionKind,
       capabilities: ((dto.capabilities as string[] | null | undefined) ?? []) as SessionCapability[],
       activeProfileId: (dto.activeProfileId as string | null | undefined) ?? null,
+      isPaused: dto.isPaused === true,
+      pausedReason: dto.isPaused === true ? ((dto.reason as string | null | undefined) ?? null) : null,
       sessionId: dto.sessionId,
       token: dto.sessionId,
       sessionState: (dto.state as SessionState) ?? null,
@@ -71,6 +87,8 @@ export const useSessionStore = create<SessionStoreState>()((set) => ({
       schemaDiagnostics: null,
       capabilities: [],
       activeProfileId: null,
+      isPaused: false,
+      pausedReason: null,
     }),
 }));
 
@@ -93,13 +111,26 @@ export const useSessionCapability = (capability: SessionCapability): boolean =>
   useSessionStore((s) => s.capabilities.includes(capability));
 
 /**
- * True when the session's profiler data comes from a capture **file** — a trace session, or an open database with a
- * profile attached — as opposed to a live attach stream.
+ * True when the session's profiler data comes from a capture **file** — as opposed to a live attach stream.
  *
  * A few profiler surfaces genuinely need this narrower question rather than "can this session profile at all": a
  * recorded capture has a source file on disk to re-read, a CPU-frame manifest and a reload-on-overwrite check, none of
- * which a live socket has. Keeping the distinction explicit here beats scattering `kind !== 'attach'` through the
- * panels, where it would read as an arbitrary exclusion rather than a statement about where the data comes from.
+ * which a live socket has.
+ *
+ * The attach clause is not simply `kind !== 'attach'` any more (#621): an attach session that saved a replay and
+ * attached it back IS reading a file, and the surfaces gated here work for it. `activeProfileId` is exactly the
+ * "a capture is attached" signal, so the test states the real condition instead of approximating it by kind.
  */
 export const useTraceBackedSession = (): boolean =>
-  useSessionStore((s) => s.capabilities.includes('profiler') && s.kind !== 'attach');
+  useSessionStore((s) => s.capabilities.includes('profiler') && (s.kind !== 'attach' || s.activeProfileId !== null));
+
+/**
+ * True when a database-backed panel should show a *paused* state rather than an error (#621).
+ *
+ * The precise question is "this session has a database, but not right now", which is why it is both flags and not
+ * either alone. `!hasDatabase` is also true of an Attach session, where there is no database to come back and nothing
+ * to wait for; `isPaused` alone would hold panels in a paused state for the instant after resume, before the capability
+ * refresh lands.
+ */
+export const useDatabasePaused = (): boolean =>
+  useSessionStore((s) => s.isPaused && !s.capabilities.includes('database'));

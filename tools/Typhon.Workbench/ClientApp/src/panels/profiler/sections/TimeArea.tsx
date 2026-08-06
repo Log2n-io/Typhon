@@ -21,7 +21,7 @@ import { openSourcePreview } from '@/shell/commands/openSchemaBrowser';
 import { resolveFrameRootForSite } from '@/libs/profiler/resolveFrameRoot';
 import { spanKindScope, systemScope, useCallTreeScopeStore } from '@/stores/useCallTreeScopeStore';
 import { useCpuFrameStore } from '@/stores/useCpuFrameStore';
-import { useSessionStore } from '@/stores/useSessionStore';
+import { useSessionStore, useTraceBackedSession } from '@/stores/useSessionStore';
 import { useOptionsStore } from '@/stores/useOptionsStore';
 import { useNavHistoryStore } from '@/stores/useNavHistoryStore';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
@@ -110,10 +110,11 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
   const selection = useSelectionStore((s) =>
     (s.leaf && (s.leaf.type === 'span' || s.leaf.type === 'tick')) ? (s.leaf.ref as ProfilerSelection) : null);
 
-  // Right-click context menu on a span bar. Session id/kind drive the "View in Call Tree" action —
-  // CPU sampling (and therefore the Call Tree) is `trace`-session only.
+  // Right-click context menu on a span bar. The "View in Call Tree" action needs a capture FILE on disk, because CPU
+  // sampling is file-mode only — that is `useTraceBackedSession`, not `kind === 'trace'` (#617/#621). The old test was
+  // false for an open database with a capture attached, silently removing the action on the database-hosted path.
   const sessionId = useSessionStore((s) => s.sessionId);
-  const sessionKind = useSessionStore((s) => s.kind);
+  const callTreeAvailable = useTraceBackedSession();
   const setCallTreeScope = useCallTreeScopeStore((s) => s.setScope);
   const [contextMenu, setContextMenu] = useState<
     | { kind: 'span'; x: number; y: number; span: SpanData; sourceLoc: ResolvedSourceLocation | null }
@@ -1112,7 +1113,7 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
           y={contextMenu.y}
           spanName={contextMenu.span.name}
           spanId={contextMenu.span.spanId}
-          callTreeAvailable={sessionKind === 'trace'}
+          callTreeAvailable={callTreeAvailable}
           sourceAvailable={contextMenu.sourceLoc != null}
           onClose={() => setContextMenu(null)}
           onViewInCallTree={() => {
@@ -1136,7 +1137,7 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
           x={contextMenu.x}
           y={contextMenu.y}
           systemName={contextMenu.chunk.systemName || `System ${contextMenu.chunk.systemIndex}`}
-          callTreeAvailable={sessionKind === 'trace'}
+          callTreeAvailable={callTreeAvailable}
           sourceAvailable={contextMenu.sourceLoc != null}
           onClose={() => setContextMenu(null)}
           onViewInCallTree={() => {

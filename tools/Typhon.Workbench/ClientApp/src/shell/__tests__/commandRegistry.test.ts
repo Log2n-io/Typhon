@@ -50,7 +50,6 @@ const PROFILER_VIEW_CMDS = [
 const ALWAYS_CMDS = [
   'open-file',
   'attach',
-  'open-trace',
   'close-session',
   'refresh-graph',
   'toggle-view-dev-fixture',

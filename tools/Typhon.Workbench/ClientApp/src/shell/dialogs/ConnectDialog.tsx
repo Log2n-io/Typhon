@@ -7,8 +7,7 @@ import {
  DialogTitle,
 } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { usePostApiSessionsAttach, usePostApiSessionsTrace } from '@/api/generated/sessions/sessions';
-import { useRecentFilesStore } from '@/stores/useRecentFilesStore';
+import { usePostApiSessionsAttach } from '@/api/generated/sessions/sessions';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useOpenDatabaseFile } from '@/hooks/useOpenDatabaseFile';
 import { logError, logInfo } from '@/stores/useLogStore';
@@ -16,15 +15,13 @@ import { extractDetail } from './connectErrors';
 import RecentFilesTab from './tabs/RecentFilesTab';
 import KnownDatabasesTab from './tabs/KnownDatabasesTab';
 import OpenFileTab from './tabs/OpenFileTab';
-import OpenTraceTab from './tabs/OpenTraceTab';
 import AttachTab from './tabs/AttachTab';
-import CachedDataTab from './tabs/CachedDataTab';
 import { toggleViewProfiler } from '@/shell/commands/profilerCommands';
 
 // Dev Fixture used to be a tab here; it now lives in `panels/DevFixture/DevFixturePanel.tsx`, reachable from the
 // View menu and palette ("Open Dev Fixture"). The `'devfixture'` literal stays in the union so any caller still
 // passing `initialTab='devfixture'` doesn't break compile (it silently falls through to the default `recent` tab).
-export type ConnectTab = 'recent' | 'known' | 'open' | 'trace' | 'attach' | 'cached' | 'devfixture';
+export type ConnectTab = 'recent' | 'known' | 'open' | 'attach' | 'devfixture';
 
 interface Props {
  open: boolean;
@@ -38,11 +35,9 @@ export default function ConnectDialog({ open, initialTab, onOpenChange }: Props)
  // open round-trip (a big DB takes ~1s; without this the click feels dead until the UI flips to database mode).
  const [openingPath, setOpeningPath] = useState<string | null>(null);
  const setSession = useSessionStore((s) => s.setSession);
- const recordRecent = useRecentFilesStore((s) => s.record);
  // Shared open-file flow (also used by the `typhon ui <db>` startup auto-open, #429). `postFile` is the
  // underlying mutation, kept for the pending spinner and the error pill below.
  const { openDatabaseFile, mutation: postFile } = useOpenDatabaseFile();
- const postTrace = usePostApiSessionsTrace();
  const postAttach = usePostApiSessionsAttach();
 
  // Snap to the requested tab every time the dialog opens — the prop may have changed while the
@@ -58,34 +53,6 @@ export default function ConnectDialog({ open, initialTab, onOpenChange }: Props)
  onOpenChange(false);
  } catch {
  // Already logged by useOpenDatabaseFile; the error pill below surfaces postFile.error for retry.
- } finally {
- setOpeningPath(null);
- }
- };
-
- const handleOpenTrace = async (filePath: string) => {
- logInfo(`Opening trace: ${filePath}`, { filePath });
- setOpeningPath(filePath);
- try {
- const response = await postTrace.mutateAsync({ data: { filePath } });
- const dto = response.data;
- setSession(dto);
- recordRecent({
- filePath: dto.filePath ?? filePath,
- schemaDllPaths: [],
- lastOpenedAt: new Date().toISOString(),
- lastState: 'Ready',
- kind: 'trace',
- });
- logInfo(`Trace session opened`, { sessionId: dto.sessionId, filePath: dto.filePath ?? filePath });
- onOpenChange(false);
- toggleViewProfiler();
- } catch (err) {
- logError(`Failed to open trace: ${filePath}`, {
- filePath,
- error: extractDetail(err) || String(err),
- });
- throw err;
  } finally {
  setOpeningPath(null);
  }
@@ -128,15 +95,13 @@ export default function ConnectDialog({ open, initialTab, onOpenChange }: Props)
  <TabsTrigger value="recent">Recent</TabsTrigger>
  <TabsTrigger value="known">Known</TabsTrigger>
  <TabsTrigger value="open">Open File</TabsTrigger>
- <TabsTrigger value="trace">Open Trace</TabsTrigger>
  <TabsTrigger value="attach">Attach</TabsTrigger>
- <TabsTrigger value="cached">Cached Data</TabsTrigger>
  {/* Dev Fixture moved to its own standalone panel (View → Dev Fixture / palette: "Open Dev Fixture").
      The capability probe + `devFixtureAvailable` state stay here only as a hint for the View-menu wiring
      to render; the tab is no longer inside the Connect dialog. */}
  </TabsList>
  <TabsContent value="recent" className="min-h-0 flex-1">
- <RecentFilesTab onOpen={handleOpen} onOpenTrace={handleOpenTrace} openingPath={openingPath} />
+ <RecentFilesTab onOpen={handleOpen} openingPath={openingPath} />
  </TabsContent>
  <TabsContent value="known" className="min-h-0 flex-1">
  {/* `active` holds the request until the tab is actually shown — the registry is a filesystem read, and opening
@@ -146,25 +111,14 @@ export default function ConnectDialog({ open, initialTab, onOpenChange }: Props)
  <TabsContent value="open" className="min-h-0 flex-1">
  <OpenFileTab onOpen={handleOpen} isOpening={postFile.isPending} />
  </TabsContent>
- <TabsContent value="trace" className="min-h-0 flex-1">
- <OpenTraceTab onOpen={handleOpenTrace} isOpening={postTrace.isPending} />
- </TabsContent>
  <TabsContent value="attach" className="min-h-0 flex-1">
  <AttachTab onAttach={handleOpenAttach} isAttaching={postAttach.isPending} />
- </TabsContent>
- <TabsContent value="cached" className="min-h-0 flex-1">
- <CachedDataTab />
  </TabsContent>
  </Tabs>
 
  {postFile.isError && (
  <p className="shrink-0 rounded border border-destructive/50 bg-destructive/10 px-2 py-1 text-fs-sm text-destructive">
  Failed to open session. {extractDetail(postFile.error)}
- </p>
- )}
- {postTrace.isError && (
- <p className="shrink-0 rounded border border-destructive/50 bg-destructive/10 px-2 py-1 text-fs-sm text-destructive">
- Failed to open trace. {extractDetail(postTrace.error)}
  </p>
  )}
  {postAttach.isError && (

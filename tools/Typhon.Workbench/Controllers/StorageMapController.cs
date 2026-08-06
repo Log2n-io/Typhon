@@ -100,6 +100,15 @@ public sealed class StorageMapController : WorkbenchControllerBase
     {
         if (HttpContext.Items["Session"] is OpenSession session)
         {
+            // Paused (#621): the session is the right kind but has released the engine, and the file map is pure engine state. One check here rather than at
+            // each caller — every route in this controller dereferences the engine, so there is no meaningful partial answer to give.
+            if (session.IsPaused)
+            {
+                conflict = ConflictKindMismatch(
+                    "The Database File Map needs the database, which this session has released"
+                    + (session.PausedBy is { } h ? $" to {h.Describe()}" : "") + ".");
+                return null;
+            }
             conflict = null;
             return session;
         }

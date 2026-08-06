@@ -1,6 +1,7 @@
 import { Activity, Database, Loader2, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useGetApiFsStat } from '@/api/generated/files/files';
+import { bundleOfCapture } from '@/libs/profiles/captureLocation';
 import { formatFileSize, formatRelativeAge } from '@/lib/formatters';
 import {
   useRecentFilesStore,
@@ -11,7 +12,6 @@ import {
 
 interface Props {
   onOpen: (filePath: string, schemaDllPaths: string[]) => void;
-  onOpenTrace: (filePath: string) => void;
   /** The file path currently being opened, or null when idle. The matching row shows a spinner + disables itself. */
   openingPath?: string | null;
 }
@@ -22,7 +22,7 @@ const stateStyles: Record<RecentFileState, string> = {
   Incompatible: 'bg-destructive/15 text-destructive',
 };
 
-export default function RecentFilesTab({ onOpen, onOpenTrace, openingPath }: Props) {
+export default function RecentFilesTab({ onOpen, openingPath }: Props) {
   const entries = useRecentFilesStore((s) => s.entries);
 
   if (entries.length === 0) {
@@ -41,7 +41,6 @@ export default function RecentFilesTab({ onOpen, onOpenTrace, openingPath }: Pro
           key={e.filePath}
           entry={e}
           onOpen={onOpen}
-          onOpenTrace={onOpenTrace}
           opening={openingPath === e.filePath}
           // While any file is opening, freeze the other rows too — the dialog is mid-transition and a second
           // open would race the first. Only the active row shows the spinner.
@@ -55,14 +54,16 @@ export default function RecentFilesTab({ onOpen, onOpenTrace, openingPath }: Pro
 function RecentFileRow({
   entry,
   onOpen,
-  onOpenTrace,
-  opening,
+    opening,
   disabled,
-}: { entry: RecentFile; opening: boolean; disabled: boolean } & Pick<Props, 'onOpen' | 'onOpenTrace'>) {
+}: { entry: RecentFile; opening: boolean; disabled: boolean } & Pick<Props, 'onOpen'>) {
   const remove = useRecentFilesStore((s) => s.remove);
   const name = entry.filePath.split(/[\\/]/).pop() ?? entry.filePath;
   const kind = getRecentFileKind(entry);
   const isTrace = kind === 'trace';
+  // Null when the capture does not sit in a database bundle — the row then has nowhere to go.
+  const legacyBundle = isTrace ? bundleOfCapture(entry.filePath) : null;
+  const unopenable = isTrace && legacyBundle === null;
   const Icon = isTrace ? Activity : Database;
   const iconClass = isTrace ? 'text-violet-500' : 'text-muted-foreground';
   const kindLabel = isTrace ? 'TRACE' : 'DB';
@@ -84,12 +85,18 @@ function RecentFileRow({
   const detail = size && age ? `${size} · ${age}` : size || age;
 
   const handleActivate = () => {
-    if (disabled) return;
+    if (disabled || unopenable) return;
+    // #621 — a capture is no longer an entry point. A legacy 'trace' row is migrated in place: its database is derived
+    // from the capture's own path (D-1 co-location) and opened instead, which is where that capture is now reachable.
+    // A capture outside a profilings/ directory has no database to migrate to, so its row is disabled rather than
+    // silently opening something else.
     if (isTrace) {
-      onOpenTrace(entry.filePath);
-    } else {
-      onOpen(entry.filePath, entry.schemaDllPaths);
+      if (legacyBundle) {
+        onOpen(legacyBundle, []);
+      }
+      return;
     }
+    onOpen(entry.filePath, entry.schemaDllPaths);
   };
 
   return (

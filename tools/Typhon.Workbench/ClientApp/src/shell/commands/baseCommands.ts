@@ -69,7 +69,6 @@ export function buildBaseCommands(): CommandItem[] {
     { id: 'open-file',     label: 'Open File…',               keywords: 'open typhon',      action: () => openConnect('open') },
     { id: 'open-recent',   label: 'Open Recent',              keywords: 'recent file',       action: () => openConnect('recent') },
     { id: 'attach',        label: 'Attach…',                  keywords: 'attach engine',     action: () => openConnect('attach') },
-    { id: 'open-trace',    label: 'Open Trace…',              keywords: 'trace typhon',      action: () => openConnect('trace') },
     { id: 'close-session', label: 'Close Session',            keywords: 'close disconnect',  action: closeSession },
     { id: 'refresh-graph', label: 'Refresh Resource Graph',   keywords: 'refresh reload tree', action: refreshResourceGraph },
     // (Stage 2 / GAP-02: the schema-archetypes/indexes/relationships toggle commands were removed with the

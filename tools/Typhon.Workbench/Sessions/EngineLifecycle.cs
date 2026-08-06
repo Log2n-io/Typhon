@@ -135,6 +135,15 @@ public sealed class EngineLifecycle : IDisposable
                 {
                     opts.DatabaseName = databaseName;
                     opts.DatabaseDirectory = directory;
+                    // #621 — advertise that this holder will step aside. The Workbench is a long-lived, read-only
+                    // observer; an application that wants the database it is sitting on should not have to wait for a
+                    // human to close a window. Only a holder's own advertisement enables handoff, so setting it here
+                    // changes nothing about how two applications contend with each other.
+                    //
+                    // This is a promise, and DatabasePauseCoordinator is what keeps it: it watches for the claim file
+                    // and disposes this engine when one appears. Advertising without honouring requests would merely
+                    // turn an instant failure into a short wait followed by the same failure.
+                    opts.YieldableLock = true;
                     // 131072 pages × 8KB = 1 GiB page cache. Sized for multi-million-entity databases: at that
                     // scale the EntityMap (paged hash) + component clusters + BTree index pages alone need
                     // thousands of pages resident or eviction back-pressure dominates on Commit. 1 GiB gives
@@ -274,6 +283,15 @@ public sealed class EngineLifecycle : IDisposable
         }
         catch (WorkbenchException)
         {
+            alc?.Dispose();
+            sp?.Dispose();
+            throw;
+        }
+        catch (DatabaseLockedException)
+        {
+            // Propagated intact rather than flattened into engine_open_failed (#621). This exception is the only place that carries WHO holds the database —
+            // OwnerPid / OwnerMachine / StartedAt, observed at the moment of refusal. The caller turns that into a paused session whose banner names the
+            // holder; re-reading db.lock to recover it would race, because the holder may have exited and been replaced in between.
             alc?.Dispose();
             sp?.Dispose();
             throw;

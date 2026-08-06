@@ -108,7 +108,6 @@ export default function MenuBar() {
  <MenubarTrigger className="h-7 px-2 text-fs-lg">File</MenubarTrigger>
  <MenubarContent>
  <MenubarItem onClick={() => openConnect('open')}>Open .typhon File…</MenubarItem>
- <MenubarItem onClick={() => openConnect('trace')}>Open .typhon-trace…</MenubarItem>
  <MenubarItem onClick={() => openConnect('attach')}>Attach to Engine…</MenubarItem>
  <MenubarSeparator />
  <MenubarItem

@@ -104,7 +104,7 @@ describe('viewRegistry — session-kind scope (IA §5.1)', () => {
   });
 
   it('isViewAvailableInKind — profiler views follow the capability, not the session kind', () => {
-    expect(isViewAvailableInKind('Profiler', scope('trace', 'profiler'))).toBe(true);
+    expect(isViewAvailableInKind('Profiler', scope('open', 'profiler'))).toBe(true);
     expect(isViewAvailableInKind('Profiler', scope('attach', 'profiler'))).toBe(true);
     expect(isViewAvailableInKind('Profiler', scope('open', 'database'))).toBe(false);
   });
@@ -116,7 +116,7 @@ describe('viewRegistry — session-kind scope (IA §5.1)', () => {
   });
 
   it('isViewAvailableInKind — `any` views (and non-view commands) run in every kind', () => {
-    for (const kind of ['open', 'attach', 'trace', 'none'] as const) {
+    for (const kind of ['open', 'attach', 'none'] as const) {
       expect(isViewAvailableInKind('DevFixture', scope(kind))).toBe(true);
       expect(isViewAvailableInKind(undefined, scope(kind))).toBe(true);
     }

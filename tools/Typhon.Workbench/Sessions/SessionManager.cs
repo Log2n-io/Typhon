@@ -24,10 +24,23 @@ public sealed partial class SessionManager
         return found;
     }
 
+    /// <summary>
+    /// Raised after a session has been removed from the manager and <b>before</b> it is disposed, with the removed session's id.
+    /// </summary>
+    /// <remarks>
+    /// Exists so the paused-session coordinator (#621) can stop watching a session's database at the moment it stops being live. Firing before disposal is
+    /// what makes it safe: a watcher that learned about the removal afterwards could, in the window between, reopen the database into a session already being
+    /// torn down — re-acquiring the lock the removal exists to release.
+    /// </remarks>
+    public event Action<Guid> SessionRemoved;
+
     public bool Remove(Guid id)
     {
         var removed = _sessions.TryRemove(id, out var session);
         if (!removed) return false;
+
+        try { SessionRemoved?.Invoke(id); }
+        catch (Exception ex) { LogSessionDisposeFailed(id, ex.Message); }
 
         if (session is IDisposable d)
         {

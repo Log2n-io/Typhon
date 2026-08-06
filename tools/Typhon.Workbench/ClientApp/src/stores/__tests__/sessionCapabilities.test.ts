@@ -56,7 +56,8 @@ describe('session capabilities (#617)', () => {
 
   it('the Profiles list itself is an open-session view — it is how you find a capture', () => {
     expect(isViewVisible('Profiles', { kind: 'open', capabilities: ['database'] })).toBe(true);
-    expect(isViewVisible('Profiles', { kind: 'trace', capabilities: ['profiler'] })).toBe(false);
+    // An Attach session profiles but has no database, so it has no profilings/ directory to list.
+    expect(isViewVisible('Profiles', { kind: 'attach', capabilities: ['profiler'] })).toBe(false);
   });
 
   it('sessionHasCapability reads a plain state slice', () => {
@@ -66,7 +67,6 @@ describe('session capabilities (#617)', () => {
 
   it('the test-only kind→capability table matches what the server reports for plain sessions', () => {
     expect(sessionCapabilitiesForKind('open')).toEqual(['database']);
-    expect(sessionCapabilitiesForKind('trace')).toEqual(['profiler']);
     expect(sessionCapabilitiesForKind('attach')).toEqual(['profiler']);
     expect(sessionCapabilitiesForKind('none')).toEqual([]);
   });

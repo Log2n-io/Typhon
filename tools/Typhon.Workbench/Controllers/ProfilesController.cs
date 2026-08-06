@@ -76,9 +76,17 @@ public sealed partial class ProfilesController : WorkbenchControllerBase
             throw new WorkbenchException(404, "profile_not_found", $"No capture named '{fileName}' in {profilings}.");
         }
 
+        // Reject a file that is not a capture BEFORE starting a runtime for it (#621). This guard used to live on the
+        // standalone-trace route; with that route gone, attaching is the only way a user hands the Workbench a file, so
+        // it is where the "pasted the sidecar cache instead of the capture" mistake now surfaces. Without it the session
+        // gets a runtime whose background build faults, and /metadata answers 500 in a loop instead of saying why.
+        ValidateCaptureMagic(path);
+
         // Co-location is not provenance (D-1): the bundle may have been copied or restored since the capture was written. #614 recorded the database id so
         // this is a check rather than an assumption.
-        var databaseId = open.Engine.Engine?.DatabaseId ?? Guid.Empty;
+        // Empty while paused (#621) — BelongsToDatabase already treats an unknown id as "cannot answer" and allows the attach, which is the same allowance
+        // pre-#614 captures get. Attaching a capture is a file operation; it must not require the database the capture describes to be open.
+        var databaseId = open.Engine?.Engine?.DatabaseId ?? Guid.Empty;
         if (!ProfileCatalog.BelongsToDatabase(path, databaseId, out var reason))
         {
             throw new WorkbenchException(409, "profile_database_mismatch", reason);
@@ -115,7 +123,7 @@ public sealed partial class ProfilesController : WorkbenchControllerBase
     /// missing feature but a category error — the message says which, rather than leaving the caller to guess.
     /// </summary>
     private static string NoDatabaseDetail(string action) =>
-        $"{action} requires a session with an open database. Trace sessions already are a capture, and an attached engine's database cannot be opened while "
+        $"{action} requires a session with an open database. An attached engine's database cannot be opened while "
         + "it is running.";
 
     [LoggerMessage(EventId = 6170, Level = LogLevel.Information, Message = "Session {SessionId}: attached profile '{FileName}' as {ProfileId}")]
@@ -123,4 +131,70 @@ public sealed partial class ProfilesController : WorkbenchControllerBase
 
     [LoggerMessage(EventId = 6171, Level = LogLevel.Information, Message = "Session {SessionId}: detached profile {ProfileId}")]
     static partial void LogProfileDetached(ILogger logger, Guid sessionId, Guid profileId);
+
+    /// <summary>
+    /// Validates the file at <paramref name="path"/> as either a <c>.typhon-trace</c> source (magic "TYTR") OR a
+    /// <c>.typhon-replay</c> self-contained cache (magic "TPCH"). Throws 400 with a human-readable reason on any other content. The
+    /// extension determines the expected magic — opening a <c>.typhon-trace-cache</c> file (TPCH magic but conventional sidecar role)
+    /// from the trace open dialog is rejected with a hint to open the parent <c>.typhon-trace</c> instead.
+    /// </summary>
+    private static void ValidateCaptureMagic(string path)
+    {
+        // Read magic (4 bytes) + on-disk format version (next 2 bytes) in one peek — the version gate below catches an
+        // old/newer .typhon-trace up-front, so an unsupported file fails here with a clear 400 instead of creating a
+        // session whose background build faults at TraceFileReader.ReadHeader and surfaces a 500 on /metadata.
+        Span<byte> head = stackalloc byte[6];
+        int read;
+        try
+        {
+            using var fs = System.IO.File.OpenRead(path);
+            read = fs.ReadAtLeast(head, head.Length, throwOnEndOfStream: false);
+        }
+        catch (IOException ex)
+        {
+            throw new WorkbenchException(400, "invalid_trace_file", $"Cannot read trace file: {ex.Message}");
+        }
+        if (read < 4)
+        {
+            throw new WorkbenchException(400, "invalid_trace_file", $"File is too small to be a valid trace: {path}");
+        }
+
+        var magic = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(head);
+        var extension = Path.GetExtension(path);
+        var isReplay = string.Equals(extension, ".typhon-replay", StringComparison.OrdinalIgnoreCase);
+
+        if (isReplay)
+        {
+            if (magic == Typhon.Profiler.CacheHeader.MagicValue)
+            {
+                return;
+            }
+            var asAscii = System.Text.Encoding.ASCII.GetString(head[..4]);
+            throw new WorkbenchException(400, "invalid_replay_file",
+                $"File magic is '{asAscii}' (0x{magic:X8}); expected 'TPCH' for a .typhon-replay file.");
+        }
+
+        // Default: source .typhon-trace file with TYTR magic.
+        if (magic == Typhon.Profiler.TraceFileHeader.MagicValue)
+        {
+            // Magic is valid — also gate the on-disk format version so an old/newer trace fails with an immediate,
+            // actionable 400 (mirrors TraceFileReader.ReadHeader's range check, which would otherwise fault the build).
+            var version = read >= 6 ? System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(head[4..6]) : (ushort)0;
+            if (version < Typhon.Profiler.TraceFileReader.MinSupportedVersion || version > Typhon.Profiler.TraceFileHeader.CurrentVersion)
+            {
+                throw new WorkbenchException(400, "unsupported_trace_version",
+                    $"Unsupported trace file version: {version}. This build reads versions "
+                    + $"{Typhon.Profiler.TraceFileReader.MinSupportedVersion}..{Typhon.Profiler.TraceFileHeader.CurrentVersion}. Re-record against a current build.");
+            }
+            return;
+        }
+
+        // Common-mistake hint: a TPCH file with .typhon-trace-cache extension is the auto-built sidecar; the user should open the parent.
+        var ascii = System.Text.Encoding.ASCII.GetString(head[..4]);
+        var hint = magic == Typhon.Profiler.CacheHeader.MagicValue
+            ? "This looks like a .typhon-trace-cache sidecar. Open the matching source .typhon-trace file instead, or use .typhon-replay extension if this is a saved replay file."
+            : $"File magic is '{ascii}' (0x{magic:X8}); expected 'TYTR' for a .typhon-trace file.";
+        throw new WorkbenchException(400, "invalid_trace_file", hint);
+    }
+
 }

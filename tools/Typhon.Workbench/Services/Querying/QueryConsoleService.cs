@@ -173,6 +173,14 @@ public sealed class QueryConsoleService
             throw new WorkbenchException(400, "data_unavailable",
                 $"Query Console requires an open `.typhon` file. Session is of kind '{session.Kind}'.");
         }
+        if (open.IsPaused)
+        {
+            // Paused (#621) is a DIFFERENT answer from wrong-kind: it is temporary and self-resolving, so it gets 409 (retry once the holder exits) rather
+            // than 400 (you asked the wrong thing). Every path below opens a read-only transaction against the engine, so there is nothing to serve.
+            throw new WorkbenchException(409, "database_paused",
+                "The Query Console needs the database, which this session has released"
+                + (open.PausedBy is { } h ? $" to {h.Describe()}" : "") + ".");
+        }
         return open;
     }
 

@@ -37,6 +37,9 @@ public static class ServiceExtensions
         // constructed per-request so tests can substitute a temp-rooted instance, the same isolation the bootstrap
         // token, PAT store and options store already need to keep test runs out of the real %LOCALAPPDATA%.
         services.AddSingleton(_ => new Typhon.Engine.DatabaseRegistry(Typhon.Engine.DatabaseRegistry.EffectiveDirectory));
+        // #621: owns the paused-session lifecycle — releasing a database to another process and watching for its return. Singleton because it holds one
+        // shared poll timer and the per-session watchers; a scoped instance would leave a paused session with nobody watching for it.
+        services.AddSingleton<DatabasePauseCoordinator>();
         return services;
     }
 
@@ -66,7 +69,16 @@ public static class ServiceExtensions
     {
         var lifetime = services.GetRequiredService<IHostApplicationLifetime>();
         var manager = services.GetRequiredService<SessionManager>();
+
+        // #621: a removed session must stop being watched, or the poll could reopen a database into a session that is being torn down — re-acquiring the very
+        // lock the removal just released.
+        var pause = services.GetRequiredService<DatabasePauseCoordinator>();
+        manager.SessionRemoved += pause.Forget;
+
+        // Registration order is deliberate: cancellation callbacks run LIFO, so registering the coordinator LAST makes it stop FIRST — the poll timer is dead
+        // before any session is disposed, rather than racing the teardown.
         lifetime.ApplicationStopping.Register(manager.DisposeAll);
+        lifetime.ApplicationStopping.Register(pause.Dispose);
 #if DEBUG
         lifetime.ApplicationStopping.Register(() =>
         {

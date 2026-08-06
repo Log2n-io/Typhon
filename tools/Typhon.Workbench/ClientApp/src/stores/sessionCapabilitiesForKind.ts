@@ -14,7 +14,6 @@ export function sessionCapabilitiesForKind(kind: SessionKind): SessionCapability
   switch (kind) {
     case 'open':
       return ['database'];
-    case 'trace':
     case 'attach':
       return ['profiler'];
     default:

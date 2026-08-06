@@ -27,9 +27,12 @@ public static class ProfileCatalog
     {
         ArgumentNullException.ThrowIfNull(session);
 
+        // Every engine reference here is optional, and deliberately so: listing captures is a filesystem operation — a bundle path plus one ~200-byte header
+        // read per file, opened FileShare.ReadWrite. A paused session (#621) has no engine but still knows its bundle, so the Profiles list keeps working
+        // while the application owns the database. The database-derived columns simply read as "unknown" rather than the list refusing to render.
         var profilings = TraceLocation.ProfilingsDirectoryOf(session.FilePath);
-        var databaseTsn = session.Engine.Engine?.CurrentTsn ?? 0;
-        var databaseId = session.Engine.Engine?.DatabaseId ?? Guid.Empty;
+        var databaseTsn = session.Engine?.Engine?.CurrentTsn ?? 0;
+        var databaseId = session.Engine?.Engine?.DatabaseId ?? Guid.Empty;
 
         if (!Directory.Exists(profilings))
         {
@@ -123,9 +126,13 @@ public static class ProfileCatalog
     /// here now — bundles get copied, restored and migrated. #614 recorded the database id so the claim can actually be checked instead of assumed. A capture
     /// that predates that field carries an empty id and is allowed through: refusing it would make older captures unopenable to enforce a check they cannot
     /// answer either way.
+    /// <para>The allowance is <b>symmetric</b>, and that matters since #621: a paused session has no engine, so it passes <see cref="Guid.Empty"/> as
+    /// <paramref name="databaseId"/>. Comparing a real capture id against an unknown session id would reject every capture with a message naming database
+    /// <c>00000000-0000-0000-0000-000000000000</c> — a confident wrong answer produced by a check that had no information. Unknown on <i>either</i> side means
+    /// the question cannot be answered, so it is not asked.</para>
     /// </remarks>
     /// <param name="capturePath">The capture being attached.</param>
-    /// <param name="databaseId">The session database's durable id.</param>
+    /// <param name="databaseId">The session database's durable id, or <see cref="Guid.Empty"/> when it is unknown (paused session).</param>
     /// <param name="reason">Receives why the capture was rejected, or null when it is accepted.</param>
     public static bool BelongsToDatabase(string capturePath, Guid databaseId, out string reason)
     {
@@ -136,7 +143,7 @@ public static class ProfileCatalog
             using var reader = new TraceFileReader(stream);
             var h = reader.ReadHeader();
 
-            if (h.DatabaseId == Guid.Empty || h.DatabaseId == databaseId)
+            if (h.DatabaseId == Guid.Empty || databaseId == Guid.Empty || h.DatabaseId == databaseId)
             {
                 return true;
             }

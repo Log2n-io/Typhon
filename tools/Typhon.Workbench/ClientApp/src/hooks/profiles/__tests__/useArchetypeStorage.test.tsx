@@ -78,7 +78,7 @@ describe('useArchetypeStorage (#619 §4.2)', () => {
   it('a session with no database asks for nothing and stays unresolved', () => {
     // The Data Flow panel opens in a plain trace session too. An ungated `useDbMapHealth` would fire /dbmap/health
     // and log a 409 on every open — cosmetic, but it is how a real defect hides.
-    useSessionStore.setState({ kind: 'trace', capabilities: ['profiler'] });
+    useSessionStore.setState({ kind: 'open', capabilities: ['profiler'] });
 
     const { result } = renderHook(() => useArchetypeStorage('Swg.Shard.Unit'));
 

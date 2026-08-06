@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { IDockviewPanelProps } from 'dockview-react';
-import { useSessionStore } from '@/stores/useSessionStore';
+import { useSessionCapability, useSessionStore } from '@/stores/useSessionStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useQueryDefinitions } from './useQueryDefinitions';
 import { toNumber } from './numeric';
@@ -20,7 +20,10 @@ const MIN_MASTER_PCT = 25;
 const MAX_MASTER_PCT = 70;
 
 export default function QueryAnalyzerPanel(_props: IDockviewPanelProps) {
-  const sessionKind = useSessionStore((s) => s.kind);
+  // Capability, not kind (#617/#621). This gate read `kind === 'trace' || 'attach'`, which is false for an open database
+  // with a capture attached — so the Query Analyzer refused outright on the very path F4 made primary, telling the user
+  // it was "available in Trace and Attach sessions only" while sitting on a perfectly good query catalog.
+  const hasProfiler = useSessionCapability('profiler');
   const sessionId = useSessionStore((s) => s.sessionId);
   const { definitions, isLoading, isError } = useQueryDefinitions();
 
@@ -89,8 +92,8 @@ export default function QueryAnalyzerPanel(_props: IDockviewPanelProps) {
     }
   };
 
-  if (sessionKind !== 'trace' && sessionKind !== 'attach') {
-    return <CenteredMessage><p>Query Analyzer is available in Trace and Attach sessions only.</p></CenteredMessage>;
+  if (!hasProfiler) {
+    return <CenteredMessage><p>Query Analyzer needs a capture — attach a profile or a live session.</p></CenteredMessage>;
   }
   if (isError) {
     return <CenteredMessage tone="error"><p>Failed to load query catalog.</p></CenteredMessage>;

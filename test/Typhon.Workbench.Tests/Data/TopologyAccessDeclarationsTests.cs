@@ -37,17 +37,13 @@ public sealed class TopologyAccessDeclarationsTests
     private async Task<SessionDto> CreateRfc07TraceAsync()
     {
         var path = TraceFixtureBuilder.BuildTraceWithAccessDeclarations(_factory.DemoDirectory);
-        var resp = await _client.PostAsJsonAsync("/api/sessions/trace", new CreateTraceSessionRequest(path));
-        resp.EnsureSuccessStatusCode();
-        return JsonSerializer.Deserialize<SessionDto>(await resp.Content.ReadAsStringAsync(), Json)!;
+        return await CaptureSessionFactory.OpenWithCaptureAsync(_client, _factory.DemoDirectory, path);
     }
 
     private async Task<SessionDto> CreateTrackHierarchyTraceAsync()
     {
         var path = TraceFixtureBuilder.BuildTraceWithTrackHierarchy(_factory.DemoDirectory);
-        var resp = await _client.PostAsJsonAsync("/api/sessions/trace", new CreateTraceSessionRequest(path));
-        resp.EnsureSuccessStatusCode();
-        return JsonSerializer.Deserialize<SessionDto>(await resp.Content.ReadAsStringAsync(), Json)!;
+        return await CaptureSessionFactory.OpenWithCaptureAsync(_client, _factory.DemoDirectory, path);
     }
 
     private async Task<TopologyDto> WaitForTopologyAsync(Guid sessionId)

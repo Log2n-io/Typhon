@@ -21,7 +21,7 @@ function setAttach() {
   useSessionStore.setState({ kind: 'attach', sessionId: 'sess-A', filePath: 'localhost:9100' });
 }
 function setTrace() {
-  useSessionStore.setState({ kind: 'trace', sessionId: 'sess-T', filePath: '/path/to.typhon-trace' });
+  useSessionStore.setState({ kind: 'open', sessionId: 'sess-T', filePath: '/path/to.typhon-trace' });
 }
 function setNone() {
   useSessionStore.setState({ kind: 'none', sessionId: null, filePath: null });

@@ -55,8 +55,9 @@ public abstract class WorkbenchControllerBase : ControllerBase
     /// those two questions have different answers. Asking it in one place means a route cannot be left behind when a third way of holding a capture appears.
     /// </para>
     /// <para>
-    /// <see cref="AttachSession"/> is deliberately not handled here: its runtime is a different type serving a live stream, and the endpoints that support it
-    /// branch to it explicitly. Collapsing the two runtimes behind one interface is a real simplification, but it is not this change's job.
+    /// An <see cref="AttachSession"/>'s <i>live stream</i> is a different runtime type and the endpoints that support it branch to it explicitly. What is
+    /// handled here is a capture <i>attached to</i> an attach session — a replay saved from that stream (#621). An attached replay wins over the live stream
+    /// because attaching one is an explicit user action: they asked to look at the recording, not the feed it came from.
     /// </para>
     /// </remarks>
     /// <param name="session">The resolved session, from <c>HttpContext.Items["Session"]</c>.</param>
@@ -65,14 +66,14 @@ public abstract class WorkbenchControllerBase : ControllerBase
     {
         switch (session)
         {
-            case TraceSession trace:
-                // The session IS the capture.
-                runtime = trace.Runtime;
-                return true;
             case OpenSession { ActiveProfile: { } active }:
                 // A capture attached to an open database. Null ActiveProfile falls through — an Open session with no profile has nothing to profile, which is
                 // exactly what the capability set reports to the client.
                 runtime = active;
+                return true;
+            case AttachSession { ActiveProfile: { } replay }:
+                // A replay saved from this live session and attached back to it.
+                runtime = replay;
                 return true;
             default:
                 runtime = null;

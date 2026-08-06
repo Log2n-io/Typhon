@@ -238,30 +238,13 @@ public sealed class ProfilesControllerTests
     }
 
     // ── AC9 · sessions with no database ──────────────────────────────────────────────────────────────────────
+    //
+    // #621 removed the standalone trace session, so the two tests that lived here — "attaching to a trace session is a
+    // category error" and "a trace session still advertises the profiler capability" — describe a type that no longer
+    // exists. Deleted rather than retargeted: an Attach session is already covered by the kind-mismatch tests above, and
+    // keeping them pointed at a different subject would have preserved the assertions while losing their meaning.
 
-    [Test]
-    public async Task AttachingToATraceSession_Is409_WithAReasonThatExplainsWhy()
-    {
-        var tracePath = TraceFixtureBuilder.BuildMinimalTrace(Path.Combine(Path.GetTempPath(), "typhon-f4-" + Guid.NewGuid().ToString("N")));
-        var created = await _client.PostAsJsonAsync("/api/sessions/trace", new { filePath = tracePath });
-        var traceSession = JsonSerializer.Deserialize<SessionDto>(await created.Content.ReadAsStringAsync(), Json);
 
-        var resp = await PostProfileAsync(traceSession.SessionId, "anything.typhon-trace");
-
-        Assert.That(resp.StatusCode, Is.EqualTo(HttpStatusCode.Conflict));
-        var body = await resp.Content.ReadAsStringAsync();
-        Assert.That(body, Does.Contain("already are a capture"), "a category error deserves a message that names the category, not a bare 409");
-    }
-
-    [Test]
-    public async Task ATraceSession_StillAdvertisesTheProfilerCapability()
-    {
-        var tracePath = TraceFixtureBuilder.BuildMinimalTrace(Path.Combine(Path.GetTempPath(), "typhon-f4-" + Guid.NewGuid().ToString("N")));
-        var created = await _client.PostAsJsonAsync("/api/sessions/trace", new { filePath = tracePath });
-        var traceSession = JsonSerializer.Deserialize<SessionDto>(await created.Content.ReadAsStringAsync(), Json);
-
-        Assert.That(traceSession.Capabilities, Does.Contain("profiler"), "a trace session IS a capture — the rewiring must not have cost it its panels");
-    }
 
     // ── helpers ──────────────────────────────────────────────────────────────────────────────────────────────
 
