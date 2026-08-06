@@ -44,12 +44,15 @@ internal abstract class BTreeBase<TStore> : IBTreeIndex where TStore : struct, I
 
     public abstract void CheckConsistency(ref ChunkAccessor<TStore>accessor);
 
-    // Diagnostic counters
-    public abstract long Count { get; }
-    public abstract long OptimisticRestarts { get; }
-    public abstract long PessimisticFallbacks { get; }
-    public abstract long LeafFullFromOlc { get; }
-    public abstract long SplitCount { get; }
+    // Deliberately NOT here: the OLC diagnostic counters (OptimisticRestarts, PessimisticFallbacks, SplitCount,
+    // MergeCount, MoveRightCount, WriteLockFailures, ContentionSplitCount). Five of them were abstract on this base and
+    // nothing ever read them through a BTreeBase reference — every caller holds the concrete BTree<TKey, TStore>, and
+    // four of their immediate neighbours were already plain members, so the split between "promoted to the polymorphic
+    // surface" and "not" tracked nothing. Put a counter here only when a caller genuinely has nothing but a BTreeBase.
+    //
+    // Removed outright rather than demoted: Count (a second name for EntryCount over the same field) and
+    // LeafFullFromOlc (incremented on the insert path, read by nobody, and not even reset by ResetDiagnostics — the
+    // signal it carried is emitted live as Data:Index:BTree:RebalanceFallback reason 0).
 
     /// <summary>
     /// Returns the minimum key encoded as a <see cref="long"/> using the same encoding as
