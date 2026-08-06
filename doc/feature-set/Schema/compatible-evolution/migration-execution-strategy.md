@@ -80,7 +80,7 @@ if (!result.IsValid)
 - `OnMigrationProgress` fires on the calling thread in monotonically non-decreasing `MigrationPhase` order, always starting at `Analyzing` and ending at `Complete` — safe to drive a log/progress bar, not a substitute for cross-thread coordination.
 - Crash mid-migration is safe to retry: the database's root metadata only repoints to the new segments after migration's own flush succeeds, so a crash before that leaves the prior (pre-migration) segments authoritative and the next open re-runs migration in full.
 - `DatabaseSchema.ValidateEvolution()` mutates nothing — it's read-only analysis against the file, suitable for a pre-deploy CI check.
-- Cost is proportional to entity count and paid once at startup (sub-millisecond to tens of milliseconds for typical sizes; an added index is the only path with O(N) B+Tree cost) — there is no incremental or amortized migration for very large databases today.
+- Cost is proportional to entity count and paid once at startup, and it **includes a full index rebuild** — a migration re-clusters the archetype and repopulates every per-archetype B+Tree from cluster data, not only the trees for newly-`[Index]`-attributed fields. Budget O(entities) per archetype plus an index build per indexed field. There is no incremental or amortized migration for very large databases today.
 
 ## 🧪 Tests
 

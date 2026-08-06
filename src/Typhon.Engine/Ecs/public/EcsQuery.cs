@@ -1240,19 +1240,23 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     }
 
     /// <summary>
-    /// The one place that knows secondary indexes live in two homes: per-archetype for cluster-backed archetypes (values are packed
-    /// <c>ClusterLocation</c>s) and per-ComponentTable for the rest (values are chunk ids). Scans every archetype this query's mask admits, from whichever
-    /// home owns it, and deposits the matches in <paramref name="sink"/>.
+    /// Scans every archetype this query's mask admits and deposits the matches in <paramref name="sink"/>.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// This used to be "the one place that knows secondary indexes live in two homes". There is one home now (#629):
+    /// every index is per-archetype and its values are packed <c>ClusterLocation</c>s. What survives of that job is
+    /// choosing, per archetype, between the selective B+Tree scan and the SoA scan — and raising if an archetype
+    /// carries the where-component but exposes no index at all, because there is nothing left to fall back to.
+    /// </para>
     /// <para>
     /// Shared deliberately. This loop used to exist only inside <see cref="ExecuteTargeted"/>, while the four view-population call sites passed the
     /// ComponentTable straight to <c>PipelineExecutor</c> — scanning a tree that is empty for a cluster-backed archetype, so <c>ToView()</c> came back
     /// permanently empty while <c>Execute()</c> on the same query was correct (#663). One copy cannot drift from the other.
     /// </para>
     /// <para>
-    /// The two homes filter by archetype at different points: the cluster loop tests the mask per ARCHETYPE before scanning, while the ComponentTable is
-    /// shared across every archetype holding that component, so its results are filtered per ENTITY by routing id.
+    /// Filtering is per ARCHETYPE, before scanning: the loop tests the query mask against each archetype and skips it whole. The deleted shared home could
+    /// not do that — one table served every archetype holding the component, so its results had to be filtered per ENTITY by routing id.
     /// </para>
     /// </remarks>
     private void ScanAllArchetypes<TSink>(ExecutionPlan plan, FieldEvaluator[] evaluators, ComponentTable ct, ref TSink sink)
@@ -1727,9 +1731,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             return 0.5f;
         }
 
-        // EstimatedCounts[0] = estimated match count for the most selective predicate.
-        // This estimate comes from the shared per-ComponentTable B+Tree, which may have 0 entries
-        // for cluster archetypes (all entities in per-archetype B+Trees). Treat 0 as "unknown" → Path B.
+        // EstimatedCounts[0] = estimated match count for the most selective predicate. A plan is built per ComponentTable while the trees live per
+        // archetype, so the planner cannot know how many entries THIS archetype's tree holds — one may be empty and the next full. Treat 0 as "unknown"
+        // → Path B, which is correct whichever home the index is in.
         var estimated = plan.EstimatedCounts[0];
         if (estimated <= 0)
         {

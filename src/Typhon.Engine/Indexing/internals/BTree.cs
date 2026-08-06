@@ -114,7 +114,15 @@ internal readonly struct BTreeStableKey : IEquatable<BTreeStableKey>
         Slot = slot;
     }
 
-    /// <summary>A tree on a segment it does not share with other component slots — the per-ComponentTable case.</summary>
+    /// <summary>
+    /// A tree on a segment it does not share with other component slots, addressed by field id alone.
+    /// </summary>
+    /// <remarks>
+    /// The slot half of the key exists because one archetype's index segment hosts the trees of every component slot it
+    /// carries, so <c>(fieldId, slot)</c> is what disambiguates them. This conversion is for the segments where that is
+    /// not the case and slot 0 is the only occupant — it is NOT the "per-ComponentTable" case its previous summary
+    /// named, which no longer exists (#629).
+    /// </remarks>
     public static implicit operator BTreeStableKey(short stableId) => new(stableId, 0);
 
     public bool Equals(BTreeStableKey other) => StableId == other.StableId && Slot == other.Slot;

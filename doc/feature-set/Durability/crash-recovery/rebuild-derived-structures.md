@@ -61,9 +61,11 @@ catch (CorruptionException ex)
   to their single committed HEAD, so indexes are built from final values, never from pre-crash MVCC history.
   The occupancy bitmap rebuild specifically runs after recovery's own seal checkpoint, since that checkpoint can
   still grow segments — page ownership is only final afterward.
-- **Heal-or-loud-fail is reserved for primary data** — component/revision content, collections, cluster slots,
-  and the rare non-rebuildable EntityMap (a non-cluster archetype still holding a `SingleVersion` slot with no
-  persisted source to rebuild from). A torn primary page heals only if it no longer backs any live chunk (the
+- **Heal-or-loud-fail is reserved for primary data** — component/revision content, collections and cluster slots.
+  The "rare non-rebuildable EntityMap" this list used to name is gone: it described a *non-cluster* archetype, and
+  since [#629](https://github.com/Log2n-io/Typhon/issues/629) there is no such thing — every archetype is
+  cluster-backed, so every EntityMap has a persisted source (the cluster occupancy walk) to rebuild from.
+  A torn primary page heals only if it no longer backs any live chunk (the
   entity was re-created within the recovery window); otherwise the open fails with `CorruptionException` rather
   than silently opening over corrupt data.
 - **No Full-Page-Image anywhere** — the mechanism that historically repaired pages byte-for-byte (a before-image
