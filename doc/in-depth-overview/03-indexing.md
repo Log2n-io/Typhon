@@ -210,7 +210,7 @@ Variants:
 
 The caller **must be inside an epoch scope** ([01-foundation §4](01-foundation.md)) — without that, pages backing leaves could be evicted mid-scan.
 
-### `RemoveValue(key, elementId, value, ref accessor, preserveEmptyBuffer)` — multi-value removal
+### `RemoveValue(key, elementId, value, ref accessor)` — multi-value removal
 
 [`BTree.cs RemoveValue`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/BTree.cs)
 
@@ -223,9 +223,9 @@ Flow:
 3. Read the buffer ID from the leaf value slot.
 4. `_storage.RemoveFromBuffer(bufferId, elementId, value)` — variable-sized-buffer-segment delete.
 5. WriteUnlock the leaf (version bump now visible to OLC readers).
-6. If the buffer is now empty *and* `preserveEmptyBuffer == false`, remove the BTree key entry too (via `RemoveCorePessimistic`) and delete the buffer.
+6. If the buffer is now empty, remove the BTree key entry too (via `RemoveCorePessimistic`) and delete the buffer.
 
-The `preserveEmptyBuffer = true` mode keeps the key alive even when the buffer is empty — needed by temporal indexes ([`TemporalIndexQuery.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/TemporalIndexQuery.cs), [`VersionedIndexEntry.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/VersionedIndexEntry.cs)) where the HEAD buffer chains to a TAIL of older versions; dropping the HEAD would unlink the entire history.
+(`preserveEmptyBuffer` — a fifth parameter that kept the key alive for the HEAD→TAIL temporal-index link — was removed in #666 along with the TAIL architecture. `TemporalIndexQuery.cs` and `VersionedIndexEntry.cs` were deleted at the same time.)
 
 ### `Move(oldKey, newKey, value)` / `MoveValue(...)` — compound move
 
@@ -267,7 +267,7 @@ Counted via `MergeCount`.
 
 ## 7. Multi-tree segments — the BTree directory
 
-A single `ChunkBasedSegment<TStore>` can host **multiple B+Trees** — most commonly the per-component PK index plus all of that component's secondary indexes share one segment, which keeps page-cache locality high. The directory mechanism makes this work.
+A single `ChunkBasedSegment<TStore>` can host **multiple B+Trees** — most commonly all secondary indexes for an archetype's components share one segment (`ArchetypeClusterState.IndexSegment`), which keeps page-cache locality high. (The pre-#629 pattern of a per-component PK B+Tree plus secondary indexes sharing one `ComponentTable`-owned segment no longer applies: secondary indexes are per-archetype, and the PK B+Tree was removed.) The directory mechanism makes this work.
 
 ### Layout
 
@@ -336,5 +336,5 @@ These are **payload-less spans** — 37 B header, 53 B with trace context. The e
 
 - [01-foundation](01-foundation.md) — `OlcLatch`/`SpinWait`/`EpochManager` are described in their primitive form; this doc shows how the BTree composes them.
 - [02-storage](02-storage.md) — `IPageStore`, `ChunkBasedSegment`, `ChunkAccessor`. BTree nodes are chunks; everything here is built on top of those.
-- [05-revision](05-revision.md) — B+Trees host the revision-chain indexes used by MVCC (`TemporalIndexQuery`, `VersionedIndexEntry` — the multi-value preservation in `RemoveValue` is for these).
+- [05-revision](05-revision.md) — MVCC revision chains are stored in a `BTree`-addressed segment; `RemoveValue` is used by the element-precise delete path that removes exactly one entity from a multi-value key's buffer without evicting its siblings.
 - [12-observability](12-observability.md) — typed event kinds, gating, span shapes (`BTreeInsertEvent` et al.).

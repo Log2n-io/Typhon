@@ -146,13 +146,13 @@ public struct ComponentR1
     public int CompOverhead;         // ComponentStorageOverhead
     public int ComponentSPI;         // root page index of ComponentSegment
     public int VersionSPI;           // root page index of CompRevSegment (revision chain)
-    public int DefaultIndexSPI;      // root page index of the L64 default index segment
-    public int String64IndexSPI;     // root page index of the String64 index segment
-    public int TailIndexSPI;         // tail multi-value index segment
+    // DefaultIndexSPI, String64IndexSPI, TailIndexSPI removed in #629 —
+    // secondary-index ownership moved to ArchetypeR1 (ClusterIndexSPI / ClusterString64IndexSPI).
     public ComponentCollection<FieldR1> Fields;
     public int SchemaRevision;
     public int FieldCount;
     public byte StorageMode;
+    public ushort AssemblyId;        // ArchetypeR1 row id of the declaring assembly; 0 = core engine
 }
 ```
 
