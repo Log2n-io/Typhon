@@ -8,14 +8,33 @@ namespace Typhon.Engine.Tests;
 
 /// <summary>
 /// Stress tests for OLC (Optimistic Lock Coupling) B+Tree concurrency.
-/// These tests use 16-32 threads to exercise split/merge/restart/fallback paths
-/// that rarely trigger under light contention (2-8 threads in OlcBTreeTests).
+/// Thread counts are derived from <see cref="Environment.ProcessorCount"/> (see WideThreads / NarrowThreads) rather than fixed, so the fixture stays
+/// oversubscribed — and therefore meaningful — on both a 32-vCPU CI box and a 3-core hosted runner. Contrast OlcBTreeTests, which runs 2-8 threads.
 /// </summary>
+// NonParallelizable, NOT Explicit. The fixture oversubscribes the box with threads and was marked [Explicit] to keep it from saturating the thread pool
+// alongside the parallel fixtures — but [Explicit] does not merely deprioritise a test, it removes it from every unfiltered run, so this had not run in CI
+// since 2026-02. It is the B+Tree's only real concurrency guard, and #679 (a concurrent insert losing a key and leaving the tree inconsistent) went
+// unnoticed for that entire window. [NonParallelizable] buys the same isolation the [Explicit] reason was actually asking for: NUnit runs this fixture on
+// its own, never concurrently with another, so the thread pool is not contended. Measured: 0.94-1.12 s for all 8 tests, slowest single test 230-276 ms
+// against its [CancelAfter(5000)] budget — 18x headroom idle, and still 10.9x with 28 busy processes pinning a 32-CPU box.
 [TestFixture]
-[Explicit("Stress test — spawns 16-32 threads, run manually to avoid thread pool saturation in parallel CI")]
+[NonParallelizable]
 public class OlcBTreeStressTests
 {
     private IServiceProvider _serviceProvider;
+
+    // Thread counts scale with the box instead of being pinned at 16/32. What makes this fixture worth running is OVERSUBSCRIPTION — more runnable threads
+    // than cores, so the scheduler preempts a thread inside the OLC read/validate window and the optimistic-restart and pessimistic-fallback paths actually
+    // execute. A hard 32 delivers that on the 32-vCPU gate box and on a dev machine, but the macOS arm64 nightly runs this same shard plan on a 3-core
+    // hosted runner (bench/aws/shard.py:32-34). At 3 cores, 32 threads is no longer contention — it is ~10x oversubscription, which mostly buys scheduler
+    // thrash and wall time rather than any interleaving the 2x case does not already produce.
+    //
+    // 2x cores keeps the oversubscription the tests depend on. The floor of 8 protects the assertion that a mixed workload MUST produce optimistic restarts:
+    // below that there is too little concurrency to guarantee one, and the test would fail for lack of contention rather than for a defect. The ceiling of 32
+    // reproduces today's numbers EXACTLY everywhere the suite currently runs — at >= 16 logical CPUs this is Wide 32 / Narrow 16, unchanged.
+    private static readonly int WideThreads = Math.Clamp(Environment.ProcessorCount * 2, 8, 32);
+
+    private static readonly int NarrowThreads = Math.Max(4, WideThreads / 2);
 
     [SetUp]
     public void Setup()
@@ -72,21 +91,23 @@ public class OlcBTreeStressTests
     }
 
     // ========================================
-    // B4 — Mixed Read-Write (128 threads total)
+    // B4 — Mixed Read-Write (readers + inserters + removers, WideThreads total)
     // ========================================
 
     [Test]
     [CancelAfter(5000)]
-    public unsafe void Stress_MixedReadWrite_32Threads()
+    public unsafe void Stress_MixedReadWrite()
     {
         using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
         using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
         var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 200, sizeof(Index32Chunk));
 
-        const int readerCount = 20;
-        const int inserterCount = 6;
-        const int removerCount = 6;
-        const int totalThreads = readerCount + inserterCount + removerCount; // 32
+        // Same 20 : 6 : 6 split the fixed counts encoded, expressed as a ratio. Removers walk 501 + threadId * 10 for 10 keys each, so the removed span stays
+        // inside the 501..1000 half and never touches the 1..500 range the readers assert on, for any remover count up to 50.
+        var inserterCount = Math.Max(2, WideThreads / 5);
+        var removerCount = Math.Max(2, WideThreads / 5);
+        var readerCount = WideThreads - inserterCount - removerCount;
+        var totalThreads = WideThreads;
         const int initialKeys = 1000;
 
         var setupDepth = epochManager.EnterScope();
@@ -108,7 +129,7 @@ public class OlcBTreeStressTests
             var tasks = new Task[totalThreads];
             int taskIndex = 0;
 
-            // 80 readers: read from safe range 1..500 (never removed)
+            // Readers: sample the safe range 1..500, which no remover touches.
             for (int t = 0; t < readerCount; t++)
             {
                 var seed = t * 17;
@@ -139,7 +160,7 @@ public class OlcBTreeStressTests
                 }, TaskCreationOptions.LongRunning);
             }
 
-            // 24 inserters: insert from range 100_000+
+            // Inserters: disjoint blocks from 100_000+, 20 keys each.
             for (int t = 0; t < inserterCount; t++)
             {
                 var threadId = t;
@@ -165,7 +186,7 @@ public class OlcBTreeStressTests
                 }, TaskCreationOptions.LongRunning);
             }
 
-            // 24 removers: remove from range 501..1000 (disjoint per thread)
+            // Removers: disjoint 10-key blocks from 501 upward, all inside the half the readers never read.
             for (int t = 0; t < removerCount; t++)
             {
                 var threadId = t;
@@ -218,7 +239,7 @@ public class OlcBTreeStressTests
         using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
         var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 200, sizeof(Index32Chunk));
 
-        const int threadCount = 32;
+        var threadCount = WideThreads;
         const int keysPerThread = 150;
         int sharedCounter = 0;
 
@@ -302,8 +323,8 @@ public class OlcBTreeStressTests
         using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
         var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 200, sizeof(Index32Chunk));
 
-        const int writerCount = 16;
-        const int readerCount = 16;
+        var writerCount = WideThreads / 2;
+        var readerCount = WideThreads - writerCount;
         const int keysPerWriter = 200;
         int sharedCounter = 0;
 
@@ -423,13 +444,13 @@ public class OlcBTreeStressTests
 
     [Test]
     [CancelAfter(5000)]
-    public unsafe void Stress_MoveSameLeaf_16Threads()
+    public unsafe void Stress_MoveSameLeaf()
     {
         using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
         using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
         var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 200, sizeof(Index32Chunk));
 
-        const int threadCount = 16;
+        var threadCount = NarrowThreads;
         const int slotsPerThread = 800;   // exclusive range size per thread (wide gap avoids shared boundary leaves)
         const int keysPerThread = 200;    // only even slots populated
         const int movesPerThread = 200;   // move all keys: even→odd
@@ -512,13 +533,13 @@ public class OlcBTreeStressTests
     // Cross-leaf Move exercises the dual-lock path (lock two leaves in ChunkId order).
     [Test]
     [CancelAfter(5000)]
-    public unsafe void Stress_MoveCrossLeaf_16Threads()
+    public unsafe void Stress_MoveCrossLeaf()
     {
         using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
         using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
         var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 200, sizeof(Index32Chunk));
 
-        const int threadCount = 16;
+        var threadCount = NarrowThreads;
         const int keysPerThread = 200;
         const int movesPerThread = 50;
 
@@ -597,13 +618,13 @@ public class OlcBTreeStressTests
 
     [Test]
     [CancelAfter(5000)]
-    public unsafe void Stress_MoveValueTailConsistency_32Threads()
+    public unsafe void Stress_MoveValueTailConsistency()
     {
         using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
         using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
         var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 200, sizeof(Index32Chunk));
 
-        const int threadCount = 32;
+        var threadCount = WideThreads;
         const int sourceKeyCount = 200;
         const int valuesPerKey = 3;
 
@@ -696,14 +717,14 @@ public class OlcBTreeStressTests
 
     [Test]
     [CancelAfter(5000)]
-    public unsafe void Stress_EnumerationDuringMutation_16Threads()
+    public unsafe void Stress_EnumerationDuringMutation()
     {
         using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
         using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
         var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 200, sizeof(Index32Chunk));
 
-        const int writerCount = 8;
-        const int enumeratorCount = 8;
+        var writerCount = NarrowThreads / 2;
+        var enumeratorCount = NarrowThreads - writerCount;
         const int insertsPerWriter = 50;
         const int initialKeys = 500;
 
@@ -829,7 +850,7 @@ public class OlcBTreeStressTests
         using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
         var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 100, sizeof(Index32Chunk));
 
-        const int writerCount = 8;
+        var writerCount = Math.Max(2, NarrowThreads / 2);
         const int batchSize = 10;
         const int batchCount = 5;
         const int initialKeys = 500;
