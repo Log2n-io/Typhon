@@ -1,0 +1,24 @@
+<RunSettings>
+  <!-- The Nightly tier (#703): [Explicit] + [Category("Nightly")] fixtures — chaos/stress/torture workloads kept
+       out of the PR gate for their duration but genuinely RUN here.
+
+       NumberOfTestWorkers=1 for the same reason the gate shards use it: the suite carries process-static state
+       (ArchetypeRegistry, profiler rings, epoch registry) and these fixtures deliberately saturate the box, so a
+       parallel run would measure interference rather than the engine.
+
+       DefaultTimeout is 180 s rather than workers1.runsettings' 10 s because these workloads legitimately run for
+       seconds (OlcBTreeRaceStressTests defaults to a 30 s wall).
+
+       DO NOT rely on DefaultTimeout to bound a HANG. Measured on this branch (2026-08-07) against the
+       ChaosStressTests livelock (#695): NUnit could not terminate it. .NET has no Thread.Abort, so a CPU-bound
+       spin ignores the per-test deadline entirely — the run had to be killed from outside. DefaultTimeout bounds
+       a test that CRAWLS, not one that spins.
+
+       The real guard is vstest's `--blame-hang`, which kills the test host and names the hanging test in a
+       Sequence_*.xml. nightly-suppressed.yml passes it for exactly that reason; without it a single livelock
+       consumes the whole job timeout and reports nothing about which test caused it. -->
+  <NUnit>
+    <NumberOfTestWorkers>1</NumberOfTestWorkers>
+    <DefaultTimeout>180000</DefaultTimeout>
+  </NUnit>
+</RunSettings>

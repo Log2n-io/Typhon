@@ -235,8 +235,12 @@ class StorageModeStressTests : TestBase<StorageModeStressTests>
     // Category 2: Transient Spawn/Destroy at scale
     // ═══════════════════════════════════════════════════════════════════════
 
+    // QUARANTINE (#708): concurrent Transient spawn hands out COLLIDING slots — a thread reads another thread's stamp
+    // through an EntityId its own Spawn returned. Deterministic: 3/3 running this test ALONE on an idle box.
+    // It was [Ignore("Flaky: throughput threshold assertion fails intermittently under parallel test load")] — both
+    // halves wrong (the assertion is data correctness, and it is not load-dependent), and that label is what hid it.
     [Test]
-    [Ignore("Flaky: throughput threshold assertion fails intermittently under parallel test load")]
+    [Category("Quarantine")]
     public void Transient_SpawnDestroy_Throughput()
     {
         using var dbe = SetupEngine();

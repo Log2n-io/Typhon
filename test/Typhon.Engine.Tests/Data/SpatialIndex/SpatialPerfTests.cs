@@ -12,7 +12,9 @@ namespace Typhon.Engine.Tests;
 /// Not for CI — run manually to measure optimization impact.
 /// </summary>
 [TestFixture]
-[Explicit("Performance benchmarks — run manually")]
+// Manual tier: wall-clock performance thresholds, which a shared runner cannot hold — a red here would mean "busy box".
+[Explicit("Performance benchmarks")]
+[Category("Manual")]
 public class SpatialPerfTests
 {
     private IServiceProvider _serviceProvider;

@@ -9,7 +9,10 @@ namespace Typhon.Engine.Tests.Runtime;
 /// Diagnostic tests that measure and report actual scheduler latencies.
 /// These validate acceptance criteria: inter-system transition &lt; 1µs, tick jitter ±1ms at 60Hz.
 /// </summary>
+// Manual tier: these assert sub-microsecond transition latencies and 60 Hz jitter bounds. Those hold on dedicated
+// hardware and cannot hold on a shared runner, so tiering them would manufacture a permanent red.
 [TestFixture]
+[Category("Manual")]
 public class DagSchedulerLatencyTests
 {
     private ResourceRegistry _registry;
@@ -94,7 +97,7 @@ public class DagSchedulerLatencyTests
     /// via FindReadySystem scan (not inlined). This is the slower path.
     /// </summary>
     [Test]
-    [Ignore("Flaky — latency measurement sensitive to system load, passes in isolation")]
+    [Explicit("Latency measurement — same wall-clock dependence as the rest of this fixture")]
     public void Report_DiscoveryPipelineTransitionLatency()
     {
         // A(CallbackSystem) → B(PipelineSystem,50 chunks) → C(CallbackSystem)

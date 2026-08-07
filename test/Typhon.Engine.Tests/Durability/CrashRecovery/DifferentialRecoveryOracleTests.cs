@@ -227,6 +227,38 @@ internal sealed class DifferentialRecoveryOracleTests
         });
     }
 
+    /// <summary>
+    /// The <see cref="RuleMutantAttribute"/> companion to every AP-12 verifier that asserts through
+    /// <see cref="RecoveryOracle.AssertPrimaryAxis"/>: it proves that ASSERTION rejects a divergence, not merely
+    /// that <see cref="RecoveryShadowModel.Diff"/> returns a non-empty list.
+    /// </summary>
+    /// <remarks>
+    /// The distinction is the whole point. <see cref="ShadowModel_MutatedCopy_IsDetected"/> above pins `Diff`'s
+    /// RETURN VALUE, but every AP-12 verifier in the suite calls `AssertPrimaryAxis`, and a wired-wrong assertion
+    /// there (asserting on the wrong collection, or with a matcher that cannot fail) would leave every one of them
+    /// permanently green while `Diff` kept working perfectly. So the mutant drives the real path and requires the
+    /// failure to carry the oracle's OWN message — positive evidence, per <see cref="RuleMutants.AssertDetects"/>.
+    /// </remarks>
+    [Test]
+    [CancelAfter(15_000)]
+    [RuleMutant("AP-12")]
+    public void Mutant_PrimaryAxisAssertion_RejectsADivergentShadow()
+    {
+        RunWorkloadLive(new SingleTxSpawnWorkload(8), (dbe, shadow) =>
+        {
+            // Sanity: unmutated, the oracle's own assertion passes against the engine it was captured from. Without
+            // this the mutant could "detect" a divergence that was there all along.
+            RecoveryOracle.AssertPrimaryAxis(dbe, shadow);
+
+            shadow.Entities.Values.First().ValueBytesBySlot[0][0] ^= 0xFF;
+
+            RuleMutants.AssertDetects(
+                "AP-12",
+                "Differential oracle — primary (broad-scan) axis found",
+                () => RecoveryOracle.AssertPrimaryAxis(dbe, shadow));
+        });
+    }
+
     // ── AC4 — primary (broad-scan) axis green on the flat path ───────────────
 
     [Test]
@@ -268,6 +300,47 @@ internal sealed class DifferentialRecoveryOracleTests
                 Is.EquivalentTo(broad),
                 $"index axis: CompD.B index result set ({indexed.Count}) must equal the broad-scan set ({broad.Count}); a shortfall means recovery did not rebuild "
                 + "the secondary index (RB-01).");
+        });
+    }
+
+    /// <summary>
+    /// The <see cref="RuleMutantAttribute"/> companion to <see cref="IndexedFlat_IndexAxis_MatchesBroadScan"/>:
+    /// proves the index-axis comparison rejects a SHORTFALL — the failure mode RB-01 is about.
+    /// </summary>
+    /// <remarks>
+    /// This assertion has a specific way of being vacuously true, and <see cref="RecoveryOracle"/>'s own docstring
+    /// warns about its mirror image: if the index enumeration returns nothing AND the broad scan returns nothing,
+    /// `Is.EquivalentTo` passes while proving nothing. The real verifier guards one half with a "broad is not empty"
+    /// sanity assert; this mutant guards the other, by removing a single entity from the index side and requiring
+    /// the equivalence to reject it. A comparison that cannot see one missing entity cannot see recovery failing to
+    /// rebuild a secondary index either.
+    /// </remarks>
+    [Test]
+    [CancelAfter(15_000)]
+    [RuleMutant("RB-01")]
+    public void Mutant_IndexAxisComparison_RejectsAOneEntityShortfall()
+    {
+        RecoverWith(new IndexedFlatWorkload(10), (dbe, shadow) =>
+        {
+            var compDArch = shadow.Entities.Keys.First().ArchetypeId;
+            using var tx = dbe.CreateQuickTransaction();
+            var broad = RecoveryOracle.BroadScanEntityIds(tx, compDArch);
+            var indexed = RecoveryOracle.IndexEntityIds<CompD, int>(dbe, tx, d => d.B, int.MinValue, int.MaxValue);
+
+            // Unmutated the two sets agree — otherwise the mutant would be "detecting" a pre-existing divergence.
+            Assert.That(indexed, Is.EquivalentTo(broad), "sanity: the index and broad-scan sets must agree before the mutation");
+
+            // Exactly the shape RB-01 describes: recovery rebuilt the entity but not its index entry.
+            indexed.Remove(indexed.First());
+
+            RuleMutants.AssertDetects(
+                "RB-01",
+                "index axis: CompD.B index result set",
+                () => Assert.That(
+                    indexed,
+                    Is.EquivalentTo(broad),
+                    $"index axis: CompD.B index result set ({indexed.Count}) must equal the broad-scan set ({broad.Count}); a shortfall means recovery did not "
+                    + "rebuild the secondary index (RB-01)."));
         });
     }
 

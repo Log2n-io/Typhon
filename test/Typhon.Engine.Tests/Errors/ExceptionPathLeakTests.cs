@@ -12,7 +12,7 @@ namespace Typhon.Engine.Tests;
 /// </summary>
 [TestFixture]
 [NonParallelizable] // Mutates static TimeoutOptions.Current — would race with any parallel DatabaseEngine ctor.
-[Category("Quarantine")] // The leak assertion (MMF.CheckInternalState) compares the WHOLE page-state array
+[Category("Quarantine")] // #410 — the leak assertion (MMF.CheckInternalState) compares the WHOLE page-state array
                          // (PageState/ExclusiveLatchDepth/DirtyCounter) before vs after; that comparison races
                          // background page-cache/checkpoint timing and fails only on the slower c6id gate box
                          // (deterministically green locally — even in the serial quiet pass). Excluded from the
@@ -72,7 +72,6 @@ class ExceptionPathLeakTests : TestBase<ExceptionPathLeakTests>
     // isolation and the code under test is correct (verified). TODO: harden the test so it no longer depends on
     // wall-clock timing — force the timeout deterministically (synchronization barrier) or mark [NonParallelizable].
     [Test]
-    [Ignore("Flaky under parallel load; passes in isolation. Test timing needs hardening (see comment).")]
     [CancelAfter(5000)]
     public void RevisionEnumerator_Constructor_WhenLockTimeout_DoesNotLeakChunkHandle()
     {
@@ -150,7 +149,6 @@ class ExceptionPathLeakTests : TestBase<ExceptionPathLeakTests>
     // isolation and the code under test is correct (verified). TODO: harden the test so it no longer depends on
     // wall-clock timing — force the timeout deterministically (synchronization barrier) or mark [NonParallelizable].
     [Test]
-    [Ignore("Flaky under parallel load; passes in isolation. Test timing needs hardening (see comment).")]
     [CancelAfter(5000)]
     public void GetRevisionElement_WhenLockTimeout_DoesNotLeakChunkHandles()
     {
@@ -228,7 +226,6 @@ class ExceptionPathLeakTests : TestBase<ExceptionPathLeakTests>
     // isolation and the code under test is correct (verified). TODO: harden the test so it no longer depends on
     // wall-clock timing — force the timeout deterministically (synchronization barrier) or mark [NonParallelizable].
     [Test]
-    [Ignore("Flaky under parallel load; passes in isolation. Test timing needs hardening (see comment).")]
     [CancelAfter(5000)]
     public void VariableSizedBufferAccessor_Constructor_WhenLockTimeout_DoesNotLeakResources()
     {

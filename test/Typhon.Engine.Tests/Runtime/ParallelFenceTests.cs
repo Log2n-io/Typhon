@@ -153,7 +153,7 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
     /// the runtime's built-in per-system Transaction (not a free-standing user transaction).
     /// </summary>
     [Test]
-    [Ignore("Test infra issue: in-callback Transaction crosses worker thread. Re-enable once converted to use runtime-managed per-system Transaction.")]
+    [Ignore("#707 — in-callback Transaction crosses worker threads. Re-enable once converted to the runtime-managed per-system Transaction.")]
     public void ParallelMigration_StressManyCellsManyTicks_NoExceptions()
     {
         // Build a WAL-enabled engine so RunParallelFence's WAL-mode gate actually dispatches the parallel

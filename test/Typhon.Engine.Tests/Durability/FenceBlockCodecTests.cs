@@ -11,7 +11,10 @@ namespace Typhon.Engine.Tests;
 /// </summary>
 [TestFixture]
 [VerifiesRule("LOG-02")]
-[VerifiesRule("LOG-06")]
+// LOG-06 was claimed here until 2026-08-07 (#703) and RETIRED: LOG-06 constrains what the EMITTER puts on the
+// wire, and this fixture is "Pure — no engine, no recovery" — every byte it reads it wrote itself via WriteBlock,
+// so it stays green in the same build as a red production probe (#389). LOG-02 (single codec) IS genuinely
+// verified here. See rule LOG-06 `verified: NOT COVERED`.
 internal sealed class FenceBlockCodecTests
 {
     private const long Lsn = 4242;

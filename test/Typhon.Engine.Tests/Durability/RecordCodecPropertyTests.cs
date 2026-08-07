@@ -14,7 +14,9 @@ namespace Typhon.Engine.Tests;
 /// </summary>
 [TestFixture]
 [VerifiesRule("LOG-02")]
-[VerifiesRule("LOG-06")]
+// LOG-06 was claimed here until 2026-08-07 (#703) and RETIRED, for the same reason as FenceBlockCodecTests: this
+// fixture is "Pure — no engine, no recovery" and round-trips records it constructs itself, so it cannot observe
+// an emitter writing a physical identifier. LOG-02 and LOG-07 remain genuinely verified here.
 [VerifiesRule("LOG-07")]
 internal sealed class RecordCodecPropertyTests
 {
