@@ -356,12 +356,35 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// Filter entities by an indexed-field predicate, enabling incremental view refresh via <see cref="ViewDeltaRingBuffer"/>.
     /// The expression is parsed into <see cref="FieldEvaluator"/> for boundary crossing detection. Requires indexed fields.
     /// </summary>
+    /// <remarks>
+    /// Chained calls AND together, and every call must target the SAME component — a second call naming a different one throws. Predicates are merged into
+    /// one branch set that records field names but not which component each came from, so a cross-component chain has no way to resolve correctly; see the
+    /// guard below. To filter on a second component use <see cref="Where{T}"/>, which opens the entity and reads each component by its own type.
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">
+    /// <typeparamref name="T"/> is not registered, or a previous <c>WhereField</c> on this query targeted a different component.
+    /// </exception>
     public EcsQuery<TArchetype> WhereField<T>(Expression<Func<T, bool>> predicate) where T : unmanaged
     {
         var ct = _tx.DBE.GetComponentTable<T>();
         if (ct == null)
         {
             throw new InvalidOperationException($"Component type {typeof(T).Name} is not registered.");
+        }
+
+        // Reject a second WhereField on a DIFFERENT component instead of answering it wrongly. Each call's branches are cross-producted into one flat
+        // FieldPredicate[][] below, and a FieldPredicate carries only a field NAME — never the component it came from — while _whereComponentTable is
+        // overwritten by whichever call ran last. So every predicate ends up resolved against the LAST component: a name unique to the first component
+        // throws deep in QueryResolverHelper, and a name both components share (Code, Score, Level...) resolves silently against the wrong one and the
+        // query returns the wrong rows. The information is not mis-propagated, it is never captured, so there is nothing to recover at execution time.
+        // Cross-component predicates ARE supported — through ExpressionParser.Parse<T1, T2>, which splits by lambda PARAMETER (see NavigationQueryBuilder).
+        // Routing WhereField through that is a feature, tracked separately; until then, raising beats a silent wrong answer.
+        if (_whereComponentTable != null && !ReferenceEquals(_whereComponentTable, ct))
+        {
+            throw new InvalidOperationException(
+                $"WhereField cannot combine predicates on two different components ('{_whereComponentTable.Definition.Name}' then "
+                + $"'{ct.Definition.Name}'). Chained WhereField calls must all target the same component. Use Where<T>(...) for the second component — "
+                + "it evaluates per entity and composes correctly across components.");
         }
 
         var branches = ExpressionParser.ParseDnf(predicate);
