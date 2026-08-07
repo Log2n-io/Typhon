@@ -27,6 +27,11 @@ namespace Typhon.Engine.Tests;
 /// </summary>
 [TestFixture]
 [Category("CrashSweep")]
+// [Seeded] attaches the repro line to a failure; Category("Seeded") is what the nightly's --filter selects. Two markers because an attribute cannot be
+// selected by a vstest filter and a category cannot run code — and #703's taxonomy is explicit that a marker only counts if some tier actually runs it.
+// "Seeded" is NOT a gate-excluding tier: these tests run in the PR gate too, at the fixed default seed.
+[Category("Seeded")]
+[Seeded]
 internal sealed class WalCrashSweepTests
 {
     private string _dbDir;
@@ -35,14 +40,43 @@ internal sealed class WalCrashSweepTests
 
     private static readonly string[] NonClusterWorkloads = ["SingleTxSpawn", "LifecycleChurn", "IndexedFlat", "MultiValueDupKey"];
 
-    // Representative checkpoint page-write boundaries. Boundaries beyond a cycle's write count let the cycle complete (consolidated base) —
-    // recovery still holds, so the sweep is robust without probing the exact per-workload write count.
-    private static readonly int[] CrashBoundaries = [1, 2, 3, 5, 8];
+    // Checkpoint page-write boundaries. Boundaries beyond a cycle's write count let the cycle complete (consolidated base) — recovery still holds, so the
+    // sweep is robust without probing the exact per-workload write count.
+    //
+    // #704 T6: the fixed five are a FLOOR, not the set. This file's own :15 comment claims the sweep crashes "at EVERY page-write boundary"; it crashed at
+    // five, and had done since it was written, because the array is a literal. Two seeded extras are appended so the boundary explored grows with CI-hours
+    // instead of being frozen on the day the array was typed. With TYPHON_TEST_SEED unset the seed is constant, so the gate still runs one fixed set — the
+    // nightly is what varies it.
+    private static readonly int[] CrashBoundaries = BuildCrashBoundaries();
+
+    private static int[] BuildCrashBoundaries()
+    {
+        var floor = new[] { 1, 2, 3, 5, 8 };
+
+        // A context-free derivation, not TestSeed.Random(): this runs in a static field initializer, where TestContext may name the fixture, a random test, or
+        // nothing at all. Keying on the fixture name instead keeps the boundary set identical for every case in the run.
+        var rand = new Random(TestSeed.Derive(TestSeed.RunSeed, nameof(WalCrashSweepTests), "crash-boundaries"));
+        var extras = new SortedSet<int>();
+        while (extras.Count < 2)
+        {
+            var n = rand.Next(1, 17);
+            if (System.Array.IndexOf(floor, n) < 0)
+            {
+                extras.Add(n);
+            }
+        }
+
+        var all = new List<int>(floor);
+        all.AddRange(extras);
+        return [.. all];
+    }
 
     private static IRecoveryWorkload MakeWorkload(string name) => name switch
     {
         "SingleTxSpawn" => new SingleTxSpawnWorkload(10),
-        "LifecycleChurn" => new LifecycleChurnWorkload(1234, 24),
+        // The seed was the literal 1234, which pinned this "seeded-random" workload to one churn sequence forever. It now derives from the run seed, so the
+        // gate keeps a fixed sequence and a seeded nightly explores others — replayable from the printed seed alone.
+        "LifecycleChurn" => new LifecycleChurnWorkload(TestSeed.For("lifecycle-churn"), 24),
         "IndexedFlat" => new IndexedFlatWorkload(10),
         "MultiValueDupKey" => new MultiValueDupKeyWorkload(12, 3),
         "MixedDiscipline" => new MixedDisciplineWorkload(8),

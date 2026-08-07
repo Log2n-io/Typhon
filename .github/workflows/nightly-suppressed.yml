@@ -133,8 +133,13 @@ jobs:
               for r in sorted(set(rows)):
                   print(f"- `{r}`")
               print("\nThese are tracked reds of the Nightly tier — file or update an issue, do NOT re-suppress "
-                    "(#703). Known: #695 (BTree.SpinWriteLock livelock), #696 (ChaosStressTests deterministic "
-                    "failures).")
+                    "(#703). Known:\n"
+                    "- #695 — BTree.SpinWriteLock livelock (ChaosStressTests.CreateDeleteRecreate_RapidLifecycle)\n"
+                    "- #696 — ChaosStressTests deterministic concurrent value/index failures\n"
+                    "- #297 — OlcRaceStress_FourScenariosUnderCpuNoise: the OLC B+Tree loses a present key on a\n"
+                    "  concurrent read (~0.8% of Add iterations). REOPENED 2026-08-07 on this tier's first run since\n"
+                    "  February; the fixture had been [Explicit] with no tier, so the issue was closed in May on\n"
+                    "  evidence its own harness now contradicts.")
           PY
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -145,3 +150,171 @@ jobs:
           name: nightly-suppressed
           path: ci-out/**
           if-no-files-found: ignore
+
+  # ── The seed-space cell (#704 T6) ──────────────────────────────────────────────────────────────────────────────────
+  # Every seed in the suite used to be a literal — `new Random(42)` x8, `LifecycleChurnWorkload(1234, 24)` — so CI run
+  # #1 and CI run #1,000 explored the identical state. This job is the only place TYPHON_TEST_SEED is set: the PR gate
+  # runs with it UNSET and therefore stays bit-for-bit deterministic, which is what #703 bought and what a randomly
+  # flaky gate would spend back.
+  #
+  # Three seeds, not one: a single extra point per night is barely exploration, and three is still under a minute.
+  # Each seed is PRINTED in the job summary and every seeded failure carries its own repro line (see SeededAttribute),
+  # so a red here is reproducible from one number with no other input:
+  #     TYPHON_TEST_SEED=<n> dotnet test ... --filter "FullyQualifiedName~<test>"
+  seeded:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false          # one unlucky seed must not hide what the other two would have found
+      matrix:
+        cell: [1, 2, 3]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build (Release)
+        run: dotnet build test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj -c Release
+
+      - name: Pick a seed
+        id: seed
+        run: |
+          set -uo pipefail
+          # 31-bit: TestSeed parses an int32, and a negative seed is legal but reads badly in a summary table.
+          SEED=$(( (RANDOM << 16 | RANDOM) & 0x7FFFFFFF ))
+          echo "seed=$SEED" >> "$GITHUB_OUTPUT"
+          echo "Cell ${{ matrix.cell }} seed: $SEED"
+
+      - name: Run the seeded tests
+        continue-on-error: true      # exploring; a red reports, it does not fail the workflow
+        env:
+          TYPHON_TEST_SEED: ${{ steps.seed.outputs.seed }}
+        run: |
+          set -uo pipefail
+          mkdir -p ci-out
+          dotnet test test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj \
+            -c Release --no-build \
+            --filter "Category=Seeded" \
+            --settings bench/aws/nightly.runsettings \
+            --blame-hang --blame-hang-timeout 300s \
+            --logger "trx;LogFileName=seeded.trx" \
+            --results-directory ci-out \
+            2>&1 | tee ci-out/seeded.log
+
+      # Same guard as the tier above, for the same reason: a seed cell that selects zero tests reports a green that
+      # means nothing. Blocking, because it says the job stopped testing anything.
+      - name: Assert the seeded filter selected tests, and report
+        env:
+          TYPHON_TEST_SEED: ${{ steps.seed.outputs.seed }}
+        run: |
+          set -uo pipefail
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import glob, os, sys, xml.etree.ElementTree as ET
+          NS = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
+          seed = os.environ["TYPHON_TEST_SEED"]
+          total = passed = failed = 0
+          names = {}
+          rows = []
+          for f in glob.glob("ci-out/*.trx"):
+              root = ET.parse(f).getroot()
+              c = root.find(f"{NS}ResultSummary/{NS}Counters")
+              if c is not None:
+                  total += int(c.get("total", 0)); passed += int(c.get("passed", 0)); failed += int(c.get("failed", 0))
+              for ut in root.iter(f"{NS}UnitTest"):
+                  tm = ut.find(f"{NS}TestMethod")
+                  if ut.get("id") and tm is not None:
+                      names[ut.get("id")] = f'{tm.get("className")}.{tm.get("name")}'
+              for r in root.iter(f"{NS}UnitTestResult"):
+                  if r.get("outcome") == "Failed":
+                      rows.append(names.get(r.get("testId"), r.get("testName", "?")))
+          print(f"## Seeded cell — seed `{seed}`\n")
+          print(f"| seed | total | passed | failed |\n|---|---|---|---|\n| `{seed}` | {total} | {passed} | {failed} |\n")
+          if rows:
+              print("### Failures — reproduce each with the seed above\n")
+              for r in sorted(set(rows)):
+                  print(f"- `TYPHON_TEST_SEED={seed} dotnet test test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj --filter \"FullyQualifiedName~{r}\"`")
+              print("\nA seeded red is a REAL finding on a state no previous run had visited — file it, do not re-pin the seed (#704).")
+          if total == 0:
+              print("::error::`Category=Seeded` selected ZERO tests — the seed cell is testing nothing.")
+              sys.exit(1)
+          PY
+
+      - name: Upload raw artifacts (.trx / logs)
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightly-seeded-${{ matrix.cell }}
+          path: ci-out/**
+          if-no-files-found: ignore
+
+  # ── Does the covering array still explore? (#704 AC9/AC10) ─────────────────────────────────────────────────────────
+  # #704's headline claim is that a planted axis-specific bug is caught by a cell nobody hand-wrote. Proving it once
+  # during development makes it an anecdote; running it nightly makes it a measurement. The probe plants a defect in
+  # src/, runs the fixtures, and requires BOTH outcomes — the matrix cell fails AND the hand-written control passes —
+  # then reverts. If a future change makes the array stop catching a mutation it used to catch, this is where that
+  # shows up.
+  #
+  # Non-blocking like the rest of this workflow: it reports, it does not gate. The probe's own logic is unit-tested in
+  # scripts/tests/test_axis_mutation_probe.py, which DOES run in the merge gate's `invariants` job.
+  mutation-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      # The probe refuses to run on a dirty src/ — it restores files from an in-memory copy and must never do that over
+      # someone's work. A fresh checkout is clean, so this is belt-and-braces; it fails loudly rather than silently
+      # skipping if that ever stops being true.
+      - name: Assert a clean src/ tree
+        run: |
+          set -uo pipefail
+          if [ -n "$(git status --porcelain -- src/)" ]; then
+            echo "::error::src/ is dirty in a fresh checkout — the mutation probe cannot run safely."
+            git status --porcelain -- src/
+            exit 1
+          fi
+
+      - name: Run the mutation probe
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          python3 scripts/axis-mutation-probe.py --all 2>&1 | tee probe.log
+          echo "PROBE_EXIT=${PIPESTATUS[0]}" >> "$GITHUB_ENV"
+
+      - name: Report
+        if: always()
+        run: |
+          set -uo pipefail
+          {
+            echo "## Axis mutation probe"
+            echo
+            if [ "${PROBE_EXIT:-1}" = "0" ]; then
+              echo "✅ Every mutation was caught by a covering-array cell that no hand-written test covers."
+            else
+              echo "🔴 At least one mutation did NOT produce the required evidence. Either the array stopped exploring"
+              echo "that axis, or a mutation went stale against a refactor — both are real findings (#704)."
+            fi
+            echo
+            echo '```'
+            tail -40 probe.log 2>/dev/null || echo "(no probe output)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Confirm src/ was restored
+        if: always()
+        run: |
+          set -uo pipefail
+          if [ -n "$(git status --porcelain -- src/)" ]; then
+            echo "::error::the probe left src/ modified — its revert path is broken."
+            git diff --stat -- src/
+            exit 1
+          fi
+          echo "src/ restored cleanly."

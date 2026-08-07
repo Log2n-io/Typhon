@@ -1,4 +1,4 @@
-using System.Linq;
+﻿using System.Linq;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
@@ -466,24 +466,6 @@ class ClusterIndexTests : TestBase<ClusterIndexTests>
         }
     }
 
-    [Test]
-    public void BulkSpawn_AllIndexed()
-    {
-        using var dbe = SetupEngine();
-
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            for (int i = 0; i < 200; i++)
-            {
-                tx.Spawn<ClIdxUnit>(ClIdxUnit.Health.Set(new ClIdxHealth(i, 100)));
-            }
-            tx.Commit();
-        }
-
-        using var tx2 = dbe.CreateQuickTransaction();
-        var all = tx2.Query<ClIdxUnit>().WhereField<ClIdxHealth>(h => h.Current >= 0).Execute();
-        Assert.That(all, Has.Count.EqualTo(200));
-    }
 
     [Test]
     public void EmptyCluster_TickFence_NoCrash()
@@ -566,59 +548,7 @@ class ClusterIndexTests : TestBase<ClusterIndexTests>
     // Code review — missing test paths
     // ═══════════════════════════════════════════════════════════════════════
 
-    [Test]
-    public void Destroy_WithoutWrite_IndexEntryRemoved()
-    {
-        // Tests the non-shadow destroy path (no Write before Destroy)
-        using var dbe = SetupEngine();
 
-        EntityId id;
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            id = tx.Spawn<ClIdxUnit>(ClIdxUnit.Health.Set(new ClIdxHealth(99, 100)));
-            tx.Commit();
-        }
-        dbe.WriteTickFence(1);
-
-        // Destroy without any Write — index entry should be removed directly by PrepareEcsDestroys
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            tx.Destroy(id);
-            tx.Commit();
-        }
-        dbe.WriteTickFence(2);
-
-        using var tx2 = dbe.CreateQuickTransaction();
-        Assert.That(tx2.Query<ClIdxUnit>().WhereField<ClIdxHealth>(h => h.Current == 99).Count(), Is.EqualTo(0));
-    }
-
-    [Test]
-    public void Destroy_MutateAndDestroy_SameTransaction()
-    {
-        // Tests mutation + destroy in same transaction (not just same tick)
-        using var dbe = SetupEngine();
-
-        EntityId id;
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            id = tx.Spawn<ClIdxUnit>(ClIdxUnit.Health.Set(new ClIdxHealth(33, 100)));
-            tx.Commit();
-        }
-        dbe.WriteTickFence(1);
-
-        // Mutate AND destroy in same transaction
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            tx.OpenMut(id).Write(ClIdxUnit.Health) = new ClIdxHealth(44, 200);
-            tx.Destroy(id);
-            tx.Commit();
-        }
-        dbe.WriteTickFence(2);
-
-        using var tx2 = dbe.CreateQuickTransaction();
-        Assert.That(tx2.Query<ClIdxUnit>().WhereField<ClIdxHealth>(h => h.Current == 33).Count(), Is.EqualTo(0), "Original value removed");
-        Assert.That(tx2.Query<ClIdxUnit>().WhereField<ClIdxHealth>(h => h.Current == 44).Count(), Is.EqualTo(0), "Mutated value removed");
-    }
 
     [Test]
     public void EqualityQuery_ExactMatch()

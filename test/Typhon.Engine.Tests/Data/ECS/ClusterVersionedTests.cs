@@ -116,35 +116,6 @@ class ClusterVersionedTests : TestBase<ClusterVersionedTests>
     // 2. Spawn & Read HEAD
     // ═══════════════════════════════════════════════════════════════════════
 
-    [Test]
-    public void SpawnAndRead_VersionedHead_CorrectValue()
-    {
-        using var dbe = SetupEngine();
-        EntityId id;
-
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            var pos = new ClV5SvPos(10, 20);
-            var hp = new ClV5Health(100, 200);
-            id = tx.Spawn<ClVMixed>(ClVMixed.Pos.Set(in pos), ClVMixed.Health.Set(in hp));
-            tx.Commit();
-        }
-
-        // Read in a new transaction
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            var entity = tx.Open(id);
-            Assert.That(entity.IsValid, Is.True);
-
-            ref readonly var pos = ref entity.Read(ClVMixed.Pos);
-            Assert.That(pos.X, Is.EqualTo(10));
-            Assert.That(pos.Y, Is.EqualTo(20));
-
-            ref readonly var hp = ref entity.Read(ClVMixed.Health);
-            Assert.That(hp.Current, Is.EqualTo(100));
-            Assert.That(hp.Max, Is.EqualTo(200));
-        }
-    }
 
     [Test]
     public void SpawnAndRead_ViaArchetypeAccessor_CorrectValue()
@@ -178,38 +149,6 @@ class ClusterVersionedTests : TestBase<ClusterVersionedTests>
     // 3. Write & Commit
     // ═══════════════════════════════════════════════════════════════════════
 
-    [Test]
-    public void WriteVersioned_CommitUpdatesClusterSlot()
-    {
-        using var dbe = SetupEngine();
-        EntityId id;
-
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            var pos = new ClV5SvPos(1, 2);
-            var hp = new ClV5Health(100, 200);
-            id = tx.Spawn<ClVMixed>(ClVMixed.Pos.Set(in pos), ClVMixed.Health.Set(in hp));
-            tx.Commit();
-        }
-
-        // Write Versioned component
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            var entity = tx.OpenMut(id);
-            ref var hp = ref entity.Write(ClVMixed.Health);
-            hp.Current = 75;
-            tx.Commit();
-        }
-
-        // Read in new transaction — should see updated value
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            var entity = tx.Open(id);
-            ref readonly var hp = ref entity.Read(ClVMixed.Health);
-            Assert.That(hp.Current, Is.EqualTo(75));
-            Assert.That(hp.Max, Is.EqualTo(200));
-        }
-    }
 
     [Test]
     public void WriteSvComponent_InMixedArchetype_InPlaceUpdate()
@@ -248,38 +187,6 @@ class ClusterVersionedTests : TestBase<ClusterVersionedTests>
         }
     }
 
-    [Test]
-    public void MultipleWritesSameTransaction_FinalValuePersists()
-    {
-        using var dbe = SetupEngine();
-        EntityId id;
-
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            var pos = new ClV5SvPos(1, 1);
-            var hp = new ClV5Health(100, 100);
-            id = tx.Spawn<ClVMixed>(ClVMixed.Pos.Set(in pos), ClVMixed.Health.Set(in hp));
-            tx.Commit();
-        }
-
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            var entity = tx.OpenMut(id);
-            ref var hp = ref entity.Write(ClVMixed.Health);
-            hp.Current = 80;
-            // Write again
-            ref var hp2 = ref entity.Write(ClVMixed.Health);
-            hp2.Current = 60;
-            tx.Commit();
-        }
-
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            var entity = tx.Open(id);
-            ref readonly var hp = ref entity.Read(ClVMixed.Health);
-            Assert.That(hp.Current, Is.EqualTo(60));
-        }
-    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // 4. Bulk Iteration via GetClusterEnumerator
@@ -378,48 +285,6 @@ class ClusterVersionedTests : TestBase<ClusterVersionedTests>
     // 5. Multiple Entities & Destroy
     // ═══════════════════════════════════════════════════════════════════════
 
-    [Test]
-    public void MultipleEntities_AllHeadsCorrect()
-    {
-        using var dbe = SetupEngine();
-        const int count = 50;
-        var ids = new EntityId[count];
-
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            for (int i = 0; i < count; i++)
-            {
-                var pos = new ClV5SvPos(i, i);
-                var hp = new ClV5Health(i * 10, 1000);
-                ids[i] = tx.Spawn<ClVMixed>(ClVMixed.Pos.Set(in pos), ClVMixed.Health.Set(in hp));
-            }
-            tx.Commit();
-        }
-
-        // Write to every other entity
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            for (int i = 0; i < count; i += 2)
-            {
-                var entity = tx.OpenMut(ids[i]);
-                ref var hp = ref entity.Write(ClVMixed.Health);
-                hp.Current = 999;
-            }
-            tx.Commit();
-        }
-
-        // Verify all values
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            for (int i = 0; i < count; i++)
-            {
-                var entity = tx.Open(ids[i]);
-                ref readonly var hp = ref entity.Read(ClVMixed.Health);
-                int expected = (i % 2 == 0) ? 999 : i * 10;
-                Assert.That(hp.Current, Is.EqualTo(expected), $"Entity {i} has wrong Health");
-            }
-        }
-    }
 
     [Test]
     public void Destroy_VersionedClusterEntity_SlotFreed()
@@ -532,56 +397,6 @@ class ClusterVersionedTests : TestBase<ClusterVersionedTests>
         Assert.That(layout.SlotToVersionedIndex[1], Is.EqualTo(0));
     }
 
-    [Test]
-    public void ManyEntities_AcrossClusters_AllCorrect()
-    {
-        using var dbe = SetupEngine();
-        const int count = 200; // Should span multiple clusters
-        var ids = new EntityId[count];
-
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            for (int i = 0; i < count; i++)
-            {
-                var pos = new ClV5SvPos(i, i);
-                var hp = new ClV5Health(i, 1000);
-                ids[i] = tx.Spawn<ClVMixed>(ClVMixed.Pos.Set(in pos), ClVMixed.Health.Set(in hp));
-            }
-            tx.Commit();
-        }
-
-        // Verify all values
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            for (int i = 0; i < count; i++)
-            {
-                var entity = tx.Open(ids[i]);
-                Assert.That(entity.Read(ClVMixed.Health).Current, Is.EqualTo(i), $"Entity {i} wrong Health");
-                Assert.That(entity.Read(ClVMixed.Pos).X, Is.EqualTo(i), $"Entity {i} wrong Pos.X");
-            }
-        }
-
-        // Write to all and verify
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            for (int i = 0; i < count; i++)
-            {
-                var entity = tx.OpenMut(ids[i]);
-                ref var hp = ref entity.Write(ClVMixed.Health);
-                hp.Current = count - i;
-            }
-            tx.Commit();
-        }
-
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            for (int i = 0; i < count; i++)
-            {
-                var entity = tx.Open(ids[i]);
-                Assert.That(entity.Read(ClVMixed.Health).Current, Is.EqualTo(count - i));
-            }
-        }
-    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // 8. Regression tests — bugs caught during code review

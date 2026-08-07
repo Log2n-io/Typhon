@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
@@ -18,7 +18,7 @@ public class PageInterceptorTests : AllocatorTestBase
     private ManagedPagedMMFOptions _options;
     private ManagedPagedMMF _mmf;
 
-    private static string DbName => $"T_PageIntercept_{(uint)TestContext.CurrentContext.Test.Name.GetHashCode():X8}";
+    private static string DbName => $"T_PageIntercept_{TestSeed.StableHash(TestContext.CurrentContext.Test.Name):X8}";
 
     public override void Setup()
     {
