@@ -14,9 +14,15 @@
        spin ignores the per-test deadline entirely — the run had to be killed from outside. DefaultTimeout bounds
        a test that CRAWLS, not one that spins.
 
-       The real guard is vstest's `--blame-hang`, which kills the test host and names the hanging test in a
+       The real guard is vstest's blame-hang option, which kills the test host and names the hanging test in a
        Sequence_*.xml. nightly-suppressed.yml passes it for exactly that reason; without it a single livelock
-       consumes the whole job timeout and reports nothing about which test caused it. -->
+       consumes the whole job timeout and reports nothing about which test caused it.
+
+       NB: written as `blame-hang`, not with its two leading dashes. An XML comment may not contain a double
+       hyphen, and spelling the flag out here made this whole file unparseable — dotnet test then rejected the
+       settings and ran ZERO tests, so the seeded and suppressed tiers reported nothing at all while looking
+       configured. The prose describing the hang guard is what disabled the tier; #703's "the tier must select
+       tests" assertion is the only thing that noticed. -->
   <NUnit>
     <NumberOfTestWorkers>1</NumberOfTestWorkers>
     <DefaultTimeout>180000</DefaultTimeout>

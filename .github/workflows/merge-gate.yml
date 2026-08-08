@@ -301,8 +301,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/lint-test-suppressions.py
 
+      # A malformed .runsettings makes `dotnet test` run ZERO tests while the job still looks configured — the
+      # nightly's seeded and suppressed tiers were both silently empty because a comment in nightly.runsettings
+      # contained `--`. That is a false green one layer BELOW the suppression lints, which reason about which
+      # tests are selected and cannot see a settings file that was never parsed (#705).
+      - name: Check .runsettings files are well-formed
+        run: python3 scripts/check-runsettings.py
+
       # The lints are themselves tested: each check has a planted violation it must reject, including a planted
-      # zero-test shard. A lint that has never rejected anything is the same false green it exists to remove.
+      # zero-test shard and the exact double-hyphen comment that shipped. A lint that has never rejected anything
+      # is the same false green it exists to remove.
       - name: Lint self-tests (#703)
         run: python3 -m unittest discover -s scripts/tests -v
 
