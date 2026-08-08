@@ -634,6 +634,7 @@ internal sealed class DifferentialRecoveryOracleTests
     /// </remarks>
     [Test]
     [CancelAfter(20_000)]
+    [VerifiesRule("LOG-08")]
     [TestCaseSource(nameof(PostRecoveryShapes), new object[] { "PostRecoveryWrite_LsnFloor" })]
     public void PostRecoveryWrite_ContinuesTheLsnSequenceAboveTheReplayedFrontier(PostRecoveryShape shape)
     {
@@ -698,6 +699,7 @@ internal sealed class DifferentialRecoveryOracleTests
     /// </remarks>
     [Test]
     [CancelAfter(20_000)]
+    [VerifiesRule("CK-10")]
     [TestCaseSource(nameof(PostRecoveryShapes), new object[] { "RecoveredThenCrashed_NoWrite" })]
     public void RecoveredEngine_CrashingWithNoWrite_StillHasEverythingItRecovered(PostRecoveryShape shape)
     {

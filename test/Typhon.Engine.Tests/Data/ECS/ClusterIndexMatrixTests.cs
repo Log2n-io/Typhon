@@ -279,6 +279,7 @@ internal sealed class ClusterIndexMatrixTests : TestBase<ClusterIndexMatrixTests
     /// that never had it. This is the shape the issue documents: mutate the indexed field and destroy, on an archetype mixing publication timings.
     /// </remarks>
     [Test]
+    [VerifiesRule("IX-06")]
     public void MixedPublicationTimings_MutateAndDestroy_LeaveTheIndexAgreeing()
     {
         var cell = new Cell(StorageShape.VerPlusTransient, DurabilityMode.Immediate, IndexShape.AllowMultiple, ReopenKind.None);
@@ -307,6 +308,7 @@ internal sealed class ClusterIndexMatrixTests : TestBase<ClusterIndexMatrixTests
     /// and the pair together is the actual boundary.
     /// </remarks>
     [Test]
+    [VerifiesRule("IX-06")]
     public void DestroyAfterWritingOnlyAnUnindexedSibling_LeavesTheIndexAgreeing()
     {
         var cell = new Cell(StorageShape.VerPlusTransient, DurabilityMode.Immediate, IndexShape.AllowMultiple, ReopenKind.None);
@@ -327,6 +329,7 @@ internal sealed class ClusterIndexMatrixTests : TestBase<ClusterIndexMatrixTests
 
     /// <summary>#711's control: writing only the INDEXED Versioned component and destroying. Green before the fix — kept so the pair states the boundary.</summary>
     [Test]
+    [VerifiesRule("IX-06")]
     public void DestroyAfterWritingOnlyTheIndexedComponent_LeavesTheIndexAgreeing()
     {
         var cell = new Cell(StorageShape.VerPlusTransient, DurabilityMode.Immediate, IndexShape.AllowMultiple, ReopenKind.None);
