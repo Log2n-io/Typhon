@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
@@ -1155,6 +1155,37 @@ internal sealed unsafe class ArchetypeClusterState
     }
 
     /// <summary>
+    /// Claims one free bit in <paramref name="occupancy"/> by CAS, retrying until it wins or the word is full. Returns the slot index, or <c>-1</c> when no
+    /// bit is free. The returned bit is exclusively this caller's.
+    /// </summary>
+    /// <remarks>
+    /// #708. Both <c>ClaimSlot</c> overloads used to CAS ONCE and, on failure, re-read and commit the second attempt with a PLAIN store, commented
+    /// "single-writer (no concurrent commit)". That premise does not hold — Transient spawns commit concurrently from independent transactions — and two
+    /// losers of the first CAS then read the same occupancy word, pick the same trailing-zero slot, and both store it. Two entities end up in one slot with
+    /// distinct EntityIds, so the second silently overwrites the first's component data and a thread reads back another thread's value.
+    /// A retry that abandons the atomicity of the attempt it is retrying is not a retry; the loop below keeps every attempt a CAS.
+    /// </remarks>
+    private static int ClaimFreeBit(ref ulong occupancy, ulong fullMask)
+    {
+        while (true)
+        {
+            ulong current = Volatile.Read(ref occupancy);
+            ulong available = ~current & fullMask;
+            if (available == 0)
+            {
+                return -1;
+            }
+
+            int slot = BitOperations.TrailingZeroCount(available);
+            ulong desired = current | (1UL << slot);
+            if (Interlocked.CompareExchange(ref occupancy, desired, current) == current)
+            {
+                return slot;
+            }
+        }
+    }
+
+    /// <summary>
     /// Claim a free slot in an existing cluster, or allocate a new cluster.
     /// Returns the cluster chunk ID and the slot index within the cluster.
     /// </summary>
@@ -1173,40 +1204,16 @@ internal sealed unsafe class ArchetypeClusterState
             byte* clusterBase = accessor.GetChunkAddress(clusterId, true);
             ref ulong occupancy = ref *(ulong*)clusterBase;
 
-            ulong current = occupancy;
-            ulong available = ~current & Layout.FullMask;
-            if (available != 0)
+            int slot = ClaimFreeBit(ref occupancy, Layout.FullMask);
+            if (slot >= 0)
             {
-                int slot = BitOperations.TrailingZeroCount(available);
-                ulong desired = current | (1UL << slot);
-
-                // CAS for future-proof concurrent commit. Single-writer (no concurrent commit).
-                if (Interlocked.CompareExchange(ref occupancy, desired, current) == current)
+                // If the cluster is now full, reset the head — the next call allocates a new one (O(1)).
+                if ((Volatile.Read(ref occupancy) & Layout.FullMask) == Layout.FullMask)
                 {
-                    // If cluster is now full, reset head — next call allocates new (O(1))
-                    if (desired == Layout.FullMask)
-                    {
-                        FreeClusterHead = -1;
-                    }
-
-                    return (clusterId, slot);
+                    FreeClusterHead = -1;
                 }
 
-                // CAS failed (concurrent writer took a different slot) — reread once
-                current = occupancy;
-                available = ~current & Layout.FullMask;
-                if (available != 0)
-                {
-                    slot = BitOperations.TrailingZeroCount(available);
-                    desired = current | (1UL << slot);
-                    occupancy = desired; // Direct write — single-writer (no concurrent commit)
-                    if (desired == Layout.FullMask)
-                    {
-                        FreeClusterHead = -1;
-                    }
-
-                    return (clusterId, slot);
-                }
+                return (clusterId, slot);
             }
 
             // Current free cluster is actually full — reset and fall through to allocate
@@ -1236,35 +1243,14 @@ internal sealed unsafe class ArchetypeClusterState
             byte* clusterBase = accessor.GetChunkAddress(clusterId, true);
             ref ulong occupancy = ref *(ulong*)clusterBase;
 
-            ulong current = occupancy;
-            ulong available = ~current & Layout.FullMask;
-            if (available != 0)
+            int slot = ClaimFreeBit(ref occupancy, Layout.FullMask);
+            if (slot >= 0)
             {
-                int slot = BitOperations.TrailingZeroCount(available);
-                ulong desired = current | (1UL << slot);
-
-                if (Interlocked.CompareExchange(ref occupancy, desired, current) == current)
+                if ((Volatile.Read(ref occupancy) & Layout.FullMask) == Layout.FullMask)
                 {
-                    if (desired == Layout.FullMask)
-                    {
-                        FreeClusterHead = -1;
-                    }
-                    return (clusterId, slot);
+                    FreeClusterHead = -1;
                 }
-
-                current = occupancy;
-                available = ~current & Layout.FullMask;
-                if (available != 0)
-                {
-                    slot = BitOperations.TrailingZeroCount(available);
-                    desired = current | (1UL << slot);
-                    occupancy = desired;
-                    if (desired == Layout.FullMask)
-                    {
-                        FreeClusterHead = -1;
-                    }
-                    return (clusterId, slot);
-                }
+                return (clusterId, slot);
             }
 
             FreeClusterHead = -1;
