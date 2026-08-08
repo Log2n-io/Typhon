@@ -185,6 +185,24 @@ jobs:
           token: ${{ secrets.TYPHON_CLAUDE_TOKEN }}
           path: typhon-claude
 
+      # Same reasoning as the rule-coverage job below: a PR that changes a TLA spec and the code it models spans
+      # both repos on same-named branches, and pinning `main` here would model-check the OLD spec against the NEW
+      # code. It has not bitten yet only because no PR has changed a spec and its implementation together.
+      - name: Prefer the PR's companion docs branch, if it exists
+        if: ${{ github.event_name == 'pull_request' }}
+        continue-on-error: true
+        working-directory: typhon-claude
+        run: |
+          set -uo pipefail
+          branch='${{ github.head_ref }}'
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            git fetch --depth=1 origin "$branch"
+            git checkout -q FETCH_HEAD
+            echo "specs: typhon-claude branch '$branch' @ $(git rev-parse --short HEAD)"
+          else
+            echo "specs: typhon-claude main @ $(git rev-parse --short HEAD) (no branch '$branch' there)"
+          fi
+
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -234,6 +252,29 @@ jobs:
           ref: main
           token: ${{ secrets.TYPHON_CLAUDE_TOKEN }}
           path: typhon-claude
+
+      # A change that adds a RULE and the test that verifies it spans both repos, and the two halves travel on
+      # branches of the same name. Auditing against `main` compares this PR's code to rules that do not yet contain
+      # its changes, which makes the pair un-mergeable in either order: the code PR stays red until the docs PR
+      # merges, and the docs PR has no gate of its own to show it is safe to merge first. #705 hit exactly this —
+      # a new rule (RB-06) and its [VerifiesRule] test, reported as "names a rule that does not exist".
+      #
+      # The fallback is announced rather than silent: a green run must say WHICH rules it audited, or it cannot be
+      # told apart from a green run that audited the wrong ones.
+      - name: Prefer the PR's companion docs branch, if it exists
+        if: ${{ github.event_name == 'pull_request' }}
+        continue-on-error: true      # no checkout on a fork PR — the audit's own --skip-if-no-rules handles that
+        working-directory: typhon-claude
+        run: |
+          set -uo pipefail
+          branch='${{ github.head_ref }}'
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            git fetch --depth=1 origin "$branch"
+            git checkout -q FETCH_HEAD
+            echo "rules: typhon-claude branch '$branch' @ $(git rev-parse --short HEAD)"
+          else
+            echo "rules: typhon-claude main @ $(git rev-parse --short HEAD) (no branch '$branch' there)"
+          fi
 
       - name: Audit rule coverage + ratchet
         run: |
