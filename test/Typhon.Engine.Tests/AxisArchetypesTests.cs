@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
@@ -153,12 +153,15 @@ internal sealed class AxisArchetypesTests : TestBase<AxisArchetypesTests>
     }
 
     /// <summary>
-    /// #710 — a hard crash on an SV archetype with a UNIQUE index leaves the database permanently unopenable: every surviving entity reads Key == 0, and
-    /// rebuilding a unique index over 64 identical keys throws out of <c>InitializeArchetypes</c>. Quarantined, not deleted: when #710 is fixed this is the
-    /// regression lock, and it fails today for exactly the documented reason.
+    /// #710 — a hard crash on an SV archetype with a UNIQUE index used to leave the database permanently unopenable: every surviving entity reads Key == 0,
+    /// and rebuilding a unique index over 64 identical keys threw out of <c>InitializeArchetypes</c>, from state on disk, so the next open repeated it.
     /// </summary>
+    /// <remarks>
+    /// The conflict assertion is not decoration. "It opens" is also what you get if the rebuild stops running at all, or if the archetype comes back with no
+    /// entities to index — both of which would satisfy every other assertion here. Requiring the drop count to be non-zero is what makes this a test of the
+    /// tolerated-conflict path rather than of any route that happens to avoid the throw.
+    /// </remarks>
     [Test]
-    [Category("Quarantine")]
     public void SvWithUniqueIndex_AfterHardCrash_StillOpens()
     {
         var cell = new Cell(StorageShape.PureSv, DurabilityMode.Immediate, IndexShape.Unique, ReopenKind.Crash);
@@ -168,12 +171,15 @@ internal sealed class AxisArchetypesTests : TestBase<AxisArchetypesTests>
         using var dbe2 = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
         AxisArchetypes.Register(dbe2, cell);
 
-        // #710: this throws UniqueConstraintViolationException from RebuildIndexesFromData. The values are legitimately lost (TickFence), but an unopenable
-        // database is not a documented consequence of losing them.
+        // The values are legitimately lost (TickFence's documented ≤1-tick window); an unopenable database is not a documented consequence of losing them.
         Assert.DoesNotThrow(() => dbe2.InitializeArchetypes(), $"{cell}: #710 — the database must open even when the rebuild's source data was lost");
 
+        Assert.That(dbe2.LastOpenUniqueIndexRebuildConflicts, Is.GreaterThan(0),
+            $"{cell}: the open must have REPORTED the dropped unique-index entries — a silent zero here means the rebuild was skipped, not tolerated");
+
         using var read = dbe2.CreateQuickTransaction();
-        Assert.That(AxisArchetypes.Dispatch(cell, read, new CountVisitor()), Is.EqualTo(ids.Length));
+        Assert.That(AxisArchetypes.Dispatch(cell, read, new CountVisitor()), Is.EqualTo(ids.Length),
+            $"{cell}: the entities themselves must survive and stay reachable by scan — only their index entries are dropped");
     }
 
     private sealed class CountVisitor : ICellVisitor<Transaction, int>

@@ -3110,12 +3110,17 @@ internal sealed unsafe class ArchetypeClusterState
     /// Rebuild per-archetype B+Tree indexes from cluster data (scan all occupied entities).
     /// Used on reopen when index segment is not persisted or is corrupted.
     /// </summary>
-    public void RebuildIndexesFromData(ChangeSet changeSet)
+    /// <returns>
+    /// The number of index entries dropped because the recovered data could not satisfy a UNIQUE constraint (#710). Zero on every healthy rebuild.
+    /// </returns>
+    public int RebuildIndexesFromData(ChangeSet changeSet)
     {
         if (IndexSlots == null || IndexSlots.Length == 0)
         {
-            return;
+            return 0;
         }
+
+        var uniqueConflicts = 0;
 
         // Index rebuild reads from primary segment (SV/V data — Transient excluded from IndexSlots)
         var clusterAccessor = ClusterSegment.CreateChunkAccessor();
@@ -3146,9 +3151,31 @@ internal sealed unsafe class ArchetypeClusterState
                         {
                             ref var field = ref ixSlot.Fields[f];
                             byte* fieldPtr = compBase + slotIndex * compSize + field.FieldOffset;
-                            int elementId = hasString64 && ReferenceEquals(field.Index.Segment, IndexSegmentString64)
-                                ? field.Index.Add(fieldPtr, clusterLocation, ref idxAccessorS64)
-                                : field.Index.Add(fieldPtr, clusterLocation, ref idxAccessor);
+
+                            int elementId;
+                            try
+                            {
+                                elementId = hasString64 && ReferenceEquals(field.Index.Segment, IndexSegmentString64)
+                                    ? field.Index.Add(fieldPtr, clusterLocation, ref idxAccessorS64)
+                                    : field.Index.Add(fieldPtr, clusterLocation, ref idxAccessor);
+                            }
+                            catch (UniqueConstraintViolationException)
+                            {
+                                // #710. RB-01 says derived structures are rebuilt from primary data; it has no clause for primary data that CANNOT satisfy
+                                // the constraint. That state is reachable and legitimate: a hard crash under TickFence loses up to one tick of SingleVersion
+                                // VALUES while keeping every lifecycle record, so an archetype can come back with all its entities and all their keys zeroed.
+                                // Rebuilding a unique index over N identical keys then threw out of InitializeArchetypes, uncatchably, and the state is on
+                                // disk — so the next open repeated it. Losing ≤1 tick of values is the documented trade; a database that will not open is not.
+                                //
+                                // Skipping the entry keeps the entity itself alive and reachable by scan, which is the honest outcome: the value the key was
+                                // derived from is gone, so there is no key to index. The caller logs the count — silence here would trade an unopenable
+                                // database for a quietly incomplete index, which is a worse bargain.
+                                //
+                                // The throw-per-conflict cost is accepted: this runs once, at open, only on a database that has already lost data.
+                                uniqueConflicts++;
+                                continue;
+                            }
+
                             // Rebuild writes a fresh elementId into the cluster tail, overwriting any stale
                             // value from the previous (torn-down) BTree state. Issue #229 Phase 3.
                             if (field.AllowMultiple)
@@ -3169,6 +3196,8 @@ internal sealed unsafe class ArchetypeClusterState
             idxAccessor.Dispose();
             clusterAccessor.Dispose();
         }
+
+        return uniqueConflicts;
     }
 
     /// <summary>
