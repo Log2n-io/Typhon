@@ -23,6 +23,13 @@ internal sealed class RecoveryDriver
         public long MaxLsn; // highest LSN seen in the recovery window — the frontier the post-recovery seal consolidates to
 
         /// <summary>
+        /// Per-(entity, slot) records expanded out of columnar FenceBlock records (#559). Surfaced so a test can tell that a recovered value actually
+        /// travelled the fence-block path rather than arriving as a per-entity Slot record — the two are indistinguishable downstream by design, which is
+        /// exactly what makes "the FenceBlock path feeds recovery correctly" (#569) otherwise unfalsifiable.
+        /// </summary>
+        public int FenceBlockRecordsExpanded;
+
+        /// <summary>
         /// True when the scan stopped at a corruption boundary (LOG-03 / REC-01) rather than running out of segments.
         /// </summary>
         /// <remarks>
@@ -146,6 +153,7 @@ internal sealed class RecoveryDriver
 
                                 for (var c = 0; c < block.ColumnCount; c++)
                                 {
+                                    result.FenceBlockRecordsExpanded++;
                                     records.Add(new Rec
                                     {
                                         Lsn = view.Lsn, Tsn = view.Tsn, Kind = RecordKind.Slot, Op = (byte)SlotOp.Upsert,

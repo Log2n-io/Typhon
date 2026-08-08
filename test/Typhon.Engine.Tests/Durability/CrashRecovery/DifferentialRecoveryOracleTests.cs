@@ -316,7 +316,7 @@ internal sealed class DifferentialRecoveryOracleTests
             TestContext.WriteLine(
                 $"{seed.Name} cross-frontier recovery: checkpointLsn={dbe.LastWalV2RecoveryCheckpointLsn} "
                 + $"scanned={dbe.LastWalV2RecoveryResult.RecordsScanned} applied={dbe.LastWalV2RecoveryResult.RecordsApplied} "
-                + $"maxLsn={dbe.LastWalV2RecoveryResult.MaxLsn}");
+                + $"maxLsn={dbe.LastWalV2RecoveryResult.MaxLsn} fenceBlockExpanded={dbe.LastWalV2RecoveryResult.FenceBlockRecordsExpanded}");
 
             assertRecovered(dbe, shadow);
         }
@@ -789,6 +789,34 @@ internal sealed class DifferentialRecoveryOracleTests
             new PostRecoveryWriteWorkload(shape, preCount: 8, postCount: 0),
             existing => new CrossFrontierUpdateWorkload(shape, existing, passes: 2),
             RecoveryOracle.AssertPrimaryAxis);
+
+    /// <summary>
+    /// #569's remaining acceptance criterion: the post-#559 columnar FenceBlock path must feed the cross-frontier applier, not just the per-entity Slot path.
+    /// </summary>
+    /// <remarks>
+    /// The two are indistinguishable downstream on purpose — <c>RecoveryDriver</c> expands a FenceBlock into exactly the per-(entity, slot) shape the Slot
+    /// records produced, so every existing assertion passes identically whichever format carried the value. That is what made this criterion unfalsifiable
+    /// and left it unchecked. Asserting on the expansion counter is what separates "recovered correctly" from "recovered correctly THROUGH the fence-block
+    /// path", and the cluster shape is used because its tick-fence writes are what emit blocks at all.
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    public void CrossFrontierUpdate_ArrivesThroughTheColumnarFenceBlockPath()
+    {
+        // ClusterSv only, and not via PostRecoveryShapes: the flat homes do not emit fence blocks at all, so running them here would assert zero blocks
+        // expanded and fail for a reason that is correct behaviour.
+        const PostRecoveryShape shape = PostRecoveryShape.ClusterSv;
+        RecoverWithCrossFrontierUpdate(
+            new PostRecoveryWriteWorkload(shape, preCount: 8, postCount: 0),
+            existing => new CrossFrontierUpdateWorkload(shape, existing),
+            (dbe, shadow) =>
+            {
+                Assert.That(dbe.LastWalV2RecoveryResult.FenceBlockRecordsExpanded, Is.GreaterThan(0),
+                    "no FenceBlock record was expanded — the cross-frontier update reached the applier as a per-entity Slot record, so this case is not "
+                    + "covering the columnar path it exists to cover");
+                RecoveryOracle.AssertPrimaryAxis(dbe, shadow);
+            });
+    }
 
     /// <summary>
     /// The workload must refuse an empty alive-set rather than quietly assert nothing.
