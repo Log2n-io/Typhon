@@ -93,21 +93,24 @@ class LintFixtureCase(unittest.TestCase):
         with open(self.shards, "w", encoding="utf-8") as fh:
             json.dump([{"filter": "x", "classes": classes}], fh)
 
-    def run_lint(self):
+    def run_lint(self, closing=None):
         """(exit_code, stdout). --no-github keeps the self-tests offline and deterministic."""
+        argv = ["--root", self.root, "--shards", self.shards, "--no-github"]
+        if closing is not None:
+            argv += ["--closing", closing]
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = lint.main(["--root", self.root, "--shards", self.shards, "--no-github"])
+            rc = lint.main(argv)
         return rc, buf.getvalue()
 
-    def assert_flags(self, check):
-        rc, out = self.run_lint()
+    def assert_flags(self, check, closing=None):
+        rc, out = self.run_lint(closing)
         self.assertEqual(rc, 1, f"expected {check} to fail the lint; output was:\n{out}")
         self.assertIn(check, out)
         return out
 
-    def assert_clean(self):
-        rc, out = self.run_lint()
+    def assert_clean(self, closing=None):
+        rc, out = self.run_lint(closing)
         self.assertEqual(rc, 0, f"expected a clean pass; output was:\n{out}")
 
 
@@ -360,3 +363,59 @@ class TestShardTierExclusion(LintFixtureCase):
         shard = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(shard)
         self.assertEqual(set(shard.GATE_EXCLUDED), lint.GATE_EXCLUDED_CATEGORIES)
+
+
+class TestClosingKeywordCompanion(LintFixtureCase):
+    """SUPPRESSION_CITES_CLOSING_ISSUE — the blind spot IGNORE_CLOSED_ISSUE cannot see out of.
+
+    On a PR that closes #N and leaves an [Ignore("#N")] behind, #N is still OPEN, so IGNORE_CLOSED_ISSUE passes; the
+    merge closes it and the same lint reddens main. Measured: PR #721 closed #718 with the suppression still in the
+    tree, and `invariants` went green on the PR and red on main minutes later. This check is fed the set the merge
+    gate's closing-keywords job already extracts, so the contradiction is visible while it is still cheap to fix.
+    """
+
+    IGNORED_AGAINST_718 = ('[TestFixture]\nclass A\n{\n    [Test]\n'
+                           '    [Ignore("#718 - needs the lifecycle notification channel")]\n'
+                           '    public void T() { }\n}\n')
+
+    def test_ignore_citing_an_issue_this_change_closes_is_rejected(self):
+        """The load-bearing case: PR #721's exact shape."""
+        self.write("A.cs", self.IGNORED_AGAINST_718)
+        out = self.assert_flags("SUPPRESSION_CITES_CLOSING_ISSUE", closing="718")
+        self.assertIn("#718", out)
+
+    def test_no_closing_set_is_a_no_op(self):
+        """Guards the guard: without --closing the check must stay silent, or every ordinary run breaks."""
+        self.write("A.cs", self.IGNORED_AGAINST_718)
+        self.assert_clean()
+
+    def test_suppression_citing_an_unrelated_issue_passes(self):
+        """The over-fire case. A tree full of [Ignore]s is normal; only the ones this change closes are wrong."""
+        self.write("A.cs", self.IGNORED_AGAINST_718)
+        self.assert_clean(closing="999 1000")
+
+    def test_quarantine_prose_is_deliberately_out_of_scope(self):
+        """The false positive that shaped the check, lifted from the real tree.
+
+        `ChaosStressTests.CreateDeleteRecreate_RapidLifecycle` is quarantined against #696, and its comment ALSO names
+        #695 (the livelock it was retargeted from) and #716 (a suspected mechanism). All three are a `#N` sitting next
+        to a `[Category("Quarantine")]`, and only one is the blocker — nothing distinguishes them without a convention
+        that does not exist. `[Ignore]`'s reason string carries no such ambiguity, so the check covers that alone.
+        Flagging this would punish the best-documented suppression in the suite, and a lint that cries wolf on good
+        prose gets switched off.
+        """
+        self.write("A.cs", '[TestFixture]\nclass A\n{\n    [Test]\n'
+                           '    // QUARANTINE (#696), retargeted from #695. Possibly #716 mechanism.\n'
+                           '    [Category("Quarantine")]\n'
+                           '    public void T() { }\n}\n')
+        self.assert_clean(closing="716")
+
+    def test_hash_prefixed_and_comma_separated_input_parses(self):
+        """The gate hands over whatever its grep produced; be liberal about the separator, not about the numbers."""
+        self.write("A.cs", self.IGNORED_AGAINST_718)
+        self.assert_flags("SUPPRESSION_CITES_CLOSING_ISSUE", closing="#717, #718")
+
+    def test_a_substring_number_is_not_a_match(self):
+        """#71 must not match a suppression citing #718 — the set is numeric, not textual."""
+        self.write("A.cs", self.IGNORED_AGAINST_718)
+        self.assert_clean(closing="71")

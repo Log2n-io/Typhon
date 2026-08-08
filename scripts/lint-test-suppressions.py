@@ -32,10 +32,18 @@ Checks (each maps to an issue #703 deliverable):
     SHARD_ZERO_TESTS      a class named in `shards.json` that resolves to zero runnable tests — either the
                           fixture is class-level `[Ignore]`d, or it is class-level tagged with a tier the gate
                           excludes (Quarantine / Nightly / Manual)
+    SUPPRESSION_CITES_CLOSING_ISSUE
+                          a suppression citing an issue THIS change closes  (needs --closing)
+
+`SUPPRESSION_CITES_CLOSING_ISSUE` exists because `IGNORE_CLOSED_ISSUE` has a blind spot it cannot see out of. On a PR
+that closes #N *and* leaves an `[Ignore("#N")]` behind, #N is still OPEN while the PR is open, so the lint passes —
+and the merge is what closes it, so the same lint reddens `main` minutes later. Green before merge, red after. The
+merge gate's `closing-keywords` job already extracts the set GitHub will act on; feed it here with `--closing`.
 
 Usage:
     python3 scripts/lint-test-suppressions.py                       # lint the repo, probe issue state
     python3 scripts/lint-test-suppressions.py --no-github           # offline: skip IGNORE_CLOSED_ISSUE
+    python3 scripts/lint-test-suppressions.py --closing "718 722"   # + reject suppressions citing what this closes
     python3 scripts/lint-test-suppressions.py --root DIR --shards F # point at a fixture tree (self-tests)
 
 Exit code: 0 when clean, 1 when any violation is found, 2 on a usage error.
@@ -275,6 +283,53 @@ def check_ignores(parsed, states):
     return violations
 
 
+def check_closing_keywords(parsed, closing):
+    """Flag suppressions that cite an issue THIS change closes.
+
+    The gap this fills is a timing one, and it is invisible from inside a PR. `IGNORE_CLOSED_ISSUE` asks whether the
+    cited issue is closed *right now*; on a PR that both closes #N and leaves an `[Ignore("#N")]` in the tree, #N is
+    still OPEN, so the lint passes — and the merge is what closes it, so the same lint fails on `main` minutes later.
+    Green before merge, red after, with nothing in between to catch it.
+
+    Measured: PR #721 closed #718 while `ViewCreatedBeforeTheSpawns_ConvergesWithOneCreatedAfter` stayed quarantined
+    against it. `invariants` passed on the PR and reddened `main` at 22:32.
+
+    `[Ignore]` ONLY, deliberately. Its `#N` comes from the reason string, a single field whose reference IS the
+    blocker by construction. `Quarantine` records its issue in free prose — the attribute block or the comment above
+    it — and that prose legitimately discusses more than one issue: `ChaosStressTests.CreateDeleteRecreate_RapidLifecycle`
+    is quarantined against #696 while its comment also names #695 (the livelock it was retargeted from) and #716 (a
+    suspected mechanism). Treating every nearby reference as the target flags that comment, which is well written and
+    exactly what a quarantine note should say. A checker that cries wolf on good prose gets switched off, so the
+    narrow, precise half is the one worth having.
+
+    The gap that leaves is real and worth its own issue: `Quarantine` has no machine-readable target field, which is
+    also why nothing today catches a quarantine whose issue has closed (`IGNORE_CLOSED_ISSUE` covers `[Ignore]` alone).
+    """
+    if not closing:
+        return []
+
+    violations = []
+    for path, (groups, _class_groups) in parsed.items():
+        for g in groups:
+            ignore_m = IGNORE_ATTR.search(g.attr_text)
+            if not ignore_m:
+                continue
+
+            refs = {int(n) for n in ISSUE_REF.findall(ignore_m.group(1))}
+            line = g.line_of(re.compile(r"\[Ignore"))
+
+            for ref in sorted(refs & closing):
+                violations.append(Violation(
+                    "SUPPRESSION_CITES_CLOSING_ISSUE", path, line,
+                    f"[Ignore] cites #{ref}, which this change CLOSES",
+                    "Pick one, because they contradict each other. If the suppression is obsolete, delete it and let "
+                    "the test run. If it describes work this change does NOT do, that work needs its own issue — "
+                    "split it out and repoint the marker there. Leaving both in one commit is green here and red on "
+                    "main, because the merge is what closes the issue: IGNORE_CLOSED_ISSUE cannot see it from inside "
+                    "the PR. If the closing keyword itself is the mistake, defuse it (`#N` in backticks, or 'PR #N')."))
+    return violations
+
+
 def check_quarantine(parsed):
     violations = []
     for path, (groups, class_groups) in parsed.items():
@@ -481,15 +536,22 @@ def main(argv):
                     help="owner/name used to resolve issue state")
     ap.add_argument("--no-github", action="store_true",
                     help="skip IGNORE_CLOSED_ISSUE (offline / no gh)")
+    ap.add_argument("--closing", default="",
+                    help="issue numbers this change will close (whitespace- or comma-separated, '#' optional). Any "
+                         "suppression citing one is rejected: the merge is what closes them, so IGNORE_CLOSED_ISSUE "
+                         "cannot see the conflict from inside the PR. Fed by the merge gate's closing-keywords job.")
     args = ap.parse_args(argv)
 
     if not os.path.isdir(args.root):
         print(f"ERROR: --root {args.root} is not a directory", file=sys.stderr)
         return 2
 
+    closing = {int(n) for n in re.findall(r"\d+", args.closing)}
+
     parsed = scan_tree(args.root)
 
     violations = []
+    violations += check_closing_keywords(parsed, closing)
     violations += check_quarantine(parsed)
     violations += check_explicit(parsed)
     violations += check_shards(parsed, args.shards)
