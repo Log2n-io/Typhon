@@ -25,6 +25,7 @@ namespace Typhon.Engine.Tests.Runtime;
 class SystemInputViewLivenessTests : TestBase<SystemInputViewLivenessTests>
 {
     [Test]
+    [VerifiesRule("BIND-04")]
     public void SystemInputView_SeesEntitiesSpawnedWhileTheRuntimeIsRunning()
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();

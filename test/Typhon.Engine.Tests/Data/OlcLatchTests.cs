@@ -201,6 +201,7 @@ public class OlcLatchTests
     /// </remarks>
     [Test]
     [CancelAfter(1000)]
+    [VerifiesRule("IXW-02")]
     public void TryWriteLock_Obsolete_ReturnsFalse()
     {
         int version = 0;
@@ -238,6 +239,7 @@ public class OlcLatchTests
     /// </remarks>
     [Test]
     [CancelAfter(1000)]
+    [VerifiesRule("IXW-02")]
     public void TryWriteLockOnSmoPath_Obsolete_AcquiresAndReportsIt()
     {
         int version = 0;

@@ -905,6 +905,7 @@ public class OlcBTreeTests
     /// </remarks>
     [Test]
     [CancelAfter(5000)]
+    [VerifiesRule("IXW-02")]
     public unsafe void Remove_ConcurrentMerges_NoWriterEverLocksADetachedNode()
     {
         using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
