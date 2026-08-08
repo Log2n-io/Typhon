@@ -331,12 +331,19 @@ class TestShardTierExclusion(LintFixtureCase):
         self.assert_clean()
 
     def test_class_level_and_method_level_do_not_double_report(self):
-        """A wholesale-excluded fixture is one violation, not two — the class-level check owns it."""
+        """A wholesale-excluded fixture is one violation, not two — the class-level check owns it.
+
+        Asserted on the violation COUNT and on the absence of the method-level message, never by counting how many
+        times a message appears in the output: under GitHub Actions the reporter prints each violation twice — once
+        in the listing and once as a `::error::` annotation — so an occurrence count is green locally and red on the
+        runner for a reason unrelated to the behaviour. That is precisely how the first version of this test failed.
+        """
         self.write("A.cs", '// Known-red, see #552.\n[TestFixture]\n[Category("Quarantine")]\nclass Doubled\n{\n'
                            '    [Test]\n    [Category("Quarantine")]\n    public void T() { }\n}\n')
         self.write_shards(["Typhon.Engine.Tests.Doubled"])
         out = self.assert_flags("SHARD_ZERO_TESTS")
-        self.assertEqual(out.count("Doubled is named by a CI shard"), 1, f"reported more than once:\n{out}")
+        self.assertIn("SHARD_ZERO_TESTS - 1 violation(s)", out, f"expected exactly one violation; output was:\n{out}")
+        self.assertNotIn("EVERY [Test]", out, f"the method-level check must not fire as well:\n{out}")
 
     def test_a_class_with_no_tests_at_all_is_silent(self):
         """A helper class named by a shard has no [Test] members; saying nothing beats guessing."""
