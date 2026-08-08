@@ -1,6 +1,7 @@
 using JetBrains.Annotations;
 using Microsoft.Win32.SafeHandles;
 using System;
+using System.Collections.Generic;
 using System.IO;
 
 namespace Typhon.Engine.Internals;
@@ -60,6 +61,10 @@ internal sealed class WalFileIO : IWalFileIO
 
     /// <inheritdoc />
     public bool Exists(string path) => File.Exists(path);
+
+    /// <inheritdoc />
+    public IReadOnlyList<string> EnumerateSegmentPaths(string directory) =>
+        directory != null && Directory.Exists(directory) ? Directory.GetFiles(directory, "*.wal") : [];
 
     /// <inheritdoc />
     public void Delete(string path) => File.Delete(path);
