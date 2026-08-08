@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using Typhon.Engine.internals;
 using Typhon.Profiler;
 using Typhon.Schema.Definition;
@@ -138,6 +139,13 @@ public sealed partial class TyphonRuntime : IDisposable
 
     /// <summary>Number of ticks executed so far.</summary>
     public long CurrentTickNumber => Scheduler.CurrentTickNumber;
+
+    /// <summary>
+    /// The archetype this system was bound to for parallel cluster dispatch, or <see cref="ushort.MaxValue"/> when it was bound to none — gate 1 of the
+    /// Data Flow touch rollup (#327). Exposed for tests: the binding is otherwise unobservable, and a rollup that silently emits nothing is exactly the
+    /// failure #631 reported.
+    /// </summary>
+    internal ushort SystemArchetypeIdOf(int sysIdx) => (uint)sysIdx < (uint)_systemArchetypeIds.Length ? _systemArchetypeIds[sysIdx] : ushort.MaxValue;
 
     /// <summary>Current overload response level.</summary>
     public OverloadLevel CurrentOverloadLevel => Scheduler.CurrentOverloadLevel;
@@ -503,15 +511,24 @@ public sealed partial class TyphonRuntime : IDisposable
                     foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
                     {
                         // Same shape as before, with one difference that is the whole fix: match the view's archetype instead of taking the first
-                        // cluster-eligible one found. The ActiveClusterCount > 0 condition is retained deliberately — binding a cluster state switches the
-                        // system to cluster-RANGE dispatch, which walks ActiveClusterIds and ignores view-level filtering (tier, dormancy).
+                        // cluster-eligible one found.
                         if (meta.ArchetypeId != viewArchetypeId || !meta.IsClusterEligible || meta.ArchetypeId >= Engine._archetypeStates.Length)
                         {
                             continue;
                         }
 
+                        // #631: this used to also require `ActiveClusterCount > 0`, which reads a TRANSIENT condition to make a PERMANENT decision. This
+                        // runs once, in the constructor; an application that builds its runtime before loading its data — the ordering every sample and
+                        // every Workbench capture harness uses — leaves the system unbound for the rest of the session. It then silently falls back to
+                        // materializing a per-entity id list from the view instead of taking cluster-RANGE dispatch, and the #327 touch rollup, whose
+                        // first gate is exactly this id, can never emit a row.
+                        //
+                        // Dropping the count is safe because the code already tolerates a bound state whose count is zero: nothing un-binds a system whose
+                        // archetype is later fully drained, so `ActiveClusterCount == 0` on a bound system was always reachable. Both dispatch paths read
+                        // the count LIVE per tick (`PrepareFullNonVersioned` → 0 chunks → EmptyInput skip; `ExecuteChunkWithAccessor` → an empty range),
+                        // so an archetype that is empty at construction and empty forever behaves exactly as before.
                         var es = Engine._archetypeStates[meta.ArchetypeId];
-                        if (es?.ClusterState is { ActiveClusterCount: > 0 })
+                        if (es?.ClusterState != null)
                         {
                             _systemClusterStates[i] = es.ClusterState;
                             _systemArchetypeIds[i] = meta.ArchetypeId;
@@ -1224,8 +1241,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 {
                     // Non-tier-filtered system with sleeping clusters: "promote" to use a filtered copy of ActiveClusterIds
                     // so the tier-filtered dispatch path in ExecuteChunkWithAccessor handles it.
-                    srcIds = cs.ActiveClusterIds;
-                    srcCount = cs.ActiveClusterCount;
+                    srcIds = ReadActiveClusterList(cs, out srcCount);
                 }
 
                 if (srcIds != null)
@@ -1271,8 +1287,8 @@ public sealed partial class TyphonRuntime : IDisposable
                     var cs2 = _systemClusterStates[sysIdx];
                     if (cs2 != null)
                     {
-                        _systemTierClusterIds[sysIdx] = cs2.ActiveClusterIds;
-                        _systemTierClusterCount[sysIdx] = cs2.ActiveClusterCount;
+                        _systemTierClusterIds[sysIdx] = ReadActiveClusterList(cs2, out var promotedCount);
+                        _systemTierClusterCount[sysIdx] = promotedCount;
                     }
                 }
 
@@ -1538,12 +1554,11 @@ public sealed partial class TyphonRuntime : IDisposable
                 var cs = _systemClusterStates[sysIdx];
                 if (cs != null)
                 {
-                    var totalClusters = cs.ActiveClusterCount;
+                    clusterIdArray = ReadActiveClusterList(cs, out var totalClusters);
                     var cBase = totalClusters / totalChunks;
                     var cRemainder = totalClusters % totalChunks;
                     clusterStart = chunkIndex * cBase + Math.Min(chunkIndex, cRemainder);
                     clusterEnd = clusterStart + cBase + (chunkIndex < cRemainder ? 1 : 0);
-                    clusterIdArray = cs.ActiveClusterIds;
                 }
             }
         }
@@ -1595,12 +1610,11 @@ public sealed partial class TyphonRuntime : IDisposable
             var cs = _systemClusterStates[sysIdx];
             if (cs != null)
             {
-                var totalClusters = cs.ActiveClusterCount;
+                clusterIdArray = ReadActiveClusterList(cs, out var totalClusters);
                 var cBase = totalClusters / totalChunks;
                 var cRemainder = totalClusters % totalChunks;
                 clusterStart = chunkIndex * cBase + Math.Min(chunkIndex, cRemainder);
                 clusterEnd = clusterStart + cBase + (chunkIndex < cRemainder ? 1 : 0);
-                clusterIdArray = cs.ActiveClusterIds;
             }
         }
 
@@ -1755,12 +1769,11 @@ public sealed partial class TyphonRuntime : IDisposable
                 var cs = _systemClusterStates[sysIdx];
                 if (cs != null)
                 {
-                    var totalClusters = cs.ActiveClusterCount;
+                    clusterIdArray = ReadActiveClusterList(cs, out var totalClusters);
                     var cBase = totalClusters / totalChunks;
                     var cRemainder = totalClusters % totalChunks;
                     clusterStart = chunkIndex * cBase + Math.Min(chunkIndex, cRemainder);
                     clusterEnd = clusterStart + cBase + (chunkIndex < cRemainder ? 1 : 0);
-                    clusterIdArray = cs.ActiveClusterIds;
                 }
             }
 
@@ -1918,23 +1931,27 @@ public sealed partial class TyphonRuntime : IDisposable
 
             var cs = _systemClusterStates[i];
 
-            // Late-spawn recovery: if the archetype was empty when ResolveChangeFilters ran (construction time), _systemClusterStates[i] is null. Re-evaluate
-            // now — entities may have been spawned between construction and the first tick (e.g. via OnFirstTick). This check runs once per tick per
-            // tier-filtered system with a null slot; the inner archetype scan is O(registered archetypes) ≈ O(10), negligible.
-            if (cs == null && sys.IsParallelQuery && sys.InputFactory != null)
+            // Late-spawn recovery: if the archetype had no ClusterState at all when ResolveChangeFilters ran, _systemClusterStates[i] is null. Re-evaluate
+            // now — the state may have been created between construction and the first tick. This check runs once per tick per tier-filtered system with a
+            // null slot; the inner archetype scan is O(registered archetypes) ≈ O(10), negligible.
+            //
+            // #662 again: this used to take the FIRST cluster-eligible archetype it found rather than the system's own view archetype — the exact defect
+            // #662 fixed at the construction site, left behind in the recovery path. In any schema with more than one cluster archetype it hands the system
+            // another archetype's cluster ids, which is a page-index-out-of-range throw when the counts differ and silent wrong work when they match. It
+            // also never set `_systemArchetypeIds`, so a system rescued here kept gate 1 of the #327 touch rollup shut for the rest of the session.
+            if (cs == null && sys.IsParallelQuery && sys.InputFactory != null && _systemViews[i] != null)
             {
-                foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+                var viewArchetypeId = _systemViews[i].QueriedArchetypeId;
+                if (viewArchetypeId < Engine._archetypeStates.Length)
                 {
-                    if (meta.IsClusterEligible && meta.ArchetypeId < Engine._archetypeStates.Length)
+                    var meta = ArchetypeRegistry.GetMetadata(viewArchetypeId);
+                    var es = Engine._archetypeStates[viewArchetypeId];
+                    if (meta is { IsClusterEligible: true } && es?.ClusterState != null)
                     {
-                        var es = Engine._archetypeStates[meta.ArchetypeId];
-                        if (es?.ClusterState is { ActiveClusterCount: > 0 })
-                        {
-                            cs = es.ClusterState;
-                            cs.TierIndex ??= new TierClusterIndex();
-                            _systemClusterStates[i] = cs;
-                            break;
-                        }
+                        cs = es.ClusterState;
+                        cs.TierIndex ??= new TierClusterIndex();
+                        _systemClusterStates[i] = cs;
+                        _systemArchetypeIds[i] = viewArchetypeId;
                     }
                 }
             }
@@ -2148,6 +2165,41 @@ public sealed partial class TyphonRuntime : IDisposable
 
         metrics.UtilizationRatio = metrics.BudgetMs > 0 ? metrics.TotalCostMs / metrics.BudgetMs : 0f;
         _previousTickMetrics = metrics;
+    }
+
+    /// <summary>
+    /// Reads the <c>(ActiveClusterIds, ActiveClusterCount)</c> pair as a usable snapshot — #582 face 2.
+    /// </summary>
+    /// <remarks>
+    /// The pair is mutated by committing workers while other workers walk it, with nothing excluding the overlap. `AddToActiveList` releases the grown
+    /// array before the count; this acquires them in the mirror order, so the array is never older than the count and `count &lt;= array.Length` holds.
+    /// Loading the array first — which three call sites used to do — admits a plain interleaving that needs no reordering to fault: read the old
+    /// length-16 array, a concurrent spawn resizes and bumps the count, read the count as 17, index 16 of the old array.
+    /// <para>
+    /// This makes the pair CONSISTENT. It does not make the walk safe against a concurrent destroy: `RemoveFromActiveList` swaps with the last element, so
+    /// a walker holding a count from before it can still visit one cluster twice and skip the removed one, whose chunk may then be freed under it. That is
+    /// #582 face 1 and needs a snapshot or epoch protocol, not an ordering fix.
+    /// </para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int[] ReadActiveClusterList(ArchetypeClusterState cs, out int count)
+    {
+        count = Volatile.Read(ref cs.ActiveClusterCount);
+        var ids = Volatile.Read(ref cs.ActiveClusterIds);
+        if (ids == null)
+        {
+            count = 0;
+            return null;
+        }
+
+        // Defensive clamp: a shrink between the two loads leaves count larger than the live prefix, which is benign (the entries are still in range), but a
+        // count past the array itself must never reach a caller.
+        if (count > ids.Length)
+        {
+            count = ids.Length;
+        }
+
+        return ids;
     }
 
     private TickContext OnSystemStartInternal(int sysIdx)

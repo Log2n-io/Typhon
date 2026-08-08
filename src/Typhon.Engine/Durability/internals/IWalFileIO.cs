@@ -1,4 +1,5 @@
 using Microsoft.Win32.SafeHandles;
+using System.Collections.Generic;
 using System;
 
 namespace Typhon.Engine.Internals;
@@ -84,4 +85,17 @@ internal interface IWalFileIO : IDisposable
     /// </summary>
     /// <param name="path">File path of the segment to delete.</param>
     void Delete(string path);
+
+    /// <summary>
+    /// Enumerates the WAL segment files this backend holds for <paramref name="directory"/>, in no particular order.
+    /// </summary>
+    /// <remarks>
+    /// Recovery previously discovered segments with a direct <c>Directory.GetFiles(walDir, "*.wal")</c> in three places, which means an injected backend
+    /// contributes nothing to discovery: the crash-path flag, `WalRecovery` and `RecoveryDriver` all see an empty WAL directory no matter what the backend
+    /// actually holds. Every fixture using the in-memory backend was therefore off the production recovery path entirely (#688). Asking the backend is the
+    /// only way that question can be answered honestly.
+    /// </remarks>
+    /// <param name="directory">The WAL directory to enumerate.</param>
+    /// <returns>Segment file paths; empty when the directory does not exist or holds no segments.</returns>
+    IReadOnlyList<string> EnumerateSegmentPaths(string directory);
 }

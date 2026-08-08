@@ -1467,7 +1467,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             UowRegistry = new UowRegistry(segment, MMF, EpochManager, MemoryAllocator, this);
 
             var walDir = _options.Wal?.WalDirectory;
-            if (walDir != null && Directory.Exists(walDir) && Directory.GetFiles(walDir, "*.wal").Length > 0)
+            // #688: ask the WAL backend rather than the filesystem. A physical scan makes this flag FALSE for every engine using an injected in-memory
+            // backend, whatever that backend actually holds — which quietly took every such fixture off the production crash-recovery path, including the
+            // RB-01 index clear+rebuild and the EntityMap crash branch. A throwaway production IO is used only when nothing was injected, matching the
+            // recovery call a few lines below.
+            var discoveryIo = _injectedWalIo ?? new WalFileIO();
+            var walSegmentsPresent = walDir != null && discoveryIo.EnumerateSegmentPaths(walDir).Count > 0;
+            if (_injectedWalIo == null)
+            {
+                discoveryIo.Dispose();
+            }
+
+            if (walSegmentsPresent)
             {
                 // A crash left a WAL window. Gate the crash-path secondary-index clear+rebuild (RB-01) on this, captured HERE at open — before component
                 // registration builds the ComponentTables — so the clear in BuildIndexedFieldInfo sees it. RunWalV2Recovery reads the same flag for the
@@ -3210,7 +3221,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         if (!loadIndexes && !crashPath && !isFreshAllocation && clusterState.ActiveClusterCount > 0)
                         {
                             using var idxEpoch = EpochGuard.Enter(EpochManager);
-                            clusterState.RebuildIndexesFromData(changeSet);
+                            NoteUniqueIndexRebuildConflicts(meta, clusterState.RebuildIndexesFromData(changeSet));
                             LastOpenClusterIndexRebuildCount++;
                         }
                     }
@@ -3683,7 +3694,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     continue;
                 }
 
-                clusterState.RebuildIndexesFromData(changeSet);
+                NoteUniqueIndexRebuildConflicts(meta, clusterState.RebuildIndexesFromData(changeSet));
                 LastOpenClusterIndexRebuildCount++;
             }
         }
@@ -4270,7 +4281,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // the per-archetype replacement for ComponentTable.PopulateNewIndexes.
         if (clusterState.IndexSlots != null && clusterState.ActiveClusterCount > 0)
         {
-            clusterState.RebuildIndexesFromData(cs);
+            NoteUniqueIndexRebuildConflicts(meta, clusterState.RebuildIndexesFromData(cs));
             LastOpenClusterIndexRebuildCount++;
         }
 
@@ -5112,6 +5123,38 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     [LoggerMessage(LogLevel.Information,
         "Open: WAL LSN allocator continued above the recovered frontier {frontier} — the next appended record gets LSN {frontier}+1 (LOG-08)")]
     internal partial void LogWalFrontierSeededAfterRecovery(long frontier);
+
+    // #710. Warning, not Information: the index this open produced does not describe the data, and every query planned against it will under-report until
+    // the affected entities are rewritten. The archetype is named because the operator's next question is always "which one", and the count because one
+    // dropped entry is a schema question while thousands mean a whole tick of SingleVersion values was lost to a crash.
+    [LoggerMessage(LogLevel.Warning,
+        "Open: archetype {archetype} — {conflicts} index entr(ies) dropped rebuilding a UNIQUE index: the recovered data holds duplicate keys, which a "
+        + "hard crash under TickFence produces when it loses the SingleVersion values the keys came from. The entities are intact and reachable by scan; "
+        + "the unique index is incomplete until they are rewritten (#710)")]
+    internal partial void LogUniqueIndexRebuildConflicts(string archetype, int conflicts);
+
+    /// <summary>
+    /// Reports index entries a rebuild had to drop because the recovered data violates a UNIQUE constraint (#710), and counts them for tests.
+    /// </summary>
+    /// <remarks>
+    /// Kept as one call rather than inlined at each rebuild site so that "the rebuild dropped something" cannot be discarded silently by the next site
+    /// somebody adds — the ignorable <c>int</c> return of <see cref="ArchetypeClusterState.RebuildIndexesFromData"/> makes that easy to do by accident.
+    /// </remarks>
+    private void NoteUniqueIndexRebuildConflicts(ArchetypeMetadata meta, int conflicts)
+    {
+        if (conflicts <= 0)
+        {
+            return;
+        }
+
+        LastOpenUniqueIndexRebuildConflicts += conflicts;
+        LogUniqueIndexRebuildConflicts(meta?.ArchetypeType?.Name ?? meta?.ArchetypeId.ToString() ?? "<unknown>", conflicts);
+    }
+
+    /// <summary>
+    /// Index entries dropped during this open's rebuilds because the recovered data could not satisfy a UNIQUE constraint (#710). Zero on a healthy open.
+    /// </summary>
+    internal int LastOpenUniqueIndexRebuildConflicts { get; private set; }
 
     [LoggerMessage(LogLevel.Information,
         "Open: total {totalMs:F0} ms — engineConstruct {engineConstructMs:F0} ms (incl. WAL recovery + system-schema load), schemaDllLoad {schemaDllMs:F0} ms, initializeArchetypes {initArchetypesMs:F0} ms")]

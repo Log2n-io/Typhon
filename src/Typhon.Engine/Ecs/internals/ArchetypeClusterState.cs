@@ -838,6 +838,13 @@ internal sealed unsafe class ArchetypeClusterState
 
     private ArchetypeClusterState() { }
 
+    /// <summary>
+    /// A state carrying nothing but the active-cluster list — for testing <see cref="AddToActiveList"/> / <see cref="RemoveFromActiveList"/>'s publication
+    /// order (#582 face 2) without standing up segments and an engine. Those two methods touch only plain fields, so the list behaves identically here.
+    /// </summary>
+    internal static ArchetypeClusterState CreateActiveListOnlyForTests() =>
+        new() { ActiveClusterIds = new int[16], ActiveClusterCount = 0, FreeClusterHead = -1 };
+
     /// <summary>Chunk capacity of the primary (non-null) segment.</summary>
     internal int PrimarySegmentCapacity => ClusterSegment?.ChunkCapacity ?? TransientSegment.ChunkCapacity;
 
@@ -2596,13 +2603,29 @@ internal sealed unsafe class ArchetypeClusterState
     }
 
     /// <summary>Add a cluster chunk ID to the active list.</summary>
+    /// <remarks>
+    /// #582 face 2. Worker threads read <see cref="ActiveClusterIds"/> and <see cref="ActiveClusterCount"/> live, concurrently with this. The publication
+    /// order is what makes a (count, array) pair usable: the grown array is released FIRST, the count that indexes into it SECOND, so a reader that acquires
+    /// a given count is guaranteed to see an array at least that long. Readers must load the pair in the mirror order — count, then array — and both loads
+    /// must be `Volatile.Read` (see `TyphonRuntime.ReadActiveClusterList`). Loading the array first admits a plain interleaving that needs no reordering at
+    /// all to fault: old array of length 16, concurrent resize, count read as 17, index 16 of the old array.
+    /// <para>
+    /// This orders the GROWTH of the list. It does not make the list safe to walk against a concurrent <see cref="RemoveFromActiveList"/>, whose
+    /// swap-with-last can still show a walker one cluster twice and skip another — #582 face 1, which needs a real snapshot protocol, not an ordering fix.
+    /// </para>
+    /// </remarks>
     public void AddToActiveList(int chunkId)
     {
         if (ActiveClusterCount >= ActiveClusterIds.Length)
         {
             Array.Resize(ref ActiveClusterIds, ActiveClusterIds.Length * 2);
         }
-        ActiveClusterIds[ActiveClusterCount++] = chunkId;
+
+        // The array store above is a plain store, deliberately: the release below is what orders it. A Volatile.Write cannot sink a preceding store past
+        // itself, so a reader that ACQUIRES this count is guaranteed to see the grown array. Caching the array in a local first — the obvious way to write
+        // this — is what must not be done: it widens the writer's own (array, count) window and produced an IndexOutOfRange in parallel spawn.
+        ActiveClusterIds[ActiveClusterCount] = chunkId;
+        Volatile.Write(ref ActiveClusterCount, ActiveClusterCount + 1);
         // Issue #231: any change to the active cluster set invalidates the tier index.
         ClusterSetVersion++;
         // Issue #233: ensure dormancy arrays cover the new chunkId, initialize to Active/0.
@@ -2634,7 +2657,9 @@ internal sealed unsafe class ArchetypeClusterState
                 }
 
                 ActiveClusterIds[i] = ActiveClusterIds[ActiveClusterCount - 1];
-                ActiveClusterCount--;
+                // Released, to pair with the acquiring readers described on AddToActiveList. Shrinking is the benign direction — a reader that sees the
+                // stale larger count reads an index that is still in range — but leaving one store of the pair plain would make the pairing accidental.
+                Volatile.Write(ref ActiveClusterCount, ActiveClusterCount - 1);
 
                 // If the removed cluster was the free head, reset
                 if (FreeClusterHead == chunkId)
@@ -3083,12 +3108,17 @@ internal sealed unsafe class ArchetypeClusterState
     /// Rebuild per-archetype B+Tree indexes from cluster data (scan all occupied entities).
     /// Used on reopen when index segment is not persisted or is corrupted.
     /// </summary>
-    public void RebuildIndexesFromData(ChangeSet changeSet)
+    /// <returns>
+    /// The number of index entries dropped because the recovered data could not satisfy a UNIQUE constraint (#710). Zero on every healthy rebuild.
+    /// </returns>
+    public int RebuildIndexesFromData(ChangeSet changeSet)
     {
         if (IndexSlots == null || IndexSlots.Length == 0)
         {
-            return;
+            return 0;
         }
+
+        var uniqueConflicts = 0;
 
         // Index rebuild reads from primary segment (SV/V data — Transient excluded from IndexSlots)
         var clusterAccessor = ClusterSegment.CreateChunkAccessor();
@@ -3119,9 +3149,31 @@ internal sealed unsafe class ArchetypeClusterState
                         {
                             ref var field = ref ixSlot.Fields[f];
                             byte* fieldPtr = compBase + slotIndex * compSize + field.FieldOffset;
-                            int elementId = hasString64 && ReferenceEquals(field.Index.Segment, IndexSegmentString64)
-                                ? field.Index.Add(fieldPtr, clusterLocation, ref idxAccessorS64)
-                                : field.Index.Add(fieldPtr, clusterLocation, ref idxAccessor);
+
+                            int elementId;
+                            try
+                            {
+                                elementId = hasString64 && ReferenceEquals(field.Index.Segment, IndexSegmentString64)
+                                    ? field.Index.Add(fieldPtr, clusterLocation, ref idxAccessorS64)
+                                    : field.Index.Add(fieldPtr, clusterLocation, ref idxAccessor);
+                            }
+                            catch (UniqueConstraintViolationException)
+                            {
+                                // #710. RB-01 says derived structures are rebuilt from primary data; it has no clause for primary data that CANNOT satisfy
+                                // the constraint. That state is reachable and legitimate: a hard crash under TickFence loses up to one tick of SingleVersion
+                                // VALUES while keeping every lifecycle record, so an archetype can come back with all its entities and all their keys zeroed.
+                                // Rebuilding a unique index over N identical keys then threw out of InitializeArchetypes, uncatchably, and the state is on
+                                // disk — so the next open repeated it. Losing ≤1 tick of values is the documented trade; a database that will not open is not.
+                                //
+                                // Skipping the entry keeps the entity itself alive and reachable by scan, which is the honest outcome: the value the key was
+                                // derived from is gone, so there is no key to index. The caller logs the count — silence here would trade an unopenable
+                                // database for a quietly incomplete index, which is a worse bargain.
+                                //
+                                // The throw-per-conflict cost is accepted: this runs once, at open, only on a database that has already lost data.
+                                uniqueConflicts++;
+                                continue;
+                            }
+
                             // Rebuild writes a fresh elementId into the cluster tail, overwriting any stale
                             // value from the previous (torn-down) BTree state. Issue #229 Phase 3.
                             if (field.AllowMultiple)
@@ -3142,6 +3194,8 @@ internal sealed unsafe class ArchetypeClusterState
             idxAccessor.Dispose();
             clusterAccessor.Dispose();
         }
+
+        return uniqueConflicts;
     }
 
     /// <summary>
