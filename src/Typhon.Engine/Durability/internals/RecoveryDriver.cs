@@ -83,7 +83,8 @@ internal sealed class RecoveryDriver
         var records = new List<Rec>();
         var committed = new HashSet<long>();
 
-        var paths = Directory.GetFiles(walDir, "*.wal").OrderBy(p => p, StringComparer.Ordinal).ToArray();
+        // #688: through the backend, so an injected WAL IO is discoverable. Same reason as WalRecovery.DiscoverSegments.
+        var paths = walIO.EnumerateSegmentPaths(walDir).OrderBy(p => p, StringComparer.Ordinal).ToArray();
         using (var reader = new WalSegmentReader(walIO))
         {
             foreach (var path in paths)

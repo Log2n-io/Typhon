@@ -1467,7 +1467,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             UowRegistry = new UowRegistry(segment, MMF, EpochManager, MemoryAllocator, this);
 
             var walDir = _options.Wal?.WalDirectory;
-            if (walDir != null && Directory.Exists(walDir) && Directory.GetFiles(walDir, "*.wal").Length > 0)
+            // #688: ask the WAL backend rather than the filesystem. A physical scan makes this flag FALSE for every engine using an injected in-memory
+            // backend, whatever that backend actually holds — which quietly took every such fixture off the production crash-recovery path, including the
+            // RB-01 index clear+rebuild and the EntityMap crash branch. A throwaway production IO is used only when nothing was injected, matching the
+            // recovery call a few lines below.
+            var discoveryIo = _injectedWalIo ?? new WalFileIO();
+            var walSegmentsPresent = walDir != null && discoveryIo.EnumerateSegmentPaths(walDir).Count > 0;
+            if (_injectedWalIo == null)
+            {
+                discoveryIo.Dispose();
+            }
+
+            if (walSegmentsPresent)
             {
                 // A crash left a WAL window. Gate the crash-path secondary-index clear+rebuild (RB-01) on this, captured HERE at open — before component
                 // registration builds the ComponentTables — so the clear in BuildIndexedFieldInfo sees it. RunWalV2Recovery reads the same flag for the

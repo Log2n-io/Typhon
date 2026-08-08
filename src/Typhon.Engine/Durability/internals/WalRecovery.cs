@@ -508,15 +508,18 @@ internal sealed class WalRecovery : IDisposable
     /// </summary>
     private List<string> DiscoverSegments()
     {
-        if (!Directory.Exists(_walDirectory))
+        // #688: ask the BACKEND, not the filesystem. A direct Directory.GetFiles here means an injected in-memory backend contributes nothing to discovery,
+        // so every fixture using one silently skips recovery no matter what it wrote.
+        var discovered = _fileIO.EnumerateSegmentPaths(_walDirectory);
+        if (discovered.Count == 0)
         {
             return [];
         }
 
-        var walFiles = Directory.GetFiles(_walDirectory, "*.wal");
-        if (walFiles.Length == 0)
+        var walFiles = new string[discovered.Count];
+        for (var i = 0; i < discovered.Count; i++)
         {
-            return [];
+            walFiles[i] = discovered[i];
         }
 
         // Sort by segment ID (filename is {segmentId:D16}.wal)
