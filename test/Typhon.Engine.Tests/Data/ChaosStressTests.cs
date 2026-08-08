@@ -2004,9 +2004,11 @@ class ChaosStressTests : TestBase<ChaosStressTests>
         Assert.That(errors, Is.Empty, $"Errors:\n{string.Join("\n", errors.Take(30))}");
     }
 
-    // QUARANTINE (#695): LIVELOCKS in the commit publish phase (BTree.SpinWriteLock) — re-confirmed on main 2026-08-07, the run needed --blame-hang to terminate.
-    // Excluded from every tier until #695 is fixed — NOT re-suppressed with [Ignore], which would
-    // hide it from local runs and from the filter too (#703).
+    // QUARANTINE (#696), retargeted from #695. The LIVELOCK is fixed: this used to need --blame-hang to terminate at all and now completes in ~150 ms,
+    // because the pessimistic descent no longer waits on an OBSOLETE leaf as though it were merely locked (IXS-03; see BTree.Insert.cs). What it reports now
+    // is a different and pre-existing defect — "A duplicate key was detected in a unique index" under concurrency, which is #696's family (and possibly
+    // #716's mechanism, a writer inserting into a merge-detached node). Roughly 1 run in 4.
+    // Still quarantined, still NOT [Ignore]d — that would hide it from local runs and from the filter too (#703).
     /// <summary>
     /// Rapidly creates, deletes, and recreates CompD entities (3 secondary indexes each)
     /// to stress index entry insertion/removal cycling and revision chain creation/destruction.
