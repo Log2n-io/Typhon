@@ -1861,6 +1861,10 @@ public sealed partial class TyphonRuntime : IDisposable
         _currentUow = Engine.CreateUnitOfWork();
         TyphonEvent.EmitRuntimePhaseUoWCreate(scheduler.CurrentTickNumber);
 
+        // A pull-mode system input is a snapshot until someone re-queries it (#718). Must run BEFORE the tier-index rebuild and before any dispatch: both
+        // read the view's entity set, and a set refreshed after them is a set the tier index does not know about.
+        RefreshSystemInputViewsAtTickStart();
+
         // Rebuild per-archetype tier indexes ONCE per tick on the scheduler thread, before any parallel system dispatch. This eliminates the race where
         // multiple worker threads concurrently invoking OnParallelQueryPrepare for different systems on the same archetype would corrupt shared
         // TierClusterIndex buffers. After this point, every reader (parallel prepare callbacks, change-filter scans, view materialization) only READS the tier
@@ -1892,6 +1896,59 @@ public sealed partial class TyphonRuntime : IDisposable
                 tx.Dispose();
                 _firstTickExecuted = true; // Set in finally — prevents infinite retry if handler throws
             }
+        }
+    }
+
+    /// <summary>
+    /// Re-query every pull-mode View the scheduler feeds to a system, once per tick, on the scheduler thread (#718).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>ToView()</c> has two modes and only one of them is live. With a <c>WhereField</c> predicate it takes the incremental path and subscribes to the
+    /// <see cref="ViewRegistry"/>, so spawns and destroys reach it as deltas. Without one — the plain <c>Query&lt;T&gt;().ToView()</c> that every sample and
+    /// every doc uses to mean "all entities of this archetype" — it takes the pull path, which registers nothing. Membership was therefore frozen at the
+    /// moment the view was constructed, and a system declared with <c>input: () =&gt; view</c> ran against that snapshot for the entire life of the runtime:
+    /// no system ever processed an entity spawned after startup. Silent — the system ran every tick and reported a plausible count.
+    /// </para>
+    /// <para>
+    /// The mechanism to fix it already existed: <c>EcsView.Refresh</c> dispatches a pull view into a full re-query and diff. Nothing called it, because
+    /// system-input views are consumed as cached entity sets rather than refreshed. This drives it once per tick, single-threaded, before anything reads the
+    /// set.
+    /// </para>
+    /// <para>
+    /// This is the interim of the three directions #718 lists, and its cost is honest: an O(N) re-query per tick per pull system input, where the incremental
+    /// path pays O(deltas). It is correct for every pull view including the <c>.Where(lambda)</c> and spatial ones, which is what the cheaper alternatives are
+    /// not — a delta channel keyed on archetype membership would still be exact only for the UNFILTERED case. The endpoint is a lifecycle-level view
+    /// notification channel (direction 1), which is a design change to the view subsystem rather than a repair.
+    /// </para>
+    /// </remarks>
+    private void RefreshSystemInputViewsAtTickStart()
+    {
+        Transaction tx = null;
+        try
+        {
+            for (var i = 0; i < _systemViews.Length; i++)
+            {
+                var view = _systemViews[i];
+                // Incremental views are excluded deliberately, not incidentally: they already receive spawns and destroys as deltas, and draining their ring
+                // buffer here would consume entries the per-system consumption path expects to still be there.
+                if (view == null || !view.IsPullMode || view.IsDisposed || view.LastSystemInputRefreshTick == Scheduler.CurrentTickNumber)
+                {
+                    continue;
+                }
+
+                // Created lazily: a schedule with no pull system input must not pay for a transaction it never uses.
+                tx ??= _currentUow.CreateTransaction();
+                view.RefreshFromScheduler(tx);
+                view.ClearDelta();
+                view.LastSystemInputRefreshTick = Scheduler.CurrentTickNumber;
+            }
+
+            tx?.Commit();
+        }
+        finally
+        {
+            tx?.Dispose();
         }
     }
 
