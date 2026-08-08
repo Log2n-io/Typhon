@@ -29,12 +29,12 @@ public sealed class ComponentAttribute : Attribute
     public StorageMode StorageMode { get; set; } = StorageMode.Versioned;
 
     /// <summary>
-    /// Default durability discipline for this component when its <see cref="StorageMode"/> is <see cref="StorageMode.SingleVersion"/>.
-    /// Default is <see cref="DurabilityDiscipline.TickFence"/> (batched, ≤1-tick loss).
-    /// Set to <see cref="DurabilityDiscipline.Commit"/> to make any transaction that writes this component commit-durable (zero-loss, atomic) for all of its
+    /// Default commit discipline for this component when its <see cref="StorageMode"/> is <see cref="StorageMode.SingleVersion"/>.
+    /// Default is <see cref="CommitDiscipline.TickFence"/> (batched, ≤1-tick loss).
+    /// Set to <see cref="CommitDiscipline.Commit"/> to make any transaction that writes this component commit-durable (zero-loss, atomic) for all of its
     /// writes (CM-02 uniformity). Ignored for <see cref="StorageMode.Versioned"/> (always commit-scoped) and <see cref="StorageMode.Transient"/> (never durable).
     /// </summary>
-    public DurabilityDiscipline DefaultDiscipline { get; set; } = DurabilityDiscipline.TickFence;
+    public CommitDiscipline DefaultDiscipline { get; set; } = CommitDiscipline.TickFence;
 
     /// <summary>Declares a component with the given schema <paramref name="name"/> and <paramref name="revision"/>.</summary>
     /// <param name="name">Registered component name (see <see cref="Name"/>).</param>

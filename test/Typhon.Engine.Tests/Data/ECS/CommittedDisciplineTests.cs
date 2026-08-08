@@ -5,7 +5,7 @@ using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests;
 
-// ── Test components for the Committed durability discipline (issue #392) ──────────────────
+// ── Test components for the Committed discipline (issue #392) ──────────────────
 [Component("Typhon.Test.Committed.CmPosition", 1, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 struct CmPosition
@@ -15,7 +15,7 @@ struct CmPosition
 }
 
 // DefaultDiscipline=Commit — any tx that writes this component is escalated to Commit (CM-02).
-[Component("Typhon.Test.Committed.CmWallet", 1, StorageMode = StorageMode.SingleVersion, DefaultDiscipline = DurabilityDiscipline.Commit)]
+[Component("Typhon.Test.Committed.CmWallet", 1, StorageMode = StorageMode.SingleVersion, DefaultDiscipline = CommitDiscipline.Commit)]
 [StructLayout(LayoutKind.Sequential)]
 struct CmWallet
 {
@@ -113,7 +113,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         using var dbe = SetupEngine();
         var id = SpawnAnt(dbe, 10, 20, 0);
 
-        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, DurabilityDiscipline.Commit))
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit))
         {
             var e = tx.OpenMut(id);
             ref var p = ref e.Write(CmEntity.Position);
@@ -135,7 +135,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         using var dbe = SetupEngine();
         var id = SpawnAnt(dbe, 1, 2, 0);
 
-        using var writeTx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, DurabilityDiscipline.Commit);
+        using var writeTx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit);
         var e = writeTx.OpenMut(id);
         e.Write(CmEntity.Position).X = 777;   // staged — HEAD must remain (1,2)
 
@@ -159,7 +159,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         using var dbe = SetupEngine();
         var id = SpawnAnt(dbe, 5, 6, 0);
 
-        using var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, DurabilityDiscipline.Commit);
+        using var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit);
         var e = tx.OpenMut(id);
         e.Write(CmEntity.Position).X = 42;
         ref readonly var rp = ref e.Read(CmEntity.Position);
@@ -174,7 +174,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         using var dbe = SetupEngine();
         var id = SpawnAnt(dbe, 3, 4, 0);
 
-        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, DurabilityDiscipline.Commit))
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit))
         {
             tx.OpenMut(id).Write(CmEntity.Position).X = 1234;
             tx.Rollback();
@@ -191,7 +191,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         using var dbe = SetupEngine();
         var id = SpawnAnt(dbe, 0, 0, 100);
 
-        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, DurabilityDiscipline.Commit))
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit))
         {
             var e = tx.OpenMut(id);
             e.Write(CmEntity.Position) = new CmPosition(7, 8);
@@ -216,7 +216,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
         {
             tx.OpenMut(id).Write(CmEntity.Wallet).Gold = 9999;
-            Assert.That(tx.Discipline, Is.EqualTo(DurabilityDiscipline.Commit), "tx was not escalated by DefaultDiscipline=Commit");
+            Assert.That(tx.Discipline, Is.EqualTo(CommitDiscipline.Commit), "tx was not escalated by DefaultDiscipline=Commit");
             tx.Commit();
         }
 
@@ -241,7 +241,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
 
         // Move entity from TeamId 1 → 7 under Commit discipline, then commit. Deliberately NO WriteTickFence afterward:
         // the exact index must already reflect TeamId=7, the same as Versioned (CM-05/AC-11 — Move done at commit).
-        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, DurabilityDiscipline.Commit))
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit))
         {
             tx.OpenMut(id).Write(CmIdxEntity.Team).TeamId = 7;
             tx.Commit();
@@ -290,7 +290,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         using var dbe = SetupEngine();
         var id = SpawnFlat(dbe, 10);
 
-        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, DurabilityDiscipline.Commit))
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit))
         {
             var e = tx.OpenMut(id);
             // Staged write — HEAD untouched until commit; a peek tx sees the old value.
@@ -313,7 +313,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         using var dbe = SetupEngine();
         var id = SpawnFlat(dbe, 7);
 
-        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, DurabilityDiscipline.Commit))
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit))
         {
             tx.OpenMut(id).Write(CmFlatEntity.Val).Tag = 999;
             tx.Rollback();
@@ -339,7 +339,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         }
         dbe.WriteTickFence(1);
 
-        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, DurabilityDiscipline.Commit))
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit))
         {
             tx.OpenMut(id).Write(CmFlatEntity.Val).Tag = 7;
             tx.Commit();
@@ -366,7 +366,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         using var dbe = SetupEngine();
 
         EntityId id;
-        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, DurabilityDiscipline.Commit))
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit))
         {
             var pos = new CmPosition(1, 2);
             var wallet = new CmWallet(50);
@@ -390,7 +390,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
     {
         using var dbe = SetupEngine();
 
-        using var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, DurabilityDiscipline.Commit);
+        using var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit);
         var pos = new CmPosition(1, 2);
         var wallet = new CmWallet(0);
         var id = tx.Spawn<CmEntity>(CmEntity.Position.Set(in pos), CmEntity.Wallet.Set(in wallet));
@@ -411,7 +411,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         using var dbe = SetupEngine();
 
         EntityId a, b;
-        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, DurabilityDiscipline.Commit))
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit))
         {
             var pos = new CmPosition(0, 0);
             var wallet = new CmWallet(0);

@@ -567,12 +567,12 @@ public static class AxisArchetypes
 
     /// <summary>
     /// Whether this cell's SingleVersion component VALUES are expected to survive a HARD CRASH. They are not, unless the writing transaction ran under
-    /// <see cref="DurabilityDiscipline.Commit"/>.
+    /// <see cref="CommitDiscipline.Commit"/>.
     /// </summary>
     /// <remarks>
     /// <para>
     /// This is the storage contract, not a workaround. A SingleVersion component is durable at the tick fence (≤1 tick of loss); its per-commit WAL record is
-    /// what <see cref="DurabilityDiscipline.Commit"/> buys, and <c>WalCrashSweepTests</c> states the same thing at its <c>:334-336</c>. Entity LIFECYCLE
+    /// what <see cref="CommitDiscipline.Commit"/> buys, and <c>WalCrashSweepTests</c> states the same thing at its <c>:334-336</c>. Entity LIFECYCLE
     /// records are durable either way, so after a crash the entities are all still there — with zeroed values.
     /// </para>
     /// <para>
@@ -580,7 +580,7 @@ public static class AxisArchetypes
     /// happened while building this kit: 12 of 18 apparent failures were the contract working, and only separating them exposed the 6 that were not (#710).
     /// </para>
     /// </remarks>
-    public static bool SvValuesAreCrashDurable(in Cell c) => !c.HasSingleVersion || c.Discipline == DurabilityDiscipline.Commit;
+    public static bool SvValuesAreCrashDurable(in Cell c) => !c.HasSingleVersion || c.Discipline == CommitDiscipline.Commit;
 
     /// <summary>How many elements the kit puts in entity <paramref name="i"/>'s collection — 1..4, so the count itself varies per entity.</summary>
     /// <remarks>

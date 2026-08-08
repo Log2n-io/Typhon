@@ -65,7 +65,7 @@ internal sealed class EngineAxesTests
                 {
                     foreach (ReopenKind reopen in Enum.GetValues(typeof(ReopenKind)))
                     {
-                        foreach (var disc in new[] { DurabilityDiscipline.TickFence, DurabilityDiscipline.Commit })
+                        foreach (var disc in new[] { CommitDiscipline.TickFence, CommitDiscipline.Commit })
                         {
                             foreach (CollectionShape coll in Enum.GetValues(typeof(CollectionShape)))
                             {
@@ -230,25 +230,25 @@ internal sealed class EngineAxesTests
     [Test]
     public void IsValid_RejectsCommitDisciplineOnAShapeWithNoSingleVersionComponent()
     {
-        // DurabilityDiscipline.cs:11-13 — the discipline applies only to the SingleVersion layout.
+        // CommitDiscipline.cs:11-13 — the discipline applies only to the SingleVersion layout.
         Assert.Multiple(() =>
         {
             Assert.That(
                 EngineAxes.IsValid(new Cell(StorageShape.PureVersioned, DurabilityMode.Deferred, IndexShape.None, ReopenKind.None,
-                    DurabilityDiscipline.Commit)),
+                    CommitDiscipline.Commit)),
                 Is.False,
                 "Versioned is always commit-scoped — the knob names nothing there");
             Assert.That(
                 EngineAxes.IsValid(new Cell(StorageShape.PureTransient, DurabilityMode.Deferred, IndexShape.None, ReopenKind.None,
-                    DurabilityDiscipline.Commit)),
+                    CommitDiscipline.Commit)),
                 Is.False,
                 "Transient is never durable");
             Assert.That(
-                EngineAxes.IsValid(new Cell(StorageShape.PureSv, DurabilityMode.Deferred, IndexShape.None, ReopenKind.None, DurabilityDiscipline.Commit)),
+                EngineAxes.IsValid(new Cell(StorageShape.PureSv, DurabilityMode.Deferred, IndexShape.None, ReopenKind.None, CommitDiscipline.Commit)),
                 Is.True);
             Assert.That(
                 EngineAxes.IsValid(new Cell(StorageShape.SvPlusTransient, DurabilityMode.Deferred, IndexShape.None, ReopenKind.None,
-                    DurabilityDiscipline.Commit)),
+                    CommitDiscipline.Commit)),
                 Is.True,
                 "a mixed shape has an SV member, so the discipline is meaningful");
         });
@@ -430,7 +430,7 @@ internal sealed class EngineAxesTests
     public void CellToString_NamesTheNewAxesWhenTheyDiffer()
     {
         var rich = new Cell(StorageShape.PureSv, DurabilityMode.Deferred, IndexShape.Unique, ReopenKind.Clean,
-            DurabilityDiscipline.Commit, CollectionShape.Present, SpatialShape.Present);
+            CommitDiscipline.Commit, CollectionShape.Present, SpatialShape.Present);
 
         Assert.That(rich.ToString(), Is.EqualTo("PureSv_Deferred_Unique_Clean_Commit_Coll_Spatial"));
     }

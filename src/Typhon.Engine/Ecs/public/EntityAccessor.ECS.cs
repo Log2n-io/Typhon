@@ -406,7 +406,7 @@ public unsafe partial class EntityAccessor
         // Commit-discipline read-your-own-writes: return this tx's staged value if it has staged this (component, entity). The staging map is keyed by
         // entity PK, which the CALLER supplies — reading it back out of the chunk header instead was #713: a spawn-staging chunk has no PK written yet
         // (FinalizeSpawns stamps it at publish), so every own-spawn lookup keyed on 0.
-        if (_discipline == DurabilityDiscipline.Commit && table.StorageMode == StorageMode.SingleVersion
+        if (_discipline == CommitDiscipline.Commit && table.StorageMode == StorageMode.SingleVersion
             && info.CommitStaged != null && info.CommitStaged.TryGetValue(pk, out var slot))
         {
             return ref Unsafe.AsRef<T>(_commitStagingBuffer + slot.Offset);
@@ -440,7 +440,7 @@ public unsafe partial class EntityAccessor
         // pre-write value, so seed the staging slot from it for partial-write correctness. CM-02 escalation first (so DefaultDiscipline=Commit applies).
         if (table.StorageMode == StorageMode.SingleVersion)
         {
-            if (table.Discipline == DurabilityDiscipline.Commit)
+            if (table.Discipline == CommitDiscipline.Commit)
             {
                 ResolveCommitDiscipline(table);
             }
@@ -450,7 +450,7 @@ public unsafe partial class EntityAccessor
             // was wrong three ways: StagedSlot.Location would carry a content chunk id where PublishStagedEntry expects a cluster location, the publish
             // would run against a HEAD that does not exist yet, and FinalizeSpawns would then overwrite it with the spawn value. Skipping the staging
             // leaves the spawn's own SV Slot record (BuildCommitBatch, #395 D5 / CM-06) carrying the final value — one record, still atomic.
-            if (_discipline == DurabilityDiscipline.Commit && !isOwnSpawn)
+            if (_discipline == CommitDiscipline.Commit && !isOwnSpawn)
             {
                 byte* head = info.CompContentAccessor.GetChunkAddress(chunkId);
                 // Flat location is the content chunkId (captured for the no-re-lookup publish).
@@ -499,13 +499,13 @@ public unsafe partial class EntityAccessor
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Committed durability discipline — Variant A staging (issue #392)
+    // Committed discipline — Variant A staging (issue #392)
     // ═══════════════════════════════════════════════════════════════════════
 
     private const int InitialCommitStagingCapacity = 4096;
 
     /// <summary>
-    /// CM-02 discipline resolution, invoked from the write path for a <see cref="DurabilityDiscipline.Commit"/>-defaulted
+    /// CM-02 discipline resolution, invoked from the write path for a <see cref="CommitDiscipline.Commit"/>-defaulted
     /// <see cref="StorageMode.SingleVersion"/> component. Escalates this accessor's whole transaction to Commit on first touch (so
     /// every subsequent write is commit-durable), and rejects escalation if a TickFence in-place write has already happened (we cannot
     /// retroactively make an applied write atomic). Idempotent and cheap once escalated. Callers gate on
@@ -513,7 +513,7 @@ public unsafe partial class EntityAccessor
     /// </summary>
     internal void ResolveCommitDiscipline(ComponentTable table)
     {
-        if (_discipline == DurabilityDiscipline.Commit)
+        if (_discipline == CommitDiscipline.Commit)
         {
             return;
         }
@@ -522,11 +522,11 @@ public unsafe partial class EntityAccessor
         {
             throw new InvalidOperationException(
                 $"Component '{table.Name}' is declared DefaultDiscipline=Commit, but this transaction has already performed a TickFence " +
-                "in-place write. Create the transaction with discipline: DurabilityDiscipline.Commit before writing any component so the " +
+                "in-place write. Create the transaction with discipline: CommitDiscipline.Commit before writing any component so the " +
                 "whole transaction is commit-durable (CM-02 uniformity).");
         }
 
-        _discipline = DurabilityDiscipline.Commit;
+        _discipline = CommitDiscipline.Commit;
         _dbe?.LogDisciplineEscalated(TSN, table.Name);
     }
 

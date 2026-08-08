@@ -186,11 +186,11 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     public StorageMode StorageMode { get; private set; }
 
     /// <summary>
-    /// Default durability discipline for this component, resolved from <c>[Component(DefaultDiscipline=…)]</c>.
+    /// Default commit discipline for this component, resolved from <c>[Component(DefaultDiscipline=…)]</c>.
     /// Only consulted for <see cref="StorageMode.SingleVersion"/>; a transaction writing a
-    /// <see cref="DurabilityDiscipline.Commit"/> component is committed-durable for all of its writes (CM-02).
+    /// <see cref="CommitDiscipline.Commit"/> component is committed-durable for all of its writes (CM-02).
     /// </summary>
-    public DurabilityDiscipline Discipline { get; private set; }
+    public CommitDiscipline Discipline { get; private set; }
 
     // ── Persistent segments (Versioned & SingleVersion) ──
     /// <summary>Segment holding the component data chunks (the field payloads). Null in <see cref="StorageMode.Transient"/> mode.</summary>

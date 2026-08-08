@@ -470,7 +470,7 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
             }
             else if (na.Key == "DefaultDiscipline")
             {
-                disciplineCast = EnumCast("DurabilityDiscipline", na.Value);
+                disciplineCast = EnumCast("CommitDiscipline", na.Value);
             }
         }
 

@@ -467,9 +467,9 @@ public sealed partial class TyphonRuntime : IDisposable
     /// Side-transactions are NOT visible to the current tick's main Transactions (snapshot isolation).
     /// </summary>
     public Transaction CreateSideTransaction(DurabilityMode durability = DurabilityMode.Immediate,
-        DurabilityDiscipline discipline = DurabilityDiscipline.TickFence) => Engine.CreateQuickTransaction(durability, discipline);
+        CommitDiscipline discipline = CommitDiscipline.TickFence) => Engine.CreateQuickTransaction(durability, discipline);
 
-    private Transaction CreateSideTransactionInternal(DurabilityMode durability, DurabilityDiscipline discipline)
+    private Transaction CreateSideTransactionInternal(DurabilityMode durability, CommitDiscipline discipline)
         => Engine.CreateQuickTransaction(durability, discipline);
 
     // ═══════════════════════════════════════════════════════════════

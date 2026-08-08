@@ -512,7 +512,7 @@ internal sealed class DifferentialRecoveryOracleTests
     [Test]
     [CancelAfter(15_000)]
     public void ClusterAllSv_PrimaryAxis_SurvivesCrash()
-        => RecoverWith(new ClusterAllSvWorkload(10, DurabilityDiscipline.Commit), RecoveryOracle.AssertPrimaryAxis);
+        => RecoverWith(new ClusterAllSvWorkload(10, CommitDiscipline.Commit), RecoveryOracle.AssertPrimaryAxis);
 
     // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     // #705 T3 — the WRITE-AFTER-RECOVERY axis (#697)
@@ -1207,7 +1207,7 @@ internal sealed class DifferentialRecoveryOracleTests
     [VerifiesRule("RB-01")]
     public void ClusterIndexed_IndexAxis_MatchesBroadScan()
     {
-        RecoverWith(new ClusterAllSvWorkload(40, DurabilityDiscipline.Commit), (dbe, shadow) =>
+        RecoverWith(new ClusterAllSvWorkload(40, CommitDiscipline.Commit), (dbe, shadow) =>
         {
             RecoveryOracle.AssertPrimaryAxis(dbe, shadow);
 
@@ -1255,8 +1255,8 @@ internal sealed class DifferentialRecoveryOracleTests
     public void ClusterIndexed_MidCheckpoint_IndexAxisHolds()
     {
         RecoverWithMidCheckpoint(
-            new ClusterAllSvWorkload(30, DurabilityDiscipline.Commit),
-            new ClusterAllSvWorkload(20, DurabilityDiscipline.Commit, keyBase: 1000),
+            new ClusterAllSvWorkload(30, CommitDiscipline.Commit),
+            new ClusterAllSvWorkload(20, CommitDiscipline.Commit, keyBase: 1000),
             (dbe, shadow) =>
             {
                 RecoveryOracle.AssertPrimaryAxis(dbe, shadow);
@@ -1282,8 +1282,8 @@ internal sealed class DifferentialRecoveryOracleTests
     public void TornCheckpointedClusterIndexPage_RecoversViaRebuild()
     {
         var shadow = new RecoveryShadowModel();
-        var below = new ClusterAllSvWorkload(3000, DurabilityDiscipline.Commit);                    // checkpointed: an index spanning many node pages
-        var window = new ClusterAllSvWorkload(8, DurabilityDiscipline.Commit, keyBase: 900_000);    // WAL window: keeps the crash path active
+        var below = new ClusterAllSvWorkload(3000, CommitDiscipline.Commit);                    // checkpointed: an index spanning many node pages
+        var window = new ClusterAllSvWorkload(8, CommitDiscipline.Commit, keyBase: 900_000);    // WAL window: keeps the crash path active
 
         int tornFilePage;
         using (var scope1 = _serviceProvider.CreateScope())

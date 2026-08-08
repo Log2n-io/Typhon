@@ -7,7 +7,7 @@ using Typhon.Schema.Definition;
 namespace Typhon.Benchmark;
 
 // ═══════════════════════════════════════════════════════════════════════
-// Committed durability discipline write/commit benchmarks (#392 AC-5).
+// Committed discipline write/commit benchmarks (#392 AC-5).
 // Targets (Zen 4): Commit-discipline write ≤ 25 ns; commit publish ≤ 60 ns/component; ≥ 8× faster than a Versioned write;
 // the SV TickFence in-place path (~3 ns) unregressed.
 //
@@ -118,7 +118,7 @@ public class CommittedDisciplineBenchmarks : IDisposable
     [Benchmark(OperationsPerInvoke = N)]
     public void Write_Sv_Commit()
     {
-        using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred, DurabilityDiscipline.Commit);
+        using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit);
         for (int i = 0; i < N; i++)
         {
             tx.OpenMut(_svIds[i]).Write(AaBenchAnt.Position).X = i;
@@ -142,7 +142,7 @@ public class CommittedDisciplineBenchmarks : IDisposable
     [Benchmark(OperationsPerInvoke = N)]
     public void Commit_Sv_Commit()
     {
-        using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred, DurabilityDiscipline.Commit);
+        using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit);
         for (int i = 0; i < N; i++)
         {
             tx.OpenMut(_svIds[i]).Write(AaBenchAnt.Position).X = i;
@@ -155,7 +155,7 @@ public class CommittedDisciplineBenchmarks : IDisposable
     [IterationSetup(Target = nameof(Publish_Only))]
     public void StagePublishTx()
     {
-        _stagedTx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred, DurabilityDiscipline.Commit);
+        _stagedTx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit);
         for (int i = 0; i < N; i++)
         {
             _stagedTx.OpenMut(_svIds[i]).Write(AaBenchAnt.Position).X = i; // stage only — not committed

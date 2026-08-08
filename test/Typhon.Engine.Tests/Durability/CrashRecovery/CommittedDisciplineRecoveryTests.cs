@@ -8,8 +8,8 @@ using Typhon.Schema.Definition;
 namespace Typhon.Engine.Tests;
 
 /// <summary>
-/// Crash-recovery proof for the Committed durability discipline (issue #392, AC-2 / AC-7). A SingleVersion-layout component written under
-/// <see cref="DurabilityDiscipline.Commit"/> with <see cref="DurabilityMode.Immediate"/> is fsynced to the WAL as an ordinary Slot record (Committed
+/// Crash-recovery proof for the Committed discipline (issue #392, AC-2 / AC-7). A SingleVersion-layout component written under
+/// <see cref="CommitDiscipline.Commit"/> with <see cref="DurabilityMode.Immediate"/> is fsynced to the WAL as an ordinary Slot record (Committed
 /// flag = telemetry only). After a hard crash (managed page cache discarded, no checkpoint), reopen must replay the record through the same
 /// <c>RecoveryDriver</c> path tick-fence and Versioned records use — last-writer-wins by LSN — and restore the exact committed value (AC-7: zero
 /// Committed-specific recovery code). Uses the <see cref="CmEntity"/> cluster archetype from <c>CommittedDisciplineTests</c>.
@@ -125,7 +125,7 @@ internal sealed class CommittedDisciplineRecoveryTests
                 tx.Commit();
             }
 
-            using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, DurabilityDiscipline.Commit))
+            using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit))
             {
                 tx.OpenMut(id).Write(CmEntity.Position) = new CmPosition(99, 88);
                 tx.Commit();
@@ -174,7 +174,7 @@ internal sealed class CommittedDisciplineRecoveryTests
             dbe.RegisterComponentFromAccessor<CmWallet>();
             dbe.InitializeArchetypes();
 
-            using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, DurabilityDiscipline.Commit))
+            using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit))
             {
                 id = tx.Spawn<CmEntity>(CmEntity.Position.Set(new CmPosition(1, 1)), CmEntity.Wallet.Set(new CmWallet(50)));
                 tx.OpenMut(id).Write(CmEntity.Position) = new CmPosition(99, 88);   // same transaction as the Spawn
@@ -235,7 +235,7 @@ internal sealed class CommittedDisciplineRecoveryTests
             }
 
             // Commit-discipline write on e1 (zero-loss).
-            using (var cm = dbe.CreateQuickTransaction(DurabilityMode.Immediate, DurabilityDiscipline.Commit))
+            using (var cm = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit))
             {
                 cm.OpenMut(e1).Write(CmEntity.Position) = new CmPosition(11, 11);
                 cm.Commit();
@@ -249,7 +249,7 @@ internal sealed class CommittedDisciplineRecoveryTests
             }
 
             // Final Commit-discipline transaction on e1 — overwrites Position (last writer) and sets Wallet (CmWallet is DefaultDiscipline=Commit).
-            using (var cm = dbe.CreateQuickTransaction(DurabilityMode.Immediate, DurabilityDiscipline.Commit))
+            using (var cm = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit))
             {
                 var e = cm.OpenMut(e1);
                 e.Write(CmEntity.Position) = new CmPosition(33, 33);
@@ -303,7 +303,7 @@ internal sealed class CommittedDisciplineRecoveryTests
             dbe.RegisterComponentFromAccessor<CmTeam>();
             dbe.InitializeArchetypes();
 
-            using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, DurabilityDiscipline.Commit))
+            using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit))
             {
                 id1 = tx.Spawn<CmIdxEntity>(CmIdxEntity.Position.Set(new CmPosition(1, 1)), CmIdxEntity.Team.Set(new CmTeam { TeamId = 7, Rank = 1 }));
                 id2 = tx.Spawn<CmIdxEntity>(CmIdxEntity.Position.Set(new CmPosition(2, 2)), CmIdxEntity.Team.Set(new CmTeam { TeamId = 9, Rank = 2 }));
