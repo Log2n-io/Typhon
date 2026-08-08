@@ -408,7 +408,10 @@ class PerCellRTreeTests : TestBase<PerCellRTreeTests>
     /// until a dedicated BDN benchmark with a properly sized cache is added as a follow-up sub-issue of #228.
     /// </remarks>
     [Test]
+    // Manual tier: exceeds the page-cache budget the shared test config allocates, so any tier would fail it on sizing
+    // rather than on behaviour. Retire this in favour of the dedicated BDN benchmark rather than tiering it.
     [Explicit("Hits page cache sizing limits in default test config; manual-run smoke until dedicated BDN benchmark lands.")]
+    [Category("Manual")]
     [CancelAfter(30000)]
     public void SmokeBench_ClusterQueryPath_VsLegacyTree()
     {

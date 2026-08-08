@@ -20,7 +20,10 @@ namespace Typhon.Engine.Tests;
 /// </remarks>
 [TestFixture]
 [Category("ScaleRepro")]
+// Manual tier: an investigation entry point, not a pass/fail test — it is driven interactively to narrow a residual
+// lost-write and has no stable oracle a tier could act on.
 [Explicit("Entry point for the stability investigation initiative (residual lost-write at ~700K). Skipped from normal runs; opt-in via --filter Category=ScaleRepro or --filter ClassName=RawValueHashMapScaleRepro.")]
+[Category("Manual")]
 unsafe class RawValueHashMapScaleRepro
 {
     private ServiceProvider _serviceProvider;

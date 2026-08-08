@@ -281,8 +281,12 @@ class StorageModeReadWriteTests : TestBase<StorageModeReadWriteTests>
 
     // ── DirtyBitmap unit tests ──
 
+    // QUARANTINE (#709): DirtyBitmap.Set loses a bit — its Interlocked.Or targets the array the thread CAPTURED,
+    // which Grow/Snapshot may already have swapped out of _bits. Passes alone (4/4), fails under parallel load.
+    // Deliberately NOT [Category("Sensitive")]: that tier runs a test alone, which for a contention-only race is a
+    // guaranteed false green — the exact failure mode #703 exists to remove.
     [Test]
-    [Ignore("Flaky — concurrent DirtyBitmap race sensitive to system load, passes in isolation")]
+    [Category("Quarantine")]
     public void DirtyBitmap_ConcurrentSet()
     {
         var bitmap = new DirtyBitmap(1024);

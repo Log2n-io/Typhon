@@ -9,7 +9,10 @@ namespace Typhon.Engine.Tests.Runtime;
 /// Measures CPU consumption during idle periods. Uses OS-level process CPU time
 /// to capture real waste — no instrumentation gating required.
 /// </summary>
+// Manual tier: every assertion here is an OS-level CPU-time threshold measured over multi-second windows. A shared CI
+// runner's own scheduling noise lands inside those windows, so a tiered run would report the runner, not the scheduler.
 [TestFixture]
+[Category("Manual")]
 public class DagSchedulerCpuTests
 {
     private ResourceRegistry _registry;

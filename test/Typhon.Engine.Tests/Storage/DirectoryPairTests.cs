@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
@@ -19,7 +19,7 @@ public class DirectoryPairTests
 {
     private IServiceProvider _serviceProvider;
 
-    private static string DbName => $"T_DirPair_{(uint)TestContext.CurrentContext.Test.Name.GetHashCode():X8}";
+    private static string DbName => $"T_DirPair_{TestSeed.StableHash(TestContext.CurrentContext.Test.Name):X8}";
 
     [SetUp]
     public void Setup()

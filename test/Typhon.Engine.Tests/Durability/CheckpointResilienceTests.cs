@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
@@ -27,7 +27,7 @@ public class CheckpointResilienceTests : AllocatorTestBase
 
     // Short, stable-per-test name — the engine caps the database name at 63 UTF8 bytes, and the test method names here
     // are long, so we hash the name rather than embed it.
-    private static string CurrentDatabaseName => $"T_CkRes_{(uint)TestContext.CurrentContext.Test.Name.GetHashCode():X8}";
+    private static string CurrentDatabaseName => $"T_CkRes_{TestSeed.StableHash(TestContext.CurrentContext.Test.Name):X8}";
 
     public override void Setup()
     {

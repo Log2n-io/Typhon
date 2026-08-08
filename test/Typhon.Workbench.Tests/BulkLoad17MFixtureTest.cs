@@ -24,8 +24,11 @@ namespace Typhon.Workbench.Tests;
 /// forward motion (or lack thereof — if the destroy phase stalls again the log will show it).
 /// </para>
 /// </remarks>
+// Manual tier: a 17 M-entity load takes minutes and needs disk headroom a shared runner does not advertise. Promote to
+// Nightly once the runner's disk budget is known to hold it.
 [TestFixture]
-[Explicit("17 M-entity stress test — takes minutes to run; invoke explicitly")]
+[Explicit("17 M-entity stress test — takes minutes to run")]
+[Category("Manual")]
 public sealed class BulkLoad17MFixtureTest
 {
     private string _tempDir;

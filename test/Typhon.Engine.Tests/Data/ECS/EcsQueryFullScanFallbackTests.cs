@@ -127,7 +127,7 @@ class EcsQueryFullScanFallbackTests : TestBase<EcsQueryFullScanFallbackTests>
         Assert.That(ReadBValues(tx, result), Is.EquivalentTo(new[] { 5, 6, 8, 9 }));
     }
 
-    // ── Shape 2: OrderBy on a field the predicate never mentions — STILL OPEN ──────────────────────────────────────
+    // ── Shape 2: OrderBy on a field the predicate never mentions — STILL OPEN, tracked by #706 ──────────────────────────────────────
     //
     // Left unfixed deliberately. Serving this needs a full-range scan bound on the OrderBy field, and for Float/Double the raw IEEE-bit endpoints that both
     // PlanBuilder.TypeMinAsLong/TypeMaxAsLong and EcsQuery.GetTypeMinAsLong/GetTypeMaxAsLong return do not bracket negative values: -1.0f encodes to
@@ -139,7 +139,7 @@ class EcsQueryFullScanFallbackTests : TestBase<EcsQueryFullScanFallbackTests>
     // These two stay as live reproducers.
 
     [Test]
-    [Ignore("#591 second shape — blocked on float/double full-range key bounds; see the comment above this fixture region.")]
+    [Ignore("#706 — blocked on float/double full-range key bounds; see the comment above this fixture region.")]
     public void OrderByFieldAbsentFromPredicate_ReturnsOrderedResults()
     {
         using var dbe = SetupEngine();
@@ -158,7 +158,7 @@ class EcsQueryFullScanFallbackTests : TestBase<EcsQueryFullScanFallbackTests>
     }
 
     [Test]
-    [Ignore("#591 second shape — blocked on float/double full-range key bounds; see the comment above this fixture region.")]
+    [Ignore("#706 — blocked on float/double full-range key bounds; see the comment above this fixture region.")]
     public void OrderByFieldAbsentFromPredicate_AppliesThePredicate()
     {
         using var dbe = SetupEngine();

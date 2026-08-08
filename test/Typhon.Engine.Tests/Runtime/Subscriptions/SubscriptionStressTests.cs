@@ -17,9 +17,12 @@ namespace Typhon.Engine.Tests.Runtime;
 /// rapid connect/disconnect, high entity churn, and multi-client fan-out under load.
 /// </summary>
 /// <remarks>
-/// All tests are <c>[Explicit]</c> — run manually via <c>dotnet test --filter "FullyQualifiedName~SubscriptionStress"</c>.
+/// All tests are <c>[Explicit]</c> — too slow and too port-bound for the PR gate — but the fixture is <c>[Category("Nightly")]</c>, so the
+/// nightly tier runs them. They assert correctness under load (fan-out completeness, backpressure, resync), not throughput, so a failure
+/// is a real defect rather than a measurement artefact.
 /// </remarks>
 [TestFixture]
+[Category("Nightly")]
 class SubscriptionStressTests : TestBase<SubscriptionStressTests>
 {
     private const int StressPort = 19900;

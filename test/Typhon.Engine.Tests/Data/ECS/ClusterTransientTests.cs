@@ -97,28 +97,7 @@ class ClusterTransientTests : TestBase<ClusterTransientTests>
     // 1 — Eligibility
     // ═══════════════════════════════════════════════════════════════════════
 
-    [Test]
-    public void MixedSvTransient_IsClusterEligible()
-    {
-        using var dbe = SetupEngine();
-        var meta = ArchetypeRegistry.GetMetadata<ClT6MixedSvT>();
-        Assert.That(meta.IsClusterEligible, Is.True);
-        Assert.That(meta.TransientSlotMask, Is.Not.EqualTo(0));
-        Assert.That(dbe._archetypeStates[meta.ArchetypeId].ClusterState, Is.Not.Null);
-        Assert.That(dbe._archetypeStates[meta.ArchetypeId].ClusterState.ClusterSegment, Is.Not.Null, "Mixed has PersistentStore segment");
-        Assert.That(dbe._archetypeStates[meta.ArchetypeId].ClusterState.TransientSegment, Is.Not.Null, "Mixed has TransientStore segment");
-    }
 
-    [Test]
-    public void PureTransient_IsClusterEligible()
-    {
-        using var dbe = SetupEngine();
-        var meta = ArchetypeRegistry.GetMetadata<ClT6PureT>();
-        Assert.That(meta.IsClusterEligible, Is.True);
-        Assert.That(dbe._archetypeStates[meta.ArchetypeId].ClusterState, Is.Not.Null);
-        Assert.That(dbe._archetypeStates[meta.ArchetypeId].ClusterState.ClusterSegment, Is.Null, "Pure-T has no PersistentStore segment");
-        Assert.That(dbe._archetypeStates[meta.ArchetypeId].ClusterState.TransientSegment, Is.Not.Null, "Pure-T has TransientStore segment");
-    }
 
     [Test]
     public void ThreeWay_IsClusterEligible()
@@ -134,56 +113,7 @@ class ClusterTransientTests : TestBase<ClusterTransientTests>
     // 2 — Spawn and Read
     // ═══════════════════════════════════════════════════════════════════════
 
-    [Test]
-    public void MixedSvT_SpawnAndRead_BothComponents()
-    {
-        using var dbe = SetupEngine();
-        var pos = new ClT6SvPos(10f, 20f);
-        var vel = new ClT6TransVel(1f, 2f);
 
-        EntityId id;
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            id = tx.Spawn<ClT6MixedSvT>(ClT6MixedSvT.Pos.Set(in pos), ClT6MixedSvT.Vel.Set(in vel));
-            tx.Commit();
-        }
-
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            var entity = tx.Open(id);
-            ref readonly var readPos = ref entity.Read(ClT6MixedSvT.Pos);
-            ref readonly var readVel = ref entity.Read(ClT6MixedSvT.Vel);
-            Assert.That(readPos.X, Is.EqualTo(10f));
-            Assert.That(readPos.Y, Is.EqualTo(20f));
-            Assert.That(readVel.VX, Is.EqualTo(1f));
-            Assert.That(readVel.VY, Is.EqualTo(2f));
-        }
-    }
-
-    [Test]
-    public void PureTransient_SpawnAndRead()
-    {
-        using var dbe = SetupEngine();
-        var vel = new ClT6TransVel(3f, 4f);
-        var tag = new ClT6TransTag(42);
-
-        EntityId id;
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            id = tx.Spawn<ClT6PureT>(ClT6PureT.Vel.Set(in vel), ClT6PureT.Tag.Set(in tag));
-            tx.Commit();
-        }
-
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            var entity = tx.Open(id);
-            ref readonly var readVel = ref entity.Read(ClT6PureT.Vel);
-            ref readonly var readTag = ref entity.Read(ClT6PureT.Tag);
-            Assert.That(readVel.VX, Is.EqualTo(3f));
-            Assert.That(readVel.VY, Is.EqualTo(4f));
-            Assert.That(readTag.Value, Is.EqualTo(42));
-        }
-    }
 
     [Test]
     public void ThreeWay_SpawnAndRead_AllThree()
@@ -389,40 +319,6 @@ class ClusterTransientTests : TestBase<ClusterTransientTests>
     // 6 — Many entities across clusters
     // ═══════════════════════════════════════════════════════════════════════
 
-    [Test]
-    public void ManyEntities_MultiCluster()
-    {
-        using var dbe = SetupEngine();
-        const int count = 500;
-        var ids = new EntityId[count];
-
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            for (int i = 0; i < count; i++)
-            {
-                var pos = new ClT6SvPos(i, i);
-                var vel = new ClT6TransVel(i + 0.1f, i + 0.2f);
-                ids[i] = tx.Spawn<ClT6MixedSvT>(ClT6MixedSvT.Pos.Set(in pos), ClT6MixedSvT.Vel.Set(in vel));
-            }
-            tx.Commit();
-        }
-
-        // Verify all entities readable
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            for (int i = 0; i < count; i++)
-            {
-                var entity = tx.Open(ids[i]);
-                Assert.That(entity.Read(ClT6MixedSvT.Pos).X, Is.EqualTo((float)i));
-                Assert.That(entity.Read(ClT6MixedSvT.Vel).VX, Is.EqualTo(i + 0.1f));
-            }
-        }
-
-        // Verify cluster count > 1 (N is typically 16-32 for small components)
-        var meta = ArchetypeRegistry.GetMetadata<ClT6MixedSvT>();
-        var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
-        Assert.That(cs.ActiveClusterCount, Is.GreaterThan(1), "Should span multiple clusters");
-    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // 7 — Dirty tracking

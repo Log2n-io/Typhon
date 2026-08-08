@@ -110,6 +110,45 @@ internal sealed class BatchOrderTests
 
     // ── Helpers ─────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// The <see cref="RuleMutantAttribute"/> companion to <see cref="Builder_EmitsLog07Order_RegardlessOfCallOrder"/>:
+    /// proves the order assertions genuinely discriminate ORDER, not merely membership.
+    /// </summary>
+    /// <remarks>
+    /// LOG-07 is an ordering rule, and an ordering test is unusually easy to write so that it cannot fail — assert
+    /// the six records are present, or assert each one against its own index, and a builder that emitted them in any
+    /// order would still pass. So the mutant takes the genuinely-ordered stream the builder produced and SWAPS the
+    /// Spawn and Slot records — a stream that violates LOG-07 while containing exactly the same six records — then
+    /// runs the verifier's own positional assertions over it and requires them to reject it.
+    /// </remarks>
+    [Test]
+    [RuleMutant("LOG-07")]
+    public void Mutant_Log07OrderAssertions_RejectASwappedStream()
+    {
+        var arena = new CommitBatchArena();
+        var b = new CommitBatchBuilder(arena, tsn: 42, uowEpoch: 1);
+        b.AddDestroy(100);
+        b.AddSlot(200, slotIndex: 7, payload: [1, 2, 3]);
+        b.AddSpawn(300, archetypeId: 4, enabledBits: 0);
+
+        var size = RecordCodec.Measure(b, out _, out _);
+        var buf = new byte[size];
+        RecordCodec.Write(buf, b, firstLsn: 1000);
+        var records = ReadAll(buf);
+
+        // Unmutated, the real emission order holds: Spawn, then Slot, then Destroy (LOG-07).
+        AssertRecord(records[0], RecordKind.Lifecycle, (byte)LifecycleOp.Spawn, 300);
+        AssertRecord(records[1], RecordKind.Slot, (byte)SlotOp.Upsert, 200);
+
+        // Same six records, LOG-07 order broken: Slot now precedes Spawn.
+        (records[0], records[1]) = (records[1], records[0]);
+
+        RuleMutants.AssertDetects(
+            "LOG-07",
+            "Expected: Lifecycle",
+            () => AssertRecord(records[0], RecordKind.Lifecycle, (byte)LifecycleOp.Spawn, 300));
+    }
+
     private static void AssertRecord(in Captured r, RecordKind kind, byte op, long entityId)
     {
         Assert.That(r.Kind, Is.EqualTo(kind));

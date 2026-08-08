@@ -1386,7 +1386,7 @@ public class BlockAllocatorThreadSafetyTests
 
     [Test]
     [CancelAfter(15000)]
-    [Ignore("Flaky — timing-dependent concurrency test, passes in isolation but fails under parallel load")]
+    [Category("Sensitive")] // timing-dependent concurrency test — flaky under parallel CPU load; runs in the gate's serial quiet pass
     public void ConcurrentAllocateAndFree_MaintainsConsistency()
     {
         const int threadCount = 8;

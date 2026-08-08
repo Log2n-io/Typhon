@@ -1,0 +1,6 @@
+{
+  "fatal_rules_with_verifier": 12,
+  "rules_total": 179,
+  "rules_with_mutant": 3,
+  "rules_with_verifier": 14
+}

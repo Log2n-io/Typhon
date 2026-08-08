@@ -326,7 +326,7 @@ class TyphonRuntimeTests : TestBase<TyphonRuntimeTests>
     // ═══════════════════════════════════════════════════════════════
 
     [Test]
-    [Ignore("Flaky: SpinWait deadline (5s) fails intermittently under parallel test load")]
+    [Category("Sensitive")] // SpinWait deadline (5s) — starved under parallel CPU load; runs in the gate's serial quiet pass
     public void Telemetry_EntitiesProcessed_RecordedForQuerySystem()
     {
         using var dbe = SetupEngine();

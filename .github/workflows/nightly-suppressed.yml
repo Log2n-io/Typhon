@@ -1,0 +1,385 @@
+name: Nightly suppressed tier
+
+# Runs the tests the PR gate deliberately does NOT run: `[Explicit] + [Category("Nightly")]` — chaos, stress,
+# torture and race-density fixtures whose duration keeps them out of the gate.
+#
+# WHY THIS EXISTS (#703 / design `Infrastructure/test-strategy.md` §5.2). `[Explicit]` was being used to mean
+# "run this manually someday", and nothing ever did:
+#   * `ChaosStressTests` was `[Ignore("Too long…")]`. It was not slow, it HUNG — a BTree.SpinWriteLock livelock
+#     (#695) — plus 5 deterministic failures on its first-ever execution (#696). The label hid both.
+#   * `OlcBTreeStressTests` / `OlcBTreeRaceStressTests` were `[Explicit]` with no tier, so the latch-coupled-SMO
+#     fix whose design claims "Validated By: stress tests from #117" had NO running evidence in CI after
+#     February 2026.
+# A marker that removes a test from the gate is only honest if some tier still runs it. This is that tier.
+#
+# NON-BLOCKING by design: a nightly is a signal, not a merge gate, and it is never a required check. What it is
+# NOT allowed to be is quiet — see the "selected zero tests" guard below, which is the whole point of the job.
+
+on:
+  schedule:
+    - cron: "0 1 * * *"     # 01:00 UTC daily — an hour after the arm64 nightly so the two do not contend for
+                            # hosted-runner capacity, and still well before the European morning.
+  workflow_dispatch: {}
+  # Self-validation: this workflow runs on any PR that touches its own inputs, and only then. Scheduled workflows
+  # exist only once they are on the default branch, so without this a change here could not be tested before it
+  # merged. Same pattern as nightly-macos-arm64.yml.
+  pull_request:
+    paths:
+      - '.github/workflows/nightly-suppressed.yml'
+      - 'bench/aws/nightly.runsettings'
+
+concurrency:
+  group: nightly-suppressed
+  cancel-in-progress: false   # a nightly is a data point; let a slow run finish rather than dropping the night.
+
+permissions:
+  contents: read
+
+jobs:
+  suppressed:
+    # GitHub-hosted on purpose: this must NOT consume the self-hosted c6id the merge gate depends on. These
+    # fixtures assert correctness under load (fan-out completeness, invariant conservation, no lost keys), not
+    # throughput, so a slower shared runner changes the duration, not the verdict. Anything whose assertion IS a
+    # wall-clock threshold belongs to [Category("Manual")] instead, which this job deliberately does not select.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build (Release)
+        run: dotnet build test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj -c Release
+
+      # `Category=Nightly` is a ONE-term filter, and that is load-bearing: NUnit runs an [Explicit] test when it
+      # reads the filter as naming it. The gate's 305-term class filter does not qualify, which is precisely why
+      # these fixtures never ran there. Keep this filter narrow — widening it re-hides them.
+      - name: Run the Nightly tier
+        continue-on-error: true      # a red here reports; it does not fail the workflow (non-blocking by design)
+        run: |
+          set -uo pipefail
+          mkdir -p ci-out
+          # --blame-hang is load-bearing, not belt-and-braces. NUnit's DefaultTimeout cannot stop a CPU-bound
+          # spin (.NET has no Thread.Abort) — measured against the #695 livelock on 2026-08-07, the run had to be
+          # killed from outside. Without this, one hung stress test eats the 60-minute job timeout and the log
+          # says nothing about which test hung. With it, vstest kills the host and names the test in a
+          # Sequence_*.xml, which the artifact upload below preserves.
+          dotnet test test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj \
+            -c Release --no-build \
+            --filter "Category=Nightly" \
+            --settings bench/aws/nightly.runsettings \
+            --blame-hang --blame-hang-timeout 300s \
+            --logger "trx;LogFileName=nightly.trx" \
+            --results-directory ci-out \
+            2>&1 | tee ci-out/nightly.log
+
+      # ── The load-bearing guard ────────────────────────────────────────────────────────────────────────────
+      # A tier that selects ZERO tests and reports green is the exact defect this whole issue is about, one level
+      # up: `shards.json` named two [Ignore]d fixtures, ran nothing, and the gate went green. If a rename, a
+      # dropped category or a filter typo empties this run, that must be LOUD — and unlike the test results, it
+      # is blocking, because it means the job is no longer testing anything.
+      - name: Assert the tier actually selected tests
+        run: |
+          set -uo pipefail
+          python3 - <<'PY'
+          import glob, sys, xml.etree.ElementTree as ET
+          NS = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
+          files = glob.glob("ci-out/*.trx")
+          if not files:
+              print("::error::The Nightly tier produced no trx at all — the run did not execute.")
+              sys.exit(1)
+          total = passed = failed = 0
+          for f in files:
+              c = ET.parse(f).getroot().find(f"{NS}ResultSummary/{NS}Counters")
+              if c is None:
+                  continue
+              total += int(c.get("total", 0)); passed += int(c.get("passed", 0)); failed += int(c.get("failed", 0))
+          print(f"Nightly tier: total={total} passed={passed} failed={failed}")
+          with open("summary.md", "w", encoding="utf-8") as fh:
+              fh.write(f"## Nightly suppressed tier\n\n| total | passed | failed |\n|---|---|---|\n"
+                       f"| {total} | {passed} | {failed} |\n")
+          if total == 0:
+              print("::error::`Category=Nightly` selected ZERO tests. Either the category was dropped from every "
+                    "fixture, or the filter no longer matches. A tier that runs nothing while reporting success is "
+                    "the false green #703 exists to remove — failing on purpose.")
+              sys.exit(1)
+          PY
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report the tier's failures
+        if: always()
+        run: |
+          set -uo pipefail
+          {
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          NS = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
+          rows = []
+          for f in glob.glob("ci-out/*.trx"):
+              root = ET.parse(f).getroot()
+              names = {}
+              for ut in root.iter(f"{NS}UnitTest"):
+                  tm = ut.find(f"{NS}TestMethod")
+                  if ut.get("id") and tm is not None:
+                      names[ut.get("id")] = f'{tm.get("className")}.{tm.get("name")}'
+              for r in root.iter(f"{NS}UnitTestResult"):
+                  if r.get("outcome") == "Failed":
+                      rows.append(names.get(r.get("testId"), r.get("testName", "?")))
+          if rows:
+              print("### Failures\n")
+              for r in sorted(set(rows)):
+                  print(f"- `{r}`")
+              print("\nThese are tracked reds of the Nightly tier — file or update an issue, do NOT re-suppress "
+                    "(#703). Known:\n"
+                    "- #695 — BTree.SpinWriteLock livelock (ChaosStressTests.CreateDeleteRecreate_RapidLifecycle)\n"
+                    "- #696 — ChaosStressTests deterministic concurrent value/index failures\n"
+                    "- #297 — OlcRaceStress_FourScenariosUnderCpuNoise: the OLC B+Tree loses a present key on a\n"
+                    "  concurrent read (~0.8% of Add iterations). REOPENED 2026-08-07 on this tier's first run since\n"
+                    "  February; the fixture had been [Explicit] with no tier, so the issue was closed in May on\n"
+                    "  evidence its own harness now contradicts.")
+          PY
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload raw artifacts (.trx / logs)
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightly-suppressed
+          path: ci-out/**
+          if-no-files-found: ignore
+
+  # ── The seed-space cell (#704 T6) ──────────────────────────────────────────────────────────────────────────────────
+  # Every seed in the suite used to be a literal — `new Random(42)` x8, `LifecycleChurnWorkload(1234, 24)` — so CI run
+  # #1 and CI run #1,000 explored the identical state. This job is the only place TYPHON_TEST_SEED is set: the PR gate
+  # runs with it UNSET and therefore stays bit-for-bit deterministic, which is what #703 bought and what a randomly
+  # flaky gate would spend back.
+  #
+  # Three seeds, not one: a single extra point per night is barely exploration, and three is still under a minute.
+  # Each seed is PRINTED in the job summary and every seeded failure carries its own repro line (see SeededAttribute),
+  # so a red here is reproducible from one number with no other input:
+  #     TYPHON_TEST_SEED=<n> dotnet test ... --filter "FullyQualifiedName~<test>"
+  seeded:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false          # one unlucky seed must not hide what the other two would have found
+      matrix:
+        cell: [1, 2, 3]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build (Release)
+        run: dotnet build test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj -c Release
+
+      - name: Pick a seed
+        id: seed
+        run: |
+          set -uo pipefail
+          # 31-bit: TestSeed parses an int32, and a negative seed is legal but reads badly in a summary table.
+          SEED=$(( (RANDOM << 16 | RANDOM) & 0x7FFFFFFF ))
+          echo "seed=$SEED" >> "$GITHUB_OUTPUT"
+          echo "Cell ${{ matrix.cell }} seed: $SEED"
+
+      - name: Run the seeded tests
+        continue-on-error: true      # exploring; a red reports, it does not fail the workflow
+        env:
+          TYPHON_TEST_SEED: ${{ steps.seed.outputs.seed }}
+        run: |
+          set -uo pipefail
+          mkdir -p ci-out
+          dotnet test test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj \
+            -c Release --no-build \
+            --filter "Category=Seeded" \
+            --settings bench/aws/nightly.runsettings \
+            --blame-hang --blame-hang-timeout 300s \
+            --logger "trx;LogFileName=seeded.trx" \
+            --results-directory ci-out \
+            2>&1 | tee ci-out/seeded.log
+
+      # Same guard as the tier above, for the same reason: a seed cell that selects zero tests reports a green that
+      # means nothing. Blocking, because it says the job stopped testing anything.
+      - name: Assert the seeded filter selected tests, and report
+        env:
+          TYPHON_TEST_SEED: ${{ steps.seed.outputs.seed }}
+        run: |
+          set -uo pipefail
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import glob, os, sys, xml.etree.ElementTree as ET
+          NS = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
+          seed = os.environ["TYPHON_TEST_SEED"]
+          total = passed = failed = 0
+          names = {}
+          rows = []
+          for f in glob.glob("ci-out/*.trx"):
+              root = ET.parse(f).getroot()
+              c = root.find(f"{NS}ResultSummary/{NS}Counters")
+              if c is not None:
+                  total += int(c.get("total", 0)); passed += int(c.get("passed", 0)); failed += int(c.get("failed", 0))
+              for ut in root.iter(f"{NS}UnitTest"):
+                  tm = ut.find(f"{NS}TestMethod")
+                  if ut.get("id") and tm is not None:
+                      names[ut.get("id")] = f'{tm.get("className")}.{tm.get("name")}'
+              for r in root.iter(f"{NS}UnitTestResult"):
+                  if r.get("outcome") == "Failed":
+                      rows.append(names.get(r.get("testId"), r.get("testName", "?")))
+          print(f"## Seeded cell — seed `{seed}`\n")
+          print(f"| seed | total | passed | failed |\n|---|---|---|---|\n| `{seed}` | {total} | {passed} | {failed} |\n")
+          if rows:
+              print("### Failures — reproduce each with the seed above\n")
+              for r in sorted(set(rows)):
+                  print(f"- `TYPHON_TEST_SEED={seed} dotnet test test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj --filter \"FullyQualifiedName~{r}\"`")
+              print("\nA seeded red is a REAL finding on a state no previous run had visited — file it, do not re-pin the seed (#704).")
+          if total == 0:
+              print("::error::`Category=Seeded` selected ZERO tests — the seed cell is testing nothing.")
+              sys.exit(1)
+          PY
+
+      - name: Upload raw artifacts (.trx / logs)
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightly-seeded-${{ matrix.cell }}
+          path: ci-out/**
+          if-no-files-found: ignore
+
+  # ── Does the covering array still explore? (#704 AC9/AC10) ─────────────────────────────────────────────────────────
+  # #704's headline claim is that a planted axis-specific bug is caught by a cell nobody hand-wrote. Proving it once
+  # during development makes it an anecdote; running it nightly makes it a measurement. The probe plants a defect in
+  # src/, runs the fixtures, and requires BOTH outcomes — the matrix cell fails AND the hand-written control passes —
+  # then reverts. If a future change makes the array stop catching a mutation it used to catch, this is where that
+  # shows up.
+  #
+  # Non-blocking like the rest of this workflow: it reports, it does not gate. The probe's own logic is unit-tested in
+  # scripts/tests/test_axis_mutation_probe.py, which DOES run in the merge gate's `invariants` job.
+  mutation-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      # The probe refuses to run on a dirty src/ — it restores files from an in-memory copy and must never do that over
+      # someone's work. A fresh checkout is clean, so this is belt-and-braces; it fails loudly rather than silently
+      # skipping if that ever stops being true.
+      - name: Assert a clean src/ tree
+        run: |
+          set -uo pipefail
+          if [ -n "$(git status --porcelain -- src/)" ]; then
+            echo "::error::src/ is dirty in a fresh checkout — the mutation probe cannot run safely."
+            git status --porcelain -- src/
+            exit 1
+          fi
+
+      - name: Run the mutation probe
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          python3 scripts/axis-mutation-probe.py --all 2>&1 | tee probe.log
+          echo "PROBE_EXIT=${PIPESTATUS[0]}" >> "$GITHUB_ENV"
+
+      - name: Report
+        if: always()
+        run: |
+          set -uo pipefail
+          {
+            echo "## Axis mutation probe"
+            echo
+            if [ "${PROBE_EXIT:-1}" = "0" ]; then
+              echo "✅ Every mutation was caught by a covering-array cell that no hand-written test covers."
+            else
+              echo "🔴 At least one mutation did NOT produce the required evidence. Either the array stopped exploring"
+              echo "that axis, or a mutation went stale against a refactor — both are real findings (#704)."
+            fi
+            echo
+            echo '```'
+            tail -40 probe.log 2>/dev/null || echo "(no probe output)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Confirm src/ was restored
+        if: always()
+        run: |
+          set -uo pipefail
+          if [ -n "$(git status --porcelain -- src/)" ]; then
+            echo "::error::the probe left src/ modified — its revert path is broken."
+            git diff --stat -- src/
+            exit 1
+          fi
+          echo "src/ restored cleanly."
+
+  # ── #705 T5: the linearizability model, validated against a known-racy build ──────────────────────────────────────
+  #
+  # Non-blocking, like the axis probe. The three-way exit status is the design: 0 = every planted race detected on a
+  # green baseline, 1 = a race went UNDETECTED (the model is too weak, which is the failure mode §9 warns about), and
+  # 2 = the baseline itself is red. Status 2 is expected while #400 is open — the model reproduces the shared-ChangeSet
+  # race on the production default within milliseconds — and it must NOT be reported as either a pass or a probe
+  # failure, because it is neither.
+  linearizability-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Assert a clean src/ tree
+        run: |
+          set -uo pipefail
+          if [ -n "$(git status --porcelain -- src/)" ]; then
+            echo "::error::src/ is dirty in a fresh checkout — the linearizability probe cannot run safely."
+            git status --porcelain -- src/
+            exit 1
+          fi
+
+      - name: Run the linearizability probe
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          python3 scripts/linearizability-probe.py --all 2>&1 | tee lin-probe.log
+          echo "LIN_PROBE_EXIT=${PIPESTATUS[0]}" >> "$GITHUB_ENV"
+
+      - name: Report
+        if: always()
+        run: |
+          set -uo pipefail
+          {
+            echo "## Linearizability model probe"
+            echo
+            case "${LIN_PROBE_EXIT:-1}" in
+              0) echo "✅ Every planted race was detected, on a green baseline — the model's green results carry information." ;;
+              2) echo "🟡 BASELINE RED: the model rejects a REAL race (#400) on unmutated source. That is stronger evidence of" ;
+                 echo "detection power than any planted fault, but the planted-race gate stays pending until #400 is fixed." ;;
+              *) echo "🔴 A planted race went UNDETECTED on a green baseline, or the probe itself failed. A model that passes a" ;
+                 echo "deliberately racy build is too weak, and its green results mean nothing (test-strategy.md §9)." ;;
+            esac
+            echo
+            echo '```'
+            tail -40 lin-probe.log 2>/dev/null || echo "(no probe output)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Confirm src/ was restored
+        if: always()
+        run: |
+          set -uo pipefail
+          if [ -n "$(git status --porcelain -- src/)" ]; then
+            echo "::error::the probe left src/ modified — its revert path is broken."
+            git diff --stat -- src/
+            exit 1
+          fi
+          echo "src/ restored cleanly."

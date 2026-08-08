@@ -29,6 +29,7 @@ jobs:
       engine: ${{ steps.filter.outputs.engine }}
       workbench: ${{ steps.filter.outputs.workbench }}
       tla: ${{ steps.filter.outputs.tla }}
+      rules: ${{ steps.filter.outputs.rules }}
       # `[no-ut]` in the PR head commit message → skip the heavy aws-gate suites (self-declared small-fix bypass).
       skip_ut: ${{ steps.ut.outputs.skip_ut }}
     steps:
@@ -44,6 +45,14 @@ jobs:
               - 'tools/Typhon.Workbench/**'
             tla:
               - 'src/Typhon.Engine/Durability/**'
+            # #703: re-audit when a rule CITATION or the audit itself changes. The rule database
+            # lives in the private repo, so its own edits cannot trigger this — the nightly
+            # doc-drift job in that repo covers that direction.
+            rules:
+              - 'test/**/*.cs'
+              - 'scripts/audit-rule-coverage.py'
+              - 'scripts/tests/**'
+              - 'coverage/rule-coverage-baseline.json'
 
       # Opt-out for genuine small fixes: `[no-ut]` in the head commit message skips the heavy aws-gate
       # unit-test suites. Reads pull_request.head.sha (NOT the working-tree HEAD — on a PR that is the
@@ -176,6 +185,24 @@ jobs:
           token: ${{ secrets.TYPHON_CLAUDE_TOKEN }}
           path: typhon-claude
 
+      # Same reasoning as the rule-coverage job below: a PR that changes a TLA spec and the code it models spans
+      # both repos on same-named branches, and pinning `main` here would model-check the OLD spec against the NEW
+      # code. It has not bitten yet only because no PR has changed a spec and its implementation together.
+      - name: Prefer the PR's companion docs branch, if it exists
+        if: ${{ github.event_name == 'pull_request' }}
+        continue-on-error: true
+        working-directory: typhon-claude
+        run: |
+          set -uo pipefail
+          branch='${{ github.head_ref }}'
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            git fetch --depth=1 origin "$branch"
+            git checkout -q FETCH_HEAD
+            echo "specs: typhon-claude branch '$branch' @ $(git rev-parse --short HEAD)"
+          else
+            echo "specs: typhon-claude main @ $(git rev-parse --short HEAD) (no branch '$branch' there)"
+          fi
+
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -196,6 +223,70 @@ jobs:
             bash run-tlc.sh "$spec" mutant --expect-violation
             echo "::endgroup::"
           done
+
+  # ---- Rule-coverage audit on a free runner (#703 Part 2). ----
+  #
+  # Cross-checks `claude/rules/*.md` against the tests that claim to verify them, in BOTH directions, and ratchets
+  # the counts so a verifier cannot be quietly deleted. It fails on: a duplicate rule id (README requires ids unique
+  # across the whole database — `CX-01..05` were defined twice with different meanings until #703), a `verified:`
+  # naming a test that does not exist, a [VerifiesRule] naming a rule that does not exist, and any DECREASE in
+  # coverage. A verifier with no [RuleMutant] is reported, not blocking — see the audit's own docstring for why
+  # forcing 15 mutants in one push would move the dishonesty rather than remove it.
+  #
+  # Shaped exactly like the `tla` job below-left: the rules live in the PRIVATE Typhon-Claude repo, so this needs
+  # the PAT and is path-gated to keep it off unrelated PRs. `--skip-if-no-rules` makes a fork PR (where GitHub
+  # withholds the secret, so the checkout produces nothing) SKIP loudly rather than red-out — and the skip message
+  # says the run proves nothing, so it cannot be mistaken for a pass.
+  rule-coverage:
+    needs: changes
+    if: ${{ needs.changes.outputs.rules == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Checkout typhon-claude (rule database)
+        continue-on-error: true    # fork PRs get no secret; the audit then skips rather than failing the gate
+        uses: actions/checkout@v5
+        with:
+          repository: Log2n-io/Typhon-Claude
+          ref: main
+          token: ${{ secrets.TYPHON_CLAUDE_TOKEN }}
+          path: typhon-claude
+
+      # A change that adds a RULE and the test that verifies it spans both repos, and the two halves travel on
+      # branches of the same name. Auditing against `main` compares this PR's code to rules that do not yet contain
+      # its changes, which makes the pair un-mergeable in either order: the code PR stays red until the docs PR
+      # merges, and the docs PR has no gate of its own to show it is safe to merge first. #705 hit exactly this —
+      # a new rule (RB-06) and its [VerifiesRule] test, reported as "names a rule that does not exist".
+      #
+      # The fallback is announced rather than silent: a green run must say WHICH rules it audited, or it cannot be
+      # told apart from a green run that audited the wrong ones.
+      - name: Prefer the PR's companion docs branch, if it exists
+        if: ${{ github.event_name == 'pull_request' }}
+        continue-on-error: true      # no checkout on a fork PR — the audit's own --skip-if-no-rules handles that
+        working-directory: typhon-claude
+        run: |
+          set -uo pipefail
+          branch='${{ github.head_ref }}'
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            git fetch --depth=1 origin "$branch"
+            git checkout -q FETCH_HEAD
+            echo "rules: typhon-claude branch '$branch' @ $(git rev-parse --short HEAD)"
+          else
+            echo "rules: typhon-claude main @ $(git rev-parse --short HEAD) (no branch '$branch' there)"
+          fi
+
+      - name: Audit rule coverage + ratchet
+        run: |
+          python3 scripts/audit-rule-coverage.py \
+            --rules-dir typhon-claude/rules \
+            --skip-if-no-rules
+
+      # The audit is itself tested — planted duplicate id, planted dangling `verified:`, planted always-green
+      # verifier, planted ratchet regression. An audit that has never rejected anything is the same false green it
+      # exists to remove. Runs unconditionally: it needs no rules checkout and no secret.
+      - name: Audit self-tests
+        run: python3 -m unittest discover -s scripts/tests -v
 
   # ---- Cheap source-invariant gate on a free runner (must NOT consume the c6id). ----
   #
@@ -234,6 +325,35 @@ jobs:
             exit 1
           fi
           echo "LOG-02: RecordFormat confined to Durability/internals/"
+
+      # ---- #703: a suppressed test must say WHY, and expire. ----
+      #
+      # `[Ignore]` meant five different things (blocked on a bug / flaky / slow / a manual tool / unstable), so
+      # nothing could lint it and nothing revisited it. Two measured consequences: `shards.json` NAMED two
+      # class-level [Ignore]d fixtures, so the gate budgeted a shard slot, ran zero tests and reported green; and
+      # two tests stayed suppressed against #591 for weeks after #591 closed. The lint gives each marker one
+      # meaning and requires an OPEN issue behind every suppression.
+      #
+      # Runs here rather than in the test job because it is pure source analysis — no build, no c6id. The
+      # closed-issue probe uses the built-in GITHUB_TOKEN against THIS repo only, so it keeps the job's
+      # self-contained property (no PAT, no cross-repo checkout, green on fork PRs).
+      - name: Test-suppression lint (#703)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/lint-test-suppressions.py
+
+      # A malformed .runsettings makes `dotnet test` run ZERO tests while the job still looks configured — the
+      # nightly's seeded and suppressed tiers were both silently empty because a comment in nightly.runsettings
+      # contained `--`. That is a false green one layer BELOW the suppression lints, which reason about which
+      # tests are selected and cannot see a settings file that was never parsed (#705).
+      - name: Check .runsettings files are well-formed
+        run: python3 scripts/check-runsettings.py
+
+      # The lints are themselves tested: each check has a planted violation it must reject, including a planted
+      # zero-test shard and the exact double-hyphen comment that shipped. A lint that has never rejected anything
+      # is the same false green it exists to remove.
+      - name: Lint self-tests (#703)
+        run: python3 -m unittest discover -s scripts/tests -v
 
   # ---- Guard: a closing keyword that would auto-close a PULL REQUEST on merge. ----
   #
@@ -334,7 +454,7 @@ jobs:
 
   # ---- The ONLY required check. Aggregates: skipped → pass, failure/cancelled → fail. ----
   gate:
-    needs: [changes, aws-gate, aws-gate-selfhosted, tla, invariants, closing-keywords]
+    needs: [changes, aws-gate, aws-gate-selfhosted, tla, rule-coverage, invariants, closing-keywords]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -344,9 +464,10 @@ jobs:
           aws='${{ needs.aws-gate.result }}'
           awssh='${{ needs.aws-gate-selfhosted.result }}'
           tla='${{ needs.tla.result }}'
+          rules='${{ needs.rule-coverage.result }}'
           inv='${{ needs.invariants.result }}'
           keywords='${{ needs.closing-keywords.result }}'
-          echo "changes=$changes  aws-gate=$aws  aws-gate-selfhosted=$awssh  tla=$tla  invariants=$inv  closing-keywords=$keywords"
+          echo "changes=$changes  aws-gate=$aws  aws-gate-selfhosted=$awssh  tla=$tla  rule-coverage=$rules  invariants=$inv  closing-keywords=$keywords"
           fail=0
           # changes must succeed; the two aws-gate variants + tla may legitimately be 'skipped' (nothing relevant
           # changed, or the other runner variant is inactive), and closing-keywords is 'skipped' on push/dispatch.
@@ -354,6 +475,8 @@ jobs:
           case "$aws" in failure|cancelled) echo "aws-gate failed"; fail=1 ;; esac
           case "$awssh" in failure|cancelled) echo "aws-gate-selfhosted failed"; fail=1 ;; esac
           case "$tla" in failure|cancelled) echo "tla failed"; fail=1 ;; esac
+          # rule-coverage is path-gated like tla, so 'skipped' is legitimate; a REGRESSION is not (#703).
+          case "$rules" in failure|cancelled) echo "rule-coverage audit failed"; fail=1 ;; esac
           # invariants has no `if:` guard — it runs on every event, so anything but success is a red gate.
           [ "$inv" = "success" ] || { echo "invariants gate failed"; fail=1; }
           case "$keywords" in failure|cancelled) echo "closing-keywords guard failed"; fail=1 ;; esac

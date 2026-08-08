@@ -14,14 +14,17 @@ namespace Typhon.Engine.Tests;
 /// Time-bounded race-stress harness for OLC B+Tree (issue #297).
 /// Loops the five flaky concurrency scenarios from <see cref="OlcBTreeTests"/> in parallel under saturating CPU noise to maximize repro density.
 /// Different from <see cref="OlcBTreeStressTests"/> (high-thread single-shot scenarios) — this one is for "fail fast on a known race."
-/// [Explicit] — never runs in CI; invoke via filter or env-tuned local runs.
+/// [Explicit] + [Category("Nightly")] — kept out of the PR gate for its wall duration, but it RUNS in the nightly tier. It used to be
+/// [Explicit] with no tier, i.e. nowhere: the latch-coupled-SMO fix whose design claims "Validated By: stress tests from #117" then had
+/// no running evidence in CI from February 2026 onward (#703).
 /// Configure via env vars:
 ///   OLC_STRESS_SECONDS — wall duration of the run (default 30)
 ///   OLC_STRESS_NOISE   — count of CPU-saturating noise threads (default = ProcessorCount/2)
 /// One ManagedPagedMMF per scenario, reused across iterations (fresh segment per iter) — avoids per-iter file I/O cost.
 /// </summary>
 [TestFixture]
-[Explicit("Long-running race-stress harness for issue #297 — invoke manually")]
+[Explicit("Long-running race-stress harness for issue #297")]
+[Category("Nightly")]
 public class OlcBTreeRaceStressTests
 {
     private static int _scenarioId;

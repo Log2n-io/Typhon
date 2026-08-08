@@ -310,7 +310,8 @@ class TransactionChainTests : TestBase<TransactionChainTests>
     /// </para>
     /// </summary>
     [Test]
-    [Explicit("Torture test — run manually, takes ~3s and saturates all cores")]
+    [Explicit("Torture test — takes ~3s and saturates all cores, so it is out of the PR gate")]
+    [Category("Nightly")]
     public void Torture_32Cores_MixedWorkload_AllInvariantsHold()
     {
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
