@@ -281,6 +281,14 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
     }
 
     /// <summary>
+    /// True while no producer has ever claimed an LSN from this buffer. The re-seed the crash-recovery path performs once its replayed frontier is known
+    /// (#712) is only sound in this state: <see cref="_lsnBase"/> is otherwise written by <c>PerformSwap</c> on the writer thread, and rebasing it after
+    /// records have been claimed would leave those already-materialised LSNs sitting below the new floor. <c>PerformSwap</c> runs only in response to a
+    /// producer filling a buffer, so "nothing claimed" also means "the writer thread cannot be touching the base".
+    /// </summary>
+    internal bool NothingClaimedYet => LsnOffsetOf(Interlocked.Read(ref _claim)) == 0;
+
+    /// <summary>
     /// Highest LSN contained in the frames returned by the most recent <see cref="TryDrain"/> call (0 if that drain returned nothing). Consumer-thread only. The WAL
     /// writer advances its durable watermark to this value after the drained bytes are physically written and flushed, so <see cref="WalWriter.DurableLsn"/> never
     /// exceeds what reached stable media (LOG-05). Replaces the old <c>NextLsn - 1</c> peek, which counted claims that had been assigned an LSN but not yet drained (TXW-2).

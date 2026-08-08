@@ -623,6 +623,63 @@ internal sealed class DifferentialRecoveryOracleTests
     /// folding the two together would have parked a working regression lock behind an unrelated defect.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// #712 / LOG-08 on the CRASH path: a crash-recovered engine must continue its LSN sequence strictly above the window its own recovery replayed.
+    /// </summary>
+    /// <remarks>
+    /// Asserted on the watermarks rather than on entity survival, deliberately. Entity survival across the SECOND crash is
+    /// <see cref="PostRecoveryWrite_SurvivesASecondCrash"/>'s job and it depends on more than the allocator; this case fails if and only if the LSN floor is
+    /// wrong, so it cannot be greened by an unrelated durability change or reddened by one. Pre-fix numbers, from the issue: frontier 16,
+    /// <c>LastAppendedLsn</c> 9, <c>DurableLsn</c> 16 — the writer restarted at 1 and believed 7 LSNs it never appended were durable.
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    [TestCaseSource(nameof(PostRecoveryShapes), new object[] { "PostRecoveryWrite_LsnFloor" })]
+    public void PostRecoveryWrite_ContinuesTheLsnSequenceAboveTheReplayedFrontier(PostRecoveryShape shape)
+    {
+        var workload = new PostRecoveryWriteWorkload(shape);
+        var shadow = new RecoveryShadowModel();
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            workload.Register(dbe);
+            dbe.InitializeArchetypes();
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                workload.Execute(uow, shadow);
+                uow.Flush();
+            }
+            shadow.CaptureValues(dbe);
+            dbe.SimulateHardCrash();
+        }
+
+        using var scope2 = _serviceProvider.CreateScope();
+        var recovered = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        workload.Register(recovered);
+        recovered.InitializeArchetypes();   // recovery
+
+        var frontier = recovered.LastWalV2RecoveryResult.MaxLsn;
+        Assert.That(frontier, Is.GreaterThan(0), "the workload must leave a WAL window for recovery to replay, or this case proves nothing");
+
+        // Before the first post-recovery write: the allocator already sits on the frontier, and the durable watermark agrees with it.
+        Assert.That(recovered.WalManager.LastAppendedLsn, Is.EqualTo(frontier),
+            "the reopened allocator did not continue from the replayed frontier (LOG-08) — the next record will reuse an LSN the prior session wrote");
+        Assert.That(recovered.WalManager.LastAppendedLsn, Is.GreaterThanOrEqualTo(recovered.WalManager.DurableLsn),
+            "DurableLsn exceeds LastAppendedLsn: the writer believes LSNs it never appended are durable");
+
+        using (var uow = recovered.CreateUnitOfWork(DurabilityMode.Immediate))
+        {
+            workload.Resume(uow, shadow);
+            uow.Flush();
+        }
+
+        Assert.That(recovered.WalManager.LastAppendedLsn, Is.GreaterThan(frontier),
+            $"post-recovery records were written at or below the replayed frontier {frontier} — the next recovery discards them as already-consolidated");
+        Assert.That(recovered.WalManager.LastAppendedLsn, Is.GreaterThanOrEqualTo(recovered.WalManager.DurableLsn),
+            "DurableLsn exceeds LastAppendedLsn after the post-recovery window");
+    }
+
     [Test]
     [CancelAfter(20_000)]
     [TestCaseSource(nameof(PostRecoveryShapes), new object[] { "PostRecoveryWrite_SecondCrash" })]
