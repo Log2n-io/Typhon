@@ -291,6 +291,59 @@ class TestShardTierExclusion(LintFixtureCase):
         self.write_shards(["Typhon.Engine.Tests.Mixed"])
         self.assert_clean()
 
+    # ── every-method-excluded (#705) ────────────────────────────────────────────────────────────────────────────
+    #
+    # These four pin the hole that cost a full gate run. `WorkbenchFixtureGenerator` carries NO class-level
+    # suppression — its single [Test] is [Explicit] + [Category("Manual")] — so the class-level checks called it
+    # clean while shard.py's run-time integrity check failed on it, on the expensive runner, after 5,017 tests.
+    # A lint whose blind spot is the exact thing it exists to detect is the false green it was written to remove.
+
+    def test_shard_naming_a_fixture_whose_every_test_is_manual_fails(self):
+        """The real shape: [TestFixture] at class level, everything excluded at method level."""
+        self.write("A.cs", '[TestFixture]\npublic sealed class WorkbenchFixtureGenerator\n{\n'
+                           '    [Test]\n    [Explicit("Fixture generator")]\n    [Category("Manual")]\n'
+                           '    public void Generate() { }\n}\n')
+        self.write_shards(["Typhon.Engine.Tests.WorkbenchFixtureGenerator"])
+        out = self.assert_flags("SHARD_ZERO_TESTS")
+        self.assertIn("WorkbenchFixtureGenerator", out)
+        self.assertIn("EVERY [Test]", out, "the message must distinguish this from a class-level suppression")
+
+    def test_shard_naming_a_fixture_whose_every_test_is_explicit_fails(self):
+        """[Explicit] alone empties a fixture for the gate — the filter never selects it."""
+        self.write("A.cs", '[TestFixture]\nclass OnlyExplicit\n{\n'
+                           '    [Test]\n    [Explicit("manual")]\n    public void A() { }\n\n'
+                           '    [TestCase(1)]\n    [Explicit("manual")]\n    public void B(int i) { }\n}\n')
+        self.write_shards(["Typhon.Engine.Tests.OnlyExplicit"])
+        self.assert_flags("SHARD_ZERO_TESTS")
+
+    def test_one_runnable_test_is_enough_to_keep_the_fixture(self):
+        """The complement, and the one that stops this check becoming noise: any runnable test clears the class.
+
+        The [Explicit] member carries a tier, because [Explicit] without one is its own violation
+        (EXPLICIT_NO_TIER) and a fixture that trips two rules cannot show which one this test is about.
+        """
+        self.write("A.cs", '[TestFixture]\nclass MostlyExcluded\n{\n'
+                           '    [Test]\n    [Category("Nightly")]\n    public void A() { }\n\n'
+                           '    [Test]\n    [Explicit("slow")]\n    [Category("Nightly")]\n'
+                           '    public void B() { }\n\n'
+                           '    [Test]\n    public void StillRuns() { }\n}\n')
+        self.write_shards(["Typhon.Engine.Tests.MostlyExcluded"])
+        self.assert_clean()
+
+    def test_class_level_and_method_level_do_not_double_report(self):
+        """A wholesale-excluded fixture is one violation, not two — the class-level check owns it."""
+        self.write("A.cs", '// Known-red, see #552.\n[TestFixture]\n[Category("Quarantine")]\nclass Doubled\n{\n'
+                           '    [Test]\n    [Category("Quarantine")]\n    public void T() { }\n}\n')
+        self.write_shards(["Typhon.Engine.Tests.Doubled"])
+        out = self.assert_flags("SHARD_ZERO_TESTS")
+        self.assertEqual(out.count("Doubled is named by a CI shard"), 1, f"reported more than once:\n{out}")
+
+    def test_a_class_with_no_tests_at_all_is_silent(self):
+        """A helper class named by a shard has no [Test] members; saying nothing beats guessing."""
+        self.write("A.cs", '[TestFixture]\nclass JustHelpers\n{\n    public void NotATest() { }\n}\n')
+        self.write_shards(["Typhon.Engine.Tests.JustHelpers"])
+        self.assert_clean()
+
     def test_the_excluded_set_matches_shard_py(self):
         """The lint hard-codes the tier list; if shard.py's GATE_EXCLUDED drifts, the two disagree silently."""
         import importlib.util

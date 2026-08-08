@@ -73,6 +73,9 @@ IGNORE_ATTR = re.compile(r"\[Ignore\s*\(\s*(?:@?\$?)\"(.*?)\"\s*(?:,|\))", re.DO
 IGNORE_BARE = re.compile(r"\[Ignore\s*\]")
 EXPLICIT_ATTR = re.compile(r"\[Explicit\b")
 CATEGORY_ATTR = re.compile(r"\[Category\s*\(\s*\"([^\"]+)\"\s*\)\s*\]")
+# `[Test]`, `[TestCase(...)]`, `[TestCaseSource(...)]` — anything that makes a member a runnable case. Used to tell
+# "this fixture declares tests, all of them excluded" from "this file has no tests here", which must stay silent.
+TEST_ATTR = re.compile(r"\[Test(?:Case(?:Source)?)?\s*[\(\]]")
 
 
 class Violation:
@@ -323,17 +326,60 @@ def check_explicit(parsed):
     return violations
 
 
+def _method_groups_of(groups, cls):
+    """Every attribute group in `groups` that decorates a MEMBER of class `cls` (i.e. not the class itself)."""
+    return [g for g in groups if g.enclosing_class == cls and not g.is_class]
+
+
+def _every_test_is_gate_excluded(groups, cls):
+    """
+    True when `cls` declares at least one test and the gate would run NONE of them, purely from method-level
+    markers. Returns (True, reason) or (False, None).
+
+    This is the method-level twin of the class-level checks below, and it exists because the class-level ones
+    missed a real case: `WorkbenchFixtureGenerator` carries no class-level suppression at all — its single
+    `[Test]` is `[Explicit] + [Category("Manual")]` — so the static lint called it clean while the gate's
+    run-time integrity check failed on it, on the expensive runner, after a full suite run. A fixture whose
+    every METHOD is excluded resolves to exactly the same zero tests as one excluded wholesale.
+    """
+    method_groups = _method_groups_of(groups, cls)
+    tests = [g for g in method_groups if TEST_ATTR.search(g.attr_text)]
+    if not tests:
+        return (False, None)   # no [Test] members parsed — say nothing rather than guess
+
+    reasons = set()
+    for g in tests:
+        excluded = g.categories() & GATE_EXCLUDED_CATEGORIES
+        if excluded:
+            reasons.add(f'[Category("{sorted(excluded)[0]}")]')
+            continue
+        if EXPLICIT_ATTR.search(g.attr_text):
+            reasons.add("[Explicit]")
+            continue
+        if IGNORE_ATTR.search(g.attr_text) or IGNORE_BARE.search(g.attr_text):
+            reasons.add("[Ignore]")
+            continue
+        return (False, None)   # this one WOULD run, so the class is not empty to the gate
+
+    return (True, " + ".join(sorted(reasons)))
+
+
 def check_shards(parsed, shards_path):
     """
     A class NAMED by a shard must resolve to at least one test the gate will actually run.
 
-    Two ways a named class silently resolves to zero, and both are checked here rather than only by shard.py's
-    run-time integrity check — that one is authoritative but only reports on the expensive gate runner, while this
-    is the cheap fast feedback on a free runner:
+    Three ways a named class silently resolves to zero, all checked here rather than only by shard.py's run-time
+    integrity check — that one is authoritative but only reports on the expensive gate runner, while this is the
+    cheap fast feedback on a free runner:
 
       * a class-level `[Ignore]` — NUnit applies it unconditionally, so no filter can reach the fixture;
       * a class-level tier category the gate EXCLUDES (`Quarantine` / `Nightly` / `Manual`, see shard.py's
-        GATE_EXCLUDED) — the filter reaches the fixture and then excludes every test in it.
+        GATE_EXCLUDED) — the filter reaches the fixture and then excludes every test in it;
+      * EVERY `[Test]` in the fixture individually excluded, with nothing at class level at all.
+
+    The third was missing until #705 and cost a full gate run to discover. Checking only the class level encodes
+    an assumption — that a fixture is suppressed wholesale or not at all — which the suite does not honour, and
+    a check whose blind spot is the thing it exists to detect is the false green this lint was written to remove.
     """
     violations = []
     if not shards_path or not os.path.exists(shards_path):
@@ -342,7 +388,32 @@ def check_shards(parsed, shards_path):
         shards = json.load(fh)
     named = {c.split(".")[-1] for s in shards for c in s.get("classes", []) if not c.startswith("<")}
 
-    for path, (_, class_groups) in parsed.items():
+    for path, (groups, class_groups) in parsed.items():
+        # Method-level exclusion. Runs for every named class, INCLUDING ones that have a class-level attribute
+        # group — nearly all of them do, because `[TestFixture]` is itself a class-level attribute. Gating this on
+        # "has no class group" was the first attempt and it fired on nothing at all.
+        # Reported only when the class-level checks below would not fire, so one fixture never yields two
+        # violations for the same zero tests.
+        for cls in sorted({g.enclosing_class for g in groups if g.enclosing_class}):
+            if cls not in named:
+                continue
+            cg = class_groups.get(cls)
+            if cg is not None and (IGNORE_ATTR.search(cg.attr_text) or IGNORE_BARE.search(cg.attr_text)
+                                   or (cg.categories() & GATE_EXCLUDED_CATEGORIES)):
+                continue   # the class-level check below owns this one
+
+            all_excluded, reason = _every_test_is_gate_excluded(groups, cls)
+            if all_excluded:
+                first = _method_groups_of(groups, cls)[0]
+                violations.append(Violation(
+                    "SHARD_ZERO_TESTS", path, first.start_line,
+                    f"{cls} is named by a CI shard but EVERY [Test] in it is {reason} - the shard runs zero tests "
+                    f"and reports green",
+                    "Nothing is suppressed at CLASS level here, so a class-level check sees a healthy fixture and "
+                    "this only surfaces in shard.py's run-time integrity check, on the gate runner, after a full "
+                    "suite run. Drop the class from shards.json - shard 0 is a negative-filter catch-all, so "
+                    "nothing escapes the gate by being unnamed."))
+
         for cls, g in class_groups.items():
             if cls not in named:
                 continue
