@@ -2064,7 +2064,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 CollectTyped((BTree<uint, PersistentStore>)index, (uint)scanMin, (uint)scanMax, allowMultiple, matchBitsArr, ref hasAny);
                 break;
             case KeyType.ULong:
-                CollectTyped((BTree<long, PersistentStore>)index, scanMin, scanMax, allowMultiple, matchBitsArr, ref hasAny);
+                // #676: the ULong trees are genuinely ulong-keyed, so this must cast to the ulong tree and reinterpret the bounds unsigned. Casting to
+                // BTree<long> was correct only while the tree was declared L64BTree<long>, which is the storage-level defect #676 fixed; leaving it would
+                // now throw InvalidCastException on every ulong-indexed query instead of silently mis-ordering.
+                CollectTyped((BTree<ulong, PersistentStore>)index, unchecked((ulong)scanMin), unchecked((ulong)scanMax), allowMultiple, matchBitsArr,
+                    ref hasAny);
                 break;
             default:
                 // Bool and String64 have no typed tree here. Falling out of the switch would leave `hasAny` false and the query would answer EMPTY — the #663

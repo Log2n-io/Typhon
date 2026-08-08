@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Runtime.CompilerServices;
 
 namespace Typhon.Engine.Internals;
@@ -49,16 +49,16 @@ internal static class KeyRange
     /// so this predicate and they cannot drift apart silently: one of them fails loudly if they do.)
     /// </para>
     /// <para>
-    /// <c>ULong</c> is excluded for a different and less obvious reason: its index is a <c>ULongSingleBTree</c>/<c>ULongMultipleBTree</c>, which is an
-    /// <c>L64BTree&lt;<b>long</b>&gt;</c> — the keys are stored reinterpreted as SIGNED longs and the tree orders them that way, so any value at or above
-    /// 2^63 sorts before zero. The full range is then <c>[0, -1]</c> read signed, which is empty, and every ULong-keyed query would answer nothing at all.
-    /// Correcting that means changing how the tree stores the key, not how the bound is computed, so it is not this fix's to make.
+    /// <c>ULong</c> used to be excluded here for a different reason: its index was declared <c>L64BTree&lt;<b>long</b>&gt;</c>, so the keys were stored
+    /// reinterpreted as SIGNED longs and the tree ordered them that way — anything at or above 2^63 sorted before zero, and the full range read
+    /// <c>[0, -1]</c>, i.e. empty. #676 gave those trees a genuine <c>ulong</c> key, which is the level the defect actually lived at; the bound arithmetic
+    /// here (<see cref="Compare"/> already compares <c>ULong</c> unsigned) and <c>OrderedKeyEncoding</c> were correct all along.
     /// </para>
     /// <para>
     /// Every excluded type falls to the SoA scan, which evaluates predicates against component data and is correct for any key type — slower, never wrong.
     /// </para>
     /// </remarks>
-    internal static bool IsStreamable(KeyType kt) => kt is not (KeyType.Bool or KeyType.String64 or KeyType.ULong);
+    internal static bool IsStreamable(KeyType kt) => kt is not (KeyType.Bool or KeyType.String64);
 
     /// <summary>The encoded lower bound of the key type's full range.</summary>
     /// <remarks>

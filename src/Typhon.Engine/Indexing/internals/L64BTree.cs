@@ -904,7 +904,7 @@ internal class LongMultipleBTree<TStore> : L64MultipleBTree<long, TStore> where 
     {
     }
 }
-internal class ULongSingleBTree<TStore> : L64BTree<long, TStore> where TStore : struct, IPageStore
+internal class ULongSingleBTree<TStore> : L64BTree<ulong, TStore> where TStore : struct, IPageStore
 {
     public ULongSingleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
         : base(segment, load, key, changeSet)
@@ -912,7 +912,7 @@ internal class ULongSingleBTree<TStore> : L64BTree<long, TStore> where TStore : 
     }
 }
 
-internal class ULongMultipleBTree<TStore> : L64MultipleBTree<long, TStore> where TStore : struct, IPageStore
+internal class ULongMultipleBTree<TStore> : L64MultipleBTree<ulong, TStore> where TStore : struct, IPageStore
 {
     public ULongMultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
         : base(segment, load, key, changeSet)
