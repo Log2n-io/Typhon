@@ -1,10 +1,10 @@
 ---
 uid: feature-durability-durability-modes-committed-discipline
-title: 'Committed Durability Discipline'
+title: 'Commit Discipline'
 description: 'Zero-loss, atomic writes on Typhon''s cheapest component layout — without paying for an MVCC revision chain.'
 ---
 
-# Committed Durability Discipline
+# Commit Discipline
 > Zero-loss, atomic writes on Typhon's cheapest component layout — without paying for an MVCC revision chain.
 
 **Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Durability](../README.md)
@@ -22,20 +22,20 @@ never uses. Committed discipline gives zero-loss, atomic writes on the `SingleVe
 
 ## ⚙️ How it works (in brief)
 
-`DurabilityDiscipline` is a per-transaction knob (`TickFence` default, or `Commit`) — orthogonal to
+`CommitDiscipline` is a per-transaction knob (`TickFence` default, or `Commit`) — orthogonal to
 `DurabilityMode`: mode still decides *when* the WAL flushes, discipline decides *how* a `SingleVersion` write
 becomes durable. Under `Commit`, a write is staged into a per-transaction arena (the live HEAD slot is never
 touched pre-commit); at `Commit()`, the staged values are appended to the WAL as ordinary records and only then
 published in place — memcpy to HEAD plus index reconciliation. The discipline is uniform per transaction: once
 any write escalates a transaction to `Commit` — explicitly, or because a component declares
-`[Component(DefaultDiscipline = DurabilityDiscipline.Commit)]` — every `SingleVersion` write in that
+`[Component(DefaultDiscipline = CommitDiscipline.Commit)]` — every `SingleVersion` write in that
 transaction is commit-staged. Rollback is O(1): discard the arena, HEAD was never touched.
 
 ## 💻 Usage
 
 ```csharp
 [Component("Game.Wallet", 1, StorageMode = StorageMode.SingleVersion,
-           DefaultDiscipline = DurabilityDiscipline.Commit)]   // optional: every tx touching this escalates
+           DefaultDiscipline = CommitDiscipline.Commit)]   // optional: every tx touching this escalates
 struct Wallet { public long Gold; }
 
 [Archetype]
@@ -46,7 +46,7 @@ partial class Player : Archetype<Player>
 }
 
 // Explicit escalation for one critical operation:
-using var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, DurabilityDiscipline.Commit);
+using var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit);
 var e = tx.OpenMut(playerId);
 ref var pos = ref e.Write(Player.Pos);
 pos.X = teleportTarget.X;
@@ -54,7 +54,7 @@ pos.Y = teleportTarget.Y;
 tx.Commit();              // staged value WAL-logged + published atomically — zero loss on crash
 
 // From inside a scheduled system, via the TickContext side-transaction idiom:
-using var side = ctx.CreateSideTransaction(DurabilityMode.Immediate, DurabilityDiscipline.Commit);
+using var side = ctx.CreateSideTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit);
 side.OpenMut(playerId).Write(Player.Wallet).Gold -= price;
 side.Commit();
 ```
@@ -87,8 +87,8 @@ side.Commit();
 ## 🔗 Related
 
 - Parent feature: [Durability Modes](./README.md)
-- Sibling: [Committed Durability Discipline](../../Ecs/storage-modes/storage-mode-committed.md) — same feature, ECS storage-mode-facing side of this durability-facing knob
-- Sibling: [SingleVersion Durability Discipline (TickFence / Commit)](../../Transactions/durability-discipline/README.md) — the Transaction-level API surface for choosing this discipline
+- Sibling: [Commit Discipline](../../Ecs/storage-modes/storage-mode-committed.md) — same feature, ECS storage-mode-facing side of this durability-facing knob
+- Sibling: [SingleVersion Commit Discipline (TickFence / Commit)](../../Transactions/commit-discipline/README.md) — the Transaction-level API surface for choosing this discipline
 
 <!-- Deep dive: claude/design/Durability/MinimalWal/05-committed-mode.md, claude/adr/057-committed-durability-discipline.md, claude/design/Ecs/committed-storage-mode.md -->
 <!-- Rules: claude/design/Durability/MinimalWal/07-rules.md — module CM -->

@@ -55,7 +55,7 @@ Console.WriteLine(uow.CommittedTransactionCount);
 |---|---|---|
 | `durabilityMode` | `DurabilityMode.Deferred` | See [Durability Modes](../durability-modes/README.md) — when this UoW's WAL records become crash-safe. |
 | `timeout` | `TimeoutOptions.Current.DefaultUowTimeout` | Absolute deadline shared by every transaction, lock, and flush wait created under this UoW. |
-| `discipline` (on `CreateTransaction`) | `DurabilityDiscipline.TickFence` | Per-transaction `SingleVersion` write discipline — see [Durability Discipline](../durability-discipline/README.md). |
+| `discipline` (on `CreateTransaction`) | `CommitDiscipline.TickFence` | Per-transaction `SingleVersion` write discipline — see [Commit Discipline](../commit-discipline/README.md). |
 
 ## ⚠️ Guarantees & limits
 

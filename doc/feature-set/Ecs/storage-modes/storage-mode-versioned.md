@@ -69,7 +69,7 @@ tx2.Commit();                 // new revision becomes HEAD, durable
 
 ## 🔗 Related
 
-- Sibling: [Committed Durability Discipline](./storage-mode-committed.md) — gets `Versioned`-grade commit atomicity on the cheaper `SingleVersion` layout, for writes that don't need snapshot isolation
+- Sibling: [Commit Discipline](./storage-mode-committed.md) — gets `Versioned`-grade commit atomicity on the cheaper `SingleVersion` layout, for writes that don't need snapshot isolation
 - Sibling: [Revision](../../Revision/README.md) — the MVCC revision-chain subsystem `Versioned` writes append into
 - Parent feature: [Storage Modes](./README.md)
 

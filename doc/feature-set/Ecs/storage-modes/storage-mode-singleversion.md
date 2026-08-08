@@ -64,14 +64,16 @@ dbe.WriteTickFence(tickNumber);  // batches every dirty SingleVersion component 
 - Forgetting to call `WriteTickFence` silently degrades a `SingleVersion` component to `Transient`-like
   durability (no crash recovery) — it never corrupts data.
 - No MVCC isolation: last-writer-wins, and `tx.Rollback()` does **not** revert a `SingleVersion` write already
-  applied in-place.
+  applied in-place — *unless* the transaction was opened with the `Commit` discipline, which stages the write
+  and therefore does roll it back, in O(1). See the sub-feature below.
 - `ReadsSnapshot` is rejected at scheduler `Build()` time for `SingleVersion` components — use `Versioned` for
   snapshot reads.
 - Secondary B+Tree indexes and spatial structures are reconciled at the tick-fence boundary (deferred), not
   synchronously on every write.
-- Need atomicity and zero loss for one write without paying for snapshot isolation? See
-  [Committed Durability Discipline](./storage-mode-committed.md) — it escalates a `SingleVersion` write to
-  commit-time durability, closing the ≤1-tick loss window.
+- Need **rollback**, atomicity, or zero loss on one `SingleVersion` write without paying for snapshot isolation?
+  See [Commit Discipline](./storage-mode-committed.md). Because it stages the write instead of applying it in
+  place, it buys all three at once: `Rollback` reverts it, the write is all-or-nothing, and the ≤1-tick loss
+  window closes.
 
 ## 🧪 Tests
 
@@ -81,7 +83,7 @@ dbe.WriteTickFence(tickNumber);  // batches every dirty SingleVersion component 
 ## 🔗 Related
 
 - Code: `src/Typhon.Engine/Ecs/internals/DirtyBitmap.cs`, `src/Typhon.Engine/Ecs/internals/DirtyBitmapRing.cs`
-- Sub-feature: [Committed Durability Discipline](./storage-mode-committed.md)
+- Sub-feature: [Commit Discipline](./storage-mode-committed.md)
 - Sibling: [Durability Modes](../../Durability/durability-modes/README.md) — the separate UoW-level commit-durability spectrum; tick-fence durability here is a distinct, component-level mechanism
 - Parent feature: [Storage Modes](./README.md)
 

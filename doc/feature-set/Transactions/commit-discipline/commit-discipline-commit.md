@@ -1,5 +1,5 @@
 ---
-uid: feature-transactions-durability-discipline-durability-discipline-commit
+uid: feature-transactions-commit-discipline-commit-discipline-commit
 title: 'Commit Discipline (Variant-A Staging)'
 description: 'Atomic, zero-loss SingleVersion writes — durable and visible together at Commit(), with no revision chain.'
 ---
@@ -34,7 +34,7 @@ every `SingleVersion` write that transaction makes is staged the same way.
 
 ```csharp
 [Component("Game.Wallet", 1, StorageMode = StorageMode.SingleVersion,
-           DefaultDiscipline = DurabilityDiscipline.Commit)]   // optional: every tx touching this escalates
+           DefaultDiscipline = CommitDiscipline.Commit)]   // optional: every tx touching this escalates
 struct Wallet { public long Gold; }
 
 [Archetype]
@@ -45,14 +45,14 @@ partial class Player : Archetype<Player>
 }
 
 // Explicit escalation for one critical operation:
-using var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, DurabilityDiscipline.Commit);
+using var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit);
 ref var pos = ref tx.OpenMut(playerId).Write(Player.Pos);
 pos.X = teleportTarget.X;
 pos.Y = teleportTarget.Y;
 tx.Commit();                  // staged value WAL-logged then published — zero loss on crash
 
 // From inside a scheduled system, via the TickContext side-transaction idiom:
-using var side = ctx.CreateSideTransaction(DurabilityMode.Immediate, DurabilityDiscipline.Commit);
+using var side = ctx.CreateSideTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit);
 side.OpenMut(playerId).Write(Player.Wallet).Gold -= price;
 side.Commit();
 ```
@@ -94,9 +94,9 @@ side.Commit();
 
 ## 🔗 Related
 
-- Parent feature: [SingleVersion Durability Discipline](./README.md)
-- Sibling: [TickFence discipline (default)](./durability-discipline-tickfence.md)
+- Parent feature: [SingleVersion Commit Discipline](./README.md)
+- Sibling: [TickFence discipline (default)](./commit-discipline-tickfence.md)
 
-<!-- Deep dive: claude/overview/02-execution.md — Durability Discipline (SingleVersion) (#durability-discipline-singleversion), claude/design/Ecs/committed-storage-mode.md -->
-<!-- ADR: ADR-057 — Committed Durability Discipline — claude/adr/057-committed-durability-discipline.md -->
+<!-- Deep dive: claude/overview/02-execution.md — Commit Discipline (SingleVersion) (#commit-discipline-singleversion), claude/design/Ecs/committed-storage-mode.md -->
+<!-- ADR: ADR-057 — Commit Discipline — claude/adr/057-committed-durability-discipline.md -->
 <!-- Rules: claude/design/Durability/MinimalWal/07-rules.md — module CM -->

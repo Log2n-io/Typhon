@@ -1,10 +1,10 @@
 ---
 uid: feature-ecs-storage-modes-storage-mode-committed
-title: 'Committed Durability Discipline'
+title: 'Commit Discipline'
 description: 'Zero-loss, atomic commits on the SingleVersion layout — without paying for a Versioned revision chain.'
 ---
 
-# Committed Durability Discipline
+# Commit Discipline
 > Zero-loss, atomic commits on the SingleVersion layout — without paying for a Versioned revision chain.
 
 **Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Ecs](../README.md)
@@ -22,7 +22,7 @@ choice, not a schema change.
 
 ## ⚙️ How it works (in brief)
 
-`Commit` is a runtime `DurabilityDiscipline` (`TickFence` default, or `Commit`), set per transaction or
+`Commit` is a runtime `CommitDiscipline` (`TickFence` default, or `Commit`), set per transaction or
 side-transaction — not a new `StorageMode` and not a layout change. Under `Commit`, a write stages into a
 per-transaction arena instead of touching the cluster HEAD slot; at `Transaction.Commit()` the staged values are
 WAL-appended as ordinary durable records and only then published in place (HEAD memcpy plus exact index
@@ -34,7 +34,7 @@ discipline is uniform per transaction).
 
 ```csharp
 [Component("Game.Wallet", 1, StorageMode = StorageMode.SingleVersion,
-           DefaultDiscipline = DurabilityDiscipline.Commit)]   // optional: any tx touching Wallet escalates
+           DefaultDiscipline = CommitDiscipline.Commit)]   // optional: any tx touching Wallet escalates
 public struct Wallet { public long Gold; }
 
 [Archetype]
@@ -44,13 +44,13 @@ partial class Player : Archetype<Player>
 }
 
 // Explicit escalation for one critical operation:
-using var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, DurabilityDiscipline.Commit);
+using var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit);
 var e = tx.OpenMut(playerId);
 e.Write(Player.Wallet).Gold -= price;
 tx.Commit();                  // staged value WAL-logged + published atomically — zero loss on crash
 
 // From inside a scheduled system, via the side-transaction idiom:
-using var side = ctx.CreateSideTransaction(DurabilityMode.Immediate, DurabilityDiscipline.Commit);
+using var side = ctx.CreateSideTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit);
 side.OpenMut(playerId).Write(Player.Wallet).Gold += reward;
 side.Commit();
 ```
@@ -65,7 +65,7 @@ side.Commit();
 - Applies only to `StorageMode.SingleVersion` components — `Versioned` is always commit-scoped already (no
   benefit), `Transient` is never durable (the discipline knob is meaningless there).
 - Discipline is fixed per transaction: once any write escalates a transaction to `Commit` — explicitly, or
-  because a component declares `DefaultDiscipline = DurabilityDiscipline.Commit` — every `SingleVersion` write
+  because a component declares `DefaultDiscipline = CommitDiscipline.Commit` — every `SingleVersion` write
   in that transaction is commit-staged.
 - Read-your-own-writes works for point reads (`EntityRef.Read`/`Write`) inside the writing transaction. Bulk
   span reads (`ClusterRef.GetSpan<T>`) inside that same transaction do **not** see staged values — read HEAD
@@ -83,7 +83,7 @@ side.Commit();
 
 ## 🔗 Related
 
-- Also documented from the durability-mode angle: [Durability Modes — Committed Durability Discipline](../../Durability/durability-modes/committed-discipline.md)
+- Also documented from the durability-mode angle: [Durability Modes — Commit Discipline](../../Durability/durability-modes/committed-discipline.md)
 - Parent feature: [Storage Modes](./README.md)
 
 <!-- Deep dive: claude/design/Ecs/committed-storage-mode.md, claude/adr/057-committed-durability-discipline.md, claude/design/Durability/MinimalWal/05-committed-mode.md -->

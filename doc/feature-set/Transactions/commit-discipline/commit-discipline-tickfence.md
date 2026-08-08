@@ -1,5 +1,5 @@
 ---
-uid: feature-transactions-durability-discipline-durability-discipline-tickfence
+uid: feature-transactions-commit-discipline-commit-discipline-tickfence
 title: 'TickFence Discipline (Default)'
 description: 'The default, lowest-cost SingleVersion write — durable at the next tick fence, not at commit.'
 ---
@@ -46,7 +46,7 @@ pos.Y += velocity.Y * dt;
 tx.Commit();                  // ~40 ns write; value rides the next tick fence to the WAL
 
 // Equally explicit, if calling out the choice matters at the call site:
-using var tx2 = uow.CreateTransaction(discipline: DurabilityDiscipline.TickFence);
+using var tx2 = uow.CreateTransaction(discipline: CommitDiscipline.TickFence);
 ```
 
 ## ⚠️ Guarantees & limits
@@ -62,7 +62,7 @@ using var tx2 = uow.CreateTransaction(discipline: DurabilityDiscipline.TickFence
   either discipline — `TickFence` has no history to freeze to.
 - Mixing disciplines on the same component across different transactions is fine — `TickFence` and `Commit`
   writes to the same slot compose correctly at recovery (last-writer-wins by LSN).
-- A component declared `[Component(DefaultDiscipline = DurabilityDiscipline.Commit)]` cannot be written
+- A component declared `[Component(DefaultDiscipline = CommitDiscipline.Commit)]` cannot be written
   `TickFence`-style: the first write to it escalates the whole transaction to `Commit` (CM-02). Once any
   `TickFence` in-place write has already happened in that transaction, later escalation to `Commit` throws —
   pick the discipline before the first write.
@@ -77,8 +77,8 @@ using var tx2 = uow.CreateTransaction(discipline: DurabilityDiscipline.TickFence
 
 ## 🔗 Related
 
-- Parent feature: [SingleVersion Durability Discipline](./README.md)
-- Sibling: [Commit discipline (Variant-A staging)](./durability-discipline-commit.md)
+- Parent feature: [SingleVersion Commit Discipline](./README.md)
+- Sibling: [Commit discipline (Variant-A staging)](./commit-discipline-commit.md)
 
-<!-- Deep dive: claude/overview/02-execution.md — Durability Discipline (SingleVersion) (#durability-discipline-singleversion) -->
-<!-- ADR: ADR-057 — Committed Durability Discipline — claude/adr/057-committed-durability-discipline.md -->
+<!-- Deep dive: claude/overview/02-execution.md — Commit Discipline (SingleVersion) (#commit-discipline-singleversion) -->
+<!-- ADR: ADR-057 — Commit Discipline — claude/adr/057-committed-durability-discipline.md -->

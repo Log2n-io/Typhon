@@ -78,7 +78,7 @@ t1.Commit(ConflictHandler);   // result: A == 120, not 90 (ours) or 130 (theirs)
 - Baseline tracking is per `(transaction, entity, component)` and only meaningful across the lifetime of one
   transaction — it is not a general-purpose diff/version API.
 - Applies only to `StorageMode.Versioned` components — `SingleVersion`/`Committed`-discipline writes have no
-  revision chain to compare against (see [Committed Durability Discipline](../Ecs/storage-modes/storage-mode-committed.md)).
+  revision chain to compare against (see [Commit Discipline](../Ecs/storage-modes/storage-mode-committed.md)).
 
 ## 🧪 Tests
 
