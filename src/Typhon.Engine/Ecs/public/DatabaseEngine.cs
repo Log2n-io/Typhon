@@ -3385,8 +3385,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             MMF.SetPageChecksumVerification(_options.Resources.PageChecksumVerification);
         }
 
-        // Open + recovery (incl. the seal) are done — arm the checkpoint-time SPI persistence (#395 / CK-10). From here every steady-state checkpoint
-        // records the per-archetype segment SPIs so a consolidated cluster/EntityMap base is reachable on reopen after a hard crash.
+        // Arm the checkpoint-time SPI persistence (#395 / CK-10) for the paths that did NOT go through recovery — a clean reopen, or a fresh database. From
+        // here every steady-state checkpoint records the per-archetype segment SPIs so a consolidated cluster/EntityMap base is reachable on reopen after a
+        // hard crash. The crash path arms it earlier, before its seal, because the seal advances CheckpointLSN and reclaims the WAL and so must persist the
+        // SPIs in the same cycle (#715); this assignment is then a no-op for it.
         _archetypeSpiPersistArmed = true;
     }
 
@@ -3439,6 +3441,16 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // acknowledges lands at an LSN the previous session already used, and the next recovery discards the whole post-recovery window as
         // already-consolidated. The seal below then persists CheckpointLSN from this same frontier, so the two agree by construction.
         SeedWalFrontierAfterRecovery(Math.Max(result.MaxLsn, checkpointLsn));
+
+        // #715 / CK-10. Arm the checkpoint-time SPI persistence BEFORE the seal, so the seal's own ForceCheckpoint records the per-archetype segment SPIs
+        // alongside the data it is consolidating. Arming it after (its original position, at the end of InitializeArchetypes) left a window in which the seal
+        // had already advanced CheckpointLSN — and therefore reclaimed every WAL segment below it — while the metadata needed to NAVIGATE to the consolidated
+        // base was still unpersisted. "The first steady-state checkpoint then records them" assumes there is one: crash again before it and the WAL no longer
+        // holds the data while the data file cannot be reached, losing the entire recovered database with zero writes in between. That window opens at the
+        // moment a database is most likely to crash again — immediately after recovering from a crash.
+        //
+        // Safe here: the seal runs after apply, scrub, index rebuild and suspect resolution, so the segments are final when the hook fires at cycle start.
+        _archetypeSpiPersistArmed = true;
 
         // Phase 4 — SCRUB (03-recovery.md §6, D1): now that the WAL window is applied, collapse every Versioned revision chain
         // to its HEAD so the consolidated base carries no pre-crash MVCC history. Runs before the seal so its mutations are
