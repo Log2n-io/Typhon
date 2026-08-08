@@ -318,6 +318,7 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
     /// the call site indistinguishable from legitimately-zero data. Retention was rejected as the fix because it would let any caller degrade the engine-wide
     /// lock-free Versioned read path by holding an accessor too long; failing fast is the cheaper contract, so the assertion is now the throw.
     /// </remarks>
+    [VerifiesRule("SNAP-01")]
     [Test]
     public void AccessorReadingATrimmedVersionedRevision_ThrowsSnapshotExpired()
     {
@@ -355,6 +356,7 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
     /// transaction already makes, through the mechanism the accessor skips. Without this, "PointInTimeAccessor throws" would look like a limitation of MVCC
     /// rather than of the accessor.
     /// </remarks>
+    [VerifiesRule("SNAP-02")]
     [Test]
     public void ReadOnlyTransaction_KeepsItsSnapshotAcrossTheSameWrite()
     {
@@ -388,6 +390,7 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
     /// as one test rather than split: the pair is the point — B proves the newer snapshot is intact, which is what stops A's throw reading as a general
     /// breakage of the accessor.
     /// </remarks>
+    [VerifiesRule("SNAP-01")]
     [Test]
     public void TwoAccessorsAtDifferentTSNs_SeeDifferentSnapshots()
     {
@@ -673,6 +676,7 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
     /// "Independent" survives #672; "both readable" does not. The older accessor's revision is trimmed by the write between them, so what independence now
     /// means is that the two snapshots resolve differently — one raises, one reads — rather than both silently resolving to the same value.
     /// </remarks>
+    [VerifiesRule("SNAP-01")]
     [Test]
     public void MultipleAccessorsConcurrently_IndependentSnapshots()
     {
@@ -1058,6 +1062,7 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         }
     }
 
+    [VerifiesRule("SNAP-01")]
     [Test]
     public void MultipleSnapshotsSequential_MVCCVisibility()
     {

@@ -63,6 +63,7 @@ class SystemArchetypeTouchTests : TestBase<SystemArchetypeTouchTests>
     /// below would be measuring a system the emission never reaches, and would pass for the wrong reason.
     /// </summary>
     [TestCase(1)]
+    [VerifiesRule("BIND-01")]
     [TestCase(4)]
     public void ParallelClusterNativeSystem_IsBoundToItsOwnArchetype(int workerCount)
     {
@@ -108,6 +109,7 @@ class SystemArchetypeTouchTests : TestBase<SystemArchetypeTouchTests>
     /// </para>
     /// </remarks>
     [TestCase(1)]
+    [VerifiesRule("BIND-03")]
     [TestCase(4)]
     public void ParallelClusterNativeSystem_ReportsTheEntitiesItProcessed(int workerCount)
     {
@@ -187,6 +189,7 @@ class SystemArchetypeTouchTests : TestBase<SystemArchetypeTouchTests>
     /// </para>
     /// </remarks>
     [TestCase(1)]
+    [VerifiesRule("BIND-01")]
     [TestCase(4)]
     public void ParallelSystem_OnAnArchetypePopulatedAfterConstruction_StillBindsToIt(int workerCount)
     {

@@ -161,6 +161,7 @@ internal sealed class AxisArchetypesTests : TestBase<AxisArchetypesTests>
     /// entities to index — both of which would satisfy every other assertion here. Requiring the drop count to be non-zero is what makes this a test of the
     /// tolerated-conflict path rather than of any route that happens to avoid the throw.
     /// </remarks>
+    [VerifiesRule("RB-07")]
     [Test]
     public void SvWithUniqueIndex_AfterHardCrash_StillOpens()
     {

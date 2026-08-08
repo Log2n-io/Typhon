@@ -43,6 +43,7 @@ class ActiveClusterListPublicationTests
     }
 
     /// <summary>The removed order, shown faulting. This is the defect, not a hypothetical.</summary>
+    [VerifiesRule("CLUSTERWALK-02")]
     [Test]
     public void LoadingTheArrayBeforeTheCount_YieldsACountPastTheArray()
     {
@@ -59,6 +60,7 @@ class ActiveClusterListPublicationTests
     }
 
     /// <summary>The order every call site now uses, shown holding across the same interleaving.</summary>
+    [VerifiesRule("CLUSTERWALK-02")]
     [Test]
     public void LoadingTheCountBeforeTheArray_NeverYieldsACountPastTheArray()
     {
@@ -77,6 +79,7 @@ class ActiveClusterListPublicationTests
     /// The other half of the pairing: the writer must release the grown array BEFORE the count that indexes it, or an acquiring reader could pair a new
     /// count with an array it cannot see yet on a weak memory model.
     /// </summary>
+    [VerifiesRule("CLUSTERWALK-02")]
     [Test]
     public void TheGrownArrayIsPublishedBeforeTheCountThatIndexesIt()
     {
@@ -96,6 +99,7 @@ class ActiveClusterListPublicationTests
     }
 
     /// <summary>A removal must not leave a count above the live prefix in a way a reader can misuse.</summary>
+    [VerifiesRule("CLUSTERWALK-02")]
     [Test]
     public void RemovingFromTheActiveList_KeepsTheCountWithinTheArray()
     {
