@@ -190,6 +190,93 @@ public class OlcLatchTests
     }
 
     // ========================================
+    // IXW-02 — an obsolete node is never a legal write target (#716, #297, #679)
+    // ========================================
+
+    /// <remarks>
+    /// The whole of #716 in one assertion. Before the fix this returned TRUE: <c>TryWriteLock</c> consulted the locked bit alone, so a node a concurrent merge
+    /// had detached was a legal write target. The OLC fast paths hid it — they follow the lock with <c>ValidateVersionLocked</c>, which fails because the
+    /// obsolete bit lives inside the version word — but the pessimistic paths re-check business conditions instead, and a detached leaf satisfies "not full",
+    /// "no right sibling" and "keys in order" perfectly well. The insert then lands in a node unreachable from the root: the key is counted and lost.
+    /// </remarks>
+    [Test]
+    [CancelAfter(1000)]
+    public void TryWriteLock_Obsolete_ReturnsFalse()
+    {
+        int version = 0;
+        var latch = new OlcLatch(ref version);
+
+        latch.TryWriteLock();
+        latch.MarkObsolete();
+        latch.WriteUnlock();   // unlocked, but obsolete — the state a merged-away node rests in until its epoch passes
+
+        var writer = new OlcLatch(ref version);
+        Assert.That(writer.IsLocked, Is.False, "control: the node is genuinely unlocked, so a refusal cannot be blamed on contention");
+        Assert.That(writer.IsObsolete, Is.True);
+        Assert.That(writer.TryWriteLock(), Is.False, "an obsolete node must never be acquirable for write (IXW-02)");
+        Assert.That(writer.IsLocked, Is.False, "the refused acquisition must not have set the locked bit");
+    }
+
+    /// <remarks>Guards the guard: a version word carrying only the obsolete bit must not be mistaken for "locked" and vice versa.</remarks>
+    [Test]
+    [CancelAfter(1000)]
+    public void TryWriteLock_NotObsolete_StillAcquires()
+    {
+        int version = 0;
+        var latch = new OlcLatch(ref version);
+
+        latch.TryWriteLock();
+        latch.WriteUnlock();
+
+        var writer = new OlcLatch(ref version);
+        Assert.That(writer.TryWriteLock(), Is.True, "refusing obsolete must not refuse a live node");
+    }
+
+    /// <remarks>
+    /// The one deliberate exception. The four latch-coupled SMO sibling sites are mid-algorithm with no restart point, so they admit an obsolete node — but the
+    /// fact is reported rather than silent, which is what makes the residual measurable (<c>BTree.ObsoleteSmoSiblingLocks</c>).
+    /// </remarks>
+    [Test]
+    [CancelAfter(1000)]
+    public void TryWriteLockOnSmoPath_Obsolete_AcquiresAndReportsIt()
+    {
+        int version = 0;
+        var latch = new OlcLatch(ref version);
+
+        latch.TryWriteLock();
+        latch.MarkObsolete();
+        latch.WriteUnlock();
+
+        var writer = new OlcLatch(ref version);
+        Assert.That(writer.TryWriteLockOnSmoPath(out var wasObsolete), Is.True);
+        Assert.That(wasObsolete, Is.True, "the SMO path admits an obsolete node, but must never do so silently");
+    }
+
+    [Test]
+    [CancelAfter(1000)]
+    public void TryWriteLockOnSmoPath_Live_AcquiresAndReportsNotObsolete()
+    {
+        int version = 0;
+        var latch = new OlcLatch(ref version);
+
+        Assert.That(latch.TryWriteLockOnSmoPath(out var wasObsolete), Is.True);
+        Assert.That(wasObsolete, Is.False);
+    }
+
+    /// <remarks>The SMO escape hatch relaxes the OBSOLETE rule only — mutual exclusion between writers is not negotiable.</remarks>
+    [Test]
+    [CancelAfter(1000)]
+    public void TryWriteLockOnSmoPath_Locked_ReturnsFalse()
+    {
+        int version = 0;
+        var latch = new OlcLatch(ref version);
+        latch.TryWriteLock();
+
+        var contender = new OlcLatch(ref version);
+        Assert.That(contender.TryWriteLockOnSmoPath(out _), Is.False);
+    }
+
+    // ========================================
     // Concurrent OlcLatch test
     // ========================================
 

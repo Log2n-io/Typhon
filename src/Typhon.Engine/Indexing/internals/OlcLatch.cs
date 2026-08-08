@@ -77,13 +77,26 @@ internal readonly ref struct OlcLatch
     // --- Writer API ---
 
     /// <summary>
-    /// Acquire exclusive write lock. Returns false on contention; emits a Concurrency:OlcLatch:WriteLockAttempt trace event on failure.
+    /// Acquire exclusive write lock. Returns false when the node is locked by another writer OR obsolete; emits a Concurrency:OlcLatch:WriteLockAttempt trace
+    /// event on failure. Callers distinguish the two with <see cref="IsObsolete"/>: locked is transient (spin or restart), obsolete is permanent (restart only).
     /// </summary>
+    /// <remarks>
+    /// Issue #716 (rule IXW-02). This used to gate on the locked bit alone, which made a node a concurrent merge had already detached a legal write target. The
+    /// OLC fast paths survived that by accident: they follow the lock with <see cref="ValidateVersionLocked"/>, and since <see cref="MarkObsolete"/> sets a bit
+    /// INSIDE the version word, the comparison fails and the operation restarts. Paths that re-check business conditions instead of the version — a leaf with
+    /// room, no right sibling, keys in order — got no such protection, and a detached node satisfies all three. The insert then lands in a node unreachable from
+    /// the root: the key is silently lost, which is #297's and #679's exact symptom.
+    /// <para>
+    /// Refusing here makes the invariant STRUCTURAL rather than something each of seventeen call sites has to remember. <see cref="MarkObsolete"/> requires the
+    /// write lock, so a node that is not obsolete at the instant of this CAS cannot become obsolete while the acquisition holds — the check is not merely a
+    /// hint. The one deliberate exception is <see cref="TryWriteLockOnSmoPath"/>; see its remarks for why it exists and what bounds it.
+    /// </para>
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool TryWriteLock()
     {
         int v = _version;
-        if ((v & 0b1) != 0)
+        if ((v & 0b11) != 0)  // locked (bit 0) or obsolete (bit 1)
         {
             TyphonEvent.EmitConcurrencyOlcLatchWriteLockAttempt((uint)v, false);
             return false;
@@ -92,6 +105,42 @@ internal readonly ref struct OlcLatch
         {
             return true;
         }
+        TyphonEvent.EmitConcurrencyOlcLatchWriteLockAttempt((uint)v, false);
+        return false;
+    }
+
+    /// <summary>
+    /// Acquire exclusive write lock, admitting an obsolete node. Reports through <paramref name="wasObsolete"/> whether the acquired node was already detached.
+    /// </summary>
+    /// <remarks>
+    /// The four latch-coupled SMO sibling sites (split spill in <c>InsertIterative</c> Phase 3, borrow/merge in <c>RemoveIterative</c> Phase 3) are mid-algorithm
+    /// with no restart point: the leaf mutation has already happened and the promoted key or the merge MUST be propagated. They also cannot simply skip a sibling
+    /// — <c>HandleChildMerge</c> resolves it a second time internally and its merge branch dereferences it, so dropping it would trade a rare lost key for a
+    /// certain null dereference.
+    /// <para>
+    /// What bounds them instead is that both phases hold the write lock on the sibling's parent, version-validated against the descent, so no merge can be
+    /// detaching a TRUE sibling underneath them. A COUSIN (the left/right edge case, whose parent is a different node this operation does not hold) is not
+    /// covered by that argument, which is why the outcome is reported and counted (<c>BTree.ObsoleteSmoSiblingLocks</c>) rather than assumed away. Measured over
+    /// the full gate suite the counter reads 0; if it ever does not, the residual is real and the fix is to make the sibling droppable, which needs
+    /// <c>NodeRelatives.HasTrue*Sibling</c> to become mutable.
+    /// </para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool TryWriteLockOnSmoPath(out bool wasObsolete)
+    {
+        int v = _version;
+        if ((v & 0b1) != 0)
+        {
+            wasObsolete = false;
+            TyphonEvent.EmitConcurrencyOlcLatchWriteLockAttempt((uint)v, false);
+            return false;
+        }
+        if (Interlocked.CompareExchange(ref _version, v | 0b1, v) == v)
+        {
+            wasObsolete = (v & 0b10) != 0;
+            return true;
+        }
+        wasObsolete = false;
         TyphonEvent.EmitConcurrencyOlcLatchWriteLockAttempt((uint)v, false);
         return false;
     }
@@ -113,11 +162,17 @@ internal readonly ref struct OlcLatch
     /// <summary>
     /// Mark node as obsolete. Must hold write lock.
     /// </summary>
+    /// <remarks>
+    /// Release store, not a plain one. The write lock serialises WRITERS, so the read-modify-write needs no interlock — but readers observe this word with
+    /// <c>Volatile.Read</c> outside the lock, and since #716 <see cref="TryWriteLock"/> refuses on this bit, a writer's acquisition decision now depends on it
+    /// too. On arm64 a plain store may be observed after stores the merge made before it; publishing with release keeps the bit ordered behind them.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void MarkObsolete()
     {
-        _version |= 0b10;
-        TyphonEvent.EmitConcurrencyOlcLatchMarkObsolete((uint)_version);
+        var v = _version | 0b10;
+        Volatile.Write(ref _version, v);
+        TyphonEvent.EmitConcurrencyOlcLatchMarkObsolete((uint)v);
     }
 
     /// <summary>
