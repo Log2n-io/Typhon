@@ -1934,23 +1934,27 @@ public sealed partial class TyphonRuntime : IDisposable
 
             var cs = _systemClusterStates[i];
 
-            // Late-spawn recovery: if the archetype was empty when ResolveChangeFilters ran (construction time), _systemClusterStates[i] is null. Re-evaluate
-            // now — entities may have been spawned between construction and the first tick (e.g. via OnFirstTick). This check runs once per tick per
-            // tier-filtered system with a null slot; the inner archetype scan is O(registered archetypes) ≈ O(10), negligible.
-            if (cs == null && sys.IsParallelQuery && sys.InputFactory != null)
+            // Late-spawn recovery: if the archetype had no ClusterState at all when ResolveChangeFilters ran, _systemClusterStates[i] is null. Re-evaluate
+            // now — the state may have been created between construction and the first tick. This check runs once per tick per tier-filtered system with a
+            // null slot; the inner archetype scan is O(registered archetypes) ≈ O(10), negligible.
+            //
+            // #662 again: this used to take the FIRST cluster-eligible archetype it found rather than the system's own view archetype — the exact defect
+            // #662 fixed at the construction site, left behind in the recovery path. In any schema with more than one cluster archetype it hands the system
+            // another archetype's cluster ids, which is a page-index-out-of-range throw when the counts differ and silent wrong work when they match. It
+            // also never set `_systemArchetypeIds`, so a system rescued here kept gate 1 of the #327 touch rollup shut for the rest of the session.
+            if (cs == null && sys.IsParallelQuery && sys.InputFactory != null && _systemViews[i] != null)
             {
-                foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+                var viewArchetypeId = _systemViews[i].QueriedArchetypeId;
+                if (viewArchetypeId < Engine._archetypeStates.Length)
                 {
-                    if (meta.IsClusterEligible && meta.ArchetypeId < Engine._archetypeStates.Length)
+                    var meta = ArchetypeRegistry.GetMetadata(viewArchetypeId);
+                    var es = Engine._archetypeStates[viewArchetypeId];
+                    if (meta is { IsClusterEligible: true } && es?.ClusterState != null)
                     {
-                        var es = Engine._archetypeStates[meta.ArchetypeId];
-                        if (es?.ClusterState is { ActiveClusterCount: > 0 })
-                        {
-                            cs = es.ClusterState;
-                            cs.TierIndex ??= new TierClusterIndex();
-                            _systemClusterStates[i] = cs;
-                            break;
-                        }
+                        cs = es.ClusterState;
+                        cs.TierIndex ??= new TierClusterIndex();
+                        _systemClusterStates[i] = cs;
+                        _systemArchetypeIds[i] = viewArchetypeId;
                     }
                 }
             }
