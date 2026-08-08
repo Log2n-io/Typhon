@@ -88,7 +88,7 @@ class ActiveClusterListPublicationTests
         Assert.That(cs.ActiveClusterCount, Is.LessThanOrEqualTo(cs.ActiveClusterIds.Length));
         Assert.That(cs.ActiveClusterIds[capacity], Is.EqualTo(9999), "the appended element must be present in the published array");
 
-        // Every prior element survived the copy — the manual grow copies `count` elements rather than relying on Array.Resize.
+        // Every prior element survived the growth.
         for (var i = 0; i < capacity; i++)
         {
             Assert.That(cs.ActiveClusterIds[i], Is.EqualTo(i), $"element {i} was lost across the resize");

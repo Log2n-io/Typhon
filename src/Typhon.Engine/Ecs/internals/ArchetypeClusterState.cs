@@ -2616,18 +2616,16 @@ internal sealed unsafe class ArchetypeClusterState
     /// </remarks>
     public void AddToActiveList(int chunkId)
     {
-        var ids = ActiveClusterIds;
-        var count = ActiveClusterCount;
-        if (count >= ids.Length)
+        if (ActiveClusterCount >= ActiveClusterIds.Length)
         {
-            var grown = new int[ids.Length * 2];
-            Array.Copy(ids, grown, count);
-            ids = grown;
-            Volatile.Write(ref ActiveClusterIds, grown);
+            Array.Resize(ref ActiveClusterIds, ActiveClusterIds.Length * 2);
         }
 
-        ids[count] = chunkId;
-        Volatile.Write(ref ActiveClusterCount, count + 1);
+        // The array store above is a plain store, deliberately: the release below is what orders it. A Volatile.Write cannot sink a preceding store past
+        // itself, so a reader that ACQUIRES this count is guaranteed to see the grown array. Caching the array in a local first — the obvious way to write
+        // this — is what must not be done: it widens the writer's own (array, count) window and produced an IndexOutOfRange in parallel spawn.
+        ActiveClusterIds[ActiveClusterCount] = chunkId;
+        Volatile.Write(ref ActiveClusterCount, ActiveClusterCount + 1);
         // Issue #231: any change to the active cluster set invalidates the tier index.
         ClusterSetVersion++;
         // Issue #233: ensure dormancy arrays cover the new chunkId, initialize to Active/0.
