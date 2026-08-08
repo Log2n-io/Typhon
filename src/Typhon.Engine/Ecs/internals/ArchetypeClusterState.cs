@@ -3261,9 +3261,20 @@ internal sealed unsafe class ArchetypeClusterState
     /// Rebuild Versioned component HEAD values in cluster slots from revision chains.
     /// Called on database reopen when the cluster slot WAL might be stale (crash between commit and tick fence).
     /// For each occupied entity, walks the revision chain to find the HEAD and copies its value to the cluster slot.
+    /// Returns the number of occupied (entity, Versioned slot) pairs it could NOT rebuild — see <paramref name="skips"/>.
     /// </summary>
-    public void RebuildVersionedHeadFromChain(ArchetypeMetadata meta, ArchetypeEngineState engineState, ChangeSet changeSet)
+    /// <param name="meta">Metadata of the archetype being rebuilt.</param>
+    /// <param name="engineState">Per-archetype engine state; supplies the EntityMap and the per-slot ComponentTables.</param>
+    /// <param name="changeSet">ChangeSet the rebuilt slot writes are tracked in.</param>
+    /// <param name="skips">
+    /// Receives a breakdown of the pairs this pass gave up on. Each is a slot left holding whatever was in it — on a fresh reopen, zero. #688 is that outcome
+    /// reaching a caller as if it were committed state: <c>IsValid</c> passes, the rebuild count is non-zero, and the value is silently wrong. The rebuild
+    /// cannot repair these — the chain it needs is genuinely not reachable — but it can stop being quiet about them, which is the difference between a
+    /// diagnosable defect and one that took a 1-in-4 arm64 nightly to notice.
+    /// </param>
+    public void RebuildVersionedHeadFromChain(ArchetypeMetadata meta, ArchetypeEngineState engineState, ChangeSet changeSet, out VersionedHeadRebuildSkips skips)
     {
+        skips = default;
         if (meta.VersionedSlotMask == 0)
         {
             return;
@@ -3313,11 +3324,27 @@ internal sealed unsafe class ArchetypeClusterState
 
                     // Read entity key from cluster
                     long entityPK = *(long*)(clusterBase + Layout.EntityIdsOffset + slotIndex * 8);
+
+                    // C3 (#680's review, applied here per #688): a LIVE cluster slot always carries a non-zero entity id, so a zero at an occupied slot proves
+                    // the geometry being read through is wrong — whatever the cause. Elsewhere (ClusterMigration) a zero here is a legitimate race with a
+                    // concurrent clear and is skipped; that defence does not apply on this path, which runs single-threaded at OPEN before any transaction
+                    // exists. Loud, because the alternative is serving a zeroed component from a reopened database as if it were committed state.
+                    if (entityPK == 0)
+                    {
+                        throw new CorruptionException(meta.Name, chunkId,
+                            $"cluster slot {slotIndex} is marked occupied but carries entity id 0 while rebuilding Versioned HEADs at open — "
+                            + "the cluster geometry being read does not match the occupancy bitmap");
+                    }
+
                     long entityKey = EntityId.FromRaw(entityPK).EntityKey;
 
                     // Read ClusterEntityRecord from EntityMap to get compRevFirstChunkId
                     if (!engineState.EntityMap.TryGet(entityKey, recordBuf, ref mapAccessor))
                     {
+                        // The entity is in the cluster but not in the EntityMap. Its Versioned slots keep whatever they held — zero on a fresh reopen — and
+                        // that value is then served as committed state. RB-01's ordering caveat is the known way to get here: on the crash path the loaded
+                        // EntityMap is not yet trusted, and a mixed cluster archetype runs this pass before the map is rebuilt.
+                        skips.EntityNotInMap++;
                         continue;
                     }
 
@@ -3333,6 +3360,9 @@ internal sealed unsafe class ArchetypeClusterState
                         int compRevFirstChunkId = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(recordBuf, vi);
                         if (compRevFirstChunkId == 0)
                         {
+                            // No chain root recorded for this Versioned slot. Legitimate for a slot never written; indistinguishable, from here, from a record
+                            // whose root was lost — which is why it is counted rather than assumed benign.
+                            skips.NoChainRoot++;
                             continue;
                         }
 
@@ -3341,6 +3371,8 @@ internal sealed unsafe class ArchetypeClusterState
                         var chainResult = RevisionChainReader.WalkChain(ref compRevAccessor, compRevFirstChunkId, long.MaxValue);
                         if (chainResult.IsFailure)
                         {
+                            // A chain root exists and the walk failed. Never benign: the slot keeps its stale or zero value with no other signal.
+                            skips.ChainWalkFailed++;
                             continue;
                         }
 

@@ -453,6 +453,16 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <see cref="InitializeArchetypes"/>. 0 on a trusted (clean) reopen; &gt;0 after a crash or on a legacy database.</summary>
     internal int LastOpenVersionedHeadRebuildCount;
 
+    /// <summary>
+    /// Diagnostic + test oracle: the (entity, Versioned slot) pairs the last open's HEAD rebuild could NOT resolve, summed across archetypes. Expected 0.
+    /// </summary>
+    /// <remarks>
+    /// Non-zero means a reopened database is serving at least one Versioned component from a cluster slot the rebuild never filled — zero on a fresh reopen —
+    /// with nothing else to say so: <c>IsValid</c> passes and <see cref="LastOpenVersionedHeadRebuildCount"/> is non-zero, so every other signal reads healthy.
+    /// That is #688. This does not repair those pairs; it makes them countable, and a warning is logged when the count is non-zero.
+    /// </remarks>
+    internal VersionedHeadRebuildSkips LastOpenVersionedHeadRebuildSkips;
+
     /// <summary>Diagnostic + test oracle: the number of archetypes whose per-archetype B+Tree indexes were rebuilt from a cluster scan during the last
     /// <see cref="InitializeArchetypes"/> instead of being loaded from the persisted chunk-0 directory. 0 when every index segment reloaded. Lets a test
     /// assert it is exercising the LOAD path (<c>FindInDirectory</c>) and not the create-and-rebuild path, which resolves keys differently (#657).</summary>
@@ -2750,6 +2760,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // is independent of CheckpointLSN, so a bulk-generated DB (CheckpointLSN == 0) is trusted too. The on-disk flag was
         // already cleared in the ctor, before registration could mutate anything (CS-02, #583); this reads the value captured there.
         LastOpenVersionedHeadRebuildCount = 0;
+        LastOpenVersionedHeadRebuildSkips = default;
         LastOpenClusterIndexRebuildCount = 0;
         _headsTrusted = _cleanShutdownAtOpen
             && (_migratedComponents == null || _migratedComponents.Count == 0);
@@ -3335,7 +3346,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                             {
                                 using var vEpoch = EpochGuard.Enter(EpochManager);
                                 var vStart = Stopwatch.GetTimestamp();
-                                clusterState.RebuildVersionedHeadFromChain(meta, _archetypeStates[meta.ArchetypeId], changeSet);
+                                clusterState.RebuildVersionedHeadFromChain(meta, _archetypeStates[meta.ArchetypeId], changeSet, out var headSkips);
+                                NoteVersionedHeadRebuildSkips(meta, in headSkips);
                                 versionedHeadTicks += Stopwatch.GetTimestamp() - vStart;
                                 LastOpenVersionedHeadRebuildCount++;
                             }
@@ -4274,7 +4286,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // Order matters. The loop above established WHERE each entity lives; the slots themselves are still zeroed, because the component bytes live in the
         // revision chains. Fill the HEADs from those chains first, then build the indexes over real values — indexing first yields one entry per zeroed slot.
-        clusterState.RebuildVersionedHeadFromChain(meta, state, cs);
+        clusterState.RebuildVersionedHeadFromChain(meta, state, cs, out var headSkips);
+        NoteVersionedHeadRebuildSkips(meta, in headSkips);
 
         // Every entity just moved to a new (clusterChunkId, slotIndex), and a per-archetype index entry IS a cluster position, so any tree that survived the
         // reopen now points at the old geometry. This scan also covers a component that merely GAINED an index: its tree is created empty, and this fills it —
@@ -4486,7 +4499,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             try
             {
                 using var vEpoch = EpochGuard.Enter(EpochManager);
-                clusterState.RebuildVersionedHeadFromChain(meta, state, changeSet);
+                clusterState.RebuildVersionedHeadFromChain(meta, state, changeSet, out var headSkips);
+                NoteVersionedHeadRebuildSkips(meta, in headSkips);
                 LastOpenVersionedHeadRebuildCount++;
             }
             finally
@@ -5155,6 +5169,24 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// Index entries dropped during this open's rebuilds because the recovered data could not satisfy a UNIQUE constraint (#710). Zero on a healthy open.
     /// </summary>
     internal int LastOpenUniqueIndexRebuildConflicts { get; private set; }
+
+    /// <summary>Accumulate one archetype's un-rebuilt HEAD pairs and log them, so the silent case in #688 leaves a trace (see the field's remarks).</summary>
+    private void NoteVersionedHeadRebuildSkips(ArchetypeMetadata meta, in VersionedHeadRebuildSkips skips)
+    {
+        if (skips.Total <= 0)
+        {
+            return;
+        }
+
+        LastOpenVersionedHeadRebuildSkips.Add(in skips);
+        LogVersionedHeadRebuildSkips(meta?.ArchetypeType?.Name ?? meta?.ArchetypeId.ToString() ?? "<unknown>",
+            skips.Total, skips.EntityNotInMap, skips.NoChainRoot, skips.ChainWalkFailed);
+    }
+
+    [LoggerMessage(LogLevel.Warning,
+        "Open: archetype {archetype} — {total} Versioned HEAD slot(s) left un-rebuilt (entityNotInMap {entityNotInMap}, noChainRoot {noChainRoot}, "
+        + "chainWalkFailed {chainWalkFailed}). Those slots serve whatever they already held, which on a fresh reopen is zero.")]
+    private partial void LogVersionedHeadRebuildSkips(string archetype, int total, int entityNotInMap, int noChainRoot, int chainWalkFailed);
 
     [LoggerMessage(LogLevel.Information,
         "Open: total {totalMs:F0} ms — engineConstruct {engineConstructMs:F0} ms (incl. WAL recovery + system-schema load), schemaDllLoad {schemaDllMs:F0} ms, initializeArchetypes {initArchetypesMs:F0} ms")]
