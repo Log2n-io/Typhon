@@ -95,9 +95,13 @@ class SystemInputViewLivenessTests : TestBase<SystemInputViewLivenessTests>
     /// publishes membership to it. Making this green needs direction 1 of #718 — a lifecycle-level notification channel views subscribe to by archetype —
     /// which is a design change to the view subsystem. Rewriting it to call Refresh() first would make it assert that RefreshPull works, which was never in
     /// doubt.
+    /// <para>
+    /// Tracked as #722 since #718 closed with the system-input half. The parent's title is about systems and that part is fixed; this is the residual, split
+    /// out rather than kept alive on a closed issue.
+    /// </para>
     /// </remarks>
     [Test]
-    [Ignore("#718 — a pull View nobody refreshes is still frozen; needs the lifecycle notification channel (direction 1), not the per-tick refresh.")]
+    [Ignore("#722 — a pull View nobody refreshes is still frozen; needs the lifecycle notification channel (direction 1), not the per-tick refresh.")]
     public void ViewCreatedBeforeTheSpawns_ConvergesWithOneCreatedAfter()
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
