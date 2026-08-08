@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 
@@ -51,19 +51,6 @@ internal sealed class ClusterIndexMatrixTests : TestBase<ClusterIndexMatrixTests
     /// <summary>Cells whose index permits duplicates — the only ones where "the siblings at this key survive" means anything.</summary>
     public static IEnumerable<TestCaseData> MultiValueCells() =>
         EngineAxes.PairwiseWhere(c => AxisArchetypes.SupportsBase(c) && c.Reopen == ReopenKind.None && c.Index == IndexShape.AllowMultiple);
-
-    /// <summary>
-    /// Indexed cells MINUS the mixed-publication-timing shapes, which #711 breaks. Only the behaviours that stage a KEY MOVE narrow this way — spawn and
-    /// destroy-without-a-move pass on every shape and keep their full cell set, so the exclusion is as small as the bug is.
-    /// </summary>
-    public static IEnumerable<TestCaseData> KeyMoveCells() =>
-        EngineAxes.PairwiseWhere(c => AxisArchetypes.SupportsBase(c) && c.Reopen == ReopenKind.None
-            && c.Index != IndexShape.None && !AxisArchetypes.MixesPublicationTimings(c));
-
-    /// <summary>Duplicate-key cells, minus #711's shapes, for the same reason.</summary>
-    public static IEnumerable<TestCaseData> MultiValueKeyMoveCells() =>
-        EngineAxes.PairwiseWhere(c => AxisArchetypes.SupportsBase(c) && c.Reopen == ReopenKind.None
-            && c.Index == IndexShape.AllowMultiple && !AxisArchetypes.MixesPublicationTimings(c));
 
     private sealed class OracleVisitor : ICellVisitor<(DatabaseEngine Dbe, string When), bool>
     {
@@ -191,7 +178,7 @@ internal sealed class ClusterIndexMatrixTests : TestBase<ClusterIndexMatrixTests
     }
 
     [Test]
-    [TestCaseSource(nameof(KeyMoveCells))]
+    [TestCaseSource(nameof(IndexedCells))]
     public void MutateAndDestroy_InOneTransaction_LeaveTheIndexAgreeing(Cell cell)
     {
         // The ordering hazard: a write stages a key move and the destroy then has to remove the entry the move would
@@ -242,7 +229,7 @@ internal sealed class ClusterIndexMatrixTests : TestBase<ClusterIndexMatrixTests
     }
 
     [Test]
-    [TestCaseSource(nameof(MultiValueKeyMoveCells))]
+    [TestCaseSource(nameof(MultiValueCells))]
     public void RepeatedMovesAcrossDuplicateKeys_KeepTheIndexAgreeing(Cell cell)
     {
         // ClusterMultiValueIndexTests.SvMultiValueMutation_AtFence_RepeatedMovesKeepBufferIntact pinned this on one
@@ -281,19 +268,20 @@ internal sealed class ClusterIndexMatrixTests : TestBase<ClusterIndexMatrixTests
         AssertOracle(dbe, cell, $"after spawning {ManyEntities} across more than one cluster");
     }
 
-    // ── #711, quarantined ───────────────────────────────────────────────────────────────────────────────────────────
+    // ── #711 ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// #711 — on an archetype whose components publish at different times, a staged key move plus a destroy in one
-    /// transaction leaves the secondary index disagreeing with the data. Quarantined rather than deleted: it is the
-    /// regression lock for when #711 is fixed, and it fails today for exactly the reason the issue documents.
+    /// #711 — a destroy in the same transaction as ANY sibling write must not leave the secondary index holding the released slot.
     /// </summary>
+    /// <remarks>
+    /// The shadow BITMAP is per-entity and is set by a write to any component, but the shadow ENTRIES cover only indexed NON-Versioned slots. The destroy
+    /// used to read the bitmap as "the fence will remove all my index entries" and skip removal wholesale, so a Versioned slot's entry was handed to a fence
+    /// that never had it. This is the shape the issue documents: mutate the indexed field and destroy, on an archetype mixing publication timings.
+    /// </remarks>
     [Test]
-    [Category("Quarantine")]
     public void MixedPublicationTimings_MutateAndDestroy_LeaveTheIndexAgreeing()
     {
         var cell = new Cell(StorageShape.VerPlusTransient, DurabilityMode.Immediate, IndexShape.AllowMultiple, ReopenKind.None);
-        Assert.That(AxisArchetypes.MixesPublicationTimings(cell), Is.True, "precondition: this is one of #711's shapes");
 
         using var dbe = Open(cell);
         var ids = Seed(dbe, cell, 16);
@@ -307,5 +295,53 @@ internal sealed class ClusterIndexMatrixTests : TestBase<ClusterIndexMatrixTests
 
         Fence(dbe);
         AssertOracle(dbe, cell, "#711 — after mutate-then-destroy on a mixed-timing archetype");
+    }
+
+    /// <summary>
+    /// #711, the sharper half: writing ONLY the UNINDEXED Transient sibling and destroying leaves the same corruption. There is no key move anywhere in this
+    /// transaction, which is what proves the trigger is the shadow bit the sibling sets and not the mutation of an indexed field.
+    /// </summary>
+    /// <remarks>
+    /// Worth its own case because it contradicts the issue's title. Anyone reading "mutate-then-destroy" would reach for a fix that reconciles the key move,
+    /// and such a fix passes the case above while leaving this one red. Its twin below — updating only the INDEXED component — passed even before the fix,
+    /// and the pair together is the actual boundary.
+    /// </remarks>
+    [Test]
+    public void DestroyAfterWritingOnlyAnUnindexedSibling_LeavesTheIndexAgreeing()
+    {
+        var cell = new Cell(StorageShape.VerPlusTransient, DurabilityMode.Immediate, IndexShape.AllowMultiple, ReopenKind.None);
+
+        using var dbe = Open(cell);
+        var ids = Seed(dbe, cell, 16);
+
+        using (var t = dbe.CreateQuickTransaction(cell.Durability, cell.Discipline))
+        {
+            t.OpenMut(ids[3]).Write(AxVerTrMulti.S) = new AxTrCore { Key = 900, Bucket = 900, Weight = 900, Tag = 900 };
+            t.Destroy(ids[3]);
+            Assert.That(t.Commit(), Is.True);
+        }
+
+        Fence(dbe);
+        AssertOracle(dbe, cell, "#711 — destroy after writing only the unindexed Transient sibling");
+    }
+
+    /// <summary>#711's control: writing only the INDEXED Versioned component and destroying. Green before the fix — kept so the pair states the boundary.</summary>
+    [Test]
+    public void DestroyAfterWritingOnlyTheIndexedComponent_LeavesTheIndexAgreeing()
+    {
+        var cell = new Cell(StorageShape.VerPlusTransient, DurabilityMode.Immediate, IndexShape.AllowMultiple, ReopenKind.None);
+
+        using var dbe = Open(cell);
+        var ids = Seed(dbe, cell, 16);
+
+        using (var t = dbe.CreateQuickTransaction(cell.Durability, cell.Discipline))
+        {
+            t.OpenMut(ids[3]).Write(AxVerTrMulti.P) = new AxVerMulti { Key = 900, Bucket = 900, Weight = 900, Tag = 900 };
+            t.Destroy(ids[3]);
+            Assert.That(t.Commit(), Is.True);
+        }
+
+        Fence(dbe);
+        AssertOracle(dbe, cell, "#711 — destroy after writing only the indexed Versioned component");
     }
 }

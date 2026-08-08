@@ -469,14 +469,21 @@ public unsafe ref struct EntityRef
     {
         int entityIndex = _clusterChunkId * 64 + _clusterSlotIndex;
 
-        // Versioned slots are skipped: their indexes are updated at commit time, not at the fence.
-        CaptureIndexedSlots(clusterState.IndexSlots, _clusterBase, entityIndex, _archetype.VersionedSlotMask);
+        // Skip every slot whose index is maintained at COMMIT rather than at the fence — Versioned always, and SingleVersion too when this transaction runs
+        // under Commit discipline (its writes are staged and reconciled by PublishStagedCommitWrites). Capturing a commit-maintained slot is not merely
+        // wasted work: the fence would then apply a SECOND Move for it, from a pre-write OldKey the commit publish has already moved away from, which
+        // corrupts the entry rather than refreshing it (#711, the SvPlusTransient+Commit half).
+        //
+        // This mask MUST stay the exact complement of the one the destroy path removes inline — see Transaction.FlushEcsPendingOperations. The two
+        // disagreeing is what #711 was.
+        var skipMask = (ushort)~_archetype.FenceMaintainedSlotsUnder(_accessor.Discipline);
+        CaptureIndexedSlots(clusterState.IndexSlots, _clusterBase, entityIndex, skipMask);
 
         // A PURE-Transient archetype has no second base — _clusterBase already IS the Transient one (see the field comment on _transientClusterBase), so it
         // stays null here. Passing it straight through hit CaptureIndexedSlots' null guard and captured NOTHING, leaving the tree on the pre-mutation key for
         // the entity's whole lifetime: spawn indexed correctly, every later in-place write was invisible to the index.
         byte* transientBase = _transientClusterBase != null ? _transientClusterBase : _clusterBase;
-        CaptureIndexedSlots(clusterState.TransientIndexSlots, transientBase, entityIndex, _archetype.VersionedSlotMask);
+        CaptureIndexedSlots(clusterState.TransientIndexSlots, transientBase, entityIndex, skipMask);
     }
 
     /// <summary>

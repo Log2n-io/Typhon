@@ -2889,6 +2889,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             meta.VersionedSlotCount = isClusterEligible ? (byte)BitOperations.PopCount(versionedSlotMask) : (byte)0;
             meta.TransientSlotMask = isClusterEligible ? transientSlotMask : (ushort)0;
             meta.TransientSlotCount = isClusterEligible ? (byte)BitOperations.PopCount(transientSlotMask) : (byte)0;
+            // Every declared slot that is not Versioned — i.e. SingleVersion and Transient. Bounded to ComponentCount rather than left as ~mask so the spare
+            // high bits cannot make an absent slot look fence-maintained (#711).
+            meta.FenceMaintainedSlotMask = isClusterEligible
+                ? (ushort)(((1 << meta.ComponentCount) - 1) & ~versionedSlotMask)
+                : (ushort)0;
 
             if (isClusterEligible)
             {
