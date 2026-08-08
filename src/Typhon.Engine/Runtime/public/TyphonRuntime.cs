@@ -139,6 +139,13 @@ public sealed partial class TyphonRuntime : IDisposable
     /// <summary>Number of ticks executed so far.</summary>
     public long CurrentTickNumber => Scheduler.CurrentTickNumber;
 
+    /// <summary>
+    /// The archetype this system was bound to for parallel cluster dispatch, or <see cref="ushort.MaxValue"/> when it was bound to none — gate 1 of the
+    /// Data Flow touch rollup (#327). Exposed for tests: the binding is otherwise unobservable, and a rollup that silently emits nothing is exactly the
+    /// failure #631 reported.
+    /// </summary>
+    internal ushort SystemArchetypeIdOf(int sysIdx) => (uint)sysIdx < (uint)_systemArchetypeIds.Length ? _systemArchetypeIds[sysIdx] : ushort.MaxValue;
+
     /// <summary>Current overload response level.</summary>
     public OverloadLevel CurrentOverloadLevel => Scheduler.CurrentOverloadLevel;
 
@@ -503,15 +510,24 @@ public sealed partial class TyphonRuntime : IDisposable
                     foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
                     {
                         // Same shape as before, with one difference that is the whole fix: match the view's archetype instead of taking the first
-                        // cluster-eligible one found. The ActiveClusterCount > 0 condition is retained deliberately — binding a cluster state switches the
-                        // system to cluster-RANGE dispatch, which walks ActiveClusterIds and ignores view-level filtering (tier, dormancy).
+                        // cluster-eligible one found.
                         if (meta.ArchetypeId != viewArchetypeId || !meta.IsClusterEligible || meta.ArchetypeId >= Engine._archetypeStates.Length)
                         {
                             continue;
                         }
 
+                        // #631: this used to also require `ActiveClusterCount > 0`, which reads a TRANSIENT condition to make a PERMANENT decision. This
+                        // runs once, in the constructor; an application that builds its runtime before loading its data — the ordering every sample and
+                        // every Workbench capture harness uses — leaves the system unbound for the rest of the session. It then silently falls back to
+                        // materializing a per-entity id list from the view instead of taking cluster-RANGE dispatch, and the #327 touch rollup, whose
+                        // first gate is exactly this id, can never emit a row.
+                        //
+                        // Dropping the count is safe because the code already tolerates a bound state whose count is zero: nothing un-binds a system whose
+                        // archetype is later fully drained, so `ActiveClusterCount == 0` on a bound system was always reachable. Both dispatch paths read
+                        // the count LIVE per tick (`PrepareFullNonVersioned` → 0 chunks → EmptyInput skip; `ExecuteChunkWithAccessor` → an empty range),
+                        // so an archetype that is empty at construction and empty forever behaves exactly as before.
                         var es = Engine._archetypeStates[meta.ArchetypeId];
-                        if (es?.ClusterState is { ActiveClusterCount: > 0 })
+                        if (es?.ClusterState != null)
                         {
                             _systemClusterStates[i] = es.ClusterState;
                             _systemArchetypeIds[i] = meta.ArchetypeId;
