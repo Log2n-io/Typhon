@@ -353,4 +353,99 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         Assert.That(q.Query<CmFlatEntity>().WhereField<CmFlatVal>(b => b.Tag == 2).Count(), Is.EqualTo(1),
             "untouched flat entity disappeared from the index");
     }
+
+    // ── #713: spawn an entity and write one of its components in the SAME transaction ──────────────────────────────
+    //
+    // "Build the object completely, then commit it" is the common shape, and under Commit discipline it threw an NRE out of BuildCommitBatch: the staging
+    // key is the entity PK read from the content chunk header, which the spawn-staging chunk does not carry yet, so every such write staged under key 0.
+    // The suite's other Commit-discipline coverage only ever writes to entities spawned in a PREVIOUS transaction, which is why nothing saw it.
+
+    [Test]
+    public void CommitDiscipline_SpawnThenWrite_SameTransaction()
+    {
+        using var dbe = SetupEngine();
+
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, DurabilityDiscipline.Commit))
+        {
+            var pos = new CmPosition(1, 2);
+            var wallet = new CmWallet(50);
+            id = tx.Spawn<CmEntity>(CmEntity.Position.Set(in pos), CmEntity.Wallet.Set(in wallet));
+            tx.OpenMut(id).Write(CmEntity.Position).X = 42;   // same transaction as the Spawn
+            tx.Commit();
+        }
+
+        using var read = dbe.CreateQuickTransaction();
+        ref readonly var rp = ref read.Open(id).Read(CmEntity.Position);
+        Assert.That(rp.X, Is.EqualTo(42f), "the same-transaction write did not win over the spawn value");
+        Assert.That(rp.Y, Is.EqualTo(2f), "the untouched field lost its spawn value");
+    }
+
+    /// <summary>
+    /// #713: read-your-own-writes has to hold for a spawn-then-write entity too — the staged value is keyed on the entity PK, so a key that does not
+    /// identify the entity would make the staging lookup miss and hand back the spawn value instead of the staged one.
+    /// </summary>
+    [Test]
+    public void CommitDiscipline_SpawnThenWrite_ReadsBackStagedValueBeforeCommit()
+    {
+        using var dbe = SetupEngine();
+
+        using var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, DurabilityDiscipline.Commit);
+        var pos = new CmPosition(1, 2);
+        var wallet = new CmWallet(0);
+        var id = tx.Spawn<CmEntity>(CmEntity.Position.Set(in pos), CmEntity.Wallet.Set(in wallet));
+        tx.OpenMut(id).Write(CmEntity.Position).X = 314;
+
+        ref readonly var staged = ref tx.Open(id).Read(CmEntity.Position);
+        Assert.That(staged.X, Is.EqualTo(314f), "read-your-own-writes broken for a same-transaction spawn+write");
+        tx.Commit();
+    }
+
+    /// <summary>
+    /// #713: two entities spawned and written in one Commit-discipline transaction must not collide. Staging under a constant key (the unpopulated PK
+    /// header) made the second write overwrite the first — a silent wrong value, where the single-entity case only crashed.
+    /// </summary>
+    [Test]
+    public void CommitDiscipline_SpawnThenWrite_TwoEntities_DoNotCollide()
+    {
+        using var dbe = SetupEngine();
+
+        EntityId a, b;
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, DurabilityDiscipline.Commit))
+        {
+            var pos = new CmPosition(0, 0);
+            var wallet = new CmWallet(0);
+            a = tx.Spawn<CmEntity>(CmEntity.Position.Set(in pos), CmEntity.Wallet.Set(in wallet));
+            b = tx.Spawn<CmEntity>(CmEntity.Position.Set(in pos), CmEntity.Wallet.Set(in wallet));
+            tx.OpenMut(a).Write(CmEntity.Position).X = 11;
+            tx.OpenMut(b).Write(CmEntity.Position).X = 22;
+            tx.Commit();
+        }
+
+        using var read = dbe.CreateQuickTransaction();
+        Assert.That(read.Open(a).Read(CmEntity.Position).X, Is.EqualTo(11f));
+        Assert.That(read.Open(b).Read(CmEntity.Position).X, Is.EqualTo(22f));
+    }
+
+    /// <summary>#713: the same sequence under the default TickFence discipline already worked — this locks it so a fix cannot regress the other side.</summary>
+    [Test]
+    public void TickFenceDiscipline_SpawnThenWrite_SameTransaction()
+    {
+        using var dbe = SetupEngine();
+
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var pos = new CmPosition(1, 2);
+            var wallet = new CmWallet(0);
+            id = tx.Spawn<CmEntity>(CmEntity.Position.Set(in pos), CmEntity.Wallet.Set(in wallet));
+            tx.OpenMut(id).Write(CmEntity.Position).X = 42;
+            tx.Commit();
+        }
+
+        using var read = dbe.CreateQuickTransaction();
+        ref readonly var rp = ref read.Open(id).Read(CmEntity.Position);
+        Assert.That(rp.X, Is.EqualTo(42f));
+        Assert.That(rp.Y, Is.EqualTo(2f));
+    }
 }

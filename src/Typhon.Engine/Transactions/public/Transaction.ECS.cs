@@ -972,6 +972,7 @@ public unsafe partial class Transaction
             }
 
             var result = new EntityRef(id, meta, es, this, enabledBits, writable);
+            result._isOwnSpawn = true;   // #713: no HEAD yet — a Commit-discipline write goes in place into the staging chunk, not through the staging arena
             for (int slot = 0; slot < meta.ComponentCount; slot++)
             {
                 result.SetLocation(slot, entry.Loc[slot]);

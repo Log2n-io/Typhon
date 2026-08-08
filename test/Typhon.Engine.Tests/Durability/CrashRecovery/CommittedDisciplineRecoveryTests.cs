@@ -157,6 +157,50 @@ internal sealed class CommittedDisciplineRecoveryTests
     }
 
     /// <summary>
+    /// #713: spawn an entity and write it in the SAME Commit-discipline transaction, then hard-crash with no checkpoint. The write no longer goes through
+    /// the staging arena — an own spawn has no HEAD to protect, so it is written in place and rides the spawn's own SV Slot record (CM-06 / #395 D5). This
+    /// test is what makes that claim testable: if the in-place write did not reach the record BuildCommitBatch emits, recovery hands back the spawn value.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    public void CommitDiscipline_SpawnThenWrite_SameTransaction_SurvivesHardCrash()
+    {
+        EntityId id;
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<CmPosition>();
+            dbe.RegisterComponentFromAccessor<CmWallet>();
+            dbe.InitializeArchetypes();
+
+            using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, DurabilityDiscipline.Commit))
+            {
+                id = tx.Spawn<CmEntity>(CmEntity.Position.Set(new CmPosition(1, 1)), CmEntity.Wallet.Set(new CmWallet(50)));
+                tx.OpenMut(id).Write(CmEntity.Position) = new CmPosition(99, 88);   // same transaction as the Spawn
+                tx.Commit();
+            }
+
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<CmPosition>();
+            dbe.RegisterComponentFromAccessor<CmWallet>();
+            dbe.InitializeArchetypes();
+
+            using var tx = dbe.CreateQuickTransaction();
+            Assert.That(tx.IsAlive(id), Is.True, "a Commit-discipline spawn must survive a hard crash via WAL replay (CM-06)");
+
+            ref readonly var pos = ref tx.Open(id).Read(CmEntity.Position);
+            Assert.That(pos.X, Is.EqualTo(99f), "recovery restored the spawn value, not the same-transaction write");
+            Assert.That(pos.Y, Is.EqualTo(88f), "recovery restored the spawn value, not the same-transaction write");
+        }
+    }
+
+    /// <summary>
     /// MixedDiscipline crash sweep (issue #392, AC-10 workload from 08 §T-6): a single session interleaves TickFence (default) and Commit-discipline
     /// transactions across distinct entities, then hard-crashes with no checkpoint. The contract under test is that the Commit-discipline writes are
     /// recovered EXACTLY (zero-loss, last-writer-wins by LSN) regardless of the interleaved TickFence churn — i.e. mixing disciplines never weakens the

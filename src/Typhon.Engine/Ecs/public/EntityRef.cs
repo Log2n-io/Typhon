@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Runtime.CompilerServices;
 using JetBrains.Annotations;
 using Typhon.Schema.Definition;
@@ -22,6 +22,13 @@ public unsafe ref struct EntityRef
     internal readonly EntityAccessor _accessor;
     internal ushort _enabledBits;
     internal readonly bool _writable;
+
+    /// <summary>
+    /// True when this ref was built from a <c>SpawnEntry</c> of the OPEN transaction — the entity exists only in spawn-staging chunks and is not in the
+    /// EntityMap or the cluster yet, so it has no HEAD and no other transaction can observe it. The Commit-discipline write path keys off this to write
+    /// in place instead of staging (#713); see <see cref="EntityAccessor.WriteEcsComponentData{T}"/>.
+    /// </summary>
+    internal bool _isOwnSpawn;
     private fixed int _locations[16];
 
     /// <summary>
@@ -172,7 +179,7 @@ public unsafe ref struct EntityRef
                 EnsureVersionedResolved(slot);
                 int chunkId = _locations[slot];
                 var table = _engineState.SlotToComponentTable[slot];
-                return ref _accessor.ReadEcsComponentData<T>(table, chunkId);
+                return ref _accessor.ReadEcsComponentData<T>(table, chunkId, (long)_id.RawValue);
             }
             // Commit-discipline read-your-own-writes: see this tx's staged value (point reads only; bulk spans read HEAD).
             if (_accessor.Discipline == DurabilityDiscipline.Commit)
@@ -188,7 +195,7 @@ public unsafe ref struct EntityRef
 
         int chunkId2 = _locations[slot];
         var table2 = _engineState.SlotToComponentTable[slot];
-        return ref _accessor.ReadEcsComponentData<T>(table2, chunkId2);
+        return ref _accessor.ReadEcsComponentData<T>(table2, chunkId2, (long)_id.RawValue);
     }
 
     /// <summary>Write a component by handle. Returns a mutable ref into the chunk page (or cluster slot).
@@ -304,7 +311,7 @@ public unsafe ref struct EntityRef
                 _accessor.ShadowIndexedFields<T>(table, chunkId, _id);
             }
 
-            return ref _accessor.WriteEcsComponentData<T>(table, chunkId);
+            return ref _accessor.WriteEcsComponentData<T>(table, chunkId, (long)_id.RawValue, _isOwnSpawn);
         }
     }
 
@@ -334,7 +341,7 @@ public unsafe ref struct EntityRef
                 EnsureVersionedResolved(slot);
                 int chunkId = _locations[slot];
                 var table = _engineState.SlotToComponentTable[slot];
-                return ref _accessor.ReadEcsComponentData<T>(table, chunkId);
+                return ref _accessor.ReadEcsComponentData<T>(table, chunkId, (long)_id.RawValue);
             }
             // Commit-discipline read-your-own-writes: see this tx's staged value (point reads only; bulk spans read HEAD).
             if (_accessor.Discipline == DurabilityDiscipline.Commit)
@@ -350,7 +357,7 @@ public unsafe ref struct EntityRef
 
         int chunkId2 = _locations[slot];
         var table2 = _engineState.SlotToComponentTable[slot];
-        return ref _accessor.ReadEcsComponentData<T>(table2, chunkId2);
+        return ref _accessor.ReadEcsComponentData<T>(table2, chunkId2, (long)_id.RawValue);
     }
 
     /// <summary>Write a component by type. Resolves slot via archetype metadata.
@@ -444,7 +451,7 @@ public unsafe ref struct EntityRef
                 _accessor.ShadowIndexedFields<T>(table, chunkId, _id);
             }
 
-            return ref _accessor.WriteEcsComponentData<T>(table, chunkId);
+            return ref _accessor.WriteEcsComponentData<T>(table, chunkId, (long)_id.RawValue, _isOwnSpawn);
         }
     }
 
@@ -558,7 +565,7 @@ public unsafe ref struct EntityRef
                 EnsureVersionedResolved(slot);
                 int chunkId = _locations[slot];
                 var table = _engineState.SlotToComponentTable[slot];
-                value = _accessor.ReadEcsComponentData<T>(table, chunkId);
+                value = _accessor.ReadEcsComponentData<T>(table, chunkId, (long)_id.RawValue);
                 return true;
             }
 
@@ -568,7 +575,7 @@ public unsafe ref struct EntityRef
 
         int chunkId2 = _locations[slot];
         var table2 = _engineState.SlotToComponentTable[slot];
-        value = _accessor.ReadEcsComponentData<T>(table2, chunkId2);
+        value = _accessor.ReadEcsComponentData<T>(table2, chunkId2, (long)_id.RawValue);
         return true;
     }
 
