@@ -286,13 +286,83 @@ public class OlcBTreeRaceStressTests
                 var r = tree.TryGet(i, ref va);
                 if (!r.IsSuccess || r.Value != i * 10)
                 {
+                    var where = DescribeLostKey(tree, i, ref va);
                     va.Dispose();
-                    throw new Exception($"Add_Splits: key {i} success={r.IsSuccess} value={r.Value} expected={i * 10}");
+                    throw new Exception($"Add_Splits: key {i} success={r.IsSuccess} value={r.Value} expected={i * 10} | {where}");
                 }
             }
             va.Dispose();
         }
         finally { em.ExitScope(setupDepth); }
+    }
+
+    /// <summary>
+    /// Answers the one question that splits #297/#679's candidate causes in half: is a key that <c>TryGet</c> cannot find still PRESENT in the leaf-level
+    /// linked list?
+    /// </summary>
+    /// <remarks>
+    /// <c>TryGet</c> reaches a leaf by descending through separators; <c>EnumerateLeaves</c> reaches it by walking the sibling chain. The two disagreeing is not
+    /// a detail, it is the diagnosis:
+    /// <list type="bullet">
+    /// <item>present in the chain, absent by descent — the key landed in a real leaf and the PARENT cannot route to it. A separator or child pointer is wrong;
+    /// the insert itself was fine.</item>
+    /// <item>absent from both — the insert never took effect anywhere reachable, even though <c>EntryCount</c> was incremented for it. A write into a node that
+    /// is in neither structure.</item>
+    /// </list>
+    /// Reported at the point of failure because the tree is torn down per iteration: without this the message carries only "not found", which is compatible
+    /// with every hypothesis in #297 and therefore separates none of them.
+    /// </remarks>
+    private static string DescribeLostKey(IntSingleBTree<PersistentStore> tree, int key, ref ChunkAccessor<PersistentStore> accessor)
+    {
+        int chainCount = 0;
+        bool inChain = false;
+        int predecessor = int.MinValue;
+        int successor = int.MaxValue;
+        bool chainOrdered = true;
+        int previousKey = int.MinValue;
+        try
+        {
+            foreach (var kv in tree.EnumerateLeaves())
+            {
+                chainCount++;
+                if (kv.Key == key)
+                {
+                    inChain = true;
+                }
+                else if (kv.Key < key && kv.Key > predecessor)
+                {
+                    predecessor = kv.Key;
+                }
+                else if (kv.Key > key && kv.Key < successor)
+                {
+                    successor = kv.Key;
+                }
+                if (chainCount > 1 && kv.Key <= previousKey)
+                {
+                    chainOrdered = false;
+                }
+                previousKey = kv.Key;
+            }
+        }
+        catch (Exception ex)
+        {
+            return $"leaf-chain walk threw {ex.GetType().Name}: {ex.Message}";
+        }
+
+        string consistency;
+        try
+        {
+            tree.CheckConsistency(ref accessor);
+            consistency = "ok";
+        }
+        catch (Exception ex)
+        {
+            consistency = ex.Message;
+        }
+
+        return $"inLeafChain={inChain} chainCount={chainCount} chainOrdered={chainOrdered} entryCount={tree.EntryCount} height={tree.Height} "
+             + $"chainNeighbours=({(predecessor == int.MinValue ? "-" : predecessor.ToString())},"
+             + $"{(successor == int.MaxValue ? "-" : successor.ToString())}) consistency=[{consistency}]";
     }
 
     private static unsafe void AddDisjointBody(ScenarioContext ctx)
@@ -349,8 +419,9 @@ public class OlcBTreeRaceStressTests
                 var r = tree.TryGet(i, ref va);
                 if (!r.IsSuccess || r.Value != i * 10)
                 {
+                    var where = DescribeLostKey(tree, i, ref va);
                     va.Dispose();
-                    throw new Exception($"Add_Disjoint: key {i} success={r.IsSuccess} value={r.Value} expected={i * 10}");
+                    throw new Exception($"Add_Disjoint: key {i} success={r.IsSuccess} value={r.Value} expected={i * 10} | {where}");
                 }
             }
             va.Dispose();

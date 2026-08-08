@@ -19,8 +19,8 @@ public readonly struct ComponentSchemaSpec
     /// <summary>Storage mode for this component (from <see cref="ComponentAttribute.StorageMode"/>).</summary>
     public StorageMode StorageMode { get; }
 
-    /// <summary>Default durability discipline (from <see cref="ComponentAttribute.DefaultDiscipline"/>); only meaningful for <see cref="StorageMode.SingleVersion"/>.</summary>
-    public DurabilityDiscipline DefaultDiscipline { get; }
+    /// <summary>Default commit discipline (from <see cref="ComponentAttribute.DefaultDiscipline"/>); only meaningful for <see cref="StorageMode.SingleVersion"/>.</summary>
+    public CommitDiscipline DefaultDiscipline { get; }
 
     /// <summary>The component's fields in declaration order (parent-first for inherited layouts). Never null.</summary>
     public ComponentFieldSpec[] Fields { get; }
@@ -30,13 +30,13 @@ public readonly struct ComponentSchemaSpec
     /// <param name="revision">Schema revision (see <see cref="Revision"/>).</param>
     /// <param name="fields">Ordered field specs (see <see cref="Fields"/>).</param>
     /// <param name="storageMode">Storage mode (see <see cref="StorageMode"/>); default <see cref="StorageMode.Versioned"/>.</param>
-    /// <param name="defaultDiscipline">Default durability discipline (see <see cref="DefaultDiscipline"/>); default <see cref="DurabilityDiscipline.TickFence"/>.</param>
+    /// <param name="defaultDiscipline">Default commit discipline (see <see cref="DefaultDiscipline"/>); default <see cref="CommitDiscipline.TickFence"/>.</param>
     public ComponentSchemaSpec(
         string name,
         int revision,
         ComponentFieldSpec[] fields,
         StorageMode storageMode = StorageMode.Versioned,
-        DurabilityDiscipline defaultDiscipline = DurabilityDiscipline.TickFence)
+        CommitDiscipline defaultDiscipline = CommitDiscipline.TickFence)
     {
         Name = name;
         Revision = revision;

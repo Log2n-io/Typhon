@@ -257,7 +257,7 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
     /// Lock-free transaction creation. No lock acquired — uses ConcurrentQueue for pooling, atomic TSN increment, and CAS-based PushHead.
     /// </summary>
     [return: TransfersOwnership]
-    public Transaction CreateTransaction(DatabaseEngine dbe, UnitOfWork uow = null, bool readOnly = false, DurabilityDiscipline discipline = DurabilityDiscipline.TickFence)
+    public Transaction CreateTransaction(DatabaseEngine dbe, UnitOfWork uow = null, bool readOnly = false, CommitDiscipline discipline = CommitDiscipline.TickFence)
     {
         if (_activeCount >= _maxActiveTransactions)
         {

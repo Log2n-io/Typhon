@@ -54,7 +54,7 @@ using (var tx2 = dbe.CreateQuickTransaction())
 | Parameter | Default | Effect |
 |---|---|---|
 | `durabilityMode` | `DurabilityMode.Deferred` | Durability mode of the hidden `UnitOfWork` — see [Durability Modes](../durability-modes/README.md). |
-| `discipline` | `DurabilityDiscipline.TickFence` | `SingleVersion` write discipline for the one transaction — see [Durability Discipline](../durability-discipline/README.md). |
+| `discipline` | `CommitDiscipline.TickFence` | `SingleVersion` write discipline for the one transaction — see [Commit Discipline](../commit-discipline/README.md). |
 
 ## ⚠️ Guarantees & limits
 

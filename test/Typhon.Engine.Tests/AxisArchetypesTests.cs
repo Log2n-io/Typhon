@@ -37,7 +37,7 @@ internal sealed class AxisArchetypesTests : TestBase<AxisArchetypesTests>
 
     /// <summary>
     /// Cells that cross a reopen AND whose values the storage contract promises will still be there. A clean close persists everything; a hard crash keeps
-    /// SingleVersion values only under <see cref="DurabilityDiscipline.Commit"/> — see <see cref="AxisArchetypes.SvValuesAreCrashDurable"/>.
+    /// SingleVersion values only under <see cref="CommitDiscipline.Commit"/> — see <see cref="AxisArchetypes.SvValuesAreCrashDurable"/>.
     /// </summary>
     public static IEnumerable<TestCaseData> DurableReopenCells() =>
         EngineAxes.PairwiseWhere(c => AxisArchetypes.SupportsBase(c)
@@ -282,7 +282,7 @@ internal sealed class AxisArchetypesTests : TestBase<AxisArchetypesTests>
                 {
                     foreach (ReopenKind reopen in Enum.GetValues(typeof(ReopenKind)))
                     {
-                        foreach (var disc in new[] { DurabilityDiscipline.TickFence, DurabilityDiscipline.Commit })
+                        foreach (var disc in new[] { CommitDiscipline.TickFence, CommitDiscipline.Commit })
                         {
                             foreach (CollectionShape coll in Enum.GetValues(typeof(CollectionShape)))
                             {

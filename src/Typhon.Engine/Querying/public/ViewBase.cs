@@ -113,6 +113,21 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
 
     /// <summary>True if this View is used as a system input in the DAG scheduler.</summary>
     public bool IsSystemInput { get; internal set; }
+
+    /// <summary>
+    /// True when membership is maintained by re-querying (no field evaluators) rather than by draining <see cref="ViewRegistry"/> deltas.
+    /// </summary>
+    /// <remarks>
+    /// The distinction is invisible at the call site and decides whether the view is live: <c>WhereField</c> takes the incremental path and subscribes for
+    /// deltas, while the unfiltered <c>Query&lt;T&gt;().ToView()</c> — the form that means "every entity of this archetype" — takes the pull path and
+    /// subscribes to nothing. A pull view is only as fresh as its last <see cref="Refresh"/>, which is why the runtime has to drive one per tick for the
+    /// views it feeds to systems (#718).
+    /// </remarks>
+    internal bool IsPullMode => Evaluators is { Length: 0 };
+
+    /// <summary>Tick number of the last runtime-driven system-input refresh; guards against refreshing one shared view once per consuming system.</summary>
+    internal long LastSystemInputRefreshTick { get; set; } = -1;
+
     /// <summary>Number of entities currently in the view.</summary>
     public int Count => _entityIds.Count;
 

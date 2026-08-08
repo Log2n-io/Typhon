@@ -47,7 +47,7 @@ Isolation and durability aren't one selector — they're **three orthogonal knob
 | Dial | Scope | Values | Default | Decides |
 |---|---|---|---|---|
 | **`StorageMode`** | per **component type**, fixed at registration | `Versioned` · `SingleVersion` · `Transient` | `Versioned` | memory **layout** + whether MVCC/isolation exists at all |
-| **`DurabilityDiscipline`** | per **transaction** (only on `SingleVersion` layout) | `TickFence` · `Commit` | `TickFence` | *how* a SingleVersion write becomes durable |
+| **`CommitDiscipline`** | per **transaction** (only on `SingleVersion` layout) | `TickFence` · `Commit` | `TickFence` | whether a SingleVersion write **participates in the transaction** — isolation, rollback and durability move together |
 | **`DurabilityMode`** | per **UnitOfWork** | `Deferred` · `GroupCommit` · `Immediate` | `GroupCommit` (typical) | *when* the WAL is flushed to disk |
 
 They compose freely. A `SingleVersion` component written under the `Commit` discipline inside an `Immediate` UoW is a real, valid combination — layout says "one in-place slot," discipline says "stage and make this write atomic + zero-loss," mode says "fsync before `Commit()` returns."
@@ -146,12 +146,12 @@ Three names in this area mislead. Learn them once here.
 
 - **"Tick fence" names three related things.** In this guide it always means **the per-tick durability step** that batches dirty `SingleVersion` writes into the WAL (`dbe.WriteTickFence(n)`, run automatically by the runtime each tick). It is *not* a memory fence, and the parallel-execution machinery that speeds that step up (`RuntimeOptions.EnableParallelFence`) is an internal performance detail you never call.
 
-- **`Committed` is a *discipline*, not a `StorageMode`.** There are exactly three storage modes (`Versioned`/`SingleVersion`/`Transient`). `Committed` is `DurabilityDiscipline.Commit` layered on the `SingleVersion` layout — see the `Commit` column in §4.
+- **`Committed` is a *discipline*, not a `StorageMode`.** There are exactly three storage modes (`Versioned`/`SingleVersion`/`Transient`). `Committed` is `CommitDiscipline.Commit` layered on the `SingleVersion` layout — see the `Commit` column in §4.
 
 And the three dials one more time, because collapsing them is the root confusion:
 
 - **`StorageMode`** = *layout* (design-time, per component).
-- **`DurabilityDiscipline`** = *how* a SingleVersion write is made durable (per transaction).
+- **`CommitDiscipline`** = whether a SingleVersion write is *transactional* — isolation, rollback **and** durability, per transaction. It was called `DurabilityDiscipline` until #648, which is why so much of the documentation used to claim a SingleVersion write can never be rolled back.
 - **`DurabilityMode`** = *when* the WAL flushes (per UnitOfWork).
 
 ---

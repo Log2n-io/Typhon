@@ -25,7 +25,7 @@ namespace Typhon.Engine.Tests.Runtime;
 class SystemInputViewLivenessTests : TestBase<SystemInputViewLivenessTests>
 {
     [Test]
-    [Ignore("#718 — an unfiltered pull View is frozen at construction; a system never sees entities spawned after it was built.")]
+    [VerifiesRule("BIND-04")]
     public void SystemInputView_SeesEntitiesSpawnedWhileTheRuntimeIsRunning()
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
@@ -89,8 +89,15 @@ class SystemInputViewLivenessTests : TestBase<SystemInputViewLivenessTests>
     }
 
     /// <summary>The same mechanism without a runtime: two views over one engine, differing only in when they were built.</summary>
+    /// <remarks>
+    /// Still quarantined, and deliberately so — this one pins the ENDPOINT, not the interim. The runtime now re-queries the pull views it feeds to systems
+    /// once per tick, which is what makes the test above pass; a pull view held by user code and never refreshed is still a snapshot, because nothing
+    /// publishes membership to it. Making this green needs direction 1 of #718 — a lifecycle-level notification channel views subscribe to by archetype —
+    /// which is a design change to the view subsystem. Rewriting it to call Refresh() first would make it assert that RefreshPull works, which was never in
+    /// doubt.
+    /// </remarks>
     [Test]
-    [Ignore("#718 — an unfiltered pull View is frozen at construction; it never receives ViewRegistry deltas.")]
+    [Ignore("#718 — a pull View nobody refreshes is still frozen; needs the lifecycle notification channel (direction 1), not the per-tick refresh.")]
     public void ViewCreatedBeforeTheSpawns_ConvergesWithOneCreatedAfter()
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();

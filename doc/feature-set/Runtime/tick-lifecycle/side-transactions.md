@@ -20,7 +20,7 @@ without forcing every other write in the tick to pay that cost.
 
 ## ⚙️ How it works (in brief)
 
-`TickContext.CreateSideTransaction(DurabilityMode, DurabilityDiscipline)` opens a brand-new `Transaction` (with
+`TickContext.CreateSideTransaction(DurabilityMode, CommitDiscipline)` opens a brand-new `Transaction` (with
 its own `UnitOfWork`) on the current thread. It is short-lived by design: open it, do the writes, `Commit()`,
 `Dispose()` — all within the same system callback. Because it commits independently with its own TSN, the
 calling system's main `ctx.Transaction` (whose TSN was fixed when it was created) does NOT see the side-
@@ -53,7 +53,7 @@ void ProcessTrade(TickContext ctx, TradeRequest trade)
 | Option | Default | Effect |
 |---|---|---|
 | `DurabilityMode` | `Immediate` | FUA on `Commit()` — blocks until the WAL record is on stable media (~15-85µs) |
-| `DurabilityDiscipline` | `TickFence` | `SingleVersion` writes batch durability at the tick fence; pass `Commit` for atomic, zero-loss, commit-scoped writes (no revision chain) on `SingleVersion` components |
+| `CommitDiscipline` | `TickFence` | `SingleVersion` writes batch durability at the tick fence; pass `Commit` for atomic, zero-loss, commit-scoped writes (no revision chain) on `SingleVersion` components |
 
 ## ⚠️ Guarantees & limits
 
@@ -64,7 +64,7 @@ void ProcessTrade(TickContext ctx, TradeRequest trade)
   Visible to systems that run later in the same tick. Use typed event queues for explicit same-tick
   coordination — don't rely on TSN ordering.
 - Side-transactions see each other's commits, sequentially, in ascending-TSN order.
-- Writes Versioned storage mode (full MVCC, WAL records) by default; pass `DurabilityDiscipline.Commit` for
+- Writes Versioned storage mode (full MVCC, WAL records) by default; pass `CommitDiscipline.Commit` for
   `SingleVersion`-layout components to get atomic, zero-loss commits without paying for a revision chain.
 - No conflict with Patate scatter writes in the same tick — side-transactions write Versioned components,
   Patate scatter writes SingleVersion/Transient components in place; different storage paths, no overlap.

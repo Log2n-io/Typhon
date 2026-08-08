@@ -243,14 +243,14 @@ internal sealed class MultiValueDupKeyWorkload : IRecoveryWorkload
 internal sealed class ClusterAllSvWorkload : IRecoveryWorkload
 {
     private readonly int _count;
-    private readonly DurabilityDiscipline _discipline;
+    private readonly CommitDiscipline _discipline;
     private readonly int _keyBase;
 
     // discipline TickFence (default): the SV spawn values are checkpoint-durable only (a hard crash before a checkpoint recovers them alive-but-default
     // — by design, #395 Face B's "non-guarantee"). discipline Commit: the spawn WAL-logs its SV values per-commit (#395 Face B fix / D5), so they
     // survive a hard crash with NO checkpoint — the per-commit-durable mode the differential oracle's "SurvivesCrash" assertion needs.
     // keyBase offsets K so two phases (before / after a checkpoint) don't collide on SvIndexed.K's UNIQUE index — same role as IndexedFlatWorkload's.
-    public ClusterAllSvWorkload(int count = 10, DurabilityDiscipline discipline = DurabilityDiscipline.TickFence, int keyBase = 0)
+    public ClusterAllSvWorkload(int count = 10, CommitDiscipline discipline = CommitDiscipline.TickFence, int keyBase = 0)
     {
         _count = count;
         _discipline = discipline;
@@ -304,7 +304,7 @@ internal sealed class ClusterMultiValueDupKeyWorkload : IRecoveryWorkload
 
     public void Execute(UnitOfWork uow, RecoveryShadowModel shadow)
     {
-        using var tx = uow.CreateTransaction(DurabilityDiscipline.Commit);
+        using var tx = uow.CreateTransaction(CommitDiscipline.Commit);
         for (var i = 0; i < _count; i++)
         {
             var s = new SvMultiIndexed(i % _groups, i);
@@ -318,12 +318,12 @@ internal sealed class ClusterMultiValueDupKeyWorkload : IRecoveryWorkload
 
 /// <summary>
 /// The P2 <b>MixedDiscipline</b> workload (design 08 §5 / §T-6): a cluster-eligible all-SingleVersion archetype written under a MIX of durability
-/// disciplines in interleaved transactions — a TickFence (default, ≤1-tick-loss) noise write followed by a <see cref="DurabilityDiscipline.Commit"/>
+/// disciplines in interleaved transactions — a TickFence (default, ≤1-tick-loss) noise write followed by a <see cref="CommitDiscipline.Commit"/>
 /// write that overwrites BOTH components with their final values. Because the differential oracle asserts every recorded entity's exact post-recovery
 /// state, the workload makes the asserted state entirely Commit-durable: the Commit write is the last writer on every component, so each captured value
 /// is the zero-loss Commit value (the spawn + TickFence values are deliberately transient and overwritten). This proves Commit-discipline WRITES
 /// survive every crash boundary despite interleaved TickFence churn. (Commit-discipline SPAWNS — the value carried by the spawn itself rather than a
-/// later write — are #395 Face B, covered by <see cref="ClusterAllSvWorkload"/> under <see cref="DurabilityDiscipline.Commit"/>; a plain TickFence
+/// later write — are #395 Face B, covered by <see cref="ClusterAllSvWorkload"/> under <see cref="CommitDiscipline.Commit"/>; a plain TickFence
 /// <see cref="ClusterAllSvWorkload"/> remains checkpoint-durable only, the documented non-guarantee.)
 /// </summary>
 internal sealed class MixedDisciplineWorkload : IRecoveryWorkload
@@ -371,7 +371,7 @@ internal sealed class MixedDisciplineWorkload : IRecoveryWorkload
         }
 
         // Phase 3: Commit discipline — overwrite BOTH components with their final, zero-loss values (last writer on every asserted field).
-        using (var tx = uow.CreateTransaction(DurabilityDiscipline.Commit))
+        using (var tx = uow.CreateTransaction(CommitDiscipline.Commit))
         {
             for (int i = 0; i < ids.Count; i++)
             {
@@ -442,12 +442,12 @@ internal static class ShapeOps
     }
 
     /// <summary>
-    /// Begin a transaction appropriate to the shape. The cluster shape uses <see cref="DurabilityDiscipline.Commit"/>: a plain TickFence SingleVersion write is
+    /// Begin a transaction appropriate to the shape. The cluster shape uses <see cref="CommitDiscipline.Commit"/>: a plain TickFence SingleVersion write is
     /// checkpoint-durable only (#395 Face B), so asserting it survives a hard crash would be asserting a documented NON-guarantee. Commit discipline is the
     /// mode that promises zero loss, which makes a dropped value unambiguously a defect rather than a contract the test misread — trap 1 from #704.
     /// </summary>
     public static Transaction Begin(UnitOfWork uow, PostRecoveryShape shape)
-        => shape == PostRecoveryShape.ClusterSv ? uow.CreateTransaction(DurabilityDiscipline.Commit) : uow.CreateTransaction();
+        => shape == PostRecoveryShape.ClusterSv ? uow.CreateTransaction(CommitDiscipline.Commit) : uow.CreateTransaction();
 
     public static EntityId Spawn(Transaction tx, PostRecoveryShape shape, int k) => shape switch
     {
@@ -682,7 +682,7 @@ internal sealed class PayloadPayloadWorkload : IRecoveryWorkload, ICollectionPro
 
     public void Execute(UnitOfWork uow, RecoveryShadowModel shadow)
     {
-        using var tx = uow.CreateTransaction(DurabilityDiscipline.Commit);
+        using var tx = uow.CreateTransaction(CommitDiscipline.Commit);
         for (var i = 0; i < _count; i++)
         {
             var bag = new PayloadBag

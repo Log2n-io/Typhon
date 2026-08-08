@@ -81,7 +81,7 @@ public static class C3Runner
         long val = 1;
         double ns = Measure.NsPerOp(() =>
         {
-            using var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, DurabilityDiscipline.Commit);
+            using var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit);
             var e = tx.OpenMut(ids[k]);
             e.Write(TripArch.A).V = val;
             e.Write(TripArch.B).V = val;

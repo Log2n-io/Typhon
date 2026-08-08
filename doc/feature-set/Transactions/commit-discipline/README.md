@@ -1,10 +1,10 @@
 ---
-uid: feature-transactions-durability-discipline-index
-title: 'SingleVersion Durability Discipline (TickFence / Commit)'
+uid: feature-transactions-commit-discipline-index
+title: 'SingleVersion Commit Discipline (TickFence / Commit)'
 description: 'Per-transaction knob that picks how a SingleVersion write becomes durable, orthogonal to DurabilityMode.'
 ---
 
-# SingleVersion Durability Discipline (TickFence / Commit)
+# SingleVersion Commit Discipline (TickFence / Commit)
 > Per-transaction knob that picks how a `SingleVersion` write becomes durable, orthogonal to `DurabilityMode`.
 
 **Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🔵 Core · **Category:** [Transactions](../README.md)
@@ -17,16 +17,16 @@ description: 'Per-transaction knob that picks how a SingleVersion write becomes 
 one tick of writes can be lost on crash. Some writes need atomicity and zero loss — a teleport, an item pickup, a
 currency debit — without the snapshot isolation or AS-OF history a `Versioned` component provides. Routing those
 writes through `Versioned` buys zero-loss durability at ~6x the write cost (a revision-chain allocation plus its
-GC) for an isolation guarantee they never use. `DurabilityDiscipline` is a second, transaction-scoped knob that
+GC) for an isolation guarantee they never use. `CommitDiscipline` is a second, transaction-scoped knob that
 makes a `SingleVersion` write commit-durable without changing the component's layout or paying that tax.
 
 ## ⚙️ How it works (in brief)
 
-`DurabilityDiscipline { TickFence (default) | Commit }` is fixed when a transaction is created — via
+`CommitDiscipline { TickFence (default) | Commit }` is fixed when a transaction is created — via
 `dbe.CreateQuickTransaction(discipline:)`, `uow.CreateTransaction(discipline:)`, or
 `ctx.CreateSideTransaction(mode, discipline)` — and never changes for that transaction's lifetime. It is
 orthogonal to `DurabilityMode`: `DurabilityMode` decides *when* a UoW's WAL records reach stable media,
-`DurabilityDiscipline` decides *how* a `SingleVersion` write reaches the WAL in the first place. The two compose
+`CommitDiscipline` decides *how* a `SingleVersion` write reaches the WAL in the first place. The two compose
 freely — `Commit` discipline under a `Deferred` UoW still buffers its WAL record until `Flush()`. Discipline is
 **uniform per transaction** (CM-02): a component declared `[Component(DefaultDiscipline = Commit)]` silently
 escalates the whole transaction to `Commit` on first touch; once escalated, every `SingleVersion` write that
@@ -36,8 +36,8 @@ transaction makes is commit-staged.
 
 | Sub-feature | Use when | Write cost (Zen 4) | Loss window |
 |-------------|----------|---------------------|--------------|
-| [TickFence discipline (default)](./durability-discipline-tickfence.md) | High-frequency, loss-tolerant data (positions, AI state, anything the next tick re-derives) | ~40 ns | ≤ 1 tick |
-| [Commit discipline (Variant-A staging)](./durability-discipline-commit.md) | Atomic, zero-loss writes that don't need snapshot isolation (teleport, item pickup, currency debit) | ~40 ns + commit publish | zero |
+| [TickFence discipline (default)](./commit-discipline-tickfence.md) | High-frequency, loss-tolerant data (positions, AI state, anything the next tick re-derives) | ~40 ns | ≤ 1 tick |
+| [Commit discipline (Variant-A staging)](./commit-discipline-commit.md) | Atomic, zero-loss writes that don't need snapshot isolation (teleport, item pickup, currency debit) | ~40 ns + commit publish | zero |
 
 ## ⚠️ Guarantees & limits
 
@@ -63,11 +63,11 @@ transaction makes is commit-staged.
 
 ## 🔗 Related
 
-- Sub-features: [TickFence discipline (default)](./durability-discipline-tickfence.md), [Commit discipline
-  (Variant-A staging)](./durability-discipline-commit.md)
+- Sub-features: [TickFence discipline (default)](./commit-discipline-tickfence.md), [Commit discipline
+  (Variant-A staging)](./commit-discipline-commit.md)
 - Related feature: [Durability Modes](../durability-modes/README.md) — the orthogonal per-UoW axis that decides
   *when* WAL records reach stable media
 
-<!-- Deep dive: claude/overview/02-execution.md — Durability Discipline (SingleVersion) (#durability-discipline-singleversion), claude/design/Ecs/committed-storage-mode.md -->
-<!-- ADR: ADR-057 — Committed Durability Discipline — claude/adr/057-committed-durability-discipline.md -->
+<!-- Deep dive: claude/overview/02-execution.md — Commit Discipline (SingleVersion) (#commit-discipline-singleversion), claude/design/Ecs/committed-storage-mode.md -->
+<!-- ADR: ADR-057 — Commit Discipline — claude/adr/057-committed-durability-discipline.md -->
 <!-- Rules: claude/design/Durability/MinimalWal/07-rules.md — module CM -->

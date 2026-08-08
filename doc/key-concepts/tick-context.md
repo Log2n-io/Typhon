@@ -10,7 +10,7 @@ description: 'The per-tick execution context a system receives in Execute — it
 
 A system never creates a [unit of work](xref:concept-unit-of-work) or calls `Commit` — it is handed a `TickContext` and works through it. The context exposes: `Transaction` (the system's own per-tick [transaction](xref:concept-transaction), committed for you by the scheduler); `Accessor` (a [`PointInTimeAccessor`](xref:concept-point-in-time-accessor) for lock-free parallel reads); `Entities` (the [view](xref:concept-view)'s matched set, for a `QuerySystem`); `DeltaTime` (seconds since the last tick); and `SpatialGrid` (assign a [`SimTier`](xref:concept-spatial-tiers) per cell, read tier budgets).
 
-It also carries the escape hatches from the one-transaction-per-tick default: **typed event queues** for inter-system signalling, and **side transactions** — `ctx.CreateSideTransaction(DurabilityMode.Immediate, DurabilityDiscipline.Commit)` opens an independent transaction mid-tick for an immediate, ACID write (a player purchase, a teleport) that must not ride the tick's shared commit.
+It also carries the escape hatches from the one-transaction-per-tick default: **typed event queues** for inter-system signalling, and **side transactions** — `ctx.CreateSideTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit)` opens an independent transaction mid-tick for an immediate, ACID write (a player purchase, a teleport) that must not ride the tick's shared commit.
 
 ## How it relates
 
@@ -22,7 +22,7 @@ It also carries the escape hatches from the one-transaction-per-tick default: **
 ## In the API
 
 - [`TickContext`](xref:Typhon.Engine.TickContext) — [`Transaction`](xref:Typhon.Engine.TickContext.Transaction) / [`Accessor`](xref:Typhon.Engine.TickContext.Accessor) / [`Entities`](xref:Typhon.Engine.TickContext.Entities) / [`DeltaTime`](xref:Typhon.Engine.TickContext.DeltaTime) / [`SpatialGrid`](xref:Typhon.Engine.TickContext.SpatialGrid).
-- [`TickContext.CreateSideTransaction(DurabilityMode, DurabilityDiscipline)`](xref:Typhon.Engine.TickContext.CreateSideTransaction) — an independent mid-tick transaction.
+- [`TickContext.CreateSideTransaction(DurabilityMode, CommitDiscipline)`](xref:Typhon.Engine.TickContext.CreateSideTransaction) — an independent mid-tick transaction.
 - Typed [`EventQueue<T>`](xref:Typhon.Engine.EventQueue`1) — single-producer inter-system signalling, drained per tick.
 
 ## Learn & use

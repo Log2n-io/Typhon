@@ -890,6 +890,95 @@ public class OlcBTreeTests
         }
     }
 
+    /// <summary>
+    /// #716 / IXW-02 acceptance: under concurrent merges, no writer ever takes the write lock on a node an SMO has detached.
+    /// </summary>
+    /// <remarks>
+    /// The enforcement itself is structural and unit-tested at the latch (<c>OlcLatchTests.TryWriteLock_Obsolete_ReturnsFalse</c>); what this test adds is the
+    /// residual. Four sibling sites in the latch-coupled SMO phases cannot refuse — they are mid-algorithm with no restart point — and they are bounded by an
+    /// argument, not by a check: both phases hold the write lock on the sibling's PARENT, so no merge can be detaching a true sibling underneath them. A cousin
+    /// has a different parent and is not covered by that argument, so <c>ObsoleteSmoSiblingLocks</c> counts what gets through. Zero is the claim.
+    /// <para>
+    /// <c>MergeCount</c> is the non-vacuity control and is the load-bearing half: 400 removes against 500 initial entries drive the leaf population below half
+    /// capacity, so merges are structural rather than incidental. Without it, a run that happened to merge nothing would assert zero-of-nothing and pass.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(5000)]
+    [VerifiesRule("IXW-02")]
+    public unsafe void Remove_ConcurrentMerges_NoWriterEverLocksADetachedNode()
+    {
+        using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+        var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 100, sizeof(Index32Chunk));
+
+        const int initialEntries = 500;
+        const int removerCount = 4;
+        const int removesPerRemover = 100;
+
+        var setupDepth = epochManager.EnterScope();
+        try
+        {
+            var accessor = segment.CreateChunkAccessor();
+            var tree = new IntSingleBTree<PersistentStore>(segment);
+            for (int i = 1; i <= initialEntries; i++)
+            {
+                tree.Add(i, i * 10, ref accessor);
+            }
+            accessor.Dispose();
+
+            using var startSignal = new ManualResetEventSlim(false);
+            var exceptions = new ConcurrentBag<Exception>();
+            var removeTasks = new Task[removerCount];
+            for (int r = 0; r < removerCount; r++)
+            {
+                int removerId = r;
+                removeTasks[r] = Task.Factory.StartNew(() =>
+                {
+                    var depth = epochManager.EnterScope();
+                    try
+                    {
+                        var wa = segment.CreateChunkAccessor();
+                        startSignal.Wait();
+                        int start = removerId * removesPerRemover + 1;
+                        for (int i = start; i < start + removesPerRemover; i++)
+                        {
+                            tree.Remove(i, out _, ref wa);
+                        }
+                        wa.CommitChanges();
+                        wa.Dispose();
+                    }
+                    catch (Exception ex)
+                    {
+                        exceptions.Add(ex);
+                    }
+                    finally
+                    {
+                        epochManager.ExitScope(depth);
+                    }
+                }, TaskCreationOptions.LongRunning);
+            }
+
+            startSignal.Set();
+            Task.WaitAll(removeTasks);
+
+            Assert.That(exceptions, Is.Empty, () => $"Removers threw {exceptions.Count} exception(s); first:\n{exceptions.First()}");
+            Assert.That(tree.EntryCount, Is.EqualTo(initialEntries - removerCount * removesPerRemover));
+            Assert.That(tree.MergeCount, Is.GreaterThan(0), "control: with no merge, nothing can be marked obsolete and the assertion below is vacuous");
+            Assert.That(tree.ObsoleteSmoSiblingLocks, Is.Zero,
+                "a latch-coupled SMO locked a sibling a concurrent merge had already detached — the parent-lock argument bounding those four sites does not hold");
+
+            var verifyAccessor = segment.CreateChunkAccessor();
+            tree.CheckConsistency(ref verifyAccessor);
+            verifyAccessor.Dispose();
+            TestContext.WriteLine($"merges={tree.MergeCount} obsoleteRestarts={tree.ObsoleteRestarts} obsoleteSmoSiblingLocks={tree.ObsoleteSmoSiblingLocks}");
+        }
+        finally
+        {
+            epochManager.ExitScope(setupDepth);
+        }
+    }
+
     [Test]
     [CancelAfter(5000)]
     public unsafe void Remove_ConcurrentRemoveWithReaders_ReadersGetCorrectValues()

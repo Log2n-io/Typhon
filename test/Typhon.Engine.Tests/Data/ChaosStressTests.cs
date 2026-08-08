@@ -1169,16 +1169,39 @@ class ChaosStressTests : TestBase<ChaosStressTests>
 
         Task.WaitAll(tasks);
 
+        // Verification opens by ENTITY ID, not through an index, so a mismatch here is not an index defect — it is Open(id).Read() serving another entity's
+        // data. Before reporting that, rule out the cheaper explanation: Spawn handing the SAME id to two entities. If two distinct B keys map to one id, the
+        // defect is at spawn (id or slot reuse racing a destroy) and the read is innocent. Reported together so a failure says which.
+        var idToKeys = new Dictionary<EntityId, List<int>>();
+        foreach (var kvp in allEntities)
+        {
+            if (!idToKeys.TryGetValue(kvp.Value, out var keys))
+            {
+                keys = [];
+                idToKeys[kvp.Value] = keys;
+            }
+            keys.Add(kvp.Key);
+        }
+
+        foreach (var pair in idToKeys)
+        {
+            if (pair.Value.Count > 1)
+            {
+                errors.Add($"DUPLICATE ENTITY ID: {pair.Key} was returned by Spawn for B keys [{string.Join(", ", pair.Value)}]");
+            }
+        }
+
         // Global verification: every surviving entity must be readable with correct B value
         var survivingCount = 0;
         foreach (var kvp in allEntities)
         {
             using var txn = dbe.CreateQuickTransaction();
-            var comp = txn.Open(kvp.Value).Read(CompDArch.D);
+            var opened = txn.Open(kvp.Value);
+            var comp = opened.Read(CompDArch.D);
             survivingCount++;
             if (comp.B != kvp.Key)
             {
-                errors.Add($"Global verify: B={kvp.Key} entity has wrong B field: {comp.B}");
+                errors.Add($"Global verify: B={kvp.Key} entity={kvp.Value} valid={opened.IsValid} has wrong B field: {comp.B}");
             }
         }
 

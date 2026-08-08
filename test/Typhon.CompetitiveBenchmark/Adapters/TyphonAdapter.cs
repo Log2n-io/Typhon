@@ -173,7 +173,7 @@ public sealed class TyphonAdapter : IEngineAdapter
             case Config.SvCommitted:
             {
                 // Discipline MUST be selected at tx creation, before any write (CM-02).
-                using var t = _dbe.CreateQuickTransaction(WriteMode, DurabilityDiscipline.Commit);
+                using var t = _dbe.CreateQuickTransaction(WriteMode, CommitDiscipline.Commit);
                 t.OpenMut(_ids[key]).Write(SvValArch.Data).Value = value;
                 t.Commit();
                 break;

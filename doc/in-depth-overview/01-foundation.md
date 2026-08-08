@@ -388,7 +388,7 @@ Some types Typhon engine users *will* touch don't live in `Typhon.Engine` — th
 | [`FieldType`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/FieldType.cs) | Enum of supported component field kinds (full set incl. `Unsigned` / `DoubleFloat` flags and AABB/BSphere variants) |
 | [`Attributes`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/Attributes.cs) | Component / field attributes (`[SpatialIndex]`, `[Unique]`, etc.) |
 | [`StorageMode`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/StorageMode.cs) | Per-component storage policy: Versioned / SingleVersion / Transient |
-| [`DurabilityDiscipline`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/DurabilityDiscipline.cs) | Per-transaction escalation for `SingleVersion` components: `TickFence` (default, batched) or `Commit` (atomic, zero-loss, O(1) rollback) — see [06-ecs §8](06-ecs.md) |
+| [`CommitDiscipline`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/CommitDiscipline.cs) | Per-transaction escalation for `SingleVersion` components: `TickFence` (default, batched) or `Commit` (atomic, zero-loss, O(1) rollback) — see [06-ecs §8](06-ecs.md) |
 | [`MurmurHash2`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/MurmurHash2.cs) | Hash algorithm used in keying / partitioning |
 | [`ComponentCollection`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/ComponentCollection.cs) | Container type for component metadata |
 

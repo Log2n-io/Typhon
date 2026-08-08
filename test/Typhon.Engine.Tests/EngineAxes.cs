@@ -61,7 +61,7 @@ public readonly record struct Cell(
     DurabilityMode Durability,
     IndexShape Index,
     ReopenKind Reopen,
-    DurabilityDiscipline Discipline = DurabilityDiscipline.TickFence,
+    CommitDiscipline Discipline = CommitDiscipline.TickFence,
     CollectionShape Collection = CollectionShape.None,
     SpatialShape Spatial = SpatialShape.None)
 {
@@ -79,7 +79,7 @@ public readonly record struct Cell(
     public override string ToString()
     {
         var name = $"{Shape}_{Durability}_{Index}_{Reopen}";
-        if (Discipline != DurabilityDiscipline.TickFence)
+        if (Discipline != CommitDiscipline.TickFence)
         {
             name += $"_{Discipline}";
         }
@@ -134,7 +134,7 @@ public static class EngineAxes
     private static readonly DurabilityMode[] Durabilities = [DurabilityMode.Deferred, DurabilityMode.GroupCommit, DurabilityMode.Immediate];
     private static readonly IndexShape[] Indexes = (IndexShape[])Enum.GetValues(typeof(IndexShape));
     private static readonly ReopenKind[] Reopens = (ReopenKind[])Enum.GetValues(typeof(ReopenKind));
-    private static readonly DurabilityDiscipline[] Disciplines = [DurabilityDiscipline.TickFence, DurabilityDiscipline.Commit];
+    private static readonly CommitDiscipline[] Disciplines = [CommitDiscipline.TickFence, CommitDiscipline.Commit];
     private static readonly CollectionShape[] Collections = (CollectionShape[])Enum.GetValues(typeof(CollectionShape));
     private static readonly SpatialShape[] Spatials = (SpatialShape[])Enum.GetValues(typeof(SpatialShape));
 
@@ -158,9 +158,9 @@ public static class EngineAxes
             return false;
         }
 
-        // DurabilityDiscipline.Commit is defined only for the SingleVersion layout: "Versioned is always commit-scoped and Transient is never durable"
-        // (DurabilityDiscipline.cs:11-13). On a shape with no SV component the knob names nothing.
-        if (c.Discipline == DurabilityDiscipline.Commit && !c.HasSingleVersion)
+        // CommitDiscipline.Commit is defined only for the SingleVersion layout: "Versioned is always commit-scoped and Transient is never durable"
+        // (CommitDiscipline.cs:11-13). On a shape with no SV component the knob names nothing.
+        if (c.Discipline == CommitDiscipline.Commit && !c.HasSingleVersion)
         {
             return false;
         }

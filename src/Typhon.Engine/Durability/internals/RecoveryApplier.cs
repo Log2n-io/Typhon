@@ -270,7 +270,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     /// <remarks>
     /// <para>
     /// The base-entity counterpart of the spawn-init slots folded by <see cref="ApplySpawnedEntity"/>, and the piece whose absence made
-    /// <see cref="DurabilityDiscipline.TickFence"/>'s documented ≤1-tick loss window untrue: the driver aggregated these payloads correctly and then dropped
+    /// <see cref="CommitDiscipline.TickFence"/>'s documented ≤1-tick loss window untrue: the driver aggregated these payloads correctly and then dropped
     /// them, so the durability actually delivered for a steady-state workload — spawn once, mutate forever — was the CHECKPOINT interval (30 s by default),
     /// not one tick. Note this is not SingleVersion-specific despite #569's title: the branch is keyed on "no Spawn in this window", so flat Versioned
     /// archetypes lost their updates identically.

@@ -326,7 +326,7 @@ public sealed class RuntimeSchedule
         }
 
         // Phase 2a.5 — CM-04 (runtime-scheduling AC-05, issue #392): ReadsSnapshot requires MVCC history to freeze to, which only the Versioned layout has.
-        // Reject ReadsSnapshot on any non-Versioned component at Build() (SingleVersion under either durability discipline, or Transient).
+        // Reject ReadsSnapshot on any non-Versioned component at Build() (SingleVersion under either commit discipline, or Transient).
         foreach (var (reg, _) in allRegs)
         {
             if (reg.Access?.ReadsSnapshot == null)

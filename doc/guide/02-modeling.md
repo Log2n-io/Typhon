@@ -72,11 +72,11 @@ Every component picks a **storage mode**, set on its `[Component]` attribute. Th
 |---|---|---|---|
 | Reads | snapshot-isolated (consistent point-in-time) | live (last write wins) | live |
 | Writes | transactional — staged, committed | in-place, immediate | in-place, immediate |
-| `Rollback` reverts it? | yes | no | no |
+| `Rollback` reverts it? | yes | no by default — **yes** under `Commit` discipline ([ch.3](03-transactions.md#5-what-each-storage-mode-guarantees-here)) | no |
 | Survives a crash? | yes (WAL + checkpoint) | to the last tick (tick-fence WAL) | no (memory only) |
 | Cost | highest (~250 ns/write) | low (~40 ns/write) | lowest |
 
-💡 **Why three modes instead of "everything is ACID"?** Because full MVCC isn't free — every Versioned write allocates a new revision and every read may walk a version chain. That's the right price for a wallet or an inventory, where "did this commit?" matters. It's the *wrong* price for a position you overwrite 60 times a second and never need to roll back. Typhon lets you pay per component instead of all-or-nothing.
+💡 **Why three modes instead of "everything is ACID"?** Because full MVCC isn't free — every Versioned write allocates a new revision and every read may walk a version chain. That's the right price for a wallet or an inventory, where "did this commit?" matters. It's the *wrong* price for a position you overwrite 60 times a second. Typhon lets you pay per component instead of all-or-nothing.
 
 The rule of thumb:
 

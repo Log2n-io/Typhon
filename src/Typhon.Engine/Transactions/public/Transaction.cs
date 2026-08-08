@@ -169,14 +169,14 @@ public unsafe partial class Transaction : EntityAccessor
 
     /// <summary>
     /// (Re)initializes this pooled transaction instance for a new lease: enters an epoch scope, binds the engine and owning unit of work, fixes the MVCC
-    /// snapshot at <paramref name="tsn"/>, and selects the durability discipline. Called by the engine when a transaction is created; not for direct use.
+    /// snapshot at <paramref name="tsn"/>, and selects the commit discipline. Called by the engine when a transaction is created; not for direct use.
     /// </summary>
     /// <param name="dbe">Owning database engine.</param>
     /// <param name="tsn">Transaction sequence number that fixes this transaction's MVCC read snapshot.</param>
     /// <param name="uow">Owning unit of work, or <see langword="null"/> for the standalone path (UoW id 0).</param>
     /// <param name="readOnly">When <see langword="true"/>, no <see cref="ChangeSet"/> or UoW is allocated and all writes are forbidden.</param>
     /// <param name="discipline">Durability discipline applied to SingleVersion-layout writes for the transaction's lifetime.</param>
-    public void Init(DatabaseEngine dbe, long tsn, UnitOfWork uow = null, bool readOnly = false, DurabilityDiscipline discipline = DurabilityDiscipline.TickFence)
+    public void Init(DatabaseEngine dbe, long tsn, UnitOfWork uow = null, bool readOnly = false, CommitDiscipline discipline = CommitDiscipline.TickFence)
     {
         // Residual risk: _dbe.MMF.CreateChangeSet allocates and could throw OOM in extreme conditions, dropping the span.
         // Per project policy this is acceptable for a hot per-tx path.
@@ -2390,7 +2390,7 @@ public unsafe partial class Transaction : EntityAccessor
             // spawn values are already logged via their revision chains (SingleCache loop below); Transient is never logged. Read from the
             // spawn-staging content chunk (entry.Loc[slot]) — FinalizeSpawns runs later (PUBLISH), so the cluster SoA is not populated yet, but the
             // value already sits at ComponentOverhead in the staging chunk.
-            if (_discipline == DurabilityDiscipline.Commit)
+            if (_discipline == CommitDiscipline.Commit)
             {
                 for (int i = 0; i < _spawnedEntities.Count; i++)
                 {
@@ -2504,7 +2504,7 @@ public unsafe partial class Transaction : EntityAccessor
             {
                 _commitBatchArena ??= new CommitBatchArena();
                 _commitBatchArena.Reset();
-                var batch = new CommitBatchBuilder(_commitBatchArena, TSN, UowId, committedDiscipline: _discipline == DurabilityDiscipline.Commit);
+                var batch = new CommitBatchBuilder(_commitBatchArena, TSN, UowId, committedDiscipline: _discipline == CommitDiscipline.Commit);
                 BuildCommitBatch(ref batch);
                 if (!batch.IsEmpty)
                 {

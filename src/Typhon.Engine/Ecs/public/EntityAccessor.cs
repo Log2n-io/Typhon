@@ -70,14 +70,14 @@ public partial class EntityAccessor : IDisposable
     private protected ChangeSet _changeSet;
 
     /// <summary>
-    /// Effective durability discipline for <see cref="StorageMode.SingleVersion"/> writes in this accessor's scope.
-    /// Always <see cref="DurabilityDiscipline.TickFence"/> for a bare <see cref="EntityAccessor"/> (parallel workers never stage); a <see cref="Transaction"/>
-    /// resolves it from the explicit argument or escalates on first touch of a <see cref="DurabilityDiscipline.Commit"/> component (CM-02).
+    /// Effective commit discipline for <see cref="StorageMode.SingleVersion"/> writes in this accessor's scope.
+    /// Always <see cref="CommitDiscipline.TickFence"/> for a bare <see cref="EntityAccessor"/> (parallel workers never stage); a <see cref="Transaction"/>
+    /// resolves it from the explicit argument or escalates on first touch of a <see cref="CommitDiscipline.Commit"/> component (CM-02).
     /// </summary>
-    private protected DurabilityDiscipline _discipline;
+    private protected CommitDiscipline _discipline;
 
-    /// <summary>Effective durability discipline for SingleVersion writes (see <see cref="_discipline"/>).</summary>
-    internal DurabilityDiscipline Discipline => _discipline;
+    /// <summary>Effective commit discipline for SingleVersion writes (see <see cref="_discipline"/>).</summary>
+    internal CommitDiscipline Discipline => _discipline;
 
     /// <summary>True once any in-place (TickFence) SingleVersion write has been applied — blocks late escalation to Commit (CM-02).</summary>
     private protected bool _didInPlaceSvWrite;
@@ -388,7 +388,7 @@ public partial class EntityAccessor : IDisposable
         Array.Clear(_componentInfosByTypeId);
 
         FreeCommitStaging();
-        _discipline = DurabilityDiscipline.TickFence;
+        _discipline = CommitDiscipline.TickFence;
         _didInPlaceSvWrite = false;
 
         TSN = 0;
