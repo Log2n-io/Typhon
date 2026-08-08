@@ -375,6 +375,13 @@ public unsafe partial class EntityAccessor
                 if (chainResult.IsFailure)
                 {
                     ThrowIfSnapshotExpired();
+
+                    // #672, second half. `CopyLocationsFrom` above seeded this slot with the chain ROOT, and `continue` used to leave it there — so a walk
+                    // that found nothing handed the reader a CompRev chunk id to dereference as a CONTENT chunk id. It reads whatever happens to live at
+                    // that id in the content segment, which is a silent wrong VALUE rather than a zeroed one, and is exactly why three PTA tests passed
+                    // before the #629 eligibility flip: chunk id 1 in the CompRev segment happened to name chunk id 1 in the content segment, which still
+                    // held the pre-update value. Zeroing is not a good answer either, but it is an honest one, and it is what the cluster branch already does.
+                    result.SetLocation(slot, 0);
                     continue;
                 }
 
