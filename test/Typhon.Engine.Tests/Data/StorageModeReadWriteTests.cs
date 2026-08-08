@@ -281,12 +281,9 @@ class StorageModeReadWriteTests : TestBase<StorageModeReadWriteTests>
 
     // ── DirtyBitmap unit tests ──
 
-    // QUARANTINE (#709): DirtyBitmap.Set loses a bit — its Interlocked.Or targets the array the thread CAPTURED,
-    // which Grow/Snapshot may already have swapped out of _bits. Passes alone (4/4), fails under parallel load.
-    // Deliberately NOT [Category("Sensitive")]: that tier runs a test alone, which for a contention-only race is a
-    // guaranteed false green — the exact failure mode #703 exists to remove.
+    // #709 regression: covers the Grow half of the array-swap race. The bitmap starts at 1024 bits (16 words) and the threads reach bit 7999
+    // (125 words), so Grow is guaranteed to fire while the other writers are mid-Set.
     [Test]
-    [Category("Quarantine")]
     public void DirtyBitmap_ConcurrentSet()
     {
         var bitmap = new DirtyBitmap(1024);
@@ -322,6 +319,70 @@ class StorageModeReadWriteTests : TestBase<StorageModeReadWriteTests>
             setBits += System.Numerics.BitOperations.PopCount((ulong)snapshot[i]);
         }
         Assert.That(setBits, Is.EqualTo(threadCount * opsPerThread));
+    }
+
+    /// <summary>
+    /// #709 regression, Snapshot half. The fixed-size bitmap removes Grow from the picture entirely, so the ONLY array swap under test is
+    /// <c>Snapshot</c>'s <c>Interlocked.Exchange</c> — the half a growth-only fix would leave broken. Every bit set by a writer must appear
+    /// in exactly one place: some snapshot taken along the way, or the final one. A bit in neither was ORed into an orphaned array.
+    /// </summary>
+    [Test]
+    public void DirtyBitmap_ConcurrentSetWhileSnapshotting()
+    {
+        const int threadCount = 4;
+        const int opsPerThread = 2000;
+        const int totalBits = threadCount * opsPerThread;
+
+        var bitmap = new DirtyBitmap(totalBits);   // pre-sized: no Grow can fire, so any lost bit is Snapshot's doing
+        var seen = new long[(totalBits + 63) >> 6];
+        var barrier = new Barrier(threadCount + 1);
+        var writersDone = 0;
+        var threads = new Thread[threadCount];
+
+        for (int t = 0; t < threadCount; t++)
+        {
+            int threadId = t;
+            threads[t] = new Thread(() =>
+            {
+                barrier.SignalAndWait();
+                for (int i = 0; i < opsPerThread; i++)
+                {
+                    bitmap.Set(threadId * opsPerThread + i);
+                }
+                Interlocked.Increment(ref writersDone);
+            });
+            threads[t].Start();
+        }
+
+        barrier.SignalAndWait();
+
+        // Snapshot repeatedly while the writers run, ORing every drained word into `seen`. A snapshot that races a Set is exactly the window
+        // under test, so the loop deliberately does not pace itself.
+        while (Volatile.Read(ref writersDone) < threadCount)
+        {
+            Accumulate(bitmap.Snapshot(), seen);
+        }
+
+        for (int t = 0; t < threadCount; t++)
+        {
+            threads[t].Join();
+        }
+        Accumulate(bitmap.Snapshot(), seen);   // final drain, after every writer has retired
+
+        int setBits = 0;
+        for (int i = 0; i < seen.Length; i++)
+        {
+            setBits += System.Numerics.BitOperations.PopCount((ulong)seen[i]);
+        }
+        Assert.That(setBits, Is.EqualTo(totalBits), "every bit set by a writer must survive in some snapshot");
+
+        static void Accumulate(long[] snapshot, long[] seen)
+        {
+            for (int i = 0; i < snapshot.Length && i < seen.Length; i++)
+            {
+                seen[i] |= snapshot[i];
+            }
+        }
     }
 
     [Test]
