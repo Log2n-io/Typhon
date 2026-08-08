@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using Typhon.Engine.internals;
 using Typhon.Profiler;
 using Typhon.Schema.Definition;
@@ -1240,8 +1241,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 {
                     // Non-tier-filtered system with sleeping clusters: "promote" to use a filtered copy of ActiveClusterIds
                     // so the tier-filtered dispatch path in ExecuteChunkWithAccessor handles it.
-                    srcIds = cs.ActiveClusterIds;
-                    srcCount = cs.ActiveClusterCount;
+                    srcIds = ReadActiveClusterList(cs, out srcCount);
                 }
 
                 if (srcIds != null)
@@ -1287,8 +1287,8 @@ public sealed partial class TyphonRuntime : IDisposable
                     var cs2 = _systemClusterStates[sysIdx];
                     if (cs2 != null)
                     {
-                        _systemTierClusterIds[sysIdx] = cs2.ActiveClusterIds;
-                        _systemTierClusterCount[sysIdx] = cs2.ActiveClusterCount;
+                        _systemTierClusterIds[sysIdx] = ReadActiveClusterList(cs2, out var promotedCount);
+                        _systemTierClusterCount[sysIdx] = promotedCount;
                     }
                 }
 
@@ -1554,12 +1554,11 @@ public sealed partial class TyphonRuntime : IDisposable
                 var cs = _systemClusterStates[sysIdx];
                 if (cs != null)
                 {
-                    var totalClusters = cs.ActiveClusterCount;
+                    clusterIdArray = ReadActiveClusterList(cs, out var totalClusters);
                     var cBase = totalClusters / totalChunks;
                     var cRemainder = totalClusters % totalChunks;
                     clusterStart = chunkIndex * cBase + Math.Min(chunkIndex, cRemainder);
                     clusterEnd = clusterStart + cBase + (chunkIndex < cRemainder ? 1 : 0);
-                    clusterIdArray = cs.ActiveClusterIds;
                 }
             }
         }
@@ -1611,12 +1610,11 @@ public sealed partial class TyphonRuntime : IDisposable
             var cs = _systemClusterStates[sysIdx];
             if (cs != null)
             {
-                var totalClusters = cs.ActiveClusterCount;
+                clusterIdArray = ReadActiveClusterList(cs, out var totalClusters);
                 var cBase = totalClusters / totalChunks;
                 var cRemainder = totalClusters % totalChunks;
                 clusterStart = chunkIndex * cBase + Math.Min(chunkIndex, cRemainder);
                 clusterEnd = clusterStart + cBase + (chunkIndex < cRemainder ? 1 : 0);
-                clusterIdArray = cs.ActiveClusterIds;
             }
         }
 
@@ -1771,12 +1769,11 @@ public sealed partial class TyphonRuntime : IDisposable
                 var cs = _systemClusterStates[sysIdx];
                 if (cs != null)
                 {
-                    var totalClusters = cs.ActiveClusterCount;
+                    clusterIdArray = ReadActiveClusterList(cs, out var totalClusters);
                     var cBase = totalClusters / totalChunks;
                     var cRemainder = totalClusters % totalChunks;
                     clusterStart = chunkIndex * cBase + Math.Min(chunkIndex, cRemainder);
                     clusterEnd = clusterStart + cBase + (chunkIndex < cRemainder ? 1 : 0);
-                    clusterIdArray = cs.ActiveClusterIds;
                 }
             }
 
@@ -2168,6 +2165,41 @@ public sealed partial class TyphonRuntime : IDisposable
 
         metrics.UtilizationRatio = metrics.BudgetMs > 0 ? metrics.TotalCostMs / metrics.BudgetMs : 0f;
         _previousTickMetrics = metrics;
+    }
+
+    /// <summary>
+    /// Reads the <c>(ActiveClusterIds, ActiveClusterCount)</c> pair as a usable snapshot — #582 face 2.
+    /// </summary>
+    /// <remarks>
+    /// The pair is mutated by committing workers while other workers walk it, with nothing excluding the overlap. `AddToActiveList` releases the grown
+    /// array before the count; this acquires them in the mirror order, so the array is never older than the count and `count &lt;= array.Length` holds.
+    /// Loading the array first — which three call sites used to do — admits a plain interleaving that needs no reordering to fault: read the old
+    /// length-16 array, a concurrent spawn resizes and bumps the count, read the count as 17, index 16 of the old array.
+    /// <para>
+    /// This makes the pair CONSISTENT. It does not make the walk safe against a concurrent destroy: `RemoveFromActiveList` swaps with the last element, so
+    /// a walker holding a count from before it can still visit one cluster twice and skip the removed one, whose chunk may then be freed under it. That is
+    /// #582 face 1 and needs a snapshot or epoch protocol, not an ordering fix.
+    /// </para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int[] ReadActiveClusterList(ArchetypeClusterState cs, out int count)
+    {
+        count = Volatile.Read(ref cs.ActiveClusterCount);
+        var ids = Volatile.Read(ref cs.ActiveClusterIds);
+        if (ids == null)
+        {
+            count = 0;
+            return null;
+        }
+
+        // Defensive clamp: a shrink between the two loads leaves count larger than the live prefix, which is benign (the entries are still in range), but a
+        // count past the array itself must never reach a caller.
+        if (count > ids.Length)
+        {
+            count = ids.Length;
+        }
+
+        return ids;
     }
 
     private TickContext OnSystemStartInternal(int sysIdx)

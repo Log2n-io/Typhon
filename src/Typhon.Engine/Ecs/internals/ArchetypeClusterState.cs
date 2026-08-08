@@ -838,6 +838,13 @@ internal sealed unsafe class ArchetypeClusterState
 
     private ArchetypeClusterState() { }
 
+    /// <summary>
+    /// A state carrying nothing but the active-cluster list — for testing <see cref="AddToActiveList"/> / <see cref="RemoveFromActiveList"/>'s publication
+    /// order (#582 face 2) without standing up segments and an engine. Those two methods touch only plain fields, so the list behaves identically here.
+    /// </summary>
+    internal static ArchetypeClusterState CreateActiveListOnlyForTests() =>
+        new() { ActiveClusterIds = new int[16], ActiveClusterCount = 0, FreeClusterHead = -1 };
+
     /// <summary>Chunk capacity of the primary (non-null) segment.</summary>
     internal int PrimarySegmentCapacity => ClusterSegment?.ChunkCapacity ?? TransientSegment.ChunkCapacity;
 
@@ -2596,13 +2603,31 @@ internal sealed unsafe class ArchetypeClusterState
     }
 
     /// <summary>Add a cluster chunk ID to the active list.</summary>
+    /// <remarks>
+    /// #582 face 2. Worker threads read <see cref="ActiveClusterIds"/> and <see cref="ActiveClusterCount"/> live, concurrently with this. The publication
+    /// order is what makes a (count, array) pair usable: the grown array is released FIRST, the count that indexes into it SECOND, so a reader that acquires
+    /// a given count is guaranteed to see an array at least that long. Readers must load the pair in the mirror order — count, then array — and both loads
+    /// must be `Volatile.Read` (see `TyphonRuntime.ReadActiveClusterList`). Loading the array first admits a plain interleaving that needs no reordering at
+    /// all to fault: old array of length 16, concurrent resize, count read as 17, index 16 of the old array.
+    /// <para>
+    /// This orders the GROWTH of the list. It does not make the list safe to walk against a concurrent <see cref="RemoveFromActiveList"/>, whose
+    /// swap-with-last can still show a walker one cluster twice and skip another — #582 face 1, which needs a real snapshot protocol, not an ordering fix.
+    /// </para>
+    /// </remarks>
     public void AddToActiveList(int chunkId)
     {
-        if (ActiveClusterCount >= ActiveClusterIds.Length)
+        var ids = ActiveClusterIds;
+        var count = ActiveClusterCount;
+        if (count >= ids.Length)
         {
-            Array.Resize(ref ActiveClusterIds, ActiveClusterIds.Length * 2);
+            var grown = new int[ids.Length * 2];
+            Array.Copy(ids, grown, count);
+            ids = grown;
+            Volatile.Write(ref ActiveClusterIds, grown);
         }
-        ActiveClusterIds[ActiveClusterCount++] = chunkId;
+
+        ids[count] = chunkId;
+        Volatile.Write(ref ActiveClusterCount, count + 1);
         // Issue #231: any change to the active cluster set invalidates the tier index.
         ClusterSetVersion++;
         // Issue #233: ensure dormancy arrays cover the new chunkId, initialize to Active/0.
@@ -2634,7 +2659,9 @@ internal sealed unsafe class ArchetypeClusterState
                 }
 
                 ActiveClusterIds[i] = ActiveClusterIds[ActiveClusterCount - 1];
-                ActiveClusterCount--;
+                // Released, to pair with the acquiring readers described on AddToActiveList. Shrinking is the benign direction — a reader that sees the
+                // stale larger count reads an index that is still in range — but leaving one store of the pair plain would make the pairing accidental.
+                Volatile.Write(ref ActiveClusterCount, ActiveClusterCount - 1);
 
                 // If the removed cluster was the free head, reset
                 if (FreeClusterHead == chunkId)
