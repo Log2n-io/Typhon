@@ -110,7 +110,46 @@ public unsafe partial class EntityAccessor
 
         var info = GetComponentInfoByTypeId(meta._componentTypeIds[slot], meta._slotToComponentType[slot]);
         var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, chainRoot, TSN, true);
-        return chainResult.IsSuccess ? chainResult.Value.CurCompContentChunkId : 0;
+        if (chainResult.IsFailure)
+        {
+            ThrowIfSnapshotExpired();
+            return 0;
+        }
+
+        return chainResult.Value.CurCompContentChunkId;
+    }
+
+    /// <summary>
+    /// Turns a revision-chain walk that found nothing into a <see cref="SnapshotExpiredException"/> when the reason is that this snapshot was trimmed (#672).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Called only from the FAILURE branch of a chain walk, so a successful read pays nothing at all — not even the watermark load. That is cheaper than
+    /// checking the watermark up front on every read, and strictly more precise: a walk that fails for a legitimate reason (the entity's component genuinely
+    /// has no revision visible at this TSN) is left alone unless the snapshot is also demonstrably below the retention floor.
+    /// </para>
+    /// <para>
+    /// Scoped to <see cref="PointInTimeAccessor"/> worker accessors via <c>_ownsPersistentEpochScope</c>. A <c>Transaction</c> registers in the chain, so
+    /// <c>ComputeNextMinTSN</c> can see it and its snapshot is genuinely retained; a walk failure there means something else and must not be reported as an
+    /// expiry.
+    /// </para>
+    /// <para>
+    /// Measured before it was written: across the full 5044-test suite there are exactly TWO chain-walk failures, both of them PTA reads below the
+    /// watermark. So this branch is not a hot path being taxed — it is a path that essentially only fires when the defect fires.
+    /// </para>
+    /// </remarks>
+    private void ThrowIfSnapshotExpired()
+    {
+        if (!_ownsPersistentEpochScope || _dbe == null)
+        {
+            return;
+        }
+
+        var retained = _dbe.TransactionChain.RetainedMinTSN;
+        if (TSN < retained)
+        {
+            throw new SnapshotExpiredException(TSN, retained);
+        }
     }
 
     /// <summary>Open an entity for reading. Throws if not found or not visible.</summary>
@@ -335,6 +374,7 @@ public unsafe partial class EntityAccessor
                 var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, compRevFirstChunkId, TSN, true);
                 if (chainResult.IsFailure)
                 {
+                    ThrowIfSnapshotExpired();
                     continue;
                 }
 

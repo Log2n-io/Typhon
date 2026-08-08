@@ -146,7 +146,41 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
             secondToLast = cur;
             cur = cur.Next;
         }
-        return secondToLast?.TSN ?? (_nextFreeId + 1);
+
+        var next = secondToLast?.TSN ?? (_nextFreeId + 1);
+        PublishRetainedMinTSN(next);
+        return next;
+    }
+
+    /// <summary>
+    /// The oldest TSN whose revisions are still guaranteed to be retained. A snapshot below this may have been trimmed — #672.
+    /// </summary>
+    /// <remarks>
+    /// Monotonic. Every caller of <see cref="ComputeNextMinTSN"/> computes it in order to trim to it, so publishing here covers the trim sites without
+    /// having to find them individually. Cleanups can complete out of order, hence an interlocked max rather than a plain store.
+    /// <para>
+    /// <see cref="PointInTimeAccessor"/> allocates a TSN via <see cref="AllocateTSN"/> and registers NOTHING in the chain, so
+    /// <see cref="ComputeNextMinTSN"/> cannot see it and no amount of care on the cleanup side will retain its snapshot. This watermark is what lets a read
+    /// at such a TSN discover that its snapshot is gone instead of reading a zeroed component.
+    /// </para>
+    /// </remarks>
+    internal long RetainedMinTSN => Volatile.Read(ref _retainedMinTSN);
+
+    private long _retainedMinTSN;
+
+    private void PublishRetainedMinTSN(long value)
+    {
+        var seen = Volatile.Read(ref _retainedMinTSN);
+        while (value > seen)
+        {
+            var prior = Interlocked.CompareExchange(ref _retainedMinTSN, value, seen);
+            if (prior == seen)
+            {
+                return;
+            }
+
+            seen = prior;
+        }
     }
 
     /// <summary>

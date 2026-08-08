@@ -18,6 +18,11 @@ public enum TyphonErrorCode
     /// <summary>A transaction exceeded its overall deadline (see <see cref="TransactionTimeoutException"/>).</summary>
     TransactionTimeout              = 1002,
 
+    /// <summary>
+    /// A read was attempted at a snapshot whose revisions have already been reclaimed (see <see cref="SnapshotExpiredException"/>).
+    /// </summary>
+    SnapshotExpired                 = 1003,
+
     // 2xxx — Storage
 
     /// <summary>Structural data corruption or an integrity violation (see <see cref="CorruptionException"/>).</summary>
