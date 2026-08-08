@@ -40,14 +40,32 @@ internal sealed class WalCrashSweepTests
 
     private static readonly string[] NonClusterWorkloads = ["SingleTxSpawn", "LifecycleChurn", "IndexedFlat", "MultiValueDupKey"];
 
-    // Checkpoint page-write boundaries. Boundaries beyond a cycle's write count let the cycle complete (consolidated base) — recovery still holds, so the
-    // sweep is robust without probing the exact per-workload write count.
+    // Checkpoint page-write boundaries.
+    //
+    // #705 T3: this comment used to read "boundaries beyond a cycle's write count let the cycle complete — recovery still holds, so the sweep is robust
+    // without probing the exact per-workload write count". That was backwards. Such a boundary injects NO crash: the case runs a clean checkpoint, asserts
+    // recovery over a consolidated base, and passes under a name claiming it crashed at write N. The sweep was not robust, it was partly inert, and the
+    // inertness was invisible because nothing asserted ChaosPageIO.HasCrashed. Both are now fixed: every boundary case requires the crash to have fired, and
+    // PageAxis_EveryBoundary_IsWithinTheObservedWriteCount pins the whole set against the measured write count so the requirement stays satisfiable.
     //
     // #704 T6: the fixed five are a FLOOR, not the set. This file's own :15 comment claims the sweep crashes "at EVERY page-write boundary"; it crashed at
     // five, and had done since it was written, because the array is a literal. Two seeded extras are appended so the boundary explored grows with CI-hours
     // instead of being frozen on the day the array was typed. With TYPHON_TEST_SEED unset the seed is constant, so the gate still runs one fixed set — the
     // nightly is what varies it.
+    //
+    // #705 T3: the seeded extras were drawn from [1, 17) — and MEASURED, a checkpoint cycle performs 87-145 page writes (SingleTxSpawn 87, MixedDiscipline 87,
+    // IndexedFlat 107, MultiValueDupKey 107, LifecycleChurn 145; see PageAxis_EveryBoundary_IsWithinTheObservedWriteCount, which prints them). So no seed could
+    // ever reach past write 16: the entire tail of every cycle had never been crashed at, and the seeding multiplied ~18 % of the space. The draw now spans
+    // BoundaryCeiling, which the probe test pins BELOW the shortest observed cycle — so widening the range cannot make a boundary inert, and if the cycle ever
+    // gets shorter the probe fails first, naming the number, instead of a nightly failing at an unlucky seed far from the cause.
     private static readonly int[] CrashBoundaries = BuildCrashBoundaries();
+
+    /// <summary>
+    /// Upper bound (exclusive) for both the seeded gate extras and the exhaustive nightly sweep. Held below the shortest MEASURED cycle (87 writes) so every
+    /// boundary it admits is guaranteed to land inside a cycle and actually inject a crash. Enforced, not assumed — see
+    /// <see cref="PageAxis_EveryBoundary_IsWithinTheObservedWriteCount"/>.
+    /// </summary>
+    private const int BoundaryCeiling = 80;
 
     private static int[] BuildCrashBoundaries()
     {
@@ -59,7 +77,7 @@ internal sealed class WalCrashSweepTests
         var extras = new SortedSet<int>();
         while (extras.Count < 2)
         {
-            var n = rand.Next(1, 17);
+            var n = rand.Next(1, BoundaryCeiling);
             if (System.Array.IndexOf(floor, n) < 0)
             {
                 extras.Add(n);
@@ -100,6 +118,36 @@ internal sealed class WalCrashSweepTests
                 yield return new TestCaseData(w, n).SetName($"PageAxis_{w}_N{n}");
             }
         }
+    }
+
+    /// <summary>Every workload with page-axis cases — the four non-cluster ones plus MixedDiscipline, which drives its own boundary fan-out below.</summary>
+    private static readonly string[] AllPageAxisWorkloads = [.. NonClusterWorkloads, "MixedDiscipline"];
+
+    private static IEnumerable<TestCaseData> BoundaryProbeCases()
+    {
+        foreach (var w in AllPageAxisWorkloads)
+        {
+            yield return new TestCaseData(w).SetName($"BoundaryProbe_{w}");
+        }
+    }
+
+    /// <summary>
+    /// Fail a boundary case that injected NO crash (#705 T3).
+    /// </summary>
+    /// <remarks>
+    /// A boundary past the cycle's write count runs a COMPLETE checkpoint and then asserts recovery over a consolidated base. That is a real assertion — it is
+    /// simply not the one the case NAME claims, and the case can no longer fail for the reason it exists. It is the W1 class from #702 §3: a test that exists
+    /// and cannot fail. <see cref="ChaosPageIO.HasCrashed"/> has been on the injector since it was written; nothing ever asserted it, and this file's own
+    /// comment described the silent pass as robustness.
+    /// </remarks>
+    private static void AssertCrashWasInjected(ChaosPageIO chaos, string what, int crashAtWrite)
+    {
+        Assert.That(
+            chaos.HasCrashed,
+            Is.True,
+            $"{what}: boundary N={crashAtWrite} injected NO crash — the cycle completed after {chaos.TotalWriteCount} page write(s), so this case exercised a "
+            + $"clean checkpoint rather than a crash at that boundary. See {nameof(PageAxis_EveryBoundary_IsWithinTheObservedWriteCount)}, which pins the "
+            + "boundary set against the observed write count.");
     }
 
     private static string CurrentDatabaseName
@@ -271,6 +319,136 @@ internal sealed class WalCrashSweepTests
 
     // ── AC4: page-axis — crash the checkpoint at every write boundary; the aborted cycle never advances CheckpointLSN, so replay heals ──
 
+    /// <summary>
+    /// Every boundary in <see cref="CrashBoundaries"/> must fall WITHIN the checkpoint cycle's real page-write count, for every workload (#705 T3).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the guard that lets <see cref="AssertCrashWasInjected"/> be an unconditional failure rather than a judgement call. Without it, tightening the
+    /// boundary cases would just relocate the problem: a boundary drifting out of range would turn a whole workload red with no indication of why, and the
+    /// obvious "fix" would be to relax the assertion back to silence.
+    /// </para>
+    /// <para>
+    /// It matters most for the SEEDED extras. #704 appended two boundaries drawn from the run seed; if the cycle ever gets shorter than the draw range, a
+    /// nightly at an unlucky seed would fail somewhere far from the cause. This test fails FIRST and names the observed count, so the draw range can be
+    /// corrected instead of guessed at.
+    /// </para>
+    /// <para>
+    /// The probe runs a recording-only <see cref="ChaosPageIO"/> (no crash configured) over one complete cycle. That consumes the dirty set, which is exactly
+    /// why the measurement cannot be folded into the boundary cases themselves — a probe and a crash cannot share a checkpoint.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    [TestCaseSource(nameof(BoundaryProbeCases))]
+    public void PageAxis_EveryBoundary_IsWithinTheObservedWriteCount(string workloadName)
+    {
+        var workload = MakeWorkload(workloadName);
+        var shadow = new RecoveryShadowModel();
+
+        using var scope = _serviceProvider.CreateScope();
+        var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        var mmf = scope.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+        workload.Register(dbe);
+        dbe.InitializeArchetypes();
+        using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+        {
+            workload.Execute(uow, shadow);
+            uow.Flush();
+        }
+
+        var chaos = new ChaosPageIO();
+        chaos.WireTo(mmf);
+        dbe.CheckpointManager.RunCheckpointCycle(dbe.WalManager.DurableLsn);
+        chaos.Unwire(mmf);
+
+        var observed = chaos.TotalWriteCount;
+        TestContext.WriteLine($"{workloadName}: checkpoint cycle performed {observed} page write(s); boundaries = [{string.Join(", ", CrashBoundaries)}]");
+
+        Assert.That(chaos.HasCrashed, Is.False, "the probe configures no crash — a crash here means the injector fired without being asked to");
+        Assert.That(
+            observed,
+            Is.GreaterThanOrEqualTo(BoundaryCeiling),
+            $"{workloadName}: the checkpoint cycle performs only {observed} page write(s), but {nameof(BoundaryCeiling)} admits boundaries up to "
+            + $"{BoundaryCeiling - 1} — for the seeded gate extras AND the exhaustive nightly sweep. Every boundary above {observed} runs a COMPLETE cycle and "
+            + $"tests a clean checkpoint under a crash-at-N name. Lower {nameof(BoundaryCeiling)} to match, and record the new measurement here.");
+    }
+
+    /// <summary>
+    /// The anti-false-green companion to <see cref="AssertCrashWasInjected"/>: drive a boundary deliberately past the end of the cycle and require the check to
+    /// REJECT it.
+    /// </summary>
+    /// <remarks>
+    /// Without this, the genuineness check is itself unverified — and it is guarding against exactly the failure mode of being green for the wrong reason, so
+    /// leaving it unexercised would be the same mistake one level up. §5.5: a verifier that has never rejected anything is not evidence. This is also the only
+    /// place the out-of-range behaviour is exercised on purpose, which is why the message assertion pins the wording the real cases would emit.
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    public void AssertCrashWasInjected_RejectsABoundaryPastTheEndOfTheCycle()
+    {
+        var workload = MakeWorkload("SingleTxSpawn");
+        var shadow = new RecoveryShadowModel();
+
+        using var scope = _serviceProvider.CreateScope();
+        var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        var mmf = scope.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+        workload.Register(dbe);
+        dbe.InitializeArchetypes();
+        using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+        {
+            workload.Execute(uow, shadow);
+            uow.Flush();
+        }
+
+        // A boundary far past any cycle: the checkpoint completes normally and the injector never fires. Pre-#705 this was a PASSING case.
+        const int wayPastTheEnd = 100_000;
+        var chaos = new ChaosPageIO();
+        chaos.WireTo(mmf);
+        chaos.SetCrashAtPageWrite(wayPastTheEnd);
+        dbe.CheckpointManager.RunCheckpointCycle(dbe.WalManager.DurableLsn);
+        chaos.Unwire(mmf);
+
+        Assert.That(chaos.HasCrashed, Is.False, "precondition: a boundary past the cycle must leave the injector unfired, or this test proves nothing");
+        var ex = Assert.Throws<AssertionException>(() => AssertCrashWasInjected(chaos, "SingleTxSpawn", wayPastTheEnd));
+        Assert.That(ex.Message, Does.Contain("injected NO crash"), "the rejection must say why, not merely fail");
+    }
+
+    /// <summary>Every workload × every boundary in <c>1..BoundaryCeiling-1</c> — the exhaustive sweep, ~400 cases, nightly only.</summary>
+    private static IEnumerable<TestCaseData> ExhaustivePageAxisCases()
+    {
+        foreach (var w in AllPageAxisWorkloads)
+        {
+            for (var n = 1; n < BoundaryCeiling; n++)
+            {
+                yield return new TestCaseData(w, n).SetName($"Exhaustive_PageAxis_{w}_N{n}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// The exhaustive boundary sweep #705 asks for: crash the checkpoint at EVERY write from 1 to <see cref="BoundaryCeiling"/>, for every workload.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The gate keeps the seeded floor; this cell is where the claim in this file's own summary — "crash the checkpoint at every page-write boundary" —
+    /// becomes true. It is <c>[Explicit] + [Category("Nightly")]</c> because ~400 crash-and-recover cycles is minutes, not a PR gate.
+    /// </para>
+    /// <para>
+    /// <b>One case per boundary, not a loop.</b> A loop would stop at the first failing boundary and hide every later one, and #704's trap 5 is the sharper
+    /// version of the same lesson: <c>Assert.Multiple</c> records into the current result independently of the exception, so a caught failure leaks into the
+    /// next iteration. Independent cases also mean the failure NAME carries the boundary.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    [TestCaseSource(nameof(ExhaustivePageAxisCases))]
+    [Explicit("Exhaustive boundary sweep — ~400 crash-and-recover cycles; the gate runs the seeded floor instead")]
+    [Category("Nightly")]
+    [VerifiesRule("CK-03")]
+    public void Exhaustive_PageAxis_CheckpointCrashAtBoundary_OracleHolds(string workloadName, int crashAtWrite)
+        => PageAxis_CheckpointCrashAtBoundary_OracleHolds(workloadName, crashAtWrite);
+
     [Test]
     [CancelAfter(20_000)]
     [TestCaseSource(nameof(PageAxisCases))]
@@ -301,6 +479,7 @@ internal sealed class WalCrashSweepTests
             chaos.SetCrashAtPageWrite(crashAtWrite);
             dbe.CheckpointManager.RunCheckpointCycle(dbe.WalManager.DurableLsn);
             chaos.Unwire(mmf);
+            AssertCrashWasInjected(chaos, workloadName, crashAtWrite);
 
             dbe.SimulateHardCrash();
         }
@@ -433,6 +612,7 @@ internal sealed class WalCrashSweepTests
             chaos.SetCrashAtPageWrite(crashAtWrite);
             dbe.CheckpointManager.RunCheckpointCycle(dbe.WalManager.DurableLsn);
             chaos.Unwire(mmf);
+            AssertCrashWasInjected(chaos, "MixedDiscipline", crashAtWrite);
 
             dbe.SimulateHardCrash();
         }

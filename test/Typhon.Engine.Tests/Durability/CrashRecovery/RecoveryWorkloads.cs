@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Numerics;
 using System.Runtime.InteropServices;
 using Typhon.Schema.Definition;
 
@@ -17,6 +18,28 @@ internal interface IRecoveryWorkload
     void Register(DatabaseEngine dbe);
 
     void Execute(UnitOfWork uow, RecoveryShadowModel shadow);
+
+    /// <summary>
+    /// Optional post-recovery phase (#705 T3): mutate the RECOVERED engine and keep recording into the same shadow, so the run continues past the reopen
+    /// instead of stopping at it. Run by <c>DifferentialRecoveryOracleTests.RecoverAndResume</c>, which then crashes a second time and re-asserts.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why this is an interface change and not another test.</b> Nothing in the crash suite writes after recovery — <c>RecoveryOracle</c> has zero
+    /// <c>Spawn&lt;</c> / <c>OpenMut</c> / <c>Destroy(</c> call sites, and every post-crash assertion in <c>TrueCrashE2ETests</c>,
+    /// <c>DifferentialRecoveryOracleTests</c> and <c>WalCrashSweepTests</c> reopens, verifies and stops. A recovery that restores the DATA correctly while
+    /// leaving an allocator, counter or watermark wrong is therefore invisible to all of them **by construction**, no matter how many workloads are added
+    /// (#702 §3.1). #697 is that class; this method is what makes it reachable.
+    /// </para>
+    /// <para>
+    /// Default-implemented as a no-op so the existing workloads compile unchanged. That is safe only because the harness REQUIRES the shadow to have grown
+    /// across the call — a silently no-op <c>Resume</c> would otherwise be a test that reports post-recovery-write coverage it never performed, which is the
+    /// trap #704 hit when a widened axis produced case names a fixture body never exercised.
+    /// </para>
+    /// </remarks>
+    void Resume(UnitOfWork uow, RecoveryShadowModel shadow)
+    {
+    }
 }
 
 /// <summary>The simplest case: N CompA entities spawned in one committed transaction (flat, non-indexed, Versioned). Exercises increments 1–2 as a differential property.</summary>
@@ -359,6 +382,342 @@ internal sealed class MixedDisciplineWorkload : IRecoveryWorkload
 
             tx.Commit();
         }
+    }
+}
+
+/// <summary>
+/// Reads an entity's <c>ComponentCollection</c> ELEMENTS so the oracle can compare them (#705 T3 / #389).
+/// </summary>
+/// <remarks>
+/// A projector rather than reflection inside <see cref="RecoveryShadowModel"/>: reading a collection needs the element type at compile time
+/// (<c>Transaction.CreateComponentCollectionAccessor&lt;T&gt;</c>), and the workload is the one place that already knows it. The shadow enforces that a
+/// collection-bearing archetype HAS one — see <c>RecoveryShadowModel.AssertCollectionsAreObservable</c> — so the type-safety is bought without leaving the
+/// false-green reachable by omission.
+/// </remarks>
+internal interface ICollectionProjector
+{
+    /// <summary>The elements of every collection field the entity carries, in a stable field order.</summary>
+    IReadOnlyList<int[]> Project(Transaction tx, EntityId id);
+}
+
+/// <summary>The storage shapes the #705 workloads can carry. One axis, three values — not three near-duplicate workload classes.</summary>
+internal enum PostRecoveryShape
+{
+    /// <summary>Flat, Versioned, non-indexed (CompA) — #697's own minimal repro: a component with no collection data at all.</summary>
+    Flat,
+
+    /// <summary>Flat, Versioned, UNIQUE-indexed (CompD.B) — the sharp variant: a re-issued key violates the index and fails loudly, not silently.</summary>
+    FlatIndexed,
+
+    /// <summary>Cluster-backed all-SingleVersion under the Commit discipline (SvIndexed) — the other storage home, which has its own watermark path.</summary>
+    ClusterSv,
+}
+
+/// <summary>
+/// The per-shape register / spawn / update primitives, in ONE place (#705 T3).
+/// </summary>
+/// <remarks>
+/// #704's fourth trap was a kit whose methods drifted apart as shapes were added: a composition one method handled and another did not fell through and wrote a
+/// DIFFERENT archetype's component instead of refusing. Every switch here throws on an unhandled shape for that reason — adding a shape must break loudly at
+/// compile-adjacent time, not silently produce a green test that exercised the wrong archetype.
+/// </remarks>
+internal static class ShapeOps
+{
+    public static void Register(DatabaseEngine dbe, PostRecoveryShape shape)
+    {
+        switch (shape)
+        {
+            case PostRecoveryShape.Flat:
+                dbe.RegisterComponentFromAccessor<CompA>();
+                break;
+            case PostRecoveryShape.FlatIndexed:
+                dbe.RegisterComponentFromAccessor<CompD>();
+                break;
+            case PostRecoveryShape.ClusterSv:
+                dbe.RegisterComponentFromAccessor<SvIndexed>();
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(shape), shape, "unhandled shape");
+        }
+    }
+
+    /// <summary>
+    /// Begin a transaction appropriate to the shape. The cluster shape uses <see cref="DurabilityDiscipline.Commit"/>: a plain TickFence SingleVersion write is
+    /// checkpoint-durable only (#395 Face B), so asserting it survives a hard crash would be asserting a documented NON-guarantee. Commit discipline is the
+    /// mode that promises zero loss, which makes a dropped value unambiguously a defect rather than a contract the test misread — trap 1 from #704.
+    /// </summary>
+    public static Transaction Begin(UnitOfWork uow, PostRecoveryShape shape)
+        => shape == PostRecoveryShape.ClusterSv ? uow.CreateTransaction(DurabilityDiscipline.Commit) : uow.CreateTransaction();
+
+    public static EntityId Spawn(Transaction tx, PostRecoveryShape shape, int k) => shape switch
+    {
+        PostRecoveryShape.Flat => tx.Spawn<CompAArch>(CompAArch.A.Set(new CompA(k + 1, k, k))),
+        PostRecoveryShape.FlatIndexed => tx.Spawn<CompDArch>(CompDArch.D.Set(new CompD(k * 1.5f, k * 100, k * 2.5))),
+        PostRecoveryShape.ClusterSv => tx.Spawn<SvIndexedArch>(SvIndexedArch.S.Set(new SvIndexed(k * 7, k))),
+        _ => throw new ArgumentOutOfRangeException(nameof(shape), shape, "unhandled shape"),
+    };
+
+    /// <summary>Overwrite an EXISTING entity's component with the value <paramref name="k"/> encodes. Indexed keys stay distinct across any k.</summary>
+    public static void Update(Transaction tx, PostRecoveryShape shape, EntityId id, int k)
+    {
+        switch (shape)
+        {
+            case PostRecoveryShape.Flat:
+                tx.OpenMut(id).Write(CompAArch.A) = new CompA(k + 1, k, k);
+                break;
+            case PostRecoveryShape.FlatIndexed:
+                tx.OpenMut(id).Write(CompDArch.D) = new CompD(k * 1.5f, k * 100, k * 2.5);
+                break;
+            case PostRecoveryShape.ClusterSv:
+                tx.OpenMut(id).Write(SvIndexedArch.S) = new SvIndexed(k * 7, k);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(shape), shape, "unhandled shape");
+        }
+    }
+}
+
+/// <summary>
+/// The cross-frontier update workload (#705 T3 / #569): it spawns NOTHING and updates entities a previous phase already committed.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Why a constructor taking the alive-set is the whole point.</b> Every pre-existing workload builds its own entities in a <c>List&lt;EntityId&gt;</c> local
+/// inside <c>Execute</c>, so the two windows of <c>RecoverWithMidCheckpoint</c> always touched DISJOINT entity sets — each phase spawned its own with a
+/// disjoint <c>keyBase</c>. "An entity checkpointed in window 1 and UPDATED in window 2" was therefore not merely untested but inexpressible, and no number of
+/// additional workloads through that interface could produce it (#702 §3.1).
+/// </para>
+/// <para>
+/// <c>RecoveryDriver</c>'s aggregation loop drops the aggregated Slot payloads for any entity with no Spawn in the window — regardless of storage mode. #569 is
+/// titled for SingleVersion, but the Versioned flat shapes below take the same branch, which is why all three run.
+/// </para>
+/// </remarks>
+internal sealed class CrossFrontierUpdateWorkload : IRecoveryWorkload
+{
+    /// <summary>Offset applied to every updated payload, so the post-update value is distinguishable from the pre-update one on every field.</summary>
+    public const int UpdateKeyOffset = 500;
+
+    /// <summary>Offset for the FIRST pass when <c>passes == 2</c>. Far from <see cref="UpdateKeyOffset"/> so a stale value is unmistakable.</summary>
+    public const int SupersededKeyOffset = 9_000;
+
+    private readonly PostRecoveryShape _shape;
+    private readonly EntityId[] _existing;
+    private readonly int _passes;
+
+    /// <param name="shape">Storage home to exercise.</param>
+    /// <param name="existing">Entities a previous phase committed. Must be non-empty — see the constructor guard.</param>
+    /// <param name="passes">
+    /// 1 = a single update per entity. 2 = two updates in SEPARATE committed transactions, so the window holds two Slot records for the same (entity, slot)
+    /// and the aggregation's latest-wins rule is what decides the recovered value — #569's CM-03 acceptance criterion. The first pass writes a deliberately
+    /// distinct value, so applying the wrong record produces a diff rather than a coincidence.
+    /// </param>
+    public CrossFrontierUpdateWorkload(PostRecoveryShape shape, IReadOnlyCollection<EntityId> existing, int passes = 1)
+    {
+        ArgumentNullException.ThrowIfNull(existing);
+        if (existing.Count == 0)
+        {
+            throw new ArgumentException(
+                "the cross-frontier workload updates entities a PREVIOUS phase committed; an empty alive-set means it would assert nothing", nameof(existing));
+        }
+
+        if (passes is < 1 or > 2)
+        {
+            throw new ArgumentOutOfRangeException(nameof(passes), passes, "1 (plain update) or 2 (last-writer-wins)");
+        }
+
+        _shape = shape;
+        _existing = [.. existing];
+        _passes = passes;
+    }
+
+    public string Name => $"CrossFrontierUpdate_{_shape}_x{_passes}";
+
+    public void Register(DatabaseEngine dbe) => ShapeOps.Register(dbe, _shape);
+
+    public void Execute(UnitOfWork uow, RecoveryShadowModel shadow)
+    {
+        // Pass 1 of 2 is a SEPARATE committed transaction, so its Slot records carry lower LSNs than pass 2's. One transaction writing twice would collapse
+        // into a single record and test nothing about ordering.
+        if (_passes == 2)
+        {
+            WritePass(uow, SupersededKeyOffset);
+        }
+
+        WritePass(uow, UpdateKeyOffset);
+
+        // No RecordSpawn / RecordDestroy: the alive-set is unchanged. CaptureValues reads the FINAL values back before the crash, so the shadow expects the
+        // last write — which is exactly the claim TickFence's ≤1-tick window makes and #569 says is not delivered.
+    }
+
+    private void WritePass(UnitOfWork uow, int keyOffset)
+    {
+        using var tx = ShapeOps.Begin(uow, _shape);
+        for (var i = 0; i < _existing.Length; i++)
+        {
+            ShapeOps.Update(tx, _shape, _existing[i], i + keyOffset);
+        }
+
+        tx.Commit();
+    }
+}
+
+/// <summary>
+/// The <c>Resume</c> exemplar (#705 T3 / #697): spawn a generation, crash, recover, then <b>spawn a second generation on the recovered engine</b>.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The assertion lives in <see cref="RecoveryShadowModel.RecordSpawn"/>, not here. If recovery restored the entity-key watermark too low, the second
+/// generation's ids collide with live recovered entities, and the shadow rejects the duplicate naming #697. Putting the check in the shadow rather than the
+/// workload means EVERY workload that ever gains a <c>Resume</c> inherits it, instead of each one having to remember.
+/// </para>
+/// <para>
+/// The two generations use disjoint key bases so the UNIQUE index in <see cref="PostRecoveryShape.FlatIndexed"/> only ever rejects a genuine id collision,
+/// never a payload one the workload created itself.
+/// </para>
+/// </remarks>
+internal sealed class PostRecoveryWriteWorkload : IRecoveryWorkload
+{
+    private const int ResumeKeyBase = 10_000;
+
+    private readonly PostRecoveryShape _shape;
+    private readonly int _preCount;
+    private readonly int _postCount;
+
+    public PostRecoveryWriteWorkload(PostRecoveryShape shape, int preCount = 8, int postCount = 4)
+    {
+        _shape = shape;
+        _preCount = preCount;
+        _postCount = postCount;
+    }
+
+    public string Name => $"PostRecoveryWrite_{_shape}";
+
+    public void Register(DatabaseEngine dbe) => ShapeOps.Register(dbe, _shape);
+
+    public void Execute(UnitOfWork uow, RecoveryShadowModel shadow) => SpawnGeneration(uow, shadow, _preCount, keyBase: 0);
+
+    public void Resume(UnitOfWork uow, RecoveryShadowModel shadow) => SpawnGeneration(uow, shadow, _postCount, ResumeKeyBase);
+
+    private void SpawnGeneration(UnitOfWork uow, RecoveryShadowModel shadow, int count, int keyBase)
+    {
+        using var tx = ShapeOps.Begin(uow, _shape);
+        for (var i = 0; i < count; i++)
+        {
+            shadow.RecordSpawn(ShapeOps.Spawn(tx, _shape, i + keyBase));
+        }
+
+        tx.Commit();
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// #705 T3 — the PAYLOAD axes: ComponentCollection, String64 and spatial (#389)
+//
+// `grep ComponentCollection RecoveryWorkloads.cs` returned 0 before this. Every workload carried plain blittable scalars, so the recovery oracle had never
+// compared a variable-size buffer, a String64, or a spatially-indexed field — three payload kinds with their own persistence machinery.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+/// <summary>
+/// A SingleVersion component carrying all three payload axes at once: a variable-size collection, a fixed 64-byte string, and a spatial box.
+/// </summary>
+/// <remarks>
+/// One component rather than three, because the axes are cheap to carry together and the question here is whether recovery reproduces each payload KIND — not
+/// how they interact. SingleVersion + no indexed field keeps the archetype cluster-eligible, which is where <c>ClusterState.CollectionSlots</c> tracks CC
+/// buffers and therefore where the interesting ownership lives.
+/// </remarks>
+[Component("Typhon.Schema.UnitTest.PayloadBag", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct PayloadBag
+{
+    [Field]
+    public ComponentCollection<int> Items;
+
+    [Field]
+    [SpatialIndex(0.0f)]
+    public AABB3F Bounds;
+
+    [Field]
+    public String64 Name;
+
+    public int Seq;
+}
+
+[Archetype]
+internal class PayloadBagArch : Archetype<PayloadBagArch>
+{
+    public static readonly Comp<PayloadBag> P = Register<PayloadBag>();
+}
+
+/// <summary>
+/// Spawns entities carrying a collection, a <c>String64</c> and a spatial box, so the recovery oracle finally compares payload kinds it never saw (#705 T3).
+/// </summary>
+/// <remarks>
+/// <b>Element count varies per entity</b> (<c>(i % 4) + 1</c>), the same choice <c>ComponentCollectionMatrixTests</c> makes: a constant length would let a
+/// defect that hands every entity the SAME buffer read as correct, whereas a varying length fails on the count — earlier, and localised.
+/// </remarks>
+internal sealed class PayloadPayloadWorkload : IRecoveryWorkload, ICollectionProjector
+{
+    private readonly int _count;
+
+    public PayloadPayloadWorkload(int count = 8) => _count = count;
+
+    public string Name => "PayloadBag";
+
+    public static int ElementCountOf(int i) => (i % 4) + 1;
+
+    public static int ElementValue(int i, int element) => (i * 100) + element + 1;
+
+    public void Register(DatabaseEngine dbe)
+    {
+        ArgumentNullException.ThrowIfNull(dbe);
+        dbe.RegisterComponentFromAccessor<PayloadBag>();
+
+        // A cluster-eligible archetype with a [SpatialIndex] field requires the grid BEFORE InitializeArchetypes (#230 Phase 3 Option B), and Register is the
+        // workload hook that runs there — on both the pre-crash and the post-crash open, which is exactly what a reopen needs.
+        dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+            worldMin: new Vector2(-1000f, -1000f),
+            worldMax: new Vector2(1000f, 1000f),
+            cellSize: 100f));
+    }
+
+    public void Execute(UnitOfWork uow, RecoveryShadowModel shadow)
+    {
+        using var tx = uow.CreateTransaction(DurabilityDiscipline.Commit);
+        for (var i = 0; i < _count; i++)
+        {
+            var bag = new PayloadBag
+            {
+                Bounds = new AABB3F { MinX = i, MinY = i, MinZ = i, MaxX = i + 1, MaxY = i + 1, MaxZ = i + 1 },
+                Name = (String64)$"entity-{i}",
+                Seq = i,
+            };
+
+            // Fill the buffer on the LOCAL struct before Spawn, as ClusterComponentCollectionTests does. Spawning first and then writing through
+            // OpenMut(id).Write(...) in the same transaction NREs inside Transaction.BuildCommitBatch's Commit-staged path — see #713.
+            using (var cca = tx.CreateComponentCollectionAccessor(ref bag.Items))
+            {
+                for (var el = 0; el < ElementCountOf(i); el++)
+                {
+                    cca.Add(ElementValue(i, el));
+                }
+            }
+
+            var id = tx.Spawn<PayloadBagArch>(PayloadBagArch.P.Set(in bag));
+            shadow.RecordSpawn(id);
+        }
+
+        tx.Commit();
+    }
+
+    /// <summary>The single collection field's elements — what makes the buffer's CONTENT observable to the oracle rather than only its descriptor.</summary>
+    public IReadOnlyList<int[]> Project(Transaction tx, EntityId id)
+    {
+        ArgumentNullException.ThrowIfNull(tx);
+        var bag = tx.Open(id).Read(PayloadBagArch.P);
+        using var cca = tx.CreateComponentCollectionAccessor(ref bag.Items);
+        var items = new int[cca.ElementCount];
+        cca.GetAllElements(items);
+        return [items];
     }
 }
 

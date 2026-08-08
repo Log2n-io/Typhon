@@ -318,3 +318,68 @@ jobs:
             exit 1
           fi
           echo "src/ restored cleanly."
+
+  # ── #705 T5: the linearizability model, validated against a known-racy build ──────────────────────────────────────
+  #
+  # Non-blocking, like the axis probe. The three-way exit status is the design: 0 = every planted race detected on a
+  # green baseline, 1 = a race went UNDETECTED (the model is too weak, which is the failure mode §9 warns about), and
+  # 2 = the baseline itself is red. Status 2 is expected while #400 is open — the model reproduces the shared-ChangeSet
+  # race on the production default within milliseconds — and it must NOT be reported as either a pass or a probe
+  # failure, because it is neither.
+  linearizability-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Assert a clean src/ tree
+        run: |
+          set -uo pipefail
+          if [ -n "$(git status --porcelain -- src/)" ]; then
+            echo "::error::src/ is dirty in a fresh checkout — the linearizability probe cannot run safely."
+            git status --porcelain -- src/
+            exit 1
+          fi
+
+      - name: Run the linearizability probe
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          python3 scripts/linearizability-probe.py --all 2>&1 | tee lin-probe.log
+          echo "LIN_PROBE_EXIT=${PIPESTATUS[0]}" >> "$GITHUB_ENV"
+
+      - name: Report
+        if: always()
+        run: |
+          set -uo pipefail
+          {
+            echo "## Linearizability model probe"
+            echo
+            case "${LIN_PROBE_EXIT:-1}" in
+              0) echo "✅ Every planted race was detected, on a green baseline — the model's green results carry information." ;;
+              2) echo "🟡 BASELINE RED: the model rejects a REAL race (#400) on unmutated source. That is stronger evidence of" ;
+                 echo "detection power than any planted fault, but the planted-race gate stays pending until #400 is fixed." ;;
+              *) echo "🔴 A planted race went UNDETECTED on a green baseline, or the probe itself failed. A model that passes a" ;
+                 echo "deliberately racy build is too weak, and its green results mean nothing (test-strategy.md §9)." ;;
+            esac
+            echo
+            echo '```'
+            tail -40 lin-probe.log 2>/dev/null || echo "(no probe output)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Confirm src/ was restored
+        if: always()
+        run: |
+          set -uo pipefail
+          if [ -n "$(git status --porcelain -- src/)" ]; then
+            echo "::error::the probe left src/ modified — its revert path is broken."
+            git diff --stat -- src/
+            exit 1
+          fi
+          echo "src/ restored cleanly."

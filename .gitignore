@@ -303,6 +303,8 @@ coverage/fixtures.txt
 # Transient trx output from scripts/axis-mutation-probe.py (#704). The probe's VERDICT is the artefact; the
 # per-run trx is scratch, and committing it would make a mutated-build run look like a recorded result.
 coverage/mutation-probe/
+# Same for scripts/linearizability-probe.py (#705), whose runs additionally include a RACY build's results.
+coverage/linearizability-probe/
 
 
 # Windows reserved device names (git sees these as phantom untracked files)
