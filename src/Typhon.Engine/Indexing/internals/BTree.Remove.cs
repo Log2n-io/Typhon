@@ -1,4 +1,4 @@
-// unset
+﻿// unset
 
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -412,7 +412,7 @@ internal abstract partial class BTree<TKey, TStore>
             _hasCachedLastKey = false;
             bool merge;
             SpinWait spin = default;
-            while (true)
+            for (int attempt = 0; ; attempt++)
             {
                 merge = RemoveIterative(ref args, ref accessor, out bool removeCompleted);
                 if (removeCompleted)
@@ -420,6 +420,13 @@ internal abstract partial class BTree<TKey, TStore>
                     break;
                 }
                 Interlocked.Increment(ref _optimisticRestarts);
+                if (attempt >= MaxPessimisticRestarts)
+                {
+                    // #695: this loop used to be `while (true)`, same as the insert twin.
+                    ThrowHelper.ThrowInvalidOp(
+                        $"B+Tree remove made no progress in {MaxPessimisticRestarts} pessimistic retries. The descent keeps reaching a leaf it can neither "
+                        + "validate nor modify, which no further retrying resolves. This is a liveness defect in the tree, not contention (see #695).");
+                }
                 spin.SpinOnce();
             }
 
@@ -536,9 +543,13 @@ internal abstract partial class BTree<TKey, TStore>
         int leafVersion = leafLatch.ReadVersion();
         if (leafVersion == 0)
         {
-            // Leaf is locked or obsolete. SpinWriteLock to wait, then restart.
-            SpinWriteLock(leafLatch);
-            leafLatch.AbortWriteLock();
+            // LOCKED and OBSOLETE both read 0 and need opposite treatment — see the twin in BTree.Insert.cs and IXS-03. Waiting on an obsolete node is
+            // waiting for something that will never happen, and locking it writes into a detached node (#716).
+            if (!leafLatch.IsObsolete)
+            {
+                SpinWriteLock(leafLatch);
+                leafLatch.AbortWriteLock();
+            }
             return false;
         }
         SpinWriteLock(leafLatch);

@@ -1,4 +1,4 @@
-// CS1591: this file declares public-accessibility types that live in the internal namespace (Phase 2b entanglement, see
+﻿// CS1591: this file declares public-accessibility types that live in the internal namespace (Phase 2b entanglement, see
 // claude/research/PublicVsInternalApiClassification.md). They are excluded from the published API reference, so consumer-facing
 // doc coverage is not enforced here.
 #pragma warning disable 1591
@@ -535,6 +535,22 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
 
     internal const int MaxTreeDepth = 32;
     internal const int MaxOptimisticRestarts = 3;
+
+    /// <summary>
+    /// Bound on the PESSIMISTIC retry loops in <c>AddOrUpdateCorePessimistic</c> and <c>RemoveCorePessimistic</c>. Exhausting it throws.
+    /// </summary>
+    /// <remarks>
+    /// Both loops were <c>while (true)</c> (#695). Their inner step returns "not completed" for a leaf whose <c>ReadVersion()</c> is 0, and that is 0 for a
+    /// LOCKED leaf (transient — retrying is right) and for an OBSOLETE one (permanent — retrying can never help). Conflating them is what IXS-03 forbids, and
+    /// its stated consequence is exactly what was observed: four threads spinning 24+ minutes with CPU climbing and no progress, after the WAL append, with
+    /// no exception, no timeout and no way out but killing the process.
+    /// <para>
+    /// Not a contention limit. A legitimately contended operation completes in a handful of retries; this is three orders of magnitude above that, so
+    /// reaching it means no amount of further retrying would have helped. Turning a permanent silent hang into a loud, diagnosable error is the same trade
+    /// IX-03 makes elsewhere — the failure is silent and permanent, the exception is not.
+    /// </para>
+    /// </remarks>
+    internal const int MaxPessimisticRestarts = 10_000;
     internal const int ContentionSplitThreshold = 3;
 
     #region OLC Path Buffers

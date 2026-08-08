@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using NUnit.Framework;
 using Typhon.Engine.Internals;
@@ -239,11 +239,10 @@ class KeyRangeTests
         {
             Assert.That(KeyRange.IsStreamable(KeyType.Bool), Is.False, "no typed B+Tree scan case exists for Bool");
             Assert.That(KeyRange.IsStreamable(KeyType.String64), Is.False, "no typed B+Tree scan case exists for String64");
-            Assert.That(KeyRange.IsStreamable(KeyType.ULong), Is.False,
-                "a ULong index is an L64BTree<long>, so its full range [0, ulong.MaxValue] encodes to the signed range [0, -1] — empty");
-
-            foreach (var kt in new[] { KeyType.SByte, KeyType.Byte, KeyType.Short, KeyType.UShort, KeyType.Int, KeyType.UInt, KeyType.Long, KeyType.Float,
-                         KeyType.Double })
+            // #676: ULong was excluded because its index was an L64BTree<long> — the full range [0, ulong.MaxValue] read signed as [0, -1], which is empty.
+            // The trees are genuinely ulong-keyed now, and both KeyRange.Compare and OrderedKeyEncoding already ordered ULong unsigned, so it streams.
+            foreach (var kt in new[] { KeyType.SByte, KeyType.Byte, KeyType.Short, KeyType.UShort, KeyType.Int, KeyType.UInt, KeyType.Long, KeyType.ULong,
+                         KeyType.Float, KeyType.Double })
             {
                 Assert.That(KeyRange.IsStreamable(kt), Is.True, $"{kt} has a typed B+Tree scan and must remain streamable");
             }

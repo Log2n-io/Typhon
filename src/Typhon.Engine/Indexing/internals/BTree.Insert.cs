@@ -1,4 +1,4 @@
-// unset
+﻿// unset
 
 using System;
 using System.Runtime.CompilerServices;
@@ -484,7 +484,7 @@ internal abstract partial class BTree<TKey, TStore>
             // General path with latch-coupled SMO — retry on lock contention
             // InsertIterative handles root splits internally under the root's write lock.
             SpinWait spin = default;
-            while (true)
+            for (int attempt = 0; ; attempt++)
             {
                 InsertIterative(ref args, ref accessor, out bool insertCompleted);
                 if (insertCompleted)
@@ -492,6 +492,13 @@ internal abstract partial class BTree<TKey, TStore>
                     break;
                 }
                 Interlocked.Increment(ref _optimisticRestarts);
+                if (attempt >= MaxPessimisticRestarts)
+                {
+                    // #695: this loop used to be `while (true)`. See MaxPessimisticRestarts for why exhausting it means retrying cannot help.
+                    ThrowHelper.ThrowInvalidOp(
+                        $"B+Tree insert made no progress in {MaxPessimisticRestarts} pessimistic retries. The descent keeps reaching a leaf it can neither "
+                        + "validate nor modify, which no further retrying resolves. This is a liveness defect in the tree, not contention (see #695).");
+                }
                 spin.SpinOnce();
             }
 
@@ -605,9 +612,15 @@ internal abstract partial class BTree<TKey, TStore>
         int leafVersion = leafLatch.ReadVersion();
         if (leafVersion == 0)
         {
-            // Leaf is locked or obsolete. SpinWriteLock to wait for the current holder to release, then restart — we can't validate without a baseline version.
-            SpinWriteLock(leafLatch);
-            leafLatch.AbortWriteLock(); // release without version bump (we didn't modify anything)
+            // ReadVersion() returns 0 for LOCKED and for OBSOLETE alike, and the two need opposite treatment (IXS-03). Locked is transient: wait for the
+            // holder, then restart with a fresh baseline. Obsolete is permanent — the node was replaced by a structure modification and will never become
+            // valid — so do NOT take its write lock (that is #716's hazard: writing into a detached node) and do not wait on it. Restart immediately and let
+            // the descent find the live node. #695 came from treating both as "retry": the caller's loop had no bound, so an obsolete leaf spun forever.
+            if (!leafLatch.IsObsolete)
+            {
+                SpinWriteLock(leafLatch);
+                leafLatch.AbortWriteLock(); // release without version bump (we didn't modify anything)
+            }
             return;
         }
         bool leafAcquiredClean = SpinWriteLock(leafLatch);

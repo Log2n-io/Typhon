@@ -972,6 +972,7 @@ public unsafe partial class Transaction
             }
 
             var result = new EntityRef(id, meta, es, this, enabledBits, writable);
+            result._isOwnSpawn = true;   // #713: no HEAD yet — a Commit-discipline write goes in place into the staging chunk, not through the staging arena
             for (int slot = 0; slot < meta.ComponentCount; slot++)
             {
                 result.SetLocation(slot, entry.Loc[slot]);
@@ -1389,7 +1390,7 @@ public unsafe partial class Transaction
     /// </remarks>
     private void RemoveClusterIndexEntries<TStore>(ClusterIndexSlot<TStore>[] ixSlots, ArchetypeEngineState engineState, byte* dataBase,
         byte* primaryBase, ArchetypeClusterInfo layout, int clusterChunkId, byte slotIndex, EntityId entityId, ref ChunkAccessor<TStore> idxAccessor,
-        ref ChunkAccessor<TStore> idxAccessorS64, ChunkBasedSegment<TStore> s64Segment)
+        ref ChunkAccessor<TStore> idxAccessorS64, ChunkBasedSegment<TStore> s64Segment, ushort onlySlotMask = ushort.MaxValue)
         where TStore : struct, IPageStore
     {
         if (ixSlots == null || ixSlots.Length == 0)
@@ -1404,6 +1405,11 @@ public unsafe partial class Transaction
         for (int s = 0; s < ixSlots.Length; s++)
         {
             ref var ixSlot = ref ixSlots[s];
+            if ((onlySlotMask & (1 << ixSlot.Slot)) == 0)
+            {
+                continue;   // this slot's removal belongs to the tick-fence shadow drain, not here (see the destroy call site)
+            }
+
             int compSize = layout.ComponentSize(ixSlot.Slot);
             byte* compBase = dataBase + layout.ComponentOffset(ixSlot.Slot) + slotIndex * compSize;
             int destroyClusterLocation = clusterChunkId * 64 + slotIndex;
@@ -2404,17 +2410,27 @@ public unsafe partial class Transaction
                         byte slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(readBuf);
 
                         // Remove per-archetype B+Tree entries before releasing the slot.
-                        // If the entity was written this tick (shadow bitmap set), skip B+Tree removal here — ProcessClusterShadowEntries at tick fence will
-                        // detect occupancy=0 and Remove the OLD key.
-                        // This is necessary because the current cluster data may contain the post-mutation value, but the B+Tree still holds the pre-mutation
-                        // key (Move hasn't happened yet).
+                        // If the entity was written this tick (shadow bitmap set), the tick fence's ProcessClusterShadowEntries detects occupancy=0 and
+                        // removes the OLD key — which is the only correct key, because the cluster data may already hold the post-mutation value while the
+                        // B+Tree still holds the pre-mutation one (the Move has not happened yet).
+                        //
+                        // #711: that hand-off is only valid for the slots the fence actually shadows. ShadowClusterIndexedFields captures every indexed
+                        // NON-Versioned slot and skips Versioned ones (their index is maintained on the commit path instead), while the shadow BITMAP is
+                        // per-entity and set by a write to ANY component. So one write to an unindexed Transient sibling was enough to make this branch skip
+                        // a Versioned slot's removal and hand it to a fence that never had an entry for it — nobody removed it, and the index kept an entry
+                        // for a released slot. Silent for AllowMultiple, loud on the next rebuild for Unique. No key move is needed to reach it.
+                        //
+                        // So the skip is scoped to the shadowed slots: when a shadow is pending, Versioned slots are still removed here, and only those.
                         // Remove from BOTH index homes (#655). The elementId tail lives on the cluster (primary) base even for a Transient slot, whose
                         // component bytes live in the Transient segment.
                         {
                             int entityIndex = clusterChunkId * 64 + slotIndex;
                             bool hasPendingShadow = destroyClusterState.ClusterShadowBitmap != null && destroyClusterState.ClusterShadowBitmap.Test(entityIndex);
 
-                            if (!hasPendingShadow)
+                            // The exact complement of what ShadowClusterIndexedFields captured — both sides read it off the same method so they cannot drift.
+                            ushort removeHereMask = hasPendingShadow ? (ushort)~meta.FenceMaintainedSlotsUnder(_discipline) : ushort.MaxValue;
+
+                            if (removeHereMask != 0)
                             {
                                 byte* clusterBase = hasClusterAccessor
                                     ? clusterAccessor.GetChunkAddress(clusterChunkId)
@@ -2423,9 +2439,10 @@ public unsafe partial class Transaction
 
                                 RemoveClusterIndexEntries(destroyClusterState.IndexSlots, engineState, clusterBase, clusterBase, layout, clusterChunkId,
                                     slotIndex, entityId, ref destroyClusterIdxAccessor, ref destroyClusterIdxAccessorS64,
-                                    hasDestroyClusterIdxAccessorS64 ? destroyClusterState.IndexSegmentString64 : null);
+                                    hasDestroyClusterIdxAccessorS64 ? destroyClusterState.IndexSegmentString64 : null, removeHereMask);
 
-                                if (destroyClusterState.TransientIndexSlots != null)
+                                // Transient slots are the fence's under every discipline, so under a pending shadow this home is entirely its business.
+                                if (destroyClusterState.TransientIndexSlots != null && !hasPendingShadow)
                                 {
                                     byte* transientBase = hasDestroyTransientClusterAccessor
                                         ? destroyTransientClusterAccessor.GetChunkAddress(clusterChunkId)
@@ -2435,7 +2452,6 @@ public unsafe partial class Transaction
                                         ref destroyClusterTransientIdxAccessorS64, destroyClusterState.TransientIndexSegmentString64);
                                 }
                             }
-                            // else: shadow processing at tick fence will handle removal
                         }
 
                         // Issue #230 Phase 3 Option B: the per-archetype R-Tree remove call is gone; ReleaseSlot below handles per-cell index cleanup

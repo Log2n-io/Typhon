@@ -281,12 +281,9 @@ class StorageModeReadWriteTests : TestBase<StorageModeReadWriteTests>
 
     // ── DirtyBitmap unit tests ──
 
-    // QUARANTINE (#709): DirtyBitmap.Set loses a bit — its Interlocked.Or targets the array the thread CAPTURED,
-    // which Grow/Snapshot may already have swapped out of _bits. Passes alone (4/4), fails under parallel load.
-    // Deliberately NOT [Category("Sensitive")]: that tier runs a test alone, which for a contention-only race is a
-    // guaranteed false green — the exact failure mode #703 exists to remove.
+    // #709 regression: covers the Grow half of the array-swap race. The bitmap starts at 1024 bits (16 words) and the threads reach bit 7999
+    // (125 words), so Grow is guaranteed to fire while the other writers are mid-Set.
     [Test]
-    [Category("Quarantine")]
     public void DirtyBitmap_ConcurrentSet()
     {
         var bitmap = new DirtyBitmap(1024);
@@ -322,6 +319,135 @@ class StorageModeReadWriteTests : TestBase<StorageModeReadWriteTests>
             setBits += System.Numerics.BitOperations.PopCount((ulong)snapshot[i]);
         }
         Assert.That(setBits, Is.EqualTo(threadCount * opsPerThread));
+    }
+
+    /// <summary>
+    /// #709 regression, the drain half. The bitmap is pre-sized so growth cannot fire, leaving <c>Snapshot</c> as the only thing racing the writers — the
+    /// half a growth-only fix would leave broken. Every bit set by a writer must appear in exactly one place: some snapshot taken along the way, or the
+    /// final one. A bit in neither was lost to the drain.
+    /// </summary>
+    [Test]
+    public void DirtyBitmap_ConcurrentSetWhileSnapshotting()
+    {
+        const int threadCount = 4;
+        const int opsPerThread = 2000;
+        const int totalBits = threadCount * opsPerThread;
+
+        var bitmap = new DirtyBitmap(totalBits);   // pre-sized: no growth can fire, so any lost bit is the drain's doing
+        var seen = new long[(totalBits + 63) >> 6];
+        var barrier = new Barrier(threadCount + 1);
+        var writersDone = 0;
+        var threads = new Thread[threadCount];
+
+        for (int t = 0; t < threadCount; t++)
+        {
+            int threadId = t;
+            threads[t] = new Thread(() =>
+            {
+                barrier.SignalAndWait();
+                for (int i = 0; i < opsPerThread; i++)
+                {
+                    bitmap.Set(threadId * opsPerThread + i);
+                }
+                Interlocked.Increment(ref writersDone);
+            });
+            threads[t].Start();
+        }
+
+        barrier.SignalAndWait();
+
+        // Snapshot repeatedly while the writers run, ORing every drained word into `seen`. A snapshot that races a Set is exactly the window
+        // under test, so the loop deliberately does not pace itself.
+        while (Volatile.Read(ref writersDone) < threadCount)
+        {
+            Accumulate(bitmap.Snapshot(), seen);
+        }
+
+        for (int t = 0; t < threadCount; t++)
+        {
+            threads[t].Join();
+        }
+        Accumulate(bitmap.Snapshot(), seen);   // final drain, after every writer has retired
+
+        int setBits = 0;
+        for (int i = 0; i < seen.Length; i++)
+        {
+            setBits += System.Numerics.BitOperations.PopCount((ulong)seen[i]);
+        }
+        Assert.That(setBits, Is.EqualTo(totalBits), "every bit set by a writer must survive in some snapshot");
+
+        static void Accumulate(long[] snapshot, long[] seen)
+        {
+            for (int i = 0; i < snapshot.Length && i < seen.Length; i++)
+            {
+                seen[i] |= snapshot[i];
+            }
+        }
+    }
+
+    /// <summary>
+    /// #709 regression, the growth window — the case that decided the implementation. A design that grows by copying the words into a bigger array cannot
+    /// survive this, because the copy runs before the new array is published: a writer landing in between still sees its own array as the live one, and the
+    /// bit reaches neither.
+    /// </summary>
+    /// <remarks>
+    /// Both of the other two cases missed that. They grow from 16 words to 125 — three copies, three sub-microsecond windows — so they went green against a
+    /// copying design with a post-OR validation still in it, and only the full parallel suite reddened them, once. This one starts every round at a single
+    /// block so each round crosses several extensions, and runs many rounds: against that design it failed 6 runs in 30, with the tell being CONTIGUOUS runs
+    /// of lost bits at a thread's first writes (e.g. <c>3001..3007</c>) rather than isolated ones.
+    /// </remarks>
+    [Test]
+    public void DirtyBitmap_ConcurrentSetAcrossManyGrowths()
+    {
+        const int threadCount = 8;
+        const int opsPerThread = 1000;
+        const int rounds = 25;
+
+        for (int round = 0; round < rounds; round++)
+        {
+            var bitmap = new DirtyBitmap(1);   // smallest possible — every round has to extend the bitmap repeatedly to reach bit 7999
+            var barrier = new Barrier(threadCount);
+            var threads = new Thread[threadCount];
+
+            for (int t = 0; t < threadCount; t++)
+            {
+                int threadId = t;
+                threads[t] = new Thread(() =>
+                {
+                    barrier.SignalAndWait();
+                    for (int i = 0; i < opsPerThread; i++)
+                    {
+                        bitmap.Set(threadId * opsPerThread + i);
+                    }
+                });
+                threads[t].Start();
+            }
+
+            for (int t = 0; t < threadCount; t++)
+            {
+                threads[t].Join();
+            }
+
+            var snapshot = bitmap.Snapshot();
+            int setBits = 0;
+            for (int i = 0; i < snapshot.Length; i++)
+            {
+                setBits += System.Numerics.BitOperations.PopCount((ulong)snapshot[i]);
+            }
+            if (setBits != threadCount * opsPerThread)
+            {
+                var missing = new System.Text.StringBuilder();
+                for (int b = 0; b < threadCount * opsPerThread; b++)
+                {
+                    int w = b >> 6;
+                    if (w >= snapshot.Length || (snapshot[w] & (1L << (b & 63))) == 0)
+                    {
+                        missing.Append(b).Append(" (w").Append(w).Append(") ");
+                    }
+                }
+                Assert.Fail($"round {round}: {threadCount * opsPerThread - setBits} bit(s) lost, snapshotWords={snapshot.Length}, missing={missing}");
+            }
+        }
     }
 
     [Test]

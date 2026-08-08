@@ -349,16 +349,18 @@ public unsafe partial class EntityAccessor
     // Component data access (delegated from EntityRef) — non-virtual hot path
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// <summary>Read component data via the existing ComponentInfo accessor cache. Zero-copy — returns a ref into the page.</summary>
+    /// <summary>Read component data via the existing ComponentInfo accessor cache. Zero-copy — returns a ref into the page.
+    /// <paramref name="pk"/> is the entity's raw <see cref="EntityId"/>, the key of the Commit-discipline staging map.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal ref readonly T ReadEcsComponentData<T>(ComponentTable table, int chunkId) where T : unmanaged
+    internal ref readonly T ReadEcsComponentData<T>(ComponentTable table, int chunkId, long pk) where T : unmanaged
     {
         var info = GetComponentInfo(typeof(T));
         byte* ptr = table.StorageMode == StorageMode.Transient ? info.TransientCompContentAccessor.GetChunkAddress(chunkId) : info.CompContentAccessor.GetChunkAddress(chunkId);
-        // Commit-discipline read-your-own-writes: return this tx's staged value if it has staged this (component, entity). The chunk's inline
-        // entityPK (offset 0 for SV/Transient) keys the staging map.
+        // Commit-discipline read-your-own-writes: return this tx's staged value if it has staged this (component, entity). The staging map is keyed by
+        // entity PK, which the CALLER supplies — reading it back out of the chunk header instead was #713: a spawn-staging chunk has no PK written yet
+        // (FinalizeSpawns stamps it at publish), so every own-spawn lookup keyed on 0.
         if (_discipline == DurabilityDiscipline.Commit && table.StorageMode == StorageMode.SingleVersion
-            && info.CommitStaged != null && info.CommitStaged.TryGetValue(*(long*)ptr, out var slot))
+            && info.CommitStaged != null && info.CommitStaged.TryGetValue(pk, out var slot))
         {
             return ref Unsafe.AsRef<T>(_commitStagingBuffer + slot.Offset);
         }
@@ -379,9 +381,11 @@ public unsafe partial class EntityAccessor
     }
 
     /// <summary>Write component data via the existing ComponentInfo accessor cache. Returns mutable ref.
-    /// For SingleVersion: atomically marks chunkId in DirtyBitmap for tick fence serialization.</summary>
+    /// For SingleVersion: atomically marks chunkId in DirtyBitmap for tick fence serialization.
+    /// <paramref name="pk"/> is the entity's raw <see cref="EntityId"/>; <paramref name="isOwnSpawn"/> marks an entity this transaction spawned and has
+    /// not published yet (see the Commit-discipline branch below).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal ref T WriteEcsComponentData<T>(ComponentTable table, int chunkId) where T : unmanaged
+    internal ref T WriteEcsComponentData<T>(ComponentTable table, int chunkId, long pk, bool isOwnSpawn) where T : unmanaged
     {
         var info = GetComponentInfo(typeof(T));
 
@@ -393,11 +397,17 @@ public unsafe partial class EntityAccessor
             {
                 ResolveCommitDiscipline(table);
             }
-            if (_discipline == DurabilityDiscipline.Commit)
+
+            // #713: an entity this transaction spawned has no HEAD to protect — it lives in a spawn-staging chunk that no other transaction can see until
+            // FinalizeSpawns publishes it, so writing in place IS the atomic behaviour CM-01 asks for, and it is what TickFence already does. Staging it
+            // was wrong three ways: StagedSlot.Location would carry a content chunk id where PublishStagedEntry expects a cluster location, the publish
+            // would run against a HEAD that does not exist yet, and FinalizeSpawns would then overwrite it with the spawn value. Skipping the staging
+            // leaves the spawn's own SV Slot record (BuildCommitBatch, #395 D5 / CM-06) carrying the final value — one record, still atomic.
+            if (_discipline == DurabilityDiscipline.Commit && !isOwnSpawn)
             {
                 byte* head = info.CompContentAccessor.GetChunkAddress(chunkId);
                 // Flat location is the content chunkId (captured for the no-re-lookup publish).
-                return ref StageCommitWriteCore<T>(info, *(long*)head, chunkId, head + info.ComponentOverhead);
+                return ref StageCommitWriteCore<T>(info, pk, chunkId, head + info.ComponentOverhead);
             }
         }
 

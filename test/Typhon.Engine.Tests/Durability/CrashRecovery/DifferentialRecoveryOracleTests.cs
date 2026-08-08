@@ -623,14 +623,128 @@ internal sealed class DifferentialRecoveryOracleTests
     /// folding the two together would have parked a working regression lock behind an unrelated defect.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// #712 / LOG-08 on the CRASH path: a crash-recovered engine must continue its LSN sequence strictly above the window its own recovery replayed.
+    /// </summary>
+    /// <remarks>
+    /// Asserted on the watermarks rather than on entity survival, deliberately. Entity survival across the SECOND crash is
+    /// <see cref="PostRecoveryWrite_SurvivesASecondCrash"/>'s job and it depends on more than the allocator; this case fails if and only if the LSN floor is
+    /// wrong, so it cannot be greened by an unrelated durability change or reddened by one. Pre-fix numbers, from the issue: frontier 16,
+    /// <c>LastAppendedLsn</c> 9, <c>DurableLsn</c> 16 — the writer restarted at 1 and believed 7 LSNs it never appended were durable.
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    [VerifiesRule("LOG-08")]
+    [TestCaseSource(nameof(PostRecoveryShapes), new object[] { "PostRecoveryWrite_LsnFloor" })]
+    public void PostRecoveryWrite_ContinuesTheLsnSequenceAboveTheReplayedFrontier(PostRecoveryShape shape)
+    {
+        var workload = new PostRecoveryWriteWorkload(shape);
+        var shadow = new RecoveryShadowModel();
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            workload.Register(dbe);
+            dbe.InitializeArchetypes();
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                workload.Execute(uow, shadow);
+                uow.Flush();
+            }
+            shadow.CaptureValues(dbe);
+            dbe.SimulateHardCrash();
+        }
+
+        using var scope2 = _serviceProvider.CreateScope();
+        var recovered = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        workload.Register(recovered);
+        recovered.InitializeArchetypes();   // recovery
+
+        var frontier = recovered.LastWalV2RecoveryResult.MaxLsn;
+        Assert.That(frontier, Is.GreaterThan(0), "the workload must leave a WAL window for recovery to replay, or this case proves nothing");
+
+        // Before the first post-recovery write: the allocator already sits on the frontier, and the durable watermark agrees with it.
+        Assert.That(recovered.WalManager.LastAppendedLsn, Is.EqualTo(frontier),
+            "the reopened allocator did not continue from the replayed frontier (LOG-08) — the next record will reuse an LSN the prior session wrote");
+        Assert.That(recovered.WalManager.LastAppendedLsn, Is.GreaterThanOrEqualTo(recovered.WalManager.DurableLsn),
+            "DurableLsn exceeds LastAppendedLsn: the writer believes LSNs it never appended are durable");
+
+        using (var uow = recovered.CreateUnitOfWork(DurabilityMode.Immediate))
+        {
+            workload.Resume(uow, shadow);
+            uow.Flush();
+        }
+
+        Assert.That(recovered.WalManager.LastAppendedLsn, Is.GreaterThan(frontier),
+            $"post-recovery records were written at or below the replayed frontier {frontier} — the next recovery discards them as already-consolidated");
+        Assert.That(recovered.WalManager.LastAppendedLsn, Is.GreaterThanOrEqualTo(recovered.WalManager.DurableLsn),
+            "DurableLsn exceeds LastAppendedLsn after the post-recovery window");
+    }
+
     [Test]
     [CancelAfter(20_000)]
     [TestCaseSource(nameof(PostRecoveryShapes), new object[] { "PostRecoveryWrite_SecondCrash" })]
-    // Quarantine, not [Ignore] — #712 is a known red whose cause is unfixed, and Quarantine still runs it LOCALLY so whoever fixes #712 sees it flip. [Ignore]
-    // is unconditional in NUnit and would run it nowhere, which is how #695 stayed invisible for months (#703).
-    [Category("Quarantine")]
     public void PostRecoveryWrite_SurvivesASecondCrash(PostRecoveryShape shape)
         => RecoverAndResume(new PostRecoveryWriteWorkload(shape), RecoveryOracle.AssertPrimaryAxis);
+
+    /// <summary>
+    /// #715: the same three-session shape with NOTHING written after recovery. Session 2 opens, recovers, seals — and crashes. Generation 1 must still be
+    /// there in session 3, out of the data file the seal consolidated, because the seal also reclaimed the WAL segments that held it.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately writes nothing between the recovery and the second crash, which is what separates this from
+    /// <see cref="PostRecoveryWrite_SurvivesASecondCrash"/>: no post-recovery window exists, so no LSN can be misallocated and #712 cannot be the cause of a
+    /// failure here. What it leaves under test is the seal's own promise — that advancing <c>CheckpointLSN</c>, and reclaiming the WAL on the strength of it,
+    /// means the consolidated base is REACHABLE and not merely written. Pre-fix all three shapes reported <c>scanned=0 applied=0</c> with every entity lost.
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    [VerifiesRule("CK-10")]
+    [TestCaseSource(nameof(PostRecoveryShapes), new object[] { "RecoveredThenCrashed_NoWrite" })]
+    public void RecoveredEngine_CrashingWithNoWrite_StillHasEverythingItRecovered(PostRecoveryShape shape)
+    {
+        var workload = new PostRecoveryWriteWorkload(shape);
+        var shadow = new RecoveryShadowModel();
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            workload.Register(dbe);
+            dbe.InitializeArchetypes();
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                workload.Execute(uow, shadow);
+                uow.Flush();
+            }
+            shadow.CaptureValues(dbe);
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            workload.Register(dbe);
+            dbe.InitializeArchetypes();          // recovery + seal
+            RecoveryOracle.AssertPrimaryAxis(dbe, shadow);   // the recovery itself is faithful — so a session-3 loss is the seal's, not the replay's
+            dbe.SimulateHardCrash();             // not one write between the two
+        }
+
+        using (var scope3 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope3.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            workload.Register(dbe);
+            dbe.InitializeArchetypes();
+
+            // Printed unconditionally: scanned=0 is the load-bearing fact — the seal reclaimed the WAL, so everything asserted below has to come out of the
+            // data file. A diff alone could not distinguish that from a replay that silently did nothing.
+            TestContext.WriteLine(
+                $"{workload.Name} third open: checkpointLsn(threshold)={dbe.LastWalV2RecoveryCheckpointLsn} "
+                + $"scanned={dbe.LastWalV2RecoveryResult.RecordsScanned} applied={dbe.LastWalV2RecoveryResult.RecordsApplied} "
+                + $"maxLsn={dbe.LastWalV2RecoveryResult.MaxLsn}");
+
+            RecoveryOracle.AssertPrimaryAxis(dbe, shadow);
+        }
+    }
 
     // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     // #705 T3 — the CROSS-FRONTIER UPDATE axis (#569)

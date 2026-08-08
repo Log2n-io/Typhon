@@ -1,4 +1,4 @@
-using JetBrains.Annotations;
+﻿using JetBrains.Annotations;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Concurrent;
@@ -2889,6 +2889,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             meta.VersionedSlotCount = isClusterEligible ? (byte)BitOperations.PopCount(versionedSlotMask) : (byte)0;
             meta.TransientSlotMask = isClusterEligible ? transientSlotMask : (ushort)0;
             meta.TransientSlotCount = isClusterEligible ? (byte)BitOperations.PopCount(transientSlotMask) : (byte)0;
+            // Every declared slot that is not Versioned — i.e. SingleVersion and Transient. Bounded to ComponentCount rather than left as ~mask so the spare
+            // high bits cannot make an absent slot look fence-maintained (#711).
+            meta.FenceMaintainedSlotMask = isClusterEligible
+                ? (ushort)(((1 << meta.ComponentCount) - 1) & ~versionedSlotMask)
+                : (ushort)0;
 
             if (isClusterEligible)
             {
@@ -3385,8 +3390,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             MMF.SetPageChecksumVerification(_options.Resources.PageChecksumVerification);
         }
 
-        // Open + recovery (incl. the seal) are done — arm the checkpoint-time SPI persistence (#395 / CK-10). From here every steady-state checkpoint
-        // records the per-archetype segment SPIs so a consolidated cluster/EntityMap base is reachable on reopen after a hard crash.
+        // Arm the checkpoint-time SPI persistence (#395 / CK-10) for the paths that did NOT go through recovery — a clean reopen, or a fresh database. From
+        // here every steady-state checkpoint records the per-archetype segment SPIs so a consolidated cluster/EntityMap base is reachable on reopen after a
+        // hard crash. The crash path arms it earlier, before its seal, because the seal advances CheckpointLSN and reclaims the WAL and so must persist the
+        // SPIs in the same cycle (#715); this assignment is then a no-op for it.
         _archetypeSpiPersistArmed = true;
     }
 
@@ -3432,6 +3439,24 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             LogWalRecoveryStoppedAtCorruption(result.SegmentsScanned, result.MaxLsn);
         }
 
+        // LOG-08 across a RECOVERY, not only across a clean reopen (#712). InitializeWalManager has to choose the LSN floor in the constructor, where the
+        // only frontier that exists is the persisted CheckpointLSN — and that is 0 exactly when the previous session crashed without checkpointing. The
+        // authoritative frontier is the window this recovery just replayed, which is knowable only here. Raise the floor now, before InitializeArchetypes
+        // returns and the engine can accept its first transaction; otherwise the reopened writer allocates from 1 again, every commit it durably
+        // acknowledges lands at an LSN the previous session already used, and the next recovery discards the whole post-recovery window as
+        // already-consolidated. The seal below then persists CheckpointLSN from this same frontier, so the two agree by construction.
+        SeedWalFrontierAfterRecovery(Math.Max(result.MaxLsn, checkpointLsn));
+
+        // #715 / CK-10. Arm the checkpoint-time SPI persistence BEFORE the seal, so the seal's own ForceCheckpoint records the per-archetype segment SPIs
+        // alongside the data it is consolidating. Arming it after (its original position, at the end of InitializeArchetypes) left a window in which the seal
+        // had already advanced CheckpointLSN — and therefore reclaimed every WAL segment below it — while the metadata needed to NAVIGATE to the consolidated
+        // base was still unpersisted. "The first steady-state checkpoint then records them" assumes there is one: crash again before it and the WAL no longer
+        // holds the data while the data file cannot be reached, losing the entire recovered database with zero writes in between. That window opens at the
+        // moment a database is most likely to crash again — immediately after recovering from a crash.
+        //
+        // Safe here: the seal runs after apply, scrub, index rebuild and suspect resolution, so the segments are final when the hook fires at cycle start.
+        _archetypeSpiPersistArmed = true;
+
         // Phase 4 — SCRUB (03-recovery.md §6, D1): now that the WAL window is applied, collapse every Versioned revision chain
         // to its HEAD so the consolidated base carries no pre-crash MVCC history. Runs before the seal so its mutations are
         // consolidated into the data file by the same checkpoint.
@@ -3461,6 +3486,22 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // final only afterwards. The corrected bitmap is held dirty (DC > 0, so it can't be evicted stale) and consolidated by the next checkpoint / clean shutdown;
         // if this session crashes again first, recovery simply re-derives (idempotent).
         RederiveOccupancyOnCrash();
+    }
+
+    /// <summary>
+    /// Continues the global LSN sequence above the frontier a crash recovery just replayed (#712 / LOG-08). Separated from
+    /// <see cref="RunWalV2Recovery"/> so the ordering constraint has a name: this MUST run after the recovery frontier is known and before the engine
+    /// accepts its first transaction, and there is exactly one point in the open sequence that satisfies both.
+    /// </summary>
+    private void SeedWalFrontierAfterRecovery(long frontier)
+    {
+        if (frontier <= 0 || WalManager == null)
+        {
+            return;
+        }
+
+        WalManager.SeedRecoveryFrontier(frontier);
+        LogWalFrontierSeededAfterRecovery(frontier);
     }
 
     /// <summary>
@@ -5065,6 +5106,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     [LoggerMessage(LogLevel.Warning,
         "Open: WAL recovery STOPPED at a corruption boundary after {segmentsScanned} segment(s) — records beyond it were NOT applied (frontier LSN {maxLsn})")]
     internal partial void LogWalRecoveryStoppedAtCorruption(int segmentsScanned, long maxLsn);
+
+    // LOG-08 on the crash path (#712). Information, not Debug: this is the moment the reopened writer's LSN sequence is rebased onto the recovered window,
+    // and a crash-recovery investigation that cannot see the floor it continued from cannot tell a lost commit from one that was never appended.
+    [LoggerMessage(LogLevel.Information,
+        "Open: WAL LSN allocator continued above the recovered frontier {frontier} — the next appended record gets LSN {frontier}+1 (LOG-08)")]
+    internal partial void LogWalFrontierSeededAfterRecovery(long frontier);
 
     [LoggerMessage(LogLevel.Information,
         "Open: total {totalMs:F0} ms — engineConstruct {engineConstructMs:F0} ms (incl. WAL recovery + system-schema load), schemaDllLoad {schemaDllMs:F0} ms, initializeArchetypes {initArchetypesMs:F0} ms")]

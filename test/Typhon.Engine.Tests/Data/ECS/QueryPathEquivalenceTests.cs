@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq.Expressions;
 using System.Runtime.InteropServices;
@@ -117,8 +117,10 @@ class QPathCritterUnit : Archetype<QPathCritterUnit, QPathCreatureUnit>
 /// </para>
 /// <para>
 /// <b>Axes covered.</b> Key type (8 of the 9 streamable ones) × comparison operator (all 6) × threshold sign (negative, zero, positive) × range windows, plus
-/// the descending and OrderBy variants. <c>ULong</c>, <c>Bool</c> and <c>String64</c> are deliberately absent — <see cref="KeyRange.IsStreamable"/> rejects
-/// them, so they have no Path A to compare against, and <see cref="NonStreamableKeyType_StillAnswersCorrectly"/> covers them where they do run.
+/// the descending and OrderBy variants. <c>Bool</c> and <c>String64</c> are deliberately absent — <see cref="KeyRange.IsStreamable"/> rejects them, so they
+/// have no Path A to compare against, and <see cref="NonStreamableKeyType_StillAnswersCorrectly"/> covers them where they do run. <c>ULong</c> became
+/// streamable with #676 and is covered end to end by <c>UlongIndexOrderingTests</c>; giving it a column here so it joins this fixture's operator × sign
+/// matrix is worthwhile follow-up, and is why that is called out rather than left implied.
 /// </para>
 /// </remarks>
 [TestFixture]
@@ -271,20 +273,20 @@ class QueryPathEquivalenceTests : TestBase<QueryPathEquivalenceTests>
     }
 
     /// <summary>
-    /// A <c>ulong</c> field is not streamable, and must still answer correctly rather than empty.
+    /// A non-streamable key type must still answer correctly rather than empty, whichever path is forced.
     /// </summary>
     /// <remarks>
-    /// The guard that keeps it off Path A lives in <see cref="KeyRange.IsStreamable"/>, and a guard nobody exercises is a guard that gets deleted. Its index is
-    /// an <c>L64BTree&lt;long&gt;</c> — ulong keys stored reinterpreted as signed — so the full range <c>[0, ulong.MaxValue]</c> encodes to the signed range
-    /// <c>[0, -1]</c>, which is EMPTY. Routed to Path A this query would answer nothing at all, silently.
+    /// The guard that keeps such types off Path A lives in <see cref="KeyRange.IsStreamable"/>, and a guard nobody exercises is a guard that gets deleted.
+    /// <c>ULong</c> was on that list until #676: its index was an <c>L64BTree&lt;long&gt;</c>, so the full range <c>[0, ulong.MaxValue]</c> encoded to the
+    /// signed range <c>[0, -1]</c> — empty — and Path A would have answered nothing at all, silently. The trees are genuinely ulong-keyed now and it streams;
+    /// <c>UlongIndexOrderingTests</c> covers it end to end across the sign boundary. <c>Bool</c> and <c>String64</c> remain genuinely non-streamable.
     /// </remarks>
     [Test]
     public void NonStreamableKeyType_StillAnswersCorrectly()
     {
         Assert.Multiple(() =>
         {
-            Assert.That(KeyRange.IsStreamable(KeyType.ULong), Is.False,
-                "a ULong index is an L64BTree<long>: its full range encodes to the signed range [0,-1]");
+            Assert.That(KeyRange.IsStreamable(KeyType.ULong), Is.True, "#676 gave the ULong trees a genuine ulong key, so they range-scan correctly");
             Assert.That(KeyRange.IsStreamable(KeyType.Bool), Is.False, "no typed B+Tree scan exists for Bool");
             Assert.That(KeyRange.IsStreamable(KeyType.String64), Is.False, "no typed B+Tree scan exists for String64");
             Assert.That(KeyRange.IsStreamable(KeyType.Float), Is.True);

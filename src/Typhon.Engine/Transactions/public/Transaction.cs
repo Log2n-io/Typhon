@@ -1990,6 +1990,16 @@ public unsafe partial class Transaction : EntityAccessor
     private void ReconcileClusterIndexAndViews(ArchetypeEngineState es, ArchetypeClusterState clusterState, int compSlot, int clusterChunkId,
         int clusterLocation, EntityId entityId, byte* oldComp, byte* newComp)
     {
+        // #711: an entity this transaction also DESTROYS has no index entry to maintain — it has one to remove, and the destroy path owns that. Moving its
+        // key here would insert the post-move key onto a slot that is about to be released, and the removal (whether it runs here or at the tick fence) keys
+        // off the PRE-move value, so the moved-to entry survives with nothing pointing at it. Both callers are commit-scoped and both run in the same commit
+        // as the destroy: PrepareClusterVersionedSlot before FlushEcsPendingOperations, PublishStagedCommitWrites after it. Guarding the shared method rather
+        // than each caller keeps the two from drifting.
+        if (_pendingDestroys != null && _pendingDestroys.Contains(entityId))
+        {
+            return;
+        }
+
         var layout = clusterState.Layout;
         int slotIndex = clusterLocation & 63;
         // Cluster chunk base holding the per-entity index element-id tail slot for AllowMultiple fields. Resolved lazily on the first AllowMultiple field

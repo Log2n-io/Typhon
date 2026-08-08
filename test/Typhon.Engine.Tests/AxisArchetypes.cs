@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using NUnit.Framework;
@@ -581,26 +581,6 @@ public static class AxisArchetypes
     /// </para>
     /// </remarks>
     public static bool SvValuesAreCrashDurable(in Cell c) => !c.HasSingleVersion || c.Discipline == DurabilityDiscipline.Commit;
-
-    /// <summary>
-    /// Whether this cell's archetype has components that publish at DIFFERENT times — one commit-scoped, one tick-fenced. Currently the trigger for
-    /// <see href="https://github.com/log2n-io/Typhon/issues/711">#711</see>: a staged key-move on such an archetype can leave the secondary index pointing at a
-    /// slot the entity no longer occupies.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Two shapes qualify. <c>SvPlusTransient</c> under <see cref="DurabilityDiscipline.Commit"/> stages its SV write for commit while its Transient sibling
-    /// lands at the fence. <c>VerPlusTransient</c> qualifies under ANY discipline, because Versioned is commit-scoped by construction. <c>SvPlusTransient</c>
-    /// under TickFence does NOT qualify — both members are then fenced — which is why the boundary is this predicate rather than "has a Transient component".
-    /// </para>
-    /// <para>
-    /// Exposed on the kit rather than copied into each fixture so that when #711 is fixed there is exactly one place to delete, and so that a fixture
-    /// narrowing against it is visibly narrowing against a tracked bug rather than against a shape it forgot to support.
-    /// </para>
-    /// </remarks>
-    public static bool MixesPublicationTimings(in Cell c) =>
-        c.Shape == StorageShape.VerPlusTransient
-        || (c.Shape == StorageShape.SvPlusTransient && c.Discipline == DurabilityDiscipline.Commit);
 
     /// <summary>How many elements the kit puts in entity <paramref name="i"/>'s collection — 1..4, so the count itself varies per entity.</summary>
     /// <remarks>
