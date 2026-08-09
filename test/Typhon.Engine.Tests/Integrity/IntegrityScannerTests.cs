@@ -512,23 +512,78 @@ internal sealed class IntegrityScannerTests
     }
 
     /// <summary>
-    /// The spine tier is what runs on every open, so it must be bounded by segment count rather than database size. This
-    /// asserts the shape (it does not read page bodies) rather than a wall-clock number, which would be flaky.
+    /// The spine tier runs on <b>every open</b>, so its cost must be bounded by the number of segments, not by the size
+    /// of the database. This asserts the I/O it actually performs.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The first version of this test asserted <c>Totals.PagesScanned == 0</c> and passed — while the implementation was
+    /// reading every page in the file on every open. That counter is only incremented by the <i>later</i> checksum sweep,
+    /// so it measured a different thing than the one that mattered and turned a serious performance defect into a green
+    /// test. The lesson is specific: when the claim is about cost, assert at the boundary where the cost is incurred.
+    /// </para>
+    /// <para>
+    /// The bound is expressed against page count rather than as a wall-clock number so it cannot be flaky, and it is
+    /// deliberately generous — the point is to catch O(database), not to police a constant.
+    /// </para>
+    /// </remarks>
     [Test]
     [CancelAfter(30_000)]
-    public void SpineTier_DoesNotSweepPages()
+    public void SpineTier_ReadsSegmentsNotTheWholeFile()
     {
-        BuildHealthyDatabase(256);
+        BuildHealthyDatabase(512);
         _serviceProvider.Dispose();
         _serviceProvider = null;
 
         using var source = new OfflineBundlePageSource(BundlePath);
         var report = IntegrityScanner.VerifySpine(source);
 
-        Assert.That(report.Verdict, Is.EqualTo(IntegrityVerdict.Sound));
-        Assert.That(report.Totals.PagesScanned, Is.Zero, "the spine tier must not sweep page bodies");
-        Assert.That(report.Totals.SegmentsWalked, Is.GreaterThan(0), "but it must still resolve every segment");
-        Assert.That(report.Limits.ChecksSkipped, Is.Not.Empty, "and it must say which checks it skipped");
+        Assert.That(report.Verdict, Is.EqualTo(IntegrityVerdict.Sound), IntegrityReportText.Render(report));
+        Assert.That(report.Totals.SegmentsWalked, Is.GreaterThan(0), "it must still resolve the segments the bootstrap names");
+        Assert.That(report.Limits.ChecksSkipped, Is.Not.Empty, "and say which checks it skipped");
+
+        Assert.That(source.PagesRead, Is.LessThan(source.PageCount),
+            $"the spine tier read {source.PagesRead} pages of a {source.PageCount}-page database — it must not sweep the file. "
+            + "This tier is on by default at every open, so O(database) here is a tax on every open of every database.");
+
+        // A few pages per segment plus the meta pair. Generous, but O(segments) rather than O(pages) is the property.
+        var budget = (report.Totals.SegmentsWalked * 8L) + 16;
+        Assert.That(source.PagesRead, Is.LessThanOrEqualTo(budget),
+            $"read {source.PagesRead} pages for {report.Totals.SegmentsWalked} segments; the tier is meant to cost a few "
+            + "pages per segment.");
+    }
+
+    /// <summary>
+    /// The same bound, restated where it bites: growing the database must not grow what an open costs.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    public void SpineTierCost_DoesNotGrowWithTheDatabase()
+    {
+        BuildHealthyDatabase(64);
+        _serviceProvider.Dispose();
+        _serviceProvider = null;
+
+        long smallReads;
+        int smallPages;
+        using (var small = new OfflineBundlePageSource(BundlePath))
+        {
+            IntegrityScanner.VerifySpine(small);
+            smallReads = small.PagesRead;
+            smallPages = small.PageCount;
+        }
+
+        Setup();
+        BuildHealthyDatabase(30_000);
+        _serviceProvider.Dispose();
+        _serviceProvider = null;
+
+        using var big = new OfflineBundlePageSource(BundlePath);
+        IntegrityScanner.VerifySpine(big);
+
+        Assert.That(big.PageCount, Is.GreaterThan(smallPages * 4), "precondition: the second database is materially larger");
+        Assert.That(big.PagesRead, Is.LessThan(smallReads * 4),
+            $"spine read {smallReads} pages on a {smallPages}-page database and {big.PagesRead} on a {big.PageCount}-page one. "
+            + "The cost must track segment count, not file size.");
     }
 }

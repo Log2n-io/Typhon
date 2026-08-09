@@ -68,12 +68,25 @@ public static class IntegrityScanner
 
         if (!ctx.StopScan)
         {
-            DiscoverStructure(ctx);
-            ReadOccupancy(ctx);
-            BootstrapChecks.RunLate(ctx);
-            SegmentChecks.Run(ctx);
-            SweepPages(ctx);
-            WalChecks.Run(ctx);
+            // Spine is the tier that runs on every open, so it must stay bounded by the number of SEGMENTS rather than
+            // the size of the database — it reaches structures through the bootstrap's own pointers and never sweeps.
+            // Deeper tiers can afford the physical sweep, which is strictly better at finding things the bootstrap does
+            // not mention, but paying for it at every open is the tax this design explicitly refused.
+            if (ctx.Options.Depth == ScanDepth.Spine)
+            {
+                DiscoverSpine(ctx);
+                BootstrapChecks.RunLate(ctx);
+                SegmentChecks.Run(ctx);
+            }
+            else
+            {
+                DiscoverStructure(ctx);
+                ReadOccupancy(ctx);
+                BootstrapChecks.RunLate(ctx);
+                SegmentChecks.Run(ctx);
+                SweepPages(ctx);
+                WalChecks.Run(ctx);
+            }
         }
 
         stopwatch.Stop();
@@ -94,6 +107,72 @@ public static class IntegrityScanner
     /// </remarks>
     /// <param name="source">The source to verify.</param>
     public static IntegrityReport VerifySpine(IPageSource source) => Scan(source, IntegrityOptions.Spine);
+
+    /// <summary>
+    /// Segment discovery for the <see cref="ScanDepth.Spine"/> tier: follow the bootstrap's own segment pointers and walk
+    /// only those segments' directories. Reads on the order of a few pages per segment, never the whole file.
+    /// </summary>
+    /// <remarks>
+    /// This deliberately gives up what the physical sweep buys — a segment the bootstrap has forgotten about is invisible
+    /// here — and that trade is the whole point of the tier. Spine answers "can this database be traversed at all", which
+    /// is the question worth asking on every open; "is every page accounted for" is a question worth asking when someone
+    /// asks it.
+    /// </remarks>
+    private static void DiscoverSpine(ScanContext ctx)
+    {
+        var walker = new SegmentWalker(ctx.Source);
+        var seen = new HashSet<int>();
+
+        // The genesis pages exist before any segment does, so they are reachable by definition.
+        for (var p = 0; p < Math.Min(ManagedPagedMMF.InitialReservedPageCount, ctx.Source.PageCount); p++)
+        {
+            ctx.Roles[p] = PageRole.Reserved;
+        }
+
+        for (var i = 0; i < ctx.Bootstrap.Entries.Count; i++)
+        {
+            var value = ctx.Bootstrap.Entries[i].Value;
+            for (var c = 0; c < value.IntCount; c++)
+            {
+                var spi = value.GetInt(c);
+
+                // A bootstrap value is an arbitrary integer until proven otherwise, so only follow one that addresses a
+                // real page AND says on that page that it is a segment root. Anything else is configuration, not a
+                // pointer, and chasing it would manufacture findings out of ordinary values.
+                if (spi <= 0 || !ctx.IsInRange(spi) || !seen.Add(spi))
+                {
+                    continue;
+                }
+
+                if (!LooksLikeSegmentRoot(ctx, spi))
+                {
+                    continue;
+                }
+
+                var segment = walker.WalkSegment(spi);
+                ctx.Segments[spi] = segment;
+                AttributePages(ctx, segment);
+            }
+        }
+    }
+
+    /// <summary>Whether a page declares itself the root of the segment its own directory names.</summary>
+    private static bool LooksLikeSegmentRoot(ScanContext ctx, int pageIndex)
+    {
+        Span<byte> page = new byte[IntegrityConstants.PageSize];
+        if (!ctx.Source.TryReadPage(pageIndex, page))
+        {
+            return false;
+        }
+
+        ctx.FlagsByte[pageIndex] = (byte)PageImage.Flags(page);
+        if ((PageImage.Flags(page) & PageBlockFlags.IsLogicalSegmentRoot) == 0)
+        {
+            return false;
+        }
+
+        return System.Runtime.InteropServices.MemoryMarshal.Read<int>(PageImage.RawData(page)) == pageIndex;
+    }
 
     private static void DiscoverStructure(ScanContext ctx)
     {

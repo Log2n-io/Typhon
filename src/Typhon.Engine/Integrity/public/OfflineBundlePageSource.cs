@@ -93,6 +93,19 @@ public sealed class OfflineBundlePageSource : IPageSource
     /// <inheritdoc />
     public int PageCount { get; }
 
+    /// <summary>
+    /// Pages actually read from disk since this source was opened.
+    /// </summary>
+    /// <remarks>
+    /// Exists so a test can assert what a scan <b>costs</b> rather than what it claims to cost. The open-time
+    /// <see cref="ScanDepth.Spine"/> tier is only affordable as a default because it is bounded by the number of segments
+    /// rather than the size of the database; that is a property of the I/O it performs, so it has to be measured at the
+    /// I/O boundary. Asserting it any further up measures the wrong thing.
+    /// </remarks>
+    public long PagesRead => System.Threading.Volatile.Read(ref _pagesRead);
+
+    private long _pagesRead;
+
     /// <inheritdoc />
     public bool TryReadPage(int index, Span<byte> destination)
     {
@@ -106,6 +119,7 @@ public sealed class OfflineBundlePageSource : IPageSource
             throw new ArgumentException($"Destination must be at least {IntegrityConstants.PageSize} bytes.", nameof(destination));
         }
 
+        System.Threading.Interlocked.Increment(ref _pagesRead);
         return _data.ReadExactly(destination[..IntegrityConstants.PageSize], index * (long)IntegrityConstants.PageSize);
     }
 
