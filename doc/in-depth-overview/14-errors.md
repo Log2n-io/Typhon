@@ -69,6 +69,7 @@ System.Exception
    │  ├─ TransactionTimeoutException        (TransactionId)
    │  ├─ PageCacheBackpressureTimeoutException (DirtyPageCount, EpochProtectedCount)
    │  └─ WalBackPressureTimeoutException    (RequestedBytes)            ← NOT under DurabilityException
+   ├─ SnapshotExpiredException             (SnapshotTsn, RetainedMinTsn)
    ├─ StorageException
    │  ├─ CorruptionException                (ComponentName, PageIndex)
    │  │  └─ PageCorruptionException         (ExpectedCrc, ComputedCrc)
@@ -113,6 +114,12 @@ Every engine exception derives from this and carries an `ErrorCode`. The numeric
 | [`WalBackPressureTimeoutException`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Errors/public/WalBackPressureTimeoutException.cs) | `int RequestedBytes` | WAL claim ring is full; producer waited past its deadline. |
 
 > **Note:** `WalBackPressureTimeoutException` is a **timeout**, not a durability error — it lives under `TyphonTimeoutException`, **not** under `DurabilityException`. The hierarchy classification follows "what does the caller want to do?", and the answer here is "retry later", which is the timeout-family contract.
+
+### MVCC snapshot — `SnapshotExpiredException`
+
+[`Errors/public/SnapshotExpiredException.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Errors/public/SnapshotExpiredException.cs)
+
+**Direct subclass of `TyphonException`** (`ErrorCode = SnapshotExpired = 1003`, `IsTransient => false`). Thrown when a [`PointInTimeAccessor`](05-revision.md) reads a `Versioned` component whose revisions have already been reclaimed by MVCC cleanup. A PTA does not register in the transaction chain, so the cleanup watermark can advance past the snapshot TSN; rather than return silently wrong (all-zero) data, the engine fails fast. Callers that need a snapshot to survive concurrent commits should use a read-only `Transaction` instead, which does register in the chain and therefore holds back the reclaim watermark. Carries `SnapshotTsn` (the TSN the read was attempted at) and `RetainedMinTsn` (the oldest TSN whose revisions are still guaranteed to be retained).
 
 ### Storage family — `StorageException`
 
@@ -171,7 +178,7 @@ A flat `enum TyphonErrorCode` organized into numeric ranges by subsystem. Codes 
 | Range | Subsystem | Codes |
 |---|---|---|
 | 0 | Unspecified | `Unspecified = 0` |
-| 1xxx | Transaction | `TransactionTimeout = 1002` |
+| 1xxx | Transaction | `TransactionTimeout = 1002`, `SnapshotExpired = 1003` |
 | 2xxx | Storage | `DataCorruption = 2003`, `StorageCapacityExceeded = 2004`, `PageChecksumMismatch = 2005`, `PageCacheBackpressureTimeout = 2006`, `DatabaseLocked = 2007` |
 | 3xxx | Schema / Component | `SchemaValidation = 3001`, `SchemaMigration = 3002` |
 | 4xxx | Index | `UniqueConstraintViolation = 4001` |
