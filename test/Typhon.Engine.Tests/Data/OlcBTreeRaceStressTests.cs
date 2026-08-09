@@ -360,7 +360,10 @@ public class OlcBTreeRaceStressTests
             consistency = ex.Message;
         }
 
+        // No separate separator/HighKey/depth dumps here any more: CheckConsistency asserts all three itself (#679), so `consistency` already carries the
+        // detail and carries it in priority order instead of printing four reports of which three are usually "all agree".
         return $"inLeafChain={inChain} chainCount={chainCount} chainOrdered={chainOrdered} entryCount={tree.EntryCount} height={tree.Height} "
+             + $"emptyInitRacesLost={tree.EmptyInitRacesLost} "
              + $"chainNeighbours=({(predecessor == int.MinValue ? "-" : predecessor.ToString())},"
              + $"{(successor == int.MaxValue ? "-" : successor.ToString())}) consistency=[{consistency}]";
     }
