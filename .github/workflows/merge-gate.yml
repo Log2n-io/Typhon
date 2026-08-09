@@ -375,7 +375,10 @@ jobs:
       pull-requests: read
       issues: read
     steps:
+      - uses: actions/checkout@v5
+
       - name: Reject closing keywords that target a pull request
+        id: keywords
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -414,6 +417,10 @@ jobs:
             | grep -oiE '(^|[^[:alnum:]_])(close[sd]?|fix(es|ed)?|resolve[sd]?)[[:space:]]*:?[[:space:]]+#[0-9]+' \
             | grep -oE '#[0-9]+' | tr -d '#' | sort -un || true)
 
+          # Published for the companion step below, and written BEFORE the early exit so the empty case is explicit
+          # rather than an absent output.
+          echo "closes=$(printf '%s' "$NUMS" | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+
           if [ -z "$NUMS" ]; then
             echo "No closing keywords found — nothing to check."
             exit 0
@@ -451,6 +458,30 @@ jobs:
             exit 1
           fi
           echo "Closing keywords: all target issues. OK."
+
+      # ── The companion: nothing in the tree may still CITE what this PR closes ────────────────────────────
+      # `IGNORE_CLOSED_ISSUE` (in `invariants`) asks whether a suppression's issue is closed RIGHT NOW. On a PR that
+      # closes #N and leaves an `[Ignore("#N")]` behind, #N is still open while the PR is open — so that check passes,
+      # the merge closes #N, and the identical check reddens `main` minutes later. Green before merge, red after, with
+      # no run in between that could have caught it. Measured: PR #721 closed #718 with the suppression still in the
+      # tree; `invariants` passed on the PR and failed on main at 22:32.
+      #
+      # This step is the only place in CI that holds both facts at once — the closing set, and the tree as it will be
+      # after the merge (`pull_request` checks out the merge ref). Hence here rather than in `invariants`, which runs
+      # on push too and has no PR to read a closing set from.
+      #
+      # It runs the whole lint, so an unrelated violation would be reported here AND by `invariants`. That duplication
+      # is deliberate: this job is seconds and fails fast, and two identical messages are cheaper than a second flag to
+      # keep in sync.
+      - name: Nothing may still cite what this PR closes
+        if: steps.keywords.outputs.closes != ''
+        env:
+          CLOSES: ${{ steps.keywords.outputs.closes }}
+        run: |
+          set -uo pipefail
+          echo "This PR closes: $CLOSES"
+          # --no-github: IGNORE_CLOSED_ISSUE is `invariants`' job, and this runner has no reason to re-probe the API.
+          python3 scripts/lint-test-suppressions.py --no-github --closing "$CLOSES"
 
   # ---- The ONLY required check. Aggregates: skipped → pass, failure/cancelled → fail. ----
   gate:
