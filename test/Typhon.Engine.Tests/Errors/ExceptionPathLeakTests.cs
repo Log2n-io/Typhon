@@ -332,7 +332,12 @@ class ExceptionPathLeakTests : TestBase<ExceptionPathLeakTests>
         var depth = _dbe.EpochManager.EnterScope();
         try
         {
-            var meta = ArchetypeRegistry.GetMetadata(entityId.ArchetypeId);
+            // Two id spaces, and this helper used to conflate them: EntityId.ArchetypeId is the per-DB ROUTING id, while ArchetypeRegistry and
+            // _archetypeStates are keyed by the per-process CATALOG id. Feeding a routing id to GetMetadata returns whichever archetype happens to hold that
+            // catalog id — usually one this engine never registered, whose state slot is null. Hence "EntityMap should exist" firing before the test reached
+            // anything it meant to assert. GetMetaByRouting is the translation the engine itself uses (see _archetypeStates' own remarks).
+            var meta = _dbe.GetMetaByRouting(entityId.ArchetypeId);
+            Assert.That(meta, Is.Not.Null, $"routing id {entityId.ArchetypeId} should resolve to an archetype registered in this engine");
             var es = _dbe._archetypeStates[meta.ArchetypeId];
             Assert.That(es?.EntityMap, Is.Not.Null, "EntityMap should exist");
 

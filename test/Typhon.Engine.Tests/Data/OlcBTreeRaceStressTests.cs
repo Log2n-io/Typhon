@@ -113,6 +113,8 @@ public class OlcBTreeRaceStressTests
             report.AppendLine($"  end-fast-path   (key > rll.lastKey)    : {_removeNotFoundByBranch[OlcDescentTrace.RemoveBranchEndFastPathGreaterThanLast]}");
             report.AppendLine($"  general path    (descend keyIndex<0)   : {_removeNotFoundByBranch[OlcDescentTrace.RemoveBranchGeneralKeyIndexNegative]}");
             report.AppendLine($"  under-lock re-find (concurrent removed): {_removeNotFoundByBranch[OlcDescentTrace.RemoveBranchUnderLockReFindNegative]}");
+            report.AppendLine($"  PESS begin-fast-path (key < ll.first)  : {_removeNotFoundByBranch[OlcDescentTrace.RemoveBranchPessimisticBeginLessThanFirst]}");
+            report.AppendLine($"  PESS end-fast-path   (key > rll.last)  : {_removeNotFoundByBranch[OlcDescentTrace.RemoveBranchPessimisticEndGreaterThanLast]}");
             report.AppendLine($"  TOTAL: {rnfTotal}");
         }
         if (_rdNotRemoved > 0 || _rdWrongValue > 0)
@@ -139,7 +141,7 @@ public class OlcBTreeRaceStressTests
     }
 
     // === Remove NotFound branch capture ===
-    private static readonly long[] _removeNotFoundByBranch = new long[5];
+    private static readonly long[] _removeNotFoundByBranch = new long[OlcDescentTrace.RemoveBranchCount];
     private static int _removeNotFoundDetailsCaptured;
     private static readonly object _rnfLock = new();
     private static readonly string _rnfDetailsPath = (Environment.GetEnvironmentVariable("OLC_STRESS_LOG")
@@ -360,7 +362,10 @@ public class OlcBTreeRaceStressTests
             consistency = ex.Message;
         }
 
+        // No separate separator/HighKey/depth dumps here any more: CheckConsistency asserts all three itself (#679), so `consistency` already carries the
+        // detail and carries it in priority order instead of printing four reports of which three are usually "all agree".
         return $"inLeafChain={inChain} chainCount={chainCount} chainOrdered={chainOrdered} entryCount={tree.EntryCount} height={tree.Height} "
+             + $"emptyInitRacesLost={tree.EmptyInitRacesLost} "
              + $"chainNeighbours=({(predecessor == int.MinValue ? "-" : predecessor.ToString())},"
              + $"{(successor == int.MaxValue ? "-" : successor.ToString())}) consistency=[{consistency}]";
     }
@@ -529,6 +534,9 @@ public class OlcBTreeRaceStressTests
             using var barrier = new Barrier(threadCount);
             var exceptions = new ConcurrentBag<Exception>();
             var tasks = new Task[threadCount];
+            // Keys are disjoint per thread, so no remove can lose a race with another remove for the same key. That makes the two candidate explanations for a
+            // wrong EntryCount cleanly separable, and the return value — discarded until now — is half the evidence.
+            var removeReturnedFalse = new int[1];
             for (int t = 0; t < threadCount; t++)
             {
                 int tid = t;
@@ -544,7 +552,10 @@ public class OlcBTreeRaceStressTests
                             int key = i * threadCount + tid + 1;
                             if (key <= totalKeys)
                             {
-                                tree.Remove(key, out _, ref wa);
+                                if (!tree.Remove(key, out _, ref wa))
+                                {
+                                    Interlocked.Increment(ref removeReturnedFalse[0]);
+                                }
                             }
                         }
                         wa.CommitChanges();
@@ -560,7 +571,22 @@ public class OlcBTreeRaceStressTests
             int expected = totalKeys - threadCount * keysToRemovePerThread;
             if (tree.EntryCount != expected)
             {
-                throw new Exception($"Remove_Merges: EntryCount={tree.EntryCount} expected={expected}");
+                // chainCount is the ground truth (what the tree actually holds); EntryCount is the counter. Which of the two is wrong names the defect:
+                // chain == expected means a DecCount was lost, chain == EntryCount means a key really survived its Remove.
+                int chainCount = 0;
+                var leftover = new System.Collections.Generic.List<int>();
+                foreach (var kv in tree.EnumerateLeaves())
+                {
+                    chainCount++;
+                    // The removed set is exactly 1..threadCount*keysToRemovePerThread (i*threadCount + tid + 1 covers it densely), so anything at or below
+                    // that bound still in the chain is a key whose Remove did not take.
+                    if (kv.Key <= threadCount * keysToRemovePerThread && leftover.Count < 8)
+                    {
+                        leftover.Add(kv.Key);
+                    }
+                }
+                throw new Exception($"Remove_Merges: EntryCount={tree.EntryCount} expected={expected} chainCount={chainCount} "
+                                  + $"removeReturnedFalse={removeReturnedFalse[0]} survivingRemovedKeys=[{string.Join(",", leftover)}]");
             }
             var va = segment.CreateChunkAccessor();
             tree.CheckConsistency(ref va);

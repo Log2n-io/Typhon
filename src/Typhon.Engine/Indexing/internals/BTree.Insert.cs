@@ -1,6 +1,7 @@
 ﻿// unset
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -19,6 +20,36 @@ internal abstract partial class BTree<TKey, TStore>
         /// <summary>Target leaf is full — needs pessimistic path for split/spill.</summary>
         LeafFull,
     }
+    
+    /// <summary>
+    /// True when <paramref name="key"/> sits BELOW the lower bound that routes to <paramref name="leaf"/> — i.e. the descent that chose this leaf is stale and
+    /// the insert must restart rather than proceed.
+    /// </summary>
+    /// <remarks>
+    /// A leaf's first key IS the separator its parent holds. Inserting a key smaller than it lands at slot 0, drops the first key below that separator, and no
+    /// insert path updates the ancestor — so descent for the new key then routes LEFT of the separator and never reaches the leaf. The key is counted by
+    /// IncCount, sits in a correctly chained leaf, and is unreachable. That is #297/#679's mode 1, measured: `separator=408 -> child=5 firstKey=226`, with the
+    /// separator never rewritten and the leaf's first key dropped by an insert at slot 0.
+    /// <para>
+    /// Every insert path already validated the UPPER bound — the OLC general path checks <c>key >= HighKey</c>, the append fast paths check
+    /// <c>!GetNext().IsValid</c>, <c>InsertIterative</c> has its move-right gap check — and not one validated the lower bound. This is that missing half,
+    /// stated once and applied at all four sites, because a rule enforced at one call site is a rule enforced at one call site (the lesson IXS-03/IXW-01
+    /// already record for readers and writers).
+    /// </para>
+    /// <para>
+    /// A leaf with no previous sibling is the tree's leftmost and is reached through the left POINTER, which carries no separator — lowering its first key is
+    /// legitimate and is what the prepend fast paths exist to do. Hence the <c>GetPrevious</c> test, and it is evaluated LAST: the comparison short-circuits on
+    /// the overwhelmingly common in-range insert, so the extra chunk read is paid only when a key really is below the leaf's first.
+    /// </para>
+    /// <para>
+    /// Restarting is safe against livelock because both callers are bounded: the OLC loop by <c>MaxOptimisticRestarts</c> (then the pessimistic path), and the
+    /// pessimistic loop by <c>MaxPessimisticRestarts</c>, which throws rather than spins — the guard #695 put in place for exactly this shape.
+    /// </para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool KeyBelowLeafLowerBound(NodeWrapper leaf, TKey key, IComparer<TKey> comparer, ref ChunkAccessor<TStore> accessor)
+        => leaf.GetCount(ref accessor) > 0 && comparer.Compare(key, leaf.GetFirst(ref accessor).Key) < 0 && leaf.GetPrevious(ref accessor).IsValid;
+
     /// <summary>Creates the insert value, handling AllowMultiple buffer creation.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int CreateInsertValue(ref InsertArguments args, ref ChunkAccessor<TStore> accessor)
@@ -269,6 +300,13 @@ internal abstract partial class BTree<TKey, TStore>
                             llLatch.WriteUnlock();
                             return OlcInsertResult.LeafFull;
                         }
+                        // #297 mode 1: `_linkList` is a cached field, so it can name a leaf that is no longer the leftmost. Pushing a smaller key to the front
+                        // of an INTERIOR leaf drops its first key below the separator routing to it, with no ancestor update — see KeyBelowLeafLowerBound.
+                        if (ll.GetPrevious(ref accessor).IsValid)
+                        {
+                            llLatch.AbortWriteLock();
+                            return OlcInsertResult.Restart;
+                        }
                         int value = CreateInsertValue(ref args, ref accessor);
                         ll.PushFirst(new KeyValueItem(args.Key, value), ref accessor);
                         llLatch.WriteUnlock();
@@ -330,6 +368,13 @@ internal abstract partial class BTree<TKey, TStore>
             leafLatch.WriteUnlock();
             return OlcInsertResult.Restart;
         }
+        // #297 mode 1: and the same check on the LOWER bound, which this path never had. Above only rejects a key past the leaf's high key; a key below its
+        // FIRST key is equally out of range and inserting it silently invalidates the separator. AbortWriteLock, not WriteUnlock — nothing was modified.
+        if (KeyBelowLeafLowerBound(leaf, args.Key, args.KeyComparer, ref accessor))
+        {
+            leafLatch.AbortWriteLock();
+            return OlcInsertResult.Restart;
+        }
         if (leaf.GetIsFull(ref accessor))
         {
             leafLatch.WriteUnlock();
@@ -372,12 +417,31 @@ internal abstract partial class BTree<TKey, TStore>
         {
             ref var accessor = ref args.Accessor;
 
-            if (IsEmpty())
+            // Issue #297/#679: the twin of AddOrUpdateCore's empty-tree initialisation, and it needs that one's CAS for the same reason. The trigger cannot be
+            // `IsEmpty()`: that tests the ENTRY COUNT, and the winner of the OLC init publishes `_rootChunkId` several instructions BEFORE its IncCount(). A
+            // writer that loses the OLC CAS, burns MaxOptimisticRestarts against the winner's still-locked leaf and lands here inside that window observes
+            // count==0 with a live root — and the unconditional `Root = AllocNode(...)` this replaces then republished a fresh EMPTY leaf over it. The winner's
+            // root and the key in it were orphaned (counted by EntryCount, reachable from nothing), and Height was left permanently one too high: two
+            // increments, one level. Test on root existence and CAS the publication, so the loser frees its node exactly as the OLC path's loser does.
+            //
+            // Both symptoms outlive the microsecond that produced them, which is why this read as an insert-path defect for so long: the key is simply absent
+            // from a structurally flawless tree, and the height drift persists into a large tree where it trips CheckConsistency's FIRST assertion and aborts
+            // the walk before any separator is examined.
+            if (_rootChunkId == 0)
             {
-                Root = AllocNode(NodeStates.IsLeaf, ref accessor);
-                _linkList = Root;
-                _reverseLinkList = _linkList;
-                Height++;
+                var newRoot = AllocNode(NodeStates.IsLeaf, ref accessor);
+                if (Interlocked.CompareExchange(ref _rootChunkId, newRoot.ChunkId, 0) == 0)
+                {
+                    _linkList = newRoot;
+                    _reverseLinkList = newRoot;
+                    Height++;
+                }
+                else
+                {
+                    // Another writer published a root first — drop ours rather than overwrite theirs.
+                    Interlocked.Increment(ref _emptyInitRacesLost);
+                    _segment.FreeChunk(newRoot.ChunkId);
+                }
             }
 
             // Append fast path: lock the last leaf and insert if key > lastKey and leaf not full.
@@ -471,7 +535,18 @@ internal abstract partial class BTree<TKey, TStore>
                         }
                         else
                         {
-                            if (!ll.GetIsFull(ref accessor) && args.Compare(args.Key, ll.GetFirst(ref accessor).Key) < 0)
+                            // #297: `ll.GetPrevious()` must be checked, and its absence here was the defect. This path lowers the leaf's FIRST key, and a leaf's
+                            // first key is what its parent separator holds. That is sound only for the tree's leftmost leaf, which hangs off the left POINTER
+                            // and has no separator — so nothing needs updating. `_linkList` is a cached field, though, and a concurrent split can create a new
+                            // leftmost leaf (or the field can simply be observed stale), leaving `ll` an INTERIOR leaf reached through a separator. Pushing a
+                            // smaller key to its front then drops its first key below that separator with no ancestor update, and descent for the new key
+                            // routes left of the separator and never reaches the leaf: the key is counted by IncCount and unreachable. Measured signature —
+                            // `separator=1054 -> leaf firstKey=1049`, the key present in a chained leaf, TryGet failing.
+                            //
+                            // The other three cached-pointer fast paths already guard this: the append path re-checks `!rl.GetNext().IsValid`, and both Remove
+                            // fast paths bail on a valid Previous/Next. The Remove BEGIN path's comment even names this exact hazard. Only this one was left.
+                            if (!ll.GetIsFull(ref accessor) && !ll.GetPrevious(ref accessor).IsValid
+                                                            && args.Compare(args.Key, ll.GetFirst(ref accessor).Key) < 0)
                             {
                                 int value = CreateInsertValue(ref args, ref accessor);
                                 ll.PushFirst(new KeyValueItem(args.Key, value), ref accessor);
@@ -580,7 +655,7 @@ internal abstract partial class BTree<TKey, TStore>
     /// </summary>
     private void InsertIterative(ref InsertArguments args, ref ChunkAccessor<TStore> accessor, out bool completed)
     {
-        completed = false;
+        completed = false; // descent
         MutationContext ctx = default;
         var node = Root;
         var relatives = new NodeRelatives();
@@ -637,8 +712,8 @@ internal abstract partial class BTree<TKey, TStore>
 
         // Phase 1.5A: Lock leaf with version validation.
         // Between Phase 1 descent and lock acquisition, a concurrent writer may have split/modified this leaf. Snapshot the version before locking,
-        // then validate after.
-        node.PreDirtyForWrite(ref accessor);
+        // then validate after. // INSIDE leaf PreDirtyForWrite — page-cache admission, blocks without spinning
+        node.PreDirtyForWrite(ref accessor); // leaf lock
         var leafLatch = node.GetLatch(ref accessor);
         int leafVersion = leafLatch.ReadVersion();
         if (leafVersion == 0)
@@ -686,7 +761,7 @@ internal abstract partial class BTree<TKey, TStore>
 
         // B-link move_right (Lehman & Yao): if the key is beyond this leaf's range, a concurrent split moved some keys to a right sibling. Chain right using
         // lock coupling (lock next before releasing current) until we find the correct leaf. Forward progress is guaranteed:
-        // all movement is strictly rightward with no cycle, and SpinWriteLock waits for busy siblings.
+        // all movement is strictly rightward with no cycle, and SpinWriteLock waits for busy siblings. // move-right
         bool movedRight = false;
         // High key is an exclusive upper bound, so key >= highKey means we're out of range.
         while (node.GetCount(ref accessor) > 0 && node.GetNext(ref accessor).IsValid && args.Compare(args.Key, node.GetHighKey(ref accessor)) >= 0)
@@ -723,6 +798,16 @@ internal abstract partial class BTree<TKey, TStore>
             node.GetLatch(ref accessor).AbortWriteLock();    // release current
             node = nextNode;
             movedRight = true;
+        }
+
+        // #297 mode 1: the lower-bound half of the move-right gap check above. That one rejects a key past this leaf's range on the RIGHT; this rejects one
+        // below its first key, which InsertLeaf would place at slot 0 — dropping the leaf's first key under the separator that routes to it, with no ancestor
+        // update from either the non-full path or the split path below. See KeyBelowLeafLowerBound. Nothing has been modified yet, so abort without a version
+        // bump and let the bounded outer loop re-descend.
+        if (KeyBelowLeafLowerBound(node, args.Key, args.KeyComparer, ref accessor))
+        {
+            node.GetLatch(ref accessor).AbortWriteLock();
+            return; // completed=false → outer retry
         }
 
         // Fast path: leaf not full → InsertLeaf only modifies this leaf (insert or duplicate append)
@@ -769,14 +854,20 @@ internal abstract partial class BTree<TKey, TStore>
         // within microseconds).
         if (movedRight)
         {
-            node.GetLatch(ref accessor).WriteUnlock();
+            // #679: AbortWriteLock, NOT WriteUnlock. Nothing was modified on this path — `shouldContentionSplit` requires `!movedRight`, so arriving here means
+            // the leaf was full and the item was never inserted — and WriteUnlock BUMPS the version. That bump invalidates every concurrent OLC reader and
+            // writer that had validated against this leaf, forcing them to restart; with several writers repeatedly reaching this same bail they invalidate one
+            // another perpetually and none converges. Measured as the stress harness's HANG: all workers alive, none blocked on a latch, all sitting at
+            // pessAttempt=664 and climbing toward the MaxPessimisticRestarts throw. Releasing without the bump is what the rest of the file already does at
+            // every "condition failed — didn't modify node" exit.
+            node.GetLatch(ref accessor).AbortWriteLock();
             return; // completed=false — retry with fresh path from root
         }
 
         // Slow path: leaf full or contention split — structural modification needed.
         // For contention split, skip leafPrev lock (no spill needed — item already in, only need right neighbor for linked list).
         // On lock failure: contention split uses WriteUnlock + completed=true (item is in); regular uses AbortWriteLock + restart.
-        // Sibling locking: load sibling pages into the sibling CA to avoid evicting parent path pages from the primary CA
+        // Sibling locking: load sibling pages into the sibling CA to avoid evicting parent path pages from the primary CA // sibling locks
         var leafPrev = itemAlreadyInserted ? default : node.GetPrevious(ref accessor);
         var leafNext = node.GetNext(ref accessor);
         if (leafPrev.IsValid)
@@ -808,7 +899,7 @@ internal abstract partial class BTree<TKey, TStore>
             node.GetLatch(ref accessor).AbortWriteLock();
             return;
         }
-
+ // path locks
         // Lock path nodes bottom-up with version validation.
         // Required for ancestor key updates during spill and split propagation.
         for (int i = ctx.Depth - 1; i >= 0; i--)
@@ -864,7 +955,7 @@ internal abstract partial class BTree<TKey, TStore>
                 return;
             }
         }
-
+ // insert/split at leaf
         // All needed nodes locked — Phase 2: Insert at leaf (may spill or split) or contention split
         KeyValueItem? promoted;
         if (itemAlreadyInserted)
@@ -892,7 +983,7 @@ internal abstract partial class BTree<TKey, TStore>
         {
             node.GetLatch(ref accessor).WriteUnlock();
         }
-
+ // propagate
         // Phase 3: Propagate splits upward through internal nodes
         while (ctx.Depth > 0 && promoted != null)
         {
@@ -950,7 +1041,7 @@ internal abstract partial class BTree<TKey, TStore>
         //
         // Issue #297: hold newRoot's write lock around the structural writes (SetLeft + Insert). Without it, a concurrent thread reading the just-published
         // `Root` field can observe newRoot with count=0 (Insert(0, promoted) hasn't written yet) and descend through the leftmost child path, missing the
-        // promoted subtree entirely. The lock forces the racer to restart on a locked latch until WriteUnlock publishes a consistent state.
+        // promoted subtree entirely. The lock forces the racer to restart on a locked latch until WriteUnlock publishes a consistent state. // root split
         if (promoted != null)
         {
             var newRoot = AllocNode(NodeStates.None, ref accessor);
@@ -965,7 +1056,7 @@ internal abstract partial class BTree<TKey, TStore>
             newRootLatch.WriteUnlock();
             node.GetLatch(ref accessor).WriteUnlock(); // release old root after publishing new root
         }
-
+ // done
         completed = true;
     }
 }

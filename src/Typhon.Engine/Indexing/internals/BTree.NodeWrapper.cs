@@ -303,6 +303,17 @@ internal abstract partial class BTree<TKey, TStore>
                         }
 
                         rightLeaf = new KeyValueItem(rightNode.GetFirst(ref accessor).Key, rightNode.ChunkId);
+
+                        // #297/#679 mode 2: SplitRight set this node's HighKey to the right half's first key at the moment of the split — and BOTH branches
+                        // above then change that first key. `PushFirst` moves this node's old last key into the right half, dropping its first key below the
+                        // HighKey just recorded; the `Insert` branch can do the same. HighKey is the EXCLUSIVE upper bound the B-link protocol reads to decide
+                        // "this key is past me, follow the right link", so leaving it high makes a descent stop here for keys that now live next door, and
+                        // report not-found on a tree that is otherwise perfectly consistent — separators agreeing, the key present in a chained leaf reachable
+                        // from the root. Measured: `leaf=30 highKey=601 but next=5 firstKey=207`.
+                        //
+                        // The correct value is the one just computed for the promoted separator: they are the same fact — where the boundary between the two
+                        // leaves now sits. The spill paths already do this (SetHighKey(newSeparator)); the split path computed it and did not write it back.
+                        SetHighKey(rightLeaf.Value.Key, ref accessor);
                     }
 
                     Validate();

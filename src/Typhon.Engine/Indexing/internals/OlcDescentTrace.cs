@@ -44,6 +44,15 @@ internal static class OlcDescentTrace
     public const int RemoveBranchGeneralKeyIndexNegative = 3;
     public const int RemoveBranchUnderLockReFindNegative = 4;
 
+    // The PESSIMISTIC twins of branches 1 and 2. They were the blind spot: the stress harness saw Remove return false on a key that provably existed while
+    // every branch counter read zero, which reads as "no not-found path was taken" and sent the hunt at the count instead of the lookup. Both conclusions live
+    // in RemoveCorePessimistic's own begin/end fast paths, which duplicate the OLC logic and were never wired.
+    public const int RemoveBranchPessimisticBeginLessThanFirst = 5;
+    public const int RemoveBranchPessimisticEndGreaterThanLast = 6;
+
+    /// <summary>One past the highest branch id — sizes a counter array without hard-coding the count at each call site.</summary>
+    public const int RemoveBranchCount = 7;
+
     /// <summary>
     /// Called every time the OLC remove path concludes "key not in tree." Args:
     /// (branch, keyAsInt, leafChunkId, leafFirstOrLastKeyAsInt, leafCount). For non-int trees

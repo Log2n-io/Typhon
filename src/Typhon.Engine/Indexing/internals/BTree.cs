@@ -534,6 +534,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     internal long _contentionSplitCount;
     internal long _obsoleteRestarts;
     internal long _obsoleteSmoSiblingLocks;
+    internal long _emptyInitRacesLost;
 
     internal const int MaxTreeDepth = 32;
     internal const int MaxOptimisticRestarts = 3;
@@ -721,6 +722,13 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     public long ObsoleteRestarts => Interlocked.Read(ref _obsoleteRestarts);
 
     /// <summary>
+    /// Number of times the pessimistic insert path lost the race to publish the first root and freed its own node instead of overwriting the winner's (#679).
+    /// Non-zero is HEALTHY — it is the defect being caught. Before the CAS it was unreachable by construction, because the overwrite simply went through:
+    /// the winner's root was orphaned with the key it held, and <c>Height</c> was left one too high for the life of the tree.
+    /// </summary>
+    public long EmptyInitRacesLost => Interlocked.Read(ref _emptyInitRacesLost);
+
+    /// <summary>
     /// Number of times a latch-coupled SMO sibling lock was taken on an already-obsolete node — the residual IXW-02 does NOT cover, because those four sites are
     /// mid-algorithm with no restart point. Expected 0: both phases hold the sibling's parent lock, so only a COUSIN could get here. Non-zero means the
     /// cousin case is real and the sibling has to become droppable.
@@ -738,6 +746,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         Interlocked.Exchange(ref _contentionSplitCount, 0);
         Interlocked.Exchange(ref _obsoleteRestarts, 0);
         Interlocked.Exchange(ref _obsoleteSmoSiblingLocks, 0);
+        Interlocked.Exchange(ref _emptyInitRacesLost, 0);
     }
 
     /// <summary>
@@ -1291,6 +1300,247 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         return removed;
     }
 
+    /// <summary>
+    /// Validates that every leaf sits at the same depth and that <see cref="Height"/> equals it. Returns <c>null</c> when the tree is sound, else a detail
+    /// string. Test/diagnostic use only — walks without locks, so the caller must ensure no concurrent modification.
+    /// </summary>
+    /// <remarks>
+    /// This runs BEFORE the recursive walk for a reason. <c>NodeWrapper.CheckConsistency</c>'s first assertion compares each node's leaf flag against the depth
+    /// it was reached at, counting DOWN from <see cref="Height"/> — so a <see cref="Height"/> that is merely one too large makes every leaf trip it, and the
+    /// walk aborts before a single separator, ordering rule or child pointer is examined. In #679 that turned a root published twice into the message
+    /// "Mismatch node's Height 2 with True", which describes a leaf at the wrong level. The tree was perfectly balanced; only the scalar had drifted. Asserting
+    /// the two facts separately means a drift reports as a drift and everything downstream still gets checked.
+    /// </remarks>
+    internal string ValidateLeafDepths(ref ChunkAccessor<TStore> accessor, int maxReported = 6)
+    {
+        var depths = new Dictionary<int, int>();
+        var samples = new List<string>();
+        int visited = 0;
+        var stack = new Stack<(NodeWrapper Node, int Depth, string Path)>();
+        if (Root.IsValid)
+        {
+            stack.Push((Root, 1, "root"));
+        }
+
+        while (stack.Count > 0 && visited < 1_000_000)
+        {
+            var (node, depth, path) = stack.Pop();
+            visited++;
+            if (!node.IsValid)
+            {
+                continue;
+            }
+
+            if (node.GetIsLeaf(ref accessor))
+            {
+                depths.TryGetValue(depth, out var seen);
+                depths[depth] = seen + 1;
+                if (seen == 0 && samples.Count < maxReported)
+                {
+                    samples.Add($"depth={depth} firstSuchLeaf={node.ChunkId} via[{path}]");
+                }
+                continue;
+            }
+
+            int count = node.GetCount(ref accessor);
+            var left = node.GetLeft(ref accessor);
+            if (left.IsValid)
+            {
+                stack.Push((left, depth + 1, path + " -> left"));
+            }
+            for (int i = 0; i < count; i++)
+            {
+                var child = node.GetChild(i, ref accessor);
+                if (child.IsValid)
+                {
+                    stack.Push((child, depth + 1, path + $" -> [{i}]"));
+                }
+            }
+        }
+
+        if (depths.Count == 1 && depths.ContainsKey(Height))
+        {
+            return null;
+        }
+
+        var perDepth = new List<string>();
+        foreach (var kv in depths)
+        {
+            perDepth.Add($"{kv.Key}:{kv.Value}");
+        }
+        perDepth.Sort(StringComparer.Ordinal);
+        var what = depths.Count > 1 ? "leaves sit at differing depths" : $"Height={Height} disagrees with the real leaf depth";
+        return $"{what} — leafDepths={{{string.Join(",", perDepth)}}}" + (samples.Count > 0 ? $" :: {string.Join(" ;; ", samples)}" : "");
+    }
+
+    /// <summary>
+    /// Validates that no separator pointing at a LEAF exceeds that leaf's first key. Returns <c>null</c> when sound, else a detail string. Test/diagnostic use
+    /// only — walks without locks.
+    /// </summary>
+    /// <remarks>
+    /// A leaf's first key is the separator its parent holds, and #679's mode 1 broke that: an insert landing at slot 0 of an interior leaf lowered the first
+    /// key BELOW the separator routing to it, so descent for the new key went left of the separator and never reached the leaf. The key was counted, sat in a
+    /// correctly chained leaf, and was unreachable — and the recursive walk did not notice, because it only asserts the ordering bound
+    /// <c>parentKey &lt;= childKeys</c>, which a too-high separator satisfies.
+    /// <para>
+    /// One-sided on purpose, and this is the part that is easy to get wrong: only <c>separator &gt; firstKey</c> loses keys. The opposite slack is the normal
+    /// residue of a removal — deleting a leaf's first key raises its minimum above a separator nobody rewrites, and routing stays correct because a search in
+    /// the gap still descends to this leaf and correctly finds nothing. Asserting equality instead fails a plain single-threaded delete test
+    /// (<c>DeferredDeallocation_PinnedEpoch_DefersReclamation</c>: <c>separator=392 -> leaf firstKey=400</c>), which is how a check earns a suppression rather
+    /// than a defect.
+    /// </para>
+    /// <para>
+    /// Restricted to leaf children because an internal split promotes a median key that does not remain the child's first key; the relationship holds at the
+    /// leaf boundary only.
+    /// </para>
+    /// </remarks>
+    internal string ValidateLeafSeparators(ref ChunkAccessor<TStore> accessor, int maxReported = 6)
+    {
+        List<string> broken = null;
+        int pairs = 0, visited = 0;
+        var stack = new Stack<NodeWrapper>();
+        if (Root.IsValid)
+        {
+            stack.Push(Root);
+        }
+
+        while (stack.Count > 0 && visited < 1_000_000)
+        {
+            var node = stack.Pop();
+            visited++;
+            if (!node.IsValid || node.GetIsLeaf(ref accessor))
+            {
+                continue;
+            }
+
+            int count = node.GetCount(ref accessor);
+            var left = node.GetLeft(ref accessor);
+            if (left.IsValid)
+            {
+                stack.Push(left);
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                var child = node.GetChild(i, ref accessor);
+                if (!child.IsValid)
+                {
+                    continue;
+                }
+                stack.Push(child);
+
+                if (child.GetCount(ref accessor) == 0 || !child.GetIsLeaf(ref accessor))
+                {
+                    continue;
+                }
+                pairs++;
+
+                var item = node.GetItem(i, ref accessor);
+                var childFirst = child.GetFirst(ref accessor).Key;
+                if (Comparer.Compare(item.Key, childFirst) > 0)
+                {
+                    broken ??= [];
+                    if (broken.Count < maxReported)
+                    {
+                        broken.Add($"parent={node.ChunkId} slot={i}/{count}: separator={item.Key} is ABOVE leaf={child.ChunkId} "
+                                 + $"firstKey={childFirst} (lastKey={child.GetLast(ref accessor).Key}) — keys in between route left of this leaf");
+                    }
+                }
+            }
+        }
+
+        return broken == null
+            ? null
+            : $"{broken.Count}+ of {pairs} separator/leaf pair(s) route AROUND their leaf :: {string.Join(" ;; ", broken)}";
+    }
+
+    /// <summary>
+    /// Validates that no leaf's <c>HighKey</c> reaches past its right sibling's first key. Returns <c>null</c> when sound, else a detail string.
+    /// Test/diagnostic use only — walks without locks.
+    /// </summary>
+    /// <remarks>
+    /// <c>HighKey</c> is the EXCLUSIVE upper bound the B-link protocol reads to decide "this key is past me, follow the right link". When it reaches ABOVE the
+    /// next leaf's first key, every key in the overlap looks in-range for a leaf that does not hold it: the descent stops there, and the key is inserted out of
+    /// order or reported missing. That is #679's mode 2 — <c>SplitRight</c> set the left node's HighKey to the right half's first key, and <c>InsertLeaf</c>
+    /// then moved a smaller key into that half, lowering the very key HighKey had been pinned to. Nothing else in the consistency walk reads HighKey, so the
+    /// bound the whole B-link descent steers by had no enforcement at all.
+    /// <para>
+    /// One-sided for the same reason as <see cref="ValidateLeafSeparators"/>: a HighKey left BELOW the next first key is the normal residue of a removal and
+    /// costs at most a restart, never a key.
+    /// </para>
+    /// </remarks>
+    internal string ValidateLeafHighKeys(ref ChunkAccessor<TStore> accessor, int maxReported = 6)
+    {
+        List<string> broken = null;
+        int links = 0;
+        var cur = _linkList;
+        for (int guard = 0; cur.IsValid && guard < 1_000_000; guard++)
+        {
+            var next = cur.GetNext(ref accessor);
+            if (next.IsValid && cur.GetCount(ref accessor) > 0 && next.GetCount(ref accessor) > 0)
+            {
+                links++;
+                var high = cur.GetHighKey(ref accessor);
+                var nextFirst = next.GetFirst(ref accessor).Key;
+                if (Comparer.Compare(high, nextFirst) > 0)
+                {
+                    broken ??= [];
+                    if (broken.Count < maxReported)
+                    {
+                        broken.Add($"leaf={cur.ChunkId} highKey={high} reaches past next={next.ChunkId} firstKey={nextFirst} "
+                                 + $"(leafLast={cur.GetLast(ref accessor).Key}) — keys in between stop at a leaf that does not hold them");
+                    }
+                }
+            }
+            cur = next;
+        }
+
+        return broken == null
+            ? null
+            : $"{broken.Count}+ of {links} leaf link(s) have a HighKey reaching past the next leaf :: {string.Join(" ;; ", broken)}";
+    }
+
+    /// <summary>
+    /// Validates that the leaf sibling chain is a simple, doubly-consistent list: no node revisited, every back-pointer agreeing with the forward walk, and
+    /// the tail matching <c>_reverseLinkList</c>. Returns <c>null</c> when sound, else a detail string. Test/diagnostic use only — walks without locks.
+    /// </summary>
+    /// <remarks>
+    /// #679: every chain walk in this file and in the stress harness was written as <c>while (cur.IsValid)</c> or with a 1,000,000-iteration guard, so a cycle
+    /// in the chain either hung the walker or was silently absorbed — including inside <see cref="CheckConsistency"/> itself, which is supposed to be the thing
+    /// that catches this. A cycle IS reachable: it is what left writers walking the B-link move-right loop forever, and the reason the loop now carries a hop
+    /// bound. Detect it explicitly and name the node, so the corruption is reported where it is rather than as a hang somewhere downstream.
+    /// </remarks>
+    internal string ValidateLeafChain(ref ChunkAccessor<TStore> accessor)
+    {
+        var seen = new HashSet<int>();
+        var cur = _linkList;
+        NodeWrapper prev = default;
+        while (cur.IsValid)
+        {
+            if (!seen.Add(cur.ChunkId))
+            {
+                return $"leaf chain has a CYCLE: chunk {cur.ChunkId} revisited after {seen.Count} node(s), reached from {prev.ChunkId}";
+            }
+
+            var back = cur.GetPrevious(ref accessor);
+            if (prev.IsValid ? (back.ChunkId != prev.ChunkId) : back.IsValid)
+            {
+                return $"leaf chain back-pointer disagrees at chunk {cur.ChunkId}: previous={back.ChunkId}, forward walk arrived from "
+                     + $"{(prev.IsValid ? prev.ChunkId.ToString() : "head")}";
+            }
+
+            prev = cur;
+            cur = cur.GetNext(ref accessor);
+        }
+
+        if (prev.IsValid && _reverseLinkList.IsValid && prev.ChunkId != _reverseLinkList.ChunkId)
+        {
+            return $"leaf chain tail is chunk {prev.ChunkId} but _reverseLinkList names {_reverseLinkList.ChunkId}";
+        }
+
+        return null;
+    }
+
     public override void CheckConsistency(ref ChunkAccessor<TStore> accessor)
     {
         // Recursive check from Root to leaf
@@ -1298,6 +1548,25 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         {
             return;
         }
+
+        // #679: three invariants the recursive walk below does NOT enforce, checked first because each one, when broken, either masks that walk or slips
+        // straight through it.
+        //   - depth/Height: the walk's first assertion derives each node's expected leaf-ness by counting DOWN from Height, so a Height one too large makes
+        //     every leaf trip it and aborts before any structural check runs.
+        //   - separator == leaf's first key: the walk only asserts the ORDERING bound parentKey <= childKeys, which a too-HIGH separator satisfies.
+        //   - HighKey == next leaf's first key: nothing in the walk reads HighKey at all, so the bound the B-link descent steers by had no enforcement.
+        // The first cost a long hunt in #297/#679 by reporting as "Mismatch node's Height 2 with True" — a leaf at the wrong level — on trees that were in
+        // fact perfectly balanced. The other two were the mode 1 / mode 2 defects themselves, invisible to a check that reported "PASSED".
+        // Chain first: everything below walks the chain, and the walks are unbounded — a cycle would hang the checker instead of failing it.
+        var chainDetail = ValidateLeafChain(ref accessor);
+        ConsistencyAssert(chainDetail == null, chainDetail);
+
+        var depthDetail = ValidateLeafDepths(ref accessor);
+        ConsistencyAssert(depthDetail == null, depthDetail);
+        var separatorDetail = ValidateLeafSeparators(ref accessor);
+        ConsistencyAssert(separatorDetail == null, separatorDetail);
+        var highKeyDetail = ValidateLeafHighKeys(ref accessor);
+        ConsistencyAssert(highKeyDetail == null, highKeyDetail);
 
         // Debug/test-only: runs without locks (caller must ensure no concurrent modification)
         Root.CheckConsistency(default, NodeWrapper.CheckConsistencyParent.Root, Comparer, Height, ref accessor);
@@ -1705,7 +1974,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
             Interlocked.Increment(ref _writeLockFailures);
             spin.SpinOnce(-1);
         }
-        while (!latch.TryWriteLock());
+        while (!latch.TryWriteLock());
         return WriteLockOutcome.AcquiredContended;
     }
 
@@ -1880,20 +2149,32 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         // out-of-sync with the actual chain ordering/ under concurrent operations.
         if (followRightLink && keyIndex < 0)
         {
+            // #679: every caller reads `keyIndex < 0` as "definitively not in the tree", so this loop must only end that way when it has actually ESTABLISHED
+            // it. It had two exits that established nothing and still fell through to that answer:
+            //   - the hop budget running out, and
+            //   - meeting an empty leaf, which ended the loop via its own condition.
+            // Both are reachable while the key sits further right, and the second is routine during merges: a leaf is emptied before the merge that unlinks it.
+            // Measured in Remove_Merges — key 584 removed by nobody, still on the chain, with branch `general path (descend keyIndex<0)` the only one to fire.
+            // The same descent backs TryGet, so the identical false "not found" was reachable on the READ path.
+            // Empty leaves are now hopped OVER rather than treated as an answer, and an inconclusive exit restarts instead of lying.
             const int maxHops = 16;
-            for (int hop = 0; hop < maxHops && node.GetCount(ref accessor) > 0; hop++)
+            bool conclusive = false;
+            for (int hop = 0; hop < maxHops; hop++)
             {
                 int leafCount = node.GetCount(ref accessor);
-                int cmpToLast = leafCount > 0 ? Comparer.Compare(key, node.GetItem(leafCount - 1, ref accessor).Key) : 1; // empty leaf — treat key as beyond
-                if (cmpToLast <= 0)
+                if (leafCount > 0)
                 {
                     // key <= leaf's last → key would be in this leaf if anywhere on this side of the chain. Re-validate to guard against torn reads (key/last
                     // from inconsistent version snapshot), then conclude NotFound.
-                    if (!latch.ValidateVersion(version))
+                    if (Comparer.Compare(key, node.GetItem(leafCount - 1, ref accessor).Key) <= 0)
                     {
-                        return (0, 0, -1);
+                        if (!latch.ValidateVersion(version))
+                        {
+                            return (0, 0, -1);
+                        }
+                        conclusive = true;
+                        break;
                     }
-                    break;
                 }
                 if (!latch.ValidateVersion(version))
                 {
@@ -1903,7 +2184,8 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
                 var nextNode = node.GetNext(ref accessor);
                 if (!nextNode.IsValid)
                 {
-                    break; // chain exhausted
+                    conclusive = true; // chain exhausted — key is beyond every leaf, which IS an answer
+                    break;
                 }
 
                 var nextLatch = nextNode.GetLatch(ref accessor);
@@ -1919,8 +2201,14 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
                 keyIndex = node.Find(key, Comparer, ref accessor);
                 if (keyIndex >= 0)
                 {
+                    conclusive = true;
                     break;
                 }
+            }
+
+            if (!conclusive)
+            {
+                return (0, 0, -1); // ran out of hops without settling the question — restart rather than report a not-found we did not establish
             }
         }
 
