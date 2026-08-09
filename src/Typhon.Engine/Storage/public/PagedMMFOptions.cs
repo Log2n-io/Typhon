@@ -58,6 +58,24 @@ public class PagedMMFOptions
     public bool PagesDebugPattern { get; set; }
 
     /// <summary>
+    /// How much of the database to verify when opening it. Defaults to <see cref="OpenVerification.Spine"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The clean-shutdown flag records that the last process <i>closed properly</i>. It does not record that the bytes are
+    /// still correct. Damage that happens while a database is closed — bit rot, a truncated copy, a restore from the wrong
+    /// place, a file-level backup tool writing through — is invisible to a clean open, which then proceeds to serve it.
+    /// </para>
+    /// <para>
+    /// <see cref="OpenVerification.Spine"/> is the tier that earns being always on: it is bounded by the number of
+    /// segments rather than the size of the database, so it reads kilobytes and costs well under a millisecond, and it
+    /// catches the entire structurally-broken class — which is precisely the damage where opening anyway does the most
+    /// harm, because the engine then follows directory pointers into garbage.
+    /// </para>
+    /// </remarks>
+    public OpenVerification VerifyOnOpen { get; set; } = OpenVerification.Spine;
+
+    /// <summary>
     /// Factory that creates the backpressure strategy for page cache allocation.
     /// Defaults to <see cref="WaitForIOStrategy"/> (signal-driven passive wait).
     /// </summary>

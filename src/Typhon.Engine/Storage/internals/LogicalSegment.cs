@@ -728,7 +728,18 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     /// <summary>
     /// Initialize page header directly from a raw pointer (epoch-based path).
     /// </summary>
-    internal static unsafe void InitHeader(byte* pageAddr, PageClearMode clearMode, PageBlockFlags flags, PageBlockType type, short formatRevision)
+    /// <param name="pageAddr">Address of the page image.</param>
+    /// <param name="clearMode">How much of the page to zero before stamping.</param>
+    /// <param name="flags">Role flags for the page.</param>
+    /// <param name="type">Block type for the page.</param>
+    /// <param name="formatRevision">Type-scoped format revision.</param>
+    /// <param name="reservedMetadataBytes">
+    /// Bytes of the page metadata region the owning segment will claim for its chunk-occupancy bitmap. Decides how many
+    /// per-sector verification slots fit in what is left (<see cref="PageSectorFooter"/>). Zero for segments with no chunk
+    /// bitmap, which is the common case and yields the finest granularity.
+    /// </param>
+    internal static unsafe void InitHeader(byte* pageAddr, PageClearMode clearMode, PageBlockFlags flags, PageBlockType type, short formatRevision,
+        int reservedMetadataBytes = 0)
     {
         ref var header = ref Unsafe.AsRef<PageBaseHeader>(pageAddr + PageBaseHeader.Offset);
 
@@ -750,6 +761,11 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
         header.Flags = flags;
         header.Type = type;
         header.FormatRevision = formatRevision;
+
+        // Declare the page's per-sector verification geometry AFTER any clear, since the clear would wipe it. A chunk-based
+        // segment re-declares with its real bitmap size once it knows the stride; everything else keeps the finest
+        // granularity, which is correct because a page with no chunk bitmap has the whole metadata region free.
+        PageSectorFooter.DeclareGeometry(new Span<byte>(pageAddr, PagedMMF.PageSize), reservedMetadataBytes);
     }
 
     internal virtual bool Load(int filePageIndex)
