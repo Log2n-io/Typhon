@@ -1,0 +1,421 @@
+#!/usr/bin/env python3
+"""
+Self-tests for `scripts/lint-test-suppressions.py`.
+
+WHY THIS FILE EXISTS (issue #703): a lint that has never rejected anything is exactly the false green it was
+written to prevent. #703's acceptance clause is explicit — *"a PLANTED zero-test shard fails CI. Test the lints,
+not just the tests."* So every check gets a fixture that violates it and must produce a non-zero exit, plus a
+clean fixture that must not.
+
+Stdlib `unittest` on purpose: the merge gate's `invariants` job runs on a bare ubuntu runner with no Python
+dependencies installed, and adding pytest to buy `assert` rewriting would be a new install step for nothing.
+
+Run:  python3 -m unittest discover -s scripts/tests -v
+"""
+import importlib.util
+import io
+import json
+import os
+import sys
+import tempfile
+import unittest
+from contextlib import redirect_stdout
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SCRIPTS = os.path.dirname(HERE)
+
+
+def _load(module_name, filename):
+    """Import a hyphenated script as a module (`lint-test-suppressions.py` is not a legal identifier)."""
+    spec = importlib.util.spec_from_file_location(module_name, os.path.join(SCRIPTS, filename))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+lint = _load("lint_test_suppressions", "lint-test-suppressions.py")
+
+
+CLEAN_FIXTURE = """\
+using NUnit.Framework;
+
+namespace Typhon.Engine.Tests;
+
+[TestFixture]
+class GoodTests
+{
+    [Test]
+    public void Runs() { }
+
+    [Test]
+    [Ignore("#999 - blocked until the subtree hash lands")]
+    public void BlockedOnAnOpenIssue() { }
+
+    // Excluded from the gate: known-red under Linux CI, see #406.
+    [Test]
+    [Category("Quarantine")]
+    public void KnownRed() { }
+
+    [Test]
+    [Explicit("Long-running race harness")]
+    [Category("Nightly")]
+    public void CostlyButTiered() { }
+
+    // Needs TYPHON__PROFILER__CONCURRENCY__ENABLED=true; CI cannot set it per-fixture.
+    [Test]
+    [Explicit("Needs an env var")]
+    [Category("Manual")]
+    public void ManualWithReason() { }
+}
+"""
+
+
+class LintFixtureCase(unittest.TestCase):
+    """Writes C# fixtures to a temp tree and runs the lint over them."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = os.path.join(self.tmp.name, "test")
+        os.makedirs(self.root)
+        self.shards = os.path.join(self.tmp.name, "shards.json")
+        self.write_shards([])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write(self, name, text):
+        path = os.path.join(self.root, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return path
+
+    def write_shards(self, classes):
+        with open(self.shards, "w", encoding="utf-8") as fh:
+            json.dump([{"filter": "x", "classes": classes}], fh)
+
+    def run_lint(self, closing=None):
+        """(exit_code, stdout). --no-github keeps the self-tests offline and deterministic."""
+        argv = ["--root", self.root, "--shards", self.shards, "--no-github"]
+        if closing is not None:
+            argv += ["--closing", closing]
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = lint.main(argv)
+        return rc, buf.getvalue()
+
+    def assert_flags(self, check, closing=None):
+        rc, out = self.run_lint(closing)
+        self.assertEqual(rc, 1, f"expected {check} to fail the lint; output was:\n{out}")
+        self.assertIn(check, out)
+        return out
+
+    def assert_clean(self, closing=None):
+        rc, out = self.run_lint(closing)
+        self.assertEqual(rc, 0, f"expected a clean pass; output was:\n{out}")
+
+
+class TestCleanTree(LintFixtureCase):
+    def test_correctly_marked_suppressions_pass(self):
+        self.write("GoodTests.cs", CLEAN_FIXTURE)
+        self.assert_clean()
+
+    def test_empty_tree_passes(self):
+        self.assert_clean()
+
+
+class TestIgnoreChecks(LintFixtureCase):
+    def test_ignore_without_issue_is_rejected(self):
+        self.write("A.cs", '[TestFixture]\nclass A\n{\n    [Test]\n    [Ignore("broken somehow")]\n'
+                           '    public void T() { }\n}\n')
+        self.assert_flags("IGNORE_NO_ISSUE")
+
+    def test_ignore_meaning_slow_is_rejected(self):
+        # The ChaosStressTests shape: labelled "too long" when it actually hung (#695).
+        self.write("A.cs", '[TestFixture]\n[Ignore("Too long, should be manually executed when needed")]\n'
+                           'class A\n{\n    [Test]\n    public void T() { }\n}\n')
+        out = self.assert_flags("IGNORE_MEANS_COST")
+        self.assertIn("Too long", out)
+
+    def test_ignore_meaning_flaky_is_rejected(self):
+        self.write("A.cs", '[TestFixture]\nclass A\n{\n    [Test]\n'
+                           '    [Ignore("#42 Flaky under parallel load")]\n    public void T() { }\n}\n')
+        self.assert_flags("IGNORE_MEANS_COST")
+
+    def test_bare_ignore_is_rejected(self):
+        self.write("A.cs", '[TestFixture]\nclass A\n{\n    [Test]\n    [Ignore]\n    public void T() { }\n}\n')
+        self.assert_flags("IGNORE_NO_ISSUE")
+
+    def test_closed_issue_is_rejected(self):
+        """The #591 shape: the blocker shipped, the guard did not. States are injected — no network."""
+        self.write("A.cs", '[TestFixture]\nclass A\n{\n    [Test]\n'
+                           '    [Ignore("#591 second shape - blocked on full-range key bounds")]\n'
+                           '    public void T() { }\n}\n')
+        parsed = lint.scan_tree(self.root)
+        violations = lint.check_ignores(parsed, {591: "closed"})
+        self.assertTrue(any(v.check == "IGNORE_CLOSED_ISSUE" for v in violations))
+
+    def test_open_issue_is_accepted(self):
+        self.write("A.cs", '[TestFixture]\nclass A\n{\n    [Test]\n'
+                           '    [Ignore("#693 - cross-component WhereField is guarded, not implemented")]\n'
+                           '    public void T() { }\n}\n')
+        parsed = lint.scan_tree(self.root)
+        violations = lint.check_ignores(parsed, {693: "open"})
+        self.assertEqual([v.check for v in violations], [])
+
+    def test_unresolvable_issue_is_not_guessed(self):
+        """A number gh could not resolve is omitted from the state map; it must NOT be reported as closed."""
+        self.write("A.cs", '[TestFixture]\nclass A\n{\n    [Test]\n'
+                           '    [Ignore("#12345 - not resolvable")]\n    public void T() { }\n}\n')
+        parsed = lint.scan_tree(self.root)
+        violations = lint.check_ignores(parsed, {})
+        self.assertEqual([v.check for v in violations], [])
+
+
+class TestExplicitChecks(LintFixtureCase):
+    def test_explicit_without_tier_is_rejected(self):
+        # The OlcBTreeStressTests shape: [Explicit] with no tier ran nowhere for four months.
+        self.write("A.cs", '[TestFixture]\nclass A\n{\n    [Test]\n    [Explicit("Stress test - run manually")]\n'
+                           '    public void T() { }\n}\n')
+        self.assert_flags("EXPLICIT_NO_TIER")
+
+    def test_tier_inherited_from_the_fixture_is_accepted(self):
+        self.write("A.cs", '[TestFixture]\n[Category("Nightly")]\nclass A\n{\n    [Test]\n'
+                           '    [Explicit("Stress")]\n    public void T() { }\n}\n')
+        self.assert_clean()
+
+    def test_manual_tier_without_justification_is_rejected(self):
+        self.write("A.cs", '[TestFixture]\nclass A\n{\n    [Test]\n    [Explicit("x")]\n'
+                           '    [Category("Manual")]\n    public void T() { }\n}\n')
+        self.assert_flags("MANUAL_NO_REASON")
+
+    def test_manual_tier_with_justification_is_accepted(self):
+        self.write("A.cs", '[TestFixture]\nclass A\n{\n    [Test]\n'
+                           '    // Wall-clock latency histograms; a shared CI runner cannot hold the assertion.\n'
+                           '    [Explicit("x")]\n    [Category("Manual")]\n    public void T() { }\n}\n')
+        self.assert_clean()
+
+
+class TestQuarantineChecks(LintFixtureCase):
+    def test_quarantine_without_issue_is_rejected(self):
+        self.write("A.cs", '[TestFixture]\nclass A\n{\n    [Test]\n    [Category("Quarantine")]\n'
+                           '    public void T() { }\n}\n')
+        self.assert_flags("QUARANTINE_NO_ISSUE")
+
+    def test_quarantine_issue_in_the_leading_comment_is_accepted(self):
+        self.write("A.cs", '[TestFixture]\nclass A\n{\n    // QUARANTINE (#406): Linux-only IndexOutOfRange.\n'
+                           '    [Test]\n    [Category("Quarantine")]\n    public void T() { }\n}\n')
+        self.assert_clean()
+
+    def test_quarantine_issue_on_the_fixture_covers_its_members(self):
+        self.write("A.cs", '// Whole fixture quarantined pending #500.\n[TestFixture]\n'
+                           '[Category("Quarantine")]\nclass A\n{\n    [Test]\n'
+                           '    [Category("Quarantine")]\n    public void T() { }\n}\n')
+        self.assert_clean()
+
+
+class TestShardIntegrity(LintFixtureCase):
+    def test_planted_zero_test_shard_fails(self):
+        """#703's named acceptance clause: a shard that names a fully-[Ignore]d class must fail."""
+        self.write("A.cs", '[TestFixture]\n[Ignore("#42 whole fixture blocked")]\nclass ChaosStressTests\n'
+                           '{\n    [Test]\n    public void T() { }\n}\n')
+        self.write_shards(["Typhon.Engine.Tests.ChaosStressTests"])
+        out = self.assert_flags("SHARD_ZERO_TESTS")
+        self.assertIn("ChaosStressTests", out)
+
+    def test_shard_naming_a_live_class_passes(self):
+        self.write("A.cs", '[TestFixture]\nclass ChaosStressTests\n{\n    [Test]\n    public void T() { }\n}\n')
+        self.write_shards(["Typhon.Engine.Tests.ChaosStressTests"])
+        self.assert_clean()
+
+    def test_ignored_class_not_named_by_a_shard_is_not_a_shard_violation(self):
+        """An [Ignore]d fixture is a suppression question, not a shard-integrity one — don't conflate them."""
+        self.write("A.cs", '[TestFixture]\n[Ignore("#42 blocked")]\nclass Lonely\n'
+                           '{\n    [Test]\n    public void T() { }\n}\n')
+        self.write_shards(["Typhon.Engine.Tests.SomethingElse"])
+        rc, out = self.run_lint()
+        self.assertEqual(rc, 0, out)
+
+    def test_catchall_placeholder_is_ignored(self):
+        """shard 0's `<catch-all>` is a placeholder, not a class name."""
+        self.write("A.cs", CLEAN_FIXTURE)
+        self.write_shards(["<catch-all>"])
+        self.assert_clean()
+
+
+class TestParser(unittest.TestCase):
+    def test_attribute_block_binds_to_the_following_declaration(self):
+        groups = lint.parse_file("x.cs", '[TestFixture]\n[Category("Nightly")]\nclass A\n{\n}\n')
+        self.assertEqual(len(groups), 1)
+        self.assertTrue(groups[0].is_class)
+        self.assertEqual(groups[0].categories(), {"Nightly"})
+
+    def test_comments_between_attributes_do_not_split_the_block(self):
+        groups = lint.parse_file("x.cs", '[Test]\n// why this is explicit\n[Explicit("x")]\npublic void T() { }\n')
+        self.assertEqual(len(groups), 1)
+        self.assertIn("why this is explicit", " ".join(groups[0].comments))
+
+    def test_blank_line_resets_the_leading_comment_context(self):
+        """A comment separated by a blank line belongs to whatever came before, not to the attribute."""
+        groups = lint.parse_file("x.cs", '// unrelated banner\n\n[Test]\npublic void T() { }\n')
+        self.assertEqual(groups[0].comments, [])
+
+    def test_enclosing_class_is_tracked(self):
+        src = ('[TestFixture]\nclass Outer\n{\n    [Test]\n    [Category("Quarantine")]\n'
+               '    public void T() { }\n}\n')
+        groups = lint.parse_file("x.cs", src)
+        member = [g for g in groups if not g.is_class][0]
+        self.assertEqual(member.enclosing_class, "Outer")
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class TestShardTierExclusion(LintFixtureCase):
+    """A shard-named class that moved to an excluded TIER runs zero tests just as surely as an [Ignore]d one."""
+
+    def test_shard_naming_a_nightly_fixture_fails(self):
+        self.write("A.cs", '[TestFixture]\n[Explicit("stress")]\n[Category("Nightly")]\nclass ChaosStressTests\n'
+                           '{\n    [Test]\n    public void T() { }\n}\n')
+        self.write_shards(["Typhon.Engine.Tests.ChaosStressTests"])
+        self.assert_flags("SHARD_ZERO_TESTS")
+
+    def test_shard_naming_a_quarantined_fixture_fails(self):
+        self.write("A.cs", '// Whole fixture is known-red, see #552.\n[TestFixture]\n[Category("Quarantine")]\n'
+                           'class CheckerboardTests\n{\n    [Test]\n    public void T() { }\n}\n')
+        self.write_shards(["Typhon.Engine.Tests.Runtime.CheckerboardTests"])
+        self.assert_flags("SHARD_ZERO_TESTS")
+
+    def test_a_method_level_tier_does_not_empty_the_fixture(self):
+        """One Nightly method among normal ones leaves the class runnable — that must NOT be flagged."""
+        self.write("A.cs", '[TestFixture]\nclass Mixed\n{\n    [Test]\n    public void Normal() { }\n\n'
+                           '    [Test]\n    [Explicit("slow")]\n    [Category("Nightly")]\n'
+                           '    public void Slow() { }\n}\n')
+        self.write_shards(["Typhon.Engine.Tests.Mixed"])
+        self.assert_clean()
+
+    # ── every-method-excluded (#705) ────────────────────────────────────────────────────────────────────────────
+    #
+    # These four pin the hole that cost a full gate run. `WorkbenchFixtureGenerator` carries NO class-level
+    # suppression — its single [Test] is [Explicit] + [Category("Manual")] — so the class-level checks called it
+    # clean while shard.py's run-time integrity check failed on it, on the expensive runner, after 5,017 tests.
+    # A lint whose blind spot is the exact thing it exists to detect is the false green it was written to remove.
+
+    def test_shard_naming_a_fixture_whose_every_test_is_manual_fails(self):
+        """The real shape: [TestFixture] at class level, everything excluded at method level."""
+        self.write("A.cs", '[TestFixture]\npublic sealed class WorkbenchFixtureGenerator\n{\n'
+                           '    [Test]\n    [Explicit("Fixture generator")]\n    [Category("Manual")]\n'
+                           '    public void Generate() { }\n}\n')
+        self.write_shards(["Typhon.Engine.Tests.WorkbenchFixtureGenerator"])
+        out = self.assert_flags("SHARD_ZERO_TESTS")
+        self.assertIn("WorkbenchFixtureGenerator", out)
+        self.assertIn("EVERY [Test]", out, "the message must distinguish this from a class-level suppression")
+
+    def test_shard_naming_a_fixture_whose_every_test_is_explicit_fails(self):
+        """[Explicit] alone empties a fixture for the gate — the filter never selects it."""
+        self.write("A.cs", '[TestFixture]\nclass OnlyExplicit\n{\n'
+                           '    [Test]\n    [Explicit("manual")]\n    public void A() { }\n\n'
+                           '    [TestCase(1)]\n    [Explicit("manual")]\n    public void B(int i) { }\n}\n')
+        self.write_shards(["Typhon.Engine.Tests.OnlyExplicit"])
+        self.assert_flags("SHARD_ZERO_TESTS")
+
+    def test_one_runnable_test_is_enough_to_keep_the_fixture(self):
+        """The complement, and the one that stops this check becoming noise: any runnable test clears the class.
+
+        The [Explicit] member carries a tier, because [Explicit] without one is its own violation
+        (EXPLICIT_NO_TIER) and a fixture that trips two rules cannot show which one this test is about.
+        """
+        self.write("A.cs", '[TestFixture]\nclass MostlyExcluded\n{\n'
+                           '    [Test]\n    [Category("Nightly")]\n    public void A() { }\n\n'
+                           '    [Test]\n    [Explicit("slow")]\n    [Category("Nightly")]\n'
+                           '    public void B() { }\n\n'
+                           '    [Test]\n    public void StillRuns() { }\n}\n')
+        self.write_shards(["Typhon.Engine.Tests.MostlyExcluded"])
+        self.assert_clean()
+
+    def test_class_level_and_method_level_do_not_double_report(self):
+        """A wholesale-excluded fixture is one violation, not two — the class-level check owns it.
+
+        Asserted on the violation COUNT and on the absence of the method-level message, never by counting how many
+        times a message appears in the output: under GitHub Actions the reporter prints each violation twice — once
+        in the listing and once as a `::error::` annotation — so an occurrence count is green locally and red on the
+        runner for a reason unrelated to the behaviour. That is precisely how the first version of this test failed.
+        """
+        self.write("A.cs", '// Known-red, see #552.\n[TestFixture]\n[Category("Quarantine")]\nclass Doubled\n{\n'
+                           '    [Test]\n    [Category("Quarantine")]\n    public void T() { }\n}\n')
+        self.write_shards(["Typhon.Engine.Tests.Doubled"])
+        out = self.assert_flags("SHARD_ZERO_TESTS")
+        self.assertIn("SHARD_ZERO_TESTS - 1 violation(s)", out, f"expected exactly one violation; output was:\n{out}")
+        self.assertNotIn("EVERY [Test]", out, f"the method-level check must not fire as well:\n{out}")
+
+    def test_a_class_with_no_tests_at_all_is_silent(self):
+        """A helper class named by a shard has no [Test] members; saying nothing beats guessing."""
+        self.write("A.cs", '[TestFixture]\nclass JustHelpers\n{\n    public void NotATest() { }\n}\n')
+        self.write_shards(["Typhon.Engine.Tests.JustHelpers"])
+        self.assert_clean()
+
+    def test_the_excluded_set_matches_shard_py(self):
+        """The lint hard-codes the tier list; if shard.py's GATE_EXCLUDED drifts, the two disagree silently."""
+        import importlib.util
+        import os
+        shard_py = os.path.join(os.path.dirname(os.path.dirname(HERE)), "bench", "aws", "shard.py")
+        spec = importlib.util.spec_from_file_location("shard_for_lint_check", shard_py)
+        shard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(shard)
+        self.assertEqual(set(shard.GATE_EXCLUDED), lint.GATE_EXCLUDED_CATEGORIES)
+
+
+class TestClosingKeywordCompanion(LintFixtureCase):
+    """SUPPRESSION_CITES_CLOSING_ISSUE — the blind spot IGNORE_CLOSED_ISSUE cannot see out of.
+
+    On a PR that closes #N and leaves an [Ignore("#N")] behind, #N is still OPEN, so IGNORE_CLOSED_ISSUE passes; the
+    merge closes it and the same lint reddens main. Measured: PR #721 closed #718 with the suppression still in the
+    tree, and `invariants` went green on the PR and red on main minutes later. This check is fed the set the merge
+    gate's closing-keywords job already extracts, so the contradiction is visible while it is still cheap to fix.
+    """
+
+    IGNORED_AGAINST_718 = ('[TestFixture]\nclass A\n{\n    [Test]\n'
+                           '    [Ignore("#718 - needs the lifecycle notification channel")]\n'
+                           '    public void T() { }\n}\n')
+
+    def test_ignore_citing_an_issue_this_change_closes_is_rejected(self):
+        """The load-bearing case: PR #721's exact shape."""
+        self.write("A.cs", self.IGNORED_AGAINST_718)
+        out = self.assert_flags("SUPPRESSION_CITES_CLOSING_ISSUE", closing="718")
+        self.assertIn("#718", out)
+
+    def test_no_closing_set_is_a_no_op(self):
+        """Guards the guard: without --closing the check must stay silent, or every ordinary run breaks."""
+        self.write("A.cs", self.IGNORED_AGAINST_718)
+        self.assert_clean()
+
+    def test_suppression_citing_an_unrelated_issue_passes(self):
+        """The over-fire case. A tree full of [Ignore]s is normal; only the ones this change closes are wrong."""
+        self.write("A.cs", self.IGNORED_AGAINST_718)
+        self.assert_clean(closing="999 1000")
+
+    def test_quarantine_prose_is_deliberately_out_of_scope(self):
+        """The false positive that shaped the check, lifted from the real tree.
+
+        `ChaosStressTests.CreateDeleteRecreate_RapidLifecycle` is quarantined against #696, and its comment ALSO names
+        #695 (the livelock it was retargeted from) and #716 (a suspected mechanism). All three are a `#N` sitting next
+        to a `[Category("Quarantine")]`, and only one is the blocker — nothing distinguishes them without a convention
+        that does not exist. `[Ignore]`'s reason string carries no such ambiguity, so the check covers that alone.
+        Flagging this would punish the best-documented suppression in the suite, and a lint that cries wolf on good
+        prose gets switched off.
+        """
+        self.write("A.cs", '[TestFixture]\nclass A\n{\n    [Test]\n'
+                           '    // QUARANTINE (#696), retargeted from #695. Possibly #716 mechanism.\n'
+                           '    [Category("Quarantine")]\n'
+                           '    public void T() { }\n}\n')
+        self.assert_clean(closing="716")
+
+    def test_hash_prefixed_and_comma_separated_input_parses(self):
+        """The gate hands over whatever its grep produced; be liberal about the separator, not about the numbers."""
+        self.write("A.cs", self.IGNORED_AGAINST_718)
+        self.assert_flags("SUPPRESSION_CITES_CLOSING_ISSUE", closing="#717, #718")
+
+    def test_a_substring_number_is_not_a_match(self):
+        """#71 must not match a suppression citing #718 — the set is numeric, not textual."""
+        self.write("A.cs", self.IGNORED_AGAINST_718)
+        self.assert_clean(closing="71")

@@ -3,7 +3,14 @@ using NUnit.Framework;
 namespace Typhon.Engine.Tests.Profiler;
 
 /// <summary>Tests for the producer-side string interner used by Query Definition Export (#342, v9).</summary>
+/// <remarks>
+/// <b>Non-parallelizable, and it has to be.</b> <c>QuerySourceStringInterner</c> is process-static. <c>Reset()</c> in <c>[SetUp]</c> clears it for THIS
+/// fixture, but any other fixture building a query interns its source string into the same table, so a concurrent test can push the count between this
+/// fixture's Reset and its Snapshot. That surfaced as <c>Reset_ClearsInternerState</c> failing with "Expected 2, but was 4" roughly one run in three once
+/// #704 added ~450 query-issuing cases — the race was always there, the new cases only widened the window.
+/// </remarks>
 [TestFixture]
+[NonParallelizable]
 public class QuerySourceStringInternerTests
 {
     [SetUp]

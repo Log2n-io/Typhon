@@ -1,6 +1,7 @@
-// unset
+﻿// unset
 
 using System;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 
@@ -61,7 +62,10 @@ internal abstract partial class BTree<TKey, TStore>
             var newRoot = AllocNode(NodeStates.IsLeaf, ref accessor);
             newRoot.PreDirtyForWrite(ref accessor);
             var newRootLatch = newRoot.GetLatch(ref accessor);
-            SpinWriteLock(newRootLatch);  // exclude any concurrent OLC reader/writer touching newRoot
+            // Freshly allocated and not yet published: no other thread can have marked it obsolete, so Obsolete is unreachable here (asserted, not handled —
+            // a silent skip would leave the initialisation below unprotected, which is the very race this lock exists for).
+            var newRootOutcome = SpinWriteLock(newRootLatch);  // exclude any concurrent OLC reader/writer touching newRoot
+            Debug.Assert(newRootOutcome != WriteLockOutcome.Obsolete, "a freshly allocated root cannot be obsolete");
             if (Interlocked.CompareExchange(ref _rootChunkId, newRoot.ChunkId, 0) == 0)
             {
                 // We won the race — initialize root, LinkList, ReverseLinkList while still holding newRoot's lock. Concurrent threads that observe _rootChunkId
@@ -394,36 +398,51 @@ internal abstract partial class BTree<TKey, TStore>
                     {
                         rl.PreDirtyForWrite(ref accessor);
                         var rlLatch = rl.GetLatch(ref accessor);
-                        SpinWriteLock(rlLatch);
-                        // Re-validate under lock: leaf may now be full, another writer inserted a larger key,
-                        // or a concurrent split made this leaf no longer the rightmost (GetNext becomes valid).
-                        if (!rl.GetIsFull(ref accessor) && !rl.GetNext(ref accessor).IsValid && args.Compare(args.Key, rl.GetLast(ref accessor).Key) > 0)
+                        // #716: `_reverseLinkList` is a cached pointer, not a path through the tree, so it can name a leaf a concurrent merge already detached
+                        // — and this fast path re-checks business conditions (not full, no right sibling, key ordering), every one of which a detached node can
+                        // satisfy. On obsolete no lock is held (so no AbortWriteLock): fall through to the general path, which re-descends from the root.
+                        if (SpinWriteLock(rlLatch) == WriteLockOutcome.Obsolete)
                         {
-                            int value = CreateInsertValue(ref args, ref accessor);
-                            rl.PushLast(new KeyValueItem(args.Key, value), ref accessor);
-                            _cachedLastKey = args.Key;
-                            _hasCachedLastKey = true;
-                            rlLatch.WriteUnlock();
-                            IncCount();
-                            return;
+                            Interlocked.Increment(ref _obsoleteRestarts);
                         }
-                        rlLatch.AbortWriteLock();
+                        else
+                        {
+                            // Re-validate under lock: leaf may now be full, another writer inserted a larger key,
+                            // or a concurrent split made this leaf no longer the rightmost (GetNext becomes valid).
+                            if (!rl.GetIsFull(ref accessor) && !rl.GetNext(ref accessor).IsValid && args.Compare(args.Key, rl.GetLast(ref accessor).Key) > 0)
+                            {
+                                int value = CreateInsertValue(ref args, ref accessor);
+                                rl.PushLast(new KeyValueItem(args.Key, value), ref accessor);
+                                _cachedLastKey = args.Key;
+                                _hasCachedLastKey = true;
+                                rlLatch.WriteUnlock();
+                                IncCount();
+                                return;
+                            }
+                            rlLatch.AbortWriteLock();
+                        }
                         // Fall through to general path
                     }
                     else if (order == 0 && AllowMultiple)
                     {
                         rl.PreDirtyForWrite(ref accessor);
                         var rlLatch = rl.GetLatch(ref accessor);
-                        SpinWriteLock(rlLatch);
-                        var lastEntry = rl.GetLast(ref accessor);
-                        if (args.Compare(args.Key, lastEntry.Key) == 0)
+                        if (SpinWriteLock(rlLatch) == WriteLockOutcome.Obsolete)   // #716 — see the append fast path above
                         {
-                            args.ElementId = _storage.Append(lastEntry.Value, args.GetValue(), ref args.SiblingAccessor);
-                            args.BufferRootId = lastEntry.Value;
-                            rlLatch.WriteUnlock();
-                            return;
+                            Interlocked.Increment(ref _obsoleteRestarts);
                         }
-                        rlLatch.AbortWriteLock();
+                        else
+                        {
+                            var lastEntry = rl.GetLast(ref accessor);
+                            if (args.Compare(args.Key, lastEntry.Key) == 0)
+                            {
+                                args.ElementId = _storage.Append(lastEntry.Value, args.GetValue(), ref args.SiblingAccessor);
+                                args.BufferRootId = lastEntry.Value;
+                                rlLatch.WriteUnlock();
+                                return;
+                            }
+                            rlLatch.AbortWriteLock();
+                        }
                         // Fall through
                     }
                     else if (order == 0)
@@ -446,32 +465,44 @@ internal abstract partial class BTree<TKey, TStore>
                     {
                         ll.PreDirtyForWrite(ref accessor);
                         var llLatch = ll.GetLatch(ref accessor);
-                        SpinWriteLock(llLatch);
-                        if (!ll.GetIsFull(ref accessor) && args.Compare(args.Key, ll.GetFirst(ref accessor).Key) < 0)
+                        if (SpinWriteLock(llLatch) == WriteLockOutcome.Obsolete)   // #716 — `_linkList` is a cached pointer, same hazard as `_reverseLinkList`
                         {
-                            int value = CreateInsertValue(ref args, ref accessor);
-                            ll.PushFirst(new KeyValueItem(args.Key, value), ref accessor);
-                            llLatch.WriteUnlock();
-                            IncCount();
-                            return;
+                            Interlocked.Increment(ref _obsoleteRestarts);
                         }
-                        llLatch.AbortWriteLock();
+                        else
+                        {
+                            if (!ll.GetIsFull(ref accessor) && args.Compare(args.Key, ll.GetFirst(ref accessor).Key) < 0)
+                            {
+                                int value = CreateInsertValue(ref args, ref accessor);
+                                ll.PushFirst(new KeyValueItem(args.Key, value), ref accessor);
+                                llLatch.WriteUnlock();
+                                IncCount();
+                                return;
+                            }
+                            llLatch.AbortWriteLock();
+                        }
                         // Fall through
                     }
                     else if (order == 0 && AllowMultiple)
                     {
                         ll.PreDirtyForWrite(ref accessor);
                         var llLatch = ll.GetLatch(ref accessor);
-                        SpinWriteLock(llLatch);
-                        var firstEntry = ll.GetFirst(ref accessor);
-                        if (args.Compare(args.Key, firstEntry.Key) == 0)
+                        if (SpinWriteLock(llLatch) == WriteLockOutcome.Obsolete)   // #716 — see the prepend fast path above
                         {
-                            args.ElementId = _storage.Append(firstEntry.Value, args.GetValue(), ref args.SiblingAccessor);
-                            args.BufferRootId = firstEntry.Value;
-                            llLatch.WriteUnlock();
-                            return;
+                            Interlocked.Increment(ref _obsoleteRestarts);
                         }
-                        llLatch.AbortWriteLock();
+                        else
+                        {
+                            var firstEntry = ll.GetFirst(ref accessor);
+                            if (args.Compare(args.Key, firstEntry.Key) == 0)
+                            {
+                                args.ElementId = _storage.Append(firstEntry.Value, args.GetValue(), ref args.SiblingAccessor);
+                                args.BufferRootId = firstEntry.Value;
+                                llLatch.WriteUnlock();
+                                return;
+                            }
+                            llLatch.AbortWriteLock();
+                        }
                         // Fall through
                     }
                     else if (order == 0)
@@ -484,7 +515,7 @@ internal abstract partial class BTree<TKey, TStore>
             // General path with latch-coupled SMO — retry on lock contention
             // InsertIterative handles root splits internally under the root's write lock.
             SpinWait spin = default;
-            while (true)
+            for (int attempt = 0; ; attempt++)
             {
                 InsertIterative(ref args, ref accessor, out bool insertCompleted);
                 if (insertCompleted)
@@ -492,6 +523,13 @@ internal abstract partial class BTree<TKey, TStore>
                     break;
                 }
                 Interlocked.Increment(ref _optimisticRestarts);
+                if (attempt >= MaxPessimisticRestarts)
+                {
+                    // #695: this loop used to be `while (true)`. See MaxPessimisticRestarts for why exhausting it means retrying cannot help.
+                    ThrowHelper.ThrowInvalidOp(
+                        $"B+Tree insert made no progress in {MaxPessimisticRestarts} pessimistic retries. The descent keeps reaching a leaf it can neither "
+                        + "validate nor modify, which no further retrying resolves. This is a liveness defect in the tree, not contention (see #695).");
+                }
                 spin.SpinOnce();
             }
 
@@ -605,12 +643,28 @@ internal abstract partial class BTree<TKey, TStore>
         int leafVersion = leafLatch.ReadVersion();
         if (leafVersion == 0)
         {
-            // Leaf is locked or obsolete. SpinWriteLock to wait for the current holder to release, then restart — we can't validate without a baseline version.
-            SpinWriteLock(leafLatch);
-            leafLatch.AbortWriteLock(); // release without version bump (we didn't modify anything)
+            // ReadVersion() returns 0 for LOCKED and for OBSOLETE alike, and the two need opposite treatment (IXS-03). Locked is transient: wait for the
+            // holder, then restart with a fresh baseline. Obsolete is permanent — the node was replaced by a structure modification and will never become
+            // valid — so do NOT take its write lock (that is #716's hazard: writing into a detached node) and do not wait on it. Restart immediately and let
+            // the descent find the live node. #695 came from treating both as "retry": the caller's loop had no bound, so an obsolete leaf spun forever.
+            if (!leafLatch.IsObsolete)
+            {
+                // It can still turn obsolete between that test and this acquisition — the holder may BE the merge. SpinWriteLock reports that instead of
+                // waiting for a lock that will never be grantable, and there is then nothing to abort.
+                if (SpinWriteLock(leafLatch) != WriteLockOutcome.Obsolete)
+                {
+                    leafLatch.AbortWriteLock(); // release without version bump (we didn't modify anything)
+                }
+            }
             return;
         }
-        bool leafAcquiredClean = SpinWriteLock(leafLatch);
+        var leafOutcome = SpinWriteLock(leafLatch);
+        if (leafOutcome == WriteLockOutcome.Obsolete)
+        {
+            Interlocked.Increment(ref _obsoleteRestarts);
+            return; // completed=false → outer retry re-descends and finds the live leaf
+        }
+        bool leafAcquiredClean = leafOutcome == WriteLockOutcome.Acquired;
         if (!leafLatch.ValidateVersionLocked(leafVersion))
         {
             leafLatch.AbortWriteLock(); // release without version bump — leaf was modified, not by us
@@ -640,7 +694,15 @@ internal abstract partial class BTree<TKey, TStore>
             Interlocked.Increment(ref _moveRightCount);
             var nextNode = node.GetNext(ref accessor);
             nextNode.PreDirtyForWrite(ref accessor);
-            SpinWriteLock(nextNode.GetLatch(ref accessor));
+            // #716, and the sharpest instance of it: the B-link right chain is followed WITHOUT consulting the parent, so a merge that detached `nextNode` is
+            // invisible here. Before this check the chain terminated in a write into that detached node — a key inserted, counted, and unreachable from the
+            // root, which is #297's and #679's symptom exactly. Release the leaf we hold and restart from the root; the next pass sees a closed-up chain.
+            if (SpinWriteLock(nextNode.GetLatch(ref accessor)) == WriteLockOutcome.Obsolete)
+            {
+                Interlocked.Increment(ref _obsoleteRestarts);
+                node.GetLatch(ref accessor).AbortWriteLock();
+                return; // completed=false → outer retry
+            }
 
             // Gap check: after locking next leaf, verify key belongs there.
             // Without this, move_right chains across subtree boundaries when the key space has gaps (e.g., leaves [14-26] → [201-213] with no intermediate leaves).
@@ -844,15 +906,17 @@ internal abstract partial class BTree<TKey, TStore>
             {
                 leftSib = relatives.GetLeftSibling(ref sibAccessor);
                 rightSib = relatives.GetRightSibling(ref sibAccessor);
+                // SMO-path acquisition (#716): mid-propagation, `promoted` MUST land, so there is no restart to take. The parent (PathNodes[Depth-1]) is
+                // write-locked and version-validated, so no merge can be detaching a TRUE sibling under us; the cousin case is counted, not assumed away.
                 if (leftSib.IsValid)
                 {
                     leftSib.PreDirtyForWrite(ref sibAccessor);
-                    SpinWriteLock(leftSib.GetLatch(ref sibAccessor));
+                    SpinWriteLockOnSmoPath(leftSib.GetLatch(ref sibAccessor));
                 }
                 if (rightSib.IsValid)
                 {
                     rightSib.PreDirtyForWrite(ref sibAccessor);
-                    SpinWriteLock(rightSib.GetLatch(ref sibAccessor));
+                    SpinWriteLockOnSmoPath(rightSib.GetLatch(ref sibAccessor));
                 }
             }
 
@@ -892,7 +956,8 @@ internal abstract partial class BTree<TKey, TStore>
             var newRoot = AllocNode(NodeStates.None, ref accessor);
             newRoot.PreDirtyForWrite(ref accessor);
             var newRootLatch = newRoot.GetLatch(ref accessor);
-            SpinWriteLock(newRootLatch);
+            var newRootOutcome = SpinWriteLock(newRootLatch);   // freshly allocated — Obsolete unreachable, see the twin in AddOrUpdateCore
+            Debug.Assert(newRootOutcome != WriteLockOutcome.Obsolete, "a freshly allocated root cannot be obsolete");
             newRoot.SetLeft(Root, ref accessor);
             newRoot.Insert(0, promoted.Value, ref accessor);
             Root = newRoot;

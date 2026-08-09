@@ -1,7 +1,7 @@
 ---
 uid: concept-durability
 title: 'Durability — mode & discipline'
-description: 'Two orthogonal dials decide when and how a committed change reaches disk: DurabilityMode (per UnitOfWork — when the WAL flushes) and DurabilityDiscipline (per transaction, SingleVersion only — how an in-place write is made durable).'
+description: 'Two orthogonal dials decide when and how a committed change reaches disk: DurabilityMode (per UnitOfWork — when the WAL flushes) and CommitDiscipline (per transaction, SingleVersion only — how an in-place write is made durable).'
 ---
 
 # Durability — mode & discipline
@@ -22,7 +22,7 @@ Set per [Unit of Work](xref:concept-unit-of-work). Applies to every commit in th
 
 `Deferred` and `GroupCommit` commit at the *same* speed and are **visible before durable**; only `Immediate` blocks `Commit()` until the change is on disk. A single critical transaction can *escalate* to `Immediate` — never downgrade.
 
-## `DurabilityDiscipline` — *how* a SingleVersion write is made durable
+## `CommitDiscipline` — *how* a SingleVersion write is made durable
 
 Set per [transaction](xref:concept-transaction); applies **only** to the [`SingleVersion`](xref:concept-storage-mode) layout.
 
@@ -41,11 +41,11 @@ Set per [transaction](xref:concept-transaction); applies **only** to the [`Singl
 ## In the API
 
 - [`DurabilityMode`](xref:Typhon.Engine.DurabilityMode) — [`Deferred`](xref:Typhon.Engine.DurabilityMode.Deferred) / [`GroupCommit`](xref:Typhon.Engine.DurabilityMode.GroupCommit) / [`Immediate`](xref:Typhon.Engine.DurabilityMode.Immediate) (per UoW).
-- [`DurabilityDiscipline`](xref:Typhon.Schema.Definition.DurabilityDiscipline) — [`TickFence`](xref:Typhon.Schema.Definition.DurabilityDiscipline.TickFence) / [`Commit`](xref:Typhon.Schema.Definition.DurabilityDiscipline.Commit) (per transaction, SingleVersion).
+- [`CommitDiscipline`](xref:Typhon.Schema.Definition.CommitDiscipline) — [`TickFence`](xref:Typhon.Schema.Definition.CommitDiscipline.TickFence) / [`Commit`](xref:Typhon.Schema.Definition.CommitDiscipline.Commit) (per transaction, SingleVersion).
 - [`BulkLoadSession`](xref:Typhon.Engine.BulkLoadSession) — the third axis: [bulk load](xref:concept-bulk-load) bypasses per-row WAL entirely rather than tuning it.
 
 ## Learn & use
 
 - **Narrative:** [Guide ch.3 §3 — durability modes](xref:guide-transactions)
 - **Reference:** [Isolation & durability cheat sheet](xref:guide-isolation-durability)
-- **Feature detail:** [Durability modes](xref:feature-transactions-durability-modes-index) · [durability disciplines](xref:feature-transactions-durability-discipline-index) · [override escalation](xref:feature-transactions-durability-modes-durability-override-escalation)
+- **Feature detail:** [Durability modes](xref:feature-transactions-durability-modes-index) · [commit disciplines](xref:feature-transactions-commit-discipline-index) · [override escalation](xref:feature-transactions-durability-modes-durability-override-escalation)

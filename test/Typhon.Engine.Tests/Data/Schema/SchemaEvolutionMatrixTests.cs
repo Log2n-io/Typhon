@@ -78,8 +78,16 @@ class SchemaEvolutionMatrixTests : TestBase<SchemaEvolutionMatrixTests>
     private const int EntityCount = 200;
 
     /// <summary>The (shape, index) pairs this fixture can actually build a workload for.</summary>
+    /// <remarks>
+    /// The <c>Collection</c> and <c>Spatial</c> clauses were added with those axes in #704, and they are not padding. Without them this fixture kept receiving
+    /// cells named <c>…_Coll</c> and <c>…_Spatial</c> while its private schema-pair switch ignored both — a case name that ADVERTISED coverage the body never
+    /// performed. That is the exact illusion the covering array exists to remove, so an axis this fixture cannot express is refused here rather than dropped
+    /// silently in the body. Migrating a collection-bearing or spatial component needs new V1/V2 schema pairs, not new test logic.
+    /// </remarks>
     private static bool Supported(Cell c) =>
         c.Reopen is ReopenKind.Clean or ReopenKind.CleanThenCrash
+        && c.Collection == CollectionShape.None
+        && c.Spatial == SpatialShape.None
         && ((c.Shape == StorageShape.PureSv && c.Index is IndexShape.None or IndexShape.Unique)
             || (c.Shape == StorageShape.SvPlusVersioned && c.Index == IndexShape.None));
 
@@ -97,7 +105,10 @@ class SchemaEvolutionMatrixTests : TestBase<SchemaEvolutionMatrixTests>
             RegisterV1(dbe, cell);
             dbe.InitializeArchetypes();
 
-            using var t = dbe.CreateQuickTransaction(cell.Durability);
+            // The discipline is passed, not defaulted: #704 added it as an axis, and a cell named `…_Commit` whose body silently ran TickFence would advertise
+            // coverage it never performed. Commit-discipline seeding also makes the pre-migration SV values crash-durable, which is what the CleanThenCrash
+            // cells need in order to be migrating real data rather than zeroes.
+            using var t = dbe.CreateQuickTransaction(cell.Durability, cell.Discipline);
             for (var i = 0; i < EntityCount; i++)
             {
                 ids[i] = SpawnV1(t, cell, i);

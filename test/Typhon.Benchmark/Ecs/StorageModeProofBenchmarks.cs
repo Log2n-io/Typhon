@@ -187,7 +187,7 @@ public class StorageModeProofBenchmarks : IDisposable
     // through it would skip TSN stamping / isolation flag / WAL and be seen by concurrent snapshot readers. Versioned
     // writes are therefore L2/L3 operations only. See L2_Write_Versioned / L3_WriteCommit_Versioned below.
     //
-    // NOTE: no L1_Write_SingleVersion_Committed either, for the same class of reason. The whole DurabilityDiscipline.Commit
+    // NOTE: no L1_Write_SingleVersion_Committed either, for the same class of reason. The whole CommitDiscipline.Commit
     // write path lives in EntityRef.Write<T> (EntityRef.cs:296-307) — CM-02 escalation via ResolveCommitDiscipline, the
     // shadow-index skip, then WriteEcsComponentData. ClusterRef.GetSpan<T> does none of it: it returns a raw Span<T> over
     // HEAD, and its only guard concerns Versioned. So a bulk span write inside a Commit-discipline transaction bypasses the
@@ -292,7 +292,7 @@ public class StorageModeProofBenchmarks : IDisposable
     [Benchmark(OperationsPerInvoke = PointOps)]
     public void L2_Write_SingleVersion_Committed()
     {
-        using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred, DurabilityDiscipline.Commit);
+        using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit);
         for (int i = 0; i < PointOps; i++)
         {
             tx.OpenMut(_f.Sv[i]).Write(AaBenchAnt.Position).X = i;
@@ -320,7 +320,7 @@ public class StorageModeProofBenchmarks : IDisposable
     [Benchmark(OperationsPerInvoke = PointOps)]
     public void L3_WriteCommit_SingleVersion_Committed()
     {
-        using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred, DurabilityDiscipline.Commit);
+        using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit);
         for (int i = 0; i < PointOps; i++)
         {
             tx.OpenMut(_f.Sv[i]).Write(AaBenchAnt.Position).X = i;

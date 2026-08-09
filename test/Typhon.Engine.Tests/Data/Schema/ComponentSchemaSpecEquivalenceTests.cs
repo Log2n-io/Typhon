@@ -32,7 +32,7 @@ class ComponentSchemaSpecEquivalenceTests
     /// Representative component covering all attribute kinds; a real <c>[Component]</c> so the generator registers its spec. <c>Health</c> carries a
     /// <c>PreviousName</c> so the field-id-migration test exercises rename resolution through the spec path. <c>internal</c> for registrar reachability.
     /// </summary>
-    [Component("Typhon.Test.Codegen.Rep", 3, StorageMode = StorageMode.SingleVersion, DefaultDiscipline = DurabilityDiscipline.Commit)]
+    [Component("Typhon.Test.Codegen.Rep", 3, StorageMode = StorageMode.SingleVersion, DefaultDiscipline = CommitDiscipline.Commit)]
     [StructLayout(LayoutKind.Sequential)]
     internal struct RepComp
     {

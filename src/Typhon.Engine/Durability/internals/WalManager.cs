@@ -137,6 +137,38 @@ internal sealed class WalManager : ResourceNode
     /// <summary>Seeds the durable watermark to a frontier already durable on disk (crash-recovery seal — see <see cref="WalWriter.SeedDurableLsn"/>).</summary>
     public void SeedDurableLsn(long lsn) => _writer?.SeedDurableLsn(lsn);
 
+    /// <summary>
+    /// Raises the LSN floor to a frontier that only became known AFTER <see cref="Initialize"/> ran — the window a crash recovery replays (#712). LOG-08
+    /// requires the allocator to continue strictly above the durability frontier, but on the crash path the only frontier available in the constructor is
+    /// the persisted CheckpointLSN, which is 0 precisely when the previous session crashed without checkpointing. The authoritative frontier is the one WAL
+    /// v2 recovery replays, and that runs later, inside <c>InitializeArchetypes</c>.
+    /// <para>
+    /// Legal only before the engine has accepted a single write. <see cref="Initialize"/>'s seed is pre-<see cref="Start"/> and therefore single-threaded;
+    /// this one runs with the writer thread alive, so it asserts the equivalent quiescence — nothing claimed means no producer exists and
+    /// <c>PerformSwap</c> (the writer's only writer of the LSN base) cannot have run. Rebasing after records were claimed would strand them below the new
+    /// floor, still colliding, which is a worse outcome than refusing to open.
+    /// </para>
+    /// Seeds the durable watermark to the same frontier, exactly as the reopen path does — those LSNs were durable in the prior session.
+    /// </summary>
+    /// <param name="frontier">The highest LSN the just-completed recovery replayed (or the persisted checkpoint frontier, whichever is higher).</param>
+    public void SeedRecoveryFrontier(long frontier)
+    {
+        if (frontier <= 0)
+        {
+            return;
+        }
+
+        if (!CommitBuffer.NothingClaimedYet)
+        {
+            ThrowHelper.ThrowInvalidOp(
+                $"WAL recovery frontier {frontier} arrived after this session had already claimed an LSN. Those records were allocated below the frontier and "
+                + "would be discarded by the next recovery as already-consolidated (LOG-08). The frontier must be seeded before the first append.");
+        }
+
+        CommitBuffer.SeedNextLsn(frontier + 1);
+        _writer?.SeedDurableLsn(frontier);
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // Dispose
     // ═══════════════════════════════════════════════════════════════

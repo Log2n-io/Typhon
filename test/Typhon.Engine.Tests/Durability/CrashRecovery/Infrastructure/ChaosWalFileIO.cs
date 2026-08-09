@@ -136,6 +136,9 @@ internal sealed class ChaosWalFileIO : IWalFileIO
 
     public bool Exists(string path) => _inner.Exists(path);
 
+    /// <summary>Forwarded verbatim (#688) — a crash hides writes, not the existence of the segments already written.</summary>
+    public System.Collections.Generic.IReadOnlyList<string> EnumerateSegmentPaths(string directory) => _inner.EnumerateSegmentPaths(directory);
+
     public void Delete(string path)
     {
         ThrowIfCrashed();

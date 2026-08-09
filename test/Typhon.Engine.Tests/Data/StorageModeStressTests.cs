@@ -235,8 +235,10 @@ class StorageModeStressTests : TestBase<StorageModeStressTests>
     // Category 2: Transient Spawn/Destroy at scale
     // ═══════════════════════════════════════════════════════════════════════
 
+    // #708 regression: concurrent Transient spawns must not land two entities in one cluster slot. The EntityIds were never the problem — a probe over every
+    // id every thread received found zero duplicates — the slot CLAIM was: on a lost CAS both losers re-read the same occupancy word, picked the same
+    // trailing-zero slot, and committed with a plain store. Failed 8 of 12 runs before the fix, 0 of 15 after.
     [Test]
-    [Ignore("Flaky: throughput threshold assertion fails intermittently under parallel test load")]
     public void Transient_SpawnDestroy_Throughput()
     {
         using var dbe = SetupEngine();

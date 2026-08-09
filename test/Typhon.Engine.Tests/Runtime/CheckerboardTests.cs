@@ -13,7 +13,11 @@ namespace Typhon.Engine.Tests.Runtime;
 /// </summary>
 [TestFixture]
 [NonParallelizable] // timing-sensitive: exercises the real scheduler/tick context; concurrent CPU load from peer fixtures perturbs tick cadence (fails at LoP=8)
-[Ignore("Flaky: non-deterministic tick-cadence / spatial-tier assertions fail under CPU contention (a different test each run). Needs cadence-independent assertions. See #552.")]
+// #552 — non-deterministic tick-cadence / spatial-tier assertions fail under CPU contention (a different test each
+// run). Quarantine, not [Ignore]: the fixture stays runnable locally and by an explicit filter, and it leaves the gate
+// through the category shard.py already honours instead of vanishing from every run. Needs cadence-independent
+// assertions before it can come back.
+[Category("Quarantine")]
 class CheckerboardTests : TestBase<CheckerboardTests>
 {
     private static TierPos PointAt(float x, float y) =>

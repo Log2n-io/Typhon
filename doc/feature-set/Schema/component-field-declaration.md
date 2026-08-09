@@ -62,7 +62,7 @@ int healthOffset = def.FieldsByName["Health"].OffsetInComponentStorage;
 |---|---|---|
 | `[Component(name, revision)]` | — (required) | Persistent component identity; `revision` is a manual version bump, independent of automatic field evolution |
 | `ComponentAttribute.StorageMode` | `StorageMode.Versioned` | `Versioned` (full MVCC) / `SingleVersion` (in-place, tick-fence durable) / `Transient` (heap-only, no persistence) |
-| `ComponentAttribute.DefaultDiscipline` | `DurabilityDiscipline.TickFence` | `SingleVersion`-only; `Commit` makes writes to this component commit-durable |
+| `ComponentAttribute.DefaultDiscipline` | `CommitDiscipline.TickFence` | `SingleVersion`-only; `Commit` makes writes to this component commit-durable |
 | `[Field(FieldId, Name, PreviousName)]` | name = C# member name, id = auto-assigned | Overrides field name/id; `PreviousName` preserves identity across a rename |
 | `[Index(AllowMultiple)]` | `AllowMultiple = false` | Adds a secondary B+Tree index on the field; `AllowMultiple` allows non-unique values |
 | `[ForeignKey(targetType)]` | — | Declares a referential link (field must be `long`); enables cascade-delete via `IndexAttribute.OnParentDelete` |

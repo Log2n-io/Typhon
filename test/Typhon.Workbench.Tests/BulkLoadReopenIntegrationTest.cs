@@ -42,8 +42,10 @@ namespace Typhon.Workbench.Tests;
 /// <code>dotnet test test/Typhon.Workbench.Tests/Typhon.Workbench.Tests.csproj --filter "FullyQualifiedName~BulkLoadReopen"</code>
 /// </para>
 /// </remarks>
+// Manual tier: an investigation entry point driven interactively, minutes per case, with no stable pass/fail oracle.
 [TestFixture]
 [Explicit("Stability-initiative entry-point repro — bulk-load + reopen at scale; minutes per case")]
+[Category("Manual")]
 [NonParallelizable] // opens engines via EngineLifecycle.OpenAsync — the schema-compat State check reads the process-global ArchetypeRegistry, which must not race with other engine tests (see #554)
 public sealed class BulkLoadReopenIntegrationTest
 {

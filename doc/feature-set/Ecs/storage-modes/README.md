@@ -26,23 +26,24 @@ different mode throws `InvalidOperationException` on reopen. `Versioned` keeps a
 (snapshot isolation, zero loss); `SingleVersion` stores one in-place HEAD slot with WAL tick-fence durability
 (≤1 tick loss); `Transient` is heap-only and never persisted. All three are read and written through the same
 `EntityRef.Read<T>()` / `Write<T>()` calls — only the cost and guarantees differ, not the API. A runtime
-durability discipline (`Committed`) layers commit-time, zero-loss atomicity onto the `SingleVersion` layout
+commit discipline (`Committed`) layers commit-time, zero-loss atomicity onto the `SingleVersion` layout
 without paying for a revision chain.
 
 ## Sub-features
 
-| Sub-feature | Use it for | Write cost (Zen 4)            | Durability |
-|-------------|-----------|-------------------------------|------------|
-| [Versioned](./storage-mode-versioned.md) | Inventory, economy, progression, anything needing snapshot isolation or AS-OF reads | ~250 ns                       | Zero loss, full ACID |
-| [SingleVersion (Tick-Fence Durability)](./storage-mode-singleversion.md) | Position, velocity, health, cooldowns — high-frequency, loss-tolerant | ~40 ns                        | ≤1 tick loss |
-| [Transient](./storage-mode-transient.md) | Animation state, input buffers, pathfinding scratch, targeting info | ~40 ns                        | None — gone on crash |
-| [Committed Durability Discipline](./storage-mode-committed.md) | A `SingleVersion` write that must be atomic and zero-loss without MVCC (teleport, item pickup, currency debit) | ~40 ns + commit publish       | Zero loss, atomic, no chain |
+| Sub-feature | Use it for | Write cost (Zen 4)      | Durability | `Rollback` reverts it |
+|-------------|-----------|-------------------------|------------|-----------------------|
+| [Versioned](./storage-mode-versioned.md) | Inventory, economy, progression, anything needing snapshot isolation or AS-OF reads | ~250 ns                 | Zero loss, full ACID | yes |
+| [SingleVersion (Tick-Fence Durability)](./storage-mode-singleversion.md) | Position, velocity, health, cooldowns — high-frequency, loss-tolerant | ~40 ns                  | ≤1 tick loss | no — written in place |
+| [Transient](./storage-mode-transient.md) | Animation state, input buffers, pathfinding scratch, targeting info | ~40 ns                  | None — gone on crash | no |
+| [Commit Discipline](./storage-mode-committed.md) | A `SingleVersion` write that must be rollback-able, atomic and zero-loss without MVCC (teleport, item pickup, currency debit) | ~40 ns + commit publish | Zero loss, atomic, no chain | **yes** — O(1), staging discarded |
 
 ## ⚠️ Guarantees & limits
 
 - `StorageMode` is fixed for a given `(name, revision)`; changing a component's mode requires a new `[Component]` revision (there is no in-place mode migration yet — tracked in #546).
 - An entity can freely mix component types across all three modes (`Spawn`/`Open`/`OpenMut`/`Destroy` work
-  uniformly); rollback semantics differ per mode — see each sub-feature.
+  uniformly); rollback semantics differ per mode — the Rollback column above is the short answer, each
+  sub-feature has the long one.
 - Indexes, spatial queries, and ECS lifecycle (Spawn/Destroy/Enable) are available in all three modes, but with
   different freshness/synchronicity guarantees — check the Storage Mode Feature Matrix (linked below) before
   committing to a mode.
@@ -58,6 +59,6 @@ without paying for a revision chain.
 
 ## 🔗 Related
 
-- Sub-features: [Versioned](./storage-mode-versioned.md), [SingleVersion (Tick-Fence Durability)](./storage-mode-singleversion.md), [Transient](./storage-mode-transient.md), [Committed Durability Discipline](./storage-mode-committed.md)
+- Sub-features: [Versioned](./storage-mode-versioned.md), [SingleVersion (Tick-Fence Durability)](./storage-mode-singleversion.md), [Transient](./storage-mode-transient.md), [Commit Discipline](./storage-mode-committed.md)
 
 <!-- Deep dive: claude/design/Ecs/06-storage-modes.md, claude/design/Ecs/01-motivation.md, claude/overview/04-data.md — Storage Mode Feature Matrix -->

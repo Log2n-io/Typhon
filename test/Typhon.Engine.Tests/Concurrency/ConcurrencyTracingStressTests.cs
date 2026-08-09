@@ -35,7 +35,10 @@ namespace Typhon.Engine.Tests.Concurrency;
 /// </code>
 /// </remarks>
 [TestFixture]
+// Manual tier: needs TYPHON__PROFILER__CONCURRENCY__ENABLED=true in the PROCESS environment, which cannot be set
+// per-fixture from inside a shared test run — the tier would have to fork a differently-configured process.
 [Explicit("Requires TYPHON__PROFILER__CONCURRENCY__ENABLED=true env var (or test JSON override).")]
+[Category("Manual")]
 [NonParallelizable]
 public class ConcurrencyTracingStressTests
 {

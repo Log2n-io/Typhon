@@ -30,7 +30,7 @@
     - name: Durability Modes
       href: Durability/durability-modes/README.md
       items:
-        - name: Committed Durability Discipline
+        - name: Commit Discipline
           href: Durability/durability-modes/committed-discipline.md
 - name: Ecs
   href: Ecs/README.md
@@ -61,7 +61,7 @@
     - name: Storage Modes
       href: Ecs/storage-modes/README.md
       items:
-        - name: Committed Durability Discipline
+        - name: Commit Discipline
           href: Ecs/storage-modes/storage-mode-committed.md
         - name: SingleVersion (Tick-Fence Durability)
           href: Ecs/storage-modes/storage-mode-singleversion.md
@@ -534,13 +534,13 @@
       href: Transactions/unit-of-work.md
     - name: 'UoW Identity & Crash-Safe Recovery Boundary'
       href: Transactions/uow-identity-crash-recovery.md
-    - name: SingleVersion Durability Discipline (TickFence / Commit)
-      href: Transactions/durability-discipline/README.md
+    - name: SingleVersion Commit Discipline (TickFence / Commit)
+      href: Transactions/commit-discipline/README.md
       items:
         - name: Commit Discipline (Variant-A Staging)
-          href: Transactions/durability-discipline/durability-discipline-commit.md
+          href: Transactions/commit-discipline/commit-discipline-commit.md
         - name: TickFence Discipline (Default)
-          href: Transactions/durability-discipline/durability-discipline-tickfence.md
+          href: Transactions/commit-discipline/commit-discipline-tickfence.md
     - name: Durability Modes (Deferred / GroupCommit / Immediate)
       href: Transactions/durability-modes/README.md
       items:

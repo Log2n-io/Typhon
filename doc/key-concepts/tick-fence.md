@@ -12,7 +12,7 @@ description: 'The per-tick durability boundary: at the end of each tick, dirty S
 
 This is the sharpest case of Typhon's [visible ≠ durable](xref:guide-isolation-durability) split: a SingleVersion value is visible the instant it's written, and becomes durable one fence later.
 
-> ⚠️ **"Tick fence" is overloaded — three meanings.** Here it's the per-tick *durability step*. It is **not** a memory/CPU fence, and **not** the internal parallel-execution machinery that speeds that step up. The `TickFence` [durability discipline](xref:concept-durability) is the transaction-time enum whose durability this step realises.
+> ⚠️ **"Tick fence" is overloaded — three meanings.** Here it's the per-tick *durability step*. It is **not** a memory/CPU fence, and **not** the internal parallel-execution machinery that speeds that step up. The `TickFence` [commit discipline](xref:concept-durability) is the transaction-time enum whose durability this step realises.
 
 ## How it relates
 
@@ -24,10 +24,10 @@ This is the sharpest case of Typhon's [visible ≠ durable](xref:guide-isolation
 ## In the API
 
 - [`DatabaseEngine`](xref:Typhon.Engine.DatabaseEngine) — [`WriteTickFence(...)`](xref:Typhon.Engine.DatabaseEngine.WriteTickFence*) (called for you under the runtime).
-- [`DurabilityDiscipline`](xref:Typhon.Schema.Definition.DurabilityDiscipline) — [`TickFence`](xref:Typhon.Schema.Definition.DurabilityDiscipline.TickFence) (default) vs [`Commit`](xref:Typhon.Schema.Definition.DurabilityDiscipline.Commit).
+- [`CommitDiscipline`](xref:Typhon.Schema.Definition.CommitDiscipline) — [`TickFence`](xref:Typhon.Schema.Definition.CommitDiscipline.TickFence) (default) vs [`Commit`](xref:Typhon.Schema.Definition.CommitDiscipline.Commit).
 
 ## Learn & use
 
 - **Narrative:** [Guide ch.3 — transactions & durability](xref:guide-transactions) · [ch.5 — the tick loop](xref:guide-systems)
 - **Reference:** [Isolation & durability cheat sheet](xref:guide-isolation-durability)
-- **Feature detail:** [TickFence discipline](xref:feature-transactions-durability-discipline-durability-discipline-tickfence) · [parallel tick fence](xref:feature-runtime-tick-lifecycle-parallel-tick-fence)
+- **Feature detail:** [TickFence discipline](xref:feature-transactions-commit-discipline-commit-discipline-tickfence) · [parallel tick fence](xref:feature-runtime-tick-lifecycle-parallel-tick-fence)

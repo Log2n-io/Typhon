@@ -317,9 +317,9 @@ Cluster storage is opt-in per archetype (`IsClusterEligible` on `ArchetypeMetada
 
 ¹ The lone exception: if you `Spawn<T>` an entity whose component set includes SV fields, and then `Rollback`, the freshly-allocated SV chunks are freed and the entity is never published to the `EntityMap`, so its SV bytes effectively vanish with it. *Mutating an existing entity's SV slot* is the unrollbackable case.
 
-### `DurabilityDiscipline` — a second, orthogonal axis on SingleVersion
+### `CommitDiscipline` — a second, orthogonal axis on SingleVersion
 
-The table above describes `SingleVersion` under its default discipline, [`DurabilityDiscipline.TickFence`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/DurabilityDiscipline.cs). A second discipline, `Commit`, is selected **per transaction** and is **not a fourth `StorageMode`** — it shares the identical SV cluster layout and only changes the rows below for the writes it covers:
+The table above describes `SingleVersion` under its default discipline, [`CommitDiscipline.TickFence`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/CommitDiscipline.cs). A second discipline, `Commit`, is selected **per transaction** and is **not a fourth `StorageMode`** — it shares the identical SV cluster layout and only changes the rows below for the writes it covers:
 
 | Aspect | `TickFence` (default) | `Commit` |
 |---|---|---|
@@ -339,7 +339,7 @@ The table above describes `SingleVersion` under its default discipline, [`Durabi
 2. **No atomicity**: if you write to several SV components and then crash or rollback, the writes that already retired stay. There is no "all or nothing".
 3. **Durability follows the tick, not the commit**: SV writes ride the tick-fence WAL pipeline (`DirtyBitmap` → tick-boundary persistence). Whether your transaction commits or rolls back doesn't change what's persisted.
 
-A transaction around SV writes still gives you *thread affinity* and a *consistent read snapshot for any Versioned components in the same archetype*, but it does **not** give you the right to undo an SV mutation. If that matters, use Versioned — or escalate the SV component to `DurabilityDiscipline.Commit`, above, if you need atomicity and rollback but not snapshot isolation or temporal queries.
+A transaction around SV writes still gives you *thread affinity* and a *consistent read snapshot for any Versioned components in the same archetype*, but it does **not** give you the right to undo an SV mutation. If that matters, use Versioned — or escalate the SV component to `CommitDiscipline.Commit`, above, if you need atomicity and rollback but not snapshot isolation or temporal queries.
 
 ### Picking a mode
 

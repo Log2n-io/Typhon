@@ -1,4 +1,4 @@
-// CS1591: this file declares public-accessibility types that live in the internal namespace (Phase 2b entanglement, see
+﻿// CS1591: this file declares public-accessibility types that live in the internal namespace (Phase 2b entanglement, see
 // claude/research/PublicVsInternalApiClassification.md). They are excluded from the published API reference, so consumer-facing
 // doc coverage is not enforced here.
 #pragma warning disable 1591
@@ -532,9 +532,27 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     internal long _mergeCount;
     internal long _moveRightCount;
     internal long _contentionSplitCount;
+    internal long _obsoleteRestarts;
+    internal long _obsoleteSmoSiblingLocks;
 
     internal const int MaxTreeDepth = 32;
     internal const int MaxOptimisticRestarts = 3;
+
+    /// <summary>
+    /// Bound on the PESSIMISTIC retry loops in <c>AddOrUpdateCorePessimistic</c> and <c>RemoveCorePessimistic</c>. Exhausting it throws.
+    /// </summary>
+    /// <remarks>
+    /// Both loops were <c>while (true)</c> (#695). Their inner step returns "not completed" for a leaf whose <c>ReadVersion()</c> is 0, and that is 0 for a
+    /// LOCKED leaf (transient — retrying is right) and for an OBSOLETE one (permanent — retrying can never help). Conflating them is what IXS-03 forbids, and
+    /// its stated consequence is exactly what was observed: four threads spinning 24+ minutes with CPU climbing and no progress, after the WAL append, with
+    /// no exception, no timeout and no way out but killing the process.
+    /// <para>
+    /// Not a contention limit. A legitimately contended operation completes in a handful of retries; this is three orders of magnitude above that, so
+    /// reaching it means no amount of further retrying would have helped. Turning a permanent silent hang into a loud, diagnosable error is the same trade
+    /// IX-03 makes elsewhere — the failure is silent and permanent, the exception is not.
+    /// </para>
+    /// </remarks>
+    internal const int MaxPessimisticRestarts = 10_000;
     internal const int ContentionSplitThreshold = 3;
 
     #region OLC Path Buffers
@@ -696,6 +714,19 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     /// <summary>Number of contention splits (proactive splits of hot leaves).</summary>
     public long ContentionSplitCount => Interlocked.Read(ref _contentionSplitCount);
 
+    /// <summary>
+    /// Number of times a pessimistic writer refused a node a concurrent SMO had detached, and restarted its descent instead of writing into it (IXW-02, #716).
+    /// Non-zero is HEALTHY — it is the defect being caught. It was zero before the fix only because the write went through.
+    /// </summary>
+    public long ObsoleteRestarts => Interlocked.Read(ref _obsoleteRestarts);
+
+    /// <summary>
+    /// Number of times a latch-coupled SMO sibling lock was taken on an already-obsolete node — the residual IXW-02 does NOT cover, because those four sites are
+    /// mid-algorithm with no restart point. Expected 0: both phases hold the sibling's parent lock, so only a COUSIN could get here. Non-zero means the
+    /// cousin case is real and the sibling has to become droppable.
+    /// </summary>
+    public long ObsoleteSmoSiblingLocks => Interlocked.Read(ref _obsoleteSmoSiblingLocks);
+
     internal void ResetDiagnostics()
     {
         Interlocked.Exchange(ref _optimisticRestarts, 0);
@@ -705,6 +736,8 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         Interlocked.Exchange(ref _mergeCount, 0);
         Interlocked.Exchange(ref _moveRightCount, 0);
         Interlocked.Exchange(ref _contentionSplitCount, 0);
+        Interlocked.Exchange(ref _obsoleteRestarts, 0);
+        Interlocked.Exchange(ref _obsoleteSmoSiblingLocks, 0);
     }
 
     /// <summary>
@@ -1440,17 +1473,34 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
             // PROFILING-SPAN-NO-THROW-BEGIN — body MUST NOT throw. FindLeaf, latch lock/unlock, _storage.* and RemoveCorePessimistic are all engine-internal
             // storage manipulation.
             // FindLeaf traversal is safe under OLC: internal nodes are stable.
-            var leaf = FindLeaf(key, out _, ref opAccessor);
+            // #716: FindLeaf can land on a leaf a concurrent merge has since detached. Writing into it would remove the value from a node unreachable from the
+            // root — the removal reports success and the value stays visible. Re-descend instead; the retry is unbounded for the same reason
+            // TryGetMultiplePessimistic's is: it terminates as long as writers make progress, and each pass sees a tree one merge closer to settled.
+            NodeWrapper leaf;
+            SpinWait descentSpin = default;
+            while (true)
+            {
+                leaf = FindLeaf(key, out _, ref opAccessor);
+                if (!leaf.IsValid)
+                {
+                    break;
+                }
+                // WriteLock leaf for consistent index and to prevent concurrent OLC modification
+                leaf.PreDirtyForWrite(ref opAccessor);
+                if (SpinWriteLock(leaf.GetLatch(ref opAccessor)) != WriteLockOutcome.Obsolete)
+                {
+                    break;
+                }
+                Interlocked.Increment(ref _obsoleteRestarts);
+                descentSpin.SpinOnce(-1);
+            }
+
             if (!leaf.IsValid)
             {
                 result = false;
             }
             else
             {
-                // WriteLock leaf for consistent index and to prevent concurrent OLC modification
-                leaf.PreDirtyForWrite(ref opAccessor);
-                SpinWriteLock(leaf.GetLatch(ref opAccessor));
-
                 // Re-find under lock (index might have shifted due to concurrent OLC fast path remove)
                 var index = leaf.Find(key, Comparer, ref opAccessor);
                 if (index < 0)
@@ -1588,9 +1638,25 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         return node;
     }
 
+    /// <summary>Outcome of a pessimistic write-lock acquisition.</summary>
+    protected internal enum WriteLockOutcome : byte
+    {
+        /// <summary>Lock acquired with no contention.</summary>
+        Acquired = 0,
+
+        /// <summary>Lock acquired, but only after spinning — the node is contended.</summary>
+        AcquiredContended = 1,
+
+        /// <summary>
+        /// NOT acquired. The node is obsolete: a concurrent SMO detached it, so it is never a legal write target and never becomes one (IXW-02, #716). The
+        /// caller must restart its descent — waiting is waiting for something that cannot happen, which is how #695 livelocked.
+        /// </summary>
+        Obsolete = 2,
+    }
+
     /// <summary>
     /// Spin-waits until the write lock is acquired. Counts contention spins for diagnostics.
-    /// Returns true if lock was acquired immediately (no contention), false if spinning was needed.
+    /// Returns <see cref="WriteLockOutcome.Obsolete"/> — WITHOUT the lock — when the node has been detached by a concurrent SMO.
     /// </summary>
     /// <remarks>
     /// Two-phase spin policy tuned for OLC latch hold times (~100-500 ns):
@@ -1598,23 +1664,32 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     ///          the common case of a leaf insert/remove completing on another core.
     /// Phase 2: SpinWait with Sleep(1) disabled — escalates to Yield/Sleep(0) for rare splits/merges
     ///          or SMT core-sharing, but never pays the 15 ms Windows timer-tick penalty.
+    /// <para>
+    /// The obsolete check sits in the spin, not before it, and that placement is the point. A node that is merely LOCKED right now may be locked by the very
+    /// merge that is about to detach it, so a pre-check would read "not obsolete" and then spin forever once the merge unlocks with the bit set — since #716
+    /// <see cref="OlcLatch.TryWriteLock"/> refuses that node for good. Re-testing inside the loop converts that permanent wait into a restart.
+    /// </para>
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private bool SpinWriteLock(OlcLatch latch)
+    private WriteLockOutcome SpinWriteLock(OlcLatch latch)
     {
         if (latch.TryWriteLock())
         {
-            return true; // no contention
+            return WriteLockOutcome.Acquired; // no contention
         }
 
         // Phase 1: tight PAUSE spin — stays on-core, covers typical latch hold time + cross-core coherence
         for (int i = 0; i < 64; i++)
         {
+            if (latch.IsObsolete)
+            {
+                return WriteLockOutcome.Obsolete;
+            }
             Interlocked.Increment(ref _writeLockFailures);
             Thread.SpinWait(1);
             if (latch.TryWriteLock())
             {
-                return false; // contention detected
+                return WriteLockOutcome.AcquiredContended;
             }
         }
 
@@ -1623,11 +1698,44 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         SpinWait spin = default;
         do
         {
+            if (latch.IsObsolete)
+            {
+                return WriteLockOutcome.Obsolete;
+            }
             Interlocked.Increment(ref _writeLockFailures);
             spin.SpinOnce(-1);
         }
         while (!latch.TryWriteLock());
-        return false; // contention detected
+        return WriteLockOutcome.AcquiredContended;
+    }
+
+    /// <summary>
+    /// Spin-waits for the write lock on a node reached from a latch-coupled SMO's sibling resolution, where the caller is mid-algorithm and has no restart
+    /// point. Admits an obsolete node — see <see cref="OlcLatch.TryWriteLockOnSmoPath"/> for why, and what bounds it — and counts the occurrence.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void SpinWriteLockOnSmoPath(OlcLatch latch)
+    {
+        bool acquired = latch.TryWriteLockOnSmoPath(out var wasObsolete);
+        for (int i = 0; !acquired && i < 64; i++)
+        {
+            Interlocked.Increment(ref _writeLockFailures);
+            Thread.SpinWait(1);
+            acquired = latch.TryWriteLockOnSmoPath(out wasObsolete);
+        }
+
+        SpinWait spin = default;
+        while (!acquired)
+        {
+            Interlocked.Increment(ref _writeLockFailures);
+            spin.SpinOnce(-1);
+            acquired = latch.TryWriteLockOnSmoPath(out wasObsolete);
+        }
+
+        if (wasObsolete)
+        {
+            Interlocked.Increment(ref _obsoleteSmoSiblingLocks);
+        }
     }
 
     /// <summary>Thread-safe addition to the epoch-deferred node list (protected by _deferredLock).</summary>

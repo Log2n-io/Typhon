@@ -56,7 +56,7 @@ protected override void Execute(TickContext ctx)
 | Option | Default | Effect |
 |---|---|---|
 | `mode` (`DurabilityMode`) | `Immediate` | `Immediate` blocks `Commit()` until the WAL record is on stable media (~15-85µs); `Deferred`/`GroupCommit` are also accepted but defeat the point of a side-transaction |
-| `discipline` (`DurabilityDiscipline`) | `TickFence` | Only matters for `SingleVersion`-layout components; pass `Commit` for atomic, zero-loss, no-revision-chain writes without full MVCC. No effect on `Versioned` components (always commit-scoped) |
+| `discipline` (`CommitDiscipline`) | `TickFence` | Only matters for `SingleVersion`-layout components; pass `Commit` for atomic, zero-loss, no-revision-chain writes without full MVCC. No effect on `Versioned` components (always commit-scoped) |
 
 ## ⚠️ Guarantees & limits
 

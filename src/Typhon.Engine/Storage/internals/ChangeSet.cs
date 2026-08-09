@@ -4,6 +4,7 @@
 #pragma warning disable 1591
 
 using JetBrains.Annotations;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -28,10 +29,66 @@ public class ChangeSet
     // The sign bit of each entry encodes dirty (1) vs clean (0) for ACW handling.
     private List<int> _deferredEvictions;
 
+    // ── DEBUG concurrent-mutation detector (#705 T5 / #400) ─────────────────────────────────────────────────────────────────────────────────────────────────
+    // Managed thread id currently inside a mutating method, 0 when none; plus a re-entrancy depth for that thread. NOT an owner-thread assert: in Deferred and
+    // GroupCommit the UoW deliberately SHARES one ChangeSet across every transaction it creates (UnitOfWork.cs:64-66), so this object has no owner thread and
+    // an owner assert would fire on correct code. What is never legal is two threads mutating it AT THE SAME TIME — `_marksByPage` is a plain Dictionary and
+    // `_deferredEvictions` a plain List, so concurrent mutation can lose entries, mis-count marks, or corrupt the bucket chain outright. That is #400's
+    // mechanism, and it was silent in 36 of 40 runs.
+    private int _mutatorThreadId;
+    private int _mutationDepth;
+
     public ChangeSet(PagedMMF owner)
     {
         _owner = owner;
         _marksByPage = new Dictionary<int, int>();
+    }
+
+    /// <summary>
+    /// Marks entry to a mutating method; throws naming BOTH threads if another is already inside. Compiled out entirely in Release.
+    /// </summary>
+    /// <remarks>
+    /// A sequential hand-off between threads is legal and must not fire — only overlap is the defect — so this tracks residency rather than ownership. The
+    /// depth counter exists because the mutating methods call one another (<c>Reset</c> → the per-page decrement loop), and a re-entrant call from the thread
+    /// already inside is not a race.
+    /// </remarks>
+    [System.Diagnostics.Conditional("DEBUG")]
+    private void EnterMutation(string member)
+    {
+        var me = Environment.CurrentManagedThreadId;
+        var prev = System.Threading.Interlocked.CompareExchange(ref _mutatorThreadId, me, 0);
+        if (prev == 0)
+        {
+            _mutationDepth = 1;
+            return;
+        }
+
+        if (prev == me)
+        {
+            _mutationDepth++;
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"ChangeSet concurrent mutation: thread {me} entered {member} while thread {prev} was still inside a mutating method. This ChangeSet is shared "
+            + "across the UnitOfWork's transactions (Deferred/GroupCommit), and its backing Dictionary/List are not thread-safe — concurrent mutation loses "
+            + "dirty marks or corrupts the map (#400). Sequential hand-off between threads is fine; overlap is not.");
+    }
+
+    /// <summary>Marks exit from a mutating method. Compiled out entirely in Release.</summary>
+    [System.Diagnostics.Conditional("DEBUG")]
+    private void ExitMutation()
+    {
+        if (_mutatorThreadId != Environment.CurrentManagedThreadId)
+        {
+            return; // a losing thread that threw on entry never took residency
+        }
+
+        if (--_mutationDepth <= 0)
+        {
+            _mutationDepth = 0;
+            System.Threading.Interlocked.Exchange(ref _mutatorThreadId, 0);
+        }
     }
 
     /// <summary>
@@ -40,8 +97,16 @@ public class ChangeSet
     /// </summary>
     internal void DeferEviction(int entry)
     {
-        _deferredEvictions ??= new List<int>(16);
-        _deferredEvictions.Add(entry);
+        EnterMutation(nameof(DeferEviction));
+        try
+        {
+            _deferredEvictions ??= new List<int>(16);
+            _deferredEvictions.Add(entry);
+        }
+        finally
+        {
+            ExitMutation();
+        }
     }
 
     /// <summary>
@@ -55,16 +120,24 @@ public class ChangeSet
             return;
         }
 
-        foreach (var entry in _deferredEvictions)
+        EnterMutation(nameof(FlushDeferredEvictions));
+        try
         {
-            var memIdx = entry & 0x7FFFFFFF;
-            if (entry < 0)
+            foreach (var entry in _deferredEvictions)
             {
-                _owner.DecrementActiveChunkWriters(memIdx);
+                var memIdx = entry & 0x7FFFFFFF;
+                if (entry < 0)
+                {
+                    _owner.DecrementActiveChunkWriters(memIdx);
+                }
+                _owner.DecrementSlotRefCount(memIdx);
             }
-            _owner.DecrementSlotRefCount(memIdx);
+            _deferredEvictions.Clear();
         }
-        _deferredEvictions.Clear();
+        finally
+        {
+            ExitMutation();
+        }
     }
 
     /// <summary>
@@ -75,9 +148,17 @@ public class ChangeSet
     /// <returns><c>true</c> if this was the first registration for this page in this ChangeSet; <c>false</c> if already tracked.</returns>
     public bool AddByMemPageIndex(int memPageIndex)
     {
-        if (!_marksByPage.TryAdd(memPageIndex, 1))
+        EnterMutation(nameof(AddByMemPageIndex));
+        try
         {
-            return false;
+            if (!_marksByPage.TryAdd(memPageIndex, 1))
+            {
+                return false;
+            }
+        }
+        finally
+        {
+            ExitMutation();
         }
 
         _owner.IncrementDirty(memPageIndex);
@@ -98,13 +179,21 @@ public class ChangeSet
     /// </remarks>
     internal void RegisterReDirty(int memPageIndex)
     {
-        if (_marksByPage.TryGetValue(memPageIndex, out var n))
+        EnterMutation(nameof(RegisterReDirty));
+        try
         {
-            _marksByPage[memPageIndex] = n + 1;
+            if (_marksByPage.TryGetValue(memPageIndex, out var n))
+            {
+                _marksByPage[memPageIndex] = n + 1;
+            }
+            else
+            {
+                _marksByPage[memPageIndex] = 1;
+            }
         }
-        else
+        finally
         {
-            _marksByPage[memPageIndex] = 1;
+            ExitMutation();
         }
         _owner.IncrementDirty(memPageIndex);
     }

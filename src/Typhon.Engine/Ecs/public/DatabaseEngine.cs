@@ -1,4 +1,4 @@
-using JetBrains.Annotations;
+﻿using JetBrains.Annotations;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Concurrent;
@@ -452,6 +452,16 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <summary>Diagnostic + test oracle: the number of archetypes whose Versioned HEADs were rebuilt during the last
     /// <see cref="InitializeArchetypes"/>. 0 on a trusted (clean) reopen; &gt;0 after a crash or on a legacy database.</summary>
     internal int LastOpenVersionedHeadRebuildCount;
+
+    /// <summary>
+    /// Diagnostic + test oracle: the (entity, Versioned slot) pairs the last open's HEAD rebuild could NOT resolve, summed across archetypes. Expected 0.
+    /// </summary>
+    /// <remarks>
+    /// Non-zero means a reopened database is serving at least one Versioned component from a cluster slot the rebuild never filled — zero on a fresh reopen —
+    /// with nothing else to say so: <c>IsValid</c> passes and <see cref="LastOpenVersionedHeadRebuildCount"/> is non-zero, so every other signal reads healthy.
+    /// That is #688. This does not repair those pairs; it makes them countable, and a warning is logged when the count is non-zero.
+    /// </remarks>
+    internal VersionedHeadRebuildSkips LastOpenVersionedHeadRebuildSkips;
 
     /// <summary>Diagnostic + test oracle: the number of archetypes whose per-archetype B+Tree indexes were rebuilt from a cluster scan during the last
     /// <see cref="InitializeArchetypes"/> instead of being loaded from the persisted chunk-0 directory. 0 when every index segment reloaded. Lets a test
@@ -1467,7 +1477,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             UowRegistry = new UowRegistry(segment, MMF, EpochManager, MemoryAllocator, this);
 
             var walDir = _options.Wal?.WalDirectory;
-            if (walDir != null && Directory.Exists(walDir) && Directory.GetFiles(walDir, "*.wal").Length > 0)
+            // #688: ask the WAL backend rather than the filesystem. A physical scan makes this flag FALSE for every engine using an injected in-memory
+            // backend, whatever that backend actually holds — which quietly took every such fixture off the production crash-recovery path, including the
+            // RB-01 index clear+rebuild and the EntityMap crash branch. A throwaway production IO is used only when nothing was injected, matching the
+            // recovery call a few lines below.
+            var discoveryIo = _injectedWalIo ?? new WalFileIO();
+            var walSegmentsPresent = walDir != null && discoveryIo.EnumerateSegmentPaths(walDir).Count > 0;
+            if (_injectedWalIo == null)
+            {
+                discoveryIo.Dispose();
+            }
+
+            if (walSegmentsPresent)
             {
                 // A crash left a WAL window. Gate the crash-path secondary-index clear+rebuild (RB-01) on this, captured HERE at open — before component
                 // registration builds the ComponentTables — so the clear in BuildIndexedFieldInfo sees it. RunWalV2Recovery reads the same flag for the
@@ -2739,6 +2760,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // is independent of CheckpointLSN, so a bulk-generated DB (CheckpointLSN == 0) is trusted too. The on-disk flag was
         // already cleared in the ctor, before registration could mutate anything (CS-02, #583); this reads the value captured there.
         LastOpenVersionedHeadRebuildCount = 0;
+        LastOpenVersionedHeadRebuildSkips = default;
         LastOpenClusterIndexRebuildCount = 0;
         _headsTrusted = _cleanShutdownAtOpen
             && (_migratedComponents == null || _migratedComponents.Count == 0);
@@ -2889,6 +2911,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             meta.VersionedSlotCount = isClusterEligible ? (byte)BitOperations.PopCount(versionedSlotMask) : (byte)0;
             meta.TransientSlotMask = isClusterEligible ? transientSlotMask : (ushort)0;
             meta.TransientSlotCount = isClusterEligible ? (byte)BitOperations.PopCount(transientSlotMask) : (byte)0;
+            // Every declared slot that is not Versioned — i.e. SingleVersion and Transient. Bounded to ComponentCount rather than left as ~mask so the spare
+            // high bits cannot make an absent slot look fence-maintained (#711).
+            meta.FenceMaintainedSlotMask = isClusterEligible
+                ? (ushort)(((1 << meta.ComponentCount) - 1) & ~versionedSlotMask)
+                : (ushort)0;
 
             if (isClusterEligible)
             {
@@ -3205,7 +3232,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         if (!loadIndexes && !crashPath && !isFreshAllocation && clusterState.ActiveClusterCount > 0)
                         {
                             using var idxEpoch = EpochGuard.Enter(EpochManager);
-                            clusterState.RebuildIndexesFromData(changeSet);
+                            NoteUniqueIndexRebuildConflicts(meta, clusterState.RebuildIndexesFromData(changeSet));
                             LastOpenClusterIndexRebuildCount++;
                         }
                     }
@@ -3319,7 +3346,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                             {
                                 using var vEpoch = EpochGuard.Enter(EpochManager);
                                 var vStart = Stopwatch.GetTimestamp();
-                                clusterState.RebuildVersionedHeadFromChain(meta, _archetypeStates[meta.ArchetypeId], changeSet);
+                                clusterState.RebuildVersionedHeadFromChain(meta, _archetypeStates[meta.ArchetypeId], changeSet, out var headSkips);
+                                NoteVersionedHeadRebuildSkips(meta, in headSkips);
                                 versionedHeadTicks += Stopwatch.GetTimestamp() - vStart;
                                 LastOpenVersionedHeadRebuildCount++;
                             }
@@ -3385,8 +3413,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             MMF.SetPageChecksumVerification(_options.Resources.PageChecksumVerification);
         }
 
-        // Open + recovery (incl. the seal) are done — arm the checkpoint-time SPI persistence (#395 / CK-10). From here every steady-state checkpoint
-        // records the per-archetype segment SPIs so a consolidated cluster/EntityMap base is reachable on reopen after a hard crash.
+        // Arm the checkpoint-time SPI persistence (#395 / CK-10) for the paths that did NOT go through recovery — a clean reopen, or a fresh database. From
+        // here every steady-state checkpoint records the per-archetype segment SPIs so a consolidated cluster/EntityMap base is reachable on reopen after a
+        // hard crash. The crash path arms it earlier, before its seal, because the seal advances CheckpointLSN and reclaims the WAL and so must persist the
+        // SPIs in the same cycle (#715); this assignment is then a no-op for it.
         _archetypeSpiPersistArmed = true;
     }
 
@@ -3432,6 +3462,24 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             LogWalRecoveryStoppedAtCorruption(result.SegmentsScanned, result.MaxLsn);
         }
 
+        // LOG-08 across a RECOVERY, not only across a clean reopen (#712). InitializeWalManager has to choose the LSN floor in the constructor, where the
+        // only frontier that exists is the persisted CheckpointLSN — and that is 0 exactly when the previous session crashed without checkpointing. The
+        // authoritative frontier is the window this recovery just replayed, which is knowable only here. Raise the floor now, before InitializeArchetypes
+        // returns and the engine can accept its first transaction; otherwise the reopened writer allocates from 1 again, every commit it durably
+        // acknowledges lands at an LSN the previous session already used, and the next recovery discards the whole post-recovery window as
+        // already-consolidated. The seal below then persists CheckpointLSN from this same frontier, so the two agree by construction.
+        SeedWalFrontierAfterRecovery(Math.Max(result.MaxLsn, checkpointLsn));
+
+        // #715 / CK-10. Arm the checkpoint-time SPI persistence BEFORE the seal, so the seal's own ForceCheckpoint records the per-archetype segment SPIs
+        // alongside the data it is consolidating. Arming it after (its original position, at the end of InitializeArchetypes) left a window in which the seal
+        // had already advanced CheckpointLSN — and therefore reclaimed every WAL segment below it — while the metadata needed to NAVIGATE to the consolidated
+        // base was still unpersisted. "The first steady-state checkpoint then records them" assumes there is one: crash again before it and the WAL no longer
+        // holds the data while the data file cannot be reached, losing the entire recovered database with zero writes in between. That window opens at the
+        // moment a database is most likely to crash again — immediately after recovering from a crash.
+        //
+        // Safe here: the seal runs after apply, scrub, index rebuild and suspect resolution, so the segments are final when the hook fires at cycle start.
+        _archetypeSpiPersistArmed = true;
+
         // Phase 4 — SCRUB (03-recovery.md §6, D1): now that the WAL window is applied, collapse every Versioned revision chain
         // to its HEAD so the consolidated base carries no pre-crash MVCC history. Runs before the seal so its mutations are
         // consolidated into the data file by the same checkpoint.
@@ -3461,6 +3509,22 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // final only afterwards. The corrected bitmap is held dirty (DC > 0, so it can't be evicted stale) and consolidated by the next checkpoint / clean shutdown;
         // if this session crashes again first, recovery simply re-derives (idempotent).
         RederiveOccupancyOnCrash();
+    }
+
+    /// <summary>
+    /// Continues the global LSN sequence above the frontier a crash recovery just replayed (#712 / LOG-08). Separated from
+    /// <see cref="RunWalV2Recovery"/> so the ordering constraint has a name: this MUST run after the recovery frontier is known and before the engine
+    /// accepts its first transaction, and there is exactly one point in the open sequence that satisfies both.
+    /// </summary>
+    private void SeedWalFrontierAfterRecovery(long frontier)
+    {
+        if (frontier <= 0 || WalManager == null)
+        {
+            return;
+        }
+
+        WalManager.SeedRecoveryFrontier(frontier);
+        LogWalFrontierSeededAfterRecovery(frontier);
     }
 
     /// <summary>
@@ -3642,7 +3706,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     continue;
                 }
 
-                clusterState.RebuildIndexesFromData(changeSet);
+                NoteUniqueIndexRebuildConflicts(meta, clusterState.RebuildIndexesFromData(changeSet));
                 LastOpenClusterIndexRebuildCount++;
             }
         }
@@ -4222,14 +4286,15 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // Order matters. The loop above established WHERE each entity lives; the slots themselves are still zeroed, because the component bytes live in the
         // revision chains. Fill the HEADs from those chains first, then build the indexes over real values — indexing first yields one entry per zeroed slot.
-        clusterState.RebuildVersionedHeadFromChain(meta, state, cs);
+        clusterState.RebuildVersionedHeadFromChain(meta, state, cs, out var headSkips);
+        NoteVersionedHeadRebuildSkips(meta, in headSkips);
 
         // Every entity just moved to a new (clusterChunkId, slotIndex), and a per-archetype index entry IS a cluster position, so any tree that survived the
         // reopen now points at the old geometry. This scan also covers a component that merely GAINED an index: its tree is created empty, and this fills it —
         // the per-archetype replacement for ComponentTable.PopulateNewIndexes.
         if (clusterState.IndexSlots != null && clusterState.ActiveClusterCount > 0)
         {
-            clusterState.RebuildIndexesFromData(cs);
+            NoteUniqueIndexRebuildConflicts(meta, clusterState.RebuildIndexesFromData(cs));
             LastOpenClusterIndexRebuildCount++;
         }
 
@@ -4434,7 +4499,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             try
             {
                 using var vEpoch = EpochGuard.Enter(EpochManager);
-                clusterState.RebuildVersionedHeadFromChain(meta, state, changeSet);
+                clusterState.RebuildVersionedHeadFromChain(meta, state, changeSet, out var headSkips);
+                NoteVersionedHeadRebuildSkips(meta, in headSkips);
                 LastOpenVersionedHeadRebuildCount++;
             }
             finally
@@ -5065,6 +5131,62 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     [LoggerMessage(LogLevel.Warning,
         "Open: WAL recovery STOPPED at a corruption boundary after {segmentsScanned} segment(s) — records beyond it were NOT applied (frontier LSN {maxLsn})")]
     internal partial void LogWalRecoveryStoppedAtCorruption(int segmentsScanned, long maxLsn);
+
+    // LOG-08 on the crash path (#712). Information, not Debug: this is the moment the reopened writer's LSN sequence is rebased onto the recovered window,
+    // and a crash-recovery investigation that cannot see the floor it continued from cannot tell a lost commit from one that was never appended.
+    [LoggerMessage(LogLevel.Information,
+        "Open: WAL LSN allocator continued above the recovered frontier {frontier} — the next appended record gets LSN {frontier}+1 (LOG-08)")]
+    internal partial void LogWalFrontierSeededAfterRecovery(long frontier);
+
+    // #710. Warning, not Information: the index this open produced does not describe the data, and every query planned against it will under-report until
+    // the affected entities are rewritten. The archetype is named because the operator's next question is always "which one", and the count because one
+    // dropped entry is a schema question while thousands mean a whole tick of SingleVersion values was lost to a crash.
+    [LoggerMessage(LogLevel.Warning,
+        "Open: archetype {archetype} — {conflicts} index entr(ies) dropped rebuilding a UNIQUE index: the recovered data holds duplicate keys, which a "
+        + "hard crash under TickFence produces when it loses the SingleVersion values the keys came from. The entities are intact and reachable by scan; "
+        + "the unique index is incomplete until they are rewritten (#710)")]
+    internal partial void LogUniqueIndexRebuildConflicts(string archetype, int conflicts);
+
+    /// <summary>
+    /// Reports index entries a rebuild had to drop because the recovered data violates a UNIQUE constraint (#710), and counts them for tests.
+    /// </summary>
+    /// <remarks>
+    /// Kept as one call rather than inlined at each rebuild site so that "the rebuild dropped something" cannot be discarded silently by the next site
+    /// somebody adds — the ignorable <c>int</c> return of <see cref="ArchetypeClusterState.RebuildIndexesFromData"/> makes that easy to do by accident.
+    /// </remarks>
+    private void NoteUniqueIndexRebuildConflicts(ArchetypeMetadata meta, int conflicts)
+    {
+        if (conflicts <= 0)
+        {
+            return;
+        }
+
+        LastOpenUniqueIndexRebuildConflicts += conflicts;
+        LogUniqueIndexRebuildConflicts(meta?.ArchetypeType?.Name ?? meta?.ArchetypeId.ToString() ?? "<unknown>", conflicts);
+    }
+
+    /// <summary>
+    /// Index entries dropped during this open's rebuilds because the recovered data could not satisfy a UNIQUE constraint (#710). Zero on a healthy open.
+    /// </summary>
+    internal int LastOpenUniqueIndexRebuildConflicts { get; private set; }
+
+    /// <summary>Accumulate one archetype's un-rebuilt HEAD pairs and log them, so the silent case in #688 leaves a trace (see the field's remarks).</summary>
+    private void NoteVersionedHeadRebuildSkips(ArchetypeMetadata meta, in VersionedHeadRebuildSkips skips)
+    {
+        if (skips.Total <= 0)
+        {
+            return;
+        }
+
+        LastOpenVersionedHeadRebuildSkips.Add(in skips);
+        LogVersionedHeadRebuildSkips(meta?.ArchetypeType?.Name ?? meta?.ArchetypeId.ToString() ?? "<unknown>",
+            skips.Total, skips.EntityNotInMap, skips.NoChainRoot, skips.ChainWalkFailed);
+    }
+
+    [LoggerMessage(LogLevel.Warning,
+        "Open: archetype {archetype} — {total} Versioned HEAD slot(s) left un-rebuilt (entityNotInMap {entityNotInMap}, noChainRoot {noChainRoot}, "
+        + "chainWalkFailed {chainWalkFailed}). Those slots serve whatever they already held, which on a fresh reopen is zero.")]
+    private partial void LogVersionedHeadRebuildSkips(string archetype, int total, int entityNotInMap, int noChainRoot, int chainWalkFailed);
 
     [LoggerMessage(LogLevel.Information,
         "Open: total {totalMs:F0} ms — engineConstruct {engineConstructMs:F0} ms (incl. WAL recovery + system-schema load), schemaDllLoad {schemaDllMs:F0} ms, initializeArchetypes {initArchetypesMs:F0} ms")]

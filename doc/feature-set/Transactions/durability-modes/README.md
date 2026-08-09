@@ -77,7 +77,7 @@ trade.Commit();               // blocks ~15-85µs — WAL FUA complete before re
   the transaction is already committed and MVCC-visible; this means "durability unconfirmed," never a rollback.
 - Two orthogonal knobs extend this axis without changing UoW mode: [Per-Transaction Durability
   Override](./durability-override-escalation.md) escalates a single operation's flush timing, and
-  [SingleVersion Durability Discipline](../durability-discipline/README.md) controls *how* a `SingleVersion`
+  [SingleVersion Commit Discipline](../commit-discipline/README.md) controls *how* a `SingleVersion`
   write becomes durable, independent of flush timing.
 - Max durable tx/s: ~12K-65K for `Immediate` (FUA round-trip bound) vs. millions for `GroupCommit`/`Deferred`
   (CPU-bound, amortized FUA).
@@ -92,7 +92,7 @@ trade.Commit();               // blocks ~15-85µs — WAL FUA complete before re
 ## 🔗 Related
 
 - Sub-features: [Per-Transaction Durability Override](./durability-override-escalation.md)
-- Related feature: [SingleVersion Durability Discipline](../durability-discipline/README.md) — the orthogonal
+- Related feature: [SingleVersion Commit Discipline](../commit-discipline/README.md) — the orthogonal
   per-transaction axis (TickFence/Commit) that decides *how* a `SingleVersion` write reaches the WAL
 
 <!-- Deep dive: claude/overview/02-execution.md §2.1 Unit of Work (#21-unit-of-work), §2.3 Durability Modes (#23-durability-modes), claude/overview/README.md -->

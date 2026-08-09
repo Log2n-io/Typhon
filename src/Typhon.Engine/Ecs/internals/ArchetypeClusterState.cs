@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
@@ -838,6 +838,13 @@ internal sealed unsafe class ArchetypeClusterState
 
     private ArchetypeClusterState() { }
 
+    /// <summary>
+    /// A state carrying nothing but the active-cluster list — for testing <see cref="AddToActiveList"/> / <see cref="RemoveFromActiveList"/>'s publication
+    /// order (#582 face 2) without standing up segments and an engine. Those two methods touch only plain fields, so the list behaves identically here.
+    /// </summary>
+    internal static ArchetypeClusterState CreateActiveListOnlyForTests() =>
+        new() { ActiveClusterIds = new int[16], ActiveClusterCount = 0, FreeClusterHead = -1 };
+
     /// <summary>Chunk capacity of the primary (non-null) segment.</summary>
     internal int PrimarySegmentCapacity => ClusterSegment?.ChunkCapacity ?? TransientSegment.ChunkCapacity;
 
@@ -1155,6 +1162,37 @@ internal sealed unsafe class ArchetypeClusterState
     }
 
     /// <summary>
+    /// Claims one free bit in <paramref name="occupancy"/> by CAS, retrying until it wins or the word is full. Returns the slot index, or <c>-1</c> when no
+    /// bit is free. The returned bit is exclusively this caller's.
+    /// </summary>
+    /// <remarks>
+    /// #708. Both <c>ClaimSlot</c> overloads used to CAS ONCE and, on failure, re-read and commit the second attempt with a PLAIN store, commented
+    /// "single-writer (no concurrent commit)". That premise does not hold — Transient spawns commit concurrently from independent transactions — and two
+    /// losers of the first CAS then read the same occupancy word, pick the same trailing-zero slot, and both store it. Two entities end up in one slot with
+    /// distinct EntityIds, so the second silently overwrites the first's component data and a thread reads back another thread's value.
+    /// A retry that abandons the atomicity of the attempt it is retrying is not a retry; the loop below keeps every attempt a CAS.
+    /// </remarks>
+    private static int ClaimFreeBit(ref ulong occupancy, ulong fullMask)
+    {
+        while (true)
+        {
+            ulong current = Volatile.Read(ref occupancy);
+            ulong available = ~current & fullMask;
+            if (available == 0)
+            {
+                return -1;
+            }
+
+            int slot = BitOperations.TrailingZeroCount(available);
+            ulong desired = current | (1UL << slot);
+            if (Interlocked.CompareExchange(ref occupancy, desired, current) == current)
+            {
+                return slot;
+            }
+        }
+    }
+
+    /// <summary>
     /// Claim a free slot in an existing cluster, or allocate a new cluster.
     /// Returns the cluster chunk ID and the slot index within the cluster.
     /// </summary>
@@ -1173,40 +1211,16 @@ internal sealed unsafe class ArchetypeClusterState
             byte* clusterBase = accessor.GetChunkAddress(clusterId, true);
             ref ulong occupancy = ref *(ulong*)clusterBase;
 
-            ulong current = occupancy;
-            ulong available = ~current & Layout.FullMask;
-            if (available != 0)
+            int slot = ClaimFreeBit(ref occupancy, Layout.FullMask);
+            if (slot >= 0)
             {
-                int slot = BitOperations.TrailingZeroCount(available);
-                ulong desired = current | (1UL << slot);
-
-                // CAS for future-proof concurrent commit. Single-writer (no concurrent commit).
-                if (Interlocked.CompareExchange(ref occupancy, desired, current) == current)
+                // If the cluster is now full, reset the head — the next call allocates a new one (O(1)).
+                if ((Volatile.Read(ref occupancy) & Layout.FullMask) == Layout.FullMask)
                 {
-                    // If cluster is now full, reset head — next call allocates new (O(1))
-                    if (desired == Layout.FullMask)
-                    {
-                        FreeClusterHead = -1;
-                    }
-
-                    return (clusterId, slot);
+                    FreeClusterHead = -1;
                 }
 
-                // CAS failed (concurrent writer took a different slot) — reread once
-                current = occupancy;
-                available = ~current & Layout.FullMask;
-                if (available != 0)
-                {
-                    slot = BitOperations.TrailingZeroCount(available);
-                    desired = current | (1UL << slot);
-                    occupancy = desired; // Direct write — single-writer (no concurrent commit)
-                    if (desired == Layout.FullMask)
-                    {
-                        FreeClusterHead = -1;
-                    }
-
-                    return (clusterId, slot);
-                }
+                return (clusterId, slot);
             }
 
             // Current free cluster is actually full — reset and fall through to allocate
@@ -1236,35 +1250,14 @@ internal sealed unsafe class ArchetypeClusterState
             byte* clusterBase = accessor.GetChunkAddress(clusterId, true);
             ref ulong occupancy = ref *(ulong*)clusterBase;
 
-            ulong current = occupancy;
-            ulong available = ~current & Layout.FullMask;
-            if (available != 0)
+            int slot = ClaimFreeBit(ref occupancy, Layout.FullMask);
+            if (slot >= 0)
             {
-                int slot = BitOperations.TrailingZeroCount(available);
-                ulong desired = current | (1UL << slot);
-
-                if (Interlocked.CompareExchange(ref occupancy, desired, current) == current)
+                if ((Volatile.Read(ref occupancy) & Layout.FullMask) == Layout.FullMask)
                 {
-                    if (desired == Layout.FullMask)
-                    {
-                        FreeClusterHead = -1;
-                    }
-                    return (clusterId, slot);
+                    FreeClusterHead = -1;
                 }
-
-                current = occupancy;
-                available = ~current & Layout.FullMask;
-                if (available != 0)
-                {
-                    slot = BitOperations.TrailingZeroCount(available);
-                    desired = current | (1UL << slot);
-                    occupancy = desired;
-                    if (desired == Layout.FullMask)
-                    {
-                        FreeClusterHead = -1;
-                    }
-                    return (clusterId, slot);
-                }
+                return (clusterId, slot);
             }
 
             FreeClusterHead = -1;
@@ -2610,13 +2603,29 @@ internal sealed unsafe class ArchetypeClusterState
     }
 
     /// <summary>Add a cluster chunk ID to the active list.</summary>
+    /// <remarks>
+    /// #582 face 2. Worker threads read <see cref="ActiveClusterIds"/> and <see cref="ActiveClusterCount"/> live, concurrently with this. The publication
+    /// order is what makes a (count, array) pair usable: the grown array is released FIRST, the count that indexes into it SECOND, so a reader that acquires
+    /// a given count is guaranteed to see an array at least that long. Readers must load the pair in the mirror order — count, then array — and both loads
+    /// must be `Volatile.Read` (see `TyphonRuntime.ReadActiveClusterList`). Loading the array first admits a plain interleaving that needs no reordering at
+    /// all to fault: old array of length 16, concurrent resize, count read as 17, index 16 of the old array.
+    /// <para>
+    /// This orders the GROWTH of the list. It does not make the list safe to walk against a concurrent <see cref="RemoveFromActiveList"/>, whose
+    /// swap-with-last can still show a walker one cluster twice and skip another — #582 face 1, which needs a real snapshot protocol, not an ordering fix.
+    /// </para>
+    /// </remarks>
     public void AddToActiveList(int chunkId)
     {
         if (ActiveClusterCount >= ActiveClusterIds.Length)
         {
             Array.Resize(ref ActiveClusterIds, ActiveClusterIds.Length * 2);
         }
-        ActiveClusterIds[ActiveClusterCount++] = chunkId;
+
+        // The array store above is a plain store, deliberately: the release below is what orders it. A Volatile.Write cannot sink a preceding store past
+        // itself, so a reader that ACQUIRES this count is guaranteed to see the grown array. Caching the array in a local first — the obvious way to write
+        // this — is what must not be done: it widens the writer's own (array, count) window and produced an IndexOutOfRange in parallel spawn.
+        ActiveClusterIds[ActiveClusterCount] = chunkId;
+        Volatile.Write(ref ActiveClusterCount, ActiveClusterCount + 1);
         // Issue #231: any change to the active cluster set invalidates the tier index.
         ClusterSetVersion++;
         // Issue #233: ensure dormancy arrays cover the new chunkId, initialize to Active/0.
@@ -2648,7 +2657,9 @@ internal sealed unsafe class ArchetypeClusterState
                 }
 
                 ActiveClusterIds[i] = ActiveClusterIds[ActiveClusterCount - 1];
-                ActiveClusterCount--;
+                // Released, to pair with the acquiring readers described on AddToActiveList. Shrinking is the benign direction — a reader that sees the
+                // stale larger count reads an index that is still in range — but leaving one store of the pair plain would make the pairing accidental.
+                Volatile.Write(ref ActiveClusterCount, ActiveClusterCount - 1);
 
                 // If the removed cluster was the free head, reset
                 if (FreeClusterHead == chunkId)
@@ -3097,12 +3108,17 @@ internal sealed unsafe class ArchetypeClusterState
     /// Rebuild per-archetype B+Tree indexes from cluster data (scan all occupied entities).
     /// Used on reopen when index segment is not persisted or is corrupted.
     /// </summary>
-    public void RebuildIndexesFromData(ChangeSet changeSet)
+    /// <returns>
+    /// The number of index entries dropped because the recovered data could not satisfy a UNIQUE constraint (#710). Zero on every healthy rebuild.
+    /// </returns>
+    public int RebuildIndexesFromData(ChangeSet changeSet)
     {
         if (IndexSlots == null || IndexSlots.Length == 0)
         {
-            return;
+            return 0;
         }
+
+        var uniqueConflicts = 0;
 
         // Index rebuild reads from primary segment (SV/V data — Transient excluded from IndexSlots)
         var clusterAccessor = ClusterSegment.CreateChunkAccessor();
@@ -3133,9 +3149,31 @@ internal sealed unsafe class ArchetypeClusterState
                         {
                             ref var field = ref ixSlot.Fields[f];
                             byte* fieldPtr = compBase + slotIndex * compSize + field.FieldOffset;
-                            int elementId = hasString64 && ReferenceEquals(field.Index.Segment, IndexSegmentString64)
-                                ? field.Index.Add(fieldPtr, clusterLocation, ref idxAccessorS64)
-                                : field.Index.Add(fieldPtr, clusterLocation, ref idxAccessor);
+
+                            int elementId;
+                            try
+                            {
+                                elementId = hasString64 && ReferenceEquals(field.Index.Segment, IndexSegmentString64)
+                                    ? field.Index.Add(fieldPtr, clusterLocation, ref idxAccessorS64)
+                                    : field.Index.Add(fieldPtr, clusterLocation, ref idxAccessor);
+                            }
+                            catch (UniqueConstraintViolationException)
+                            {
+                                // #710. RB-01 says derived structures are rebuilt from primary data; it has no clause for primary data that CANNOT satisfy
+                                // the constraint. That state is reachable and legitimate: a hard crash under TickFence loses up to one tick of SingleVersion
+                                // VALUES while keeping every lifecycle record, so an archetype can come back with all its entities and all their keys zeroed.
+                                // Rebuilding a unique index over N identical keys then threw out of InitializeArchetypes, uncatchably, and the state is on
+                                // disk — so the next open repeated it. Losing ≤1 tick of values is the documented trade; a database that will not open is not.
+                                //
+                                // Skipping the entry keeps the entity itself alive and reachable by scan, which is the honest outcome: the value the key was
+                                // derived from is gone, so there is no key to index. The caller logs the count — silence here would trade an unopenable
+                                // database for a quietly incomplete index, which is a worse bargain.
+                                //
+                                // The throw-per-conflict cost is accepted: this runs once, at open, only on a database that has already lost data.
+                                uniqueConflicts++;
+                                continue;
+                            }
+
                             // Rebuild writes a fresh elementId into the cluster tail, overwriting any stale
                             // value from the previous (torn-down) BTree state. Issue #229 Phase 3.
                             if (field.AllowMultiple)
@@ -3156,6 +3194,8 @@ internal sealed unsafe class ArchetypeClusterState
             idxAccessor.Dispose();
             clusterAccessor.Dispose();
         }
+
+        return uniqueConflicts;
     }
 
     /// <summary>
@@ -3221,9 +3261,20 @@ internal sealed unsafe class ArchetypeClusterState
     /// Rebuild Versioned component HEAD values in cluster slots from revision chains.
     /// Called on database reopen when the cluster slot WAL might be stale (crash between commit and tick fence).
     /// For each occupied entity, walks the revision chain to find the HEAD and copies its value to the cluster slot.
+    /// Returns the number of occupied (entity, Versioned slot) pairs it could NOT rebuild — see <paramref name="skips"/>.
     /// </summary>
-    public void RebuildVersionedHeadFromChain(ArchetypeMetadata meta, ArchetypeEngineState engineState, ChangeSet changeSet)
+    /// <param name="meta">Metadata of the archetype being rebuilt.</param>
+    /// <param name="engineState">Per-archetype engine state; supplies the EntityMap and the per-slot ComponentTables.</param>
+    /// <param name="changeSet">ChangeSet the rebuilt slot writes are tracked in.</param>
+    /// <param name="skips">
+    /// Receives a breakdown of the pairs this pass gave up on. Each is a slot left holding whatever was in it — on a fresh reopen, zero. #688 is that outcome
+    /// reaching a caller as if it were committed state: <c>IsValid</c> passes, the rebuild count is non-zero, and the value is silently wrong. The rebuild
+    /// cannot repair these — the chain it needs is genuinely not reachable — but it can stop being quiet about them, which is the difference between a
+    /// diagnosable defect and one that took a 1-in-4 arm64 nightly to notice.
+    /// </param>
+    public void RebuildVersionedHeadFromChain(ArchetypeMetadata meta, ArchetypeEngineState engineState, ChangeSet changeSet, out VersionedHeadRebuildSkips skips)
     {
+        skips = default;
         if (meta.VersionedSlotMask == 0)
         {
             return;
@@ -3273,11 +3324,27 @@ internal sealed unsafe class ArchetypeClusterState
 
                     // Read entity key from cluster
                     long entityPK = *(long*)(clusterBase + Layout.EntityIdsOffset + slotIndex * 8);
+
+                    // C3 (#680's review, applied here per #688): a LIVE cluster slot always carries a non-zero entity id, so a zero at an occupied slot proves
+                    // the geometry being read through is wrong — whatever the cause. Elsewhere (ClusterMigration) a zero here is a legitimate race with a
+                    // concurrent clear and is skipped; that defence does not apply on this path, which runs single-threaded at OPEN before any transaction
+                    // exists. Loud, because the alternative is serving a zeroed component from a reopened database as if it were committed state.
+                    if (entityPK == 0)
+                    {
+                        throw new CorruptionException(meta.Name, chunkId,
+                            $"cluster slot {slotIndex} is marked occupied but carries entity id 0 while rebuilding Versioned HEADs at open — "
+                            + "the cluster geometry being read does not match the occupancy bitmap");
+                    }
+
                     long entityKey = EntityId.FromRaw(entityPK).EntityKey;
 
                     // Read ClusterEntityRecord from EntityMap to get compRevFirstChunkId
                     if (!engineState.EntityMap.TryGet(entityKey, recordBuf, ref mapAccessor))
                     {
+                        // The entity is in the cluster but not in the EntityMap. Its Versioned slots keep whatever they held — zero on a fresh reopen — and
+                        // that value is then served as committed state. RB-01's ordering caveat is the known way to get here: on the crash path the loaded
+                        // EntityMap is not yet trusted, and a mixed cluster archetype runs this pass before the map is rebuilt.
+                        skips.EntityNotInMap++;
                         continue;
                     }
 
@@ -3293,6 +3360,9 @@ internal sealed unsafe class ArchetypeClusterState
                         int compRevFirstChunkId = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(recordBuf, vi);
                         if (compRevFirstChunkId == 0)
                         {
+                            // No chain root recorded for this Versioned slot. Legitimate for a slot never written; indistinguishable, from here, from a record
+                            // whose root was lost — which is why it is counted rather than assumed benign.
+                            skips.NoChainRoot++;
                             continue;
                         }
 
@@ -3301,6 +3371,8 @@ internal sealed unsafe class ArchetypeClusterState
                         var chainResult = RevisionChainReader.WalkChain(ref compRevAccessor, compRevFirstChunkId, long.MaxValue);
                         if (chainResult.IsFailure)
                         {
+                            // A chain root exists and the walk failed. Never benign: the slot keeps its stale or zero value with no other signal.
+                            skips.ChainWalkFailed++;
                             continue;
                         }
 

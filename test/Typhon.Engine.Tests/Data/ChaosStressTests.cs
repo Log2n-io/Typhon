@@ -17,9 +17,15 @@ namespace Typhon.Engine.Tests;
 /// Chaos stress tests that exercise all major subsystems simultaneously under heavy load.
 /// These tests are designed to find race conditions, deadlocks, resource leaks, and edge cases.
 /// </summary>
+// Was [Ignore("Too long, should be manually executed when needed")] — and the label was wrong twice over (#703).
+// It was not slow, it HUNG (#695, a BTree.SpinWriteLock livelock), and [Ignore] made that invisible: NUnit applies
+// [Ignore] unconditionally, so no filter could reach the fixture, while bench/aws/shards.json still NAMED it — the
+// gate budgeted a shard slot, ran zero tests and reported green. [Explicit] + a tier is the honest pairing: out of
+// the PR gate for its duration, but genuinely RUN by the nightly.
 [TestFixture]
 [PublicAPI]
-[Ignore("Too long, should be manually executed when needed")]
+[Explicit("Chaos stress — multi-second, all-subsystem load; too slow for the PR gate")]
+[Category("Nightly")]
 class ChaosStressTests : TestBase<ChaosStressTests>
 {
     // Increase cache size for stress tests
@@ -935,11 +941,15 @@ class ChaosStressTests : TestBase<ChaosStressTests>
 
     #region Rollback Stress Test
 
+    // QUARANTINE (#696): entity value is a stale intermediate after concurrent rollbacks.
+    // Excluded from every tier until #696 is fixed — NOT re-suppressed with [Ignore], which would
+    // hide it from local runs and from the filter too (#703).
     /// <summary>
     /// Tests that rollbacks correctly restore state under concurrent load.
     /// </summary>
     [Test]
     [Property("CacheSize", StressCacheSize)]
+    [Category("Quarantine")]
     public void RollbackStress_ConcurrentRollbacks()
     {
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
@@ -1051,12 +1061,16 @@ class ChaosStressTests : TestBase<ChaosStressTests>
 
     #region Index Warfare Tests
 
+    // QUARANTINE (#696): entity carries the wrong B field after cascading index splits under contention.
+    // Excluded from every tier until #696 is fixed — NOT re-suppressed with [Ignore], which would
+    // hide it from local runs and from the filter too (#703).
     /// <summary>
     /// Forces B+Tree node splits to cascade via monotonic insertions (worst case)
     /// while concurrent threads delete from the middle, triggering merges that race with splits.
     /// </summary>
     [Test]
     [Property("CacheSize", StressCacheSize)]
+    [Category("Quarantine")]
     public void IndexSplit_CascadingSplitsUnderContention()
     {
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
@@ -1155,16 +1169,39 @@ class ChaosStressTests : TestBase<ChaosStressTests>
 
         Task.WaitAll(tasks);
 
+        // Verification opens by ENTITY ID, not through an index, so a mismatch here is not an index defect — it is Open(id).Read() serving another entity's
+        // data. Before reporting that, rule out the cheaper explanation: Spawn handing the SAME id to two entities. If two distinct B keys map to one id, the
+        // defect is at spawn (id or slot reuse racing a destroy) and the read is innocent. Reported together so a failure says which.
+        var idToKeys = new Dictionary<EntityId, List<int>>();
+        foreach (var kvp in allEntities)
+        {
+            if (!idToKeys.TryGetValue(kvp.Value, out var keys))
+            {
+                keys = [];
+                idToKeys[kvp.Value] = keys;
+            }
+            keys.Add(kvp.Key);
+        }
+
+        foreach (var pair in idToKeys)
+        {
+            if (pair.Value.Count > 1)
+            {
+                errors.Add($"DUPLICATE ENTITY ID: {pair.Key} was returned by Spawn for B keys [{string.Join(", ", pair.Value)}]");
+            }
+        }
+
         // Global verification: every surviving entity must be readable with correct B value
         var survivingCount = 0;
         foreach (var kvp in allEntities)
         {
             using var txn = dbe.CreateQuickTransaction();
-            var comp = txn.Open(kvp.Value).Read(CompDArch.D);
+            var opened = txn.Open(kvp.Value);
+            var comp = opened.Read(CompDArch.D);
             survivingCount++;
             if (comp.B != kvp.Key)
             {
-                errors.Add($"Global verify: B={kvp.Key} entity has wrong B field: {comp.B}");
+                errors.Add($"Global verify: B={kvp.Key} entity={kvp.Value} valid={opened.IsValid} has wrong B field: {comp.B}");
             }
         }
 
@@ -1173,6 +1210,9 @@ class ChaosStressTests : TestBase<ChaosStressTests>
         Assert.That(survivingCount, Is.EqualTo(allEntities.Count));
     }
 
+    // QUARANTINE (#696): entities end with another writer's B value — re-confirmed on main 2026-08-07 (21 mismatches).
+    // Excluded from every tier until #696 is fixed — NOT re-suppressed with [Ignore], which would
+    // hide it from local runs and from the filter too (#703).
     /// <summary>
     /// Hammers AllowMultiple indexes (CompD.A) by creating many entities with the same index key,
     /// then rapidly deleting and recreating while concurrent readers access the multi-value buffer.
@@ -1180,6 +1220,7 @@ class ChaosStressTests : TestBase<ChaosStressTests>
     /// </summary>
     [Test]
     [Property("CacheSize", StressCacheSize)]
+    [Category("Quarantine")]
     public void AllowMultipleIndex_HighChurn()
     {
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
@@ -1357,12 +1398,16 @@ class ChaosStressTests : TestBase<ChaosStressTests>
         Assert.That(errors, Is.Empty, $"Errors:\n{string.Join("\n", errors.Take(30))}");
     }
 
+    // QUARANTINE (#696): the unique-index winner carries the wrong B field.
+    // Excluded from every tier until #696 is fixed — NOT re-suppressed with [Ignore], which would
+    // hide it from local runs and from the filter too (#703).
     /// <summary>
     /// Multiple threads deliberately create entities with colliding unique index values (CompD.B).
     /// Exactly one should win per value. Verifies no ghost index entries from failed commits.
     /// </summary>
     [Test]
     [Property("CacheSize", StressCacheSize)]
+    [Category("Quarantine")]
     public void UniqueIndexViolation_UnderLoad()
     {
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
@@ -1770,6 +1815,9 @@ class ChaosStressTests : TestBase<ChaosStressTests>
 
     #region Multi-Entity Transaction Chaos Tests
 
+    // QUARANTINE (#696): conserved sum violated — the engine hands the conflict handler a (Read, Committing) pair that do not correspond (2 bad deltas), so units are CREATED, not misattributed.
+    // Excluded from every tier until #696 is fixed — NOT re-suppressed with [Ignore], which would
+    // hide it from local runs and from the filter too (#703).
     /// <summary>
     /// Bank transfer test: N entities each start with value 1000. Threads perform atomic transfers
     /// (decrement src, increment dst) in single transactions. Readers verify the global invariant:
@@ -1777,6 +1825,7 @@ class ChaosStressTests : TestBase<ChaosStressTests>
     /// </summary>
     [Test]
     [Property("CacheSize", StressCacheSize)]
+    [Category("Quarantine")]
     public void CrossEntityTransaction_AtomicMultiUpdate()
     {
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
@@ -1978,12 +2027,18 @@ class ChaosStressTests : TestBase<ChaosStressTests>
         Assert.That(errors, Is.Empty, $"Errors:\n{string.Join("\n", errors.Take(30))}");
     }
 
+    // QUARANTINE (#696), retargeted from #695. The LIVELOCK is fixed: this used to need --blame-hang to terminate at all and now completes in ~150 ms,
+    // because the pessimistic descent no longer waits on an OBSOLETE leaf as though it were merely locked (IXS-03; see BTree.Insert.cs). What it reports now
+    // is a different and pre-existing defect — "A duplicate key was detected in a unique index" under concurrency, which is #696's family (and possibly
+    // #716's mechanism, a writer inserting into a merge-detached node). Roughly 1 run in 4.
+    // Still quarantined, still NOT [Ignore]d — that would hide it from local runs and from the filter too (#703).
     /// <summary>
     /// Rapidly creates, deletes, and recreates CompD entities (3 secondary indexes each)
     /// to stress index entry insertion/removal cycling and revision chain creation/destruction.
     /// </summary>
     [Test]
     [Property("CacheSize", StressCacheSize)]
+    [Category("Quarantine")]
     public void CreateDeleteRecreate_RapidLifecycle()
     {
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
@@ -2345,6 +2400,9 @@ class ChaosStressTests : TestBase<ChaosStressTests>
 
     #region Combinatorial Nightmare Tests
 
+    // QUARANTINE (#696): was [Ignore("Instable")] with no issue; same fixture-wide concurrent-value defects.
+    // Excluded from every tier until #696 is fixed — NOT re-suppressed with [Ignore], which would
+    // hide it from local runs and from the filter too (#703).
     /// <summary>
     /// The ultimate stress test: 10 threads with different roles exercise every subsystem simultaneously.
     /// Roles: CompD creators, CompD deleters, CompA updaters, long-running MVCC readers,
@@ -2352,7 +2410,7 @@ class ChaosStressTests : TestBase<ChaosStressTests>
     /// </summary>
     [Test]
     [Property("CacheSize", StressCacheSize)]
-    [Ignore("Instable")]
+    [Category("Quarantine")]
     public void UltimateStress_AllSubsystems()
     {
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();

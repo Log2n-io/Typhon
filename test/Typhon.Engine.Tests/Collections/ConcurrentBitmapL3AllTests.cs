@@ -37,8 +37,11 @@ public class ConcurrentBitmapL3AllTests
     private static ConcurrentBitmapL3All CreateBitmap(int capacity)
         => new ConcurrentBitmapL3All("TestBitmap", BitmapTestServices.AllocationResource, BitmapTestServices.MemoryAllocator, capacity);
 
+    // Manual tier: the assertion is a wall-clock throughput threshold, which a shared CI runner cannot hold — running it
+    // in a tier would produce a red that means "the runner was busy", not "the bitmap regressed".
     [Test]
-    [Explicit("Performance test - run manually")]
+    [Explicit("Performance measurement")]
+    [Category("Manual")]
     public void FindNextUnsetL0_PerformanceTest()
     {
         const int BitSize = 1024 * 1024;

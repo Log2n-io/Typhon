@@ -138,7 +138,7 @@ public class EcsLifecycleBenchmarks : IDisposable
     [Benchmark(OperationsPerInvoke = N)]
     public void Commit_Sv_Commit()
     {
-        using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred, DurabilityDiscipline.Commit);
+        using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit);
         for (int i = 0; i < N; i++)
         {
             tx.OpenMut(_f.Sv[i]).Write(AaBenchAnt.Position).X = i;

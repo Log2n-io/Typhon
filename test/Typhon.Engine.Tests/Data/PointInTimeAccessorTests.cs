@@ -309,18 +309,18 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         Assert.That(wa.TryOpen(id2, out _), Is.False);
     }
 
+    /// <summary>
+    /// A PointInTimeAccessor holds no retention, so a committing writer is free to trim the revision its snapshot needs. The read must SAY so (#672).
+    /// </summary>
     /// <remarks>
-    /// The assertion is right and the engine does not honour it — see #672. `PointInTimeAccessor.Create` allocates a TSN without registering it, so cleanup
-    /// cannot see the snapshot and trims the revision this read needs; the read then returns a ZEROED component rather than failing. Quarantined rather than
-    /// re-pointed, because asserting the zero would enshrine the defect, and quarantined rather than deleted because #672 must turn it green again.
-    /// <para>
-    /// Not a #629 regression: reverting the eligibility flip and re-tracing shows the chain trimmed identically. This passed beforehand only because the flat
-    /// read path left the chain ROOT in <c>_locations[slot]</c> on walk failure, and that id happened to name the right content chunk.
-    /// </para>
+    /// This asserted <c>Value == 100</c> before #672 was fixed, which is what the type's name promises and what the engine does not deliver: the accessor
+    /// registers nothing in the transaction chain, so <c>ComputeNextMinTSN</c> cannot see it. The read then returned a ZEROED component — wrong data, and at
+    /// the call site indistinguishable from legitimately-zero data. Retention was rejected as the fix because it would let any caller degrade the engine-wide
+    /// lock-free Versioned read path by holding an accessor too long; failing fast is the cheaper contract, so the assertion is now the throw.
     /// </remarks>
+    [VerifiesRule("SNAP-01")]
     [Test]
-    [Ignore("#672 — PointInTimeAccessor has no retention; cleanup trims the snapshot and the read returns zeros instead of throwing.")]
-    public void AccessorSeesCorrectVersionedRevision()
+    public void AccessorReadingATrimmedVersionedRevision_ThrowsSnapshotExpired()
     {
         using var dbe = SetupEngine();
 
@@ -332,10 +332,9 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
             t.Commit();
         }
 
-        // Create accessor — sees Value=100
         using var accessor = PointInTimeAccessor.Create(dbe);
 
-        // Update the entity to Value=200 AFTER accessor creation
+        // Trims the revision the accessor's snapshot needs — the accessor is invisible to the cleanup that decides how far back to keep.
         using (var t = dbe.CreateQuickTransaction())
         {
             var entity = t.OpenMut(id);
@@ -344,14 +343,55 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
             t.Commit();
         }
 
-        // Accessor should still see Value=100 (its snapshot is frozen)
-        var e = accessor.GetWorkerAccessor(0).Open(id);
-        Assert.That(e.Read(PtaArchVersioned.Data).Value, Is.EqualTo(100));
+        var ex = Assert.Throws<SnapshotExpiredException>(
+            () => _ = accessor.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value,
+            "reading an expired snapshot must fail, not return a zeroed component");
+
+        Assert.That(ex.SnapshotTsn, Is.LessThan(ex.RetainedMinTsn), "the exception must name a snapshot genuinely below the retention floor");
     }
 
-    /// <remarks>Same cause as <see cref="AccessorSeesCorrectVersionedRevision"/> — accessor A's snapshot is trimmed by the write that separates it from B (#672).</remarks>
+    /// <summary>A read-only Transaction registers in the chain, so cleanup can see it and its snapshot survives the same write.</summary>
+    /// <remarks>
+    /// The control for the case above, and the reason the fix is fail-fast rather than retention: the guarantee the accessor cannot make is one the
+    /// transaction already makes, through the mechanism the accessor skips. Without this, "PointInTimeAccessor throws" would look like a limitation of MVCC
+    /// rather than of the accessor.
+    /// </remarks>
+    [VerifiesRule("SNAP-02")]
     [Test]
-    [Ignore("#672 — PointInTimeAccessor has no retention; cleanup trims the snapshot and the read returns zeros instead of throwing.")]
+    public void ReadOnlyTransaction_KeepsItsSnapshotAcrossTheSameWrite()
+    {
+        using var dbe = SetupEngine();
+
+        EntityId id;
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            var v = new PtaVersioned(100);
+            id = t.Spawn<PtaArchVersioned>(PtaArchVersioned.Data.Set(in v));
+            t.Commit();
+        }
+
+        using var snapshot = dbe.TransactionChain.CreateTransaction(dbe, readOnly: true);
+        Assert.That(snapshot.Open(id).Read(PtaArchVersioned.Data).Value, Is.EqualTo(100), "PREMISE: the transaction sees the pre-update value");
+
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            var entity = t.OpenMut(id);
+            ref var data = ref entity.Write(PtaArchVersioned.Data);
+            data.Value = 200;
+            t.Commit();
+        }
+
+        Assert.That(snapshot.Open(id).Read(PtaArchVersioned.Data).Value, Is.EqualTo(100),
+            "a registered snapshot must still see its own revision after a concurrent commit — this is what the accessor cannot do");
+    }
+
+    /// <remarks>
+    /// The write that separates A from B is the same write that trims A's snapshot (#672), so "different snapshots" resolves to "B reads, A raises". Kept
+    /// as one test rather than split: the pair is the point — B proves the newer snapshot is intact, which is what stops A's throw reading as a general
+    /// breakage of the accessor.
+    /// </remarks>
+    [VerifiesRule("SNAP-01")]
+    [Test]
     public void TwoAccessorsAtDifferentTSNs_SeeDifferentSnapshots()
     {
         using var dbe = SetupEngine();
@@ -377,8 +417,11 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
 
         using var accessorB = PointInTimeAccessor.Create(dbe);
 
-        Assert.That(accessorA.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value, Is.EqualTo(10));
-        Assert.That(accessorB.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value, Is.EqualTo(20));
+        Assert.Throws<SnapshotExpiredException>(
+            () => _ = accessorA.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value,
+            "A's snapshot was trimmed by the update that separates it from B");
+        Assert.That(accessorB.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value, Is.EqualTo(20),
+            "B's snapshot is above the retention floor and must read normally");
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -629,9 +672,12 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         accessor.Dispose(); // Should not throw
     }
 
-    /// <remarks>Same cause as <see cref="AccessorSeesCorrectVersionedRevision"/> (#672). The TSN-ordering half is still covered by <see cref="TSN_ReflectsCreationOrder"/>.</remarks>
+    /// <remarks>
+    /// "Independent" survives #672; "both readable" does not. The older accessor's revision is trimmed by the write between them, so what independence now
+    /// means is that the two snapshots resolve differently — one raises, one reads — rather than both silently resolving to the same value.
+    /// </remarks>
+    [VerifiesRule("SNAP-01")]
     [Test]
-    [Ignore("#672 — PointInTimeAccessor has no retention; cleanup trims the snapshot and the read returns zeros instead of throwing.")]
     public void MultipleAccessorsConcurrently_IndependentSnapshots()
     {
         using var dbe = SetupEngine();
@@ -656,8 +702,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
 
         using var acc2 = PointInTimeAccessor.Create(dbe);
 
-        // Both can be used concurrently with independent snapshots
-        Assert.That(acc1.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value, Is.EqualTo(1));
+        // Both are alive and independently resolved; only the older one's revision is gone.
+        Assert.Throws<SnapshotExpiredException>(() => _ = acc1.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value);
         Assert.That(acc2.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value, Is.EqualTo(2));
         Assert.That(acc1.TSN, Is.LessThan(acc2.TSN));
     }
@@ -1016,6 +1062,7 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         }
     }
 
+    [VerifiesRule("SNAP-01")]
     [Test]
     public void MultipleSnapshotsSequential_MVCCVisibility()
     {
@@ -1024,14 +1071,17 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         EntityId id;
         using (var t = dbe.CreateQuickTransaction())
         {
-            var v = new PtaVersioned(0);
+            // NOT zero. This test used to spawn 0 and then assert accA still read 0 after the mutation — which is exactly what a DESTROYED snapshot
+            // returns, so the assertion held whether MVCC isolation worked or not. It was passing for the wrong reason, and #672's probe found it: the
+            // whole 5044-test suite produced two revision-chain walk failures and this test owned one of them.
+            var v = new PtaVersioned(7);
             id = t.Spawn<PtaArchVersioned>(PtaArchVersioned.Data.Set(in v));
             t.Commit();
         }
 
-        // Snapshot A: sees initial value 0
+        // Snapshot A: sees the initial value.
         using var accA = PointInTimeAccessor.Create(dbe);
-        Assert.That(accA.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value, Is.EqualTo(0), "accA initial");
+        Assert.That(accA.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value, Is.EqualTo(7), "accA initial");
 
         // Mutate to 100
         using (var t = dbe.CreateQuickTransaction())
@@ -1045,8 +1095,9 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         // Snapshot B: should see 100
         using var accB = PointInTimeAccessor.Create(dbe);
 
-        // Re-verify A still sees 0 (MVCC isolation)
-        Assert.That(accA.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value, Is.EqualTo(0), "accA after mutation");
+        // A's revision was trimmed by the mutation above — the accessor holds no retention, so this is now a loud failure rather than a zeroed read.
+        Assert.Throws<SnapshotExpiredException>(
+            () => _ = accA.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value, "accA after mutation");
         // B should see 100
         Assert.That(accB.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value, Is.EqualTo(100), "accB after mutation");
 
@@ -1067,13 +1118,10 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         // txB.TSN was allocated after mutation 2, so it sees value 200
         Assert.That(txB.Open(id).Read(PtaArchVersioned.Data).Value, Is.EqualTo(200), "txB control");
 
-        // All three should still see their respective snapshots
-        Assert.That(accA.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value, Is.EqualTo(0), "accA final");
-        // Note: accB's second read of the same entity may see stale data due to the base EntityAccessor
-        // not caching CompRevInfo (Transaction caches it, preventing re-walk of a modified chain).
-        // This is a known behavioral difference — the base accessor re-walks the chain on every Open,
-        // and the chain's in-place modifications by mutation 2 can affect the walk result.
-        // For the runtime use case, each entity is opened ONCE per parallel chunk, so this is not an issue.
+        // A is two mutations behind the retention floor by now; C is current. The note that used to sit here — "accB's second read may see stale data ...
+        // a known behavioral difference" — was a description of this same defect, not of a difference worth keeping.
+        Assert.Throws<SnapshotExpiredException>(
+            () => _ = accA.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value, "accA final");
         Assert.That(accC.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value, Is.EqualTo(200), "accC final");
     }
 

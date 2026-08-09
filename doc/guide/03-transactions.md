@@ -10,7 +10,7 @@ Every change to your data enters Typhon through a **transaction**. Chapter 1 use
 
 This is a **key** chapter. The mental model here is what keeps your data correct under concurrency and crashes.
 
-> 📖 **Two ideas most databases fuse, Typhon keeps separate:** *isolation* (who can see a change) and *durability* (whether it survives a crash). You control them with three independent dials — `StorageMode` (per component), `DurabilityDiscipline` (per transaction), `DurabilityMode` (per UnitOfWork). This chapter tells the story; the **[Isolation & durability cheat sheet](isolation-durability-cheatsheet.md)** is the one-page reference to come back to.
+> 📖 **Two ideas most databases fuse, Typhon keeps separate:** *isolation* (who can see a change) and *durability* (whether it survives a crash). You control them with three independent dials — `StorageMode` (per component), `CommitDiscipline` (per transaction), `DurabilityMode` (per UnitOfWork). This chapter tells the story; the **[Isolation & durability cheat sheet](isolation-durability-cheatsheet.md)** is the one-page reference to come back to.
 
 ---
 
@@ -55,7 +55,7 @@ using (var tx = dbe.CreateQuickTransaction())
 
 **Until `Commit`, no other transaction can see your Versioned changes** — they read the previous value. That's isolation: a half-finished transaction is invisible.
 
-`Rollback` is where storage mode bites (see §4): it cleanly reverts **Versioned** data, but an in-place **SingleVersion/Transient** write has *already happened* and stays. Rollback is not a universal undo — it's an undo of the transactional (Versioned) part.
+`Rollback` is where storage mode bites (see §5): it cleanly reverts **Versioned** data, but an in-place **SingleVersion/Transient** write has *already happened* and stays. Rollback is not a universal undo — it's an undo of what was written *transactionally*. For `SingleVersion` that is a per-transaction choice rather than a property of the mode: open the transaction with the `Commit` discipline (§5) and the write is staged instead of applied in place, so `Rollback` does revert it.
 
 ---
 
@@ -104,15 +104,15 @@ Everything above — isolation, rollback, commit-controlled durability — is th
 | | **Versioned** | **SingleVersion** | **Transient** |
 |---|---|---|---|
 | Visible to others before `Commit` | no | yes, immediately | yes, immediately |
-| `Rollback` reverts the write | yes | no | no |
+| `Rollback` reverts the write | yes | no — unless *Commit* discipline (below), where it does, in O(1) | no |
 | `Commit` decides durability (`DurabilityMode`) | yes | no — tick-fenced, unless *Commit* discipline (below) | no — never persisted |
 | Concurrent writers | conflict-detected | last write wins | last write wins |
 
-So a transaction is a true ACID envelope **for the Versioned data it touches**. For SV/Transient components, the transaction still gives you three things — thread affinity, a consistent snapshot for any *Versioned* components in the same archetype, and atomic entity create/destroy — but it does **not** give you isolation, rollback, or commit-timed durability on those components' *data*. That's the deal you accepted when you chose the faster mode in [ch.2](02-modeling.md).
+So a transaction is a true ACID envelope **for the Versioned data it touches**. For SV/Transient components, the transaction still gives you three things — thread affinity, a consistent snapshot for any *Versioned* components in the same archetype, and atomic entity create/destroy — but by default it does **not** give you isolation, rollback, or commit-timed durability on those components' *data*. That's the deal you accepted when you chose the faster mode in [ch.2](02-modeling.md), and for `SingleVersion` it is a deal you can take back one transaction at a time — see the `Commit` discipline below, which buys all three.
 
 The practical guidance: if a value's correctness depends on "did this transaction commit?", it must be Versioned. If it doesn't, a faster mode is free performance.
 
-> 💡 **The middle ground — a `SingleVersion` write that must never be lost.** By default a SingleVersion write is durable only at the next tick fence (≤ 1 tick of loss). When *one specific* write must be atomic **and** zero-loss — a teleport, an item pickup, a currency debit — but you don't need MVCC snapshots or history, open its transaction with the **`Commit` discipline**: `uow.CreateTransaction(discipline: DurabilityDiscipline.Commit)` (or mark the component `[Component(..., DefaultDiscipline = DurabilityDiscipline.Commit)]`). The write is staged, made atomic and zero-loss durable *at* `Commit`, then published in place — without paying for a revision chain. That's a fourth point on the safety curve; the **[cheat sheet](isolation-durability-cheatsheet.md#4-storage-mode-guarantee-matrix)** lays all four side by side.
+> 💡 **The middle ground — a `SingleVersion` write that must never be lost.** By default a SingleVersion write is durable only at the next tick fence (≤ 1 tick of loss). When *one specific* write must be atomic **and** zero-loss — a teleport, an item pickup, a currency debit — but you don't need MVCC snapshots or history, open its transaction with the **`Commit` discipline**: `uow.CreateTransaction(discipline: CommitDiscipline.Commit)` (or mark the component `[Component(..., DefaultDiscipline = CommitDiscipline.Commit)]`). The write is staged, made atomic and zero-loss durable *at* `Commit`, then published in place — without paying for a revision chain. That's a fourth point on the safety curve; the **[cheat sheet](isolation-durability-cheatsheet.md#4-storage-mode-guarantee-matrix)** lays all four side by side.
 
 ---
 
@@ -128,4 +128,4 @@ You can now write, commit, roll back, and reason about what survives a crash and
 
 **Concepts** (the mental model — one page each): [Transaction](../key-concepts/transaction.md) · [Unit of Work](../key-concepts/unit-of-work.md) · [Snapshot isolation](../key-concepts/snapshot-isolation.md) · [Storage mode](../key-concepts/storage-mode.md) · [Durability — mode & discipline](../key-concepts/durability.md) · [Tick fence](../key-concepts/tick-fence.md).
 
-**Exact calls:** `DatabaseEngine.CreateUnitOfWork(DurabilityMode)` · `UnitOfWork.CreateTransaction(DurabilityDiscipline)` · `CreateQuickTransaction` / `CreateReadOnlyTransaction` · `Transaction.OpenMut` + `EntityRef.Write<T>` · `Commit()` / `Rollback()`.
+**Exact calls:** `DatabaseEngine.CreateUnitOfWork(DurabilityMode)` · `UnitOfWork.CreateTransaction(CommitDiscipline)` · `CreateQuickTransaction` / `CreateReadOnlyTransaction` · `Transaction.OpenMut` + `EntityRef.Write<T>` · `Commit()` / `Rollback()`.

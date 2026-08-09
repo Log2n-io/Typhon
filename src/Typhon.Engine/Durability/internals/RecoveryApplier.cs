@@ -43,6 +43,10 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     // EntityAccessor.GetComponentInfo's Versioned/SingleVersion setup, but threaded through THIS ChangeSet. Flushed at Dispose.
     private readonly Dictionary<ComponentTable, ComponentInfo> _infoByTable = new();
 
+    // routingId → highest entity key this recovery applied for that archetype (#697). Keyed by the EntityId's per-DB ROUTING id, so the driver resolves it
+    // through DatabaseEngine._stateByRouting — NOT _archetypeStates, which is indexed by the per-process catalog id and is a different space entirely.
+    private readonly Dictionary<ushort, long> _maxEntityKeyByArchetype = new();
+
     public RecoveryApplier(DatabaseEngine dbe)
     {
         ArgumentNullException.ThrowIfNull(dbe);
@@ -53,12 +57,34 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     /// <summary>Highest TSN applied — recovery restores NextFreeTSN above this (RB-05).</summary>
     public long MaxTsn => _maxTsn;
 
+    /// <summary>
+    /// Highest entity key applied, per archetype id — recovery restores each archetype's <c>NextEntityKey</c> above this (RB-05, entity-key half; #697).
+    /// </summary>
+    /// <remarks>
+    /// The rebuild paths already raise <c>NextEntityKey</c> from the persisted base (<c>DatabaseEngine.RebuildEntityMaps…</c>), but they run BEFORE the WAL
+    /// window is applied. Entities inserted afterwards by <see cref="ApplySpawnedEntity"/> carry higher keys and bumped nothing, so a crash with no checkpoint
+    /// left the counter at 0 and the first post-recovery spawn re-issued key 1 over a live recovered entity. This is the window's half of the same watermark.
+    /// </remarks>
+    /// <value>Keyed by per-DB <b>routing</b> id (what an <see cref="EntityId"/> carries), not the per-process catalog id.</value>
+    public IReadOnlyDictionary<ushort, long> MaxEntityKeyByArchetype => _maxEntityKeyByArchetype;
+
     /// <summary>Records a committed record's TSN toward the RB-05 watermark (called for every applicable record, applied or not).</summary>
     public void Track(long tsn)
     {
         if (tsn > _maxTsn)
         {
             _maxTsn = tsn;
+        }
+    }
+
+    /// <summary>Records an applied entity's key toward its archetype's allocation watermark (#697).</summary>
+    private void TrackEntityKey(long entityIdRaw)
+    {
+        var id = EntityId.FromRaw(entityIdRaw);
+        var archetypeId = id.ArchetypeId;
+        if (!_maxEntityKeyByArchetype.TryGetValue(archetypeId, out var current) || id.EntityKey > current)
+        {
+            _maxEntityKeyByArchetype[archetypeId] = id.EntityKey;
         }
     }
 
@@ -71,6 +97,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     public void ApplySpawnedEntity(long entityIdRaw, ushort archetypeId, ushort enabledBits, long bornTsn, IReadOnlyCollection<SlotData> slots)
     {
         Track(bornTsn);
+        TrackEntityKey(entityIdRaw);
         EnsureArchetype(archetypeId);
 
         if (_hasClusterAccessor)
@@ -234,6 +261,182 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         // H1: same reasoning as the commit-path tombstone — the replayed death has to take its cluster off the visibility fast path.
         _engineState.ClusterState?.NoteClusterDied(ClusterEntityRecordAccessor.GetClusterChunkId(readBuf));
         _engineState.EntityMap.Upsert(key, readBuf, ref _mapAccessor, _changeSet);
+    }
+
+    /// <summary>
+    /// Applies committed component VALUES to an entity that already exists in the loaded EntityMap — its Spawn is below the checkpoint frontier, so the
+    /// recovery window carries only the update (#569).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The base-entity counterpart of the spawn-init slots folded by <see cref="ApplySpawnedEntity"/>, and the piece whose absence made
+    /// <see cref="CommitDiscipline.TickFence"/>'s documented ≤1-tick loss window untrue: the driver aggregated these payloads correctly and then dropped
+    /// them, so the durability actually delivered for a steady-state workload — spawn once, mutate forever — was the CHECKPOINT interval (30 s by default),
+    /// not one tick. Note this is not SingleVersion-specific despite #569's title: the branch is keyed on "no Spawn in this window", so flat Versioned
+    /// archetypes lost their updates identically.
+    /// </para>
+    /// <para>
+    /// Each storage home is updated through the same primitive the LIVE write path uses, so recovery produces the shape a normal write would have:
+    /// <see cref="ComponentRevisionManager.AddCompRev"/> appends to the existing chain for Versioned (the chain ROOT is unchanged, so the EntityMap record
+    /// needs no rewrite), SingleVersion content is overwritten in place, and a cluster entity's SoA HEAD is written at the slot its ClusterEntityRecord
+    /// already names. Appending rather than re-rooting matters: Phase-4 SCRUB collapses each chain to its highest-TSN committed element and frees the rest, so
+    /// an appended revision is reclaimed correctly, whereas a fresh root would orphan the old chain's chunks where nothing walks them.
+    /// </para>
+    /// <para>Idempotent (AP-12): an entity missing from the base map is a no-op — its Spawn was not below the frontier, so the window's own Spawn handling
+    /// owns it.</para>
+    /// </remarks>
+    public void ApplySlotToExisting(long entityIdRaw, IReadOnlyCollection<SlotData> slots)
+    {
+        if (slots == null || slots.Count == 0)
+        {
+            return;
+        }
+
+        var eid = EntityId.FromRaw(entityIdRaw);
+        EnsureArchetype(eid.ArchetypeId);
+
+        var key = eid.EntityKey;
+        byte* readBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        if (!_engineState.EntityMap.TryGet(key, readBuf, ref _mapAccessor))
+        {
+            return;
+        }
+
+        if (_hasClusterAccessor)
+        {
+            ApplySlotToExistingCluster(entityIdRaw, readBuf, slots);
+            return;
+        }
+
+        var locations = (int*)(readBuf + EntityRecordAccessor.HeaderSize);
+        var rewritten = false;
+
+        foreach (var slot in slots)
+        {
+            var slotIndex = slot.SlotIndex;
+            if (slotIndex >= _metadata.ComponentCount)
+            {
+                continue; // foreign / malformed record — tolerate, as the spawn path does
+            }
+
+            var table = _engineState.SlotToComponentTable[slotIndex];
+            switch (table.StorageMode)
+            {
+                case StorageMode.Versioned:
+                    var root = locations[slotIndex];
+                    if (root == 0)
+                    {
+                        // The base record has no chain for this slot (the component was never written before the checkpoint). Build one, exactly as a spawn
+                        // would, and repoint the location — there is no prior chain to append to and none to orphan.
+                        locations[slotIndex] = CreateVersionedChainRoot(table, entityIdRaw, slot.Tsn, slot.Payload);
+                        rewritten = true;
+                    }
+                    else
+                    {
+                        AppendVersionedRevision(table, root, slot.Tsn, slot.Payload);
+                    }
+
+                    break;
+
+                case StorageMode.SingleVersion:
+                    var content = locations[slotIndex];
+                    if (content == 0)
+                    {
+                        locations[slotIndex] = CreateSingleVersionContent(table, slot.Payload);
+                        rewritten = true;
+                    }
+                    else
+                    {
+                        var info = GetRecoveryInfo(table);
+                        var dst = info.CompContentAccessor.GetChunkAsSpan(content, true);
+                        slot.Payload.AsSpan().CopyTo(dst[info.ComponentOverhead..]);
+                    }
+
+                    break;
+
+                default:
+                    break; // Transient values are never logged
+            }
+        }
+
+        // Only the two "there was no prior storage" branches change the record itself; an append or an in-place overwrite leaves the locations untouched, and
+        // rewriting the record anyway would dirty an EntityMap page for nothing.
+        if (rewritten)
+        {
+            _engineState.EntityMap.Upsert(key, readBuf, ref _mapAccessor, _changeSet);
+        }
+    }
+
+    /// <summary>Cluster counterpart of <see cref="ApplySlotToExisting"/>: writes the committed values into the SoA slot the entity already occupies.</summary>
+    private void ApplySlotToExistingCluster(long entityIdRaw, byte* recordPtr, IReadOnlyCollection<SlotData> slots)
+    {
+        var clusterState = _engineState.ClusterState;
+        var layout = clusterState.Layout;
+        var clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(recordPtr);
+        var slotIdx = ClusterEntityRecordAccessor.GetSlotIndex(recordPtr);
+        byte* clusterBase = _clusterAccessor.GetChunkAddress(clusterChunkId, true);
+
+        foreach (var slot in slots)
+        {
+            var slotIndex = slot.SlotIndex;
+            if (slotIndex >= _metadata.ComponentCount)
+            {
+                continue;
+            }
+
+            var table = _engineState.SlotToComponentTable[slotIndex];
+            if (table.StorageMode == StorageMode.Transient)
+            {
+                continue;
+            }
+
+            var compSize = layout.ComponentSize(slotIndex);
+            byte* dst = clusterBase + layout.ComponentOffset(slotIndex) + slotIdx * compSize;
+            slot.Payload.AsSpan().CopyTo(new Span<byte>(dst, compSize));
+
+            // Versioned in a cluster: the SoA slot is the HEAD cache over the chain, so the chain has to carry the value too or the scrub would collapse the
+            // HEAD back to a stale revision.
+            if (table.StorageMode == StorageMode.Versioned)
+            {
+                var vi = layout.SlotToVersionedIndex[slotIndex];
+                if (vi >= 0)
+                {
+                    var root = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(recordPtr, vi);
+                    if (root != 0)
+                    {
+                        AppendVersionedRevision(table, root, slot.Tsn, slot.Payload);
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Appends one committed revision carrying <paramref name="payload"/> to the chain rooted at <paramref name="chainRootChunkId"/>.
+    /// </summary>
+    /// <remarks>
+    /// Mirrors <see cref="CreateVersionedChainRoot"/>'s end state — content written at <c>ComponentOverhead</c>, element committed so its isolation flag is
+    /// clear — but through <see cref="ComponentRevisionManager.AddCompRev"/>, which allocates the content chunk and grows the chain when the current one is
+    /// full. <c>lockAlreadyHeld</c> stays false: recovery is single-threaded, and taking the chain lock costs nothing here while keeping this path identical
+    /// to the live one rather than a second implementation that has to be kept in step.
+    /// </remarks>
+    private void AppendVersionedRevision(ComponentTable table, int chainRootChunkId, long tsn, byte[] payload)
+    {
+        var info = GetRecoveryInfo(table);
+        var compRevInfo = new ComponentInfo.CompRevInfo
+        {
+            CompRevTableFirstChunkId = chainRootChunkId,
+            PrevRevisionIndex = -1,
+            CurRevisionIndex = -1,
+        };
+
+        ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, 0, false);
+
+        byte* contentBase = info.CompContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId, true);
+        payload.AsSpan().CopyTo(new Span<byte>(contentBase + info.ComponentOverhead, payload.Length));
+
+        var handle = ComponentRevisionManager.GetRevisionElement(ref info.CompRevTableAccessor, chainRootChunkId, compRevInfo.CurRevisionIndex);
+        handle.Commit(tsn);
     }
 
     /// <summary>

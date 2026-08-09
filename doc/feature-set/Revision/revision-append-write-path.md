@@ -74,7 +74,7 @@ deathTx.Commit();
   `TimeoutOptions.Current.RevisionChainLockTimeout`) the write throws `LockTimeoutException` rather than
   blocking indefinitely.
 - Only `StorageMode.Versioned` components use this path — `SingleVersion` and `Transient` components write
-  in place and never allocate a revision (see [Committed Durability Discipline](../Durability/durability-modes/committed-discipline.md)
+  in place and never allocate a revision (see [Commit Discipline](../Durability/durability-modes/committed-discipline.md)
   for the cheaper alternative when isolation isn't needed).
 
 ## 🧪 Tests

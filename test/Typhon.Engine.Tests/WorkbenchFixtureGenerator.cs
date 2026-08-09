@@ -22,8 +22,11 @@ public sealed class WorkbenchFixtureGenerator
     private static string OutputDirectory => Path.Combine(
         AppContext.BaseDirectory, "..", "..", "..", "TestOutput", "workbench-fixture");
 
+    // Manual tier: a developer tool, not a test — it PRODUCES base-tests.typhon for the Workbench and asserts nothing
+    // about the engine. [Explicit] rather than [Ignore] so `--filter` can actually invoke it without editing source.
     [Test]
-    [Ignore("Manual fixture generator — run explicitly via --filter to produce base-tests.typhon for the Workbench.")]
+    [Explicit("Fixture generator — produces base-tests.typhon for the Workbench")]
+    [Category("Manual")]
     public void GenerateBaseTestsDatabase()
     {
         var outDir = Path.GetFullPath(OutputDirectory);

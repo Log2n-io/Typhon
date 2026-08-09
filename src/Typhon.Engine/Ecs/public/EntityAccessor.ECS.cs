@@ -110,7 +110,46 @@ public unsafe partial class EntityAccessor
 
         var info = GetComponentInfoByTypeId(meta._componentTypeIds[slot], meta._slotToComponentType[slot]);
         var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, chainRoot, TSN, true);
-        return chainResult.IsSuccess ? chainResult.Value.CurCompContentChunkId : 0;
+        if (chainResult.IsFailure)
+        {
+            ThrowIfSnapshotExpired();
+            return 0;
+        }
+
+        return chainResult.Value.CurCompContentChunkId;
+    }
+
+    /// <summary>
+    /// Turns a revision-chain walk that found nothing into a <see cref="SnapshotExpiredException"/> when the reason is that this snapshot was trimmed (#672).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Called only from the FAILURE branch of a chain walk, so a successful read pays nothing at all — not even the watermark load. That is cheaper than
+    /// checking the watermark up front on every read, and strictly more precise: a walk that fails for a legitimate reason (the entity's component genuinely
+    /// has no revision visible at this TSN) is left alone unless the snapshot is also demonstrably below the retention floor.
+    /// </para>
+    /// <para>
+    /// Scoped to <see cref="PointInTimeAccessor"/> worker accessors via <c>_ownsPersistentEpochScope</c>. A <c>Transaction</c> registers in the chain, so
+    /// <c>ComputeNextMinTSN</c> can see it and its snapshot is genuinely retained; a walk failure there means something else and must not be reported as an
+    /// expiry.
+    /// </para>
+    /// <para>
+    /// Measured before it was written: across the full 5044-test suite there are exactly TWO chain-walk failures, both of them PTA reads below the
+    /// watermark. So this branch is not a hot path being taxed — it is a path that essentially only fires when the defect fires.
+    /// </para>
+    /// </remarks>
+    private void ThrowIfSnapshotExpired()
+    {
+        if (!_ownsPersistentEpochScope || _dbe == null)
+        {
+            return;
+        }
+
+        var retained = _dbe.TransactionChain.RetainedMinTSN;
+        if (TSN < retained)
+        {
+            throw new SnapshotExpiredException(TSN, retained);
+        }
     }
 
     /// <summary>Open an entity for reading. Throws if not found or not visible.</summary>
@@ -335,6 +374,14 @@ public unsafe partial class EntityAccessor
                 var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, compRevFirstChunkId, TSN, true);
                 if (chainResult.IsFailure)
                 {
+                    ThrowIfSnapshotExpired();
+
+                    // #672, second half. `CopyLocationsFrom` above seeded this slot with the chain ROOT, and `continue` used to leave it there — so a walk
+                    // that found nothing handed the reader a CompRev chunk id to dereference as a CONTENT chunk id. It reads whatever happens to live at
+                    // that id in the content segment, which is a silent wrong VALUE rather than a zeroed one, and is exactly why three PTA tests passed
+                    // before the #629 eligibility flip: chunk id 1 in the CompRev segment happened to name chunk id 1 in the content segment, which still
+                    // held the pre-update value. Zeroing is not a good answer either, but it is an honest one, and it is what the cluster branch already does.
+                    result.SetLocation(slot, 0);
                     continue;
                 }
 
@@ -349,16 +396,18 @@ public unsafe partial class EntityAccessor
     // Component data access (delegated from EntityRef) — non-virtual hot path
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// <summary>Read component data via the existing ComponentInfo accessor cache. Zero-copy — returns a ref into the page.</summary>
+    /// <summary>Read component data via the existing ComponentInfo accessor cache. Zero-copy — returns a ref into the page.
+    /// <paramref name="pk"/> is the entity's raw <see cref="EntityId"/>, the key of the Commit-discipline staging map.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal ref readonly T ReadEcsComponentData<T>(ComponentTable table, int chunkId) where T : unmanaged
+    internal ref readonly T ReadEcsComponentData<T>(ComponentTable table, int chunkId, long pk) where T : unmanaged
     {
         var info = GetComponentInfo(typeof(T));
         byte* ptr = table.StorageMode == StorageMode.Transient ? info.TransientCompContentAccessor.GetChunkAddress(chunkId) : info.CompContentAccessor.GetChunkAddress(chunkId);
-        // Commit-discipline read-your-own-writes: return this tx's staged value if it has staged this (component, entity). The chunk's inline
-        // entityPK (offset 0 for SV/Transient) keys the staging map.
-        if (_discipline == DurabilityDiscipline.Commit && table.StorageMode == StorageMode.SingleVersion
-            && info.CommitStaged != null && info.CommitStaged.TryGetValue(*(long*)ptr, out var slot))
+        // Commit-discipline read-your-own-writes: return this tx's staged value if it has staged this (component, entity). The staging map is keyed by
+        // entity PK, which the CALLER supplies — reading it back out of the chunk header instead was #713: a spawn-staging chunk has no PK written yet
+        // (FinalizeSpawns stamps it at publish), so every own-spawn lookup keyed on 0.
+        if (_discipline == CommitDiscipline.Commit && table.StorageMode == StorageMode.SingleVersion
+            && info.CommitStaged != null && info.CommitStaged.TryGetValue(pk, out var slot))
         {
             return ref Unsafe.AsRef<T>(_commitStagingBuffer + slot.Offset);
         }
@@ -379,9 +428,11 @@ public unsafe partial class EntityAccessor
     }
 
     /// <summary>Write component data via the existing ComponentInfo accessor cache. Returns mutable ref.
-    /// For SingleVersion: atomically marks chunkId in DirtyBitmap for tick fence serialization.</summary>
+    /// For SingleVersion: atomically marks chunkId in DirtyBitmap for tick fence serialization.
+    /// <paramref name="pk"/> is the entity's raw <see cref="EntityId"/>; <paramref name="isOwnSpawn"/> marks an entity this transaction spawned and has
+    /// not published yet (see the Commit-discipline branch below).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal ref T WriteEcsComponentData<T>(ComponentTable table, int chunkId) where T : unmanaged
+    internal ref T WriteEcsComponentData<T>(ComponentTable table, int chunkId, long pk, bool isOwnSpawn) where T : unmanaged
     {
         var info = GetComponentInfo(typeof(T));
 
@@ -389,15 +440,21 @@ public unsafe partial class EntityAccessor
         // pre-write value, so seed the staging slot from it for partial-write correctness. CM-02 escalation first (so DefaultDiscipline=Commit applies).
         if (table.StorageMode == StorageMode.SingleVersion)
         {
-            if (table.Discipline == DurabilityDiscipline.Commit)
+            if (table.Discipline == CommitDiscipline.Commit)
             {
                 ResolveCommitDiscipline(table);
             }
-            if (_discipline == DurabilityDiscipline.Commit)
+
+            // #713: an entity this transaction spawned has no HEAD to protect — it lives in a spawn-staging chunk that no other transaction can see until
+            // FinalizeSpawns publishes it, so writing in place IS the atomic behaviour CM-01 asks for, and it is what TickFence already does. Staging it
+            // was wrong three ways: StagedSlot.Location would carry a content chunk id where PublishStagedEntry expects a cluster location, the publish
+            // would run against a HEAD that does not exist yet, and FinalizeSpawns would then overwrite it with the spawn value. Skipping the staging
+            // leaves the spawn's own SV Slot record (BuildCommitBatch, #395 D5 / CM-06) carrying the final value — one record, still atomic.
+            if (_discipline == CommitDiscipline.Commit && !isOwnSpawn)
             {
                 byte* head = info.CompContentAccessor.GetChunkAddress(chunkId);
                 // Flat location is the content chunkId (captured for the no-re-lookup publish).
-                return ref StageCommitWriteCore<T>(info, *(long*)head, chunkId, head + info.ComponentOverhead);
+                return ref StageCommitWriteCore<T>(info, pk, chunkId, head + info.ComponentOverhead);
             }
         }
 
@@ -442,13 +499,13 @@ public unsafe partial class EntityAccessor
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Committed durability discipline — Variant A staging (issue #392)
+    // Committed discipline — Variant A staging (issue #392)
     // ═══════════════════════════════════════════════════════════════════════
 
     private const int InitialCommitStagingCapacity = 4096;
 
     /// <summary>
-    /// CM-02 discipline resolution, invoked from the write path for a <see cref="DurabilityDiscipline.Commit"/>-defaulted
+    /// CM-02 discipline resolution, invoked from the write path for a <see cref="CommitDiscipline.Commit"/>-defaulted
     /// <see cref="StorageMode.SingleVersion"/> component. Escalates this accessor's whole transaction to Commit on first touch (so
     /// every subsequent write is commit-durable), and rejects escalation if a TickFence in-place write has already happened (we cannot
     /// retroactively make an applied write atomic). Idempotent and cheap once escalated. Callers gate on
@@ -456,7 +513,7 @@ public unsafe partial class EntityAccessor
     /// </summary>
     internal void ResolveCommitDiscipline(ComponentTable table)
     {
-        if (_discipline == DurabilityDiscipline.Commit)
+        if (_discipline == CommitDiscipline.Commit)
         {
             return;
         }
@@ -465,11 +522,11 @@ public unsafe partial class EntityAccessor
         {
             throw new InvalidOperationException(
                 $"Component '{table.Name}' is declared DefaultDiscipline=Commit, but this transaction has already performed a TickFence " +
-                "in-place write. Create the transaction with discipline: DurabilityDiscipline.Commit before writing any component so the " +
+                "in-place write. Create the transaction with discipline: CommitDiscipline.Commit before writing any component so the " +
                 "whole transaction is commit-durable (CM-02 uniformity).");
         }
 
-        _discipline = DurabilityDiscipline.Commit;
+        _discipline = CommitDiscipline.Commit;
         _dbe?.LogDisciplineEscalated(TSN, table.Name);
     }
 

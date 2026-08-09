@@ -142,6 +142,33 @@ internal sealed class InMemoryWalFileIO : IWalFileIO
     public bool Exists(string path) => Segments.ContainsKey(NormalizePath(path));
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Answers from the segments actually held, so an in-memory fixture takes the same recovery path a disk-backed one does (#688). A segment is included
+    /// only once it holds data: <see cref="OpenSegment"/> creates the entry eagerly, and a WAL directory whose segments are all empty is indistinguishable
+    /// from one that was never written — treating it as "a crash left a window" would send every fresh open down the crash path.
+    /// </remarks>
+    public IReadOnlyList<string> EnumerateSegmentPaths(string directory)
+    {
+        if (directory == null)
+        {
+            return [];
+        }
+
+        var prefix = NormalizePath(directory);
+        var result = new List<string>();
+        foreach (var (path, segment) in Segments)
+        {
+            if (segment.WrittenLength > 0 && path.EndsWith(".wal", StringComparison.OrdinalIgnoreCase)
+                && System.IO.Path.GetDirectoryName(path) == prefix.TrimEnd(System.IO.Path.DirectorySeparatorChar))
+            {
+                result.Add(path);
+            }
+        }
+
+        return result;
+    }
+
+    /// <inheritdoc />
     public void Delete(string path) => Segments.TryRemove(NormalizePath(path), out _);
 
     /// <inheritdoc />

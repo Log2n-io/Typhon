@@ -106,11 +106,11 @@ public sealed class UnitOfWork : IDisposable
     /// <exception cref="ObjectDisposedException">The UoW has been disposed.</exception>
     /// <exception cref="InvalidOperationException">The UoW is not in <see cref="UnitOfWorkState.Pending"/> state.</exception>
     /// <param name="discipline">
-    /// Durability discipline for SingleVersion-layout writes (<see cref="DurabilityDiscipline.TickFence"/> default, or
-    /// <see cref="DurabilityDiscipline.Commit"/> for zero-loss, atomic, commit-scoped writes). Fixed for the transaction.
+    /// Durability discipline for SingleVersion-layout writes (<see cref="CommitDiscipline.TickFence"/> default, or
+    /// <see cref="CommitDiscipline.Commit"/> for zero-loss, atomic, commit-scoped writes). Fixed for the transaction.
     /// </param>
     [return: TransfersOwnership]
-    public Transaction CreateTransaction(DurabilityDiscipline discipline = DurabilityDiscipline.TickFence)
+    public Transaction CreateTransaction(CommitDiscipline discipline = CommitDiscipline.TickFence)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_state != UnitOfWorkState.Pending)

@@ -59,10 +59,10 @@ public class DBComponentDefinition
     public StorageMode StorageMode { get; internal set; }
 
     /// <summary>
-    /// Default durability discipline (from <c>[Component(DefaultDiscipline=…)]</c>). Only meaningful for
-    /// <see cref="StorageMode.SingleVersion"/>; <see cref="DurabilityDiscipline.TickFence"/> otherwise.
+    /// Default commit discipline (from <c>[Component(DefaultDiscipline=…)]</c>). Only meaningful for
+    /// <see cref="StorageMode.SingleVersion"/>; <see cref="CommitDiscipline.TickFence"/> otherwise.
     /// </summary>
-    public DurabilityDiscipline DefaultDiscipline { get; internal set; }
+    public CommitDiscipline DefaultDiscipline { get; internal set; }
 
     /// <summary>Byte size of the component's field data (the largest field offset plus its size), excluding per-chunk overhead.</summary>
     public int ComponentStorageSize { get; private set; }
@@ -220,7 +220,7 @@ public class DBComponentDefinition
     }
 
     internal DBComponentDefinition(string name, int revision, StorageMode storageMode = StorageMode.Versioned,
-        DurabilityDiscipline defaultDiscipline = DurabilityDiscipline.TickFence)
+        CommitDiscipline defaultDiscipline = CommitDiscipline.TickFence)
     {
         Name = name;
         Revision = revision;

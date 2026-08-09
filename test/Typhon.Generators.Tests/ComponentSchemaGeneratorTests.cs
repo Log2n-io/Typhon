@@ -24,21 +24,21 @@ namespace Typhon.Schema.Definition
     {
         public ComponentAttribute(string name, int revision) { }
         public StorageMode StorageMode { get; set; }
-        public DurabilityDiscipline DefaultDiscipline { get; set; }
+        public CommitDiscipline DefaultDiscipline { get; set; }
     }
     public sealed class FieldAttribute : System.Attribute { public int? FieldId { get; set; } public string Name { get; set; } public string PreviousName { get; set; } }
     public sealed class IndexAttribute : System.Attribute { public bool AllowMultiple { get; set; } public CascadeAction OnParentDelete { get; set; } }
     public sealed class ForeignKeyAttribute : System.Attribute { public ForeignKeyAttribute(System.Type t) { } }
     public sealed class SpatialIndexAttribute : System.Attribute { public SpatialIndexAttribute(float margin, float cellSize = 0f) { } public SpatialMode Mode { get; set; } public uint Category { get; set; } }
     public enum StorageMode { Versioned = 0, SingleVersion = 1, Transient = 2 }
-    public enum DurabilityDiscipline { TickFence = 0, Commit = 1 }
+    public enum CommitDiscipline { TickFence = 0, Commit = 1 }
     public enum SpatialMode : byte { Dynamic = 0, Static = 1 }
     public enum CascadeAction { None = 0, Delete = 1 }
     public interface IComponentSchemaProvider { ComponentSchemaSpec GetComponentSchema(); }
     public readonly struct ComponentSchemaSpec
     {
         public ComponentSchemaSpec(string name, int revision, ComponentFieldSpec[] fields,
-            StorageMode storageMode = StorageMode.Versioned, DurabilityDiscipline defaultDiscipline = DurabilityDiscipline.TickFence) { }
+            StorageMode storageMode = StorageMode.Versioned, CommitDiscipline defaultDiscipline = CommitDiscipline.TickFence) { }
     }
     public readonly struct ComponentFieldSpec
     {
@@ -104,7 +104,7 @@ namespace Game
     [StructLayout(LayoutKind.Sequential)]
     public struct Fk { public long Id; }
 
-    [Component(""Game.Rep"", 3, StorageMode = StorageMode.SingleVersion, DefaultDiscipline = DurabilityDiscipline.Commit)]
+    [Component(""Game.Rep"", 3, StorageMode = StorageMode.SingleVersion, DefaultDiscipline = CommitDiscipline.Commit)]
     [StructLayout(LayoutKind.Sequential)]
     public struct Rep
     {
@@ -151,7 +151,7 @@ namespace Game
             Assert.That(reg, Does.Contain("spatialCategory: 7u"));
             // Component-level storage/discipline emitted as casts from the attribute values.
             Assert.That(reg, Does.Contain("storageMode: (global::Typhon.Schema.Definition.StorageMode)1"));
-            Assert.That(reg, Does.Contain("defaultDiscipline: (global::Typhon.Schema.Definition.DurabilityDiscipline)1"));
+            Assert.That(reg, Does.Contain("defaultDiscipline: (global::Typhon.Schema.Definition.CommitDiscipline)1"));
         });
     }
 

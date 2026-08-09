@@ -1,4 +1,4 @@
-// unset
+﻿// unset
 
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -339,13 +339,18 @@ internal abstract partial class BTree<TKey, TStore>
             {
                 var ll = _linkList;
                 ll.PreDirtyForWrite(ref accessor);
-                SpinWriteLock(ll.GetLatch(ref accessor));
-
+                // #716: `_linkList` is a cached pointer, so it can name a leaf a concurrent merge already detached. Popping the first entry out of a detached
+                // node reports a successful removal while the value stays reachable from the root. On obsolete no lock is held — fall through to the general
+                // path, which re-descends.
+                if (SpinWriteLock(ll.GetLatch(ref accessor)) == WriteLockOutcome.Obsolete)
+                {
+                    Interlocked.Increment(ref _obsoleteRestarts);
+                }
                 // Issue #297: ll might no longer be the leftmost leaf if a concurrent split inserted a new
                 // left-side leaf, OR if we observed a stale `_linkList` field. If ll has a valid previous,
                 // the key could live in that earlier leaf — fall through to the general path.
                 // Mirrors the symmetric end-fast-path safety at the rll branch below.
-                if (ll.GetPrevious(ref accessor).IsValid)
+                else if (ll.GetPrevious(ref accessor).IsValid)
                 {
                     ll.GetLatch(ref accessor).AbortWriteLock();
                 }
@@ -379,11 +384,13 @@ internal abstract partial class BTree<TKey, TStore>
             {
                 var rll = _reverseLinkList;
                 rll.PreDirtyForWrite(ref accessor);
-                SpinWriteLock(rll.GetLatch(ref accessor));
-
+                if (SpinWriteLock(rll.GetLatch(ref accessor)) == WriteLockOutcome.Obsolete)   // #716 — see the begin fast path above
+                {
+                    Interlocked.Increment(ref _obsoleteRestarts);
+                }
                 // Safety: if rll was split concurrently, it's no longer the rightmost leaf.
                 // Fall through to general path which handles stale pointers correctly.
-                if (rll.GetNext(ref accessor).IsValid)
+                else if (rll.GetNext(ref accessor).IsValid)
                 {
                     rll.GetLatch(ref accessor).AbortWriteLock();
                 }
@@ -412,7 +419,7 @@ internal abstract partial class BTree<TKey, TStore>
             _hasCachedLastKey = false;
             bool merge;
             SpinWait spin = default;
-            while (true)
+            for (int attempt = 0; ; attempt++)
             {
                 merge = RemoveIterative(ref args, ref accessor, out bool removeCompleted);
                 if (removeCompleted)
@@ -420,6 +427,13 @@ internal abstract partial class BTree<TKey, TStore>
                     break;
                 }
                 Interlocked.Increment(ref _optimisticRestarts);
+                if (attempt >= MaxPessimisticRestarts)
+                {
+                    // #695: this loop used to be `while (true)`, same as the insert twin.
+                    ThrowHelper.ThrowInvalidOp(
+                        $"B+Tree remove made no progress in {MaxPessimisticRestarts} pessimistic retries. The descent keeps reaching a leaf it can neither "
+                        + "validate nor modify, which no further retrying resolves. This is a liveness defect in the tree, not contention (see #695).");
+                }
                 spin.SpinOnce();
             }
 
@@ -536,12 +550,23 @@ internal abstract partial class BTree<TKey, TStore>
         int leafVersion = leafLatch.ReadVersion();
         if (leafVersion == 0)
         {
-            // Leaf is locked or obsolete. SpinWriteLock to wait, then restart.
-            SpinWriteLock(leafLatch);
-            leafLatch.AbortWriteLock();
+            // LOCKED and OBSOLETE both read 0 and need opposite treatment — see the twin in BTree.Insert.cs and IXS-03. Waiting on an obsolete node is
+            // waiting for something that will never happen, and locking it writes into a detached node (#716).
+            if (!leafLatch.IsObsolete)
+            {
+                // It can turn obsolete between that test and this acquisition — the current holder may be the merge itself. Nothing to abort if so.
+                if (SpinWriteLock(leafLatch) != WriteLockOutcome.Obsolete)
+                {
+                    leafLatch.AbortWriteLock();
+                }
+            }
             return false;
         }
-        SpinWriteLock(leafLatch);
+        if (SpinWriteLock(leafLatch) == WriteLockOutcome.Obsolete)
+        {
+            Interlocked.Increment(ref _obsoleteRestarts);
+            return false; // restart — the descent landed on a leaf a merge has detached
+        }
         if (!leafLatch.ValidateVersionLocked(leafVersion))
         {
             leafLatch.AbortWriteLock();
@@ -697,15 +722,18 @@ internal abstract partial class BTree<TKey, TStore>
             // Lock siblings that HandleChildMerge might borrow from or merge with
             NodeWrapper leftSib = relatives.GetLeftSibling(ref sibAccessor);
             NodeWrapper rightSib = relatives.GetRightSibling(ref sibAccessor);
+            // SMO-path acquisition (#716) — same argument as InsertIterative's Phase 3 twin: the merge must propagate, there is no restart point, the parent is
+            // held so a TRUE sibling cannot be detached under us, and the cousin residual is counted. Skipping a sibling is NOT an option here: HandleChildMerge
+            // resolves it again internally and its merge branch dereferences it, so a dropped sibling trades a rare lost key for a certain null deref.
             if (leftSib.IsValid)
             {
                 leftSib.PreDirtyForWrite(ref sibAccessor);
-                SpinWriteLock(leftSib.GetLatch(ref sibAccessor));
+                SpinWriteLockOnSmoPath(leftSib.GetLatch(ref sibAccessor));
             }
             if (rightSib.IsValid)
             {
                 rightSib.PreDirtyForWrite(ref sibAccessor);
-                SpinWriteLock(rightSib.GetLatch(ref sibAccessor));
+                SpinWriteLockOnSmoPath(rightSib.GetLatch(ref sibAccessor));
             }
 
             merged = node.HandleChildMerge(ctx.PathChildIndices[ctx.Depth], ref relatives, ref accessor, ref sibAccessor);

@@ -5,7 +5,7 @@ using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests;
 
-// ── Test components for the Committed durability discipline (issue #392) ──────────────────
+// ── Test components for the Committed discipline (issue #392) ──────────────────
 [Component("Typhon.Test.Committed.CmPosition", 1, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 struct CmPosition
@@ -15,7 +15,7 @@ struct CmPosition
 }
 
 // DefaultDiscipline=Commit — any tx that writes this component is escalated to Commit (CM-02).
-[Component("Typhon.Test.Committed.CmWallet", 1, StorageMode = StorageMode.SingleVersion, DefaultDiscipline = DurabilityDiscipline.Commit)]
+[Component("Typhon.Test.Committed.CmWallet", 1, StorageMode = StorageMode.SingleVersion, DefaultDiscipline = CommitDiscipline.Commit)]
 [StructLayout(LayoutKind.Sequential)]
 struct CmWallet
 {
@@ -113,7 +113,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         using var dbe = SetupEngine();
         var id = SpawnAnt(dbe, 10, 20, 0);
 
-        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, DurabilityDiscipline.Commit))
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit))
         {
             var e = tx.OpenMut(id);
             ref var p = ref e.Write(CmEntity.Position);
@@ -135,7 +135,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         using var dbe = SetupEngine();
         var id = SpawnAnt(dbe, 1, 2, 0);
 
-        using var writeTx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, DurabilityDiscipline.Commit);
+        using var writeTx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit);
         var e = writeTx.OpenMut(id);
         e.Write(CmEntity.Position).X = 777;   // staged — HEAD must remain (1,2)
 
@@ -159,7 +159,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         using var dbe = SetupEngine();
         var id = SpawnAnt(dbe, 5, 6, 0);
 
-        using var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, DurabilityDiscipline.Commit);
+        using var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit);
         var e = tx.OpenMut(id);
         e.Write(CmEntity.Position).X = 42;
         ref readonly var rp = ref e.Read(CmEntity.Position);
@@ -174,7 +174,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         using var dbe = SetupEngine();
         var id = SpawnAnt(dbe, 3, 4, 0);
 
-        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, DurabilityDiscipline.Commit))
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit))
         {
             tx.OpenMut(id).Write(CmEntity.Position).X = 1234;
             tx.Rollback();
@@ -191,7 +191,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         using var dbe = SetupEngine();
         var id = SpawnAnt(dbe, 0, 0, 100);
 
-        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, DurabilityDiscipline.Commit))
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit))
         {
             var e = tx.OpenMut(id);
             e.Write(CmEntity.Position) = new CmPosition(7, 8);
@@ -216,7 +216,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
         {
             tx.OpenMut(id).Write(CmEntity.Wallet).Gold = 9999;
-            Assert.That(tx.Discipline, Is.EqualTo(DurabilityDiscipline.Commit), "tx was not escalated by DefaultDiscipline=Commit");
+            Assert.That(tx.Discipline, Is.EqualTo(CommitDiscipline.Commit), "tx was not escalated by DefaultDiscipline=Commit");
             tx.Commit();
         }
 
@@ -241,7 +241,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
 
         // Move entity from TeamId 1 → 7 under Commit discipline, then commit. Deliberately NO WriteTickFence afterward:
         // the exact index must already reflect TeamId=7, the same as Versioned (CM-05/AC-11 — Move done at commit).
-        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, DurabilityDiscipline.Commit))
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit))
         {
             tx.OpenMut(id).Write(CmIdxEntity.Team).TeamId = 7;
             tx.Commit();
@@ -290,7 +290,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         using var dbe = SetupEngine();
         var id = SpawnFlat(dbe, 10);
 
-        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, DurabilityDiscipline.Commit))
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit))
         {
             var e = tx.OpenMut(id);
             // Staged write — HEAD untouched until commit; a peek tx sees the old value.
@@ -313,7 +313,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         using var dbe = SetupEngine();
         var id = SpawnFlat(dbe, 7);
 
-        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, DurabilityDiscipline.Commit))
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit))
         {
             tx.OpenMut(id).Write(CmFlatEntity.Val).Tag = 999;
             tx.Rollback();
@@ -339,7 +339,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         }
         dbe.WriteTickFence(1);
 
-        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, DurabilityDiscipline.Commit))
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit))
         {
             tx.OpenMut(id).Write(CmFlatEntity.Val).Tag = 7;
             tx.Commit();
@@ -352,5 +352,100 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
             "new key not in the flat index at commit (AC-11 / CM-05)");
         Assert.That(q.Query<CmFlatEntity>().WhereField<CmFlatVal>(b => b.Tag == 2).Count(), Is.EqualTo(1),
             "untouched flat entity disappeared from the index");
+    }
+
+    // ── #713: spawn an entity and write one of its components in the SAME transaction ──────────────────────────────
+    //
+    // "Build the object completely, then commit it" is the common shape, and under Commit discipline it threw an NRE out of BuildCommitBatch: the staging
+    // key is the entity PK read from the content chunk header, which the spawn-staging chunk does not carry yet, so every such write staged under key 0.
+    // The suite's other Commit-discipline coverage only ever writes to entities spawned in a PREVIOUS transaction, which is why nothing saw it.
+
+    [Test]
+    public void CommitDiscipline_SpawnThenWrite_SameTransaction()
+    {
+        using var dbe = SetupEngine();
+
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit))
+        {
+            var pos = new CmPosition(1, 2);
+            var wallet = new CmWallet(50);
+            id = tx.Spawn<CmEntity>(CmEntity.Position.Set(in pos), CmEntity.Wallet.Set(in wallet));
+            tx.OpenMut(id).Write(CmEntity.Position).X = 42;   // same transaction as the Spawn
+            tx.Commit();
+        }
+
+        using var read = dbe.CreateQuickTransaction();
+        ref readonly var rp = ref read.Open(id).Read(CmEntity.Position);
+        Assert.That(rp.X, Is.EqualTo(42f), "the same-transaction write did not win over the spawn value");
+        Assert.That(rp.Y, Is.EqualTo(2f), "the untouched field lost its spawn value");
+    }
+
+    /// <summary>
+    /// #713: read-your-own-writes has to hold for a spawn-then-write entity too — the staged value is keyed on the entity PK, so a key that does not
+    /// identify the entity would make the staging lookup miss and hand back the spawn value instead of the staged one.
+    /// </summary>
+    [Test]
+    public void CommitDiscipline_SpawnThenWrite_ReadsBackStagedValueBeforeCommit()
+    {
+        using var dbe = SetupEngine();
+
+        using var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit);
+        var pos = new CmPosition(1, 2);
+        var wallet = new CmWallet(0);
+        var id = tx.Spawn<CmEntity>(CmEntity.Position.Set(in pos), CmEntity.Wallet.Set(in wallet));
+        tx.OpenMut(id).Write(CmEntity.Position).X = 314;
+
+        ref readonly var staged = ref tx.Open(id).Read(CmEntity.Position);
+        Assert.That(staged.X, Is.EqualTo(314f), "read-your-own-writes broken for a same-transaction spawn+write");
+        tx.Commit();
+    }
+
+    /// <summary>
+    /// #713: two entities spawned and written in one Commit-discipline transaction must not collide. Staging under a constant key (the unpopulated PK
+    /// header) made the second write overwrite the first — a silent wrong value, where the single-entity case only crashed.
+    /// </summary>
+    [Test]
+    public void CommitDiscipline_SpawnThenWrite_TwoEntities_DoNotCollide()
+    {
+        using var dbe = SetupEngine();
+
+        EntityId a, b;
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit))
+        {
+            var pos = new CmPosition(0, 0);
+            var wallet = new CmWallet(0);
+            a = tx.Spawn<CmEntity>(CmEntity.Position.Set(in pos), CmEntity.Wallet.Set(in wallet));
+            b = tx.Spawn<CmEntity>(CmEntity.Position.Set(in pos), CmEntity.Wallet.Set(in wallet));
+            tx.OpenMut(a).Write(CmEntity.Position).X = 11;
+            tx.OpenMut(b).Write(CmEntity.Position).X = 22;
+            tx.Commit();
+        }
+
+        using var read = dbe.CreateQuickTransaction();
+        Assert.That(read.Open(a).Read(CmEntity.Position).X, Is.EqualTo(11f));
+        Assert.That(read.Open(b).Read(CmEntity.Position).X, Is.EqualTo(22f));
+    }
+
+    /// <summary>#713: the same sequence under the default TickFence discipline already worked — this locks it so a fix cannot regress the other side.</summary>
+    [Test]
+    public void TickFenceDiscipline_SpawnThenWrite_SameTransaction()
+    {
+        using var dbe = SetupEngine();
+
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var pos = new CmPosition(1, 2);
+            var wallet = new CmWallet(0);
+            id = tx.Spawn<CmEntity>(CmEntity.Position.Set(in pos), CmEntity.Wallet.Set(in wallet));
+            tx.OpenMut(id).Write(CmEntity.Position).X = 42;
+            tx.Commit();
+        }
+
+        using var read = dbe.CreateQuickTransaction();
+        ref readonly var rp = ref read.Open(id).Read(CmEntity.Position);
+        Assert.That(rp.X, Is.EqualTo(42f));
+        Assert.That(rp.Y, Is.EqualTo(2f));
     }
 }

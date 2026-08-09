@@ -15,8 +15,8 @@ public static class DatabaseEngineExtensions
     /// <param name="dbe">The database engine.</param>
     /// <param name="durabilityMode">Controls when WAL records become crash-safe. Default is <see cref="DurabilityMode.Deferred"/>.</param>
     /// <param name="discipline">
-    /// Durability discipline for SingleVersion-layout writes (<see cref="DurabilityDiscipline.TickFence"/> default, or
-    /// <see cref="DurabilityDiscipline.Commit"/> for zero-loss, atomic, commit-scoped writes). Fixed for the transaction.
+    /// Durability discipline for SingleVersion-layout writes (<see cref="CommitDiscipline.TickFence"/> default, or
+    /// <see cref="CommitDiscipline.Commit"/> for zero-loss, atomic, commit-scoped writes). Fixed for the transaction.
     /// </param>
     /// <returns>A transaction whose <see cref="System.IDisposable.Dispose"/> also disposes the owning UoW.</returns>
     /// <remarks>
@@ -30,7 +30,7 @@ public static class DatabaseEngineExtensions
     /// </remarks>
     [return: TransfersOwnership]
     public static Transaction CreateQuickTransaction(this DatabaseEngine dbe, DurabilityMode durabilityMode = DurabilityMode.Deferred,
-        DurabilityDiscipline discipline = DurabilityDiscipline.TickFence)
+        CommitDiscipline discipline = CommitDiscipline.TickFence)
     {
         var uow = dbe.CreateUnitOfWork(durabilityMode);
         dbe.LogUowLifecycle("CreateQuickTransaction: UoW created, calling CreateTransaction");

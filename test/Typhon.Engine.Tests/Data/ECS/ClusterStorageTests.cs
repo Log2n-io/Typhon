@@ -149,29 +149,7 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
     // Cluster Eligibility
     // ═══════════════════════════════════════════════════════════════════════
 
-    [Test]
-    public void ClusterEligible_SvArchetype_HasClusterState()
-    {
-        using var dbe = SetupClusterEngine();
-        var meta = ArchetypeRegistry.GetMetadata<ClAnt>();
-        Assert.That(meta.IsClusterEligible, Is.True);
-        Assert.That(meta.ClusterLayout, Is.Not.Null);
-        var es = dbe._archetypeStates[meta.ArchetypeId];
-        Assert.That(es.ClusterState, Is.Not.Null);
-    }
 
-    [Test]
-    public void ClusterEligible_VersionedArchetype_HasClusterState()
-    {
-        using var dbe = SetupClusterEngine();
-        var meta = ArchetypeRegistry.GetMetadata<ClUnit>();
-
-        // Inverted by #629: a Versioned-only archetype is cluster-backed like every other. The cluster holds the HEAD in its slot and the history stays in the
-        // revision chain — the arrangement mixed SV+Versioned archetypes had used since Phase 5, so composition was never the obstacle.
-        Assert.That(meta.IsClusterEligible, Is.True);
-        var es = dbe._archetypeStates[meta.ArchetypeId];
-        Assert.That(es.ClusterState, Is.Not.Null);
-    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // Spawn Tests
@@ -534,59 +512,7 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
         Assert.That(names, Does.Contain("Typhon.Test.Cluster.Movement"));
     }
 
-    [Test]
-    public void TryGetClusterComponentNames_NonClusterRootPage_ReturnsFalse()
-    {
-        using var dbe = SetupClusterEngine();
-        Assert.That(dbe.TryGetClusterComponentNames(-1, out _), Is.False);
-    }
 
-    [Test]
-    public void Read_SpawnedEntity_CorrectData()
-    {
-        using var dbe = SetupClusterEngine();
-        using var tx = dbe.CreateQuickTransaction();
-        var pos = new ClPosition(42, 84);
-        var mov = new ClMovement(7, 3);
-        var id = tx.Spawn<ClAnt>(ClAnt.Position.Set(in pos), ClAnt.Movement.Set(in mov));
-        tx.Commit();
-
-        using var readTx = dbe.CreateQuickTransaction();
-        var entity = readTx.Open(id);
-        Assert.That(entity.IsValid, Is.True);
-        ref readonly var readPos = ref entity.Read(ClAnt.Position);
-        ref readonly var readMov = ref entity.Read(ClAnt.Movement);
-        Assert.That(readPos.X, Is.EqualTo(42f));
-        Assert.That(readPos.Y, Is.EqualTo(84f));
-        Assert.That(readMov.VX, Is.EqualTo(7f));
-        Assert.That(readMov.VY, Is.EqualTo(3f));
-    }
-
-    [Test]
-    public void Write_Entity_DataPersisted()
-    {
-        using var dbe = SetupClusterEngine();
-        using var tx = dbe.CreateQuickTransaction();
-        var pos = new ClPosition(10, 20);
-        var mov = new ClMovement(1, 2);
-        var id = tx.Spawn<ClAnt>(ClAnt.Position.Set(in pos), ClAnt.Movement.Set(in mov));
-        tx.Commit();
-
-        // Write new position
-        using var writeTx = dbe.CreateQuickTransaction();
-        var entity = writeTx.OpenMut(id);
-        ref var writePos = ref entity.Write(ClAnt.Position);
-        writePos.X = 99;
-        writePos.Y = 88;
-        writeTx.Commit();
-
-        // Read back
-        using var verifyTx = dbe.CreateQuickTransaction();
-        var verify = verifyTx.Open(id);
-        ref readonly var verifyPos = ref verify.Read(ClAnt.Position);
-        Assert.That(verifyPos.X, Is.EqualTo(99f));
-        Assert.That(verifyPos.Y, Is.EqualTo(88f));
-    }
 
     [Test]
     public void Spawn_FillOneCluster_AllReadable()

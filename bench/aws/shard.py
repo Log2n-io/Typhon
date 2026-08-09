@@ -48,22 +48,37 @@ RUNSETTINGS = os.path.join(HERE, "workers1.runsettings")
 SHARDS_JSON = os.environ.get("SHARD_PLAN") or os.path.join(HERE, "shards.json")
 CFG         = os.environ.get("SHARD_CONFIG", "Release")
 NS          = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
-SENSITIVE_FILTER = "Category=Sensitive"   # the final serial quiet pass
+SENSITIVE_FILTER = None                   # the final serial quiet pass; built below, once GATE_EXCLUDED exists
 
 # ── filters ─────────────────────────────────────────────────────────────────
 # Quarantine = known-red (excluded everywhere). Sensitive = contention-flaky
-# (excluded from the parallel shards, run alone in the serial pass). The trailing
-# '.' after each class name disambiguates class-name prefixes (`~Foo.` never
-# matches `FooBar.`).
+# (excluded from the parallel shards, run alone in the serial pass). Nightly and
+# Manual are the two [Explicit] tiers (#703): Nightly runs in its own workflow,
+# Manual runs nowhere in CI and says why in source. The trailing '.' after each
+# class name disambiguates class-name prefixes (`~Foo.` never matches `FooBar.`).
+#
+# Nightly/Manual are excluded BY CATEGORY rather than left to [Explicit]. NUnit
+# decides whether an [Explicit] test runs by whether the filter "names" it, and
+# that is exactly the subtlety that bit the arm64 nightly (see the docstring): a
+# 2-term category filter qualifies where the gate's 305-term one does not. An
+# explicit category exclusion does not depend on that judgement call.
+GATE_EXCLUDED = ("Quarantine", "Nightly", "Manual")
+
+def _excluded(extra=()):
+    return "&".join(f"(Category!={c})" for c in tuple(GATE_EXCLUDED) + tuple(extra))
 
 def positive_filter(classes):
     cls = "|".join(f"FullyQualifiedName~{c}." for c in classes)
-    return f"(Category!=Quarantine)&(Category!=Sensitive)&({cls})"
+    return f"{_excluded(('Sensitive',))}&({cls})"
 
 def catchall_filter(assigned_elsewhere):
     neg = "&".join(f"(FullyQualifiedName!~{c}.)" for c in assigned_elsewhere)
-    base = "(Category!=Quarantine)&(Category!=Sensitive)"
+    base = _excluded(("Sensitive",))
     return f"{base}&{neg}" if neg else base
+
+# The quiet pass runs Sensitive ALONE, but a Sensitive test that is also quarantined or tiered stays out — otherwise
+# the one filter in the run that does not honour GATE_EXCLUDED becomes the way an excluded test sneaks back in.
+SENSITIVE_FILTER = f"(Category=Sensitive)&{_excluded()}"
 
 # ── plan (maintenance) ──────────────────────────────────────────────────────
 
@@ -183,6 +198,34 @@ def all_results(path):
             out[key] = r.get("outcome")
     return out
 
+def shard_integrity(shards, trx_paths):
+    """
+    Every class the PLAN names must have produced at least one executed test.
+
+    WHY (#703): `cmd_plan` already refuses to write a plan whose classes do not partition the suite ("PARTITION
+    BROKEN"), but nothing checked the other end — that the plan, when RUN, actually ran what it claimed. It did not:
+    `shards.json` named `ChaosStressTests` and `Runtime.CheckerboardTests`, both class-level `[Ignore]`d, so two
+    shards budgeted a slot, executed zero tests, and the gate reported green. `[Ignore]` is unconditional in NUnit —
+    `--filter` cannot override it — so this is invisible from the filter alone and only the RESULTS can show it.
+
+    Returns the sorted list of named-but-unexecuted classes (empty == healthy).
+    """
+    executed = set()
+    for trx in trx_paths:
+        for cls, _ in all_results(trx):
+            executed.add(cls)
+
+    missing = []
+    for s in shards:
+        for named in s.get("classes", []):
+            if named.startswith("<"):          # shard 0's "<catch-all>" placeholder, not a class
+                continue
+            # trx classNames are fully qualified; a plan entry may be a suffix of one (`Runtime.CheckerboardTests`).
+            if not any(e == named or e.endswith("." + named) for e in executed):
+                missing.append(named)
+    return sorted(set(missing))
+
+
 def cmd_run(results_dir):
     shards = json.load(open(SHARDS_JSON))
     os.makedirs(results_dir, exist_ok=True)
@@ -234,7 +277,7 @@ def cmd_run(results_dir):
         if not failed:
             break
         classes = sorted({c for c, _ in failed})
-        rflt = "(Category!=Quarantine)&(" + "|".join(f"FullyQualifiedName~{c}." for c in classes) + ")"
+        rflt = _excluded() + "&(" + "|".join(f"FullyQualifiedName~{c}." for c in classes) + ")"
         print(f"\nretry {attempt}/{MAX_RETRIES}: re-running {len(failed)} failed test(s) "
               f"in {len(classes)} class(es), alone (workers=1)...", flush=True)
         _, _, rdt, rtrx = run_one(f"R{attempt}", rflt, results_dir)
@@ -245,7 +288,12 @@ def cmd_run(results_dir):
         failed -= recovered
         print(f"   R{attempt}  {rdt:5.0f}s  recovered {len(recovered)}, still failing {len(failed)}", flush=True)
 
-    overall = 0 if not failed else 1
+    # ── Plan integrity ───────────────────────────────────────────────────────
+    # Checked AFTER the retries so it sees every trx the run produced, and folded into the verdict: a plan that
+    # names a class it never runs is a false green, which is exactly as blocking as a failing test.
+    unexecuted = shard_integrity(shards, [t for _, _, _, t in results] + [strx])
+
+    overall = 0 if not failed and not unexecuted else 1
     print(f"\n[shard] WALL={par + ser + retry_secs:.0f}s "
           f"(parallel {par:.0f}s + serial {ser:.0f}s + retry {retry_secs:.0f}s)  "
           f"total={tot} initial-failed={initial_fail}", flush=True)
@@ -257,7 +305,15 @@ def cmd_run(results_dir):
         print(f"[shard] STILL FAILING after {MAX_RETRIES} retries (BLOCKING — likely a real regression):", flush=True)
         for c, n in sorted(failed):
             print(f"          x {c}.{n}", flush=True)
-    tail = f" ({len(flaked)} flaked, recovered)" if flaked and not failed else ""
+    if unexecuted:
+        print(f"[shard] PLAN INTEGRITY (BLOCKING) — {len(unexecuted)} class(es) named by shards.json ran ZERO tests. "
+              f"The gate budgeted a slot for each and reported on nothing:", flush=True)
+        for c in unexecuted:
+            print(f"          0 {c}", flush=True)
+        print("[shard]   Fix: un-suppress the fixture, or drop the class from shards.json if it now belongs to an "
+              "excluded tier (Quarantine/Nightly/Manual). A named class that runs nothing is a false green.",
+              flush=True)
+    tail = f" ({len(flaked)} flaked, recovered)" if flaked and not failed and not unexecuted else ""
     print(f"[shard] OVERALL={'PASS' if overall == 0 else 'FAIL'}{tail}", flush=True)
     return overall
 

@@ -1,4 +1,4 @@
-// unset
+﻿// unset
 
 using System;
 using System.Runtime.CompilerServices;
@@ -38,6 +38,9 @@ internal class IndexStatistics
         BTree<float, PersistentStore> or BTree<float, TransientStore> => KeyType.Float,
         BTree<double, PersistentStore> or BTree<double, TransientStore> => KeyType.Double,
         BTree<long, PersistentStore> or BTree<long, TransientStore> => KeyType.Long,
+        // #676: the ULong trees are genuinely ulong-keyed now, so this arm reports what the planner's other half
+        // (QueryResolverHelper.MapFieldTypeToKeyType) has always reported for the field. The two used to disagree about the same index.
+        BTree<ulong, PersistentStore> or BTree<ulong, TransientStore> => KeyType.ULong,
         String64BTree<PersistentStore> or String64BTree<TransientStore> => KeyType.String64,
         _ => KeyType.Long
     };

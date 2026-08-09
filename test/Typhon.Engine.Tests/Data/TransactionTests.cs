@@ -213,11 +213,10 @@ class TransactionTests : TestBase<TransactionTests>
         }
     }
 
-    // FLAKY under parallel suite load: this separate-transaction update assertion is timing-sensitive under
-    // contention and intermittently fails in the full suite while passing reliably in isolation. The code under
-    // test is correct (verified). TODO: harden the test to remove the timing dependence someday.
+    // This separate-transaction update assertion is timing-sensitive under contention: it fails intermittently in
+    // the full parallel suite while passing reliably in isolation. The code under test is correct (verified).
     [Test]
-    [Ignore("Flaky under parallel load; passes in isolation. Test timing needs hardening (see comment).")]
+    [Category("Sensitive")] // timing-sensitive under contention — runs in the gate's serial quiet pass
     public void UpdateComp_SeparateTransaction_WithoutReadBeforeUpdate()
     {
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();

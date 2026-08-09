@@ -2,6 +2,7 @@
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using Typhon.Schema.Definition;
@@ -166,6 +167,162 @@ internal sealed class DifferentialRecoveryOracleTests
     }
 
     /// <summary>
+    /// <see cref="RecoverWith"/> plus a <b>write-after-recovery</b> phase (#705 T3): recover, assert, let the workload keep mutating the recovered engine, then
+    /// crash a SECOND time and require both generations to survive.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the shape RocksDB's <c>db_stress</c> has and this suite did not: an expected-state record that survives the crash, is compared after reopen,
+    /// <b>and keeps being written to afterwards</b>. Everything the crash suite asserted before stopped at the reopen, which is why a recovery that restores
+    /// the data perfectly while leaving an allocator watermark wrong was unobservable here no matter how many workloads existed.
+    /// </para>
+    /// <para>
+    /// The growth check is not a formality. A <c>Resume</c> that does nothing would let this harness report post-recovery-write coverage it never performed —
+    /// and because <c>Resume</c> is default-implemented, EVERY existing workload can be passed here and would silently qualify. So the harness demands
+    /// evidence that the phase did something, and names the workload when it did not.
+    /// </para>
+    /// </remarks>
+    private void RecoverAndResume(IRecoveryWorkload workload, Action<DatabaseEngine, RecoveryShadowModel> assertAfterSecondCrash, bool crashAgain = true)
+    {
+        var shadow = new RecoveryShadowModel();
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            workload.Register(dbe);
+            dbe.InitializeArchetypes();
+
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                workload.Execute(uow, shadow);
+                uow.Flush();
+            }
+
+            shadow.CaptureValues(dbe);
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            workload.Register(dbe);
+            dbe.InitializeArchetypes(); // recovery
+
+            // Generation 1 must be faithful BEFORE anything writes over it — otherwise a post-Resume failure could not be attributed.
+            RecoveryOracle.AssertPrimaryAxis(dbe, shadow);
+
+            var beforeResume = shadow.AliveIds.Count;
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                workload.Resume(uow, shadow);
+                uow.Flush();
+            }
+
+            Assert.That(
+                shadow.AliveIds.Count,
+                Is.GreaterThan(beforeResume),
+                $"{workload.Name}: Resume() left the shadow at {beforeResume} entities — it wrote nothing the oracle can check. A default (no-op) Resume must "
+                + "not reach this harness; implement the phase or use RecoverWith instead.");
+
+            TestContext.WriteLine(
+                $"{workload.Name} session 2 (recovered engine) after Resume: lastAppendedLsn={dbe.WalManager.LastAppendedLsn} "
+                + $"durableLsn={dbe.WalManager.DurableLsn} recoveryFrontier={dbe.LastWalV2RecoveryResult.MaxLsn} "
+                + $"checkpointLsnAtOpen={dbe.LastWalV2RecoveryCheckpointLsn}");
+
+            // Both generations, live, on the recovered engine.
+            shadow.CaptureValues(dbe);
+            RecoveryOracle.AssertPrimaryAxis(dbe, shadow);
+
+            if (!crashAgain)
+            {
+                return;
+            }
+
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope3 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope3.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            workload.Register(dbe);
+            dbe.InitializeArchetypes(); // recovery again — now over a window written by a RECOVERED engine
+
+            // The second recovery is the one nothing has ever exercised, so its numbers are printed unconditionally: a diff alone cannot distinguish
+            // "the window was skipped" from "the window was applied and lost afterwards", and those have different causes.
+            TestContext.WriteLine(
+                $"{workload.Name} second recovery: checkpointLsn(threshold)={dbe.LastWalV2RecoveryCheckpointLsn} "
+                + $"scanned={dbe.LastWalV2RecoveryResult.RecordsScanned} applied={dbe.LastWalV2RecoveryResult.RecordsApplied} "
+                + $"maxLsn={dbe.LastWalV2RecoveryResult.MaxLsn} txCommitted={dbe.LastWalV2RecoveryResult.TxCommitted}");
+
+            assertAfterSecondCrash(dbe, shadow);
+        }
+    }
+
+    /// <summary>
+    /// The cross-frontier harness (#705 T3 / #569): phase 1 commits and is CONSOLIDATED by a checkpoint, then phase 2 — built from phase 1's alive-set —
+    /// mutates those same entities in the WAL window, and a hard crash must recover the phase-2 values.
+    /// </summary>
+    /// <remarks>
+    /// The only structural difference from <see cref="RecoverWithMidCheckpoint"/> is that phase 2 is constructed AFTER phase 1 has run, from the shadow. That
+    /// is what lets the two windows touch the same entities: with both workloads built up front, each could only spawn its own, which is why
+    /// <c>RecoverWithMidCheckpoint</c>'s existing callers all pass disjoint <c>keyBase</c> values and why this case had never been expressed.
+    /// </remarks>
+    private void RecoverWithCrossFrontierUpdate(
+        IRecoveryWorkload seed,
+        Func<IReadOnlyCollection<EntityId>, IRecoveryWorkload> makeUpdater,
+        Action<DatabaseEngine, RecoveryShadowModel> assertRecovered)
+    {
+        var shadow = new RecoveryShadowModel();
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            seed.Register(dbe);
+            dbe.InitializeArchetypes();
+
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                seed.Execute(uow, shadow);
+                uow.Flush();
+            }
+
+            // Consolidate phase 1 BELOW the checkpoint frontier: its entities now live in the data file, so a later record for one of them carries no Spawn in
+            // the window — the `!agg.HasSpawn` branch #569 is about.
+            dbe.WriteTickFence(1);
+            dbe.ForceCheckpoint();
+            dbe.CheckpointManager.WaitForCheckpoint(TimeSpan.FromSeconds(10));
+
+            // Snapshot the ids: AliveIds is a live view over the shadow's dictionary, and the updater will be reading it while the shadow is in scope.
+            var updater = makeUpdater([.. shadow.AliveIds]);
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                updater.Execute(uow, shadow);
+                uow.Flush();
+            }
+
+            dbe.WriteTickFence(2);
+
+            // Captured AFTER the update, so "expected" is the post-update state — the ≤1-tick window's own claim.
+            shadow.CaptureValues(dbe);
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            seed.Register(dbe);
+            dbe.InitializeArchetypes();
+
+            TestContext.WriteLine(
+                $"{seed.Name} cross-frontier recovery: checkpointLsn={dbe.LastWalV2RecoveryCheckpointLsn} "
+                + $"scanned={dbe.LastWalV2RecoveryResult.RecordsScanned} applied={dbe.LastWalV2RecoveryResult.RecordsApplied} "
+                + $"maxLsn={dbe.LastWalV2RecoveryResult.MaxLsn} fenceBlockExpanded={dbe.LastWalV2RecoveryResult.FenceBlockRecordsExpanded}");
+
+            assertRecovered(dbe, shadow);
+        }
+    }
+
+    /// <summary>
     /// Like <see cref="RecoverWith"/> but forces a checkpoint between two workload phases, so <paramref name="beforeCheckpoint"/>'s entities land below the checkpoint
     /// frontier (recovered from the data file) and <paramref name="afterCheckpoint"/>'s land in the WAL window (recovered by replay). Both phases share one shadow and
     /// must use the same components (only the first phase's Register runs).
@@ -227,6 +384,38 @@ internal sealed class DifferentialRecoveryOracleTests
         });
     }
 
+    /// <summary>
+    /// The <see cref="RuleMutantAttribute"/> companion to every AP-12 verifier that asserts through
+    /// <see cref="RecoveryOracle.AssertPrimaryAxis"/>: it proves that ASSERTION rejects a divergence, not merely
+    /// that <see cref="RecoveryShadowModel.Diff"/> returns a non-empty list.
+    /// </summary>
+    /// <remarks>
+    /// The distinction is the whole point. <see cref="ShadowModel_MutatedCopy_IsDetected"/> above pins `Diff`'s
+    /// RETURN VALUE, but every AP-12 verifier in the suite calls `AssertPrimaryAxis`, and a wired-wrong assertion
+    /// there (asserting on the wrong collection, or with a matcher that cannot fail) would leave every one of them
+    /// permanently green while `Diff` kept working perfectly. So the mutant drives the real path and requires the
+    /// failure to carry the oracle's OWN message — positive evidence, per <see cref="RuleMutants.AssertDetects"/>.
+    /// </remarks>
+    [Test]
+    [CancelAfter(15_000)]
+    [RuleMutant("AP-12")]
+    public void Mutant_PrimaryAxisAssertion_RejectsADivergentShadow()
+    {
+        RunWorkloadLive(new SingleTxSpawnWorkload(8), (dbe, shadow) =>
+        {
+            // Sanity: unmutated, the oracle's own assertion passes against the engine it was captured from. Without
+            // this the mutant could "detect" a divergence that was there all along.
+            RecoveryOracle.AssertPrimaryAxis(dbe, shadow);
+
+            shadow.Entities.Values.First().ValueBytesBySlot[0][0] ^= 0xFF;
+
+            RuleMutants.AssertDetects(
+                "AP-12",
+                "Differential oracle — primary (broad-scan) axis found",
+                () => RecoveryOracle.AssertPrimaryAxis(dbe, shadow));
+        });
+    }
+
     // ── AC4 — primary (broad-scan) axis green on the flat path ───────────────
 
     [Test]
@@ -271,6 +460,47 @@ internal sealed class DifferentialRecoveryOracleTests
         });
     }
 
+    /// <summary>
+    /// The <see cref="RuleMutantAttribute"/> companion to <see cref="IndexedFlat_IndexAxis_MatchesBroadScan"/>:
+    /// proves the index-axis comparison rejects a SHORTFALL — the failure mode RB-01 is about.
+    /// </summary>
+    /// <remarks>
+    /// This assertion has a specific way of being vacuously true, and <see cref="RecoveryOracle"/>'s own docstring
+    /// warns about its mirror image: if the index enumeration returns nothing AND the broad scan returns nothing,
+    /// `Is.EquivalentTo` passes while proving nothing. The real verifier guards one half with a "broad is not empty"
+    /// sanity assert; this mutant guards the other, by removing a single entity from the index side and requiring
+    /// the equivalence to reject it. A comparison that cannot see one missing entity cannot see recovery failing to
+    /// rebuild a secondary index either.
+    /// </remarks>
+    [Test]
+    [CancelAfter(15_000)]
+    [RuleMutant("RB-01")]
+    public void Mutant_IndexAxisComparison_RejectsAOneEntityShortfall()
+    {
+        RecoverWith(new IndexedFlatWorkload(10), (dbe, shadow) =>
+        {
+            var compDArch = shadow.Entities.Keys.First().ArchetypeId;
+            using var tx = dbe.CreateQuickTransaction();
+            var broad = RecoveryOracle.BroadScanEntityIds(tx, compDArch);
+            var indexed = RecoveryOracle.IndexEntityIds<CompD, int>(dbe, tx, d => d.B, int.MinValue, int.MaxValue);
+
+            // Unmutated the two sets agree — otherwise the mutant would be "detecting" a pre-existing divergence.
+            Assert.That(indexed, Is.EquivalentTo(broad), "sanity: the index and broad-scan sets must agree before the mutation");
+
+            // Exactly the shape RB-01 describes: recovery rebuilt the entity but not its index entry.
+            indexed.Remove(indexed.First());
+
+            RuleMutants.AssertDetects(
+                "RB-01",
+                "index axis: CompD.B index result set",
+                () => Assert.That(
+                    indexed,
+                    Is.EquivalentTo(broad),
+                    $"index axis: CompD.B index result set ({indexed.Count}) must equal the broad-scan set ({broad.Count}); a shortfall means recovery did not "
+                    + "rebuild the secondary index (RB-01)."));
+        });
+    }
+
     // ── AC6 — cluster-axis recovery under the Commit discipline (#395 Face B — FIXED) ──
     // The oracle originally established (record-kind counts: spawns=10, slots=0) that a TickFence cluster/SingleVersion spawn logs its lifecycle but
     // NOT its values — the spawn copies them into the cluster SoA (checkpoint-durable) without emitting Slot records, so a hard crash before a
@@ -282,7 +512,471 @@ internal sealed class DifferentialRecoveryOracleTests
     [Test]
     [CancelAfter(15_000)]
     public void ClusterAllSv_PrimaryAxis_SurvivesCrash()
-        => RecoverWith(new ClusterAllSvWorkload(10, DurabilityDiscipline.Commit), RecoveryOracle.AssertPrimaryAxis);
+        => RecoverWith(new ClusterAllSvWorkload(10, CommitDiscipline.Commit), RecoveryOracle.AssertPrimaryAxis);
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // #705 T3 — the WRITE-AFTER-RECOVERY axis (#697)
+    //
+    // Every assertion above this line stops at the reopen. A recovery that restores the data faithfully but leaves an allocation watermark below the
+    // recovered population is therefore invisible to all of them: the first post-recovery Spawn re-issues a live entity's id and overwrites it, silently.
+    // These cases continue the run past the reopen, so the defect has somewhere to surface.
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// The three storage homes, named per CONSUMER — <c>SetName</c> replaces the whole display name, so two tests sharing one source and one name template
+    /// produce indistinguishable cases, and a failure cannot be attributed to the test that produced it.
+    /// </summary>
+    private static IEnumerable<TestCaseData> PostRecoveryShapes(string prefix)
+    {
+        foreach (var shape in new[] { PostRecoveryShape.Flat, PostRecoveryShape.FlatIndexed, PostRecoveryShape.ClusterSv })
+        {
+            yield return new TestCaseData(shape).SetName($"{prefix}_{shape}");
+        }
+    }
+
+    /// <summary>
+    /// Reopen after a crash, spawn a second generation, and require every new <see cref="EntityId"/> to be distinct from the recovered ones (#697).
+    /// </summary>
+    /// <remarks>
+    /// Run across all three storage homes because the watermark is restored per-archetype and the homes derive it differently: the flat path rebuilds it from
+    /// the persisted EntityMap, the cluster path from the cluster's own entity-id array, and the WAL window's own spawns — the case that was missing — from
+    /// <c>RecoveryApplier</c>. A fix to one proves nothing about the others.
+    /// <para>
+    /// The collision is detected by <see cref="RecoveryShadowModel.RecordSpawn"/> rather than asserted here, so it fires at the exact spawn that re-issued the
+    /// id and names it.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    [TestCaseSource(nameof(PostRecoveryShapes), new object[] { "PostRecoveryWrite_NoReissue" })]
+    [VerifiesRule("RB-06")]
+    public void PostRecoveryWrite_DoesNotReissueARecoveredEntityId(PostRecoveryShape shape)
+        => RecoverAndResume(new PostRecoveryWriteWorkload(shape), RecoveryOracle.AssertPrimaryAxis, crashAgain: false);
+
+    /// <summary>
+    /// The <see cref="RuleMutantAttribute"/> companion to <see cref="PostRecoveryWrite_DoesNotReissueARecoveredEntityId"/>: prove the entity-key watermark
+    /// restore is what makes it pass, by lowering the watermark back and requiring the collision to reappear.
+    /// </summary>
+    /// <remarks>
+    /// A green verifier here could mean the watermark is restored, or simply that this particular workload never happens to collide. Those are very different
+    /// claims and only one of them is RB-06. Driving the counter back below the recovered population settles it: the shadow must reject the re-issued id with
+    /// the message the real defect produced.
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    [RuleMutant("RB-06")]
+    public void Mutant_LoweringTheEntityKeyWatermark_ReissuesALiveId()
+    {
+        var workload = new PostRecoveryWriteWorkload(PostRecoveryShape.Flat);
+        var shadow = new RecoveryShadowModel();
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            workload.Register(dbe);
+            dbe.InitializeArchetypes();
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                workload.Execute(uow, shadow);
+                uow.Flush();
+            }
+
+            shadow.CaptureValues(dbe);
+            dbe.SimulateHardCrash();
+        }
+
+        using var scope2 = _serviceProvider.CreateScope();
+        var recovered = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        workload.Register(recovered);
+        recovered.InitializeArchetypes();
+        RecoveryOracle.AssertPrimaryAxis(recovered, shadow);
+
+        // Unmutated the watermark now sits at or above the recovered population — otherwise the mutation below would be "detecting" a defect already present.
+        var routingId = shadow.AliveIds.First().ArchetypeId;
+        var state = recovered._stateByRouting[routingId];
+        Assert.That(state.NextEntityKey, Is.GreaterThanOrEqualTo(shadow.AliveIds.Count),
+            "sanity: recovery must have restored the entity-key watermark above the recovered population (RB-06)");
+
+        // Exactly the pre-fix state: the counter below the population it must not collide with.
+        state.NextEntityKey = 0;
+
+        // Asserted directly rather than through RuleMutants.AssertDetects, which requires the violation to surface as an NUnit AssertionException. This
+        // detector THROWS instead, on purpose: it fires inside RecordSpawn at the exact spawn that re-issued the id, which an assertion at the end of the
+        // workload could not localise. AssertDetects would classify the throw as a broken mutant, so using it here would report the opposite of the truth.
+        using var resumeUow = recovered.CreateUnitOfWork(DurabilityMode.Immediate);
+        var ex = Assert.Throws<InvalidOperationException>(() => workload.Resume(resumeUow, shadow));
+        Assert.That(ex.Message, Does.Contain("#697"), "the detector must name the defect it is detecting");
+    }
+
+    /// <summary>
+    /// The full write-after-recovery round trip: recover, write, crash AGAIN, and require both generations to survive.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Quarantined against #712</b>, a P0 this axis found on its first run. A crash-recovered engine's WAL writer restarts its LSN sequence at 1 — below the
+    /// LSNs the recovery it just performed replayed — so every commit it then acknowledges is written at an already-used LSN and discarded by the next
+    /// recovery as already-consolidated. Measured: recovery frontier 16, <c>LastAppendedLsn</c> 9, <c>DurableLsn</c> 16, and the next open scans 8 records and
+    /// applies 0. All 12 entities are lost, not just the 4 written after recovery.
+    /// </para>
+    /// <para>
+    /// Kept separate from <see cref="PostRecoveryWrite_DoesNotReissueARecoveredEntityId"/> so #697's fix stays gated: the id-reissue half passes today, and
+    /// folding the two together would have parked a working regression lock behind an unrelated defect.
+    /// </para>
+    /// </remarks>
+    /// <summary>
+    /// #712 / LOG-08 on the CRASH path: a crash-recovered engine must continue its LSN sequence strictly above the window its own recovery replayed.
+    /// </summary>
+    /// <remarks>
+    /// Asserted on the watermarks rather than on entity survival, deliberately. Entity survival across the SECOND crash is
+    /// <see cref="PostRecoveryWrite_SurvivesASecondCrash"/>'s job and it depends on more than the allocator; this case fails if and only if the LSN floor is
+    /// wrong, so it cannot be greened by an unrelated durability change or reddened by one. Pre-fix numbers, from the issue: frontier 16,
+    /// <c>LastAppendedLsn</c> 9, <c>DurableLsn</c> 16 — the writer restarted at 1 and believed 7 LSNs it never appended were durable.
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    [VerifiesRule("LOG-08")]
+    [TestCaseSource(nameof(PostRecoveryShapes), new object[] { "PostRecoveryWrite_LsnFloor" })]
+    public void PostRecoveryWrite_ContinuesTheLsnSequenceAboveTheReplayedFrontier(PostRecoveryShape shape)
+    {
+        var workload = new PostRecoveryWriteWorkload(shape);
+        var shadow = new RecoveryShadowModel();
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            workload.Register(dbe);
+            dbe.InitializeArchetypes();
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                workload.Execute(uow, shadow);
+                uow.Flush();
+            }
+            shadow.CaptureValues(dbe);
+            dbe.SimulateHardCrash();
+        }
+
+        using var scope2 = _serviceProvider.CreateScope();
+        var recovered = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        workload.Register(recovered);
+        recovered.InitializeArchetypes();   // recovery
+
+        var frontier = recovered.LastWalV2RecoveryResult.MaxLsn;
+        Assert.That(frontier, Is.GreaterThan(0), "the workload must leave a WAL window for recovery to replay, or this case proves nothing");
+
+        // Before the first post-recovery write: the allocator already sits on the frontier, and the durable watermark agrees with it.
+        Assert.That(recovered.WalManager.LastAppendedLsn, Is.EqualTo(frontier),
+            "the reopened allocator did not continue from the replayed frontier (LOG-08) — the next record will reuse an LSN the prior session wrote");
+        Assert.That(recovered.WalManager.LastAppendedLsn, Is.GreaterThanOrEqualTo(recovered.WalManager.DurableLsn),
+            "DurableLsn exceeds LastAppendedLsn: the writer believes LSNs it never appended are durable");
+
+        using (var uow = recovered.CreateUnitOfWork(DurabilityMode.Immediate))
+        {
+            workload.Resume(uow, shadow);
+            uow.Flush();
+        }
+
+        Assert.That(recovered.WalManager.LastAppendedLsn, Is.GreaterThan(frontier),
+            $"post-recovery records were written at or below the replayed frontier {frontier} — the next recovery discards them as already-consolidated");
+        Assert.That(recovered.WalManager.LastAppendedLsn, Is.GreaterThanOrEqualTo(recovered.WalManager.DurableLsn),
+            "DurableLsn exceeds LastAppendedLsn after the post-recovery window");
+    }
+
+    [Test]
+    [CancelAfter(20_000)]
+    [TestCaseSource(nameof(PostRecoveryShapes), new object[] { "PostRecoveryWrite_SecondCrash" })]
+    public void PostRecoveryWrite_SurvivesASecondCrash(PostRecoveryShape shape)
+        => RecoverAndResume(new PostRecoveryWriteWorkload(shape), RecoveryOracle.AssertPrimaryAxis);
+
+    /// <summary>
+    /// #715: the same three-session shape with NOTHING written after recovery. Session 2 opens, recovers, seals — and crashes. Generation 1 must still be
+    /// there in session 3, out of the data file the seal consolidated, because the seal also reclaimed the WAL segments that held it.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately writes nothing between the recovery and the second crash, which is what separates this from
+    /// <see cref="PostRecoveryWrite_SurvivesASecondCrash"/>: no post-recovery window exists, so no LSN can be misallocated and #712 cannot be the cause of a
+    /// failure here. What it leaves under test is the seal's own promise — that advancing <c>CheckpointLSN</c>, and reclaiming the WAL on the strength of it,
+    /// means the consolidated base is REACHABLE and not merely written. Pre-fix all three shapes reported <c>scanned=0 applied=0</c> with every entity lost.
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    [VerifiesRule("CK-10")]
+    [TestCaseSource(nameof(PostRecoveryShapes), new object[] { "RecoveredThenCrashed_NoWrite" })]
+    public void RecoveredEngine_CrashingWithNoWrite_StillHasEverythingItRecovered(PostRecoveryShape shape)
+    {
+        var workload = new PostRecoveryWriteWorkload(shape);
+        var shadow = new RecoveryShadowModel();
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            workload.Register(dbe);
+            dbe.InitializeArchetypes();
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                workload.Execute(uow, shadow);
+                uow.Flush();
+            }
+            shadow.CaptureValues(dbe);
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            workload.Register(dbe);
+            dbe.InitializeArchetypes();          // recovery + seal
+            RecoveryOracle.AssertPrimaryAxis(dbe, shadow);   // the recovery itself is faithful — so a session-3 loss is the seal's, not the replay's
+            dbe.SimulateHardCrash();             // not one write between the two
+        }
+
+        using (var scope3 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope3.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            workload.Register(dbe);
+            dbe.InitializeArchetypes();
+
+            // Printed unconditionally: scanned=0 is the load-bearing fact — the seal reclaimed the WAL, so everything asserted below has to come out of the
+            // data file. A diff alone could not distinguish that from a replay that silently did nothing.
+            TestContext.WriteLine(
+                $"{workload.Name} third open: checkpointLsn(threshold)={dbe.LastWalV2RecoveryCheckpointLsn} "
+                + $"scanned={dbe.LastWalV2RecoveryResult.RecordsScanned} applied={dbe.LastWalV2RecoveryResult.RecordsApplied} "
+                + $"maxLsn={dbe.LastWalV2RecoveryResult.MaxLsn}");
+
+            RecoveryOracle.AssertPrimaryAxis(dbe, shadow);
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // #705 T3 — the CROSS-FRONTIER UPDATE axis (#569)
+    //
+    // Every existing two-phase case gives each phase its own entities with a disjoint keyBase, so the two WAL windows never touch the same entity. These
+    // cases update entities the FIRST window committed and a checkpoint consolidated — the `!agg.HasSpawn` branch whose aggregated Slot payloads
+    // RecoveryDriver drops.
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// An entity checkpointed in window 1 and UPDATED in window 2 must recover with the window-2 value, not the checkpointed one (#569).
+    /// </summary>
+    /// <remarks>
+    /// All three shapes run because the branch that drops the payload is keyed on "no Spawn in this window", not on storage mode — #569 is titled for
+    /// SingleVersion, but the flat Versioned shapes take the same path. If only the cluster shape failed, the title would be right and the other two would be
+    /// evidence of that; they are run to find out rather than to confirm.
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    [TestCaseSource(nameof(PostRecoveryShapes), new object[] { "CrossFrontierUpdate" })]
+    public void CrossFrontierUpdate_RecoversTheWindowValue_NotTheCheckpointedOne(PostRecoveryShape shape)
+        => RecoverWithCrossFrontierUpdate(
+            new PostRecoveryWriteWorkload(shape, preCount: 8, postCount: 0),
+            existing => new CrossFrontierUpdateWorkload(shape, existing),
+            RecoveryOracle.AssertPrimaryAxis);
+
+    /// <summary>
+    /// Two updates to the same slot in one window: recovery must apply the LATER one (#569's CM-03 acceptance criterion).
+    /// </summary>
+    /// <remarks>
+    /// The aggregation at <c>RecoveryDriver.cs:53</c> keeps one <c>SlotData</c> per (entity, slot) and overwrites it as records arrive in LSN order, so
+    /// latest-wins is a property of the ORDER records are read in, not of anything the applier does. That was untested while the payloads were being dropped —
+    /// there was no observable difference between "keeps the last" and "keeps the first" when both were discarded. The superseded pass writes a value far from
+    /// the final one, so applying the wrong record is a diff rather than a near-miss.
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    [TestCaseSource(nameof(PostRecoveryShapes), new object[] { "CrossFrontierLastWriterWins" })]
+    [VerifiesRule("CM-03")]
+    public void CrossFrontierUpdate_TwoWritesInOneWindow_RecoversTheLastOne(PostRecoveryShape shape)
+        => RecoverWithCrossFrontierUpdate(
+            new PostRecoveryWriteWorkload(shape, preCount: 8, postCount: 0),
+            existing => new CrossFrontierUpdateWorkload(shape, existing, passes: 2),
+            RecoveryOracle.AssertPrimaryAxis);
+
+    /// <summary>
+    /// #569's remaining acceptance criterion: the post-#559 columnar FenceBlock path must feed the cross-frontier applier, not just the per-entity Slot path.
+    /// </summary>
+    /// <remarks>
+    /// The two are indistinguishable downstream on purpose — <c>RecoveryDriver</c> expands a FenceBlock into exactly the per-(entity, slot) shape the Slot
+    /// records produced, so every existing assertion passes identically whichever format carried the value. That is what made this criterion unfalsifiable
+    /// and left it unchecked. Asserting on the expansion counter is what separates "recovered correctly" from "recovered correctly THROUGH the fence-block
+    /// path", and the cluster shape is used because its tick-fence writes are what emit blocks at all.
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    public void CrossFrontierUpdate_ArrivesThroughTheColumnarFenceBlockPath()
+    {
+        // ClusterSv only, and not via PostRecoveryShapes: the flat homes do not emit fence blocks at all, so running them here would assert zero blocks
+        // expanded and fail for a reason that is correct behaviour.
+        const PostRecoveryShape shape = PostRecoveryShape.ClusterSv;
+        RecoverWithCrossFrontierUpdate(
+            new PostRecoveryWriteWorkload(shape, preCount: 8, postCount: 0),
+            existing => new CrossFrontierUpdateWorkload(shape, existing),
+            (dbe, shadow) =>
+            {
+                Assert.That(dbe.LastWalV2RecoveryResult.FenceBlockRecordsExpanded, Is.GreaterThan(0),
+                    "no FenceBlock record was expanded — the cross-frontier update reached the applier as a per-entity Slot record, so this case is not "
+                    + "covering the columnar path it exists to cover");
+                RecoveryOracle.AssertPrimaryAxis(dbe, shadow);
+            });
+    }
+
+    /// <summary>
+    /// The workload must refuse an empty alive-set rather than quietly assert nothing.
+    /// </summary>
+    /// <remarks>
+    /// A cross-frontier workload handed zero entities updates zero entities and passes — a green case reporting coverage of the exact interaction it exists to
+    /// test. Same shape as the <c>Resume</c> growth check: the harness that makes an axis reachable must also make "reached it" falsifiable.
+    /// </remarks>
+    [Test]
+    public void CrossFrontierUpdateWorkload_RejectsAnEmptyAliveSet()
+    {
+        var ex = Assert.Throws<ArgumentException>(() => new CrossFrontierUpdateWorkload(PostRecoveryShape.Flat, []));
+        Assert.That(ex.Message, Does.Contain("would assert nothing"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // #705 T3 — the PAYLOAD axes (#389)
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// The oracle must SEE a collection's elements, not just its buffer descriptor — proven by dropping one and requiring the diff.
+    /// </summary>
+    /// <remarks>
+    /// The direct analogue of <see cref="ShadowModel_MutatedCopy_IsDetected"/>, and the prerequisite for believing any #389 result: the recorded symptom is a
+    /// collection going 5 elements → 0 while <c>Diff()</c> returned 0 mismatches, because the descriptor bytes were unchanged. A capture that cannot notice a
+    /// missing element cannot notice a missing buffer either.
+    /// </remarks>
+    [Test]
+    [CancelAfter(15_000)]
+    public void CollectionOracle_DroppedElement_IsDetected()
+    {
+        var workload = new PayloadPayloadWorkload(4);
+        var shadow = new RecoveryShadowModel();
+
+        using var scope = _serviceProvider.CreateScope();
+        var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        workload.Register(dbe);
+        dbe.InitializeArchetypes();
+        using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+        {
+            workload.Execute(uow, shadow);
+            uow.Flush();
+        }
+
+        shadow.CaptureValues(dbe, workload);
+        Assert.That(shadow.Diff(dbe), Is.Empty, "a shadow captured from the live engine must match it exactly, collections included");
+
+        // Drop one element from the EXPECTED side. The raw component bytes are untouched, so only an element-aware comparison can react.
+        var victim = shadow.Entities.Values.First(e => e.CollectionElements[0].Length > 1);
+        victim.CollectionElements = [victim.CollectionElements[0][..^1]];
+
+        var diffs = shadow.Diff(dbe);
+        Assert.That(diffs, Is.Not.Empty, "a collection with one element missing must be reported — otherwise #389's 5→0 case would read as green");
+        Assert.That(string.Join("|", diffs), Does.Contain("element(s), expected"), "the diff must name the COUNT mismatch, the earliest signal");
+    }
+
+    /// <summary>
+    /// Capturing a collection-bearing archetype WITHOUT a projector must throw, not silently compare descriptor bytes.
+    /// </summary>
+    /// <remarks>
+    /// This is the guard that makes the projector non-optional in practice. Without it the #389 false-green is one forgotten argument away on the very test
+    /// written to catch it — and the failure mode is a passing test, which nobody investigates.
+    /// </remarks>
+    [Test]
+    [CancelAfter(15_000)]
+    public void CaptureValues_WithoutAProjector_RefusesACollectionBearingArchetype()
+    {
+        var workload = new PayloadPayloadWorkload(2);
+        var shadow = new RecoveryShadowModel();
+
+        using var scope = _serviceProvider.CreateScope();
+        var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        workload.Register(dbe);
+        dbe.InitializeArchetypes();
+        using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+        {
+            workload.Execute(uow, shadow);
+            uow.Flush();
+        }
+
+        var ex = Assert.Throws<InvalidOperationException>(() => shadow.CaptureValues(dbe));
+        Assert.That(ex.Message, Does.Contain("#389"), "the refusal must name the defect it prevents hiding");
+    }
+
+    /// <summary>
+    /// The payload axes across a hard crash: collection elements, <c>String64</c> and the spatial box must all recover.
+    /// </summary>
+    /// <remarks>
+    /// <b>Quarantined against #389</b> — <c>ComponentCollection</c> buffer mutations are not WAL-redo-logged, so the buffer contents do not survive a crash in
+    /// the WAL window. Kept as the regression lock for when #389 is fixed: it fails today for exactly the reason the issue documents, and it is the first test
+    /// in the suite that CAN fail for that reason.
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    [Category("Quarantine")]
+    public void PayloadAxes_SurviveACrash()
+    {
+        var workload = new PayloadPayloadWorkload(8);
+        var shadow = new RecoveryShadowModel();
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            workload.Register(dbe);
+            dbe.InitializeArchetypes();
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                workload.Execute(uow, shadow);
+                uow.Flush();
+            }
+
+            dbe.WriteTickFence(1);
+            shadow.CaptureValues(dbe, workload);
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            workload.Register(dbe);
+            dbe.InitializeArchetypes();
+            RecoveryOracle.AssertPrimaryAxis(dbe, shadow);
+        }
+    }
+
+    /// <summary>
+    /// The anti-false-green companion to <see cref="RecoverAndResume"/>'s growth check: a workload that does NOT implement <c>Resume</c> must be rejected.
+    /// </summary>
+    /// <remarks>
+    /// <c>Resume</c> is a DEFAULT interface method, so every one of the pre-existing workloads satisfies the interface while writing nothing after recovery.
+    /// Without this test, passing one of them to the resume harness would produce a green case advertising an axis it never touched — #704's trap 2, which
+    /// cost a round of case names that promised coverage the fixture body never performed.
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    public void RecoverAndResume_RejectsAWorkloadThatWritesNothingAfterRecovery()
+    {
+        var ex = Assert.Throws<AssertionException>(() => RecoverAndResume(new SingleTxSpawnWorkload(4), RecoveryOracle.AssertPrimaryAxis));
+        Assert.That(ex.Message, Does.Contain("wrote nothing the oracle can check"), "the rejection must name the reason, not merely fail");
+    }
+
+    /// <summary>
+    /// The shadow must REJECT a re-issued live id rather than absorb it.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="RecoveryShadowModel.RecordSpawn"/> used to assign through the indexer, so a duplicate id silently replaced the first-generation entity — and
+    /// an oracle that has forgotten an entity cannot report it lost. That made the shadow structurally incapable of observing the exact defect the harness
+    /// above exists to catch, so the guard is pinned here rather than left to inspection.
+    /// </remarks>
+    [Test]
+    public void ShadowModel_RespawningALiveId_IsRejected()
+    {
+        var shadow = new RecoveryShadowModel();
+        var id = EntityId.FromRaw(65537); // Entity(Key=1, Arch=1) — the id from #697's transcript
+        shadow.RecordSpawn(id);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => shadow.RecordSpawn(id));
+        Assert.That(ex.Message, Does.Contain("#697"), "the rejection must point at the defect it detects");
+        Assert.That(shadow.AliveIds, Has.Count.EqualTo(1), "the original entity must still be in the shadow — absorbing the duplicate is the false-green");
+    }
 
     // ── Scale: a large indexed workload forces the recovery index rebuild to split the B+Tree across many nodes — stresses the apply loop + RB-01 (index.Add) at scale ──
     [Test]
@@ -513,7 +1207,7 @@ internal sealed class DifferentialRecoveryOracleTests
     [VerifiesRule("RB-01")]
     public void ClusterIndexed_IndexAxis_MatchesBroadScan()
     {
-        RecoverWith(new ClusterAllSvWorkload(40, DurabilityDiscipline.Commit), (dbe, shadow) =>
+        RecoverWith(new ClusterAllSvWorkload(40, CommitDiscipline.Commit), (dbe, shadow) =>
         {
             RecoveryOracle.AssertPrimaryAxis(dbe, shadow);
 
@@ -561,8 +1255,8 @@ internal sealed class DifferentialRecoveryOracleTests
     public void ClusterIndexed_MidCheckpoint_IndexAxisHolds()
     {
         RecoverWithMidCheckpoint(
-            new ClusterAllSvWorkload(30, DurabilityDiscipline.Commit),
-            new ClusterAllSvWorkload(20, DurabilityDiscipline.Commit, keyBase: 1000),
+            new ClusterAllSvWorkload(30, CommitDiscipline.Commit),
+            new ClusterAllSvWorkload(20, CommitDiscipline.Commit, keyBase: 1000),
             (dbe, shadow) =>
             {
                 RecoveryOracle.AssertPrimaryAxis(dbe, shadow);
@@ -588,8 +1282,8 @@ internal sealed class DifferentialRecoveryOracleTests
     public void TornCheckpointedClusterIndexPage_RecoversViaRebuild()
     {
         var shadow = new RecoveryShadowModel();
-        var below = new ClusterAllSvWorkload(3000, DurabilityDiscipline.Commit);                    // checkpointed: an index spanning many node pages
-        var window = new ClusterAllSvWorkload(8, DurabilityDiscipline.Commit, keyBase: 900_000);    // WAL window: keeps the crash path active
+        var below = new ClusterAllSvWorkload(3000, CommitDiscipline.Commit);                    // checkpointed: an index spanning many node pages
+        var window = new ClusterAllSvWorkload(8, CommitDiscipline.Commit, keyBase: 900_000);    // WAL window: keeps the crash path active
 
         int tornFilePage;
         using (var scope1 = _serviceProvider.CreateScope())

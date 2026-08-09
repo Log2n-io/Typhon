@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 
 namespace Typhon.Engine.Internals;
 
@@ -20,6 +21,13 @@ internal sealed class RecoveryDriver
         public int TxCommitted;
         public long MaxTsn;
         public long MaxLsn; // highest LSN seen in the recovery window — the frontier the post-recovery seal consolidates to
+
+        /// <summary>
+        /// Per-(entity, slot) records expanded out of columnar FenceBlock records (#559). Surfaced so a test can tell that a recovered value actually
+        /// travelled the fence-block path rather than arriving as a per-entity Slot record — the two are indistinguishable downstream by design, which is
+        /// exactly what makes "the FenceBlock path feeds recovery correctly" (#569) otherwise unfalsifiable.
+        /// </summary>
+        public int FenceBlockRecordsExpanded;
 
         /// <summary>
         /// True when the scan stopped at a corruption boundary (LOG-03 / REC-01) rather than running out of segments.
@@ -75,7 +83,8 @@ internal sealed class RecoveryDriver
         var records = new List<Rec>();
         var committed = new HashSet<long>();
 
-        var paths = Directory.GetFiles(walDir, "*.wal").OrderBy(p => p, StringComparer.Ordinal).ToArray();
+        // #688: through the backend, so an injected WAL IO is discoverable. Same reason as WalRecovery.DiscoverSegments.
+        var paths = walIO.EnumerateSegmentPaths(walDir).OrderBy(p => p, StringComparer.Ordinal).ToArray();
         using (var reader = new WalSegmentReader(walIO))
         {
             foreach (var path in paths)
@@ -145,6 +154,7 @@ internal sealed class RecoveryDriver
 
                                 for (var c = 0; c < block.ColumnCount; c++)
                                 {
+                                    result.FenceBlockRecordsExpanded++;
                                     records.Add(new Rec
                                     {
                                         Lsn = view.Lsn, Tsn = view.Tsn, Kind = RecordKind.Slot, Op = (byte)SlotOp.Upsert,
@@ -243,17 +253,30 @@ internal sealed class RecoveryDriver
             // No Spawn in the window → the record targets a pre-existing (checkpointed) entity already loaded into the EntityMap.
             if (!agg.HasSpawn)
             {
-                // Base-entity Destroy wins over any enabled change (net not-alive); otherwise apply a base-entity enabled-bits
-                // change in place. A base-entity value update (AddCompRev to the existing chain) is a later increment.
+                // Base-entity Destroy wins over everything (net not-alive): applying values to an entity this window kills would write into storage the
+                // tombstone makes unreachable.
                 if (agg.HasDestroy)
                 {
                     applier.ApplyDestroyToExisting(entityIdRaw, agg.DestroyTsn);
                     result.RecordsApplied++;
+                    continue;
                 }
-                else if (agg.HasEnabledChange)
+
+                if (agg.HasEnabledChange)
                 {
                     applier.ApplySetEnabledBitsToExisting(entityIdRaw, agg.EnabledBits);
                     result.RecordsApplied++;
+                }
+
+                // #569: the aggregated Slot payloads used to be DROPPED here, with a comment calling the base-entity value update "a later increment". The
+                // aggregation at :53 has always produced exactly the right value — per (entity, slot), latest committed wins, which is the CM-03 last-writer
+                // rule the Commit discipline needs against an interleaved TickFence write — so the only thing missing was somewhere to put it. Until this
+                // landed, every entity that existed at the last checkpoint lost every value update in the window: for a steady-state workload (spawn once,
+                // mutate forever) that is effectively all of them, and the ≤1-tick promise in ADR-057 was really the checkpoint interval.
+                if (agg.Slots.Count > 0)
+                {
+                    applier.ApplySlotToExisting(entityIdRaw, agg.Slots.Values);
+                    result.RecordsApplied += agg.Slots.Count;
                 }
 
                 continue;
@@ -278,6 +301,21 @@ internal sealed class RecoveryDriver
         if (applier.MaxTsn >= dbe.TransactionChain.NextFreeId)
         {
             dbe.TransactionChain.SetNextFreeId(applier.MaxTsn + 1);
+        }
+
+        // #697, the entity-key half of the same watermark discipline: NextEntityKey must be at least the highest key this window applied, or the first
+        // post-recovery Spawn re-issues a live recovered entity's id and silently overwrites it. The rebuild paths raise this counter from the persisted base,
+        // but they run BEFORE the window is applied — so with no checkpoint at all the counter stayed 0 while recovery inserted keys 1..N. NextEntityKey holds
+        // the LAST issued key (Transaction.ECS.cs increments before use), so the max applied key is the correct floor, not max+1.
+        // NB: _stateByRouting, NOT _archetypeStates. An EntityId carries the per-DB ROUTING id; _archetypeStates is indexed by the per-process CATALOG id.
+        // The two spaces coincide often enough (single archetype, fresh process) that mixing them up silently no-ops instead of throwing.
+        foreach (var (routingId, maxKey) in applier.MaxEntityKeyByArchetype)
+        {
+            var state = routingId < dbe._stateByRouting.Length ? dbe._stateByRouting[routingId] : null;
+            if (state != null && maxKey > Interlocked.Read(ref state.NextEntityKey))
+            {
+                Interlocked.Exchange(ref state.NextEntityKey, maxKey);
+            }
         }
 
         return result;

@@ -104,6 +104,28 @@ internal class ArchetypeMetadata
     /// <summary>Number of Transient component slots (PopCount of <see cref="TransientSlotMask"/>).</summary>
     internal byte TransientSlotCount;
 
+    /// <summary>
+    /// Bitmask of the slots whose secondary-index maintenance runs at the TICK FENCE rather than at commit, under <see cref="CommitDiscipline.TickFence"/>
+    /// — every slot that is neither Versioned (always commit-scoped) nor beyond <see cref="ComponentCount"/>. Under
+    /// <see cref="CommitDiscipline.Commit"/> the SingleVersion members move to the commit path too, so callers narrow this further; see
+    /// <c>EntityRef.ShadowClusterIndexedFields</c> and the destroy hand-off in <c>Transaction.FlushEcsPendingOperations</c>, which MUST agree with each other
+    /// (#711 was them disagreeing).
+    /// </summary>
+    internal ushort FenceMaintainedSlotMask;
+
+    /// <summary>
+    /// The slots whose secondary-index maintenance the TICK FENCE owns for a transaction running under <paramref name="discipline"/> — the single
+    /// definition both sides of the hand-off consult. Under <see cref="CommitDiscipline.Commit"/> the SingleVersion members are staged and reconciled by
+    /// the commit publish, so only the Transient ones remain the fence's.
+    /// </summary>
+    /// <remarks>
+    /// Two places must agree on this and they used to compute it independently: the shadow capture (which decides what the fence CAN clean up) and the
+    /// destroy path (which decides what to leave TO the fence). #711 was the gap between them — a slot the destroy skipped and the fence had never captured
+    /// kept its index entry after the slot was released.
+    /// </remarks>
+    internal ushort FenceMaintainedSlotsUnder(CommitDiscipline discipline) =>
+        discipline == CommitDiscipline.Commit ? (ushort)(FenceMaintainedSlotMask & TransientSlotMask) : FenceMaintainedSlotMask;
+
     // ═══════════════════════════════════════════════════════════════════════
     // Cascade delete graph (populated during Freeze)
     // ═══════════════════════════════════════════════════════════════════════
