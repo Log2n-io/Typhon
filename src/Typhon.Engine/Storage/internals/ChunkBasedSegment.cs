@@ -143,14 +143,16 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     /// <summary>Byte offset within a non-root page of this segment where chunk 0 begins.</summary>
     public int OtherDataOffset => PagedMMF.PageHeaderSize + _otherAlignmentPadding;
 
-    /// <summary>
-    /// Records how many per-sector verification slots fit on a page of this segment, given how much of the metadata region
-    /// its chunk-occupancy bitmap claims.
-    /// </summary>
-    /// <param name="page">The page to stamp.</param>
-    /// <param name="bitmapLongs">Number of 64-bit bitmap words this page's chunk count needs.</param>
-    private static unsafe void DeclareSectorGeometry(PageAccessor page, int bitmapLongs)
-        => PageSectorFooter.DeclareGeometry(new Span<byte>(page.Address, PagedMMF.PageSize), bitmapLongs * sizeof(long));
+    /// <inheritdoc />
+    /// <remarks>
+    /// The chunk-occupancy bitmap grows up from the start of the metadata region; the per-sector verification footer grows
+    /// down from its end. This is what keeps them apart, and it is consulted at page <i>initialisation</i> so a page never
+    /// — not even transiently, in the window where it is unlatched and dirty and a checkpoint could persist it — declares
+    /// a finer geometry than its bitmap leaves room for. A page that did would have its footer stamped over its own chunk
+    /// bitmap, which silently corrupts chunk allocation rather than failing loudly.
+    /// </remarks>
+    protected override int MetadataReservedBytes(bool isRootPage) => (isRootPage ? _bitmapLongsRoot : _bitmapLongsOther) * sizeof(long);
+
 
     // ═══════════════════════════════════════════════════════════════════════
     // Segment lifecycle: Create, Load, Grow
@@ -171,13 +173,6 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
             var page = GetPageExclusive(i, epoch, out var memPageIdx);
             int longSize = i == 0 ? _bitmapLongsRoot : _bitmapLongsOther;
             page.Metadata<long>(0, longSize).Clear();
-
-            // The chunk bitmap and the per-sector verification footer share the page metadata region: the bitmap grows up
-            // from its start, the footer down from its end. Only the segment knows how many bitmap words its stride needs,
-            // so it is the segment that declares how many sector slots are left over. A small enough stride leaves none,
-            // and the page falls back to a whole-page checksum — correct, and reported by the checker as reduced salvage
-            // granularity rather than silently assumed.
-            DeclareSectorGeometry(page, longSize);
 
             // Clear chunk 0's raw data on the root page so the BTree directory starts clean.
             // We do this inline because ReserveChunk(index, clearContent:true) needs a ChunkAccessor which requires an epoch scope — unavailable during segment
@@ -307,7 +302,6 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
                 {
                     var page = GetPageExclusiveUnchecked(i, epoch, out var memPageIdx);
                     page.Metadata<long>(0, _bitmapLongsOther).Clear();
-                    DeclareSectorGeometry(page, _bitmapLongsOther);
                     effectiveChangeSet?.AddByMemPageIndex(memPageIdx);
 
                     // Protect new pages against the checkpoint race during Grow→first-access window.
