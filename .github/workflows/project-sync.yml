@@ -277,8 +277,35 @@ jobs:
           if [ -n "$ISSUE_NUM" ]; then
             echo "PR merged, updating issue #$ISSUE_NUM"
 
-            # Close the issue
-            gh issue close "$ISSUE_NUM" --repo "$GITHUB_REPOSITORY" || true
+            # This used to close the issue outright, and that made it a THIRD way for an issue to close — alongside a
+            # closing keyword in the squash message and one in the PR description. It fired on the first `#N` in the PR
+            # TITLE, unconditionally, which collides head-on with this repo's own convention of prefixing a title with
+            # the issue a change RELATES to. A leading `#N` means "about", not "completes".
+            #
+            # It closed #722 minutes after that issue was filed to track REMAINING work (PR #723 was titled
+            # "#722 Repoint the quarantined view test ..."), which turned an [Ignore("#722")] into a reference to a
+            # closed issue and reddened main. Neither the closing-keywords gate nor the suppression companion added in
+            # #725 could see it: both read keywords, and this path used none.
+            #
+            # Closing is now GitHub's job alone, driven by an explicit `Closes #N`. One mechanism, one gate.
+            #
+            # The BOARD still moves — that is the half worth keeping — but it now reads the issue's ACTUAL state rather
+            # than assuming the merge completed it, so it can no longer report Done for something still open.
+            ISSUE_STATE=$(gh api "/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUM" --jq '.state' || echo "")
+            if [ "$ISSUE_STATE" = "closed" ]; then
+              # A closing keyword (or a human) closed it. `update-status-on-close` normally handles this via the
+              # issues.closed event; repeating it here is harmless and covers an issue closed BEFORE the merge, where
+              # no such event fires at merge time.
+              TARGET_STATUS="$STATUS_DONE"
+              TARGET_NAME="Done"
+            else
+              # Still open, and its PR is no longer open either — so by the three-state lifecycle it is neither Done nor
+              # In Progress ("an issue stays In Progress while its PR is open"). Todo is the honest column: work landed,
+              # the issue survived it, nobody is actively on it.
+              TARGET_STATUS="$STATUS_TODO"
+              TARGET_NAME="Todo"
+            fi
+            echo "Issue #$ISSUE_NUM is $ISSUE_STATE -> board $TARGET_NAME"
 
             # Get issue node ID
             ISSUE_NODE_ID=$(gh api "/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUM" --jq '.node_id')
@@ -318,9 +345,9 @@ jobs:
                       }
                     }
                   }
-                ' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$STATUS_FIELD_ID" -f value="$STATUS_DONE"
+                ' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$STATUS_FIELD_ID" -f value="$TARGET_STATUS"
 
-                echo "✅ Issue #$ISSUE_NUM marked as Done"
+                echo "✅ Issue #$ISSUE_NUM moved to $TARGET_NAME"
               fi
             fi
           else
