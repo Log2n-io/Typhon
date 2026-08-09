@@ -1500,6 +1500,47 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
             : $"{broken.Count}+ of {links} leaf link(s) have a HighKey reaching past the next leaf :: {string.Join(" ;; ", broken)}";
     }
 
+    /// <summary>
+    /// Validates that the leaf sibling chain is a simple, doubly-consistent list: no node revisited, every back-pointer agreeing with the forward walk, and
+    /// the tail matching <c>_reverseLinkList</c>. Returns <c>null</c> when sound, else a detail string. Test/diagnostic use only — walks without locks.
+    /// </summary>
+    /// <remarks>
+    /// #679: every chain walk in this file and in the stress harness was written as <c>while (cur.IsValid)</c> or with a 1,000,000-iteration guard, so a cycle
+    /// in the chain either hung the walker or was silently absorbed — including inside <see cref="CheckConsistency"/> itself, which is supposed to be the thing
+    /// that catches this. A cycle IS reachable: it is what left writers walking the B-link move-right loop forever, and the reason the loop now carries a hop
+    /// bound. Detect it explicitly and name the node, so the corruption is reported where it is rather than as a hang somewhere downstream.
+    /// </remarks>
+    internal string ValidateLeafChain(ref ChunkAccessor<TStore> accessor)
+    {
+        var seen = new HashSet<int>();
+        var cur = _linkList;
+        NodeWrapper prev = default;
+        while (cur.IsValid)
+        {
+            if (!seen.Add(cur.ChunkId))
+            {
+                return $"leaf chain has a CYCLE: chunk {cur.ChunkId} revisited after {seen.Count} node(s), reached from {prev.ChunkId}";
+            }
+
+            var back = cur.GetPrevious(ref accessor);
+            if (prev.IsValid ? (back.ChunkId != prev.ChunkId) : back.IsValid)
+            {
+                return $"leaf chain back-pointer disagrees at chunk {cur.ChunkId}: previous={back.ChunkId}, forward walk arrived from "
+                     + $"{(prev.IsValid ? prev.ChunkId.ToString() : "head")}";
+            }
+
+            prev = cur;
+            cur = cur.GetNext(ref accessor);
+        }
+
+        if (prev.IsValid && _reverseLinkList.IsValid && prev.ChunkId != _reverseLinkList.ChunkId)
+        {
+            return $"leaf chain tail is chunk {prev.ChunkId} but _reverseLinkList names {_reverseLinkList.ChunkId}";
+        }
+
+        return null;
+    }
+
     public override void CheckConsistency(ref ChunkAccessor<TStore> accessor)
     {
         // Recursive check from Root to leaf
@@ -1516,6 +1557,10 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         //   - HighKey == next leaf's first key: nothing in the walk reads HighKey at all, so the bound the B-link descent steers by had no enforcement.
         // The first cost a long hunt in #297/#679 by reporting as "Mismatch node's Height 2 with True" — a leaf at the wrong level — on trees that were in
         // fact perfectly balanced. The other two were the mode 1 / mode 2 defects themselves, invisible to a check that reported "PASSED".
+        // Chain first: everything below walks the chain, and the walks are unbounded — a cycle would hang the checker instead of failing it.
+        var chainDetail = ValidateLeafChain(ref accessor);
+        ConsistencyAssert(chainDetail == null, chainDetail);
+
         var depthDetail = ValidateLeafDepths(ref accessor);
         ConsistencyAssert(depthDetail == null, depthDetail);
         var separatorDetail = ValidateLeafSeparators(ref accessor);
@@ -1929,7 +1974,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
             Interlocked.Increment(ref _writeLockFailures);
             spin.SpinOnce(-1);
         }
-        while (!latch.TryWriteLock());
+        while (!latch.TryWriteLock());
         return WriteLockOutcome.AcquiredContended;
     }
 
@@ -2104,20 +2149,32 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         // out-of-sync with the actual chain ordering/ under concurrent operations.
         if (followRightLink && keyIndex < 0)
         {
+            // #679: every caller reads `keyIndex < 0` as "definitively not in the tree", so this loop must only end that way when it has actually ESTABLISHED
+            // it. It had two exits that established nothing and still fell through to that answer:
+            //   - the hop budget running out, and
+            //   - meeting an empty leaf, which ended the loop via its own condition.
+            // Both are reachable while the key sits further right, and the second is routine during merges: a leaf is emptied before the merge that unlinks it.
+            // Measured in Remove_Merges — key 584 removed by nobody, still on the chain, with branch `general path (descend keyIndex<0)` the only one to fire.
+            // The same descent backs TryGet, so the identical false "not found" was reachable on the READ path.
+            // Empty leaves are now hopped OVER rather than treated as an answer, and an inconclusive exit restarts instead of lying.
             const int maxHops = 16;
-            for (int hop = 0; hop < maxHops && node.GetCount(ref accessor) > 0; hop++)
+            bool conclusive = false;
+            for (int hop = 0; hop < maxHops; hop++)
             {
                 int leafCount = node.GetCount(ref accessor);
-                int cmpToLast = leafCount > 0 ? Comparer.Compare(key, node.GetItem(leafCount - 1, ref accessor).Key) : 1; // empty leaf — treat key as beyond
-                if (cmpToLast <= 0)
+                if (leafCount > 0)
                 {
                     // key <= leaf's last → key would be in this leaf if anywhere on this side of the chain. Re-validate to guard against torn reads (key/last
                     // from inconsistent version snapshot), then conclude NotFound.
-                    if (!latch.ValidateVersion(version))
+                    if (Comparer.Compare(key, node.GetItem(leafCount - 1, ref accessor).Key) <= 0)
                     {
-                        return (0, 0, -1);
+                        if (!latch.ValidateVersion(version))
+                        {
+                            return (0, 0, -1);
+                        }
+                        conclusive = true;
+                        break;
                     }
-                    break;
                 }
                 if (!latch.ValidateVersion(version))
                 {
@@ -2127,7 +2184,8 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
                 var nextNode = node.GetNext(ref accessor);
                 if (!nextNode.IsValid)
                 {
-                    break; // chain exhausted
+                    conclusive = true; // chain exhausted — key is beyond every leaf, which IS an answer
+                    break;
                 }
 
                 var nextLatch = nextNode.GetLatch(ref accessor);
@@ -2143,8 +2201,14 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
                 keyIndex = node.Find(key, Comparer, ref accessor);
                 if (keyIndex >= 0)
                 {
+                    conclusive = true;
                     break;
                 }
+            }
+
+            if (!conclusive)
+            {
+                return (0, 0, -1); // ran out of hops without settling the question — restart rather than report a not-found we did not establish
             }
         }
 

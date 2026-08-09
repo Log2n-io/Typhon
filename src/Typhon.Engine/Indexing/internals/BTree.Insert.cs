@@ -655,7 +655,7 @@ internal abstract partial class BTree<TKey, TStore>
     /// </summary>
     private void InsertIterative(ref InsertArguments args, ref ChunkAccessor<TStore> accessor, out bool completed)
     {
-        completed = false;
+        completed = false; // descent
         MutationContext ctx = default;
         var node = Root;
         var relatives = new NodeRelatives();
@@ -712,8 +712,8 @@ internal abstract partial class BTree<TKey, TStore>
 
         // Phase 1.5A: Lock leaf with version validation.
         // Between Phase 1 descent and lock acquisition, a concurrent writer may have split/modified this leaf. Snapshot the version before locking,
-        // then validate after.
-        node.PreDirtyForWrite(ref accessor);
+        // then validate after. // INSIDE leaf PreDirtyForWrite — page-cache admission, blocks without spinning
+        node.PreDirtyForWrite(ref accessor); // leaf lock
         var leafLatch = node.GetLatch(ref accessor);
         int leafVersion = leafLatch.ReadVersion();
         if (leafVersion == 0)
@@ -761,7 +761,7 @@ internal abstract partial class BTree<TKey, TStore>
 
         // B-link move_right (Lehman & Yao): if the key is beyond this leaf's range, a concurrent split moved some keys to a right sibling. Chain right using
         // lock coupling (lock next before releasing current) until we find the correct leaf. Forward progress is guaranteed:
-        // all movement is strictly rightward with no cycle, and SpinWriteLock waits for busy siblings.
+        // all movement is strictly rightward with no cycle, and SpinWriteLock waits for busy siblings. // move-right
         bool movedRight = false;
         // High key is an exclusive upper bound, so key >= highKey means we're out of range.
         while (node.GetCount(ref accessor) > 0 && node.GetNext(ref accessor).IsValid && args.Compare(args.Key, node.GetHighKey(ref accessor)) >= 0)
@@ -854,14 +854,20 @@ internal abstract partial class BTree<TKey, TStore>
         // within microseconds).
         if (movedRight)
         {
-            node.GetLatch(ref accessor).WriteUnlock();
+            // #679: AbortWriteLock, NOT WriteUnlock. Nothing was modified on this path — `shouldContentionSplit` requires `!movedRight`, so arriving here means
+            // the leaf was full and the item was never inserted — and WriteUnlock BUMPS the version. That bump invalidates every concurrent OLC reader and
+            // writer that had validated against this leaf, forcing them to restart; with several writers repeatedly reaching this same bail they invalidate one
+            // another perpetually and none converges. Measured as the stress harness's HANG: all workers alive, none blocked on a latch, all sitting at
+            // pessAttempt=664 and climbing toward the MaxPessimisticRestarts throw. Releasing without the bump is what the rest of the file already does at
+            // every "condition failed — didn't modify node" exit.
+            node.GetLatch(ref accessor).AbortWriteLock();
             return; // completed=false — retry with fresh path from root
         }
 
         // Slow path: leaf full or contention split — structural modification needed.
         // For contention split, skip leafPrev lock (no spill needed — item already in, only need right neighbor for linked list).
         // On lock failure: contention split uses WriteUnlock + completed=true (item is in); regular uses AbortWriteLock + restart.
-        // Sibling locking: load sibling pages into the sibling CA to avoid evicting parent path pages from the primary CA
+        // Sibling locking: load sibling pages into the sibling CA to avoid evicting parent path pages from the primary CA // sibling locks
         var leafPrev = itemAlreadyInserted ? default : node.GetPrevious(ref accessor);
         var leafNext = node.GetNext(ref accessor);
         if (leafPrev.IsValid)
@@ -893,7 +899,7 @@ internal abstract partial class BTree<TKey, TStore>
             node.GetLatch(ref accessor).AbortWriteLock();
             return;
         }
-
+ // path locks
         // Lock path nodes bottom-up with version validation.
         // Required for ancestor key updates during spill and split propagation.
         for (int i = ctx.Depth - 1; i >= 0; i--)
@@ -949,7 +955,7 @@ internal abstract partial class BTree<TKey, TStore>
                 return;
             }
         }
-
+ // insert/split at leaf
         // All needed nodes locked — Phase 2: Insert at leaf (may spill or split) or contention split
         KeyValueItem? promoted;
         if (itemAlreadyInserted)
@@ -977,7 +983,7 @@ internal abstract partial class BTree<TKey, TStore>
         {
             node.GetLatch(ref accessor).WriteUnlock();
         }
-
+ // propagate
         // Phase 3: Propagate splits upward through internal nodes
         while (ctx.Depth > 0 && promoted != null)
         {
@@ -1035,7 +1041,7 @@ internal abstract partial class BTree<TKey, TStore>
         //
         // Issue #297: hold newRoot's write lock around the structural writes (SetLeft + Insert). Without it, a concurrent thread reading the just-published
         // `Root` field can observe newRoot with count=0 (Insert(0, promoted) hasn't written yet) and descend through the leftmost child path, missing the
-        // promoted subtree entirely. The lock forces the racer to restart on a locked latch until WriteUnlock publishes a consistent state.
+        // promoted subtree entirely. The lock forces the racer to restart on a locked latch until WriteUnlock publishes a consistent state. // root split
         if (promoted != null)
         {
             var newRoot = AllocNode(NodeStates.None, ref accessor);
@@ -1050,7 +1056,7 @@ internal abstract partial class BTree<TKey, TStore>
             newRootLatch.WriteUnlock();
             node.GetLatch(ref accessor).WriteUnlock(); // release old root after publishing new root
         }
-
+ // done
         completed = true;
     }
 }

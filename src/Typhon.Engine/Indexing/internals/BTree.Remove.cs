@@ -356,9 +356,16 @@ internal abstract partial class BTree<TKey, TStore>
                 }
                 else
                 {
-                    int order = args.Compare(args.Key, ll.GetFirst(ref accessor).Key);
+                    var llFirst = ll.GetFirst(ref accessor).Key;
+                    int order = args.Compare(args.Key, llFirst);
                     if (order < 0)
                     {
+                        if (OlcDescentTrace.OnRemoveNotFound != null && typeof(TKey) == typeof(int))
+                        {
+                            var ak = args.Key; var fk = llFirst;
+                            OlcDescentTrace.OnRemoveNotFound(OlcDescentTrace.RemoveBranchPessimisticBeginLessThanFirst,
+                                Unsafe.As<TKey, int>(ref ak), ll.ChunkId, Unsafe.As<TKey, int>(ref fk), ll.GetCount(ref accessor));
+                        }
                         ll.GetLatch(ref accessor).AbortWriteLock(); // key not in tree — didn't modify node
                         return;
                     }
@@ -396,9 +403,16 @@ internal abstract partial class BTree<TKey, TStore>
                 }
                 else
                 {
-                    int order = args.Compare(args.Key, rll.GetLast(ref accessor).Key);
+                    var rllLast = rll.GetLast(ref accessor).Key;
+                    int order = args.Compare(args.Key, rllLast);
                     if (order > 0)
                     {
+                        if (OlcDescentTrace.OnRemoveNotFound != null && typeof(TKey) == typeof(int))
+                        {
+                            var ak = args.Key; var lk = rllLast;
+                            OlcDescentTrace.OnRemoveNotFound(OlcDescentTrace.RemoveBranchPessimisticEndGreaterThanLast,
+                                Unsafe.As<TKey, int>(ref ak), rll.ChunkId, Unsafe.As<TKey, int>(ref lk), rll.GetCount(ref accessor));
+                        }
                         rll.GetLatch(ref accessor).AbortWriteLock(); // key not in tree — didn't modify node
                         return;
                     }
@@ -584,6 +598,23 @@ internal abstract partial class BTree<TKey, TStore>
         {
             leafLatch.AbortWriteLock(); // we held the lock without modifying the node
             return false; // restart — parent separator hasn't propagated; descent landed at wrong leaf
+        }
+
+        // #679: the LOWER-bound half of the guard above, which only ever covered the upper one. A stale separator can route a descent too far RIGHT just as
+        // easily as too far left — and then Find fails on a leaf whose first key is already past the search key, while the key sits in a leaf to the LEFT. The
+        // comment below used to reason "after the stale-separator guard above, a NotFound here means the key is genuinely not in the tree", which held for one
+        // direction only. Measured in Remove_Merges: key 584 removed by nobody, still on the chain, with Remove reporting not-found.
+        // An empty leaf is inconclusive for the same reason and gets the same treatment — merges empty a leaf before unlinking it, so meeting one says nothing
+        // about where the key is. Both cases release without a version bump (nothing was modified) and let the bounded outer loop re-descend.
+        int leafCount = node.GetCount(ref accessor);
+        bool leftOfLeaf = leafCount > 0
+                          && args.Compare(args.Key, node.GetFirst(ref accessor).Key) < 0
+                          && node.GetPrevious(ref accessor).IsValid;
+        bool emptyAndLinked = leafCount == 0 && (node.GetPrevious(ref accessor).IsValid || node.GetNext(ref accessor).IsValid);
+        if (leftOfLeaf || emptyAndLinked)
+        {
+            leafLatch.AbortWriteLock();
+            return false; // restart — this leaf is not authoritative for the key
         }
 
         // Check if key exists in this leaf
