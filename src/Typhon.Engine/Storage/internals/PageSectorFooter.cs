@@ -83,10 +83,6 @@ internal static class PageSectorFooter
     /// <param name="reservedMetadataBytes">Bytes of the metadata region already claimed, counted from <see cref="MetadataOffset"/>.</param>
     public static int ChooseSectorCount(int reservedMetadataBytes)
     {
-        if (BisectDisableSectorFooters)
-        {
-            return 0;
-        }
         var floor = MetadataOffset + reservedMetadataBytes;
         for (var n = MaxSectorCount; n >= 2; n >>= 1)
         {
@@ -273,6 +269,4 @@ internal static class PageSectorFooter
     /// <summary>Byte offset of the change revision within the page base header, mirrored here to avoid a layout lookup.</summary>
     private const int PageImageChangeRevisionOffset = 4;
 
-    /// <summary>TEMPORARY BISECT PROBE — forces every page onto the legacy whole-page checksum.</summary>
-    internal static readonly bool BisectDisableSectorFooters = true;
 }
