@@ -471,7 +471,19 @@ internal abstract partial class BTree<TKey, TStore>
                         }
                         else
                         {
-                            if (!ll.GetIsFull(ref accessor) && args.Compare(args.Key, ll.GetFirst(ref accessor).Key) < 0)
+                            // #297: `ll.GetPrevious()` must be checked, and its absence here was the defect. This path lowers the leaf's FIRST key, and a leaf's
+                            // first key is what its parent separator holds. That is sound only for the tree's leftmost leaf, which hangs off the left POINTER
+                            // and has no separator — so nothing needs updating. `_linkList` is a cached field, though, and a concurrent split can create a new
+                            // leftmost leaf (or the field can simply be observed stale), leaving `ll` an INTERIOR leaf reached through a separator. Pushing a
+                            // smaller key to its front then drops its first key below that separator with no ancestor update, and descent for the new key
+                            // routes left of the separator and never reaches the leaf: the key is counted by IncCount and unreachable. Measured signature —
+                            // `separator=1054 -> leaf firstKey=1049`, the key present in a chained leaf, TryGet failing.
+                            //
+                            // The other three cached-pointer fast paths already guard this: the append path re-checks `!rl.GetNext().IsValid`, and both Remove
+                            // fast paths bail on a valid Previous/Next. The Remove BEGIN path's comment even names this exact hazard. Only this one was left.
+                            if (!ll.GetIsFull(ref accessor)
+                                && !ll.GetPrevious(ref accessor).IsValid
+                                && args.Compare(args.Key, ll.GetFirst(ref accessor).Key) < 0)
                             {
                                 int value = CreateInsertValue(ref args, ref accessor);
                                 ll.PushFirst(new KeyValueItem(args.Key, value), ref accessor);

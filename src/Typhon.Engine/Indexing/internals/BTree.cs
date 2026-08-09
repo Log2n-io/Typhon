@@ -1291,6 +1291,157 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         return removed;
     }
 
+    /// <summary>
+    /// Diagnostic (#297/#679): report every node in the tree that carries <paramref name="key"/>, how the descent reaches it, and whether it is on the
+    /// leaf chain. Test/diagnostic use only — walks without locks, so the caller must ensure no concurrent modification.
+    /// </summary>
+    /// <remarks>
+    /// <c>DescribeLostKey</c> established the shape of the defect — the key is absent from the leaf chain, the chain is intact and ordered around the gap, and
+    /// <c>CheckConsistency</c> nonetheless finds the key somewhere under a separator far above it. That is as far as a chain walk can see. This answers the
+    /// next question: which node holds it, is that node a LEAF or an internal separator, and is the node itself on the chain.
+    /// <para>
+    /// The three answers point at different defects. A leaf holding the key but missing from the chain means a split linked its new node into the PARENT and
+    /// not into the sibling list. A leaf on the chain whose key the chain walk did not yield means the walk stops early. Only an internal separator carrying
+    /// the key, with no leaf holding it, means the data itself was dropped while the promoted copy survived.
+    /// </para>
+    /// </remarks>
+    internal string DescribeKeyLocation(TKey key, ref ChunkAccessor<TStore> accessor)
+    {
+        var chainNodes = new HashSet<int>();
+        var cur = _linkList;
+        for (int guard = 0; cur.IsValid && guard < 1_000_000; guard++)
+        {
+            chainNodes.Add(cur.ChunkId);
+            cur = cur.GetNext(ref accessor);
+        }
+
+        var found = new List<string>();
+        var stack = new Stack<(NodeWrapper Node, int Depth, string Path)>();
+        if (Root.IsValid)
+        {
+            stack.Push((Root, 0, "root"));
+        }
+
+        int visited = 0;
+        while (stack.Count > 0 && visited < 1_000_000)
+        {
+            var (node, depth, path) = stack.Pop();
+            visited++;
+            if (!node.IsValid)
+            {
+                continue;
+            }
+
+            bool isLeaf = node.GetIsLeaf(ref accessor);
+            int count = node.GetCount(ref accessor);
+
+            for (int i = 0; i < count; i++)
+            {
+                if (Comparer.Compare(node.GetItem(i, ref accessor).Key, key) == 0)
+                {
+                    found.Add($"{(isLeaf ? "LEAF" : "INTERNAL")} chunk={node.ChunkId} depth={depth} slot={i}/{count} "
+                            + $"onLeafChain={chainNodes.Contains(node.ChunkId)} via[{path}]");
+                }
+            }
+
+            if (isLeaf)
+            {
+                continue;
+            }
+
+            // Children are the left pointer plus one per item — the shape CheckConsistency walks.
+            var left = node.GetLeft(ref accessor);
+            if (left.IsValid)
+            {
+                stack.Push((left, depth + 1, path + " -> left"));
+            }
+            for (int i = 0; i < count; i++)
+            {
+                var child = node.GetChild(i, ref accessor);
+                if (child.IsValid)
+                {
+                    stack.Push((child, depth + 1, path + $" -> [{node.GetItem(i, ref accessor).Key}]"));
+                }
+            }
+        }
+
+        return $"nodesVisited={visited} chainNodes={chainNodes.Count} height={Height} | "
+             + (found.Count == 0 ? "key is in NO node of the tree" : string.Join(" ;; ", found));
+    }
+
+    /// <summary>
+    /// Diagnostic (#297/#679): report every internal item whose separator key disagrees with the first key of the child it points at.
+    /// Test/diagnostic use only — walks without locks.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="DescribeKeyLocation"/> showed the lost key sitting in a leaf that IS on the chain, under a separator far above it. That leaves exactly two
+    /// possibilities, and they implicate different code:
+    /// <list type="bullet">
+    /// <item>the separator KEY is wrong — something overwrote it, so the pair is (wrongKey, rightChild). Suspect the ancestor-key rewrites in the spill paths,
+    /// which locate the item by an index captured during the descent.</item>
+    /// <item>the child POINTER is wrong — a node id was written into the wrong slot, so the pair is (rightKey, wrongChild), and whatever the separator really
+    /// belongs to is now unreachable.</item>
+    /// </list>
+    /// Printing the separator beside the child's actual first key names which, and the count of BROKEN pairs against total pairs says whether it is one
+    /// stray write or systemic.
+    /// </remarks>
+    internal string DescribeSeparatorMismatches(ref ChunkAccessor<TStore> accessor, int maxReported = 6)
+    {
+        var broken = new List<string>();
+        int pairs = 0, visited = 0;
+        var stack = new Stack<(NodeWrapper Node, int Depth)>();
+        if (Root.IsValid)
+        {
+            stack.Push((Root, 0));
+        }
+
+        while (stack.Count > 0 && visited < 1_000_000)
+        {
+            var (node, depth) = stack.Pop();
+            visited++;
+            if (!node.IsValid || node.GetIsLeaf(ref accessor))
+            {
+                continue;
+            }
+
+            int count = node.GetCount(ref accessor);
+            var left = node.GetLeft(ref accessor);
+            if (left.IsValid)
+            {
+                stack.Push((left, depth + 1));
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                var item = node.GetItem(i, ref accessor);
+                var child = node.GetChild(i, ref accessor);
+                if (!child.IsValid)
+                {
+                    continue;
+                }
+                stack.Push((child, depth + 1));
+
+                if (child.GetCount(ref accessor) == 0)
+                {
+                    continue;
+                }
+                pairs++;
+
+                // The B+Tree invariant for a right child: separator == child's first key.
+                var childFirst = child.GetFirst(ref accessor).Key;
+                if (Comparer.Compare(item.Key, childFirst) != 0 && broken.Count < maxReported)
+                {
+                    broken.Add($"parent={node.ChunkId}(d{depth}) slot={i}/{count}: separator={item.Key} -> child={child.ChunkId} "
+                             + $"firstKey={childFirst} lastKey={child.GetLast(ref accessor).Key} childIsLeaf={child.GetIsLeaf(ref accessor)}");
+                }
+            }
+        }
+
+        return broken.Count == 0
+            ? $"separators: all {pairs} pair(s) agree"
+            : $"separators: {broken.Count}+ of {pairs} pair(s) BROKEN :: {string.Join(" ;; ", broken)}";
+    }
+
     public override void CheckConsistency(ref ChunkAccessor<TStore> accessor)
     {
         // Recursive check from Root to leaf

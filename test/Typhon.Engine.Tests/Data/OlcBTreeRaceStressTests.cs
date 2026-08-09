@@ -360,7 +360,11 @@ public class OlcBTreeRaceStressTests
             consistency = ex.Message;
         }
 
+        var location = tree.DescribeKeyLocation(key, ref accessor);
+        var separators = tree.DescribeSeparatorMismatches(ref accessor);
+
         return $"inLeafChain={inChain} chainCount={chainCount} chainOrdered={chainOrdered} entryCount={tree.EntryCount} height={tree.Height} "
+             + $"| where=[{location}] | {separators} "
              + $"chainNeighbours=({(predecessor == int.MinValue ? "-" : predecessor.ToString())},"
              + $"{(successor == int.MaxValue ? "-" : successor.ToString())}) consistency=[{consistency}]";
     }
