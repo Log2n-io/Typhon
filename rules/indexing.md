@@ -304,7 +304,16 @@ written for the read path; these are the write-path obligations that went unwrit
   enforce `BTree.KeyOutsideLeafAuthority` states the pair once; `Move`, `MoveValue` and the OLC general insert path all call it and
           restart when it holds. A bail before mutation uses `AbortWriteLock`, not `WriteUnlock` - nothing changed, so bumping the
           version would only restart other threads for free.
+  enforce the PESSIMISTIC path answers the upper bound differently and must still ask it through the same predicate:
+          `InsertIterative`'s B-link move-right loop is `while (KeyAboveLeafUpperBound(...))`, walking right until the leaf owns the
+          key rather than restarting, because mid-SMO it has no restart point. Same question, different response.
+  enforce the append and prepend fast paths answer both bounds STRUCTURALLY rather than by predicate, and that is sufficient:
+          `PushLast` requires `!rl.GetNext().IsValid` (the leaf is genuinely rightmost, so no upper bound exists) plus
+          `key > rl.GetLast()`; `PushFirst` requires `!ll.GetPrevious().IsValid` (genuinely leftmost, so no separator routes to it).
   scope: BTree.Insert.cs (`KeyAboveLeafUpperBound`, `KeyOutsideLeafAuthority`), BTree.Move.cs
+  audit  all 14 leaf-write sites, 2026-08-10: Move.cs x4 via `KeyOutsideLeafAuthority`; Insert.cs OLC general path via both halves;
+         `InsertIterative` x3 via the move-right loop and `KeyBelowLeafLowerBound`; the two `PushLast` and two `PushFirst` fast paths
+         structurally; two new-root inserts have no siblings and no separator, so the question does not arise.
   rationale: the B-link right-walk answers "where does this EXISTING key live", by hopping right until the key falls inside a leaf's
              real contents. A key being inserted exists nowhere, so the walk cannot terminate on a match and instead runs one leaf
              PAST the one whose separator range owns the key. `Move` used the default `true` and inserted into that leaf, below its

@@ -813,8 +813,10 @@ internal abstract partial class BTree<TKey, TStore>
         // lock coupling (lock next before releasing current) until we find the correct leaf. Forward progress is guaranteed:
         // all movement is strictly rightward with no cycle, and SpinWriteLock waits for busy siblings. // move-right
         bool movedRight = false;
-        // High key is an exclusive upper bound, so key >= highKey means we're out of range.
-        while (node.GetCount(ref accessor) > 0 && node.GetNext(ref accessor).IsValid && args.Compare(args.Key, node.GetHighKey(ref accessor)) >= 0)
+        // The loop condition IS the upper-bound half of leaf authority, and this was its fourth longhand copy. The pessimistic path answers it differently from
+        // the optimistic one — it walks right until the leaf owns the key, rather than restarting, because mid-SMO it has no restart point — but the QUESTION is
+        // the same one, and a question asked in four places is a question that will eventually be asked four different ways (#765 S2).
+        while (KeyAboveLeafUpperBound(node, args.Key, args.KeyComparer, ref accessor))
         {
             Interlocked.Increment(ref _moveRightCount);
             var nextNode = node.GetNext(ref accessor);
