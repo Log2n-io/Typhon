@@ -223,9 +223,19 @@ internal abstract partial class BTree<TKey, TStore>
                     // been temporarily violated by a concurrent operation). If broken, fall through to split which is range-self-contained.
                     var prevForSpill = GetPrevious(ref accessor);
                     var nextForSpill = GetNext(ref accessor);
-                    bool spillLeftOk = !forceSplit && CanSpillTo(prevForSpill, ref sibAccessor)
+
+                    // The ancestor check is load-bearing and was missing. Both spill branches finish by rewriting the separator that routes between this leaf and
+                    // the neighbour it spilled into, and they reach that separator through relatives.LeftAncestor / RightAncestor. Eligibility, however, was
+                    // decided purely from the LEAF CHAIN — GetPrevious/GetNext plus a sort-invariant check — and a chain neighbour is not necessarily a cousin
+                    // under a shared ancestor: it can sit in a different subtree, in which case the corresponding ancestor is `default` and the separator write
+                    // dereferences a NodeWrapper with a null storage. Measured: one NullReferenceException in NodeWrapper.GetItem, from InsertLeaf via
+                    // InsertIterative, in 94,814 race-harness iterations (#765 S7 run, 2026-08-10). Rare because it needs a full leaf whose chain neighbour has
+                    // room AND lives across a subtree boundary.
+                    // Falling through to split is the documented, always-correct alternative — the comment above already calls split "range-self-contained" —
+                    // so this strictly narrows when a spill is attempted and never changes what a legal spill does.
+                    bool spillLeftOk = !forceSplit && relatives.LeftAncestor.IsValid && CanSpillTo(prevForSpill, ref sibAccessor)
                                        && SpillLeftSortInvariantHolds(prevForSpill, ref sibAccessor, ref accessor);
-                    bool spillRightOk = !forceSplit && CanSpillTo(nextForSpill, ref sibAccessor)
+                    bool spillRightOk = !forceSplit && relatives.RightAncestor.IsValid && CanSpillTo(nextForSpill, ref sibAccessor)
                                         && SpillRightSortInvariantHolds(nextForSpill, ref sibAccessor, ref accessor);
                     if (spillLeftOk)
                     {
