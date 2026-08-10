@@ -103,6 +103,16 @@ internal abstract class IntegrityFixtureBase
     /// <summary>Builds a provider over the same on-disk database, for reopen-after-damage tests.</summary>
     protected ServiceProvider ReopenProvider() => BuildProvider();
 
+    /// <summary>
+    /// Reopens with the page cache at its floor, so the cache must evict rather than hold everything it touches.
+    /// </summary>
+    /// <remarks>
+    /// Used to probe whether a code path flushes under memory pressure. A comfortably-sized cache never evicts on a
+    /// fixture-sized database, so a probe run only at the default size establishes that nothing was written
+    /// <i>voluntarily</i> — which is a much weaker claim than the one being tested.
+    /// </remarks>
+    protected ServiceProvider ReopenProviderWithMinimumCache() => BuildProvider(minimumCache: true);
+
     /// <summary>Builds a small, fully-committed database and closes it cleanly.</summary>
     protected void BuildHealthyDatabase(int entityCount = 64)
     {
@@ -131,7 +141,7 @@ internal abstract class IntegrityFixtureBase
         CloseEngine();
     }
 
-    private ServiceProvider BuildProvider()
+    private ServiceProvider BuildProvider(bool minimumCache = false)
     {
         var services = new ServiceCollection();
         services
@@ -145,7 +155,9 @@ internal abstract class IntegrityFixtureBase
             {
                 opts.DatabaseName = CurrentDatabaseName;
                 opts.DatabaseDirectory = DbDir;
-                opts.DatabaseCacheSize = (ulong)PagedMMF.MinimumCacheSize * 4;
+                opts.DatabaseCacheSize = minimumCache
+                    ? PagedMMF.MinimumCacheSize
+                    : (ulong)PagedMMF.MinimumCacheSize * 4;
             })
             .AddScopedDatabaseEngine(opts =>
             {
