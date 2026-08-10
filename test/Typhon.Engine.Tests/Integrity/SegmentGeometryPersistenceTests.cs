@@ -148,7 +148,7 @@ internal sealed class SegmentGeometryPersistenceTests : IntegrityFixtureBase
         BuildHealthyDatabase();
         DamageKit.Baseline(BundlePath);
 
-        ForgeFormatRevision(6);
+        DamageKit.ForgeFormatRevision(BundlePath, 6);
 
         var ex = Assert.Catch<Exception>(() =>
         {
@@ -165,58 +165,6 @@ internal sealed class SegmentGeometryPersistenceTests : IntegrityFixtureBase
             "the open must be refused by the version gate rather than by a corrupted page:\n" + message);
         Assert.That(message, Does.Contain("file version 6").And.Contain("engine version 7"),
             "the refusal must name the revision found and the one expected, so an operator knows which build to use:\n" + message);
-    }
-
-    /// <summary>Rewrites the recorded format revision in both meta slots and re-stamps them so they stay checksum-valid.</summary>
-    private void ForgeFormatRevision(int revision)
-    {
-        var path = DamageKit.DataPath(BundlePath);
-        var data = File.ReadAllBytes(path);
-
-        for (var slot = 0; slot <= 1; slot++)
-        {
-            var page = new byte[IntegrityConstants.PageSize];
-            System.Array.Copy(data, slot * IntegrityConstants.PageSize, page, 0, IntegrityConstants.PageSize);
-
-            var at = FindRevisionOffset(page);
-            Assert.That(at, Is.GreaterThan(0), $"could not locate the format revision in meta slot {slot}");
-            System.BitConverter.GetBytes(revision).CopyTo(page, at);
-
-            // Re-stamp exactly as the engine would, so the only thing wrong with the page is its revision.
-            PagedMMF.StampPageForWrite(page, slot);
-            System.Array.Copy(page, 0, data, slot * IntegrityConstants.PageSize, IntegrityConstants.PageSize);
-        }
-
-        File.WriteAllBytes(path, data);
-    }
-
-    /// <summary>
-    /// Locates the revision by finding the header signature and stepping over it, rather than hard-coding an offset
-    /// that a later layout change would silently invalidate.
-    /// </summary>
-    private static int FindRevisionOffset(byte[] page)
-    {
-        var signature = System.Text.Encoding.UTF8.GetBytes("TyphonDatabase");
-        for (var i = 0; i + signature.Length < IntegrityConstants.PageHeaderSize + 256; i++)
-        {
-            var hit = true;
-            for (var j = 0; j < signature.Length; j++)
-            {
-                if (page[i + j] != signature[j])
-                {
-                    hit = false;
-                    break;
-                }
-            }
-
-            if (hit)
-            {
-                // HeaderSignature is a fixed 32-byte field; DatabaseFormatRevision is the int immediately after it.
-                return i + 32;
-            }
-        }
-
-        return -1;
     }
 
     private static string Flatten(Exception ex)

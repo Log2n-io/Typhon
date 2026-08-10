@@ -7457,7 +7457,8 @@
           "requiresLossyConsent",
           "steps",
           "loss",
-          "unaddressed"
+          "unaddressed",
+          "blockedReason"
         ],
         "type": "object",
         "properties": {
@@ -7508,6 +7509,12 @@
             "items": {
               "type": "string"
             }
+          },
+          "blockedReason": {
+            "type": [
+              "null",
+              "string"
+            ]
           }
         }
       },

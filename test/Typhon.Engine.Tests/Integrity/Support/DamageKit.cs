@@ -335,6 +335,108 @@ internal static class DamageKit
             RepairIsLossless: false);
     }
 
+    /// <summary>
+    /// <b>D13</b> — rewrites the recorded on-disk format revision in both meta slots, producing a bundle that a different
+    /// build of the engine would have written.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Not corruption: the output is a <i>well-formed database of another revision</i>, which is a harder and more useful
+    /// thing to forge. The revision is patched in both slots and each is re-stamped with the engine's own
+    /// <see cref="PagedMMF.StampPageForWrite"/>, so the file that reaches a reader is checksum-valid in every respect
+    /// except the one under test. Patching the four bytes alone would produce a CRC failure, and every test built on it
+    /// would pass while proving something else entirely.
+    /// </para>
+    /// <para>
+    /// Both slots, not one: a reader selects the newest valid slot, so patching one leaves a coin flip over which
+    /// revision the file appears to be — and the flip depends on how many metadata writes the fixture happened to perform.
+    /// </para>
+    /// <para>
+    /// Expected finding is <c>CHK-BOO-02</c> at <see cref="IntegritySeverity.Advisory"/>, so the verdict stays
+    /// <see cref="IntegrityVerdict.Sound"/>. That is the design and not an oversight: the database <i>is</i> sound as far
+    /// as this build could check it, the coverage shortfall belongs in <c>Limits</c>, and it is repair — not diagnosis —
+    /// that refuses (IR-01).
+    /// </para>
+    /// </remarks>
+    /// <param name="bundlePath">The bundle to convert.</param>
+    /// <param name="revision">The revision to record. Must differ from the build's, or the forgery proves nothing.</param>
+    internal static DamageRecord ForgeFormatRevision(string bundlePath, int revision)
+    {
+        Assert.That(revision, Is.Not.EqualTo(DatabaseRepair.SupportedFormatRevision),
+            "forging the revision this build already speaks would make the fixture a no-op that still passes");
+
+        var path = DataPath(bundlePath);
+        var data = File.ReadAllBytes(path);
+        var ranges = new List<ByteRange>(4);
+
+        for (var slot = 0; slot <= 1; slot++)
+        {
+            var page = new byte[IntegrityConstants.PageSize];
+            Array.Copy(data, slot * IntegrityConstants.PageSize, page, 0, IntegrityConstants.PageSize);
+
+            var at = FindRevisionOffset(page);
+            Assert.That(at, Is.GreaterThan(0), $"could not locate the format revision in meta slot {slot}");
+            BitConverter.GetBytes(revision).CopyTo(page, at);
+
+            // Stamp with the page's OWN recorded index, not the slot number. They are not the same on an A/B pair — the
+            // twin's image records the PRIMARY's index, which is exactly how a reader tells a twin from a root — and
+            // passing the slot number rewrites that field, converting a re-label into a structural change.
+            //
+            // This is not hypothetical: the first version of this primitive passed `slot`, and it took
+            // AssertOnlyDeclaredBytesChanged to notice — one stray byte at offset 48 of page 1. The test that used it was
+            // green, because it asserted an exception thrown by the version gate, which fires long before anything reads
+            // a page index. Byte-exactness caught what the assertion could not have.
+            //
+            // allowSectorFooter: false because an A/B protected page is covered by its twin rather than by per-sector
+            // CRCs, so the whole-page form is the one the engine uses for it.
+            PagedMMF.StampPageForWrite(page, PageSectorFooter.ReadFilePageIndex(page), allowSectorFooter: false);
+            Array.Copy(page, 0, data, slot * IntegrityConstants.PageSize, IntegrityConstants.PageSize);
+
+            var pageBase = (long)slot * IntegrityConstants.PageSize;
+            ranges.Add(new ByteRange(pageBase + at, sizeof(int)));
+            ranges.Add(new ByteRange(pageBase + PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize));
+        }
+
+        File.WriteAllBytes(path, data);
+
+        return new DamageRecord(
+            "D13",
+            $"both meta slots re-stamped as format revision {revision} (this build speaks {DatabaseRepair.SupportedFormatRevision})",
+            ranges,
+            ["CHK-BOO-02"],
+            IntegrityVerdict.Sound,
+            RepairIsLossless: false);
+    }
+
+    /// <summary>
+    /// Locates the format revision by finding the header signature and stepping over it, rather than hard-coding an offset
+    /// that a later layout change would silently invalidate.
+    /// </summary>
+    private static int FindRevisionOffset(byte[] page)
+    {
+        var signature = System.Text.Encoding.UTF8.GetBytes("TyphonDatabase");
+        for (var i = 0; i + signature.Length < IntegrityConstants.PageHeaderSize + 256; i++)
+        {
+            var hit = true;
+            for (var j = 0; j < signature.Length; j++)
+            {
+                if (page[i + j] != signature[j])
+                {
+                    hit = false;
+                    break;
+                }
+            }
+
+            if (hit)
+            {
+                // HeaderSignature is a fixed 32-byte field; DatabaseFormatRevision is the int immediately after it.
+                return i + 32;
+            }
+        }
+
+        return -1;
+    }
+
     /// <summary>Truncates the data file mid-page, the shape a partial copy leaves behind.</summary>
     internal static DamageRecord TruncateMidPage(string bundlePath, int keepBytesOfLastPage)
     {

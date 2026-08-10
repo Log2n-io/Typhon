@@ -1510,3 +1510,41 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
             "it opens" is equally true of a rebuild that never ran and of an archetype with nothing to index, and both would
             satisfy every other assertion in the test.
 
+---
+
+## Module: IR — Offline integrity check & repair
+
+The out-of-engine scanner and repair tool (#729). Distinct from Module RB, which is the engine's own recovery net running on
+the crash path: RB repairs a database it is *opening*, IR inspects one nobody has opened and may decline to touch it. The two
+answer to different constraints — RB must always end with a usable database, IR must never make one worse.
+
+### IR-01: Repair refuses any on-disk format revision but its own `[fatal]` `[silent]`
+  invariant ∀ mutation of a database by `DatabaseRepair`:
+              file.DatabaseFormatRevision == PagedMMF.DatabaseFormatRevision
+            The comparison is EQUALITY, not `≤`. Older is not a safe subset of newer: a revision bump may re-mean bytes an
+            earlier revision left unused, so an older page does not fail to decode — it decodes to a confident wrong answer.
+            Revision 7 is the standing example (#753): it claimed `[54,56)` for the chunk stride, and those bytes read as
+            zero on a revision-6 page, which is this build's sentinel for "this segment holds no chunks".
+  never a `--force`, `--ignore-version` or equivalent override on the mutating path. An escape hatch here exists only to let
+        someone write to a layout the tool cannot interpret, on a day they are already recovering from something.
+  invariant the refusal is by VERB, not by tool: `IntegrityScanner.Scan` still scans a mismatched revision and reports the
+            mismatch as a finding, and `IntegrityReportText`/`Json` still render it. Refusing to DIAGNOSE an unfamiliar
+            revision defeats the scanner's whole premise — the operator reaching for it has already lost the happy path.
+            Diagnosis degrades; mutation does not.
+  scope: DatabaseRepair.DescribeRevisionRefusal (the single policy), DatabaseRepair.Apply (gate — placed before the
+    fingerprint drift check and before the pre-repair copy, so a refusal writes nothing at all), DatabaseRepair.Plan
+    (emits zero steps and sets RepairPlan.BlockedReason), BootstrapChecks.CheckIdentity (the CHK-BOO-02 finding),
+    RepairCommand (renders the refusal instead of offering `--apply`).
+  on_violation: the tool writes engine-format-N structures into a format-M database while reporting success. The
+    pre-repair copy is taken but the operator has been told the repair worked, so the copy is the thing they delete. This is
+    `[silent]`: a repair that "succeeded" is the last place anyone looks for the corruption.
+  note `Plan` blocking is distinct from `Plan` being empty, and the distinction is user-visible: empty means nothing needs
+       repairing, blocked means this build must not be the one to try. Collapsing them prints "nothing to repair" over a
+       database full of findings.
+  requires the fingerprint to carry the revision (`DatabaseRepair.Fingerprint` folds in `Identity.FormatRevision`), so a plan
+           built against one revision cannot be applied to a database that has since been converted to another.
+  verified: FormatRevisionGuardTests — a genuine revision-6 forgery (revision patched in both meta slots, every touched page
+            re-stamped through `PagedMMF.StampPageForWrite`, so the file is checksum-valid in every respect except the one
+            under test) proves both halves against ONE fixture: the scan still produces a report and names the mismatch, and
+            `Apply` refuses it without writing a byte. `Mutant_ApplyWithoutTheRevisionGate` shows the assertion can fail.
+

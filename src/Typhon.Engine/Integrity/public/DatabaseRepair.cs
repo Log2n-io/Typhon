@@ -28,6 +28,43 @@ namespace Typhon.Engine;
 [PublicAPI]
 public static class DatabaseRepair
 {
+    /// <summary>The single on-disk format revision this build understands. Repair requires an exact match; scanning does not.</summary>
+    public static int SupportedFormatRevision => PagedMMF.DatabaseFormatRevision;
+
+    /// <summary>
+    /// Why repair must refuse a database at this on-disk format revision, or <c>null</c> when it may proceed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Any</b> mismatch, not merely a newer one (<c>05-repair.md</c> §7, OQ-7). Pre-alpha carries no compatibility
+    /// obligation, so this build knows exactly one revision and older and newer are equally un-understood. The asymmetry
+    /// people expect — "older is surely safe to read" — is the dangerous one: a revision bump is free to re-mean bytes an
+    /// older revision left unused, so an older page does not fail to decode, it decodes to a confident lie.
+    /// </para>
+    /// <para>
+    /// The verb matters. <see cref="IntegrityScanner"/> still scans and reports a mismatch as a finding — diagnosis
+    /// degrades, because refusing to diagnose is the opposite of what a scanner is for. Only mutation refuses, and it
+    /// refuses without an override: a <c>--force</c> here would be a switch whose only function is to let someone corrupt
+    /// a database this build cannot interpret, on a day they are already having a bad one.
+    /// </para>
+    /// </remarks>
+    /// <param name="found">The revision recorded in the database.</param>
+    public static string DescribeRevisionRefusal(int found)
+    {
+        var mine = SupportedFormatRevision;
+        if (found == mine)
+        {
+            return null;
+        }
+
+        var direction = found > mine ? "newer" : "older";
+        return $"This database is on-disk format revision {found}; this build speaks revision {mine}. Repair is refused on "
+            + $"any revision mismatch. A {direction} revision is not a subset of this one — a revision bump may re-mean "
+            + "bytes the other revision used differently, so writing to it under this build's interpretation would corrupt "
+            + $"a database that is, as far as anyone knows, intact. Use a build that speaks revision {found} to repair it. "
+            + "Scanning it is still safe and still works: run 'typhon check' for a diagnosis.";
+    }
+
     /// <summary>
     /// Derives a repair plan from a report. Read-only: produces a description, changes nothing.
     /// </summary>
@@ -36,6 +73,24 @@ public static class DatabaseRepair
     public static RepairPlan Plan(IntegrityReport report)
     {
         ArgumentNullException.ThrowIfNull(report);
+
+        // A plan is a proposal to mutate, so a revision this build must not write to produces a plan with no steps and the
+        // reason attached — rather than a list of repairs that Apply is guaranteed to refuse. The scan's own findings are
+        // preserved untouched: the operator still gets the diagnosis, just not an offer to act on it.
+        var refusal = DescribeRevisionRefusal(report.Identity.FormatRevision);
+        if (refusal != null)
+        {
+            return new RepairPlan
+            {
+                DatabaseFingerprint = Fingerprint(report),
+                Source = report.Source,
+                Verdict = report.Verdict,
+                Steps = [],
+                Loss = new LossManifest { Entries = [] },
+                Unaddressed = [refusal],
+                BlockedReason = refusal
+            };
+        }
 
         var steps = new List<RepairStep>();
         var losses = new List<LossEstimate>();
@@ -194,6 +249,18 @@ public static class DatabaseRepair
             }
 
             var current = IntegrityScanner.Scan(probe, new IntegrityOptions { Depth = plan.Verdict == IntegrityVerdict.Unopenable ? ScanDepth.Standard : ScanDepth.Deep });
+
+            // The revision gate comes BEFORE the drift check, and reads the FILE rather than the plan. Before, because a
+            // fingerprint mismatch sends the operator to "re-scan and make a fresh plan" — advice that loops forever when
+            // the real problem is that this build must not write here at all. From the file, because a plan is an artefact
+            // that can arrive from another build, another machine or a text editor, and the only revision that matters is
+            // the one on the bytes about to be mutated.
+            var refusal = DescribeRevisionRefusal(current.Identity.FormatRevision);
+            if (refusal != null)
+            {
+                throw new InvalidOperationException(refusal);
+            }
+
             var currentFingerprint = Fingerprint(current);
             if (!string.Equals(currentFingerprint, plan.DatabaseFingerprint, StringComparison.Ordinal))
             {

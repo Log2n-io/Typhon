@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import type { IntegrityFindingDto, IntegrityReportDto } from '@/api/generated/model';
+import type { IntegrityFindingDto, IntegrityReportDto, RepairPlanDto } from '@/api/generated/model';
 import {
   countBySeverity,
+  normalizePlan,
   normalizeReport,
   severityByPage,
   sortFindings,
@@ -155,4 +156,34 @@ describe('normalizeReport', () => {
       loss: { kind: 'None', count: '', archetype: '', component: '', explanation: '' },
     };
   }
+});
+
+describe('normalizePlan', () => {
+  const base: RepairPlanDto = {
+    source: 'game.typhon',
+    fingerprint: 'abc',
+    verdict: 'Sound',
+    requiresLossyConsent: false,
+    steps: [],
+    loss: [],
+    unaddressed: [],
+    blockedReason: null,
+  };
+
+  it('keeps "blocked" distinguishable from "nothing to repair"', () => {
+    // Both plans have zero steps, and the panel says opposite things about them: one is a healthy database,
+    // the other is one this build refuses to touch. A truthiness check over `steps.length` collapses them.
+    expect(normalizePlan(base).blockedReason).toBeNull();
+    expect(
+      normalizePlan({ ...base, blockedReason: 'format revision 6, this build speaks 7' }).blockedReason,
+    ).toContain('revision 6');
+  });
+
+  it('normalizes a missing reason to null rather than an empty string', () => {
+    // ASP.NET omits nulls; an absent field must not become '' — that is falsy but not null, and every
+    // downstream check would then be a truthiness test that happened to work.
+    const raw = { ...base } as Record<string, unknown>;
+    delete raw.blockedReason;
+    expect(normalizePlan(raw as RepairPlanDto).blockedReason).toBeNull();
+  });
 });

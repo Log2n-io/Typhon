@@ -52,6 +52,35 @@ export default function RepairFlow({ limits }: { limits: Limits }) {
     return null;
   }
 
+  // Refusal replaces the flow rather than disabling its button. A greyed-out Apply beneath a full plan reads
+  // as "consent harder" and invites hunting for the override; there is none, and the screen should not imply
+  // one exists. The report itself stays reachable — diagnosis is exactly what still works here.
+  if (plan.blockedReason) {
+    return (
+      <>
+        <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-1.5">
+          <Button
+            variant="ghost"
+            onClick={() => setPlan(null)}
+            data-testid="integrity-repair-back"
+            className="h-6 gap-1 px-1.5 text-fs-sm"
+          >
+            <ArrowLeft className="h-3 w-3" />
+            Back to report
+          </Button>
+          <span className="text-fs-base font-medium text-foreground">Repair refused</span>
+        </div>
+        <div className="min-h-0 flex-1 overflow-auto px-3 py-3" data-testid="integrity-repair-blocked">
+          <div className="flex items-start gap-2">
+            <Lock className="mt-0.5 h-4 w-4 shrink-0 text-rose-500" />
+            <p className="select-text text-fs-base text-foreground">{plan.blockedReason}</p>
+          </div>
+        </div>
+        <LimitsBlock limits={limits} />
+      </>
+    );
+  }
+
   // The Workbench holds databases open; repair needs exclusive access. The server independently refuses
   // (409 on a held lock) — this is the same rule stated early enough that the operator isn't surprised
   // by it after reading a manifest.

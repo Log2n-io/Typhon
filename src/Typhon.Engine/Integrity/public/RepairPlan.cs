@@ -149,6 +149,21 @@ public sealed class RepairPlan
     /// <summary>Findings this plan cannot address at all, with the reason. The honest remainder.</summary>
     public required IReadOnlyList<string> Unaddressed { get; init; }
 
+    /// <summary>
+    /// Why this plan must not be applied at all, or <c>null</c> when it may be. Set when the database's on-disk format
+    /// revision is not the one this build speaks (<see cref="DatabaseRepair.DescribeRevisionRefusal"/>).
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="IsEmpty"/>, and the distinction is the whole point: an empty plan means <i>nothing needs
+    /// repairing</i>, a blocked one means <i>this build must not be the one to try</i>. Collapsing them would report
+    /// "nothing to repair" about a database with real findings, which is the most misleading sentence the tool could
+    /// print.
+    /// </remarks>
+    public string BlockedReason { get; init; }
+
+    /// <summary>Whether applying this plan would be refused outright. Surfaces the refusal before the operator consents to it.</summary>
+    public bool IsBlocked => BlockedReason != null;
+
     /// <summary>Whether any step would destroy something, and therefore whether consent is required.</summary>
     public bool RequiresLossyConsent
     {
