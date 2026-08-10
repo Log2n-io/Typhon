@@ -821,15 +821,30 @@ internal static class DamageKit
         ranges.Add(WriteLong(bundlePath, slotOffset, newRaw));
         ranges.AddRange(RestampPage(bundlePath, filePage));
 
+        // The MAP codes are not incidental noise — they are the damage seen from the other side, and declaring them is
+        // what proves MAP-01/02 actually cross-check. Every one of these mutations changes WHICH identities the cluster
+        // holds, and the EntityMap is not edited to match, so the two structures genuinely disagree afterwards:
+        //
+        //   ClearLiveKey       the entity leaves the cluster; the map still names it        → MAP-01 (orphan)
+        //   DuplicateKey       one entity leaves, another gains a second slot               → MAP-01 (orphan + misdirect)
+        //   KeyAboveWatermark  the old key leaves and a new one appears, in both directions → MAP-01 and MAP-02
+        //
+        // Before the map comparison ran these mutations produced only their CLU/ALO codes, and the fixtures said so.
+        // That they now say more is the checks working, not the fixtures drifting.
         var (codes, verdict, description) = how switch
         {
             ClusterBreak.ClearLiveKey =>
-                (new[] { ClusterChecks.OccupancyAgreesWithKeys }, IntegrityVerdict.DataLoss,
+                (new[] { ClusterChecks.OccupancyAgreesWithKeys, EntityMapChecks.EntriesResolve }, IntegrityVerdict.DataLoss,
                     $"a live slot of '{archetypeName}' had its entity key zeroed"),
             ClusterBreak.DuplicateKey =>
-                (new[] { ClusterChecks.NoDuplicateKeys }, IntegrityVerdict.Unopenable,
+                (new[] { ClusterChecks.NoDuplicateKeys, EntityMapChecks.EntriesResolve }, IntegrityVerdict.Unopenable,
                     $"two live slots of '{archetypeName}' now claim the same entity"),
-            _ => (new[] { ClusterChecks.KeysBelowWatermark, ClusterChecks.KeyWatermark }, IntegrityVerdict.Unopenable,
+            _ => (new[]
+                    {
+                        ClusterChecks.KeysBelowWatermark, ClusterChecks.KeyWatermark,
+                        EntityMapChecks.EntriesResolve, EntityMapChecks.SlotsAreReachable
+                    },
+                    IntegrityVerdict.Unopenable,
                     $"a live slot of '{archetypeName}' holds a key past the archetype's watermark")
         };
 

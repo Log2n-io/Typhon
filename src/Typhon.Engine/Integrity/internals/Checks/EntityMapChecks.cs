@@ -17,12 +17,19 @@ namespace Typhon.Engine.Internals;
 /// is range- and allocation-checked <b>before</b> the read; the finding is what survives the walk.
 /// </para>
 /// <para>
-/// <b><c>MAP-01</c> and <c>MAP-02</c> compare key SETS, not values.</b> The obvious reading — follow each entry to the
-/// slot it names — needs the per-entry record size to step a bucket's value array, and that size is derived from the
-/// archetype's component count but is not itself persisted. Comparing the entity ids the map holds against the entity
-/// keys the cluster holds answers the same two questions (<i>is every entry real</i>, <i>is every entity findable</i>)
-/// out of two structures that are already fully decodable. It is strictly weaker in one respect, stated in the finding:
-/// it proves the identity exists, not that the entry points at the right slot.
+/// <b>The bucket is SoA, and its capacity needs the value size.</b> A bucket chunk is
+/// <c>[header 12 B][key₀..key_{cap-1}][value₀..value_{cap-1}]</c> with
+/// <c>cap = (stride − 12) / (8 + recordSize)</c>. The EntityMap is a <c>RawValuePagedHashMap&lt;long,…&gt;</c> whose
+/// value size is a <i>runtime</i> constructor argument, so that capacity is not derivable from the persisted stride —
+/// it comes from the archetype's Versioned component count via <c>ArchetypeView.EntityRecordSize</c>, which is why this
+/// family waited on the VSBS decode (<c>09 §5.5</c>).
+/// </para>
+/// <para>
+/// <b>Every chunk is copied out before the next is read.</b> The walk nests three deep — meta → directory → bucket
+/// chain — and a cursor handing back a span over one reused page buffer means a nested read silently rewrites the
+/// directory the outer loop is still iterating. That defect shipped: it is what made an earlier version of this walk
+/// recover a strict subset of a healthy map, which read as a layout problem for two rounds of debugging. Owned buffers
+/// per nesting level make it unrepresentable rather than merely fixed.
 /// </para>
 /// </remarks>
 internal static class EntityMapChecks
@@ -113,7 +120,13 @@ internal static class EntityMapChecks
         var cursor = new ChunkCursor(ctx.Source, segment, geometry);
         var locus = new Locus(segment.RootPageIndex, segment.RootPageIndex, segment.Kind);
 
-        if (!cursor.TryRead(MetaChunkId, out var meta, out _))
+        // One buffer per nesting level, owned by this frame. See the type remarks: sharing the cursor's page across a
+        // nested read is what broke the previous walk.
+        var meta = new byte[geometry.Stride];
+        var directory = new byte[geometry.Stride];
+        var bucket = new byte[geometry.Stride];
+
+        if (!cursor.TryRead(MetaChunkId, meta, out _))
         {
             ctx.Report(PointersResolve, IntegritySeverity.Fatal, "RB-01", locus,
                 $"The EntityMap for '{archetype.Name}' has no readable meta record.",
@@ -124,75 +137,82 @@ internal static class EntityMapChecks
             return;
         }
 
-        var declaredDirectories = MemoryMarshal.Read<ushort>(meta[MetaDirectoryCountOffset..]);
-        var overflowHead = MemoryMarshal.Read<int>(meta[MetaOverflowHeadOffset..]);
+        var declaredDirectories = MemoryMarshal.Read<ushort>(meta.AsSpan(MetaDirectoryCountOffset));
+        var overflowHead = MemoryMarshal.Read<int>(meta.AsSpan(MetaOverflowHeadOffset));
 
-        // No bound on the bucket scan beyond the directory itself. Bounding by the live BucketCount from PackedMeta was
-        // tried and TRUNCATED the walk — the map came back a strict subset of the cluster and MAP-02 fired on every
-        // healthy database. Over-scanning is safe here precisely because an unallocated chunk id is a caveat rather than
-        // a finding: a slot that names nothing real costs a line in Limits, while a slot wrongly skipped costs a false
-        // report that live entities are unreachable.
-
+        // No bound on the bucket scan beyond the directory itself. The directory is sized to CAPACITY rather than to
+        // population, so slots past the live bucket count name ids that were never allocated — and over-scanning is safe
+        // precisely because an unallocated chunk id is a caveat rather than a finding.
         var directoryIds = new List<int>();
         for (var i = 0; i < InlineDirectoryChunks && directoryIds.Count < declaredDirectories; i++)
         {
-            var id = MemoryMarshal.Read<int>(meta[(MetaInlineIdsOffset + (i * sizeof(int)))..]);
+            var id = MemoryMarshal.Read<int>(meta.AsSpan(MetaInlineIdsOffset + (i * sizeof(int))));
             if (id != 0)
             {
                 directoryIds.Add(id);
             }
         }
 
-        CollectOverflowDirectories(ctx, archetype, cursor, locus, overflowHead, directoryIds);
+        CollectOverflowDirectories(ctx, archetype, cursor, locus, overflowHead, directoryIds, declaredDirectories);
 
-        var mapIds = new HashSet<long>();
+        // Bucket capacity needs the value size, and with it the key array's true extent. Without it the walk can still
+        // report structure (MAP-03/04) but cannot bound the keys, so the identity checks stand down rather than read
+        // whatever lies past the key array.
+        var recordSize = archetype.EntityRecordSize;
+        var bucketCapacity = recordSize > 0 ? (geometry.Stride - BucketHeaderSize) / (sizeof(long) + recordSize) : 0;
+
+        var entries = new Dictionary<long, int>();
         var walkedBuckets = new HashSet<int>();
 
         for (var dirIndex = 0; dirIndex < directoryIds.Count; dirIndex++)
         {
-            if (!Resolve(ctx, archetype, cursor, locus, directoryIds[dirIndex], "directory", out var directory))
+            if (!Resolve(ctx, archetype, cursor, locus, directoryIds[dirIndex], "directory", directory))
             {
                 continue;
             }
 
             for (var slot = 0; slot < BucketIdsPerDirectoryChunk; slot++)
             {
-                var bucketId = MemoryMarshal.Read<int>(directory[(slot * sizeof(int))..]);
-                if (bucketId == 0 || !walkedBuckets.Add(bucketId))
+                var bucketId = MemoryMarshal.Read<int>(directory.AsSpan(slot * sizeof(int)));
+                if (bucketId <= 0 || !walkedBuckets.Add(bucketId))
                 {
                     continue;   // unpopulated, or a bucket already reached through another directory slot
                 }
 
-                WalkBucketChain(ctx, archetype, cursor, locus, bucketId, mapIds, walkedBuckets);
+                WalkBucketChain(ctx, archetype, cursor, locus, bucketId, bucket, bucketCapacity, recordSize, entries,
+                    walkedBuckets);
             }
         }
 
-        // MAP-01 holds — every id the map names is an entity the cluster holds, verified on healthy fixtures. MAP-02
-        // does NOT: the walk recovers a strict SUBSET of the cluster's entities on a database that is otherwise clean,
-        // so some entries are not being reached. Bounding the bucket scan by the live BucketCount made it worse and
-        // removing the bound did not fix it, which points at the bucket layout rather than at the directory walk.
-        //
-        // Reporting the difference would put "live entities are unreachable" on every healthy database — the exact
-        // failure this feature replaces — so the pair is declared unrun until the bucket entry layout is understood.
-        // MAP-01 is withheld with it rather than shipped alone: forward-only checking passes trivially on a map missing
-        // half its entries, so on its own it would be the reassuring half of a pair whose other half is broken.
-        ctx.Findings.NoteSkipped($"{EntriesResolve}, {SlotsAreReachable}",
-            "the EntityMap bucket walk recovers only part of a healthy map's entries, so a comparison against the cluster "
-            + "would report live entities as unreachable; the map's structure and its identities are still checked");
-        _ = mapIds;
+        if (bucketCapacity <= 0)
+        {
+            ctx.Findings.NoteSkipped($"{EntriesResolve}, {SlotsAreReachable}",
+                $"the entity-record size for '{archetype.Name}' could not be derived from the manifest, so the map's "
+                + "entries could not be located within their buckets");
+            return;
+        }
+
+        CompareAgainstCluster(ctx, archetype, locus, entries);
     }
 
     /// <summary>
-    /// <c>MAP-01</c> and <c>MAP-02</c> — the map's identities against the cluster's, in both directions.
+    /// <c>MAP-01</c> and <c>MAP-02</c> — the map's entries against the cluster's slots, in both directions.
     /// </summary>
     /// <remarks>
     /// Both directions are required and shipping one is the classic mistake: forward-only checking passes trivially on a
     /// map that is missing half its entries, which is exactly what a rebuild over pre-apply state produces
     /// (<c>RB-02</c>'s failure mode). The reverse direction is the one that catches it.
     /// </remarks>
-    private static void CompareAgainstCluster(ScanContext ctx, ArchetypeView archetype, Locus locus, HashSet<long> mapIds)
+    /// <param name="ctx">The scan context.</param>
+    /// <param name="archetype">The archetype whose map was walked.</param>
+    /// <param name="locus">Where to report.</param>
+    /// <param name="entries">Entity key to the packed <c>ClusterLocation</c> the map's value record names.</param>
+    private static void CompareAgainstCluster(ScanContext ctx, ArchetypeView archetype, Locus locus,
+        Dictionary<long, int> entries)
     {
-        if (archetype.ClusterSegmentRoot == 0 || !ctx.ClusterEntityIds.TryGetValue(archetype.Name, out var clusterIds))
+        if (archetype.ClusterSegmentRoot == 0
+            || !ctx.ClusterEntityIds.TryGetValue(archetype.Name, out var clusterIds)
+            || !ctx.ClusterEntityLocations.TryGetValue(archetype.Name, out var clusterLocations))
         {
             ctx.Findings.NoteSkipped($"{EntriesResolve}, {SlotsAreReachable}",
                 $"archetype '{archetype.Name}' has no readable cluster to compare its EntityMap against");
@@ -201,14 +221,27 @@ internal static class EntityMapChecks
 
         var orphaned = 0;
         long firstOrphan = 0;
-        foreach (var id in mapIds)
+        var misdirected = 0;
+        long firstMisdirected = 0;
+
+        foreach (var (id, location) in entries)
         {
-            if (!clusterIds.Contains(id))
+            if (!clusterLocations.TryGetValue(id, out var actual))
             {
                 if (orphaned++ == 0)
                 {
                     firstOrphan = id;
                 }
+
+                continue;
+            }
+
+            // The entry names a real entity — but does it name where that entity actually lives? An entry pointing at
+            // the wrong slot resolves to another entity's data rather than failing, so a lookup returns the wrong row
+            // with no error anywhere. Set comparison alone cannot see this.
+            if (location != actual && misdirected++ == 0)
+            {
+                firstMisdirected = id;
             }
         }
 
@@ -222,11 +255,25 @@ internal static class EntityMapChecks
                 Repairability.Lossless);
         }
 
+        if (misdirected > 0)
+        {
+            var (badChunk, badSlot) = ClusterLocation.Unpack(entries[firstMisdirected]);
+            var (realChunk, realSlot) = ClusterLocation.Unpack(clusterLocations[firstMisdirected]);
+
+            ctx.Report(EntriesResolve, IntegritySeverity.Divergence, "", locus,
+                $"The EntityMap for '{archetype.Name}' points entities at the wrong cluster slot.",
+                $"{misdirected} entry(ies) resolve to a slot other than the one holding that entity. Entity {firstMisdirected} "
+                + $"is mapped to cluster {badChunk} slot {badSlot} but lives in cluster {realChunk} slot {realSlot}. A lookup "
+                + "does not fail — it returns whatever occupies the named slot, so one entity's identity serves another's "
+                + "data. Rebuilding the map from the cluster costs nothing.",
+                Repairability.Lossless);
+        }
+
         var unreachable = 0;
         long firstUnreachable = 0;
         foreach (var id in clusterIds)
         {
-            if (!mapIds.Contains(id))
+            if (!entries.ContainsKey(id))
             {
                 if (unreachable++ == 0)
                 {
@@ -248,22 +295,23 @@ internal static class EntityMapChecks
     }
 
     private static void CollectOverflowDirectories(ScanContext ctx, ArchetypeView archetype, ChunkCursor cursor,
-        Locus locus, int head, List<int> into)
+        Locus locus, int head, List<int> into, int declaredDirectories)
     {
         var next = head;
         var visited = new HashSet<int>();
+        var chunk = new byte[cursor.Stride];
 
         // -1 is the documented end-of-chain sentinel; 0 means there is no overflow at all.
         while (next > 0 && visited.Add(next))
         {
-            if (!Resolve(ctx, archetype, cursor, locus, next, "overflow directory index", out var chunk))
+            if (!Resolve(ctx, archetype, cursor, locus, next, "overflow directory index", chunk))
             {
                 return;
             }
 
-            for (var i = 0; i < DirectoryIdsPerOverflowChunk; i++)
+            for (var i = 0; i < DirectoryIdsPerOverflowChunk && into.Count < declaredDirectories; i++)
             {
-                var id = MemoryMarshal.Read<int>(chunk[(sizeof(int) + (i * sizeof(int)))..]);
+                var id = MemoryMarshal.Read<int>(chunk.AsSpan(sizeof(int) + (i * sizeof(int))));
                 if (id != 0)
                 {
                     into.Add(id);
@@ -282,32 +330,52 @@ internal static class EntityMapChecks
         }
     }
 
+    /// <summary>
+    /// Walks one bucket and its overflow chain, collecting every entry as identity plus the location it names.
+    /// </summary>
+    /// <remarks>
+    /// The bucket is <b>SoA</b>: keys form one dense array from offset 12, the value records another after them. So an
+    /// entry's key and its value are at different places computed from the same index, and the split point depends on
+    /// <paramref name="bucketCapacity"/> — get that wrong and the keys still decode perfectly while every value is read
+    /// from the middle of another record.
+    /// </remarks>
     private static void WalkBucketChain(ScanContext ctx, ArchetypeView archetype, ChunkCursor cursor, Locus locus,
-        int bucketId, HashSet<long> mapIds, HashSet<int> walkedBuckets)
+        int bucketId, byte[] bucket, int bucketCapacity, int recordSize, Dictionary<long, int> entries,
+        HashSet<int> walkedBuckets)
     {
         var next = bucketId;
         var visited = new HashSet<int>();
+        var valuesAt = BucketHeaderSize + (bucketCapacity * sizeof(long));
 
         while (next > 0 && visited.Add(next))
         {
-            if (!Resolve(ctx, archetype, cursor, locus, next, "bucket", out var bucket))
+            if (!Resolve(ctx, archetype, cursor, locus, next, "bucket", bucket))
             {
                 return;
             }
 
-            // Keys are `long` for every EntityMap — it is RawValuePagedHashMap<long, …> at all four construction sites —
-            // so reading identities needs no record size, even though stepping the VALUES would.
+            // EntryCount is a claim, and a damaged bucket can claim more than it holds. Bound by the capacity the
+            // geometry supports rather than by what the header says.
             var count = bucket[BucketEntryCountOffset];
-            var maxKeys = (bucket.Length - BucketHeaderSize) / sizeof(long);
-            for (var i = 0; i < count && i < maxKeys; i++)
+            for (var i = 0; i < count && i < bucketCapacity; i++)
             {
-                var id = MemoryMarshal.Read<long>(bucket[(BucketHeaderSize + (i * sizeof(long)))..]);
+                var id = MemoryMarshal.Read<long>(bucket.AsSpan(BucketHeaderSize + (i * sizeof(long))));
                 if (id == 0)
                 {
                     continue;
                 }
 
-                if (!mapIds.Add(id))
+                var location = -1;
+                var recordAt = valuesAt + (i * recordSize);
+                if (recordSize > 0 && recordAt + ClusterEntityRecordAccessor.SlotIndexOffset < bucket.Length)
+                {
+                    var clusterChunk = MemoryMarshal.Read<int>(
+                        bucket.AsSpan(recordAt + ClusterEntityRecordAccessor.ClusterChunkIdOffset));
+                    var slotIndex = bucket[recordAt + ClusterEntityRecordAccessor.SlotIndexOffset];
+                    location = ClusterLocation.Pack(clusterChunk, slotIndex);
+                }
+
+                if (!entries.TryAdd(id, location))
                 {
                     ctx.Report(NoDuplicateIds, IntegritySeverity.Fatal, "", locus,
                         $"The EntityMap for '{archetype.Name}' holds one entity id twice.",
@@ -317,7 +385,7 @@ internal static class EntityMapChecks
                 }
             }
 
-            next = MemoryMarshal.Read<int>(bucket[BucketOverflowOffset..]);
+            next = MemoryMarshal.Read<int>(bucket.AsSpan(BucketOverflowOffset));
             if (next > 0)
             {
                 walkedBuckets.Add(next);
@@ -343,9 +411,9 @@ internal static class EntityMapChecks
     /// following it: an unallocated chunk is never dereferenced either way, which is MAP-04's actual requirement.
     /// </remarks>
     private static bool Resolve(ScanContext ctx, ArchetypeView archetype, ChunkCursor cursor, Locus locus, int chunkId,
-        string what, out ReadOnlySpan<byte> chunk)
+        string what, Span<byte> chunk)
     {
-        if (!cursor.TryRead(chunkId, out chunk, out var allocated))
+        if (!cursor.TryRead(chunkId, chunk, out var allocated))
         {
             ctx.Report(PointersResolve, IntegritySeverity.Divergence, "RB-01", locus,
                 $"The EntityMap for '{archetype.Name}' names a {what} chunk that does not exist.",
@@ -368,17 +436,37 @@ internal static class EntityMapChecks
         return true;
     }
 
-    /// <summary>Reads chunks of one segment, caching the current page across hops of a walk.</summary>
+    /// <summary>
+    /// Reads chunks of one segment into caller-owned buffers, caching the current page across hops of a walk.
+    /// </summary>
+    /// <remarks>
+    /// <b>It copies, and that is the point.</b> The obvious design hands back a <see cref="ReadOnlySpan{T}"/> over the
+    /// cursor's own page buffer, which is free and correct for a flat walk — and silently wrong for a nested one. This
+    /// walk is nested three deep, and the outer levels hold their chunk while inner reads run: a directory being
+    /// iterated is rewritten under the loop the moment a bucket on another page is read, so slots decode as zero and the
+    /// walk quietly returns a subset. That happened, and it was misread as a bucket-layout problem twice before the
+    /// aliasing was seen. Copying costs one stride-sized memcpy per hop and makes the failure impossible to express.
+    /// </remarks>
     private sealed class ChunkCursor(IPageSource source, SegmentView segment, ChunkGeometry geometry)
     {
         private readonly byte[] _page = new byte[IntegrityConstants.PageSize];
         private int _loadedPage = -1;
 
-        /// <summary>Reads one chunk by id. <c>false</c> when the id does not address a readable chunk at all.</summary>
-        public bool TryRead(int chunkId, out ReadOnlySpan<byte> chunk, out bool allocated)
+        /// <summary>The segment's chunk stride — the size a destination buffer must be.</summary>
+        public int Stride => geometry.Stride;
+
+        /// <summary>Copies one chunk by id. <c>false</c> when the id does not address a readable chunk at all.</summary>
+        /// <param name="chunkId">Chunk to read.</param>
+        /// <param name="destination">Receives the chunk's bytes. Must be at least <see cref="Stride"/> long.</param>
+        /// <param name="allocated">Whether the segment's own bitmap marks the chunk allocated.</param>
+        public bool TryRead(int chunkId, Span<byte> destination, out bool allocated)
         {
-            chunk = default;
             allocated = false;
+
+            if (chunkId < 0 || destination.Length < geometry.Stride)
+            {
+                return false;
+            }
 
             if (!geometry.TryLocate(chunkId, out var ordinal, out var chunkInPage) || ordinal >= segment.Pages.Count)
             {
@@ -404,7 +492,7 @@ internal static class EntityMapChecks
             }
 
             allocated = geometry.IsChunkAllocated(_page, ordinal == 0, chunkInPage);
-            chunk = new ReadOnlySpan<byte>(_page, at, geometry.Stride);
+            _page.AsSpan(at, geometry.Stride).CopyTo(destination);
             return true;
         }
     }

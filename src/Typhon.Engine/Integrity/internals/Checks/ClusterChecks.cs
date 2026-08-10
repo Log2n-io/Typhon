@@ -126,10 +126,14 @@ internal static class ClusterChecks
 
         var seen = new Dictionary<long, string>();
 
-        // Published for MAP-01/02, which compare the map's identities against these rather than following entries into
-        // bucket values — a step that would need the per-entry record size, which is not on disk.
+        // Published for MAP-01/02. Both the identities and WHERE each one lives: the map's value record names a cluster
+        // chunk and slot, so an entry can hold a real entity id and still point somewhere else, and only the location
+        // comparison sees it.
         var liveIds = new HashSet<long>();
         ctx.ClusterEntityIds[archetype.Name] = liveIds;
+
+        var liveLocations = new Dictionary<long, int>();
+        ctx.ClusterEntityLocations[archetype.Name] = liveLocations;
 
         var maxKey = 0L;
         var occupiedTotal = 0;
@@ -195,6 +199,7 @@ internal static class ClusterChecks
                         // constant and are not stored: its keys are the bare entity key. Publishing the packed value
                         // here makes the two sets disjoint and MAP-01/02 fire on every healthy database.
                         liveIds.Add(key);
+                        liveLocations[key] = ClusterLocation.Pack(chunkId, slot);
                     }
 
                     CheckOccupiedSlot(ctx, archetype, locus, chunkId, slot, key, seen, ref maxKey, cleanShutdown);

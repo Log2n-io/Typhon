@@ -70,6 +70,18 @@ internal sealed class ScanContext
     /// </remarks>
     public Dictionary<string, HashSet<long>> ClusterEntityIds { get; } = [];
 
+    /// <summary>
+    /// Where each live entity actually sits, as a packed <c>ClusterLocation</c>, per archetype. Populated by
+    /// <c>ClusterChecks</c>.
+    /// </summary>
+    /// <remarks>
+    /// What turns <c>MAP-01</c> from <i>"this identity exists somewhere"</i> into the catalogue's actual claim —
+    /// <i>"the entry resolves to an occupied slot"</i>. An EntityMap value record carries a cluster chunk id and a slot
+    /// index, so an entry can name a real entity and still point at the wrong slot; only comparing the location catches
+    /// that, and it is the shape a rebuild over stale state leaves behind.
+    /// </remarks>
+    public Dictionary<string, Dictionary<long, int>> ClusterEntityLocations { get; } = [];
+
     /// <summary>Findings accumulated so far.</summary>
     public FindingCollector Findings { get; init; }
 
