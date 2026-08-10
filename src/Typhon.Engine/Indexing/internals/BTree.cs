@@ -2299,17 +2299,26 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
             return WriteLockOutcome.Acquired; // no contention
         }
 
+        // #765 S3: spins are counted in a LOCAL and published once on the way out. The increment used to sit inside both loops, so every spinning thread issued
+        // a locked read-modify-write to the same shared field on every iteration — an unbounded phase-2 wait turns that into millions of them. Measured by the
+        // race harness's deadline sampler: 2,861,200 increments in ONE second on a single iteration, while restarts, fallbacks, splits and entry count all sat
+        // frozen. That is a diagnostic counter generating the cross-core traffic it exists to report, and it lands on the same cache line the spinners are
+        // already fighting over. The published total is unchanged — still spin iterations, not distinct acquisitions — so the numbers stay comparable.
+        int spins = 0;
+
         // Phase 1: tight PAUSE spin — stays on-core, covers typical latch hold time + cross-core coherence
         for (int i = 0; i < 64; i++)
         {
             if (latch.IsObsolete)
             {
+                PublishWriteLockSpins(spins);
                 return WriteLockOutcome.Obsolete;
             }
-            Interlocked.Increment(ref _writeLockFailures);
+            spins++;
             Thread.SpinWait(1);
             if (latch.TryWriteLock())
             {
+                PublishWriteLockSpins(spins);
                 return WriteLockOutcome.AcquiredContended;
             }
         }
@@ -2321,13 +2330,28 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         {
             if (latch.IsObsolete)
             {
+                PublishWriteLockSpins(spins);
                 return WriteLockOutcome.Obsolete;
             }
-            Interlocked.Increment(ref _writeLockFailures);
+            spins++;
             spin.SpinOnce(-1);
         }
         while (!latch.TryWriteLock());
+
+        PublishWriteLockSpins(spins);
         return WriteLockOutcome.AcquiredContended;
+    }
+
+    /// <summary>
+    /// Adds a spin tally to <c>_writeLockFailures</c> in one interlocked operation, or none at all when there was no contention.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void PublishWriteLockSpins(int spins)
+    {
+        if (spins != 0)
+        {
+            Interlocked.Add(ref _writeLockFailures, spins);
+        }
     }
 
     /// <summary>
@@ -2338,9 +2362,10 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     private void SpinWriteLockOnSmoPath(OlcLatch latch)
     {
         bool acquired = latch.TryWriteLockOnSmoPath(out var wasObsolete);
+        int spins = 0;   // #765 S3, same reason as SpinWriteLock: tally locally, publish once.
         for (int i = 0; !acquired && i < 64; i++)
         {
-            Interlocked.Increment(ref _writeLockFailures);
+            spins++;
             Thread.SpinWait(1);
             acquired = latch.TryWriteLockOnSmoPath(out wasObsolete);
         }
@@ -2348,10 +2373,12 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         SpinWait spin = default;
         while (!acquired)
         {
-            Interlocked.Increment(ref _writeLockFailures);
+            spins++;
             spin.SpinOnce(-1);
             acquired = latch.TryWriteLockOnSmoPath(out wasObsolete);
         }
+
+        PublishWriteLockSpins(spins);
 
         if (wasObsolete)
         {
