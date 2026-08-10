@@ -151,6 +151,13 @@ internal static class IndexContentChecks
                     }
                     else
                     {
+                        // The leftmost child is NOT in the value array — N keys, N+1 children.
+                        var leftmost = IndexDirectoryReader.LeftChildOf(node);
+                        if (leftmost > 0 && !seen.Contains(leftmost))
+                        {
+                            next.Add(leftmost);
+                        }
+
                         for (var i = 0; i < count; i++)
                         {
                             var child = layout.ValueAt(node, i);

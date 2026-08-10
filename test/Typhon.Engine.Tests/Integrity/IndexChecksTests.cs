@@ -129,10 +129,15 @@ internal sealed class IndexChecksTests : IntegrityFixtureBase
         var report = DamageKit.Scan(BundlePath, ScanDepth.Deep);
         DamageKit.AssertDetectedExactly(report, damage);
 
-        var finding = report.Findings.First(f => f.Code == "CHK-IDX-05");
-        Assert.That(finding.Summary, Does.Contain(field));
-        Assert.That(finding.Detail, Does.Contain("binary search"),
+        // Copying one key over another breaks the order AND duplicates a key in a unique index, so IDX-05 reports
+        // twice. Both are true, and the order one is what this test is about.
+        var order = report.Findings.First(f => f.Code == "CHK-IDX-05" && f.Summary.Contains("out of order"));
+        Assert.That(order.Summary, Does.Contain(field));
+        Assert.That(order.Detail, Does.Contain("binary search"),
             "the finding must say why order matters — a lookup stops at the first key that compares wrongly");
+
+        Assert.That(report.Findings.Any(f => f.Code == "CHK-IDX-05" && f.Summary.Contains("twice")), Is.True,
+            "the duplicated key must be reported too:\n" + IntegrityReportText.Render(report));
     }
 
     /// <summary>

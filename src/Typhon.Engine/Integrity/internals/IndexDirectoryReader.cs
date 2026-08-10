@@ -46,6 +46,9 @@ internal sealed class IndexDirectoryReader
     /// <summary>Byte offset of <c>NextChunk</c>, common to every node layout.</summary>
     private const int NextChunkOffset = 12;
 
+    /// <summary>Byte offset of <c>LeftValue</c> — an internal node's leftmost child — common to every node layout.</summary>
+    private const int LeftValueOffset = 16;
+
     /// <summary>Bytes every node spends before its high key: control, latch, two links and the left value.</summary>
     private const int SharedPrefixSize = 20;
 
@@ -78,6 +81,18 @@ internal sealed class IndexDirectoryReader
     /// <summary>Previous sibling chunk id, or <c>0</c> at the start of a level.</summary>
     /// <param name="node">The node's bytes.</param>
     public static int PrevOf(ReadOnlySpan<byte> node) => MemoryMarshal.Read<int>(node[PrevChunkOffset..]);
+
+    /// <summary>
+    /// An internal node's <b>leftmost</b> child, which is not in the value array.
+    /// </summary>
+    /// <remarks>
+    /// A B+Tree node holds N keys and N+1 children: <c>Values[i]</c> is the subtree to the RIGHT of key <c>i</c>, and
+    /// the leftmost subtree lives in its own field. A descent that reads only the value array therefore misses the
+    /// leftmost subtree at every level — which is not a partial walk, it is a walk that omits an exponentially growing
+    /// share of the tree. It showed up as <c>IDX-04</c> reporting live entities as missing from a healthy index.
+    /// </remarks>
+    /// <param name="node">The node's bytes.</param>
+    public static int LeftChildOf(ReadOnlySpan<byte> node) => MemoryMarshal.Read<int>(node[LeftValueOffset..]);
 
     /// <summary>
     /// The largest entry count any node of this stride could hold, whichever variant it is.

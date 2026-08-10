@@ -51,9 +51,9 @@ internal static class IndexChecks
         // element width depend on which of the four node layouts the tree uses. That follows from the indexed field's
         // type, and reading a node through the wrong variant produces keys that decode perfectly and mean nothing, so
         // the width is not something to guess at.
-        ctx.Findings.NoteSkipped("CHK-IDX-03, CHK-IDX-04, CHK-IDX-07",
-            "entry-to-field agreement needs per-entity component data decoded from the cluster, and multi-value entries hold "
-            + "VSBS buffer ids whose element type is not recorded per index; neither was inspected");
+        ctx.Findings.NoteSkipped("CHK-IDX-07",
+            "multi-value index entries hold a VSBS buffer id whose element type is not recorded per index, so their HEAD/TAIL "
+            + "buffers were not walked");
     }
 
     /// <summary>

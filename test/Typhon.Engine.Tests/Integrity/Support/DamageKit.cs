@@ -1433,19 +1433,23 @@ internal static class DamageKit
         };
         ranges.AddRange(RestampPage(bundlePath, filePage));
 
+        // Each mode draws a second code, and both are true rather than incidental. Rewriting a key breaks the node's
+        // order AND makes that entry disagree with the value the entity actually holds (IDX-03). Repointing a value
+        // makes the entry name a free slot AND leaves the entity it used to name with no entry at all (IDX-04) — which
+        // is the reverse-direction finding, arriving from a mutation that never touched the reverse direction.
         return how == IndexEntryBreak.KeyOrder
             ? new DamageRecord(
                 "D6(index-key-order)",
                 $"the index on '{fieldName}' has a leaf whose keys no longer ascend",
                 ranges,
-                [IndexContentChecks.KeyOrder],
+                [IndexContentChecks.KeyOrder, IndexAgreementChecks.EntriesMatchValues],
                 IntegrityVerdict.Divergent,
                 RepairIsLossless: true)
             : new DamageRecord(
                 "D6(index-dangling-value)",
                 $"an entry of the index on '{fieldName}' names a cluster slot that holds no entity",
                 ranges,
-                [IndexContentChecks.ValuesResolve],
+                [IndexContentChecks.ValuesResolve, IndexAgreementChecks.ValuesHaveEntries],
                 IntegrityVerdict.Divergent,
                 RepairIsLossless: true);
     }
