@@ -2563,11 +2563,6 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
                         // removing a leaf's first key raises its minimum above the separator that still routes to it, and restarting there never terminates.
                         // KeyBelowLeafLowerBound is the predicate that already draws that line correctly, against the PREVIOUS leaf's HighKey, so an absent key
                         // in the residue band still answers NotFound and only a key that provably belongs further left restarts.
-                        if (KeyBelowLeafLowerBound(node, key, Comparer, ref accessor))
-                        {
-                            return (0, 0, -1);
-                        }
-
                         conclusive = true;
                         break;
                     }

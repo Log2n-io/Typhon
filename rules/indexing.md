@@ -207,40 +207,28 @@ keys.
   verified: BTreeConsistencyValidatorTests.Mutant_LeavesOnTheChainButUnreachableByDescent_AreReported (mutant),
             BTreeConsistencyValidatorTests.Mutant_EntryCountDisagreeingWithTheChain_IsReported (mutant)
 
-### IXS-06: A descent answers NOT-FOUND only for a leaf that owns the key's lower bound `[silent]`
+### IXS-06: A descent answers NOT-FOUND only for a leaf that owns the key's lower bound `[UNBUILT]`
 
+  status WITHDRAWN 2026-08-10, same day it was written. The invariant is right and the defect it names is real (#739/#297);
+         the ENFORCEMENT shipped with it was not, and is reverted. Left here so the next attempt starts from the finding
+         rather than rediscovering it.
   invariant before `OptimisticDescendToLeaf` reports `keyIndex < 0` as conclusive, the leaf it stopped at must not be one the key
-            provably belongs to the LEFT of - `KeyBelowLeafLowerBound` must be false. When it holds, the descent overshot and the
-            caller restarts instead of receiving an answer
+            provably belongs to the LEFT of. When it does, the descent overshot and the caller must restart
   never treating `key <= leaf.lastKey` as sufficient evidence that the key is not in the tree
-  never restarting on the bare `key < leaf.firstKey` - that band is legitimate for an absent key and restarting there never
-        terminates, which is IXW-03's failure mode arriving on the read path
-  enforce the B-link right-walk's conclusive exit calls `KeyBelowLeafLowerBound` and returns the restart tuple when it holds
-  scope: BTree.cs (`OptimisticDescendToLeaf`)
-  rationale: the right-walk exists to recover from landing too far LEFT, and it can only travel right. Overshooting is therefore
-             unrecoverable by construction: one leaf too far right and `key <= leaf.lastKey` is trivially true, the loop calls
-             itself conclusive, and every caller reads that as "definitively not in the tree". A concurrent merge or borrow moving
-             keys leftward between the separator read and the leaf read is enough to cause it.
-  on_violation: `Remove` returns false for a key that is present, reachable and correctly chained - #739's "a key survives its
-                Remove", with `EntryCount` and the leaf chain agreeing with each other so no structural check can see it. The same
-                descent backs `TryGet`, so the identical false not-found is reachable on the READ path, which is #297.
-  measured: 25,701 race-harness iterations before the guard produced 6 Remove-NotFound events, ALL on this branch, and in all six
-            `key < landedLeaf.firstKey` - key 378 on a leaf whose first key is 381, key 88 on a leaf starting at 89, on leaves
-            holding 14 to 21 entries. After: 94,854 iterations across two runs, ZERO. Iteration throughput rose 63% in the same
-            wall time, because the failures had been costing deadline stalls.
-  cost   `BTreeMicroBenchmarks.Lookup_Miss` 197.8 -> 217.4 ns median, 3 runs per side, non-overlapping (worst with-guard 209.4 ns
-         beats best without at 198.2 ns). About +11%, or one extra `GetItem(0)` and one compare on the miss path. Lookup_Hit is
-         untouched because the guard lives inside the `keyIndex < 0` branch a hit never enters. This is a real price paid for a
-         correct answer, not a free win, and it is quoted here so nobody has to re-derive it. Most of the 20 ns is a virtual
-         `BaseNodeStorage.GetItem` call - #765 S8's devirtualisation is what reduces it.
-         🔴 Do NOT read the 5-benchmark table in an earlier form of this work as before/after: both of its runs had the guard,
-         because the change was already committed when the "before" side was measured. What that pair does establish is this
-         benchmark's noise floor on a 7950X - up to 18% run-to-run on IDENTICAL code - which is why the figure above needs three
-         runs a side and a non-overlap test rather than a single pair.
-  note this is the same defect class as IXW-04 on the write side - a descent conclusion drawn without asking whether the leaf
-       reached is the leaf that owns the key - and it is answered by the same predicate. Four write sites and one read site now
-       share it.
-  requires IXW-03 (its lower bound is the predicate this rule turns on)
+  never enforcing this by calling `KeyBelowLeafLowerBound` from the descent - that predicate reads `leaf.GetPrevious()` and then
+        DEREFERENCES it for its HighKey. On the write paths the leaf is locked and that is safe; on the lock-free descent the
+        neighbour id can be torn, and dereferencing it faults before any validation can signal a restart. Measured: the test host
+        died with no managed stack in 4 of 5 runs of `ChaosStressTests.Light_2T_50E_NoDelete`, against 6 of 6 passing on main and
+        4 of 4 passing once the call was removed. This is the hazard `BaseNodeStorage.GetChild` documents in its own comment.
+  gap the descent ALREADY follows a separator to choose each child, and that separator IS the lower bound. Carrying it out of the
+      descent answers the question with no neighbour read at all - cheaper than the reverted version and safe by construction.
+      That is the next attempt.
+  evidence 6 Remove-NotFound events in 25,701 race-harness iterations, ALL on the general-descent branch, ALL with
+           `key < landedLeaf.firstKey` - key 378 on a leaf whose first key is 381, key 88 on one starting at 89 - on leaves
+           holding 14 to 21 entries. With the (unsafe) guard in place: 0 in 94,854. The defect is not in doubt.
+  on_violation: `Remove` returns false for a key that is present, reachable and correctly chained (#739), and the same descent
+                backs `TryGet`, so the identical false not-found is reachable on the READ path (#297).
+  requires IXW-03
 
 ---
 
