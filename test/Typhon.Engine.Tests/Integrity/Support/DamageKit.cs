@@ -1048,6 +1048,113 @@ internal static class DamageKit
             RepairIsLossless: true);
     }
 
+    /// <summary>Which way to break a component-collection handle.</summary>
+    internal enum HandleBreak
+    {
+        /// <summary>Point the handle at a buffer id the collection segment does not contain.</summary>
+        Dangle,
+
+        /// <summary>Clear the handle, leaving its buffer allocated and referenced by nothing.</summary>
+        Strand
+    }
+
+    /// <summary>
+    /// <b>D6</b> — rewrites a component row's field-collection handle so its buffer dangles or is stranded.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Four bytes, and the two modes produce genuinely different damage rather than two views of one. <b>Dangle</b> is
+    /// data loss: the handle names storage that is not there, and a collection has no derived copy to rebuild from.
+    /// <b>Strand</b> loses nothing and leaks everything — the buffer stays allocated, correct, and unreachable, which is
+    /// the shape <b>#389</b> describes and the one no walk of a single structure can see.
+    /// </para>
+    /// <para>
+    /// The target is a component row's <c>Fields</c> collection because it is a handle the manifest itself records, so
+    /// the check can account for it without decoding per-entity component data. That is also exactly the boundary
+    /// <c>ALO-04</c>'s reverse half declares: it stands down the moment a user component puts handles somewhere the scan
+    /// cannot enumerate.
+    /// </para>
+    /// </remarks>
+    /// <param name="bundlePath">The bundle to damage.</param>
+    /// <param name="how">Which way to break it.</param>
+    /// <param name="ownerName">Receives the schema name of the row whose handle was rewritten.</param>
+    internal static DamageRecord BreakCollectionHandle(string bundlePath, HandleBreak how, out string ownerName)
+    {
+        const int BogusBuffer = 900_000;
+
+        int filePage;
+        long fieldOffset;
+        int originalBuffer;
+
+        using (var source = new OfflineBundlePageSource(bundlePath))
+        {
+            var bootstrap = BootstrapReader.Read(source);
+            Assert.That(bootstrap.TryGet("sys.ComponentR1", out var spi), Is.True);
+
+            var catalogRoot = spi.GetInt(0);
+            var page = new byte[IntegrityConstants.PageSize];
+            Assert.That(source.TryReadPage(catalogRoot, page), Is.True);
+
+            var geometry = ChunkGeometry.FromPage(page);
+            var segment = new SegmentWalker(source).WalkSegment(catalogRoot);
+            var found = false;
+            ownerName = null;
+            fieldOffset = 0;
+            filePage = 0;
+            originalBuffer = 0;
+
+            for (var id = 0; id < geometry.Capacity(segment.Pages.Count) && !found; id++)
+            {
+                if (!geometry.TryLocate(id, out var ordinal, out var chunkInPage) || ordinal >= segment.Pages.Count)
+                {
+                    continue;
+                }
+
+                if (!source.TryReadPage(segment.Pages[ordinal], page) || !geometry.IsChunkAllocated(page, ordinal == 0, chunkInPage))
+                {
+                    continue;
+                }
+
+                var at = geometry.OffsetInPage(ordinal, chunkInPage);
+                var row = MemoryMarshal.Read<ComponentR1>(new ReadOnlySpan<byte>(page, at, Unsafe.SizeOf<ComponentR1>()));
+                var name = row.Name.AsString;
+                if (string.IsNullOrWhiteSpace(name) || row.Fields._bufferId == 0)
+                {
+                    continue;
+                }
+
+                ownerName = name;
+                originalBuffer = row.Fields._bufferId;
+                filePage = segment.Pages[ordinal];
+                fieldOffset = ((long)filePage * IntegrityConstants.PageSize) + at
+                    + Marshal.OffsetOf<ComponentR1>(nameof(ComponentR1.Fields)).ToInt32();
+                found = true;
+            }
+
+            Assert.That(found, Is.True, "no component row carried a field-collection handle to break");
+        }
+
+        var newValue = how == HandleBreak.Dangle ? BogusBuffer : 0;
+        var ranges = new List<ByteRange> { WriteInt(bundlePath, fieldOffset, newValue) };
+        ranges.AddRange(RestampPage(bundlePath, filePage));
+
+        return how == HandleBreak.Dangle
+            ? new DamageRecord(
+                "D6(dangling-handle)",
+                $"component row '{ownerName}' now names buffer {BogusBuffer}, which its collection segment cannot contain",
+                ranges,
+                [BufferChecks.HandleTable],
+                IntegrityVerdict.DataLoss,
+                RepairIsLossless: false)
+            : new DamageRecord(
+                "D6(stranded-buffer)",
+                $"component row '{ownerName}' no longer references buffer {originalBuffer}, which stays allocated",
+                ranges,
+                [BufferChecks.HandleTable],
+                IntegrityVerdict.Divergent,
+                RepairIsLossless: true);
+    }
+
     /// <summary>Copies one chunk out of a segment. Copies, because callers hold several at once.</summary>
     private static byte[] ReadChunk(IPageSource source, SegmentView segment, ChunkGeometry geometry, int chunkId)
     {

@@ -137,6 +137,75 @@ internal sealed class VsbsReader
         return true;
     }
 
+    /// <summary>
+    /// Walks a buffer's chunk chain without decoding elements, collecting the chunk ids it occupies.
+    /// </summary>
+    /// <remarks>
+    /// What <c>ALO-04</c> needs and <see cref="TryReadBuffer{T}"/> cannot give it: accounting for handles requires the
+    /// chunks a buffer <i>occupies</i>, and that is answerable without knowing the element type at all — which matters
+    /// because the reverse direction has to account for buffers whose element type the scan never learns.
+    /// </remarks>
+    /// <param name="segment">The component-collection segment holding the buffer.</param>
+    /// <param name="geometry">That segment's chunk geometry.</param>
+    /// <param name="bufferId">The buffer's root chunk id.</param>
+    /// <param name="chunkIds">Receives every chunk id in the chain, starting with the root.</param>
+    /// <returns><c>true</c> when the chain terminated normally; <c>false</c> when it dangled or cycled.</returns>
+    public bool TryWalkChunkIds(SegmentView segment, ChunkGeometry geometry, int bufferId, List<int> chunkIds)
+    {
+        chunkIds.Clear();
+        if (bufferId == 0)
+        {
+            return true;
+        }
+
+        var seen = new HashSet<int>();
+        var chunkId = bufferId;
+
+        for (var hop = 0; chunkId != 0; hop++)
+        {
+            if (hop >= MaxChainLength || !seen.Add(chunkId))
+            {
+                Diagnostics.Add($"VSBS buffer {bufferId} in segment {segment.RootPageIndex} does not terminate (revisits chunk {chunkId})");
+                return false;
+            }
+
+            if (!TryGetChunk(segment, geometry, chunkId, out var chunk) || !IsAllocated(segment, geometry, chunkId))
+            {
+                Diagnostics.Add($"VSBS buffer {bufferId} in segment {segment.RootPageIndex} names chunk {chunkId}, which is "
+                    + "unreadable or not allocated");
+                return false;
+            }
+
+            chunkIds.Add(chunkId);
+            chunkId = MemoryMarshal.Read<VariableSizedBufferChunkHeader>(chunk).NextChunkId;
+        }
+
+        return true;
+    }
+
+    /// <summary>Whether the segment's own bitmap marks a chunk allocated.</summary>
+    private bool IsAllocated(SegmentView segment, ChunkGeometry geometry, int chunkId)
+    {
+        if (!geometry.TryLocate(chunkId, out var ordinal, out var chunkInPage) || ordinal >= segment.Pages.Count)
+        {
+            return false;
+        }
+
+        var filePage = segment.Pages[ordinal];
+        if (_cachedPage != filePage)
+        {
+            if (!_source.TryReadPage(filePage, _page))
+            {
+                _cachedPage = -1;
+                return false;
+            }
+
+            _cachedPage = filePage;
+        }
+
+        return geometry.IsChunkAllocated(_page, ordinal == 0, chunkInPage);
+    }
+
     /// <summary>The <c>TotalCount</c> a buffer's root header claims, for cross-checking against what the walk found.</summary>
     /// <param name="segment">The component-collection segment holding the buffer.</param>
     /// <param name="geometry">That segment's chunk geometry.</param>

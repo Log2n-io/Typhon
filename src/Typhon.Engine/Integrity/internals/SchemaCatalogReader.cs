@@ -75,6 +75,9 @@ internal sealed class ArchetypeView
     /// <summary>Component schema names in slot order, from the row's VSBS-backed collection. Empty when unreadable.</summary>
     public IReadOnlyList<string> ComponentNames { get; init; } = [];
 
+    /// <summary>The buffer id the row records for its component-name collection, as read. <c>0</c> when it has none.</summary>
+    public int ComponentNamesBufferId { get; init; }
+
     /// <summary>
     /// Number of <c>Versioned</c> components — the quantity the EntityMap's value record is sized by.
     /// </summary>
@@ -125,6 +128,10 @@ internal sealed class ComponentView
 
     /// <summary>Field descriptors in declaration order, from the row's VSBS-backed collection. Empty when unreadable.</summary>
     public IReadOnlyList<FieldView> Fields { get; init; } = [];
+
+    /// <summary>The buffer id the row records for its field collection, as read. <c>0</c> when it has none.</summary>
+    /// <remarks>Kept alongside the decoded elements because <c>ALO-04</c> accounts for handles, not for contents.</remarks>
+    public int FieldsBufferId { get; init; }
 
     /// <inheritdoc />
     public override string ToString() => $"{Name} ({Size} B, {FieldCount} fields, {StorageMode})";
@@ -190,6 +197,9 @@ internal sealed class SchemaCatalogReader
     /// <summary>Whether anything at all was recovered.</summary>
     public bool IsUsable => Components.Count > 0;
 
+    /// <summary>The component-collection segments found, by chunk stride — what <c>ALO-04</c> accounts for handles in.</summary>
+    public IReadOnlyDictionary<int, (SegmentView Segment, ChunkGeometry Geometry)> CollectionSegments => _collectionsByStride;
+
     /// <summary>Reads both catalogs. Never throws on damage; unreadable rows land in <see cref="Diagnostics"/>.</summary>
     /// <param name="bootstrap">The parsed bootstrap, which names the component catalog's segment.</param>
     public void Read(BootstrapView bootstrap)
@@ -225,6 +235,7 @@ internal sealed class SchemaCatalogReader
                 FieldCount = row.FieldCount,
                 StorageMode = (StorageMode)row.StorageMode,
                 Fields = ReadFields(row, name),
+                FieldsBufferId = row.Fields._bufferId,
                 ComponentSegmentRoot = Resolve(row.ComponentSPI, name, nameof(ComponentR1.ComponentSPI)),
                 RevisionSegmentRoot = Resolve(row.VersionSPI, name, nameof(ComponentR1.VersionSPI))
             };
@@ -257,6 +268,7 @@ internal sealed class SchemaCatalogReader
                 ComponentCount = row.ComponentCount,
                 NextEntityKey = row.NextEntityKey,
                 ComponentNames = componentNames,
+                ComponentNamesBufferId = row.ComponentNames._bufferId,
                 VersionedSlotCount = CountVersionedSlots(componentNames, name),
                 ClusterSegmentRoot = Resolve(row.ClusterSegmentSPI, name, nameof(ArchetypeR1.ClusterSegmentSPI)),
                 EntityMapRoot = Resolve(row.EntityMapSPI, name, nameof(ArchetypeR1.EntityMapSPI)),
