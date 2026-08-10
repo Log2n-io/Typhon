@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using NUnit.Framework;
 using Typhon.Engine;
@@ -435,6 +437,117 @@ internal static class DamageKit
         }
 
         return -1;
+    }
+
+    /// <summary>
+    /// <b>D6</b> — points one component-catalog row's data-segment pointer at a page that is not a segment root.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The manifest is a set of pointers, and this is the shape a torn catalog page leaves: a row that still parses,
+    /// still names a page inside the file, and names the wrong one. That is the case a reader must survive — an
+    /// out-of-range pointer is easy to reject, while an in-range pointer to the wrong page is what turns a scan into a
+    /// crash or, worse, into confident nonsense about a segment that belongs to somebody else.
+    /// </para>
+    /// <para>
+    /// The target is deliberately page 3 — inside the file, not a segment root, and not the meta pair, so the damage is
+    /// exactly "this pointer is wrong" and nothing else.
+    /// </para>
+    /// </remarks>
+    /// <param name="bundlePath">The bundle to damage.</param>
+    /// <param name="ownerName">Receives the schema name of the row whose pointer was redirected.</param>
+    /// <param name="bogusTarget">Receives the page the pointer now names.</param>
+    internal static DamageRecord RedirectCatalogSegmentPointer(string bundlePath, out string ownerName, out int bogusTarget)
+    {
+        const int Target = 3;
+        bogusTarget = Target;
+
+        using var source = new OfflineBundlePageSource(bundlePath);
+        var bootstrap = BootstrapReader.Read(source);
+        Assert.That(bootstrap.TryGet("sys.ComponentR1", out var spi), Is.True, "the bootstrap must name the component catalog");
+
+        var catalogRoot = spi.GetInt(0);
+        var page = new byte[IntegrityConstants.PageSize];
+        Assert.That(source.TryReadPage(catalogRoot, page), Is.True);
+
+        var geometry = ChunkGeometry.FromPage(page);
+        Assert.That(geometry.IsUsable, Is.True, "the catalog segment must record a stride");
+
+        var segment = new SegmentWalker(source).WalkSegment(catalogRoot);
+        var pages = segment.Pages;
+
+        // Pick the first row that actually owns a data segment, so the damage lands on a live pointer rather than on a
+        // legitimately-absent one.
+        for (var id = 0; id < geometry.Capacity(pages.Count); id++)
+        {
+            if (!geometry.TryLocate(id, out var ordinal, out var chunkInPage) || ordinal >= pages.Count)
+            {
+                continue;
+            }
+
+            if (!source.TryReadPage(pages[ordinal], page) || !geometry.IsChunkAllocated(page, ordinal == 0, chunkInPage))
+            {
+                continue;
+            }
+
+            var at = geometry.OffsetInPage(ordinal, chunkInPage);
+            var row = MemoryMarshal.Read<ComponentR1>(new ReadOnlySpan<byte>(page, at, Unsafe.SizeOf<ComponentR1>()));
+            var name = row.Name.AsString;
+            if (string.IsNullOrWhiteSpace(name) || row.ComponentSPI == 0 || name == ArchetypeR1.SchemaName)
+            {
+                continue;   // leave the archetype catalog reachable, so the test can prove the rest survives
+            }
+
+            ownerName = name;
+            var fieldOffset = Marshal.OffsetOf<ComponentR1>(nameof(ComponentR1.ComponentSPI)).ToInt32();
+            var fileOffset = ((long)pages[ordinal] * IntegrityConstants.PageSize) + at + fieldOffset;
+
+            source.Dispose();
+            var range = WriteInt(bundlePath, fileOffset, Target);
+            RestampPage(bundlePath, pages[ordinal]);
+
+            return new DamageRecord(
+                "D6",
+                $"component catalog row '{name}' redirected from segment {row.ComponentSPI} to page {Target}",
+                [range, new ByteRange((long)pages[ordinal] * IntegrityConstants.PageSize + PageBaseHeader.PageChecksumOffset,
+                    PageBaseHeader.PageChecksumSize)],
+                ["CHK-BOO-05"],
+                IntegrityVerdict.Unopenable,
+                RepairIsLossless: false);
+        }
+
+        ownerName = null;
+        throw new InvalidOperationException("no component-catalog row owned a data segment, so nothing could be redirected");
+    }
+
+    /// <summary>Writes one int at an absolute file offset and returns the range it wrote.</summary>
+    private static ByteRange WriteInt(string bundlePath, long fileOffset, int value)
+    {
+        using var fs = new FileStream(DataPath(bundlePath), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        fs.Seek(fileOffset, SeekOrigin.Begin);
+        fs.Write(BitConverter.GetBytes(value));
+        fs.Flush(true);
+        return new ByteRange(fileOffset, sizeof(int));
+    }
+
+    /// <summary>
+    /// Re-stamps a page's checksum so the damage is a WRONG POINTER rather than a torn page.
+    /// </summary>
+    /// <remarks>
+    /// Without this the scan reports a checksum failure and never reaches the pointer, so the test would pass while
+    /// proving something else — the same trap the format-revision forgery had to avoid.
+    /// </remarks>
+    private static void RestampPage(string bundlePath, int filePageIndex)
+    {
+        var path = DataPath(bundlePath);
+        var data = File.ReadAllBytes(path);
+        var page = new byte[IntegrityConstants.PageSize];
+        Array.Copy(data, (long)filePageIndex * IntegrityConstants.PageSize, page, 0, IntegrityConstants.PageSize);
+
+        PagedMMF.StampPageForWrite(page, PageSectorFooter.ReadFilePageIndex(page), allowSectorFooter: false);
+
+        Array.Copy(page, 0, data, (long)filePageIndex * IntegrityConstants.PageSize, IntegrityConstants.PageSize);
+        File.WriteAllBytes(path, data);
     }
 
     /// <summary>Truncates the data file mid-page, the shape a partial copy leaves behind.</summary>
