@@ -2551,6 +2551,23 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
                         {
                             return (0, 0, -1);
                         }
+
+                        // #739. This loop tests only the UPPER side — "is the key past this leaf" — and it can only travel right, so overshooting is
+                        // unrecoverable by construction: land one leaf too far right and `key <= leaf.last` is trivially true, the loop calls itself
+                        // conclusive, and every caller reads that as "definitively not in the tree". Measured in the race harness across 25,701 iterations:
+                        // six Remove-NotFound events, ALL of them branch 3 (this one), and in all six `key < landedLeaf.firstKey` — key 378 on a leaf whose
+                        // first key is 381, key 88 on a leaf starting at 89, and so on, on leaves holding 14 to 21 entries. A concurrent merge or borrow moved
+                        // the key LEFT between the separator read and the leaf read, and the descent answered for the leaf it happened to reach.
+                        //
+                        // The naive guard — restart whenever `key < firstKey` — is #740 again: that band is LEGITIMATE for a genuinely absent key, because
+                        // removing a leaf's first key raises its minimum above the separator that still routes to it, and restarting there never terminates.
+                        // KeyBelowLeafLowerBound is the predicate that already draws that line correctly, against the PREVIOUS leaf's HighKey, so an absent key
+                        // in the residue band still answers NotFound and only a key that provably belongs further left restarts.
+                        if (KeyBelowLeafLowerBound(node, key, Comparer, ref accessor))
+                        {
+                            return (0, 0, -1);
+                        }
+
                         conclusive = true;
                         break;
                     }

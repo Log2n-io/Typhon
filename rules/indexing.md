@@ -207,6 +207,32 @@ keys.
   verified: BTreeConsistencyValidatorTests.Mutant_LeavesOnTheChainButUnreachableByDescent_AreReported (mutant),
             BTreeConsistencyValidatorTests.Mutant_EntryCountDisagreeingWithTheChain_IsReported (mutant)
 
+### IXS-06: A descent answers NOT-FOUND only for a leaf that owns the key's lower bound `[silent]`
+
+  invariant before `OptimisticDescendToLeaf` reports `keyIndex < 0` as conclusive, the leaf it stopped at must not be one the key
+            provably belongs to the LEFT of - `KeyBelowLeafLowerBound` must be false. When it holds, the descent overshot and the
+            caller restarts instead of receiving an answer
+  never treating `key <= leaf.lastKey` as sufficient evidence that the key is not in the tree
+  never restarting on the bare `key < leaf.firstKey` - that band is legitimate for an absent key and restarting there never
+        terminates, which is IXW-03's failure mode arriving on the read path
+  enforce the B-link right-walk's conclusive exit calls `KeyBelowLeafLowerBound` and returns the restart tuple when it holds
+  scope: BTree.cs (`OptimisticDescendToLeaf`)
+  rationale: the right-walk exists to recover from landing too far LEFT, and it can only travel right. Overshooting is therefore
+             unrecoverable by construction: one leaf too far right and `key <= leaf.lastKey` is trivially true, the loop calls
+             itself conclusive, and every caller reads that as "definitively not in the tree". A concurrent merge or borrow moving
+             keys leftward between the separator read and the leaf read is enough to cause it.
+  on_violation: `Remove` returns false for a key that is present, reachable and correctly chained - #739's "a key survives its
+                Remove", with `EntryCount` and the leaf chain agreeing with each other so no structural check can see it. The same
+                descent backs `TryGet`, so the identical false not-found is reachable on the READ path, which is #297.
+  measured: 25,701 race-harness iterations before the guard produced 6 Remove-NotFound events, ALL on this branch, and in all six
+            `key < landedLeaf.firstKey` - key 378 on a leaf whose first key is 381, key 88 on a leaf starting at 89, on leaves
+            holding 14 to 21 entries. After: 94,854 iterations across two runs, ZERO. Iteration throughput rose 63% in the same
+            wall time, because the failures had been costing deadline stalls.
+  note this is the same defect class as IXW-04 on the write side - a descent conclusion drawn without asking whether the leaf
+       reached is the leaf that owns the key - and it is answered by the same predicate. Four write sites and one read site now
+       share it.
+  requires IXW-03 (its lower bound is the predicate this rule turns on)
+
 ---
 
 ## Module: IXW — Index writes under OLC
