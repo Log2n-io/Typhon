@@ -606,10 +606,15 @@ internal abstract partial class BTree<TKey, TStore>
         // direction only. Measured in Remove_Merges: key 584 removed by nobody, still on the chain, with Remove reporting not-found.
         // An empty leaf is inconclusive for the same reason and gets the same treatment — merges empty a leaf before unlinking it, so meeting one says nothing
         // about where the key is. Both cases release without a version bump (nothing was modified) and let the bounded outer loop re-descend.
+        // #740 twin: this tested `key < leaf.firstKey`, the predicate KeyBelowLeafLowerBound was created to replace on the insert side and which was left
+        // standing here — one copy fixed, one forgotten, which is the drift IXW-03 exists to stop and which its own scope line originally failed to cover.
+        // A leaf's first key equals the separator routing to it only until something is removed from the front; after that the band
+        // `previousHighKey <= key < firstKey` is one this leaf IS authoritative for, and answering "not authoritative" there releases the latch and re-descends
+        // to the same leaf. Unlike the insert side this is NOT single-threaded reachable — TryRemoveOlc answers NotFound from the descent before the count
+        // check, so an absent key never arrives here; it needs the descent to FIND the key, the leaf to be underfull enough to defer to the pessimistic path,
+        // and a concurrent writer to raise the leaf's first key above it in between. Concurrency-gated, and the #738 class rather than #740's.
         int leafCount = node.GetCount(ref accessor);
-        bool leftOfLeaf = leafCount > 0
-                          && args.Compare(args.Key, node.GetFirst(ref accessor).Key) < 0
-                          && node.GetPrevious(ref accessor).IsValid;
+        bool leftOfLeaf = KeyBelowLeafLowerBound(node, args.Key, args.Comparer, ref accessor);
         bool emptyAndLinked = leafCount == 0 && (node.GetPrevious(ref accessor).IsValid || node.GetNext(ref accessor).IsValid);
         if (leftOfLeaf || emptyAndLinked)
         {

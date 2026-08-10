@@ -243,9 +243,18 @@ written for the read path; these are the write-path obligations that went unwrit
   enforce `BTree.KeyBelowLeafLowerBound` short-circuits on `count == 0` and on `key >= firstKey`, then reads the previous leaf and
           returns `key < previous.HighKey`. The two extra chunk reads are paid only after the first-key comparison has failed, so
           the common in-range insert still costs one `GetCount`, one `GetFirst` and one compare.
-  scope: BTree.Insert.cs (`KeyBelowLeafLowerBound` and its two call sites: the OLC general path, `InsertIterative`)
+  scope: BTree.Insert.cs (`KeyBelowLeafLowerBound` and its call sites), BTree.Remove.cs (`RemoveIterative`), BTree.Move.cs
+  gap BTree.Move.cs performs leaf inserts with NO lower-bound guard at all. It is not a drifted copy, it is a missing one, and
+      collapsing the five hand-maintained leaf-insert copies onto one authority is the only fix that scales - see the assessment
+      in claude/research/Indexing/.
   on_violation: every re-descent reaches the same leaf and fails the same test, so the bounded pessimistic loop of IXW-01 burns all
-                10,000 restarts and throws. Measured single-threaded, no contention of any kind: 2 m 34 s to the throw.
+                10,000 restarts and throws. Measured single-threaded on the INSERT side, no contention of any kind: 2 m 34 s to the
+                throw. On the REMOVE side it is concurrency-gated - `TryRemoveOlc` answers NotFound from the descent before its
+                count check, so an absent key never reaches the pessimistic guard; it needs the descent to find the key, an
+                underfull leaf, and a concurrent writer raising the leaf's first key in between.
+  note the first version of this rule scoped itself to BTree.Insert.cs alone, while the identical defective predicate stood
+       untouched in BTree.Remove.cs:610 - the rule written to stop the drift did not cover its own twin, and shipped that way for
+       a day. A scope line that names one of N copies is a rule that only holds in one of N places.
   rationale: `separator == leaf.firstKey` holds only immediately AFTER a split. Removing a leaf's first key raises the leaf's
              minimum and leaves the separator where it was, so `separator <= key < firstKey` is a legitimate destination - the leaf
              IS correct, and the insert lowers its minimum back toward a separator that already routes to it. This is the same
