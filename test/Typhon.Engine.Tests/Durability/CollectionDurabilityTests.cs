@@ -4,6 +4,7 @@ using NUnit.Framework;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using Typhon.Engine.Internals;
 using Typhon.Schema.Definition;
@@ -366,6 +367,212 @@ internal sealed class CollectionDurabilityTests
         for (var el = 0; el < ElementCountOf(i); el++)
         {
             cca.Add(ElementValue(i, el));
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // Phase 3 — Option B: a commit emits the collection's full content
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Decoding a real commit's CollectionDelta records must reproduce every entity's collection exactly (AC 3.1).
+    /// </summary>
+    /// <remarks>
+    /// Driven through a live transaction rather than a hand-built batch, for the same reason the LOG-06 verifier is: the property under test is what the
+    /// EMITTER produces. <c>CommitBatchBuilder.AddCollectionDelta</c> had zero production callers before this — the record kind, its codec and its wire layout
+    /// all existed and had property tests, and nothing ever wrote one.
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    public void Commit_WithCollections_EmitsTheFullContent()
+    {
+        EntityId[] versioned;
+        EntityId[] single;
+        using (var scope = _serviceProvider.CreateScope())
+        {
+            var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            (versioned, single) = SeedBoth(dbe);
+        }
+
+        var records = WalScanner.ScanAll(_walDir);
+        AssertFoldsToTheModel(records, versioned, "Versioned (flat)");
+        AssertFoldsToTheModel(records, single, "SingleVersion (cluster)");
+    }
+
+    /// <summary>
+    /// The tick fence must emit collection content too — the columnar path is a separate emitter with its own hole.
+    /// </summary>
+    /// <remarks>
+    /// The fence's record carries the cluster's SoA bytes with every collection handle zeroed, so on its own it RESTORES a collection as empty. That is worse
+    /// than the bug it replaces for one specific shape: content that was already checkpointed, and therefore already safe, gets erased by replaying a window
+    /// that only touched a scalar. The content has to ride alongside, which is why the fence emits its own CollectionDelta batch.
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    public void Fence_WithCollections_EmitsTheFullContent()
+    {
+        EntityId[] single;
+        int beforeFence;
+        using (var scope = _serviceProvider.CreateScope())
+        {
+            var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            (_, single) = SeedBoth(dbe);
+            beforeFence = WalScanner.ScanAll(_walDir).Count(static r => r.Kind == RecordKind.CollectionDelta);
+
+            TouchSingleVersionEntities(dbe, single);
+            dbe.WriteTickFence(1);
+        }
+
+        var records = WalScanner.ScanAll(_walDir);
+        var fenceDeltas = records.Where(r => r.Kind == RecordKind.CollectionDelta && r.IsFence).ToList();
+        Assert.That(fenceDeltas, Is.Not.Empty,
+            "the tick fence emitted no CollectionDelta — its zeroed handles would restore every one of these collections as empty");
+        Assert.That(records.Count(static r => r.Kind == RecordKind.CollectionDelta), Is.GreaterThan(beforeFence),
+            "the fence must add content records of its own, not merely reuse the spawn commit's");
+
+        // The fold over the WHOLE window — spawn commit plus fence — still has to land on the model: a later Clear discards the earlier content and re-appends
+        // the same elements, so repetition converges rather than accumulating.
+        AssertFoldsToTheModel(records, single, "SingleVersion (cluster, after fence)");
+    }
+
+    /// <summary>
+    /// A component with NO collection field must emit byte-identical records to before the change (AC 3.3).
+    /// </summary>
+    /// <remarks>
+    /// The common case must not pay for the rare one. Stated as "not one CollectionDelta record exists" rather than as a byte comparison against a golden
+    /// file: the emitters are shared, so the only way a collection-free component could change shape is by emitting a record kind it never emitted, and that
+    /// is both the precise claim and the one that stays readable when an unrelated field is added to the fixture component.
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    public void Commit_WithoutCollections_EmitsNoCollectionDelta()
+    {
+        using (var scope = _serviceProvider.CreateScope())
+        {
+            var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<CompA>();
+            dbe.InitializeArchetypes();
+
+            using var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate);
+            using (var tx = uow.CreateTransaction(CommitDiscipline.Commit))
+            {
+                for (var i = 0; i < EntityCount; i++)
+                {
+                    tx.Spawn<CompAArch>(CompAArch.A.Set(new CompA(i)));
+                }
+
+                tx.Commit();
+            }
+
+            uow.Flush();
+            dbe.WriteTickFence(1);
+        }
+
+        var records = WalScanner.ScanAll(_walDir);
+        Assert.That(records, Is.Not.Empty, "the commit must have reached the log, or this assertion is vacuous");
+        Assert.That(records.FindAll(static r => r.Kind == RecordKind.CollectionDelta), Is.Empty,
+            "a component with no collection field must emit no CollectionDelta record — the common case does not pay for the rare one");
+    }
+
+    /// <summary>
+    /// LOG-07: a CollectionDelta must never precede the Spawn of the entity it belongs to (AC 3.2).
+    /// </summary>
+    /// <remarks>
+    /// <c>AddCollectionDelta</c> already buckets as <c>1</c>, the same bucket as <c>AddSlot</c>, so the builder places it after all Spawns by construction.
+    /// This verifies that rather than rebuilding it — the emission added a caller to a bucketing scheme that until now had none, which is exactly when an
+    /// assumed invariant is worth checking against the bytes.
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    public void CollectionDeltas_FollowTheirSpawn_InBatchOrder()
+    {
+        using (var scope = _serviceProvider.CreateScope())
+        {
+            var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            SeedBoth(dbe);
+        }
+
+        var records = WalScanner.ScanAll(_walDir);
+        var spawnLsn = new Dictionary<long, long>();
+        foreach (var r in records)
+        {
+            if (r.Kind == RecordKind.Lifecycle && r.Op == (byte)LifecycleOp.Spawn)
+            {
+                spawnLsn[r.EntityId] = r.Lsn;
+            }
+        }
+
+        var checkedDeltas = 0;
+        foreach (var r in records)
+        {
+            if (r.Kind != RecordKind.CollectionDelta || !spawnLsn.TryGetValue(r.EntityId, out var born))
+            {
+                continue;
+            }
+
+            checkedDeltas++;
+            Assert.That(r.Lsn, Is.GreaterThan(born),
+                $"LOG-07: CollectionDelta at LSN {r.Lsn} precedes entity 0x{r.EntityId:X}'s Spawn at LSN {born} — apply would fold content for an entity "
+                + "that does not exist yet");
+        }
+
+        Assert.That(checkedDeltas, Is.GreaterThan(0), "no CollectionDelta was matched to a Spawn — the ordering assertion inspected nothing");
+    }
+
+    /// <summary>
+    /// Folds the emitted CollectionDelta records the way recovery does and requires the result to equal the per-entity model.
+    /// </summary>
+    /// <remarks>
+    /// This is the test-side twin of <c>RecoveryDriver</c>'s fold, and it is deliberately a re-implementation rather than a call into it: it has to be
+    /// possible for the two to disagree, or the round-trip proves only that one piece of code is self-consistent.
+    /// </remarks>
+    private static void AssertFoldsToTheModel(IReadOnlyList<WalScanner.Record> records, IReadOnlyList<EntityId> ids, string shape)
+    {
+        var folded = new Dictionary<(long Entity, ushort Slot, ushort Field), List<int>>();
+        foreach (var r in records)
+        {
+            if (r.Kind != RecordKind.CollectionDelta)
+            {
+                continue;
+            }
+
+            var key = (r.EntityId, r.SlotIndex, r.FieldId);
+            if (!folded.TryGetValue(key, out var elements))
+            {
+                folded[key] = elements = [];
+            }
+
+            switch ((CollectionOp)r.Op)
+            {
+                case CollectionOp.Clear:
+                    elements.Clear();
+                    break;
+                case CollectionOp.Append:
+                    Assert.That(r.Payload, Has.Length.EqualTo(sizeof(int)), $"{shape}: an Append element must be one int wide");
+                    elements.Add(BitConverter.ToInt32(r.Payload));
+                    break;
+                default:
+                    Assert.Fail($"{shape}: Option B emits only Clear and Append, got {(CollectionOp)r.Op}");
+                    break;
+            }
+        }
+
+        for (var i = 0; i < ids.Count; i++)
+        {
+            var match = folded.Where(kv => kv.Key.Entity == (long)ids[i].RawValue).ToList();
+            Assert.That(match, Has.Count.EqualTo(1), $"{shape}: entity {ids[i]} must have exactly one folded collection field, got {match.Count}");
+
+            var expected = new int[ElementCountOf(i)];
+            for (var el = 0; el < expected.Length; el++)
+            {
+                expected[el] = ElementValue(i, el);
+            }
+
+            Assert.That(match[0].Value, Is.EqualTo(expected).AsCollection,
+                $"{shape}: entity {ids[i]}'s folded content must equal what was committed — the emitted records ARE the collection after a crash");
         }
     }
 
