@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Internals;
 
@@ -95,6 +96,28 @@ internal static class EntityMapChecks
         }
     }
 
+    /// <summary>
+    /// The archetype's Versioned components, in the slot order the entity record's chain-pointer array uses.
+    /// </summary>
+    /// <remarks>
+    /// The record holds one <c>compRevFirstChunkId</c> per <i>Versioned</i> slot, densely — non-Versioned components
+    /// occupy no position. So the mapping from array index to component is the archetype's component list filtered to
+    /// Versioned, in order, and getting that filter wrong attributes one component's chain roots to another.
+    /// </remarks>
+    private static List<string> VersionedComponentsInSlotOrder(ScanContext ctx, ArchetypeView archetype)
+    {
+        var ordered = new List<string>();
+        foreach (var name in archetype.ComponentNames)
+        {
+            if (ctx.Manifest.Components.TryGetValue(name, out var component) && component.StorageMode == StorageMode.Versioned)
+            {
+                ordered.Add(name);
+            }
+        }
+
+        return ordered;
+    }
+
     private static void Walk(ScanContext ctx, ArchetypeView archetype)
     {
         if (!ctx.Segments.TryGetValue(archetype.EntityMapRoot, out var segment) || segment.Pages.Count == 0)
@@ -164,6 +187,21 @@ internal static class EntityMapChecks
         var entries = new Dictionary<long, int>();
         var walkedBuckets = new HashSet<int>();
 
+        // Chain roots this map's entity records reference, gathered per component so CHN-06 can ask the reverse
+        // question of each revision segment.
+        var versioned = VersionedComponentsInSlotOrder(ctx, archetype);
+        var referenced = new List<HashSet<int>>(versioned.Count);
+        foreach (var name in versioned)
+        {
+            if (!ctx.ReferencedChainRoots.TryGetValue(name, out var set))
+            {
+                set = [];
+                ctx.ReferencedChainRoots[name] = set;
+            }
+
+            referenced.Add(set);
+        }
+
         for (var dirIndex = 0; dirIndex < directoryIds.Count; dirIndex++)
         {
             if (!Resolve(ctx, archetype, cursor, locus, directoryIds[dirIndex], "directory", directory))
@@ -180,7 +218,7 @@ internal static class EntityMapChecks
                 }
 
                 WalkBucketChain(ctx, archetype, cursor, locus, bucketId, bucket, bucketCapacity, recordSize, entries,
-                    walkedBuckets);
+                    walkedBuckets, referenced);
             }
         }
 
@@ -341,7 +379,7 @@ internal static class EntityMapChecks
     /// </remarks>
     private static void WalkBucketChain(ScanContext ctx, ArchetypeView archetype, ChunkCursor cursor, Locus locus,
         int bucketId, byte[] bucket, int bucketCapacity, int recordSize, Dictionary<long, int> entries,
-        HashSet<int> walkedBuckets)
+        HashSet<int> walkedBuckets, List<HashSet<int>> referencedChainRoots)
     {
         var next = bucketId;
         var visited = new HashSet<int>();
@@ -373,6 +411,24 @@ internal static class EntityMapChecks
                         bucket.AsSpan(recordAt + ClusterEntityRecordAccessor.ClusterChunkIdOffset));
                     var slotIndex = bucket[recordAt + ClusterEntityRecordAccessor.SlotIndexOffset];
                     location = ClusterLocation.Pack(clusterChunk, slotIndex);
+
+                    // The record's tail is one chain-root chunk id per Versioned slot, in the archetype's component
+                    // order. Collected rather than validated here — CHN-06 owns the comparison, because the authority
+                    // on what a valid root looks like is the revision segment, not the map.
+                    for (var v = 0; v < referencedChainRoots.Count; v++)
+                    {
+                        var at = recordAt + ClusterEntityRecordAccessor.CompRevOffset + (v * sizeof(int));
+                        if (at + sizeof(int) > bucket.Length)
+                        {
+                            break;
+                        }
+
+                        var chainRoot = MemoryMarshal.Read<int>(bucket.AsSpan(at));
+                        if (chainRoot > 0)
+                        {
+                            referencedChainRoots[v].Add(chainRoot);
+                        }
+                    }
                 }
 
                 if (!entries.TryAdd(id, location))

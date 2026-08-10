@@ -164,6 +164,10 @@ internal static class ChainChecks
         // Walked once per chain root and remembered, so a chunk shared by two chains is seen rather than walked twice.
         var visitedGlobally = new HashSet<int>();
 
+        // Published for CHN-06, which asks whether anything still references each of these.
+        var roots = new Dictionary<int, long>();
+        ctx.ChainRoots[component.Name] = roots;
+
         for (var id = 0; id < capacity; id++)
         {
             // Only allocated chunks are candidate roots. A freed chunk still holds its old bytes, so scanning one would
@@ -182,6 +186,8 @@ internal static class ChainChecks
             {
                 continue;
             }
+
+            roots[id] = header.EntityPK;
 
             InspectElements(ctx, component, segment, geometry, chunk, id, header, nextFreeTsn, ref highestTsn);
             WalkChain(ctx, component, segment, geometry, reader, id, header, capacity, visitedGlobally, cleanShutdown);

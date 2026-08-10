@@ -82,6 +82,23 @@ internal sealed class ScanContext
     /// </remarks>
     public Dictionary<string, Dictionary<long, int>> ClusterEntityLocations { get; } = [];
 
+    /// <summary>
+    /// Revision-chain roots found by walking each component's revision segment: component name to (chunk id, owning
+    /// entity key). Populated by <c>ChainChecks</c>.
+    /// </summary>
+    public Dictionary<string, Dictionary<int, long>> ChainRoots { get; } = [];
+
+    /// <summary>
+    /// Chain roots the EntityMap's value records actually reference, per component name. Populated by
+    /// <c>EntityMapChecks</c>.
+    /// </summary>
+    /// <remarks>
+    /// The other half of <c>CHN-06</c>. An entity record carries one <c>compRevFirstChunkId</c> per Versioned slot, so
+    /// the map is the authority on which chains are still owned — a root nobody references is storage that recovery
+    /// will never reclaim, because nothing knows it is there.
+    /// </remarks>
+    public Dictionary<string, HashSet<int>> ReferencedChainRoots { get; } = [];
+
     /// <summary>Findings accumulated so far.</summary>
     public FindingCollector Findings { get; init; }
 

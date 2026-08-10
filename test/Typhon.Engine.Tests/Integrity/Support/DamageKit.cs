@@ -943,6 +943,122 @@ internal static class DamageKit
             RepairIsLossless: true);
     }
 
+    /// <summary>
+    /// <b>D6</b> — clears one entity record's chain pointer, stranding a revision chain nothing references.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Four bytes in the value half of a bucket, chosen because the resulting shape is one no single-structure walk can
+    /// see. The chain is still there, still well-formed, still carrying its owning entity key; the entity is still there,
+    /// still live, still in the map. Only the reference between them is gone — so the chain family reports a healthy
+    /// chain, the map family reports a reachable entity, and the storage is unreclaimable forever. That is precisely
+    /// <c>CHN-06</c>'s territory and nothing else's.
+    /// </para>
+    /// <para>
+    /// The offset arithmetic is the reason this primitive could not be written before the manifest read the VSBS: it
+    /// needs the bucket's key/value split, which needs the entity-record size, which needs the archetype's Versioned
+    /// component count.
+    /// </para>
+    /// </remarks>
+    /// <param name="bundlePath">The bundle to damage.</param>
+    /// <param name="strandedChunk">Receives the chain-root chunk id that is now unreferenced.</param>
+    internal static DamageRecord OrphanRevisionChain(string bundlePath, out int strandedChunk)
+    {
+        int filePage;
+        long pointerOffset;
+        string archetypeName;
+
+        using (var source = new OfflineBundlePageSource(bundlePath))
+        {
+            var roots = SweepRoots(source);
+            var manifest = new SchemaCatalogReader(source, roots);
+            manifest.Read(BootstrapReader.Read(source));
+            Assert.That(manifest.IsUsable, Is.True, "precondition: the manifest must be readable to find an entity record");
+
+            var walker = new SegmentWalker(source);
+            var page = new byte[IntegrityConstants.PageSize];
+
+            var archetype = manifest.Archetypes.Values.First(a => a.EntityMapRoot != 0 && a.VersionedSlotCount > 0);
+            archetypeName = archetype.Name;
+
+            var segment = walker.WalkSegment(archetype.EntityMapRoot);
+            Assert.That(source.TryReadPage(segment.Pages[0], page), Is.True);
+            var geometry = ChunkGeometry.FromPage(page);
+            Assert.That(geometry.IsUsable, Is.True);
+
+            var recordSize = archetype.EntityRecordSize;
+            var capacity = (geometry.Stride - 12) / (sizeof(long) + recordSize);
+            var valuesAt = 12 + (capacity * sizeof(long));
+
+            // The meta's first inline directory slot names a directory chunk; its first populated slot names a bucket.
+            var meta = ReadChunk(source, segment, geometry, 0);
+            var directoryId = MemoryMarshal.Read<int>(meta.AsSpan(28));
+            var directory = ReadChunk(source, segment, geometry, directoryId);
+
+            var found = -1;
+            byte[] bucket = null;
+            var entryIndex = -1;
+            for (var slot = 0; slot < 64 && found < 0; slot++)
+            {
+                var bucketId = MemoryMarshal.Read<int>(directory.AsSpan(slot * sizeof(int)));
+                if (bucketId <= 0)
+                {
+                    continue;
+                }
+
+                var candidate = ReadChunk(source, segment, geometry, bucketId);
+                if (candidate[4] == 0)
+                {
+                    continue;   // an empty bucket has no record to strand
+                }
+
+                // Take an entry whose chain pointer is actually set, so clearing it strands a real chain.
+                for (var i = 0; i < candidate[4] && i < capacity; i++)
+                {
+                    var at = valuesAt + (i * recordSize) + ClusterEntityRecordAccessor.CompRevOffset;
+                    if (MemoryMarshal.Read<int>(candidate.AsSpan(at)) > 0)
+                    {
+                        found = bucketId;
+                        bucket = candidate;
+                        entryIndex = i;
+                        break;
+                    }
+                }
+            }
+
+            Assert.That(found, Is.GreaterThan(0), "no entity record with a chain pointer was found, so none could be stranded");
+
+            var recordAt = valuesAt + (entryIndex * recordSize) + ClusterEntityRecordAccessor.CompRevOffset;
+            strandedChunk = MemoryMarshal.Read<int>(bucket.AsSpan(recordAt));
+
+            geometry.TryLocate(found, out var ordinal, out var chunkInPage);
+            filePage = segment.Pages[ordinal];
+            pointerOffset = ((long)filePage * IntegrityConstants.PageSize) + geometry.OffsetInPage(ordinal, chunkInPage) + recordAt;
+        }
+
+        var ranges = new List<ByteRange> { WriteInt(bundlePath, pointerOffset, 0) };
+        ranges.AddRange(RestampPage(bundlePath, filePage));
+
+        return new DamageRecord(
+            "D6(orphan-chain)",
+            $"an entity record of '{archetypeName}' no longer references revision chain {strandedChunk}",
+            ranges,
+            [CrossStructureChecks.ChainRootsReferenced],
+            IntegrityVerdict.Divergent,
+            RepairIsLossless: true);
+    }
+
+    /// <summary>Copies one chunk out of a segment. Copies, because callers hold several at once.</summary>
+    private static byte[] ReadChunk(IPageSource source, SegmentView segment, ChunkGeometry geometry, int chunkId)
+    {
+        var page = new byte[IntegrityConstants.PageSize];
+        Assert.That(geometry.TryLocate(chunkId, out var ordinal, out var chunkInPage), Is.True, $"chunk {chunkId}");
+        Assert.That(ordinal, Is.LessThan(segment.Pages.Count), $"chunk {chunkId} is past the segment");
+        Assert.That(source.TryReadPage(segment.Pages[ordinal], page), Is.True);
+
+        return page.AsSpan(geometry.OffsetInPage(ordinal, chunkInPage), geometry.Stride).ToArray();
+    }
+
     /// <summary>Writes one long at an absolute file offset and returns the range it wrote.</summary>
     private static ByteRange WriteLong(string bundlePath, long fileOffset, long value)
     {
