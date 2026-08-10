@@ -800,7 +800,7 @@ public class OlcBTreeRaceStressTests
                             // MaxPessimisticRestarts = 10,000, measured at 2m34s single-threaded in #740) trips it exactly as a genuine deadlock would.
                             // Reading the old "HANG" label as evidence of a lock cycle is what sent five #738 hypotheses to be refuted one at a time.
                             // So do not report the label — report the measurement that separates the two. See ScenarioContext.CounterSnapshot.
-                            s.Failures.Add(new FailureRecord(iter, DiagnoseDeadline(s, iter, ctx)));
+                            s.Failures.Add(new FailureRecord(iter, DiagnoseDeadline(s, iter, ctx, iterTask)));
                             // Workers may still be alive — touching the MMF after Dispose() would AV. Skip cleanup and let the orphan workers churn against
                             // live (epoch-protected) memory until the process exits.
                             hadHangInThisIter = true;
@@ -875,7 +875,7 @@ public class OlcBTreeRaceStressTests
     /// <summary>
     /// Samples the stuck iteration's tree counters twice and reports whether it is progressing, so the record says what happened instead of that a clock expired.
     /// </summary>
-    private static string DiagnoseDeadline(Scenario s, int iter, ScenarioContext ctx)
+    private static string DiagnoseDeadline(Scenario s, int iter, ScenarioContext ctx, Task iterTask)
     {
         var snapshot = ctx.CounterSnapshot;
         if (snapshot == null)
@@ -908,11 +908,23 @@ public class OlcBTreeRaceStressTests
         // WHICH counter moved is the diagnosis. These three are materially different defects and the old single "HANG" label collapsed them into one, which is
         // how #738 accumulated five hypotheses that all assumed a lock cycle.
         string label, verdict;
+
+        // Ask FIRST whether the iteration is even still running. `Wait` timing out and the body finishing are not mutually exclusive: a body that completes a
+        // millisecond after the deadline leaves every counter frozen for the whole sample window, and a naive reading of that is "STUCK — nothing is being
+        // attempted", which is the opposite of what happened. This harness has already sent five #738 hypotheses chasing a lock cycle on the strength of a label;
+        // a classifier that manufactures a sixth would be worse than the "HANG" string it replaced. Checked before the counters are interpreted, not after.
+        if (iterTask.IsCompleted)
+        {
+            WriteProgress(s.Name, iter, "DEADLINE/LATE");
+            return $"DEADLINE after {IterationDeadline.TotalSeconds}s — LATE: the iteration finished on its own shortly after the wall clock expired, so this is "
+                 + "a budget too tight for a loaded box, not a defect. Raise OLC_STRESS_ITER_DEADLINE_SECONDS before reading anything into it.";
+        }
+
         if (!anyMoved)
         {
             label = "STUCK";
-            verdict = "not one counter moved in the sample window. Nothing is being attempted — this is the shape a lock cycle or a wait-forever has, and the "
-                    + "only thing that will tell you more is a stack dump (`--blame-hang --blame-hang-timeout <n>`).";
+            verdict = "not one counter moved in the sample window while the iteration was still running. Nothing is being attempted — this is the shape a lock "
+                    + "cycle or a wait-forever has, and the only thing that will tell you more is a stack dump.";
         }
         else if (deltas[CtrWriteLockFails] > 0 && deltas[CtrRestarts] == 0 && deltas[CtrFallbacks] == 0 && deltas[CtrEntries] == 0)
         {
