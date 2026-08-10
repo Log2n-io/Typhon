@@ -43,6 +43,21 @@ internal static class WalChecks
     /// <summary>Check code: the replayable window has no gap.</summary>
     public const string WindowContiguity = "CHK-WAL-04";
 
+    /// <summary>
+    /// Granularity every drain is written at, so the offset of the next frame is not the end of the previous one.
+    /// </summary>
+    /// <remarks>
+    /// <c>IWalFileIO.WriteAligned</c> requires both offset and length to be multiples of 4096 — the O_DIRECT
+    /// constraint — so each drain occupies a whole block and the next frame starts at the next boundary. Measured on a
+    /// real segment: eight 120-byte frames at exactly 4096, 8192, 12288, … A walk that advanced by <c>FrameLength</c>
+    /// instead reads the padding after frame 0 as an unwritten block and stops, which makes every check built on it
+    /// pass by inspecting one frame out of eight.
+    /// </remarks>
+    private const int DrainAlignment = 4096;
+
+    /// <summary>Rounds a file offset up to the next drain boundary.</summary>
+    private static int NextDrain(int offset) => ((offset + DrainAlignment - 1) / DrainAlignment) * DrainAlignment;
+
     /// <summary>Runs the WAL family.</summary>
     /// <param name="ctx">The scan context.</param>
     public static void Run(ScanContext ctx)
@@ -56,7 +71,7 @@ internal static class WalChecks
 
         var headers = ReadSegmentHeaders(bundle);
         CheckHeaders(ctx, headers);
-        CheckOrdering(ctx, headers);
+        CheckOrdering(ctx, bundle, headers);
         CheckRecordChain(ctx, bundle, headers);
     }
 
@@ -210,7 +225,7 @@ internal static class WalChecks
                 previousLsn = lastLsn;
             }
 
-            at += frameLength;
+            at = NextDrain(at + frameLength);
             frames++;
         }
     }
@@ -495,7 +510,7 @@ internal static class WalChecks
         }
     }
 
-    private static void CheckOrdering(ScanContext ctx, IReadOnlyList<WalHeaderView> headers)
+    private static void CheckOrdering(ScanContext ctx, OfflineBundlePageSource bundle, IReadOnlyList<WalHeaderView> headers)
     {
         long previousId = long.MinValue;
         long previousFirstLsn = long.MinValue;
@@ -525,27 +540,142 @@ internal static class WalChecks
                     + "carries a stale header.");
             }
 
-            if (previousId != long.MinValue && h.SegmentId > previousId + 1)
-            {
-                ctx.Report(WindowContiguity, IntegritySeverity.Fatal, "LOG-03", Locus.Database,
-                    $"The WAL is missing segment(s) between id {previousId} and {h.SegmentId}.",
-                    $"{h.SegmentId - previousId - 1} segment file(s) are absent from the middle of the log. Recovery replays "
-                    + "a contiguous window; a hole in the middle means it must stop at the hole, silently discarding every "
-                    + "transaction after it even though those segments are present and intact.",
-                    Repairability.NotRepairable,
-                    new LossEstimate
-                    {
-                        Kind = LossKind.Unknown,
-                        EntityCount = -1,
-                        BoundedMin = 1,
-                        BoundedMax = long.MaxValue,
-                        Explanation = $"Every transaction from segment {previousId + 1} onward — including the ones in the "
-                            + "segments that survived, because recovery cannot skip the gap."
-                    });
-            }
-
             previousId = h.SegmentId;
             previousFirstLsn = h.FirstLsn;
         }
+
+        CheckWindowContiguity(ctx, bundle, headers);
+    }
+
+    /// <summary>
+    /// <c>WAL-04</c> — the replayable window covers an unbroken run of LSNs.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The first implementation checked segment <i>ids</i> for contiguity, and ids are not dense.</b> Measured on a
+    /// healthy database (#771): after one open the log holds id 1 covering LSNs 1–128 and a pre-allocated spare; after
+    /// a second open it holds id 1, id <b>3</b> starting at LSN 129, and a new spare. There was never an id 2 — the
+    /// spare is promoted with a fresh id and the counter has moved on. So the id sequence jumps by design, and a check
+    /// reading that as a hole reported <c>Fatal</c> on any database that had been opened twice. It shipped with no test
+    /// at all, which is how the premise was never questioned.
+    /// </para>
+    /// <para>
+    /// What recovery actually requires is that the <b>LSNs</b> form an unbroken run: it replays forward and stops at
+    /// the first sequence number it cannot find. Segment 1 ending at 128 and segment 3 beginning at 129 is contiguous
+    /// in the sense that matters, whatever the file names say. A segment's last LSN is not in its header, so it comes
+    /// from walking the frames — which <c>WAL-02</c> already does.
+    /// </para>
+    /// <para>
+    /// Records below the checkpoint are already in the data file, so segments entirely under it are not replayed and
+    /// their absence costs nothing. The window therefore starts at the last segment beginning at or below the
+    /// checkpoint; with no checkpoint recorded, every segment is replayable.
+    /// </para>
+    /// </remarks>
+    private static void CheckWindowContiguity(ScanContext ctx, OfflineBundlePageSource bundle,
+        IReadOnlyList<WalHeaderView> headers)
+    {
+        var (checkpointLsn, _) = ctx.Bootstrap.ReadWatermarks();
+
+        // Written segments in LSN order — the order recovery reads them in, which is not necessarily file-name order.
+        var written = new List<(WalHeaderView Header, long MaxLsn)>();
+        foreach (var seg in bundle.WalSegments)
+        {
+            for (var i = 0; i < headers.Count; i++)
+            {
+                if (headers[i].Name != seg.Name || !headers[i].Valid || headers[i].Unused)
+                {
+                    continue;
+                }
+
+                written.Add((headers[i], HighestLsnIn(seg.Path)));
+                break;
+            }
+        }
+
+        written.Sort((a, b) => a.Header.FirstLsn.CompareTo(b.Header.FirstLsn));
+
+        // The window opens at the last segment that could still hold an unreplayed record.
+        var windowStart = 0;
+        for (var i = 0; i < written.Count; i++)
+        {
+            if (checkpointLsn > 0 && written[i].Header.FirstLsn <= checkpointLsn)
+            {
+                windowStart = i;
+            }
+        }
+
+        for (var i = windowStart + 1; i < written.Count; i++)
+        {
+            var previous = written[i - 1];
+            var current = written[i];
+
+            // A segment whose frames could not be walked yields 0; WAL-02 owns that failure, and guessing a coverage
+            // gap from it here would report the same damage twice under a code that means something else.
+            if (previous.MaxLsn <= 0 || current.Header.FirstLsn == previous.MaxLsn + 1)
+            {
+                continue;
+            }
+
+            if (current.Header.FirstLsn <= previous.MaxLsn)
+            {
+                continue;   // overlap, not a gap — WAL-03 owns non-monotonic LSNs
+            }
+
+            ctx.Report(WindowContiguity, IntegritySeverity.Fatal, "LOG-03", Locus.Database,
+                $"The WAL's replayable window has a gap between LSN {previous.MaxLsn:N0} and {current.Header.FirstLsn:N0}.",
+                $"'{previous.Header.Name}' ends at LSN {previous.MaxLsn:N0} and '{current.Header.Name}' begins at "
+                + $"{current.Header.FirstLsn:N0}, leaving {current.Header.FirstLsn - previous.MaxLsn - 1:N0} sequence "
+                + $"number(s) in no segment at all. The window begins at the checkpoint LSN of {checkpointLsn:N0}, so "
+                + "these records were still needed. Recovery replays forward and stops at the first LSN it cannot find, "
+                + "silently discarding every transaction after the gap even though their segments are present and intact.",
+                Repairability.NotRepairable,
+                new LossEstimate
+                {
+                    Kind = LossKind.Unknown,
+                    EntityCount = -1,
+                    BoundedMin = 1,
+                    BoundedMax = long.MaxValue,
+                    Explanation = $"Every transaction from LSN {previous.MaxLsn + 1:N0} onward — including the ones in "
+                        + "the segments that survived, because recovery cannot skip the gap."
+                });
+        }
+    }
+
+    /// <summary>The highest LSN any frame of a segment claims, or <c>0</c> when it holds none or cannot be read.</summary>
+    private static long HighestLsnIn(string path)
+    {
+        byte[] bytes;
+        try
+        {
+            bytes = File.ReadAllBytes(path);
+        }
+        catch (IOException)
+        {
+            return 0;
+        }
+
+        var at = WalSegmentHeader.SizeInBytes;
+        long highest = 0;
+
+        while (at + WalFrameHeader.SizeInBytes <= bytes.Length)
+        {
+            var frameLength = MemoryMarshal.Read<int>(bytes.AsSpan(at));
+            if (frameLength == 0 || frameLength == WalFrameHeader.PaddingSentinel
+                || frameLength < WalFrameHeader.SizeInBytes || at + frameLength > bytes.Length)
+            {
+                break;
+            }
+
+            var recordCount = MemoryMarshal.Read<int>(bytes.AsSpan(at + sizeof(int)));
+            var lastLsn = MemoryMarshal.Read<long>(bytes.AsSpan(at + (2 * sizeof(int))));
+            if (recordCount > 0 && lastLsn > highest)
+            {
+                highest = lastLsn;
+            }
+
+            at = NextDrain(at + frameLength);
+        }
+
+        return highest;
     }
 }

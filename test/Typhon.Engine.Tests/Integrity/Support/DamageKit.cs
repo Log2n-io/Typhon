@@ -1873,6 +1873,99 @@ internal static class DamageKit
         throw new InvalidOperationException("no WAL segment held a frame that could be truncated mid-body");
     }
 
+    /// <summary>
+    /// <b>D9</b> — appends a WAL segment whose first LSN skips ahead, leaving a hole in the log's coverage.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why the gap is synthesised rather than made by deleting a file.</b> The engine reclaims segments as soon as
+    /// their records are checkpointed, so a fixture-sized database keeps exactly one written segment however many times
+    /// it is reopened — there is never an interior one to remove. Filling three segments without checkpointing means
+    /// millions of records, which is not a unit test.
+    /// </para>
+    /// <para>
+    /// So the fixture writes the shape directly: a byte-for-byte copy of the real segment with its id and first LSN
+    /// advanced past the end of the original's coverage. The header CRC is recomputed the way the reader verifies it,
+    /// so what the scan meets is a well-formed segment that simply begins too late — a coverage hole and nothing else.
+    /// Patching the fields without the CRC would produce an invalid header, which <c>WAL-01</c> reports and
+    /// <c>WAL-04</c> then skips.
+    /// </para>
+    /// </remarks>
+    /// <param name="bundlePath">The bundle whose log to damage.</param>
+    /// <param name="skippedLsns">How many sequence numbers the new segment leaves unaccounted for.</param>
+    /// <returns>The file name added, or <c>null</c> when no written segment was found to copy.</returns>
+    internal static string AppendWalSegmentLeavingAnLsnGap(string bundlePath, long skippedLsns = 1000)
+    {
+        const int SegmentIdOffset = 8;
+        const int FirstLsnOffset = 16;
+        const int HeaderCrcOffset = 36;
+
+        var walDir = Path.Combine(bundlePath, "wal");
+        if (!Directory.Exists(walDir))
+        {
+            return null;
+        }
+
+        var source = Directory.GetFiles(walDir)
+            .OrderBy(p => p, StringComparer.Ordinal)
+            .FirstOrDefault(p => new FileInfo(p).Length > WalSegmentHeaderSize && HasWrittenHeader(p));
+
+        if (source == null)
+        {
+            return null;
+        }
+
+        var bytes = File.ReadAllBytes(source);
+        var sourceId = MemoryMarshal.Read<long>(bytes.AsSpan(SegmentIdOffset));
+        var sourceFirstLsn = MemoryMarshal.Read<long>(bytes.AsSpan(FirstLsnOffset));
+
+        // Start the copy far past anything the original could cover, so the hole is unambiguous rather than an
+        // off-by-one that depends on how many records the fixture happened to write.
+        BitConverter.GetBytes(sourceId + 1).CopyTo(bytes.AsSpan(SegmentIdOffset));
+        BitConverter.GetBytes(sourceFirstLsn + skippedLsns).CopyTo(bytes.AsSpan(FirstLsnOffset));
+
+        var header = bytes.AsSpan(0, WalSegmentHeaderSize);
+        BitConverter.GetBytes(Crc32CUtil.ComputeSkipping(header, HeaderCrcOffset, sizeof(uint)))
+            .CopyTo(bytes.AsSpan(HeaderCrcOffset));
+
+        var name = Path.GetFileName(source);
+        var added = Path.Combine(walDir, $"{sourceId + 1:D16}.wal");
+        File.WriteAllBytes(added, bytes);
+
+        return Path.GetFileName(added);
+    }
+
+    /// <summary>How many WAL segments carry a written (non-zero) header — i.e. are not pre-allocated spares.</summary>
+    /// <param name="bundlePath">The bundle to inspect.</param>
+    internal static int CountWrittenWalSegments(string bundlePath)
+    {
+        var walDir = Path.Combine(bundlePath, "wal");
+        return !Directory.Exists(walDir)
+            ? 0
+            : Directory.GetFiles(walDir).Count(p => new FileInfo(p).Length > WalSegmentHeaderSize && HasWrittenHeader(p));
+    }
+
+    /// <summary>Whether a segment file's header is something other than all zeros.</summary>
+    private static bool HasWrittenHeader(string path)
+    {
+        var header = new byte[64];
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        if (fs.Read(header) < header.Length)
+        {
+            return false;
+        }
+
+        for (var i = 0; i < header.Length; i++)
+        {
+            if (header[i] != 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>Right-pads a key's bytes into 8 so a narrow key can be read as a long.</summary>
     private static ReadOnlySpan<byte> PadTo8(ReadOnlySpan<byte> key)
     {
