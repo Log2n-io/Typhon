@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
 using System.IO;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests.Integrity;
 
@@ -129,6 +130,45 @@ internal abstract class IntegrityFixtureBase
                     using var tx = uow.CreateTransaction();
                     var comp = new CompA(i + 1, i, i);
                     tx.Spawn<CompAArch>(CompAArch.A.Set(in comp));
+                    tx.Commit();
+                }
+
+                uow.Flush();
+            }
+
+            dbe.ForceCheckpoint();
+        }
+
+        CloseEngine();
+    }
+
+    /// <summary>
+    /// Builds a database whose archetype owns two index segments of different node strides, and closes it cleanly.
+    /// </summary>
+    /// <remarks>
+    /// The default fixture schema declares no indexed field, so an index segment never exists in it and every
+    /// <c>IDX</c> check quietly skips — which reads in a report exactly like an index check that passed. This schema
+    /// (<c>SpiIdxNamed</c>, from the #661 fixtures) indexes both a <c>String64</c> and an <c>int</c>, so the archetype
+    /// carries two roots with different node layouts: enough to exercise the directory and both strides.
+    /// </remarks>
+    /// <param name="entityCount">How many entities to spawn.</param>
+    protected void BuildIndexedDatabase(int entityCount = 40)
+    {
+        using (var scope = _serviceProvider.CreateScope())
+        {
+            var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<SpiIdxNamed>();
+            dbe.RegisterComponentFromAccessor<SpiIdxTag>();
+            dbe.InitializeArchetypes();
+
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                for (var i = 0; i < entityCount; i++)
+                {
+                    using var tx = uow.CreateTransaction();
+                    tx.Spawn<SpiIdxArch>(
+                        SpiIdxArch.Data.Set(new SpiIdxNamed((String64)$"name{i:D4}", i * 7)),
+                        SpiIdxArch.Tag.Set(new SpiIdxTag(i)));
                     tx.Commit();
                 }
 

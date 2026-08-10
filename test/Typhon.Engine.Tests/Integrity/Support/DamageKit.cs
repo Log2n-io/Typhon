@@ -1155,6 +1155,110 @@ internal static class DamageKit
                 RepairIsLossless: true);
     }
 
+    /// <summary>How to break a B+Tree node's sibling link.</summary>
+    internal enum IndexBreak
+    {
+        /// <summary>Point <c>NextChunk</c> at a chunk id the segment does not contain.</summary>
+        Dangle,
+
+        /// <summary>Point <c>NextChunk</c> back at the node itself.</summary>
+        Cycle
+    }
+
+    /// <summary>
+    /// <b>D6</b> — rewrites a B+Tree node's <c>NextChunk</c> so the level chain dangles or loops.
+    /// </summary>
+    /// <remarks>
+    /// <c>NextChunk</c> sits at offset 12 of every node layout — inside the 20-byte prefix all four share — so this
+    /// primitive needs no knowledge of the tree's key width, which is the same reason <c>IDX-06</c> can check it.
+    /// The root is taken from the segment's chunk-0 directory rather than guessed, so the damage lands on a node that
+    /// is genuinely part of a registered tree.
+    /// </remarks>
+    /// <param name="bundlePath">The bundle to damage.</param>
+    /// <param name="how">Which way to break the link.</param>
+    /// <param name="newTarget">Receives the chunk id the link now names.</param>
+    internal static DamageRecord BreakIndexSiblingLink(string bundlePath, IndexBreak how, out int newTarget)
+    {
+        const int NextChunkOffset = 12;
+
+        int filePage;
+        long linkOffset;
+        int rootChunk;
+
+        using (var source = new OfflineBundlePageSource(bundlePath))
+        {
+            var roots = SweepRoots(source);
+            var manifest = new SchemaCatalogReader(source, roots);
+            manifest.Read(BootstrapReader.Read(source));
+            Assert.That(manifest.IsUsable, Is.True);
+
+            var walker = new SegmentWalker(source);
+            var reader = new IndexDirectoryReader(source);
+            var page = new byte[IntegrityConstants.PageSize];
+            var entries = new List<IndexTreeEntry>();
+
+            SegmentView segment = null;
+            var geometry = default(ChunkGeometry);
+            rootChunk = 0;
+
+            foreach (var archetypeRoot in manifest.Archetypes.Values
+                .SelectMany(a => new[] { a.IndexRoot, a.String64IndexRoot })
+                .Where(r => r != 0)
+                .Distinct())
+            {
+                if (!source.TryReadPage(archetypeRoot, page))
+                {
+                    continue;
+                }
+
+                var g = ChunkGeometry.FromPage(page);
+                if (!g.IsUsable)
+                {
+                    continue;
+                }
+
+                var seg = walker.WalkSegment(archetypeRoot);
+                if (!reader.TryReadDirectory(seg, g, entries))
+                {
+                    continue;
+                }
+
+                var tree = entries.FirstOrDefault(e => e.RootChunkId > 0);
+                if (tree.RootChunkId <= 0)
+                {
+                    continue;
+                }
+
+                segment = seg;
+                geometry = g;
+                rootChunk = tree.RootChunkId;
+                break;
+            }
+
+            Assert.That(rootChunk, Is.GreaterThan(0), "no index segment with a registered, non-empty tree was found");
+
+            newTarget = how == IndexBreak.Cycle ? rootChunk : geometry.Capacity(segment.Pages.Count) + 50_000;
+
+            geometry.TryLocate(rootChunk, out var ordinal, out var chunkInPage);
+            filePage = segment.Pages[ordinal];
+            linkOffset = ((long)filePage * IntegrityConstants.PageSize) + geometry.OffsetInPage(ordinal, chunkInPage)
+                + NextChunkOffset;
+        }
+
+        var ranges = new List<ByteRange> { WriteInt(bundlePath, linkOffset, newTarget) };
+        ranges.AddRange(RestampPage(bundlePath, filePage));
+
+        return new DamageRecord(
+            how == IndexBreak.Cycle ? "D6(index-cycle)" : "D6(index-dangling)",
+            how == IndexBreak.Cycle
+                ? $"index node {rootChunk} now links to itself"
+                : $"index node {rootChunk} now links to chunk {newTarget}, past the segment's capacity",
+            ranges,
+            [IndexChecks.TreeStructure],
+            how == IndexBreak.Cycle ? IntegrityVerdict.Unopenable : IntegrityVerdict.Divergent,
+            RepairIsLossless: true);
+    }
+
     /// <summary>Copies one chunk out of a segment. Copies, because callers hold several at once.</summary>
     private static byte[] ReadChunk(IPageSource source, SegmentView segment, ChunkGeometry geometry, int chunkId)
     {

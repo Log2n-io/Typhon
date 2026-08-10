@@ -173,7 +173,18 @@ internal static class ClusterChecks
             var occupancy = MemoryMarshal.Read<ulong>(cluster[OccupancyOffset..]);
             var locus = new Locus(filePage, segment.RootPageIndex, segment.Kind);
 
-            for (var slot = 0; slot < MaxSlotsPerCluster; slot++)
+            // A cluster does NOT always hold 64 entities. ArchetypeClusterInfo picks a ClusterSize to fit the stride,
+            // and the entity-id array is exactly that many longs — so slot 63 of a 48-slot cluster is not an empty slot,
+            // it is the middle of the first component's data. Reading it as a key produced entity ids like 12592, which
+            // is ASCII "01" out of a String64 field, on a database that was perfectly healthy.
+            //
+            // The occupancy word bounds this soundly without needing ClusterSize itself: the engine's FullMask keeps
+            // bits at or above ClusterSize clear, so if slot k is occupied then slots 0..k all exist. Occupied slots are
+            // always safe to read; free ones only below the highest occupied slot. Slots above it are not skipped
+            // because they are uninteresting — they are skipped because this scan cannot yet tell whether they exist.
+            var highestOccupied = occupancy == 0 ? -1 : 63 - System.Numerics.BitOperations.LeadingZeroCount(occupancy);
+
+            for (var slot = 0; slot <= highestOccupied && slot < MaxSlotsPerCluster; slot++)
             {
                 var keyAt = entityKeysOffset + (slot * sizeof(long));
                 if (keyAt + sizeof(long) > cluster.Length)

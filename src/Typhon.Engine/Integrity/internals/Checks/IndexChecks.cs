@@ -24,6 +24,9 @@ internal static class IndexChecks
     /// <summary>Check code: the WAL sequence watermark is above the log and at or above the checkpoint.</summary>
     public const string LsnWatermark = "CHK-ALO-03";
 
+    /// <summary>Check code: node links resolve, sibling chains terminate, node counts fit the node.</summary>
+    public const string TreeStructure = "CHK-IDX-06";
+
     /// <summary>Runs both checks. <c>IDX-01</c> needs the manifest; <c>ALO-03</c> needs only the bootstrap.</summary>
     /// <param name="ctx">The scan context.</param>
     public static void Run(ScanContext ctx)
@@ -41,10 +44,197 @@ internal static class IndexChecks
         else
         {
             CheckIndexOwnership(ctx);
+            CheckTreeStructure(ctx);
         }
 
-        ctx.Findings.NoteSkipped("CHK-IDX-02, CHK-IDX-03, CHK-IDX-04, CHK-IDX-05, CHK-IDX-06, CHK-IDX-07",
-            "B+Tree node structure is not decoded by this build, so index contents and shape were not inspected");
+        // What is still not decoded, and precisely why — each of these needs the node's KEY array, whose offset and
+        // element width depend on which of the four node layouts the tree uses. That follows from the indexed field's
+        // type, and reading a node through the wrong variant produces keys that decode perfectly and mean nothing, so
+        // the width is not something to guess at.
+        ctx.Findings.NoteSkipped("CHK-IDX-02, CHK-IDX-03, CHK-IDX-04, CHK-IDX-05, CHK-IDX-07",
+            "index keys and values are not decoded by this build — their offsets depend on the node layout variant, which "
+            + "follows from the indexed field's type — so entry contents, key order and uniqueness were not inspected");
+    }
+
+    /// <summary>
+    /// <c>IDX-06</c> — the part of a tree's shape that can be read without knowing its key width.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Three failure modes, all reachable from the 20-byte prefix every node layout shares: a link naming a chunk that
+    /// is out of range, unreadable or freed; a sibling chain that returns to itself; and a node claiming more entries
+    /// than any layout of its stride could hold. The first two are what turn an index walk into a crash or a hang, and
+    /// <c>RB-01</c>'s reasoning about hash directories applies unchanged to node links.
+    /// </para>
+    /// <para>
+    /// <b>The directory is also checked for #657's shape.</b> A tree's identity in a shared segment is the pair
+    /// (<c>StableId</c>, <c>Slot</c>), and <c>StableId</c> alone is not unique — field ids restart at 0 for every
+    /// component, so two components in one archetype that each index their field #0 both register as 0. When that pair
+    /// repeats, lookup returns the first match for both trees and one component's index silently resolves the other's
+    /// entities. That is a duplicate the directory can be asked about directly.
+    /// </para>
+    /// </remarks>
+    private static void CheckTreeStructure(ScanContext ctx)
+    {
+        var reader = new IndexDirectoryReader(ctx.Source);
+        var entries = new List<IndexTreeEntry>();
+        var inspected = 0;
+
+        foreach (var segment in IndexSegments(ctx))
+        {
+            var page = new byte[IntegrityConstants.PageSize];
+            if (segment.Pages.Count == 0 || !ctx.Source.TryReadPage(segment.Pages[0], page))
+            {
+                continue;
+            }
+
+            var geometry = ChunkGeometry.FromPage(page);
+            if (!geometry.IsUsable)
+            {
+                ctx.Findings.NoteCaveat($"The index segment rooted at page {segment.RootPageIndex} records no chunk stride, "
+                    + "so its trees were not walked.");
+                continue;
+            }
+
+            var locus = new Locus(segment.RootPageIndex, segment.RootPageIndex, segment.Kind);
+
+            if (reader.DirectoryOverflows(segment, geometry, out var declared, out var capacity))
+            {
+                ctx.Report(TreeStructure, IntegritySeverity.Fatal, "RB-01", locus,
+                    "An index segment's tree directory claims more trees than it can hold.",
+                    $"The directory in chunk 0 of the segment rooted at page {segment.RootPageIndex} declares {declared} "
+                    + $"entries, and the chunk holds at most {capacity}. Reading the declared count walks past the chunk and "
+                    + "treats whatever follows as further tree roots. The directory was not read.",
+                    Repairability.Lossless);
+                continue;
+            }
+
+            if (!reader.TryReadDirectory(segment, geometry, entries))
+            {
+                ctx.Report(TreeStructure, IntegritySeverity.Divergence, "", locus,
+                    "An index segment's tree directory could not be read.",
+                    $"Chunk 0 of the segment rooted at page {segment.RootPageIndex} is unreadable, so the trees it registers "
+                    + "cannot be located. Indexes are derived from cluster data, so rebuilding costs nothing.",
+                    Repairability.Lossless);
+                continue;
+            }
+
+            inspected++;
+            CheckDirectoryIdentities(ctx, locus, segment, entries);
+            CheckNodeChains(ctx, reader, locus, segment, geometry, entries);
+        }
+
+        if (inspected == 0)
+        {
+            ctx.Findings.NoteSkipped(TreeStructure, "no index segment with a readable tree directory was found");
+        }
+    }
+
+    /// <summary>Every registered tree has a distinct (StableId, Slot) — the #657 collision.</summary>
+    private static void CheckDirectoryIdentities(ScanContext ctx, Locus locus, SegmentView segment, List<IndexTreeEntry> entries)
+    {
+        var seen = new Dictionary<(short, short), IndexTreeEntry>();
+
+        foreach (var entry in entries)
+        {
+            if (seen.TryGetValue((entry.StableId, entry.Slot), out var first))
+            {
+                ctx.Report(TreeStructure, IntegritySeverity.Divergence, "IX-02", locus,
+                    "Two B+Trees in one index segment claim the same identity.",
+                    $"The directory of the segment rooted at page {segment.RootPageIndex} registers {entry.Identity} twice — "
+                    + $"once rooted at chunk {first.RootChunkId} and once at chunk {entry.RootChunkId}. A lookup finds the "
+                    + "first match for both, so one tree is unreachable and its owner's queries are answered from the "
+                    + "other's entries. This is #657's shape. Indexes are derived, so rebuilding resolves it.",
+                    Repairability.Lossless);
+                continue;
+            }
+
+            seen[(entry.StableId, entry.Slot)] = entry;
+        }
+    }
+
+    /// <summary>Every tree's node links resolve, terminate, and claim counts their nodes could hold.</summary>
+    private static void CheckNodeChains(ScanContext ctx, IndexDirectoryReader reader, Locus locus, SegmentView segment,
+        ChunkGeometry geometry, List<IndexTreeEntry> entries)
+    {
+        var visited = new HashSet<int>();
+
+        foreach (var entry in entries)
+        {
+            if (entry.RootChunkId == 0)
+            {
+                continue;   // a registered but empty tree
+            }
+
+            if (!reader.IsAllocated(segment, geometry, entry.RootChunkId))
+            {
+                ctx.Report(TreeStructure, IntegritySeverity.Divergence, "IX-01", locus,
+                    $"An index registered for {entry.Identity} has no root node.",
+                    $"Its directory entry names chunk {entry.RootChunkId} in the segment rooted at page "
+                    + $"{segment.RootPageIndex}, which is outside the segment or marked free. The tree cannot be opened; it "
+                    + "is derived from cluster data, so rebuilding it costs nothing.",
+                    Repairability.Lossless);
+                continue;
+            }
+
+            var outcome = reader.WalkSiblingChain(segment, geometry, entry.RootChunkId, visited, out var failedAt);
+            if (outcome == IndexDirectoryReader.ChainOutcome.Terminated)
+            {
+                continue;
+            }
+
+            var (severity, what, why) = outcome switch
+            {
+                IndexDirectoryReader.ChainOutcome.Cyclic =>
+                    (IntegritySeverity.Fatal, "returns to a node it has already visited",
+                        $"Following the level from chunk {entry.RootChunkId} arrives back at chunk {failedAt}. A reader "
+                        + "without its own cycle guard does not return — a range scan over this index hangs rather than "
+                        + "failing."),
+                IndexDirectoryReader.ChainOutcome.Overfull =>
+                    (IntegritySeverity.Divergence, "contains a node claiming more entries than it can hold",
+                        $"Chunk {failedAt} declares an entry count larger than any node layout of this segment's "
+                        + $"{geometry.Stride}-byte stride could store. Reading that many entries walks past the node into "
+                        + "the next one's bytes."),
+                _ =>
+                    (IntegritySeverity.Divergence, "has a sibling link that resolves to nothing",
+                        $"Chunk {failedAt} is outside the segment, unreadable, or marked free, and it was NOT followed. A "
+                        + "scan of this index stops early at best; a reader that trusts the link dereferences a freed "
+                        + "chunk.")
+            };
+
+            ctx.Report(TreeStructure, severity, "IX-01", locus,
+                $"The index for {entry.Identity} {what}.",
+                why + " Indexes are derived from cluster data, so rebuilding costs nothing.",
+                Repairability.Lossless);
+        }
+    }
+
+    /// <summary>Every segment an archetype or a field names as an index, deduplicated.</summary>
+    private static IEnumerable<SegmentView> IndexSegments(ScanContext ctx)
+    {
+        var roots = new HashSet<int>();
+
+        foreach (var archetype in ctx.Manifest.Archetypes.Values)
+        {
+            roots.Add(archetype.IndexRoot);
+            roots.Add(archetype.String64IndexRoot);
+        }
+
+        foreach (var component in ctx.Manifest.Components.Values)
+        {
+            foreach (var field in component.Fields)
+            {
+                roots.Add(field.IndexRoot);
+            }
+        }
+
+        foreach (var root in roots)
+        {
+            if (root != 0 && ctx.Segments.TryGetValue(root, out var segment))
+            {
+                yield return segment;
+            }
+        }
     }
 
     /// <summary>
