@@ -856,6 +856,42 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     }
 
     /// <summary>
+    /// Compares two keys, bypassing the <see cref="IComparer{T}"/> interface dispatch for the primitive key types. Falls back to
+    /// <paramref name="comparer"/> for everything else.
+    /// </summary>
+    /// <remarks>
+    /// <c>typeof(TKey)</c> against a concrete type is a JIT intrinsic for value types, so every branch but one is eliminated when the generic is instantiated
+    /// and this becomes a direct <c>CompareTo</c>. The same trick already lives inside <c>InsertArguments.Compare</c> and <c>RemoveArguments.Compare</c>; the
+    /// leaf-authority guards sit on the same hot paths but are handed a bare <see cref="IComparer{T}"/>, so without this they would pay a virtual call per
+    /// insert for a comparison the surrounding code does directly.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static int CompareKeys(TKey left, TKey right, IComparer<TKey> comparer)
+    {
+        if (typeof(TKey) == typeof(int))
+        {
+            return ((int)(object)left).CompareTo((int)(object)right);
+        }
+        if (typeof(TKey) == typeof(long))
+        {
+            return ((long)(object)left).CompareTo((long)(object)right);
+        }
+        if (typeof(TKey) == typeof(short))
+        {
+            return ((short)(object)left).CompareTo((short)(object)right);
+        }
+        if (typeof(TKey) == typeof(uint))
+        {
+            return ((uint)(object)left).CompareTo((uint)(object)right);
+        }
+        if (typeof(TKey) == typeof(ulong))
+        {
+            return ((ulong)(object)left).CompareTo((ulong)(object)right);
+        }
+        return comparer.Compare(left, right);
+    }
+
+    /// <summary>
     /// Converts a <typeparamref name="TKey"/> to <see cref="long"/> using the same encoding as
     /// <see cref="QueryResolverHelper.EncodeThreshold"/>. JIT eliminates dead branches for each concrete TKey.
     /// </summary>
@@ -1974,7 +2010,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
             Interlocked.Increment(ref _writeLockFailures);
             spin.SpinOnce(-1);
         }
-        while (!latch.TryWriteLock());
+        while (!latch.TryWriteLock());
         return WriteLockOutcome.AcquiredContended;
     }
 

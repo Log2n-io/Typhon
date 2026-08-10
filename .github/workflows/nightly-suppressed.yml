@@ -12,8 +12,11 @@ name: Nightly suppressed tier
 #     February 2026.
 # A marker that removes a test from the gate is only honest if some tier still runs it. This is that tier.
 #
-# NON-BLOCKING by design: a nightly is a signal, not a merge gate, and it is never a required check. What it is
-# NOT allowed to be is quiet — see the "selected zero tests" guard below, which is the whole point of the job.
+# NON-BLOCKING ABOUT KNOWN REDS, BLOCKING ABOUT NEW ONES. A nightly is a signal, not a merge gate, and it is
+# never a required check — but "non-blocking" was implemented as a bare `continue-on-error: true`, which made the
+# job green with any number of reds in it. That is this workflow committing the defect it was built to expose.
+# The reds it tolerates are now enumerated in bench/aws/nightly-known-red.txt, each with an issue, and anything
+# else fails the job. Same for the "selected zero tests" guard below: a tier that runs nothing must be loud.
 
 on:
   schedule:
@@ -27,6 +30,7 @@ on:
     paths:
       - '.github/workflows/nightly-suppressed.yml'
       - 'bench/aws/nightly.runsettings'
+      - 'bench/aws/nightly-known-red.txt'
 
 concurrency:
   group: nightly-suppressed
@@ -58,7 +62,10 @@ jobs:
       # reads the filter as naming it. The gate's 305-term class filter does not qualify, which is precisely why
       # these fixtures never ran there. Keep this filter narrow — widening it re-hides them.
       - name: Run the Nightly tier
-        continue-on-error: true      # a red here reports; it does not fail the workflow (non-blocking by design)
+        # continue-on-error so a red does not abort the job before the reporting steps run — NOT so a red goes unnoticed.
+        # "Diff the failures against the known-red allowlist" below is blocking and decides the verdict. See
+        # bench/aws/nightly-known-red.txt for why the bare version of this line was the tier's own defect (#765 S0).
+        continue-on-error: true
         run: |
           set -uo pipefail
           mkdir -p ci-out
@@ -109,15 +116,40 @@ jobs:
           PY
           cat summary.md >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Report the tier's failures
+      # ── The verdict ───────────────────────────────────────────────────────────────────────────────────────────
+      # Blocking, and deliberately so. The tier is non-blocking about KNOWN reds and blocking about new ones; those are
+      # different questions and the old bare `continue-on-error` answered neither.
+      - name: Diff the failures against the known-red allowlist
         if: always()
         run: |
           set -uo pipefail
-          {
           python3 - <<'PY'
-          import glob, xml.etree.ElementTree as ET
+          import glob, re, sys, xml.etree.ElementTree as ET
           NS = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
-          rows = []
+
+          # Section headers are the `# --- #123 / #456 ---` rules; prose comments between them carry issue numbers too and
+          # must NOT reassign the current section, or every entry inherits whichever number was mentioned last.
+          allow, issues = set(), {}
+          current = None
+          for raw in open("bench/aws/nightly-known-red.txt", encoding="utf-8"):
+              line = raw.strip()
+              if line.startswith("# ---"):
+                  found = re.findall(r"#(\d+)", line)
+                  current = ", ".join("#" + f for f in found) if found else None
+                  continue
+              if line.startswith("#"):
+                  continue
+              if line:
+                  allow.add(line)
+                  issues[line] = current or "(no issue — fix the allowlist)"
+
+          def short(name):
+              # Strip the parameterised suffix: one allowlist line covers every case of a test.
+              base = name.split("(")[0]
+              parts = base.split(".")
+              return ".".join(parts[-2:]) if len(parts) >= 2 else base
+
+          failed, passed = set(), set()
           for f in glob.glob("ci-out/*.trx"):
               root = ET.parse(f).getroot()
               names = {}
@@ -126,22 +158,41 @@ jobs:
                   if ut.get("id") and tm is not None:
                       names[ut.get("id")] = f'{tm.get("className")}.{tm.get("name")}'
               for r in root.iter(f"{NS}UnitTestResult"):
-                  if r.get("outcome") == "Failed":
-                      rows.append(names.get(r.get("testId"), r.get("testName", "?")))
-          if rows:
-              print("### Failures\n")
-              for r in sorted(set(rows)):
-                  print(f"- `{r}`")
-              print("\nThese are tracked reds of the Nightly tier — file or update an issue, do NOT re-suppress "
-                    "(#703). Known:\n"
-                    "- #695 — BTree.SpinWriteLock livelock (ChaosStressTests.CreateDeleteRecreate_RapidLifecycle)\n"
-                    "- #696 — ChaosStressTests deterministic concurrent value/index failures\n"
-                    "- #297 — OlcRaceStress_FourScenariosUnderCpuNoise: the OLC B+Tree loses a present key on a\n"
-                    "  concurrent read (~0.8% of Add iterations). REOPENED 2026-08-07 on this tier's first run since\n"
-                    "  February; the fixture had been [Explicit] with no tier, so the issue was closed in May on\n"
-                    "  evidence its own harness now contradicts.")
+                  name = names.get(r.get("testId"), r.get("testName", "?"))
+                  (failed if r.get("outcome") == "Failed" else passed).add(short(name))
+
+          unexpected = sorted(failed - allow)
+          stale = sorted(a for a in allow if a in passed and a not in failed)
+
+          out = ["## Nightly verdict\n"]
+          if stale:
+              out.append("### Allowlisted tests that PASSED\n")
+              out.append("Not a failure — these fixtures are flaky, so one green run proves nothing. But a name that stops\n"
+                         "appearing for a week is your cue to delete its line and close the issue.\n")
+              for s in stale:
+                  out.append(f"- `{s}` — {issues.get(s, '?')}")
+                  print(f"::warning::Known-red `{s}` passed. If it stays green, remove it from bench/aws/nightly-known-red.txt.")
+              out.append("")
+          if unexpected:
+              out.append("### NEW failures — not on the allowlist\n")
+              for u in unexpected:
+                  out.append(f"- `{u}`")
+                  print(f"::error::`{u}` failed and is not in bench/aws/nightly-known-red.txt. Either it is a real "
+                        f"regression, or it is a known red nobody wrote down. Both need a human.")
+              out.append("")
+          known = sorted(failed & allow)
+          if known:
+              out.append("### Known reds (tracked)\n")
+              out.extend(f"- `{k}` — {issues.get(k, '?')}" for k in known)
+              out.append("")
+          if not unexpected and not known:
+              out.append("No failures.\n")
+
+          with open("verdict.md", "w", encoding="utf-8") as fh:
+              fh.write("\n".join(out) + "\n")
+          sys.exit(1 if unexpected else 0)
           PY
-          } >> "$GITHUB_STEP_SUMMARY"
+          cat verdict.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload raw artifacts (.trx / logs)
         if: always()

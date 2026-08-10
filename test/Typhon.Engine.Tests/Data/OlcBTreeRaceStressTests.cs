@@ -240,6 +240,24 @@ public class OlcBTreeRaceStressTests
         }
     }
 
+    /// <summary>
+    /// One line of a tree's diagnostic counters, safe to call from a thread other than the one driving the tree.
+    /// </summary>
+    /// <remarks>
+    /// Every property here reads through <c>Interlocked.Read</c> and touches no ChunkAccessor, which is what makes it legal to call while the iteration being
+    /// described is still running and still owns its accessors.
+    /// </remarks>
+    private static long[] DescribeCounters(IntSingleBTree<PersistentStore> tree)
+        => [tree.OptimisticRestarts, tree.PessimisticFallbacks, tree.WriteLockFailures, tree.SplitCount, tree.MergeCount, tree.EntryCount];
+
+    private static readonly string[] CounterNames = ["Restarts", "Fallbacks", "WriteLockFails", "Splits", "Merges", "Entries"];
+
+    // Index into the arrays above. Which counter moved is the whole diagnosis, so these are named rather than spelled as literals at the comparison site.
+    private const int CtrRestarts = 0;
+    private const int CtrFallbacks = 1;
+    private const int CtrWriteLockFails = 2;
+    private const int CtrEntries = 5;
+
     // ====== Scenario bodies (mirror OlcBTreeTests bodies, allocate fresh segment per iter) ======
 
     private static unsafe void AddSplitsBody(ScenarioContext ctx)
@@ -255,6 +273,7 @@ public class OlcBTreeRaceStressTests
         {
             var setupA = segment.CreateChunkAccessor();
             var tree = new IntSingleBTree<PersistentStore>(segment);
+            ctx.CounterSnapshot = () => DescribeCounters(tree);
             setupA.Dispose();
 
             using var barrier = new Barrier(threadCount);
@@ -391,6 +410,7 @@ public class OlcBTreeRaceStressTests
         {
             var setupA = segment.CreateChunkAccessor();
             var tree = new IntSingleBTree<PersistentStore>(segment);
+            ctx.CounterSnapshot = () => DescribeCounters(tree);
             setupA.Dispose();
 
             using var barrier = new Barrier(threadCount);
@@ -461,6 +481,7 @@ public class OlcBTreeRaceStressTests
         {
             var sa = segment.CreateChunkAccessor();
             var tree = new IntSingleBTree<PersistentStore>(segment);
+            ctx.CounterSnapshot = () => DescribeCounters(tree);
             for (int i = 1; i <= totalKeys; i++)
             {
                 tree.Add(i, i * 10, ref sa);
@@ -533,6 +554,7 @@ public class OlcBTreeRaceStressTests
         {
             var sa = segment.CreateChunkAccessor();
             var tree = new IntSingleBTree<PersistentStore>(segment);
+            ctx.CounterSnapshot = () => DescribeCounters(tree);
             for (int i = 1; i <= totalKeys; i++)
             {
                 tree.Add(i, i * 10, ref sa);
@@ -619,6 +641,7 @@ public class OlcBTreeRaceStressTests
         {
             var sa = segment.CreateChunkAccessor();
             var tree = new IntSingleBTree<PersistentStore>(segment);
+            ctx.CounterSnapshot = () => DescribeCounters(tree);
             for (int i = 1; i <= initialEntries; i++)
             {
                 tree.Add(i, i * 10, ref sa);
@@ -696,6 +719,20 @@ public class OlcBTreeRaceStressTests
     {
         public ManagedPagedMMF Mpmmf;
         public EpochManager EpochManager;
+
+        /// <summary>
+        /// Published by the scenario body once it owns a tree, so the deadline handler can sample the tree's counters from OUTSIDE the stuck iteration.
+        /// </summary>
+        /// <remarks>
+        /// This is what turns "DEADLINE" from a label into a diagnosis. A wall clock expiring cannot tell a livelock from a slow loop, and reading the old
+        /// "HANG" as evidence of a lock cycle is what sent five #738 hypotheses to be refuted one at a time. Sampling the counters twice does distinguish them:
+        /// restarts still climbing means the iteration is making attempts and is merely slow, restarts frozen means it is not attempting anything.
+        /// <para>
+        /// Read from a different thread than the one that writes it, and only over <c>Interlocked.Read</c> counters — it must never touch a ChunkAccessor,
+        /// because the iteration it is describing still owns one.
+        /// </para>
+        /// </remarks>
+        public volatile Func<long[]> CounterSnapshot;
     }
 
     private sealed class Scenario
@@ -704,6 +741,7 @@ public class OlcBTreeRaceStressTests
         public readonly Action<ScenarioContext> Body;
         public int Iterations;
         public int DetailsCaptured;
+        public int Deadlines;
         public readonly ConcurrentBag<FailureRecord> Failures = new();
 
         public Scenario(string name, Action<ScenarioContext> body)
@@ -744,21 +782,28 @@ public class OlcBTreeRaceStressTests
                         var iterTask = Task.Factory.StartNew(() => s.Body(ctx), TaskCreationOptions.LongRunning);
                         if (!iterTask.Wait(IterationDeadline))
                         {
-                            // DEADLINE, not "hang" — this detects nothing about the tree. It reports that one iteration exceeded a wall clock, while
-                            // OLC_STRESS_NOISE CPU-saturating threads run alongside five scenario loops. A slow iteration reaches here identically to a
-                            // deadlocked one: a bounded-but-glacial retry loop (the pessimistic paths allow MaxPessimisticRestarts = 10,000, measured at
-                            // 2m34s single-threaded in #740) trips it exactly as a genuine deadlock would. Reading the old "HANG" label as evidence of a
-                            // lock cycle is what sent five hypotheses to be refuted one at a time in #738. If you need to know which it was, the answer is
-                            // in the STACKS — run with `--blame-hang --blame-hang-timeout <n>` and read the dump; do not infer it from this counter.
-                            s.Failures.Add(new FailureRecord(iter, $"DEADLINE: scenario body exceeded {IterationDeadline.TotalSeconds}s (slow or stuck — "
-                                                                  + "this does not distinguish them; capture stacks to tell)"));
-                            WriteProgress(s.Name, iter, "DEADLINE");
-                            // Workers may still be alive — touching the MMF after Dispose() would AV.
-                            // Skip cleanup; let the orphan workers churn against live (epoch-protected) memory
-                            // until the process exits. Memory leak across HANG iters is bounded by the stress
-                            // duration and acceptable for a diagnostic harness. See issue #297 follow-up.
+                            // A wall clock expiring reports that one iteration took too long while OLC_STRESS_NOISE CPU-saturating threads run alongside five
+                            // scenario loops. On its own that says NOTHING about the tree: a bounded-but-glacial retry loop (the pessimistic paths allow
+                            // MaxPessimisticRestarts = 10,000, measured at 2m34s single-threaded in #740) trips it exactly as a genuine deadlock would.
+                            // Reading the old "HANG" label as evidence of a lock cycle is what sent five #738 hypotheses to be refuted one at a time.
+                            // So do not report the label — report the measurement that separates the two. See ScenarioContext.CounterSnapshot.
+                            s.Failures.Add(new FailureRecord(iter, DiagnoseDeadline(s, iter, ctx)));
+                            // Workers may still be alive — touching the MMF after Dispose() would AV. Skip cleanup and let the orphan workers churn against
+                            // live (epoch-protected) memory until the process exits.
                             hadHangInThisIter = true;
-                            break;
+
+                            // Do NOT break. The old code retired the scenario for the rest of the run on its first deadline, so a 30-second harness that hit
+                            // one slow iteration at second 2 spent the remaining 28 seconds not testing that scenario — and reported a per-scenario failure
+                            // RATE computed over the handful of iterations it managed before quitting. The leak is what the break was really protecting, so
+                            // bound the leak instead: a fresh provider is built per iteration, so tolerating a few costs a few MMFs, not unbounded growth.
+                            if (Interlocked.Increment(ref s.Deadlines) >= MaxDeadlinesPerScenario)
+                            {
+                                s.Failures.Add(new FailureRecord(iter, $"RETIRED: {MaxDeadlinesPerScenario} deadlines in this scenario; stopping its loop to "
+                                                                      + "bound the leaked MMFs. Everything after this point is untested for this scenario."));
+                                WriteProgress(s.Name, iter, "RETIRED");
+                                break;
+                            }
+                            continue;
                         }
                         if (iterTask.IsFaulted)
                         {
@@ -804,6 +849,89 @@ public class OlcBTreeRaceStressTests
     }
 
     private static readonly TimeSpan IterationDeadline = TimeSpan.FromSeconds(ParseEnvInt("OLC_STRESS_ITER_DEADLINE_SECONDS", 10));
+
+    // A deadlined iteration leaks its MMF by design (its workers may still be running), so the count of them has to be bounded somewhere. It used to be
+    // bounded at one, by quitting the scenario — which bought a small leak at the price of not testing that scenario again for the rest of the run.
+    private const int MaxDeadlinesPerScenario = 3;
+
+    // How long to wait between the two counter samples. Long enough that a working-but-slow iteration demonstrably moves a counter, short enough not to eat the
+    // harness budget. A Thread.Sleep is the measurement here, not a synchronisation shortcut: there is no event to wait on, the question IS "what changed over
+    // an interval".
+    private static readonly TimeSpan DeadlineSampleWindow = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// Samples the stuck iteration's tree counters twice and reports whether it is progressing, so the record says what happened instead of that a clock expired.
+    /// </summary>
+    private static string DiagnoseDeadline(Scenario s, int iter, ScenarioContext ctx)
+    {
+        var snapshot = ctx.CounterSnapshot;
+        if (snapshot == null)
+        {
+            WriteProgress(s.Name, iter, "DEADLINE (no tree published — stuck before setup)");
+            return $"DEADLINE after {IterationDeadline.TotalSeconds}s with no tree published: the body did not get as far as constructing its tree, so this is "
+                 + "segment allocation or epoch setup, not the B+Tree.";
+        }
+
+        long[] first, second;
+        try
+        {
+            first = snapshot();
+            Thread.Sleep(DeadlineSampleWindow);
+            second = snapshot();
+        }
+        catch (Exception ex)
+        {
+            return $"DEADLINE after {IterationDeadline.TotalSeconds}s; counter sampling threw {ex.GetType().Name}: {ex.Message}";
+        }
+
+        var deltas = new long[first.Length];
+        bool anyMoved = false;
+        for (int i = 0; i < first.Length; i++)
+        {
+            deltas[i] = second[i] - first[i];
+            anyMoved |= deltas[i] != 0;
+        }
+
+        // WHICH counter moved is the diagnosis. These three are materially different defects and the old single "HANG" label collapsed them into one, which is
+        // how #738 accumulated five hypotheses that all assumed a lock cycle.
+        string label, verdict;
+        if (!anyMoved)
+        {
+            label = "STUCK";
+            verdict = "not one counter moved in the sample window. Nothing is being attempted — this is the shape a lock cycle or a wait-forever has, and the "
+                    + "only thing that will tell you more is a stack dump (`--blame-hang --blame-hang-timeout <n>`).";
+        }
+        else if (deltas[CtrWriteLockFails] > 0 && deltas[CtrRestarts] == 0 && deltas[CtrFallbacks] == 0 && deltas[CtrEntries] == 0)
+        {
+            label = "SPINNING";
+            verdict = $"only WriteLockFailures moved, by {deltas[CtrWriteLockFails]:N0} in {DeadlineSampleWindow.TotalSeconds}s. The operation is not restarting "
+                    + "and not completing: it is inside a write-lock spin that never acquires. That is lock-acquisition livelock, NOT a restart storm — the "
+                    + "restart-bound story does not apply and MaxPessimisticRestarts will never fire here.";
+        }
+        else if (deltas[CtrRestarts] > 0 || deltas[CtrFallbacks] > 0)
+        {
+            label = "RESTARTING";
+            verdict = $"restarts moved by {deltas[CtrRestarts]:N0} and fallbacks by {deltas[CtrFallbacks]:N0}. The operation keeps re-attempting and losing — a "
+                    + "restart storm. Find what invalidates the version between read and lock; a guard stronger than the invariant it protects does exactly this "
+                    + "(#740).";
+        }
+        else
+        {
+            label = "SLOW";
+            verdict = "the tree is still changing, so the iteration is progressing and merely exceeded a wall clock set while CPU-saturating noise threads run. "
+                    + "Suspect the budget before the tree.";
+        }
+
+        var sb = new StringBuilder();
+        sb.Append($"DEADLINE after {IterationDeadline.TotalSeconds}s — {label}: {verdict}\n  deltas over {DeadlineSampleWindow.TotalSeconds}s:");
+        for (int i = 0; i < deltas.Length; i++)
+        {
+            sb.Append($" {CounterNames[i]}={first[i]:N0}{(deltas[i] == 0 ? "" : $"(+{deltas[i]:N0})")}");
+        }
+
+        WriteProgress(s.Name, iter, $"DEADLINE/{label}");
+        return sb.ToString();
+    }
 
     private static readonly string _progressLogPath = Environment.GetEnvironmentVariable("OLC_STRESS_LOG")
         ?? System.IO.Path.Combine(System.IO.Path.GetTempPath(), "olc-race-stress.log");

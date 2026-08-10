@@ -57,14 +57,48 @@ internal abstract partial class BTree<TKey, TStore>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool KeyBelowLeafLowerBound(NodeWrapper leaf, TKey key, IComparer<TKey> comparer, ref ChunkAccessor<TStore> accessor)
     {
-        if (leaf.GetCount(ref accessor) == 0 || comparer.Compare(key, leaf.GetFirst(ref accessor).Key) >= 0)
+        if (leaf.GetCount(ref accessor) == 0 || CompareKeys(key, leaf.GetFirst(ref accessor).Key, comparer) >= 0)
         {
             return false;
         }
 
         var previous = leaf.GetPrevious(ref accessor);
-        return previous.IsValid && comparer.Compare(key, previous.GetHighKey(ref accessor)) < 0;
+        return previous.IsValid && CompareKeys(key, previous.GetHighKey(ref accessor), comparer) < 0;
     }
+
+    /// <summary>
+    /// True when <paramref name="key"/> reaches at or past <paramref name="leaf"/>'s exclusive <c>HighKey</c>, i.e. the key's range belongs to a leaf further
+    /// right and writing it here would place it past its own separator.
+    /// </summary>
+    /// <remarks>
+    /// The mirror of <see cref="KeyBelowLeafLowerBound"/>. This condition was already being tested inline on the OLC general insert path; naming it is what lets
+    /// a second write path ask the same question instead of re-deriving it — <c>Move</c> asked it nowhere and that is #765's first finding.
+    /// <para>
+    /// Conditioned on a valid right sibling because the rightmost leaf's <c>HighKey</c> bounds nothing: it owns every key above its separator, which is what the
+    /// append fast paths rely on.
+    /// </para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool KeyAboveLeafUpperBound(NodeWrapper leaf, TKey key, IComparer<TKey> comparer, ref ChunkAccessor<TStore> accessor)
+        => leaf.GetCount(ref accessor) > 0
+           && leaf.GetNext(ref accessor).IsValid
+           && CompareKeys(key, leaf.GetHighKey(ref accessor), comparer) >= 0;
+
+    /// <summary>
+    /// True when <paramref name="leaf"/> does not own <paramref name="key"/>'s range and therefore must not receive a write of it. Callers restart.
+    /// </summary>
+    /// <remarks>
+    /// "Leaf authority" is the single question every write path has to answer before it mutates: is THIS the leaf the descent's separators claim owns this key?
+    /// Both halves are needed and each was learned separately — the upper bound from concurrent splits, the lower bound from #297/#679 mode 1 and then corrected
+    /// in #740 — so stating them as one predicate is the point. A path that asks only one half is the shape every one of those defects had.
+    /// <para>
+    /// Cheap by construction: the common in-range case pays one <c>GetCount</c>, one <c>GetNext</c>, one <c>GetHighKey</c> and one <c>GetFirst</c> with two
+    /// compares, and the extra sibling reads happen only once a bound has already failed.
+    /// </para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool KeyOutsideLeafAuthority(NodeWrapper leaf, TKey key, IComparer<TKey> comparer, ref ChunkAccessor<TStore> accessor)
+        => KeyAboveLeafUpperBound(leaf, key, comparer, ref accessor) || KeyBelowLeafLowerBound(leaf, key, comparer, ref accessor);
 
     /// <summary>Creates the insert value, handling AllowMultiple buffer creation.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -379,7 +413,7 @@ internal abstract partial class BTree<TKey, TStore>
         }
         // Range check: stale separator may route to wrong leaf after a concurrent split.
         // High key is an exclusive upper bound, so key >= highKey means we're out of range.
-        if (leaf.GetCount(ref accessor) > 0 && leaf.GetNext(ref accessor).IsValid && args.Compare(args.Key, leaf.GetHighKey(ref accessor)) >= 0)
+        if (KeyAboveLeafUpperBound(leaf, args.Key, args.KeyComparer, ref accessor))
         {
             leafLatch.WriteUnlock();
             return OlcInsertResult.Restart;
