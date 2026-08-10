@@ -2828,16 +2828,9 @@ internal sealed unsafe class ArchetypeClusterState
                 continue;
             }
 
-            var byOffset = table.ComponentCollectionVSBSByOffset;
-            var fields = new ClusterCollectionField[byOffset.Count];
-            int fi = 0;
-            foreach (var kvp in byOffset)
-            {
-                // kvp.Key is the offset within the component's pure data; cluster slots have no overhead, so it IS the slot-relative field offset.
-                fields[fi++] = new ClusterCollectionField { FieldOffset = kvp.Key, Vsbs = kvp.Value };
-            }
-
-            (slots ??= []).Add(new ClusterCollectionSlot { Slot = slot, Fields = fields });
+            // CollectionFieldInfo.OffsetInComponentStorage is the offset within the component's pure data; cluster slots have no overhead, so it IS the
+            // slot-relative field offset — which is why the table's own descriptor can be shared here rather than copied into a cluster-local twin.
+            (slots ??= []).Add(new ClusterCollectionSlot { Slot = slot, Fields = table.CollectionFields });
         }
 
         CollectionSlots = slots?.ToArray();
@@ -2855,7 +2848,7 @@ internal sealed unsafe class ArchetypeClusterState
             byte* compBase = clusterBase + layout.ComponentOffset(cs.Slot) + slotIndex * layout.ComponentSize(cs.Slot);
             foreach (var f in cs.Fields)
             {
-                int bufferId = *(int*)(compBase + f.FieldOffset);
+                int bufferId = *(int*)(compBase + f.OffsetInComponentStorage);
                 if (bufferId != 0)
                 {
                     var ca = f.Vsbs.Segment.CreateChunkAccessor(changeSet);
@@ -3506,18 +3499,9 @@ internal struct ClusterCollectionSlot
     /// <summary>Component slot index within the archetype.</summary>
     public int Slot;
 
-    /// <summary>The ComponentCollection fields of this SingleVersion component.</summary>
-    public ClusterCollectionField[] Fields;
-}
-
-/// <summary>
-/// A single ComponentCollection field within a SingleVersion cluster slot.
-/// </summary>
-internal struct ClusterCollectionField
-{
-    /// <summary>Byte offset of the ComponentCollection <c>_bufferId</c> within the pure component data (no overhead in clusters).</summary>
-    public int FieldOffset;
-
-    /// <summary>The variable-sized buffer segment backing this collection's element type.</summary>
-    public VariableSizedBufferSegmentBase<PersistentStore> Vsbs;
+    /// <summary>
+    /// The ComponentCollection fields of this SingleVersion component — the owning <see cref="ComponentTable"/>'s own descriptor, shared not copied. A
+    /// cluster slot carries no component overhead, so the table's value-relative offsets are already slot-relative.
+    /// </summary>
+    public ComponentTable.CollectionFieldInfo[] Fields;
 }

@@ -86,13 +86,21 @@ gating) land with the `RecoveryDriver` in P1.2; LOG-05 (DurableLsn honesty) ship
   rationale (#514 Phase 2): the old dense ComponentTypeId-on-wire coupled replay to registration order → a crash→reopen under a shifted order could mis-map
            post-checkpoint records (silent data loss). (routingId, slot) is stable across crash→reopen by construction — this dissolves that risk.
   scope: RecordCodec.cs, RecordFormat.cs (SlotRecordBody.SlotIndex, CollectionDeltaRecordBody.SlotIndex); recovery RecoveryApplier maps (routingId, slot) → table
+         ComponentTable.CollectionHandleRanges (the packed ranges the codec zeroes); RecordCodec.PackColumnHandleRange (the columnar twin)
   on_violation: the log is coupled to physical layout OR to registration order → replay breaks under page relocation / compaction / shifted schema order
-  verified: NOT COVERED — retired 2026-08-07 (#703). Both fixtures that claimed this rule
-    (RecordCodecPropertyTests, FenceBlockCodecTests) are "Pure — no engine, no recovery": they construct records
-    themselves and round-trip them, so neither can observe the EMITTER placing a physical identifier on the wire,
-    which is what this rule constrains. They stayed green in the same build as a red production probe (#389).
-    A genuine verifier must drive the real emit path (CommitBatchBuilder/RecordCodec via a live commit) and assert
-    no page index / chunk id / bufferId / chain topology appears in the emitted bytes.
+  verified: CollectionDurabilityTests.Commit_WithCollections_PutsNoBufferIdOnTheWire [VerifiesRule],
+    Log06Verifier_RejectsABufferIdOnTheWire [RuleMutant] — re-covered 2026-08-11 (#389) after the 2026-08-07
+    retirement (#703). The retired fixtures (RecordCodecPropertyTests, FenceBlockCodecTests) are "Pure — no engine,
+    no recovery": they construct records themselves and round-trip them, so neither can observe the EMITTER placing
+    a physical identifier on the wire, which is what this rule constrains. They stayed green in the same build as a
+    red production probe (#389). The verifier now drives a LIVE commit and reads the bytes back off the on-disk WAL
+    (WalScanner), asserting no bufferId appears at any collection-handle offset. It covers BOTH emitters — the
+    per-entity CommitBatchBuilder path and the columnar FenceBlock path (#559), which bulk-copies component columns
+    straight out of the cluster page and had no zeroing at all until #389 — and fails if a run inspected only one.
+  note the emit side was UNWIRED, not merely unverified, until #389: all four production AddSlot sites omitted the
+       optional handleRanges argument, so RecordCodec.ZeroHandleRanges iterated an empty span on every commit. The
+       zeroing code was correct and never executed. This is why the rule's coverage and its implementation landed
+       together — a verifier written first would have been red, and a fix without one would have been unfalsifiable.
 
 ### LOG-07: Batch internal order
   invariant within one transaction's batch the record order is Spawn lifecycle → Slot/CollectionDelta →

@@ -2418,7 +2418,8 @@ public unsafe partial class Transaction : EntityAccessor
                         var info = GetComponentInfo(table.Definition.POCOType);
                         var payload = info.CompContentAccessor.GetChunkAsReadOnlySpan(locChunkId);
                         // Wire identity is the per-archetype slot (LOG-06); here it's the spawn-iteration slot index.
-                        batch.AddSlot((long)s.Id.RawValue, (ushort)slot, payload.Slice(info.ComponentOverhead, table.ComponentStorageSize));
+                        batch.AddSlot((long)s.Id.RawValue, (ushort)slot, payload.Slice(info.ComponentOverhead, table.ComponentStorageSize),
+                            table.CollectionHandleRanges);
                     }
                 }
             }
@@ -2453,7 +2454,7 @@ public unsafe partial class Transaction : EntityAccessor
                 // Wire identity is the per-archetype slot (LOG-06); the same component sits at different slots in different archetypes, so resolve it from
                 // THIS entity's archetype (routing id embedded in the PK).
                 var slot = (ushort)_dbe.GetMetaByRouting(EntityId.FromRaw(cacheEntry.Key).ArchetypeId).GetSlot(componentTypeId);
-                batch.AddSlot(cacheEntry.Key, slot, payload.Slice(overhead, storageSize));
+                batch.AddSlot(cacheEntry.Key, slot, payload.Slice(overhead, storageSize), info.ComponentTable.CollectionHandleRanges);
             }
 
             // Commit-discipline (SingleVersion) staged writes: the value lives in the native staging buffer (offset is 1-based), already sliced past
@@ -2464,7 +2465,8 @@ public unsafe partial class Transaction : EntityAccessor
                 foreach (var staged in info.CommitStaged)
                 {
                     var slot = (ushort)_dbe.GetMetaByRouting(EntityId.FromRaw(staged.Key).ArchetypeId).GetSlot(componentTypeId);
-                    batch.AddSlot(staged.Key, slot, new ReadOnlySpan<byte>(_commitStagingBuffer + staged.Value.Offset, storageSize));
+                    batch.AddSlot(staged.Key, slot, new ReadOnlySpan<byte>(_commitStagingBuffer + staged.Value.Offset, storageSize),
+                        info.ComponentTable.CollectionHandleRanges);
                 }
             }
         }

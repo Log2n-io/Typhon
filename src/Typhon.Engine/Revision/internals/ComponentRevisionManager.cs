@@ -357,11 +357,11 @@ internal ref struct ComponentRevisionManager
             var chunkId = chunksToFree[i];
             if (hasCollections)
             {
-                foreach (var kvp in ct.ComponentCollectionVSBSByOffset)
+                foreach (var f in ct.CollectionFields)
                 {
-                    var bufferId = compContentAccessor.GetChunkAsReadOnlySpan(chunkId).Slice(kvp.Key).Cast<byte, int>()[0];
-                    var collAccessor = kvp.Value.Segment.CreateChunkAccessor();
-                    kvp.Value.BufferRelease(bufferId, ref collAccessor);
+                    var bufferId = compContentAccessor.GetChunkAsReadOnlySpan(chunkId).Slice(f.OffsetInComponentStorage).Cast<byte, int>()[0];
+                    var collAccessor = f.Vsbs.Segment.CreateChunkAccessor();
+                    f.Vsbs.BufferRelease(bufferId, ref collAccessor);
                     collAccessor.Dispose();
                 }
             }
@@ -696,13 +696,13 @@ internal ref struct ComponentRevisionManager
 
         if (hasCollections)
         {
-            foreach (var kvp in ct.ComponentCollectionVSBSByOffset)
+            foreach (var f in ct.CollectionFields)
             {
-                // kvp.Key is the offset within the component struct; content chunks prefix it with ComponentOverhead
+                // The descriptor's offset is within the component struct; content chunks prefix it with ComponentOverhead
                 // (Versioned = 0, SingleVersion = 8 for the entity PK). Cluster slots have no overhead.
-                var bufferId = compContentAccessor.GetChunkAsReadOnlySpan(chunkId).Slice(ct.ComponentOverhead + kvp.Key).Cast<byte, int>()[0];
-                var collAccessor = kvp.Value.Segment.CreateChunkAccessor();
-                kvp.Value.BufferRelease(bufferId, ref collAccessor);
+                var bufferId = compContentAccessor.GetChunkAsReadOnlySpan(chunkId).Slice(ct.ComponentOverhead + f.OffsetInComponentStorage).Cast<byte, int>()[0];
+                var collAccessor = f.Vsbs.Segment.CreateChunkAccessor();
+                f.Vsbs.BufferRelease(bufferId, ref collAccessor);
                 collAccessor.Dispose();
             }
         }

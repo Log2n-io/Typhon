@@ -101,12 +101,13 @@ public partial class DatabaseEngine
         ReadOnlySpan<int> slotIndices,
         ReadOnlySpan<int> componentSizes,
         ReadOnlySpan<int> componentOffsets,
-        int totalComponentSize)
+        int totalComponentSize,
+        ReadOnlySpan<ulong> columnHandleRanges)
     {
         var wc = WaitContext.FromDeadline(Deadline.FromTimeout(TimeoutOptions.Current.DefaultCommitTimeout));
         return DurabilityLog.AppendFenceBlocks(
             blocks.AsSpan(0, count), archetypeId, tickNumber, entityKeysOffset,
-            slotIndices, componentSizes, componentOffsets, totalComponentSize, ref wc);
+            slotIndices, componentSizes, componentOffsets, totalComponentSize, columnHandleRanges, ref wc);
     }
 
     /// <summary>
@@ -194,7 +195,7 @@ public partial class DatabaseEngine
 
                             // Wire identity is the per-archetype slot (LOG-06); resolve from this entity's archetype (routing id in the PK).
                             var slot = (ushort)GetMetaByRouting(EntityId.FromRaw(entityPk).ArchetypeId).GetSlot(componentTypeId);
-                            batch.AddSlot(entityPk, slot, src.Slice(overhead, stride));
+                            batch.AddSlot(entityPk, slot, src.Slice(overhead, stride), table.CollectionHandleRanges);
                             batchBytes += recOverhead + stride;
                         }
                     }
@@ -910,6 +911,28 @@ public partial class DatabaseEngine
             compSizes = compSizes[..columnCount];
             compOffsets = compOffsets[..columnCount];
 
+            // LOG-06 for the columnar path: collect the collection-handle byte ranges of every emitted column so the codec can zero them out of the copied
+            // SoA bytes. A cluster slot carries no component overhead, so a field's value-relative offset IS its slot-relative one — the same identity that
+            // lets ClusterCollectionSlot share the table's descriptor. Almost always empty; the two loops cost nothing when it is.
+            var handleRangeCount = 0;
+            for (var c = 0; c < columnCount; c++)
+            {
+                handleRangeCount += engineState.SlotToComponentTable[slotIndices[c]].CollectionFields.Length;
+            }
+
+            Span<ulong> columnHandleRanges = handleRangeCount == 0 ? default : stackalloc ulong[handleRangeCount];
+            if (handleRangeCount > 0)
+            {
+                var hr = 0;
+                for (var c = 0; c < columnCount; c++)
+                {
+                    foreach (var f in engineState.SlotToComponentTable[slotIndices[c]].CollectionFields)
+                    {
+                        columnHandleRanges[hr++] = RecordCodec.PackColumnHandleRange(c, f.OffsetInComponentStorage, f.HandleSize);
+                    }
+                }
+            }
+
             // Columnar emission (#559): one FenceBlock record per dirty cluster instead of one Slot record per (entity, component).
             // A cluster's entity keys and each component's values are already contiguous in the SoA, so every part of the payload
             // is a single bulk copy — the codec copies straight out of the page into the WAL claim, with no staging arena.
@@ -936,7 +959,7 @@ public partial class DatabaseEngine
                 if (blockCount > 0 && (batchBytes + recWire > MaxFenceBatchBytes || blockCount == blocks.Length))
                 {
                     highestLSN = Math.Max(highestLSN, AppendFenceBlockBatch(blocks, blockCount, meta.ArchetypeId, tickNumber,
-                        entityIdsOffset, slotIndices, compSizes, compOffsets, totalCompSize));
+                        entityIdsOffset, slotIndices, compSizes, compOffsets, totalCompSize, columnHandleRanges));
                     blockCount = 0;
                     batchBytes = 0;
                 }
@@ -949,7 +972,7 @@ public partial class DatabaseEngine
             if (blockCount > 0)
             {
                 highestLSN = Math.Max(highestLSN, AppendFenceBlockBatch(blocks, blockCount, meta.ArchetypeId, tickNumber,
-                    entityIdsOffset, slotIndices, compSizes, compOffsets, totalCompSize));
+                    entityIdsOffset, slotIndices, compSizes, compOffsets, totalCompSize, columnHandleRanges));
             }
         }
         finally
