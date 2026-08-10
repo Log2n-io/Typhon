@@ -46,7 +46,7 @@ Every node carries the same header fields at the same offsets (so a generic `Bas
 | `PrevChunk` | int (4 B) | Left sibling at leaf level (doubly-linked leaf chain) |
 | `NextChunk` | int (4 B) | Right sibling — the B-link |
 | `LeftValue` | int (4 B) | Leftmost child pointer (internal nodes); reused as buffer head field at leaves of multi-value trees |
-| `HighKey` | TKey-shaped | B-link upper bound — exclusive separator. `node.HighKey == node.GetNext().GetFirst().Key` is the invariant. |
+| `HighKey` | TKey-shaped | B-link upper bound — exclusive separator. `node.HighKey <= node.GetNext().GetFirst().Key` is the invariant (one-sided: a HighKey left *below* the right sibling's first key is normal after a removal and is tolerated; only a HighKey that *exceeds* the next leaf's first key is a violation). |
 | `Keys[Capacity]` | TKey × N | Key array, contiguous |
 | `Values[Capacity]` | int × N | Value array — child chunk IDs (internal) or record IDs / buffer heads (leaves) |
 
