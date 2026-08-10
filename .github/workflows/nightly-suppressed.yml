@@ -15,8 +15,8 @@ name: Nightly suppressed tier
 # NON-BLOCKING ABOUT KNOWN REDS, BLOCKING ABOUT NEW ONES. A nightly is a signal, not a merge gate, and it is
 # never a required check — but "non-blocking" was implemented as a bare `continue-on-error: true`, which made the
 # job green with any number of reds in it. That is this workflow committing the defect it was built to expose.
-# The reds it tolerates are now enumerated in bench/aws/nightly-known-red.txt, each with an issue, and anything
-# else fails the job. Same for the "selected zero tests" guard below: a tier that runs nothing must be loud.
+# The tests it may skip are those carrying [Category("Quarantine")], documented in QUARANTINE.md and excluded
+# by the filter; anything else that fails — or a run that does not finish at all — fails the job.
 
 on:
   schedule:
@@ -30,7 +30,6 @@ on:
     paths:
       - '.github/workflows/nightly-suppressed.yml'
       - 'bench/aws/nightly.runsettings'
-      - 'bench/aws/nightly-known-red.txt'
 
 concurrency:
   group: nightly-suppressed
@@ -63,8 +62,7 @@ jobs:
       # these fixtures never ran there. Keep this filter narrow — widening it re-hides them.
       - name: Run the Nightly tier
         # continue-on-error so a red does not abort the job before the reporting steps run — NOT so a red goes unnoticed.
-        # "Diff the failures against the known-red allowlist" below is blocking and decides the verdict. See
-        # bench/aws/nightly-known-red.txt for why the bare version of this line was the tier's own defect (#765 S0).
+        # "Assert the tier finished and was green" below is blocking and decides the verdict (#765 S0).
         continue-on-error: true
         run: |
           set -uo pipefail
@@ -76,7 +74,7 @@ jobs:
           # Sequence_*.xml, which the artifact upload below preserves.
           dotnet test test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj \
             -c Release --no-build \
-            --filter "Category=Nightly" \
+            --filter "Category=Nightly&Category!=Quarantine" \
             --settings bench/aws/nightly.runsettings \
             --blame-hang --blame-hang-timeout 300s \
             --logger "trx;LogFileName=nightly.trx" \
@@ -117,113 +115,87 @@ jobs:
           cat summary.md >> "$GITHUB_STEP_SUMMARY"
 
       # ── The verdict ───────────────────────────────────────────────────────────────────────────────────────────
-      # Blocking, and deliberately so. The tier is non-blocking about KNOWN reds and blocking about new ones; those are
-      # different questions and the old bare `continue-on-error` answered neither.
-      - name: Diff the failures against the known-red allowlist
+      # Blocking, and deliberately so. "Non-blocking" used to be a bare `continue-on-error: true`, which made this job
+      # green with any number of reds in it — the workflow committing the very defect it was built to expose.
+      #
+      # There is no allowlist here, and that is a correction rather than an omission. The first version of this step
+      # carried a hand-maintained list of test names in bench/aws/nightly-known-red.txt, which duplicated a mechanism
+      # this repository already had: a known-bad test carries [Category("Quarantine")] and gets a row in
+      # test/Typhon.Engine.Tests/QUARANTINE.md naming its issue. The tier's filter now excludes that category, so
+      # everything it still runs is expected to pass and ANY failure is news. One source of truth, no name list to drift
+      # out of date, and quarantining something stays a deliberate act recorded next to the test.
+      - name: Assert the tier finished and was green
         if: always()
         run: |
           set -uo pipefail
           python3 - <<'PY'
           import glob, re, sys, xml.etree.ElementTree as ET
           NS = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
+          NL = chr(10)
 
           # ── Did the run actually FINISH? ────────────────────────────────────────────────────────────────────────
-          # This must be answered before anything else, and it was not on this step's first real run. When --blame-hang
-          # kills the host, vstest still writes a trx — but a PARTIAL one, holding only the tests that completed before
-          # the kill. Measured on PR #768: 2 results from a tier that runs dozens. Diffing that against an allowlist
-          # produces a confident verdict about a tier that never ran, which is exactly the defect #765 exists to remove,
-          # reproduced inside the instrument built to remove it. The old "selected zero tests" guard does not help: it
-          # only catches total == 0, and 2-out-of-dozens sails through.
+          # Asked first, because the answer changes what every other number in the trx means. When --blame-hang kills
+          # the host, vstest still writes a trx — a PARTIAL one, holding only the tests that completed before the kill.
+          # Measured on PR #768: 2 results from a tier that runs hundreds, and this step cheerfully rendered a verdict
+          # on them. A checker reporting confidently on incomplete input is the exact defect #765 exists to remove, and
+          # it does not get to live inside the instrument built to remove it. The "selected zero tests" guard above does
+          # not catch this either: it tests total == 0, and 2-out-of-hundreds sails straight through.
           aborted, incomplete = [], []
           for f in glob.glob("ci-out/**/*.trx", recursive=True):
-              for ri in ET.parse(f).getroot().iter(f"{NS}RunInfo"):
-                  text = (ri.findtext(f"{NS}Text") or "").strip()
+              for ri in ET.parse(f).getroot().iter(NS + "RunInfo"):
+                  text = (ri.findtext(NS + "Text") or "").strip()
                   if re.search(r"abort|host process crashed|inactivity time", text, re.I):
                       aborted.append(text.splitlines()[0][:200])
-          # Blame writes the running order and marks the one that never came back. That names the hang directly.
+
+          # Blame records the running order and marks the one that never came back, which names the hang directly
+          # instead of leaving it to be inferred from where the log stops.
           for f in glob.glob("ci-out/**/Sequence_*.xml", recursive=True):
               for t in ET.parse(f).getroot().iter("Test"):
                   if t.get("Completed") == "False":
                       incomplete.append(t.get("Name", "?"))
 
+          out = ["## Nightly verdict", ""]
+
           if aborted:
-            for a in dict.fromkeys(aborted):
-                print(f"::error::The Nightly tier did not finish: {a}")
-            for n in dict.fromkeys(incomplete):
-                print(f"::error::Never completed (this is the hang): `{n}`")
-            with open("verdict.md", "w", encoding="utf-8") as fh:
-                fh.write("## Nightly verdict\n\n### The run ABORTED — no verdict is possible\n\n"
-                         + "".join(f"- {a}\n" for a in dict.fromkeys(aborted))
-                         + ("\n**Never completed:**\n" + "".join(f"- `{n}`\n" for n in dict.fromkeys(incomplete)) if incomplete else "")
-                         + "\nThe trx holds only the tests that finished before the host was killed, so the pass/fail set below it "
-                           "describes a fraction of the tier. Fix the hang; do not read anything into the partial results, and do "
-                           "NOT allowlist your way past this.\n")
-            sys.exit(1)
+              for a in dict.fromkeys(aborted):
+                  print("::error::The Nightly tier did not finish: " + a)
+              for n in dict.fromkeys(incomplete):
+                  print("::error::Never completed (this is the hang): `" + n + "`")
+              out += ["### The run ABORTED — no verdict is possible", ""]
+              out += ["- " + a for a in dict.fromkeys(aborted)]
+              if incomplete:
+                  out += ["", "**Never completed:**"] + ["- `" + n + "`" for n in dict.fromkeys(incomplete)]
+              out += ["", "The trx describes only the tests that finished before the host was killed, so the pass/fail "
+                          "counts above it are a fraction of the tier. Fix the hang, or quarantine it deliberately per "
+                          "QUARANTINE.md. Do not read the partial results, and do not silence this step."]
+              open("verdict.md", "w", encoding="utf-8").write(NL.join(out) + NL)
+              sys.exit(1)
 
-          # Section headers are the `# --- #123 / #456 ---` rules; prose comments between them carry issue numbers too and
-          # must NOT reassign the current section, or every entry inherits whichever number was mentioned last.
-          allow, issues = set(), {}
-          current = None
-          for raw in open("bench/aws/nightly-known-red.txt", encoding="utf-8"):
-              line = raw.strip()
-              if line.startswith("# ---"):
-                  found = re.findall(r"#(\d+)", line)
-                  current = ", ".join("#" + f for f in found) if found else None
-                  continue
-              if line.startswith("#"):
-                  continue
-              if line:
-                  allow.add(line)
-                  issues[line] = current or "(no issue — fix the allowlist)"
-
-          def short(name):
-              # Strip the parameterised suffix: one allowlist line covers every case of a test.
-              base = name.split("(")[0]
-              parts = base.split(".")
-              return ".".join(parts[-2:]) if len(parts) >= 2 else base
-
-          failed, passed = set(), set()
+          failed = set()
           for f in glob.glob("ci-out/**/*.trx", recursive=True):
               root = ET.parse(f).getroot()
               names = {}
-              for ut in root.iter(f"{NS}UnitTest"):
-                  tm = ut.find(f"{NS}TestMethod")
-                  if ut.get("id") and tm is not None:
-                      names[ut.get("id")] = f'{tm.get("className")}.{tm.get("name")}'
-              for r in root.iter(f"{NS}UnitTestResult"):
-                  name = names.get(r.get("testId"), r.get("testName", "?"))
-                  (failed if r.get("outcome") == "Failed" else passed).add(short(name))
+              for ut in root.iter(NS + "UnitTest"):
+                  tm = ut.find(NS + "TestMethod")
+                  if ut.get("id") is not None and tm is not None:
+                      names[ut.get("id")] = tm.get("className").split(".")[-1] + "." + tm.get("name")
+              for r in root.iter(NS + "UnitTestResult"):
+                  if r.get("outcome") == "Failed":
+                      failed.add(names.get(r.get("testId"), r.get("testName", "?")).split("(")[0])
 
-          unexpected = sorted(failed - allow)
-          stale = sorted(a for a in allow if a in passed and a not in failed)
+          if failed:
+              for n in sorted(failed):
+                  print("::error::`" + n + "` failed. This tier excludes Category=Quarantine, so everything it runs is "
+                        "expected to pass — that is either a regression or a test somebody needs to quarantine on purpose.")
+              out += ["### Failures", ""] + ["- `" + n + "`" for n in sorted(failed)]
+              out += ["", "To quarantine one deliberately: add `[Category(\"Quarantine\")]` to the test and a row in "
+                          "`test/Typhon.Engine.Tests/QUARANTINE.md` naming its issue. That is the only supported way to "
+                          "make this step stop reporting it."]
+          else:
+              out += ["The tier ran to completion with no failures."]
 
-          out = ["## Nightly verdict\n"]
-          if stale:
-              out.append("### Allowlisted tests that PASSED\n")
-              out.append("Not a failure — these fixtures are flaky, so one green run proves nothing. But a name that stops\n"
-                         "appearing for a week is your cue to delete its line and close the issue.\n")
-              for s in stale:
-                  out.append(f"- `{s}` — {issues.get(s, '?')}")
-                  print(f"::warning::Known-red `{s}` passed. If it stays green, remove it from bench/aws/nightly-known-red.txt.")
-              out.append("")
-          if unexpected:
-              out.append("### NEW failures — not on the allowlist\n")
-              for u in unexpected:
-                  out.append(f"- `{u}`")
-                  print(f"::error::`{u}` failed and is not in bench/aws/nightly-known-red.txt. Either it is a real "
-                        f"regression, or it is a known red nobody wrote down. Both need a human.")
-              out.append("")
-          known = sorted(failed & allow)
-          if known:
-              out.append("### Known reds (tracked)\n")
-              out.extend(f"- `{k}` — {issues.get(k, '?')}" for k in known)
-              out.append("")
-          if not unexpected and not known:
-              out.append("No failures.\n")
-
-          with open("verdict.md", "w", encoding="utf-8") as fh:
-              fh.write("\n".join(out) + "\n")
-          sys.exit(1 if unexpected else 0)
+          open("verdict.md", "w", encoding="utf-8").write(NL.join(out) + NL)
+          sys.exit(1 if failed else 0)
           PY
           cat verdict.md >> "$GITHUB_STEP_SUMMARY"
 
