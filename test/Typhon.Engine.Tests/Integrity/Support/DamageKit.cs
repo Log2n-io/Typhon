@@ -503,14 +503,13 @@ internal static class DamageKit
             var fileOffset = ((long)pages[ordinal] * IntegrityConstants.PageSize) + at + fieldOffset;
 
             source.Dispose();
-            var range = WriteInt(bundlePath, fileOffset, Target);
-            RestampPage(bundlePath, pages[ordinal]);
+            var ranges = new List<ByteRange> { WriteInt(bundlePath, fileOffset, Target) };
+            ranges.AddRange(RestampPage(bundlePath, pages[ordinal]));
 
             return new DamageRecord(
                 "D6",
                 $"component catalog row '{name}' redirected from segment {row.ComponentSPI} to page {Target}",
-                [range, new ByteRange((long)pages[ordinal] * IntegrityConstants.PageSize + PageBaseHeader.PageChecksumOffset,
-                    PageBaseHeader.PageChecksumSize)],
+                ranges,
                 ["CHK-BOO-05"],
                 IntegrityVerdict.Unopenable,
                 RepairIsLossless: false);
@@ -518,6 +517,166 @@ internal static class DamageKit
 
         ownerName = null;
         throw new InvalidOperationException("no component-catalog row owned a data segment, so nothing could be redirected");
+    }
+
+    /// <summary>How to break a revision chain.</summary>
+    internal enum ChainBreak
+    {
+        /// <summary>Point the chain's tail at a chunk id the segment does not have.</summary>
+        OutOfRange,
+
+        /// <summary>Point the chain's tail at itself.</summary>
+        Cycle
+    }
+
+    /// <summary>
+    /// <b>D6</b> — rewrites one revision chain's <c>NextChunkId</c> so the chain leads somewhere it must not.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Four bytes, inside a chunk, on a page that is re-stamped afterwards — so what a scanner meets is a chain that
+    /// leads astray, not a torn page. That distinction is the whole value of the fixture: a checksum failure would be
+    /// found by the physical sweep, which proves nothing about whether the chain family works.
+    /// </para>
+    /// <para>
+    /// <b>Two findings are expected, not one, and that is correct.</b> A chain whose head points anywhere at all is by
+    /// definition not collapsed, so <c>CHK-CHN-02</c> fires alongside the pointer or cycle finding. Declaring only the
+    /// interesting one would make <see cref="AssertDetectedExactly"/> fail — which is the kit doing its job rather than
+    /// a defect in the check.
+    /// </para>
+    /// </remarks>
+    /// <param name="bundlePath">The bundle to damage.</param>
+    /// <param name="how">Which way to break the chain.</param>
+    internal static DamageRecord BreakRevisionChain(string bundlePath, ChainBreak how)
+    {
+        int filePage;
+        long fieldOffset;
+        int newValue;
+        int rootChunk;
+        string owner;
+
+        using (var source = new OfflineBundlePageSource(bundlePath))
+        {
+            var bootstrap = BootstrapReader.Read(source);
+            var walker = new SegmentWalker(source);
+            var roots = SweepRoots(source);
+
+            var manifest = new SchemaCatalogReader(source, roots);
+            manifest.Read(bootstrap);
+            Assert.That(manifest.IsUsable, Is.True, "precondition: the manifest must be readable to find a revision chain");
+
+            if (!TryFindChainRoot(source, walker, manifest, out owner, out var segment, out var geometry, out rootChunk))
+            {
+                throw new InvalidOperationException("no revision chain root was found, so none could be broken");
+            }
+
+            geometry.TryLocate(rootChunk, out var ordinal, out var chunkInPage);
+            filePage = segment.Pages[ordinal];
+
+            // NextChunkId is documented as the FIRST field of CompRevStorageHeader, so the chain's tail pointer is at
+            // chunk offset 0. Asserting that rather than trusting the comment: a layout change would otherwise silently
+            // relocate the damage into whatever field moved into its place.
+            Assert.That(Marshal.OffsetOf<CompRevStorageHeader>(nameof(CompRevStorageHeader.NextChunkId)).ToInt32(), Is.Zero,
+                "NextChunkId must be the first field of the chain header, or this primitive damages the wrong bytes");
+
+            fieldOffset = ((long)filePage * IntegrityConstants.PageSize) + geometry.OffsetInPage(ordinal, chunkInPage);
+            newValue = how == ChainBreak.Cycle ? rootChunk : geometry.Capacity(segment.Pages.Count) + 1000;
+        }
+
+        var ranges = new List<ByteRange> { WriteInt(bundlePath, fieldOffset, newValue) };
+        ranges.AddRange(RestampPage(bundlePath, filePage));
+
+        var codes = how == ChainBreak.Cycle
+            ? new[] { ChainChecks.Collapsed, ChainChecks.NoCycles }
+            : [ChainChecks.Collapsed, ChainChecks.PointerResolves];
+
+        return new DamageRecord(
+            how == ChainBreak.Cycle ? "D6(cycle)" : "D6(dangling)",
+            how == ChainBreak.Cycle
+                ? $"revision chain for '{owner}' at chunk {rootChunk} points at itself"
+                : $"revision chain for '{owner}' at chunk {rootChunk} points at chunk {newValue}, past the segment's capacity",
+            ranges,
+            codes,
+            how == ChainBreak.Cycle ? IntegrityVerdict.Unopenable : IntegrityVerdict.DataLoss,
+            RepairIsLossless: false);
+    }
+
+    /// <summary>Finds the first allocated revision chunk that owns an entity — a chain root.</summary>
+    private static bool TryFindChainRoot(OfflineBundlePageSource source, SegmentWalker walker, SchemaCatalogReader manifest,
+        out string owner, out SegmentView segment, out ChunkGeometry geometry, out int chunkId)
+    {
+        var page = new byte[IntegrityConstants.PageSize];
+
+        foreach (var component in manifest.Components.Values)
+        {
+            if (component.RevisionSegmentRoot == 0 || !source.TryReadPage(component.RevisionSegmentRoot, page))
+            {
+                continue;
+            }
+
+            var g = ChunkGeometry.FromPage(page);
+            if (!g.IsUsable)
+            {
+                continue;
+            }
+
+            var seg = walker.WalkSegment(component.RevisionSegmentRoot);
+            for (var id = 0; id < g.Capacity(seg.Pages.Count); id++)
+            {
+                if (!g.TryLocate(id, out var ordinal, out var chunkInPage) || ordinal >= seg.Pages.Count)
+                {
+                    continue;
+                }
+
+                if (!source.TryReadPage(seg.Pages[ordinal], page) || !g.IsChunkAllocated(page, ordinal == 0, chunkInPage))
+                {
+                    continue;
+                }
+
+                var at = g.OffsetInPage(ordinal, chunkInPage);
+                var header = MemoryMarshal.Read<CompRevStorageHeader>(
+                    new ReadOnlySpan<byte>(page, at, Unsafe.SizeOf<CompRevStorageHeader>()));
+
+                if (header.EntityPK == 0)
+                {
+                    continue;
+                }
+
+                owner = component.Name;
+                segment = seg;
+                geometry = g;
+                chunkId = id;
+                return true;
+            }
+        }
+
+        owner = null;
+        segment = null;
+        geometry = default;
+        chunkId = -1;
+        return false;
+    }
+
+    /// <summary>Every segment root the physical sweep finds — the list every pointer is validated against.</summary>
+    private static List<int> SweepRoots(IPageSource source)
+    {
+        var roots = new List<int>();
+        var page = new byte[IntegrityConstants.PageSize];
+
+        for (var p = 0; p < source.PageCount; p++)
+        {
+            if (!source.TryReadPage(p, page) || (PageImage.Flags(page) & PageBlockFlags.IsLogicalSegmentRoot) == 0)
+            {
+                continue;
+            }
+
+            if (MemoryMarshal.Read<int>(PageImage.RawData(page)) == p)
+            {
+                roots.Add(p);
+            }
+        }
+
+        return roots;
     }
 
     /// <summary>Writes one int at an absolute file offset and returns the range it wrote.</summary>
@@ -531,23 +690,69 @@ internal static class DamageKit
     }
 
     /// <summary>
-    /// Re-stamps a page's checksum so the damage is a WRONG POINTER rather than a torn page.
+    /// Re-stamps a page's checksum so the damage is the thing under test rather than a torn page.
     /// </summary>
     /// <remarks>
-    /// Without this the scan reports a checksum failure and never reaches the pointer, so the test would pass while
+    /// <para>
+    /// Without this the scan reports a checksum failure and never reaches the damage, so the test would pass while
     /// proving something else — the same trap the format-revision forgery had to avoid.
+    /// </para>
+    /// <para>
+    /// <b>The page's own declared geometry decides the form, and forcing one is a bug.</b> A/B protected pages carry a
+    /// whole-page CRC (their twin is what protects them from a torn write); ordinary data pages carry per-sector footers
+    /// since format revision 6. An early version of this helper passed <c>allowSectorFooter: false</c> unconditionally,
+    /// correct for the meta pair it was written against and wrong for every data page — it stamped a whole-page CRC over
+    /// a page that declares sectors, so the scan reported <c>CHK-PHY-01</c> on top of the intended finding and
+    /// <see cref="AssertDetectedExactly"/> caught it. Passing <c>true</c> lets <c>StampPageForWrite</c> read the page's
+    /// declared sector count and pick the same form the engine would, which is correct for both classes.
+    /// </para>
     /// </remarks>
-    private static void RestampPage(string bundlePath, int filePageIndex)
+    private static List<ByteRange> RestampPage(string bundlePath, int filePageIndex)
     {
         var path = DataPath(bundlePath);
         var data = File.ReadAllBytes(path);
-        var page = new byte[IntegrityConstants.PageSize];
-        Array.Copy(data, (long)filePageIndex * IntegrityConstants.PageSize, page, 0, IntegrityConstants.PageSize);
+        var pageBase = (long)filePageIndex * IntegrityConstants.PageSize;
 
-        PagedMMF.StampPageForWrite(page, PageSectorFooter.ReadFilePageIndex(page), allowSectorFooter: false);
+        var before = new byte[IntegrityConstants.PageSize];
+        Array.Copy(data, pageBase, before, 0, IntegrityConstants.PageSize);
 
-        Array.Copy(page, 0, data, (long)filePageIndex * IntegrityConstants.PageSize, IntegrityConstants.PageSize);
+        var page = (byte[])before.Clone();
+        PagedMMF.StampPageForWrite(page, PageSectorFooter.ReadFilePageIndex(page), allowSectorFooter: true);
+
+        Array.Copy(page, 0, data, pageBase, IntegrityConstants.PageSize);
         File.WriteAllBytes(path, data);
+
+        // Report what the stamp ACTUALLY touched rather than what it was assumed to. Which bytes move depends on the
+        // page's declared geometry — a whole-page CRC at offset 8 for an A/B page, per-sector footers growing down from
+        // the end of the metadata region for a data page — and hard-coding either declares the wrong range for the other.
+        // Diffing is exact by construction and stays correct when the footer layout changes.
+        return Diff(before, page, pageBase);
+    }
+
+    /// <summary>Coalesces the byte-level differences between two page images into contiguous ranges.</summary>
+    private static List<ByteRange> Diff(byte[] before, byte[] after, long baseOffset)
+    {
+        var ranges = new List<ByteRange>();
+        var i = 0;
+
+        while (i < before.Length)
+        {
+            if (before[i] == after[i])
+            {
+                i++;
+                continue;
+            }
+
+            var start = i;
+            while (i < before.Length && before[i] != after[i])
+            {
+                i++;
+            }
+
+            ranges.Add(new ByteRange(baseOffset + start, i - start));
+        }
+
+        return ranges;
     }
 
     /// <summary>Truncates the data file mid-page, the shape a partial copy leaves behind.</summary>

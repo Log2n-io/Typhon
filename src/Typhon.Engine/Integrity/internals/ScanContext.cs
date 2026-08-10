@@ -50,6 +50,16 @@ internal sealed class ScanContext
     /// <summary>The page-allocation bitmap, or <c>null</c> when it could not be read.</summary>
     public OccupancyView Occupancy { get; set; }
 
+    /// <summary>
+    /// The database's own schema manifest, or <c>null</c> when it was not read (shallow depths) or not recoverable.
+    /// </summary>
+    /// <remarks>
+    /// Every cross-structure check hangs off this. It is what turns a bag of segments into named archetypes with
+    /// component counts, entity-key watermarks and cluster/EntityMap roots — and it is read from the file, not from a
+    /// schema assembly, which is the correction recorded in <c>09 §1.1</c>.
+    /// </remarks>
+    public SchemaCatalogReader Manifest { get; set; }
+
     /// <summary>Findings accumulated so far.</summary>
     public FindingCollector Findings { get; init; }
 
