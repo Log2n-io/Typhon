@@ -89,4 +89,4 @@ game.QuerySystem("IdleDrift", ctx =>
 - Same mechanism, cell/grid-configuration angle: [Spatial category — Tiered Simulation Dispatch](../../Spatial/tiered-simulation-dispatch.md)
 
 <!-- Deep dive: claude/overview/13-runtime.md §Tier-Filtered System Dispatch -->
-<!-- Rules: claude/rules/spatial.md (modules TierClusterIndex/TI-01..TI-03, SetCellTier Validation/SC-01) -->
+<!-- Rules: rules/spatial.md (modules TierClusterIndex/TI-01..TI-03, SetCellTier Validation/SC-01) -->

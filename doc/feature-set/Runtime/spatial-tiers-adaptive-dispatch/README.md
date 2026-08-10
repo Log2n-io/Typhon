@@ -67,5 +67,5 @@ checkerboard-dispatched at once, and dormancy filters out sleeping clusters unde
 - Sub-features: [Tier-Filtered & Amortized Dispatch](./tier-filtered-amortized-dispatch.md), [Cluster Dormancy (Sleep/Wake)](./cluster-dormancy.md), [Checkerboard (Red/Black) Dispatch](./checkerboard-dispatch.md)
 
 <!-- Deep dive: claude/overview/13-runtime.md §Spatial Tiers & Multi-Resolution Dispatch -->
-<!-- Deep dive: claude/rules/spatial.md (modules TierClusterIndex, Dormancy, Checkerboard Partition) -->
+<!-- Deep dive: rules/spatial.md (modules TierClusterIndex, Dormancy, Checkerboard Partition) -->
 <!-- ADR: claude/adr/046-spatial-tiers-architecture.md -->

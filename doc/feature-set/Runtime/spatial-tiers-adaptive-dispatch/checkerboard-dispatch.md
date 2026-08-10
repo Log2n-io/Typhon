@@ -86,4 +86,4 @@ game.QuerySystem("Pheromone_Diffuse", ctx =>
 
 <!-- Deep dive: claude/overview/13-runtime.md §Checkerboard Dispatch -->
 <!-- ADR: claude/adr/046-spatial-tiers-architecture.md (Decision 6 — one DAG node, two internal phases) -->
-<!-- Rules: claude/rules/spatial.md (module Checkerboard Partition, CB-01, CB-02) -->
+<!-- Rules: rules/spatial.md (module Checkerboard Partition, CB-01, CB-02) -->

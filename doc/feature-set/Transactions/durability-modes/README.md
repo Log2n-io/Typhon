@@ -97,4 +97,4 @@ trade.Commit();               // blocks ~15-85µs — WAL FUA complete before re
 
 <!-- Deep dive: claude/overview/02-execution.md §2.1 Unit of Work (#21-unit-of-work), §2.3 Durability Modes (#23-durability-modes), claude/overview/README.md -->
 <!-- ADRs: ADR-005 — Durability Mode Per Unit of Work — claude/adr/005-durability-mode-per-uow.md, ADR-036 — WAL Durability Modes Architecture — claude/adr/036-wal-durability-modes.md -->
-<!-- Rules: claude/rules/durability.md — module UoW Registry -->
+<!-- Rules: rules/durability.md — module UoW Registry -->

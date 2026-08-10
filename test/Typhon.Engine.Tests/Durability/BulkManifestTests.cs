@@ -11,7 +11,7 @@ namespace Typhon.Engine.Tests;
 /// </summary>
 /// <remarks>
 /// <para>Source-of-truth: <c>claude/design/Durability/BulkLoad/04-manifest-format.md</c>.</para>
-/// <para>The <see cref="BulkManifestHeader.Lsn"/> field MUST sit at body offset 0 per <b>WP-07</b> (<c>claude/rules/durability.md</c>) —
+/// <para>The <see cref="BulkManifestHeader.Lsn"/> field MUST sit at body offset 0 per <b>WP-07</b> (<c>rules/durability.md</c>) —
 /// <c>WalSegmentReader</c> extracts the chunk LSN via the generic <c>body[0..8]</c> convention.</para>
 /// </remarks>
 [TestFixture]

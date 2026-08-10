@@ -232,7 +232,7 @@ public sealed class BulkLoadSession : IDisposable
     /// <c>BulkEnd</c> manifest, waits for <c>BulkEnd</c> durable, then returns. On return the bulk is fully committed and visible to subsequent transactions.
     /// </summary>
     /// <remarks>
-    /// Implements the 6-step barrier from <c>claude/design/Durability/BulkLoad/02-write-path.md</c> + invariant <b>BL-04</b> in <c>claude/rules/durability.md</c>.
+    /// Implements the 6-step barrier from <c>claude/design/Durability/BulkLoad/02-write-path.md</c> + invariant <b>BL-04</b> in <c>rules/durability.md</c>.
     /// </remarks>
     /// <exception cref="BulkSessionClosedException">Session has already been completed or disposed.</exception>
     /// <exception cref="BulkLoadCheckpointTimeoutException">Checkpoint did not complete within <see cref="BulkLoadOptions.CheckpointTimeout"/>; the session

@@ -75,4 +75,4 @@ dbe.WriteTickFence(tickNumber);   // never visits TerrainPiece's static tree —
 
 <!-- Deep dive: claude/design/Spatial/SpatialIndex/08-game-features.md §Feature F2 — Static/Dynamic Separation -->
 <!-- Deep dive: claude/design/Spatial/SpatialIndex/05-ecs-integration.md §SpatialIndexState -->
-<!-- Rules: claude/rules/spatial.md §Module: Fat AABB Updates (SF-02) -->
+<!-- Rules: rules/spatial.md §Module: Fat AABB Updates (SF-02) -->

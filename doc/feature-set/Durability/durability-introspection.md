@@ -60,4 +60,4 @@ long bytesFlushed = walWriter.Throughput.First(t => t.Name == "BytesWritten").Co
 - Related feature: [Checkpoint v2 (SnapshotStore pipeline)](./checkpoint-v2/README.md), [Metric Reporting (IMetricSource / IMetricWriter)](../Resources/metric-reporting.md), [OpenTelemetry Metrics Export](../Observability/otel-metrics-export/README.md)
 
 <!-- Deep dive: claude/overview/06-durability.md — Honest Watermarks, claude/design/Durability/MinimalWal/01-architecture.md §7 -->
-<!-- Rules: claude/rules/durability.md — CK-06, LOG-05 -->
+<!-- Rules: rules/durability.md — CK-06, LOG-05 -->

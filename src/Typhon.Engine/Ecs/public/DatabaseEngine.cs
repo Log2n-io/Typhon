@@ -444,7 +444,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     // session forces a rebuild on the next open. The flag is deliberately NOT keyed on CheckpointLSN: a bulk-generated DB
     // closes cleanly with CheckpointLSN == 0 (its data went straight to the .bin, nothing checkpointed through the WAL),
     // and its HEADs are still current — gating trust on a non-zero LSN wrongly forced a full rebuild for exactly those
-    // DBs. CheckpointLSN is kept only for the diagnostic log line. See claude/rules/durability.md (CS-01..CS-03).
+    // DBs. CheckpointLSN is kept only for the diagnostic log line. See rules/durability.md (CS-01..CS-03).
     private bool _cleanShutdownAtOpen;
     private long _checkpointLsnAtOpen;
     private bool _headsTrusted;
@@ -2118,7 +2118,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// Called from <see cref="Dispose"/> STRICTLY AFTER <see cref="PersistEngineState"/> has flushed all dirty data pages,
     /// in its own <c>FlushToDisk</c> — never bundled with the data flush. This ordering is the safety contract: the flag
     /// is only durable once every cluster page whose HEADs it vouches for is already durable, so a torn close leaves the
-    /// flag unwritten and the next open conservatively rebuilds. See claude/rules/durability.md (CS-01).
+    /// flag unwritten and the next open conservatively rebuilds. See rules/durability.md (CS-01).
     /// </remarks>
     private void MarkCleanShutdown()
     {

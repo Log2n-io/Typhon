@@ -90,4 +90,4 @@ scheduler.Start();
 
 <!-- Deep dive: claude/adr/052-track-dag-partitioning-hierarchy.md -->
 <!-- Deep dive: claude/overview/13-runtime.md §Track → DAG → Phase → System partitioning -->
-<!-- Deep dive: claude/rules/runtime-scheduling.md (PS-01, PR-01..PR-03) -->
+<!-- Deep dive: rules/runtime-scheduling.md (PS-01, PR-01..PR-03) -->

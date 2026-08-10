@@ -93,4 +93,4 @@ tx2.Commit();                  // blocks ~15-85µs — durable on the data file'
 - Sibling: [Unit of Work (durability boundary)](../../Transactions/unit-of-work.md) — `DurabilityMode` is fixed on the UoW at creation; the UoW is the object that owns this choice
 
 <!-- Deep dive: claude/overview/06-durability.md §6.3, claude/overview/02-execution.md §2.3, claude/adr/005-durability-mode-per-uow.md -->
-<!-- Rules: claude/rules/durability.md — module CX -->
+<!-- Rules: rules/durability.md — module CX -->

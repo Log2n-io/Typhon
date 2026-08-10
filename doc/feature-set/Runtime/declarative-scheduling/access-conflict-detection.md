@@ -102,4 +102,4 @@ class RenderSystem : QuerySystem
 - Sibling: [Runtime/Scheduler Declared-Access Validation](../../Errors/runtime-access-validation.md) — the DEBUG-only runtime check that cross-verifies these declarations.
 
 <!-- Deep dive: claude/design/Runtime/07-system-access-declarations.md -->
-<!-- Deep dive: claude/rules/runtime-scheduling.md (AC-01..AC-05, ED-01..ED-05f, DV-01..DV-03) -->
+<!-- Deep dive: rules/runtime-scheduling.md (AC-01..AC-05, ED-01..ED-05f, DV-01..DV-03) -->

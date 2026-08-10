@@ -28,7 +28,7 @@ Three tasks are launched by GitHub Actions, not by hand. Full design:
 
 A fourth workflow uses `shard.py` **without** AWS: `.github/workflows/nightly-macos-arm64.yml` runs the
 engine suite nightly on a GitHub-hosted `macos-15` runner (Apple Silicon — the arm64 platform Typhon
-supports for developers, which the x64 gate cannot exercise; see `claude/rules/durability.md` → SL-07).
+supports for developers, which the x64 gate cannot exercise; see `rules/durability.md` → SL-07).
 That runner has 3 cores, where the committed K=8 plan would land at ~2.7 processes per core, so the job sets
 **`SHARD_CONCURRENCY=1`** — the *same* `shards.json`, one shard at a time. It also points `TMPDIR` at a RAM
 disk, the macOS equivalent of the self-hosted gate's `TMPDIR=/nvme`. Non-blocking; never a required check.

@@ -168,7 +168,7 @@ internal static class AccessDagDeriver
     /// <summary>
     /// Returns true iff <paramref name="a"/> (in an earlier phase) and <paramref name="b"/> (in a later phase) have any access pair that requires serialisation.
     /// The direction of the edge is always earlier-phase → later-phase regardless of which side carries the writer — phase order is the disambiguator
-    /// (see ED-05f in <c>claude/rules/runtime-scheduling.md</c>).
+    /// (see ED-05f in <c>rules/runtime-scheduling.md</c>).
     ///
     /// Conflict triggers (any one is sufficient):
     /// <list type="bullet">

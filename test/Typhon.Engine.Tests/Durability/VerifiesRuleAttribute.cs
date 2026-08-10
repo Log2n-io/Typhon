@@ -3,7 +3,7 @@ using System;
 namespace Typhon.Engine.Tests;
 
 /// <summary>
-/// Marks a test as the falsifiable proof of a correctness rule from <c>claude/rules/</c> (e.g. "LOG-02").
+/// Marks a test as the falsifiable proof of a correctness rule from <c>rules/</c> (e.g. "LOG-02").
 /// </summary>
 /// <remarks>
 /// The rule-coverage audit is <c>scripts/audit-rule-coverage.py</c> (#703), and it is now built and gating: it

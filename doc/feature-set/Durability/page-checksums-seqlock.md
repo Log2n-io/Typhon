@@ -74,4 +74,4 @@ catch (PageCorruptionException ex)
 
 <!-- Deep dive: claude/overview/06-durability.md §6.7 -->
 <!-- ADR: 015-crc32c-page-checksums (claude/adr/015-crc32c-page-checksums.md) -->
-<!-- Rules: claude/rules/durability.md — modules Seqlock, Page Safety -->
+<!-- Rules: rules/durability.md — modules Seqlock, Page Safety -->

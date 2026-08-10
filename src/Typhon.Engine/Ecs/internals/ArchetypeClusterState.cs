@@ -47,7 +47,7 @@ internal sealed unsafe class ArchetypeClusterState
     // bit of a cluster — the worker that drained the cluster enters the finalize section (FinaliseEmptyClusterCellState + RemoveFromActiveList + segment
     // FreeChunk) while other workers continue their migration work undisturbed. Padded to 64 bytes so the latch field owns a full cache line and uncontended
     // acquisitions don't ping-pong with adjacent hot fields like ActiveClusterCount / MigrationHint / LastTickMigrationCount.
-    // See rule MD-03 in claude/rules/spatial.md.
+    // See rule MD-03 in rules/spatial.md.
     // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
     [StructLayout(LayoutKind.Explicit, Size = 64)]

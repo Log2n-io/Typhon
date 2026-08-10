@@ -78,4 +78,4 @@ catch (PageCacheBackpressureTimeoutException ex)
 
 <!-- Deep dive: claude/design/Storage/PageCache/02-page-states.md, claude/design/Storage/PageCache/06-changesets.md, claude/design/Storage/PageCache/07-concurrency.md -->
 <!-- ADR: claude/adr/033-epoch-based-page-eviction.md -->
-<!-- Rules: claude/rules/durability.md — module Page Safety (PS-01..PS-09) -->
+<!-- Rules: rules/durability.md — module Page Safety (PS-01..PS-09) -->

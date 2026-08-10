@@ -83,4 +83,4 @@ tx.Commit();   // batch appended now; durable on the next GroupCommit flush
 <!-- Deep dive: claude/overview/06-durability.md §6.1 -->
 <!-- Design: claude/design/Durability/MinimalWal/02-wal-format.md -->
 <!-- ADRs: 011 (claude/adr/011-logical-wal-records.md), 012 (claude/adr/012-mpsc-ring-buffer-wal.md), 015 (claude/adr/015-crc32c-page-checksums.md), 020 (claude/adr/020-dedicated-wal-writer-thread.md) -->
-<!-- Rules: claude/rules/durability.md — module LOG -->
+<!-- Rules: rules/durability.md — module LOG -->

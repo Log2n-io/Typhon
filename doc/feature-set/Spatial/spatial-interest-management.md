@@ -76,4 +76,4 @@ interest.UnregisterObserver(observer);
 - Related catalog entry: [Category Filtering](./spatial-category-filtering.md) (the AND-conjunctive mask semantics this feature reuses)
 
 <!-- Deep dive: claude/design/Spatial/SpatialIndex/08-game-features.md (Feature F4 — Interest Management: inverted dirty-set rationale, ring buffer design, Tier 1/Tier 2 split) -->
-<!-- Rules: claude/rules/spatial.md (Module: Interest Management — IM-01 no missed changes, IM-02 ring buffer safety, IM-03 SV-only scope) -->
+<!-- Rules: rules/spatial.md (Module: Interest Management — IM-01 no missed changes, IM-02 ring buffer safety, IM-03 SV-only scope) -->

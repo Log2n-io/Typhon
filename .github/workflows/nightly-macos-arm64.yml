@@ -3,7 +3,7 @@ name: Nightly arm64 (macOS)
 # Runs the Typhon.Engine unit-test suite nightly on a GitHub-hosted `macos-15` runner — Apple Silicon,
 # i.e. a genuinely weakly-ordered arm64 target. The merge gate runs on x64 (c6id.8xlarge) and therefore
 # CANNOT observe a whole class of defect: acquire/release compile to plain `mov` under x64 TSO, so
-# conforming and violating code emit identical machine code there (claude/rules/durability.md → SL-07).
+# conforming and violating code emit identical machine code there (rules/durability.md → SL-07).
 #
 # WHAT THIS DOES AND DOES NOT PROVE
 #   Catches: OBSERVABLE arm64 failures — deadlocks, crashes, assertion failures, anything the suite asserts on.

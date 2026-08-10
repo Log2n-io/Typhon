@@ -61,4 +61,4 @@ catch (StorageException ex)
 
 <!-- Deep dive: claude/design/Errors/01-exception-hierarchy.md, claude/design/Errors/05-public-exception-catalog.md -->
 <!-- Overview: claude/overview/10-errors.md §10.1, claude/overview/03-storage.md §3.9 -->
-<!-- Rules: claude/rules/durability.md — RB-04 (suspect primary pages heal or fail loudly) -->
+<!-- Rules: rules/durability.md — RB-04 (suspect primary pages heal or fail loudly) -->

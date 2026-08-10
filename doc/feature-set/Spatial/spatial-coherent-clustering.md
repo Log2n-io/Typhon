@@ -97,4 +97,4 @@ wt.Commit();
 
 <!-- Deep dive: claude/design/Spatial/SpatialTiers/01-spatial-clusters.md (cell-cluster mapping, migration, hysteresis, AABB maintenance, bulk loading) -->
 <!-- Deep dive: claude/design/Spatial/SpatialTiers/04-tick-integration.md (tick-fence ordering, migration-fence flow) -->
-<!-- Rules: claude/rules/spatial.md (modules CC-01, CA-01, MD-01, MD-02, MD-03) -->
+<!-- Rules: rules/spatial.md (modules CC-01, CA-01, MD-01, MD-02, MD-03) -->

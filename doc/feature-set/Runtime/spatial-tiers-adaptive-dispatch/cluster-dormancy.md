@@ -84,4 +84,4 @@ arbitrary game code.
 - Same mechanism, full configuration walkthrough: [Spatial category — Cluster Dormancy (Sleep / Wake)](../../Spatial/cluster-dormancy.md)
 
 <!-- Deep dive: claude/overview/13-runtime.md §Cluster Dormancy -->
-<!-- Rules: claude/rules/spatial.md (module Dormancy, DM-01..DM-03) -->
+<!-- Rules: rules/spatial.md (module Dormancy, DM-01..DM-03) -->

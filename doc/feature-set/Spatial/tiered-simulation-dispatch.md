@@ -110,4 +110,4 @@ var viewportView = tx.Query<Ant>().ToView().WithTier(SimTier.Tier0);
 - Sibling: [Tier-Filtered & Amortized Dispatch](../Runtime/spatial-tiers-adaptive-dispatch/tier-filtered-amortized-dispatch.md) — same feature cataloged from the Runtime/dispatch angle rather than the spatial-grid angle
 
 <!-- Deep dive: claude/design/Spatial/SpatialTiers/03-tier-dispatch.md, 04-tick-integration.md -->
-<!-- Rules: claude/rules/spatial.md (modules TierClusterIndex/TI-01..TI-03, SetCellTier Validation/SC-01) -->
+<!-- Rules: rules/spatial.md (modules TierClusterIndex/TI-01..TI-03, SetCellTier Validation/SC-01) -->
