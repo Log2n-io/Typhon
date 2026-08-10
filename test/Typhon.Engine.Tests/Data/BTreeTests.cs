@@ -442,6 +442,63 @@ class BtreeTests
         }
     }
 
+    /// <summary>
+    /// #737 regression guard: removing a leaf's FIRST key and re-inserting it must not stall the pessimistic insert loop.
+    /// </summary>
+    /// <remarks>
+    /// <c>KeyBelowLeafLowerBound</c> restarts the descent whenever the key sits below the target leaf's first key and that leaf has a previous sibling, on the
+    /// premise that such a leaf is reached through a separator equal to its first key — so lowering the first key would strand it under the separator. Removing
+    /// a leaf's first key breaks that premise: the separator stays where it was and is now BELOW the leaf's new minimum, which is legitimate and is exactly the
+    /// one-sided slack <c>ValidateLeafSeparators</c> deliberately tolerates. Re-inserting the removed key then lands in <c>separator &lt;= key &lt; firstKey</c>,
+    /// where the leaf IS the correct destination and the guard rejects it anyway. Single-threaded, nothing else mutates between attempts, so every re-descent
+    /// reaches the same leaf and fails the same test until <c>MaxPessimisticRestarts</c> throws. No contention is involved.
+    /// </remarks>
+    [Test]
+    [Property("MemPageCount", 8192)]
+    unsafe public void RemoveThenReinsertLeafFirstKey_DoesNotStallInsert()
+    {
+        const int Count = 2000;
+
+        using var pmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+        var segment = pmmf.AllocateChunkBasedSegment(PageBlockType.None, 10, sizeof(Index64Chunk));
+        var depth = epochManager.EnterScope();
+        try
+        {
+            var accessor = segment.CreateChunkAccessor();
+            var tree = new LongSingleBTree<PersistentStore>(segment);
+
+            for (long k = 1; k <= Count; k++)
+            {
+                tree.Add(k, (int)k, ref accessor);
+            }
+            tree.CheckConsistency(ref accessor);
+
+            // Every leaf boundary in the tree gets hit by this sweep, so the first key of each non-leftmost leaf is removed and re-inserted in turn.
+            for (long k = 1; k <= Count; k++)
+            {
+                Assert.That(tree.Remove(k, out var val, ref accessor), Is.True, () => $"Failed to remove key {k}");
+                tree.Add(k, val, ref accessor);
+            }
+
+            tree.CheckConsistency(ref accessor);
+            Assert.That(tree.EntryCount, Is.EqualTo(Count));
+
+            for (long k = 1; k <= Count; k++)
+            {
+                var result = tree.TryGet(k, ref accessor);
+                Assert.That(result.IsSuccess, Is.True, () => $"Key {k} should still be present");
+                Assert.That(result.Value, Is.EqualTo((int)k));
+            }
+
+            accessor.Dispose();
+        }
+        finally
+        {
+            epochManager.ExitScope(depth);
+        }
+    }
+
     [Test]
     unsafe public void CheckRemoveString64()
     {

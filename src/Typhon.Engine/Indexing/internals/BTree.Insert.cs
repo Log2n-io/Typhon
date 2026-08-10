@@ -26,29 +26,45 @@ internal abstract partial class BTree<TKey, TStore>
     /// the insert must restart rather than proceed.
     /// </summary>
     /// <remarks>
-    /// A leaf's first key IS the separator its parent holds. Inserting a key smaller than it lands at slot 0, drops the first key below that separator, and no
-    /// insert path updates the ancestor — so descent for the new key then routes LEFT of the separator and never reaches the leaf. The key is counted by
-    /// IncCount, sits in a correctly chained leaf, and is unreachable. That is #297/#679's mode 1, measured: `separator=408 -> child=5 firstKey=226`, with the
-    /// separator never rewritten and the leaf's first key dropped by an insert at slot 0.
+    /// Inserting a key below the bound that routes to a leaf lands it at slot 0, drops the leaf's first key below that bound, and no insert path updates the
+    /// ancestor — so descent for the new key then routes LEFT of the separator and never reaches the leaf. The key is counted by IncCount, sits in a correctly
+    /// chained leaf, and is unreachable. That is #297/#679's mode 1, measured: `separator=408 -> child=5 firstKey=226`.
     /// <para>
     /// Every insert path already validated the UPPER bound — the OLC general path checks <c>key >= HighKey</c>, the append fast paths check
     /// <c>!GetNext().IsValid</c>, <c>InsertIterative</c> has its move-right gap check — and not one validated the lower bound. This is that missing half,
-    /// stated once and applied at all four sites, because a rule enforced at one call site is a rule enforced at one call site (the lesson IXS-03/IXW-01
-    /// already record for readers and writers).
+    /// stated once and applied at both sites, because a rule enforced at one call site is a rule enforced at one call site.
+    /// </para>
+    /// <para>
+    /// The bound is the PREVIOUS leaf's <c>HighKey</c>, not this leaf's first key. Those coincide only immediately after a split. Removing a leaf's first key
+    /// raises its minimum and leaves the separator where it was, so the band <c>prevHighKey &lt;= key &lt; firstKey</c> is a legitimate destination — the leaf
+    /// IS correct and the insert lowers its minimum back toward the separator that already routes to it. This is the same one-sided slack
+    /// <c>ValidateLeafSeparators</c> deliberately tolerates, and the first version of this guard contradicted it by testing <c>key &lt; firstKey</c>: a plain
+    /// single-threaded remove-then-reinsert of any leaf's first key restarted forever and died on <c>MaxPessimisticRestarts</c> with no contention involved
+    /// (<c>RemoveThenReinsertLeafFirstKey_DoesNotStallInsert</c>). <c>HighKey</c> is the exclusive upper bound the whole B-link descent already steers by, so
+    /// reading it here asks the same question the descent asked, rather than a stricter one.
     /// </para>
     /// <para>
     /// A leaf with no previous sibling is the tree's leftmost and is reached through the left POINTER, which carries no separator — lowering its first key is
-    /// legitimate and is what the prepend fast paths exist to do. Hence the <c>GetPrevious</c> test, and it is evaluated LAST: the comparison short-circuits on
-    /// the overwhelmingly common in-range insert, so the extra chunk read is paid only when a key really is below the leaf's first.
+    /// legitimate and is what the prepend fast paths exist to do. The two extra chunk reads (previous leaf + its HighKey) are paid only after the first-key
+    /// comparison has already failed, so the overwhelmingly common in-range insert still costs one <c>GetCount</c>, one <c>GetFirst</c> and one compare.
     /// </para>
     /// <para>
     /// Restarting is safe against livelock because both callers are bounded: the OLC loop by <c>MaxOptimisticRestarts</c> (then the pessimistic path), and the
-    /// pessimistic loop by <c>MaxPessimisticRestarts</c>, which throws rather than spins — the guard #695 put in place for exactly this shape.
+    /// pessimistic loop by <c>MaxPessimisticRestarts</c>, which throws rather than spins — the guard #695 put in place for exactly this shape. That bound is
+    /// what turned the defect above into a 2.5-minute throw instead of a hang, and it is why the message names liveness rather than contention.
     /// </para>
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool KeyBelowLeafLowerBound(NodeWrapper leaf, TKey key, IComparer<TKey> comparer, ref ChunkAccessor<TStore> accessor)
-        => leaf.GetCount(ref accessor) > 0 && comparer.Compare(key, leaf.GetFirst(ref accessor).Key) < 0 && leaf.GetPrevious(ref accessor).IsValid;
+    {
+        if (leaf.GetCount(ref accessor) == 0 || comparer.Compare(key, leaf.GetFirst(ref accessor).Key) >= 0)
+        {
+            return false;
+        }
+
+        var previous = leaf.GetPrevious(ref accessor);
+        return previous.IsValid && comparer.Compare(key, previous.GetHighKey(ref accessor)) < 0;
+    }
 
     /// <summary>Creates the insert value, handling AllowMultiple buffer creation.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
