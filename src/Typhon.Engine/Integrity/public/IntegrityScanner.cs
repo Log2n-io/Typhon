@@ -89,6 +89,7 @@ public static class IntegrityScanner
                 ChainChecks.Run(ctx);
                 ClusterChecks.Run(ctx);
                 EntityMapChecks.Run(ctx);
+                IndexChecks.Run(ctx);
                 WalChecks.Run(ctx);
             }
         }
