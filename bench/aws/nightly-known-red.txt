@@ -34,3 +34,16 @@ ChaosStressTests.UniqueIndexViolation_UnderLoad
 # pessimistic insert burning all 10,000 restarts — NOT a deadlock, measured by deadline escalation. #739: a garbage chunk
 # id out of merge/unlink, plus a key surviving its Remove.
 OlcBTreeRaceStressTests.OlcRaceStress_FourScenariosUnderCpuNoise
+
+# --- #400 -------------------------------------------------------------------------------------------------------------
+# The T5 linearizability model on the production default (Deferred + parallel transactions on one shared UnitOfWork)
+# reproduces the shared-ChangeSet race within milliseconds. QUARANTINE.md names these; the _Deep variant runs ONLY in this
+# tier, which is why it was missing from the first version of this file and reddened the job on its first real run.
+LinearizabilityTests.ParallelOperations_AreLinearizable_Deep
+LinearizabilityTests.ParallelOperations_AreLinearizable
+LinearizabilityTests.DirtyCounter_IsConservedAtQuiesce
+
+# --- #389 -------------------------------------------------------------------------------------------------------------
+# ComponentCollection buffer mutations are not WAL-redo-logged, so after a crash in the WAL window every collection
+# recovers EMPTY behind an intact buffer descriptor. Regression lock for when #389 is fixed.
+DifferentialRecoveryOracleTests.PayloadAxes_SurviveACrash
