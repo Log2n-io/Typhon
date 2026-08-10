@@ -1259,6 +1259,215 @@ internal static class DamageKit
             RepairIsLossless: true);
     }
 
+    /// <summary>What to break inside a B+Tree leaf entry.</summary>
+    internal enum IndexEntryBreak
+    {
+        /// <summary>Rewrite a key so the node's keys are no longer ascending.</summary>
+        KeyOrder,
+
+        /// <summary>Point an entry's value at a cluster slot that holds no entity.</summary>
+        DanglingValue
+    }
+
+    /// <summary>
+    /// <b>D6</b> — corrupts one entry of a B+Tree leaf: its key's order, or the slot its value names.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Both modes leave the tree structurally perfect — every link resolves, every chain terminates, every count fits —
+    /// so <c>IDX-06</c> sees nothing. That separation is the point: structure and contents fail independently, and an
+    /// index whose shape is flawless can still answer every query wrongly.
+    /// </para>
+    /// <para>
+    /// The leaf is found by scanning the segment's allocated chunks for the leaf flag rather than by descending, so the
+    /// primitive does not depend on the same traversal the check under test uses. A fixture that shares its subject's
+    /// traversal cannot catch a defect in it.
+    /// </para>
+    /// </remarks>
+    /// <param name="bundlePath">The bundle to damage.</param>
+    /// <param name="how">Which way to break the entry.</param>
+    /// <param name="fieldName">Receives the name of the indexed field whose tree was damaged.</param>
+    internal static DamageRecord BreakIndexEntry(string bundlePath, IndexEntryBreak how, out string fieldName)
+    {
+        int filePage;
+        long targetOffset;
+        int writeSize;
+        long newValue;
+
+        using (var source = new OfflineBundlePageSource(bundlePath))
+        {
+            var roots = SweepRoots(source);
+            var manifest = new SchemaCatalogReader(source, roots);
+            manifest.Read(BootstrapReader.Read(source));
+            Assert.That(manifest.IsUsable, Is.True);
+
+            var walker = new SegmentWalker(source);
+            var reader = new IndexDirectoryReader(source);
+            var page = new byte[IntegrityConstants.PageSize];
+            var entries = new List<IndexTreeEntry>();
+
+            SegmentView segment = null;
+            var geometry = default(ChunkGeometry);
+            var layout = default(IndexNodeLayout);
+            var leafChunk = -1;
+            var count = 0;
+            fieldName = null;
+
+            foreach (var archetype in manifest.Archetypes.Values)
+            {
+                foreach (var root in new[] { archetype.IndexRoot, archetype.String64IndexRoot })
+                {
+                    if (root == 0 || leafChunk >= 0 || !source.TryReadPage(root, page))
+                    {
+                        continue;
+                    }
+
+                    var g = ChunkGeometry.FromPage(page);
+                    var seg = walker.WalkSegment(root);
+                    if (!g.IsUsable || !reader.TryReadDirectory(seg, g, entries))
+                    {
+                        continue;
+                    }
+
+                    foreach (var entry in entries)
+                    {
+                        if (entry.StableId < 0 || entry.Slot >= archetype.ComponentNames.Count
+                            || !manifest.Components.TryGetValue(archetype.ComponentNames[entry.Slot], out var component))
+                        {
+                            continue;
+                        }
+
+                        var field = component.Fields.FirstOrDefault(f => f.FieldId == entry.StableId && f.HasIndex);
+                        if (field == null)
+                        {
+                            continue;
+                        }
+
+                        var l = IndexNodeLayout.ForFieldType(field.Type);
+                        if (!l.IsUsable)
+                        {
+                            continue;
+                        }
+
+                        // Descend THIS tree's leftmost path to its first leaf. Scanning the segment for any leaf was the
+                        // first attempt and it silently damaged the wrong tree: an archetype index segment hosts the
+                        // primary-key tree alongside the field ones, and a PK node read through an int layout is written
+                        // at an offset that belongs to nothing. The scan came back Sound, because the tree under test was
+                        // untouched — a fixture failing open, which is the worst way for one to fail.
+                        var node = entry.RootChunkId;
+                        for (var depth = 0; depth < 32 && node > 0; depth++)
+                        {
+                            if (!reader.IsAllocated(seg, g, node) || !reader.TryGetChunk(seg, g, node, out var bytes))
+                            {
+                                node = 0;
+                                break;
+                            }
+
+                            if (IndexNodeLayout.IsLeaf(bytes))
+                            {
+                                if (IndexDirectoryReader.CountOf(bytes) < 2)
+                                {
+                                    node = 0;
+                                }
+
+                                break;
+                            }
+
+                            node = l.ValueAt(bytes, 0);
+                        }
+
+                        if (node <= 0)
+                        {
+                            continue;
+                        }
+
+                        reader.TryGetChunk(seg, g, node, out var leafBytes);
+                        segment = seg;
+                        geometry = g;
+                        layout = l;
+                        leafChunk = node;
+                        count = Math.Min(IndexDirectoryReader.CountOf(leafBytes), l.Capacity);
+                        fieldName = field.Name;
+                        break;
+                    }
+                }
+            }
+
+            Assert.That(leafChunk, Is.GreaterThan(0), "no B+Tree leaf with two or more entries was found");
+
+            reader.TryGetChunk(segment, geometry, leafChunk, out var leaf);
+            geometry.TryLocate(leafChunk, out var ordinal, out var chunkInPage);
+            filePage = segment.Pages[ordinal];
+            var chunkAt = ((long)filePage * IntegrityConstants.PageSize) + geometry.OffsetInPage(ordinal, chunkInPage);
+
+            if (how == IndexEntryBreak.KeyOrder)
+            {
+                // Overwrite the LAST key with the first one's value, so entry n-1 sorts before entry n-2 and the node's
+                // ascending order breaks without any pointer changing.
+                var slot = layout.PhysicalSlot(leaf, count - 1);
+                targetOffset = chunkAt + layout.KeysOffset + (slot * layout.KeySize);
+                writeSize = layout.KeySize;
+                newValue = layout.KeySize <= sizeof(long)
+                    ? MemoryMarshal.Read<long>(PadTo8(layout.KeyAt(leaf, 0)))
+                    : 0;
+
+                Assert.That(layout.KeySize, Is.LessThanOrEqualTo(sizeof(long)),
+                    "the key-order primitive writes a scalar key; a string-keyed tree needs a different write");
+            }
+            else
+            {
+                // Point the entry at a cluster slot far past anything the archetype allocated. It stays a well-formed
+                // ClusterLocation, so nothing structural notices.
+                var slot = layout.PhysicalSlot(leaf, 0);
+                targetOffset = chunkAt + layout.ValuesOffset + (slot * sizeof(int));
+                writeSize = sizeof(int);
+                newValue = ClusterLocation.Pack(500_000, 7);
+            }
+        }
+
+        var ranges = new List<ByteRange>
+        {
+            writeSize == sizeof(int)
+                ? WriteInt(bundlePath, targetOffset, (int)newValue)
+                : WriteBytes(bundlePath, targetOffset, BitConverter.GetBytes(newValue).AsSpan(0, writeSize))
+        };
+        ranges.AddRange(RestampPage(bundlePath, filePage));
+
+        return how == IndexEntryBreak.KeyOrder
+            ? new DamageRecord(
+                "D6(index-key-order)",
+                $"the index on '{fieldName}' has a leaf whose keys no longer ascend",
+                ranges,
+                [IndexContentChecks.KeyOrder],
+                IntegrityVerdict.Divergent,
+                RepairIsLossless: true)
+            : new DamageRecord(
+                "D6(index-dangling-value)",
+                $"an entry of the index on '{fieldName}' names a cluster slot that holds no entity",
+                ranges,
+                [IndexContentChecks.ValuesResolve],
+                IntegrityVerdict.Divergent,
+                RepairIsLossless: true);
+    }
+
+    /// <summary>Right-pads a key's bytes into 8 so a narrow key can be read as a long.</summary>
+    private static ReadOnlySpan<byte> PadTo8(ReadOnlySpan<byte> key)
+    {
+        var buffer = new byte[sizeof(long)];
+        key[..Math.Min(key.Length, buffer.Length)].CopyTo(buffer);
+        return buffer;
+    }
+
+    /// <summary>Writes raw bytes at an absolute file offset and returns the range it wrote.</summary>
+    private static ByteRange WriteBytes(string bundlePath, long fileOffset, ReadOnlySpan<byte> bytes)
+    {
+        using var fs = new FileStream(DataPath(bundlePath), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        fs.Seek(fileOffset, SeekOrigin.Begin);
+        fs.Write(bytes);
+        fs.Flush(true);
+        return new ByteRange(fileOffset, bytes.Length);
+    }
+
     /// <summary>Copies one chunk out of a segment. Copies, because callers hold several at once.</summary>
     private static byte[] ReadChunk(IPageSource source, SegmentView segment, ChunkGeometry geometry, int chunkId)
     {

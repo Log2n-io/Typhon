@@ -85,6 +85,79 @@ internal sealed class IndexChecksTests : IntegrityFixtureBase
     }
 
     /// <summary>
+    /// The content checks run, and the key comparison is the field type's own.
+    /// </summary>
+    /// <remarks>
+    /// A key-order check that compared raw bytes rather than the key type's order would pass on this fixture's
+    /// ascending <c>int</c> keys and be wrong for every signed-negative, unsigned or floating-point index. Asserting
+    /// that <c>IDX-05</c> ran and stayed silent over both an <c>int</c> tree and a <c>String64</c> one is what makes
+    /// the silence mean something.
+    /// </remarks>
+    [Test]
+    [CancelAfter(30_000)]
+    public void TheContentChecksRunOverBothKeyTypes()
+    {
+        BuildIndexedDatabase();
+
+        var report = DamageKit.Scan(BundlePath, ScanDepth.Deep);
+        var skipped = string.Join("\n", report.Limits.ChecksSkipped);
+
+        Assert.That(skipped, Does.Not.Contain("CHK-IDX-02"), IntegrityReportText.Render(report));
+        Assert.That(skipped, Does.Not.Contain("CHK-IDX-05"), IntegrityReportText.Render(report));
+
+        Assert.That(report.Findings.Where(f => f.Code is "CHK-IDX-02" or "CHK-IDX-05"), Is.Empty,
+            "the content checks fired on an undamaged database:\n" + IntegrityReportText.Render(report));
+    }
+
+    /// <summary>
+    /// A leaf whose keys stop ascending is reported, with the tree still structurally perfect.
+    /// </summary>
+    /// <remarks>
+    /// Every link resolves and every chain terminates, so <c>IDX-06</c> sees nothing — which is the point. Structure
+    /// and contents fail independently, and an index whose shape is flawless can still answer every query wrongly.
+    /// </remarks>
+    [Test]
+    [CancelAfter(30_000)]
+    public void ALeafWhoseKeysStopAscendingIsReported()
+    {
+        BuildIndexedDatabase();
+        var before = DamageKit.Baseline(BundlePath);
+
+        var damage = DamageKit.BreakIndexEntry(BundlePath, DamageKit.IndexEntryBreak.KeyOrder, out var field);
+        DamageKit.AssertOnlyDeclaredBytesChanged(before, damage);
+
+        var report = DamageKit.Scan(BundlePath, ScanDepth.Deep);
+        DamageKit.AssertDetectedExactly(report, damage);
+
+        var finding = report.Findings.First(f => f.Code == "CHK-IDX-05");
+        Assert.That(finding.Summary, Does.Contain(field));
+        Assert.That(finding.Detail, Does.Contain("binary search"),
+            "the finding must say why order matters — a lookup stops at the first key that compares wrongly");
+    }
+
+    /// <summary>
+    /// An entry pointing at a free cluster slot is reported.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void AnEntryNamingAFreeSlotIsReported()
+    {
+        BuildIndexedDatabase();
+        var before = DamageKit.Baseline(BundlePath);
+
+        var damage = DamageKit.BreakIndexEntry(BundlePath, DamageKit.IndexEntryBreak.DanglingValue, out _);
+        DamageKit.AssertOnlyDeclaredBytesChanged(before, damage);
+
+        var report = DamageKit.Scan(BundlePath, ScanDepth.Deep);
+        DamageKit.AssertDetectedExactly(report, damage);
+
+        var finding = report.Findings.First(f => f.Code == "CHK-IDX-02");
+        Assert.That(finding.RuleId, Is.EqualTo("IX-02"));
+        Assert.That(finding.Detail, Does.Contain("access violation"),
+            "RB-04 records that decoding a ClusterLocation against a slot that is not live is a crash, not a wrong row");
+    }
+
+    /// <summary>
     /// A sibling chain that points at itself is Fatal, and the scan still terminates.
     /// </summary>
     /// <remarks>

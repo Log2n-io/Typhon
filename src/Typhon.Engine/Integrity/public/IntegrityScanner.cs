@@ -95,6 +95,7 @@ public static class IntegrityScanner
                 CrossStructureChecks.Run(ctx);
                 BufferChecks.Run(ctx);
                 IndexChecks.Run(ctx);
+                IndexContentChecks.Run(ctx);
                 WalChecks.Run(ctx);
             }
         }
