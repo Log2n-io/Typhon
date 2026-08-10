@@ -68,7 +68,9 @@ public class BTreeConcurrentReadBenchmarks
     /// After OLC: 32 threads reading version counters with zero writes to shared state.
     /// </summary>
     [Benchmark(OperationsPerInvoke = OpsPerInvocation)]
-    [BenchmarkCategory("BTreeFast")]
+    // #765 S4: promoted into the Regression category, which is what bench/aws/benchmark.sky.yaml's default profile selects and therefore the only
+    // route into benchmark/history. This class sat in BTreeMedium, a profile that has to be dispatched by hand and never was.
+    [BenchmarkCategory("BTreeFast", "Regression")]
     public void ConcurrentLookup_RandomKeys()
     {
         var opsPerThread = OpsPerInvocation / ThreadCount;
