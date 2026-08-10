@@ -77,12 +77,18 @@ internal abstract partial class BTree<TKey, TStore>
     /// Conditioned on a valid right sibling because the rightmost leaf's <c>HighKey</c> bounds nothing: it owns every key above its separator, which is what the
     /// append fast paths rely on.
     /// </para>
+    /// <para>
+    /// The <c>HighKey</c> comparison is tested BEFORE the right-sibling read, and the order is deliberate. Both conjuncts are required, so the result is
+    /// identical either way, but the overwhelmingly common answer is "no, the key is in range" — and in that case this order short-circuits after one
+    /// <c>GetHighKey</c> instead of paying a <c>GetNext</c> first. Every node access here is a virtual <c>BaseNodeStorage</c> call, so dropping one from the
+    /// hot answer is worth more than it looks (#765 S8).
+    /// </para>
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool KeyAboveLeafUpperBound(NodeWrapper leaf, TKey key, IComparer<TKey> comparer, ref ChunkAccessor<TStore> accessor)
         => leaf.GetCount(ref accessor) > 0
-           && leaf.GetNext(ref accessor).IsValid
-           && CompareKeys(key, leaf.GetHighKey(ref accessor), comparer) >= 0;
+           && CompareKeys(key, leaf.GetHighKey(ref accessor), comparer) >= 0
+           && leaf.GetNext(ref accessor).IsValid;
 
     /// <summary>
     /// True when <paramref name="leaf"/> does not own <paramref name="key"/>'s range and therefore must not receive a write of it. Callers restart.
