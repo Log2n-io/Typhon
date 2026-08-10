@@ -234,3 +234,24 @@ written for the read path; these are the write-path obligations that went unwrit
   verified: OlcLatchTests.TryWriteLock_Obsolete_ReturnsFalse, OlcLatchTests.TryWriteLockOnSmoPath_Obsolete_AcquiresAndReportsIt,
             OlcBTreeTests.Remove_ConcurrentMerges_NoWriterEverLocksADetachedNode
   requires IXW-01 (the same bit, read for a different purpose)
+
+### IXW-03: A leaf's lower bound is the PREVIOUS leaf's HighKey, never its own first key `[fatal]`
+  invariant any check asking "does this key belong in this leaf" compares against the previous leaf's `HighKey` - the exclusive
+            bound the B-link descent itself steers by - and never against the leaf's own first key
+  never treating `key < leaf.firstKey` as proof the descent is stale
+  never a restart predicate strictly stronger than the invariant it protects, on a path with no other exit
+  enforce `BTree.KeyBelowLeafLowerBound` short-circuits on `count == 0` and on `key >= firstKey`, then reads the previous leaf and
+          returns `key < previous.HighKey`. The two extra chunk reads are paid only after the first-key comparison has failed, so
+          the common in-range insert still costs one `GetCount`, one `GetFirst` and one compare.
+  scope: BTree.Insert.cs (`KeyBelowLeafLowerBound` and its two call sites: the OLC general path, `InsertIterative`)
+  on_violation: every re-descent reaches the same leaf and fails the same test, so the bounded pessimistic loop of IXW-01 burns all
+                10,000 restarts and throws. Measured single-threaded, no contention of any kind: 2 m 34 s to the throw.
+  rationale: `separator == leaf.firstKey` holds only immediately AFTER a split. Removing a leaf's first key raises the leaf's
+             minimum and leaves the separator where it was, so `separator <= key < firstKey` is a legitimate destination - the leaf
+             IS correct, and the insert lowers its minimum back toward a separator that already routes to it. This is the same
+             one-sided slack `ValidateLeafSeparators` deliberately tolerates, which is what makes the stronger form self-
+             contradictory: the guard rejected states the consistency check in the same PR was written to accept. #740, shipped in
+             PR #737 and caught by `BTreeMicroBenchmarks.Insert_Random` rather than by any of the 5,072 passing tests - nothing in
+             the suite removed a leaf's first key and re-inserted it on a tree large enough to have interior leaves.
+  verified: BtreeTests.RemoveThenReinsertLeafFirstKey_DoesNotStallInsert (2 m 34 s and failing before, 130 ms and green after)
+  requires IXW-01 (its bound is what turns this into a diagnosable throw instead of a hang)
