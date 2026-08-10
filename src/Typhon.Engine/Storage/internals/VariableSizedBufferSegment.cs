@@ -40,7 +40,7 @@ internal struct VariableSizedBufferChunkHeader
 public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct, IPageStore
 {
     protected internal readonly int ElementCountRootChunk;
-    protected readonly int ElementCountPerChunk;
+    protected internal readonly int ElementCountPerChunk;
     protected internal readonly int RootHeaderTotalSize;
     public readonly ChunkBasedSegment<TStore> Segment;
 
@@ -126,19 +126,7 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
             if (newValue == 0)
             {
                 // Chain cleanup inline — do NOT call DeleteBuffer here, it would double-decrement RefCounter.
-                // Copy FirstStoredChunkId to local — rh may go stale during the loop
-                int curChunkId = rh.FirstStoredChunkId;
-                while (curChunkId != 0)
-                {
-                    var curChunkAddr = accessor.GetChunkAddress(curChunkId, true);
-                    ref var curChunkHeader = ref Unsafe.AsRef<VariableSizedBufferChunkHeader>(curChunkAddr);
-                    var toDeleteChunkId = curChunkId;
-                    curChunkId = curChunkHeader.NextChunkId;
-                    if (toDeleteChunkId != bufferId)
-                    {
-                        accessor.Segment.FreeChunk(toDeleteChunkId);
-                    }
-                }
+                FreeChunkChains(bufferId, rh.FirstFreeChunkId, ref accessor);
                 deleted = true;
             }
             return newValue;
@@ -171,23 +159,7 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
 
             if (--rh.RefCounter == 0)
             {
-                // Copy FirstStoredChunkId to local — rh may go stale during the loop
-                int curChunkId = rh.FirstStoredChunkId;
-
-                while (curChunkId != 0)
-                {
-                    var curChunkAddr = accessor.GetChunkAddress(curChunkId, true);
-                    ref var curChunkHeader = ref Unsafe.AsRef<VariableSizedBufferChunkHeader>(curChunkAddr);
-
-                    var toDeleteChunkId = curChunkId;
-                    // Read NextChunkId immediately to local before any further accessor calls
-                    curChunkId = curChunkHeader.NextChunkId;
-
-                    if (toDeleteChunkId != bufferId)
-                    {
-                        accessor.Segment.FreeChunk(toDeleteChunkId);
-                    }
-                }
+                FreeChunkChains(bufferId, rh.FirstFreeChunkId, ref accessor);
             }
         }
         finally
@@ -199,6 +171,227 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
                 ReleaseLockOnBuffer(ref rh);
             }
             accessor.Segment.FreeChunk(bufferId);
+        }
+    }
+
+    // ── Raw (type-erased) element access — #389 ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // Both #389 call sites hold a VariableSizedBufferSegmentBase<PersistentStore> and nothing more: it is the element type of
+    // ComponentTable.CollectionFields, because a ComponentTable is not generic over its fields' element types. The commit emitter must READ a collection's
+    // content to log it, and RecoveryApplier must REPLACE one wholesale when it flushes the fold. Neither can name T, so a Set<T> on the generic subclass
+    // would be unreachable from both.
+    //
+    // Working in bytes costs nothing: every operation below is a memcpy at ElementSize stride, which the base already knows, and the elements are unmanaged
+    // by constraint. The generic subclass keeps typed forwarders for callers that do have T.
+
+    /// <summary>Total number of elements currently stored in <paramref name="bufferId"/>; <c>0</c> for the null buffer.</summary>
+    internal int GetElementCount(int bufferId, ref ChunkAccessor<TStore> accessor)
+    {
+        if (bufferId == 0)
+        {
+            return 0;
+        }
+
+        return accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, false).TotalCount;
+    }
+
+    /// <summary>
+    /// Copies every element of <paramref name="bufferId"/> into <paramref name="dest"/> as raw bytes, and returns the number of elements copied.
+    /// </summary>
+    /// <remarks>
+    /// A hand-rolled chunk walk rather than <c>VariableSizedBufferAccessor.NextChunk</c>, deliberately: that "read-only" enumerator MUTATES — it promotes the
+    /// buffer lock to exclusive and frees or free-lists empty chunks as it goes. That is fine for a reader that owns the buffer, but this runs inside
+    /// <c>BuildCommitBatch</c>, on the commit path, where structural mutation of a buffer other revisions may share is not something a LOG step should do.
+    /// </remarks>
+    internal int ReadAllElementsRaw(int bufferId, Span<byte> dest, ref ChunkAccessor<TStore> accessor)
+    {
+        if (bufferId == 0)
+        {
+            return 0;
+        }
+
+        ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, false);
+        var total = rh.TotalCount;
+        if (total == 0)
+        {
+            return 0;
+        }
+
+        if (dest.Length < total * ElementSize)
+        {
+            ThrowHelper.ThrowInvalidOp($"ReadAllElementsRaw: destination holds {dest.Length} bytes, need {total * ElementSize} for {total} element(s).");
+        }
+
+        var wc = WaitContext.FromTimeout(TimeoutOptions.Current.SegmentAllocationLockTimeout);
+        if (!rh.Lock.EnterSharedAccess(ref wc))
+        {
+            ThrowHelper.ThrowLockTimeout("SegmentAllocation/BufferRead", TimeoutOptions.Current.SegmentAllocationLockTimeout);
+        }
+
+        var copied = 0;
+        try
+        {
+            var curChunkId = bufferId;   // FirstStoredChunkId names the chunk last APPENDED to, not the head of the chain — the chain always starts at the root
+            while (curChunkId != 0 && copied < total)
+            {
+                var addr = accessor.GetChunkAddress(curChunkId, false);
+                var header = (VariableSizedBufferChunkHeader*)addr;
+                var count = header->ElementCount;
+                if (count > 0)
+                {
+                    var payload = addr + (curChunkId == bufferId ? RootHeaderTotalSize : sizeof(VariableSizedBufferChunkHeader));
+                    new ReadOnlySpan<byte>(payload, count * ElementSize).CopyTo(dest[(copied * ElementSize)..]);
+                    copied += count;
+                }
+
+                curChunkId = header->NextChunkId;
+            }
+        }
+        finally
+        {
+            rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, false);
+            rh.Lock.ExitSharedAccess();
+        }
+
+        return copied;
+    }
+
+    /// <summary>
+    /// Replaces a collection's entire content: allocates a fresh buffer holding <paramref name="elements"/>, releases
+    /// <paramref name="bufferId"/>, and returns the NEW buffer id (<c>0</c> when <paramref name="elements"/> is empty).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The primitive <c>RecoveryApplier</c>'s fold-flush needs and the one operation the collection API never had — the whole mutation surface was
+    /// <c>Add</c>. Allocate-then-release rather than truncate-in-place, for three reasons that all matter here:
+    /// </para>
+    /// <list type="bullet">
+    /// <item><description>
+    /// <b>Copy-on-write safety falls out for free.</b> A buffer shared with another MVCC revision has <c>RefCounter &gt; 1</c>; writing into it would corrupt
+    /// the other revision. Never touching the old buffer's bytes makes that unreachable by construction rather than by a check someone can forget.
+    /// </description></item>
+    /// <item><description>
+    /// <b>Idempotence (AP-12).</b> Set(x) twice yields the same content and the same refcount as Set(x) once — the second call simply allocates again and
+    /// releases the first result. Only the buffer ID differs, which AP-13 explicitly tolerates: placements chosen at apply may differ from pre-crash.
+    /// </description></item>
+    /// <item><description>
+    /// <b>Empty means no buffer</b>, matching the live shape exactly: a collection that was never appended to has <c>_bufferId == 0</c>, so setting one to
+    /// empty must produce 0 too, not a fresh empty root chunk that would leak one allocation per empty collection on every recovery.
+    /// </description></item>
+    /// </list>
+    /// <para>
+    /// Release goes through <see cref="BufferRelease"/>, never <c>DeleteBuffer</c> — the latter decrements the refcount a second time (see the comment at
+    /// its chain-cleanup branch), which on a shared buffer frees it under a live holder.
+    /// </para>
+    /// </remarks>
+    internal int SetElementsRaw(int bufferId, ReadOnlySpan<byte> elements, ref ChunkAccessor<TStore> accessor)
+    {
+        if (elements.Length % ElementSize != 0)
+        {
+            ThrowHelper.ThrowInvalidOp($"SetElementsRaw: {elements.Length} bytes is not a whole number of {ElementSize}-byte elements.");
+        }
+
+        var newBufferId = elements.Length == 0 ? 0 : AllocateBuffer(ref accessor);
+        if (newBufferId != 0)
+        {
+            FillFreshBufferRaw(newBufferId, elements, ref accessor);
+        }
+
+        if (bufferId != 0)
+        {
+            BufferRelease(bufferId, ref accessor);
+        }
+
+        return newBufferId;
+    }
+
+    /// <summary>
+    /// Writes <paramref name="elements"/> into a buffer that was just allocated and is therefore empty, unshared and unreachable by any other thread.
+    /// </summary>
+    /// <remarks>
+    /// No buffer lock is taken and no free-list is consulted, because neither can matter for a buffer nobody else has seen yet. That is also why this is not
+    /// expressed in terms of the general append path: <c>AddElements</c> carries free-list bookkeeping and re-fetch discipline that exist for the shared case
+    /// and would be pure noise here.
+    /// </remarks>
+    private void FillFreshBufferRaw(int bufferId, ReadOnlySpan<byte> elements, ref ChunkAccessor<TStore> accessor)
+    {
+        var remaining = elements.Length / ElementSize;
+        var srcElement = 0;
+        var curChunkId = bufferId;
+
+        while (true)
+        {
+            var isRoot = curChunkId == bufferId;
+            var capacity = isRoot ? ElementCountRootChunk : ElementCountPerChunk;
+            var take = Math.Min(capacity, remaining);
+
+            // Copy first, then take the next chunk: AllocateChunk can evict the current chunk's slot from the accessor's cache, so the address must not
+            // outlive it. Every address below is re-fetched after any call that can allocate.
+            var addr = accessor.GetChunkAddress(curChunkId, true);
+            if (take > 0)
+            {
+                var payload = addr + (isRoot ? RootHeaderTotalSize : sizeof(VariableSizedBufferChunkHeader));
+                elements.Slice(srcElement * ElementSize, take * ElementSize).CopyTo(new Span<byte>(payload, take * ElementSize));
+            }
+
+            ((VariableSizedBufferChunkHeader*)addr)->ElementCount = take;
+            ((VariableSizedBufferChunkHeader*)addr)->NextChunkId = 0;
+            srcElement += take;
+            remaining -= take;
+
+            if (remaining == 0)
+            {
+                break;
+            }
+
+            var nextChunkId = accessor.Segment.AllocateChunk(false, accessor.ChangeSet);
+            addr = accessor.GetChunkAddress(curChunkId, true);   // re-fetch: AllocateChunk may have evicted this slot
+            ((VariableSizedBufferChunkHeader*)addr)->NextChunkId = nextChunkId;
+            curChunkId = nextChunkId;
+        }
+
+        ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
+        rh.FirstStoredChunkId = curChunkId;   // the chunk a subsequent Add appends into — the last one written, as AddElements leaves it
+        rh.FirstFreeChunkId = 0;
+        rh.TotalFreeChunk = 0;
+        rh.TotalCount = elements.Length / ElementSize;
+    }
+
+    /// <summary>
+    /// Frees every chunk a dying buffer owns — its storage chain and its free-chunk chain — except the root, which the caller frees last.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The walk starts at the root, NOT at <c>FirstStoredChunkId</c>.</b> Both release paths used to start there, and the field does not mean what its
+    /// name suggests: <c>AddElement</c> assigns it the chunk it just appended into, so it is the TAIL of the chain — the append cursor. The head is the root
+    /// chunk itself, which is exactly where <see cref="VariableSizedBufferAccessor{T,TStore}"/> starts reading. Walking from the tail therefore freed the tail
+    /// and nothing else, orphaning every intermediate chunk of a multi-chunk buffer. A single-chunk buffer has root == tail, which is why this survived: the
+    /// defect is invisible until a collection outgrows one chunk, and it leaks silently rather than failing.
+    /// </para>
+    /// <para>
+    /// The free-chunk chain is walked too. <c>VariableSizedBufferAccessor.NextChunk</c> unlinks empty chunks from the storage chain and parks them on
+    /// <c>FirstFreeChunkId</c> for reuse; those are still owned by this buffer, so a release that only walked the storage chain leaked them as well.
+    /// </para>
+    /// </remarks>
+    private void FreeChunkChains(int bufferId, int firstFreeChunkId, ref ChunkAccessor<TStore> accessor)
+    {
+        // Two passes over one loop body rather than a local function: `accessor` is a ref parameter and cannot be captured by one.
+        for (var pass = 0; pass < 2; pass++)
+        {
+            var curChunkId = pass == 0 ? bufferId : firstFreeChunkId;
+            while (curChunkId != 0)
+            {
+                // Read NextChunkId into a local before any further accessor call — FreeChunk/GetChunkAddress can evict this chunk's slot from the accessor's
+                // 16-entry cache, and a ref taken beforehand would then point at another page's bytes.
+                var curChunkAddr = accessor.GetChunkAddress(curChunkId, true);
+                var toDeleteChunkId = curChunkId;
+                curChunkId = ((VariableSizedBufferChunkHeader*)curChunkAddr)->NextChunkId;
+
+                if (toDeleteChunkId != bufferId)
+                {
+                    accessor.Segment.FreeChunk(toDeleteChunkId);
+                }
+            }
         }
     }
 
@@ -491,6 +684,18 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
     /// <param name="bufferId">The buffer identifier</param>
     /// <returns>A ref struct enumerator that can be used in foreach loops</returns>
     public BufferEnumerator<T, TStore> EnumerateBuffer(int bufferId) => new(this, bufferId);
+
+    /// <summary>
+    /// Typed forwarder to <see cref="VariableSizedBufferSegmentBase{TStore}.SetElementsRaw"/> — replaces the buffer's whole content and returns the new id.
+    /// </summary>
+    public int SetElements(int bufferId, ReadOnlySpan<T> elements, ref ChunkAccessor<TStore> accessor) =>
+        SetElementsRaw(bufferId, MemoryMarshal.AsBytes(elements), ref accessor);
+
+    /// <summary>
+    /// Typed forwarder to <see cref="VariableSizedBufferSegmentBase{TStore}.ReadAllElementsRaw"/> — returns the number of elements copied into <paramref name="dest"/>.
+    /// </summary>
+    public int ReadAllElements(int bufferId, Span<T> dest, ref ChunkAccessor<TStore> accessor) =>
+        ReadAllElementsRaw(bufferId, MemoryMarshal.AsBytes(dest), ref accessor);
 
     public int CloneBuffer(int sourceBufferId, ref ChunkAccessor<TStore> accessor)
     {
