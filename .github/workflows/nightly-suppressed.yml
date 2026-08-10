@@ -127,6 +127,39 @@ jobs:
           import glob, re, sys, xml.etree.ElementTree as ET
           NS = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
 
+          # ── Did the run actually FINISH? ────────────────────────────────────────────────────────────────────────
+          # This must be answered before anything else, and it was not on this step's first real run. When --blame-hang
+          # kills the host, vstest still writes a trx — but a PARTIAL one, holding only the tests that completed before
+          # the kill. Measured on PR #768: 2 results from a tier that runs dozens. Diffing that against an allowlist
+          # produces a confident verdict about a tier that never ran, which is exactly the defect #765 exists to remove,
+          # reproduced inside the instrument built to remove it. The old "selected zero tests" guard does not help: it
+          # only catches total == 0, and 2-out-of-dozens sails through.
+          aborted, incomplete = [], []
+          for f in glob.glob("ci-out/**/*.trx", recursive=True):
+              for ri in ET.parse(f).getroot().iter(f"{NS}RunInfo"):
+                  text = (ri.findtext(f"{NS}Text") or "").strip()
+                  if re.search(r"abort|host process crashed|inactivity time", text, re.I):
+                      aborted.append(text.splitlines()[0][:200])
+          # Blame writes the running order and marks the one that never came back. That names the hang directly.
+          for f in glob.glob("ci-out/**/Sequence_*.xml", recursive=True):
+              for t in ET.parse(f).getroot().iter("Test"):
+                  if t.get("Completed") == "False":
+                      incomplete.append(t.get("Name", "?"))
+
+          if aborted:
+            for a in dict.fromkeys(aborted):
+                print(f"::error::The Nightly tier did not finish: {a}")
+            for n in dict.fromkeys(incomplete):
+                print(f"::error::Never completed (this is the hang): `{n}`")
+            with open("verdict.md", "w", encoding="utf-8") as fh:
+                fh.write("## Nightly verdict\n\n### The run ABORTED — no verdict is possible\n\n"
+                         + "".join(f"- {a}\n" for a in dict.fromkeys(aborted))
+                         + ("\n**Never completed:**\n" + "".join(f"- `{n}`\n" for n in dict.fromkeys(incomplete)) if incomplete else "")
+                         + "\nThe trx holds only the tests that finished before the host was killed, so the pass/fail set below it "
+                           "describes a fraction of the tier. Fix the hang; do not read anything into the partial results, and do "
+                           "NOT allowlist your way past this.\n")
+            sys.exit(1)
+
           # Section headers are the `# --- #123 / #456 ---` rules; prose comments between them carry issue numbers too and
           # must NOT reassign the current section, or every entry inherits whichever number was mentioned last.
           allow, issues = set(), {}
@@ -150,7 +183,7 @@ jobs:
               return ".".join(parts[-2:]) if len(parts) >= 2 else base
 
           failed, passed = set(), set()
-          for f in glob.glob("ci-out/*.trx"):
+          for f in glob.glob("ci-out/**/*.trx", recursive=True):
               root = ET.parse(f).getroot()
               names = {}
               for ut in root.iter(f"{NS}UnitTest"):
@@ -269,7 +302,7 @@ jobs:
           total = passed = failed = 0
           names = {}
           rows = []
-          for f in glob.glob("ci-out/*.trx"):
+          for f in glob.glob("ci-out/**/*.trx", recursive=True):
               root = ET.parse(f).getroot()
               c = root.find(f"{NS}ResultSummary/{NS}Counters")
               if c is not None:
