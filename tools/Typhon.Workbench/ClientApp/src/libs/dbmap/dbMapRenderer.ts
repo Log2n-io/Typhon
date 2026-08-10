@@ -67,6 +67,7 @@ import {
   type DbMapLens,
   type DbMapPageOrder,
   type DbPageDetail,
+  type IntegrityMark,
 } from './types';
 import type { PathologyFlag } from './dbMapPathology';
 import type { DbMapRegion } from './dbMapRegions';
@@ -297,6 +298,12 @@ export class DbMapRenderer {
   private _selectionCell: { page: number; chunkInPage: number; cellIndex: number } | null = null;
   private _searchHits: readonly number[] = [];
   private _searchCurrent = -1;
+  /**
+   * Integrity-lens markers (#729): one per damaged page, coloured by finding severity. Separate from the lens
+   * *mask* because the mask only says which pages stay bright — it carries no severity, and "this page is
+   * damaged" and "this page loses data" need to be distinguishable at a glance.
+   */
+  private _integrityMarks: readonly IntegrityMark[] = [];
 
   // A2 detail-tier inputs, fed by the panel as the viewport changes.
   private _tiles: Map<number, DbDetailTile> = new Map();
@@ -413,6 +420,8 @@ export class DbMapRenderer {
     this._filterMask = null;
     this._searchHits = [];
     this._searchCurrent = -1;
+    // Markers name page indices in the *previous* map — stale ones would outline unrelated pages.
+    this._integrityMarks = [];
     this._hoverChunk = null;
     this._selectionChunk = null;
     this._hoverCell = null;
@@ -577,6 +586,14 @@ export class DbMapRenderer {
   setSearchHits(pages: readonly number[], current: number): void {
     this._searchHits = pages;
     this._searchCurrent = current;
+  }
+
+  /**
+   * Sets the integrity-lens page markers (#729). Cheap: the array is one entry per *damaged* page, not per
+   * page, so on a healthy database it is empty and the draw pass costs a zero-iteration loop.
+   */
+  setIntegrityMarks(marks: readonly IntegrityMark[]): void {
+    this._integrityMarks = marks;
   }
 
   setTheme(theme: DbMapTheme): void {
@@ -1232,6 +1249,13 @@ export class DbMapRenderer {
     // a stray box floating over the stripes when the user zooms back out to L0. drawCellHighlight clamps the
     // outline to a 3 px minimum, so without this gate the box stays visible even at sub-pixel cell sizes.
     if (l1Alpha > 0) {
+      // Integrity markers (#729) — drawn *under* search hits and the hover/selection outline so an explicit
+      // interaction always wins visually over a background annotation. Two-pixel outline: enough to read at a
+      // glance on a dimmed map without being mistaken for a selection.
+      for (let i = 0; i < this._integrityMarks.length; i++) {
+        const mark = this._integrityMarks[i];
+        this.drawCellHighlight(ctx, mark.page, mark.color, 2, l1Alpha);
+      }
       // Search-match markers — every hit gets a thin amber outline; the current match a thicker one (§4.5).
       for (let i = 0; i < this._searchHits.length; i++) {
         this.drawCellHighlight(ctx, this._searchHits[i], SEARCH_HIT_COLOR, i === this._searchCurrent ? 3 : 1, l1Alpha);

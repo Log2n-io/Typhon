@@ -15,6 +15,7 @@ const BOOTSTRAP_TOKEN_KEY = 'wb.bootstrapToken';
 let initialDbPath: string | null = null;
 let initialSchemaPaths: string[] = [];
 let initialTracePath: string | null = null;
+let initialIntegrityPath: string | null = null;
 // Fallback when sessionStorage is unavailable (private mode / storage disabled): keep the token for this page load only.
 let inMemoryToken: string | null = null;
 
@@ -33,8 +34,12 @@ export function captureLaunchParamsFromUrl(): void {
   const db = params.get('db');
   const schema = params.get('schema');
   const trace = params.get('trace');
+  // #729 — `typhon check --ui <bundle>` hands the Workbench a database to *inspect* rather than open. Distinct
+  // from `db` on purpose: `db` means "open this", which is exactly what must not happen to a database someone
+  // is checking because it would not open, or because they are about to repair it and need it unlocked.
+  const integrity = params.get('integrity');
 
-  if (!token && !db && !trace) {
+  if (!token && !db && !trace && !integrity) {
     return;
   }
 
@@ -59,6 +64,10 @@ export function captureLaunchParamsFromUrl(): void {
 
   if (trace) {
     initialTracePath = trace;
+  }
+
+  if (integrity) {
+    initialIntegrityPath = integrity;
   }
 
   // Strip the fragment so the token/db/schema/trace never persist in the address bar, browser history, or referrer.
@@ -90,6 +99,15 @@ export function getInitialSchemaPaths(): string[] {
 /** The trace path passed via `typhon ui --trace <path>` / `--open-latest` (URL fragment), or null. Consumed once at startup. */
 export function getInitialTracePath(): string | null {
   return initialTracePath;
+}
+
+/**
+ * A bundle to open the Integrity view on, passed via the launch URL's `integrity=` fragment, or null.
+ * Consumed once at startup. Unlike {@link getInitialDbPath} this must NOT open a session — the point of
+ * arriving here is that opening is either impossible or undesirable.
+ */
+export function getInitialIntegrityPath(): string | null {
+  return initialIntegrityPath;
 }
 
 /**

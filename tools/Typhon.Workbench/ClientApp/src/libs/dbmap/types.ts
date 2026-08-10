@@ -308,7 +308,21 @@ export function isDetailEncoding(encoding: DbMapEncoding): encoding is DbMapDeta
 }
 
 /** The active analytical lens (A3, §4.3) — a focused dim/highlight overlay on top of the base encoding. */
-export type DbMapLens = 'none' | 'fragmentation' | 'freeSpace' | 'pathology';
+export type DbMapLens = 'none' | 'fragmentation' | 'freeSpace' | 'pathology' | 'integrity';
+
+/**
+ * One damaged page to outline under the integrity lens (#729).
+ *
+ * Carries a resolved colour rather than a severity so the renderer stays independent of the integrity
+ * domain model — it draws what it is told, and the mapping from severity to colour lives with the other
+ * severity semantics.
+ */
+export interface IntegrityMark {
+  /** Physical page index, straight from a finding's `Locus.FilePageIndex`. */
+  page: number;
+  /** Canvas stroke colour for this page's worst severity. */
+  color: string;
+}
 
 /**
  * How file pages are laid out on the 2D grid. `hilbert` (default) preserves byte-offset locality in 2D — adjacent

@@ -10,6 +10,7 @@ import { openDbMapForComponent } from '@/shell/commands/openDbMap';
 import { segmentRgb, rgbCss } from '@/libs/dbmap/dbMapColors';
 import { sortHealthSegments, type HealthSortKey } from './storageHealthModel';
 import { formatBytes } from '@/libs/formatBytes';
+import IntegrityStrip from './IntegrityStrip';
 
 /**
  * Storage Health (Stage 2 Phase 3, GAP-16) — the *aggregate* storage dashboard, the non-spatial complement to
@@ -80,6 +81,9 @@ export default function StorageHealthPanel(_props: IDockviewPanelProps) {
           <RefreshCw className={`h-3 w-3 ${isFetching ? 'animate-spin' : ''}`} />
         </button>
       </div>
+
+      {/* #729 — the aggregate integrity verdict, sitting with the other whole-database aggregates. */}
+      <IntegrityStrip />
 
       {/* Per-segment table */}
       <div className="min-h-0 flex-1 overflow-auto">

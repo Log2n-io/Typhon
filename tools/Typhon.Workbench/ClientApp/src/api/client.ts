@@ -5,6 +5,11 @@ import { applyWorkbenchAuthHeaders } from '@/api/bootstrapToken';
  * Error raised by {@link customFetch} for any non-2xx response. Carries the parsed RFC 7807
  * ProblemDetails body (or a `{ status }` synthetic when the body wasn't JSON) so callers and
  * the global query-cache logger can surface `title`/`detail` instead of `[object Object]`.
+ *
+ * Several controllers (Integrity, Options, Profiler, ProfilerSource, Resources) return a bare
+ * `{ error: "…" }` object rather than ProblemDetails. Without the `error` fallback below, every one of
+ * those carefully-worded messages collapsed to `HTTP 409` at the client boundary — the caller saw a
+ * status code where the server had written a sentence explaining what to do about it.
  */
 export class FetchError extends Error {
   readonly status: number;
@@ -13,7 +18,8 @@ export class FetchError extends Error {
   constructor(status: number, problem: Record<string, unknown>) {
     const title = typeof problem.title === 'string' ? problem.title : undefined;
     const detail = typeof problem.detail === 'string' ? problem.detail : undefined;
-    const message = detail ?? title ?? `HTTP ${status}`;
+    const plain = typeof problem.error === 'string' ? problem.error : undefined;
+    const message = detail ?? title ?? plain ?? `HTTP ${status}`;
     super(message);
     this.name = 'FetchError';
     this.status = status;
