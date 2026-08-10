@@ -2468,6 +2468,101 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     }
 
     /// <summary>
+    /// The Phase 1 descent shared by the iterative write paths: root to leaf, recording the path, the child index and an OLC version per level into
+    /// <paramref name="ctx"/> for the escalation phases to validate against. Returns false when the descent could not vouch for its own path and the caller
+    /// must restart.
+    /// </summary>
+    /// <remarks>
+    /// This loop existed twice, verbatim — <c>InsertIterative</c> and <c>RemoveIterative</c> differed only in <c>args.Comparer</c> vs <c>args.KeyComparer</c>,
+    /// the trace opcode, and <c>return</c> vs <c>return false</c>. That is not a style complaint: three of the six defects fixed in PR #737 were a guard one
+    /// copy had and its twin had lost, and across #765 the same guard was added by hand to two copies four separate times. A descent that exists once is a
+    /// descent whose protocol can be corrected once — IXS-07's second parent validation is in here, and both write paths get it without either of them
+    /// mentioning it.
+    /// <para>
+    /// It deliberately does NOT sample the LEAF's version. Phase 1.5A owns that, because it needs <c>leafVersion == 0</c> to tell LOCKED (wait for the holder,
+    /// then restart on a fresh baseline) from OBSOLETE (restart at once — the node will never become valid), which is rule IXW-01 and the distinction #695 came
+    /// from collapsing. Sampling it here and bailing would reintroduce that shape. The final hop into the leaf keeps the protection it already has: Phase 1.5A's
+    /// locked validation plus <c>KeyOutsideLeafAuthority</c>.
+    /// </para>
+    /// </remarks>
+    private bool DescendRecordingPath(TKey key, IComparer<TKey> comparer, int traceOp, ref MutationContext ctx, ref NodeRelatives relatives,
+                                      ref ChunkAccessor<TStore> accessor, ref ChunkAccessor<TStore> sibAccessor, out NodeWrapper leaf)
+    {
+        var node = Root;
+        var parent = default(NodeWrapper);
+        int parentVersion = 0;
+        bool hopped = false;   // explicit rather than `parent.IsValid`: chunk id 0 is the invalid sentinel, so keying off it would silently skip the check below
+                               // for the root hop if the root ever occupied chunk 0 — a guard that disables itself on one node is how this subsystem got here
+
+        // OLC protocol: read version BEFORE data, validate AFTER — ensures (index, version) are consistent.
+        while (!node.GetIsLeaf(ref accessor))
+        {
+            var latch = node.GetLatch(ref accessor);
+            int version = latch.ReadVersion();
+            if (version == 0)
+            {
+                leaf = default;
+                return false; // node locked or obsolete — restart
+            }
+
+            // IXS-07 — the OLC paper's readUnlockOrRestart, for the hop that brought us HERE. The check below proves the child POINTER was current when it was
+            // read; this one proves it is still current now that the child's own version is in hand, and only the pair makes a hop atomic. An SMO completing
+            // between them is invisible to either alone. Skipped on the first pass, where `node` is the root and no hop has been made yet.
+            if (hopped && !parent.GetLatch(ref accessor).ValidateVersion(parentVersion))
+            {
+                leaf = default;
+                return false;
+            }
+
+            var index = node.Find(key, comparer, ref accessor);
+            if (index < 0)
+            {
+                index = ~index - 1;
+            }
+
+            var child = node.GetChild(index, ref accessor);
+            int parentCount = node.GetCount(ref accessor);
+
+            // Validate: node wasn't modified during our unlocked read
+            if (!latch.ValidateVersion(version))
+            {
+                leaf = default;
+                return false; // node modified between version read and data read — restart
+            }
+
+            // Defensive: a torn-but-validated read should be impossible after the version check above, but treat zero/invalid child as restart rather than
+            // crashing when the next iteration tries to deref it. Issue #297.
+            if (!child.IsValid)
+            {
+                leaf = default;
+                return false;
+            }
+
+            OlcDescentTrace.RecordStep?.Invoke(traceOp, node.ChunkId, version, index, child.ChunkId);
+
+            NodeRelatives.Create(child, index, node, parentCount, ref relatives, out var childRelatives, ref accessor, ref sibAccessor);
+
+            ctx.PathNodes[ctx.Depth] = node;
+            ctx.PathChildIndices[ctx.Depth] = index;
+            ctx.PathVersions[ctx.Depth] = version;
+
+            // Store after Create so lazy-resolved siblings are cached in the stored copy
+            ctx.PathRelatives[ctx.Depth] = relatives;
+
+            parent = node;
+            parentVersion = version;
+            hopped = true;
+
+            node = child;
+            relatives = childRelatives;
+            ctx.Depth++;
+        }
+
+        leaf = node;
+        return true;
+    }
+
+    /// <summary>
     /// Optimistic descent from root to leaf using OLC version validation.
     /// Returns (leafChunkId, leafVersion, keyIndex). leafChunkId=0 signals restart needed.
     /// Zero writes to shared state — readers never acquire any lock.
@@ -2511,12 +2606,34 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
                 return (0, 0, -1); // invalid child — restart
             }
             OlcDescentTrace.RecordStep?.Invoke(OlcDescentTrace.OpDescend, node.ChunkId, version, index, child.ChunkId);
+
+            var parent = node;
+            int parentVersion = version;
+
             node = child;
             latch = node.GetLatch(ref accessor);
             version = latch.ReadVersion();
             if (version == 0)
             {
                 return (0, 0, -1); // locked or obsolete — restart
+            }
+
+            // The OLC protocol's readUnlockOrRestart, and the half this descent was missing. The validation above answers "was the child pointer I read still
+            // current when I read it"; this one answers "is it still current now that I hold a version for the child", and only the pair makes the hop atomic.
+            // Between them sits the whole of GetLatch/ReadVersion on the child, and an SMO landing in that gap is invisible to both neighbours taken alone: the
+            // parent check already passed, and the child version is sampled AFTER the modification, so the child's own later validation sees a version that
+            // never changes again. The reader then answers for a leaf the separators no longer route this key to.
+            //
+            // That is #739/#297's residual, and the shape matches what was measured: six Remove-NotFound events in 25,701 iterations, every one of them with
+            // key < landedLeaf.firstKey — a borrow having moved the key LEFT (RemoveLeaf's borrow-from-right raises the right sibling's minimum and rewrites the
+            // separator in RightAncestor) while the descent was between these two lines.
+            //
+            // Re-resolving the latch through `parent` rather than reusing the `latch` local is deliberate: GetLatch hands out a reference into the chunk's page,
+            // and the child reads in between can evict that page and reuse the slot for another chunk. The established pattern here is to re-load by chunk id
+            // (see the leaf re-validation in TryGetValue), which costs an accessor lookup and is correct under eviction.
+            if (!parent.GetLatch(ref accessor).ValidateVersion(parentVersion))
+            {
+                return (0, 0, -1); // parent changed while we were taking the child's version — the hop was not atomic, restart
             }
         }
 

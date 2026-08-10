@@ -923,8 +923,17 @@ public class OlcBTreeRaceStressTests
         if (!anyMoved)
         {
             label = "STUCK";
-            verdict = "not one counter moved in the sample window while the iteration was still running. Nothing is being attempted — this is the shape a lock "
-                    + "cycle or a wait-forever has, and the only thing that will tell you more is a stack dump.";
+            // "...and the only thing that will tell you more is a stack dump" is what this verdict used to end with, which left the reader to go and get one
+            // from a process that had usually died by the time they read it. The stall is the ONLY state in which the stacks answer anything, and it is detected
+            // right here, so it is taken right here. Everything above this line is a counter saying something is not moving; this is the first instrument that
+            // can say WHAT.
+            // The verdict deliberately no longer NAMES a cause. It used to end "this is the shape a lock cycle or a wait-forever has", and the first stack dump
+            // taken here refuted that outright: 28 threads, not one blocked on a lock, five inside the bounded retry loops and four of those asleep in
+            // SpinWait.SpinOnce -> Thread.Sleep(1). Frozen counters mean the sample window landed in a sleep convoy, which on a box oversubscribed by the noise
+            // threads stretches Sleep(1) far past a millisecond. Counters can say "nothing moved"; only the stacks can say why, so the stacks are what this
+            // returns and the guess is what it drops. #738's five refuted hypotheses all began as a label that sounded like a diagnosis.
+            verdict = "not one counter moved in the sample window while the iteration was still running. That is a statement about the COUNTERS, not a diagnosis "
+                    + "— read the stacks below for what the threads are actually doing before naming a cause.\n" + CaptureManagedStacks(s.Name, iter);
         }
         else if (deltas[CtrWriteLockFails] > 0 && deltas[CtrRestarts] == 0 && deltas[CtrFallbacks] == 0 && deltas[CtrEntries] == 0)
         {
@@ -948,14 +957,95 @@ public class OlcBTreeRaceStressTests
         }
 
         var sb = new StringBuilder();
-        sb.Append($"DEADLINE after {IterationDeadline.TotalSeconds}s — {label}: {verdict}\n  deltas over {DeadlineSampleWindow.TotalSeconds}s:");
+
+        // The delta is printed for EVERY counter, including the zeros, and the header says total(+delta) rather than "deltas". The previous form was headed
+        // "deltas over 1s" and then printed `first[i]` — the running TOTAL — appending "(+n)" only when the delta was non-zero. A frozen counter with a large
+        // total therefore rendered as a large number under a heading promising a delta, so a genuine STUCK record read as heavy activity. That is not a
+        // hypothetical: it misread exactly that way on first encounter, minutes after the record was produced, by someone who had just written the classifier
+        // above it. A label that has to be cross-checked against the code that printed it is not evidence, and this harness's whole purpose is producing
+        // evidence.
+        sb.Append($"DEADLINE after {IterationDeadline.TotalSeconds}s — {label}: {verdict}\n  total(+delta over {DeadlineSampleWindow.TotalSeconds}s):");
         for (int i = 0; i < deltas.Length; i++)
         {
-            sb.Append($" {CounterNames[i]}={first[i]:N0}{(deltas[i] == 0 ? "" : $"(+{deltas[i]:N0})")}");
+            sb.Append($" {CounterNames[i]}={first[i]:N0}(+{deltas[i]:N0})");
         }
 
         WriteProgress(s.Name, iter, $"DEADLINE/{label}");
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Managed stacks of every thread in THIS process, taken at the instant a stall is detected, via <c>dotnet-stack report</c> over the diagnostics IPC socket.
+    /// </summary>
+    /// <remarks>
+    /// Self-attach rather than an external watcher, because the stall is what has to be caught and this method is the only code that knows it is happening. An
+    /// outside observer would have to guess when. The runtime services the diagnostics request on its own thread, so a process whose worker threads are wedged
+    /// still answers — which is precisely the case this exists for.
+    /// <para>
+    /// Everything about it is best-effort and bounded: a missing tool, a PATH miss and a hang all degrade to a one-line note in the report rather than taking
+    /// the run down. A diagnostic that can fail the thing it is diagnosing is worse than no diagnostic.
+    /// </para>
+    /// </remarks>
+    private static string CaptureManagedStacks(string scenario, int iter)
+    {
+        string path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"olc-stuck-{Environment.ProcessId:x}-{scenario}-{iter}.txt");
+        try
+        {
+            string exe = "dotnet-stack";
+            var local = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dotnet", "tools", "dotnet-stack.exe");
+            if (System.IO.File.Exists(local))
+            {
+                exe = local;   // do not rely on PATH inside a test host; the tool lives in a known place when it is installed at all
+            }
+
+            var psi = new ProcessStartInfo(exe, $"report -p {Environment.ProcessId}")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+
+            using var proc = Process.Start(psi);
+            if (proc == null)
+            {
+                return "  stack capture: could not start dotnet-stack.";
+            }
+
+            string stdout = proc.StandardOutput.ReadToEnd();
+            string stderr = proc.StandardError.ReadToEnd();
+            if (!proc.WaitForExit(90_000))
+            {
+                try { proc.Kill(entireProcessTree: true); } catch { /* best-effort */ }
+                return "  stack capture: dotnet-stack did not return within 90s — the diagnostics endpoint is itself unresponsive, which is a finding.";
+            }
+
+            if (string.IsNullOrWhiteSpace(stdout))
+            {
+                return $"  stack capture: dotnet-stack produced nothing (exit {proc.ExitCode}). stderr: {stderr.Trim()}";
+            }
+
+            System.IO.File.WriteAllText(path, stdout);
+
+            // The full report is every thread in a test host — hundreds of frames of NUnit, the thread pool and the noise generators. Inline only the threads
+            // that are actually inside the tree, which is the question being asked, and leave the rest on disk for when it is not.
+            var interesting = new StringBuilder();
+            int kept = 0;
+            foreach (var block in stdout.Split("\nThread ", StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (block.Contains("Typhon.Engine.Internals.BTree", StringComparison.Ordinal))
+                {
+                    interesting.Append("\nThread ").Append(block.TrimEnd()).Append('\n');
+                    kept++;
+                }
+            }
+
+            return $"  stacks: {kept} thread(s) inside BTree; full report at {path}\n{interesting}";
+        }
+        catch (Exception ex)
+        {
+            return $"  stack capture failed: {ex.GetType().Name}: {ex.Message}";
+        }
     }
 
     private static readonly string _progressLogPath = Environment.GetEnvironmentVariable("OLC_STRESS_LOG")

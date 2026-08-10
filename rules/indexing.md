@@ -209,9 +209,12 @@ keys.
 
 ### IXS-06: A descent answers NOT-FOUND only for a leaf that owns the key's lower bound `[UNBUILT]`
 
-  status WITHDRAWN 2026-08-10, same day it was written. The invariant is right and the defect it names is real (#739/#297);
-         the ENFORCEMENT shipped with it was not, and is reverted. Left here so the next attempt starts from the finding
-         rather than rediscovering it.
+  status WITHDRAWN 2026-08-10, same day it was written, then SUPERSEDED by IXS-07 later the same day. The invariant is right and
+         the defect it names is real (#739/#297); the ENFORCEMENT shipped with it was not, and is reverted. Kept unbuilt rather
+         than deleted because it states the OUTCOME (a descent must not answer for a leaf that does not own the key) while IXS-07
+         states the MECHANISM that was actually missing (the hop was never atomic). If a residual overshoot is ever measured with
+         IXS-07 in place, this is the rule to build, and the way to build it is a stored per-node LowKey mirroring HighKey - NOT a
+         neighbour read, and NOT a carried separator. Both of those were tried; see below.
   invariant before `OptimisticDescendToLeaf` reports `keyIndex < 0` as conclusive, the leaf it stopped at must not be one the key
             provably belongs to the LEFT of. When it does, the descent overshot and the caller must restart
   never treating `key <= leaf.lastKey` as sufficient evidence that the key is not in the tree
@@ -220,15 +223,52 @@ keys.
         neighbour id can be torn, and dereferencing it faults before any validation can signal a restart. Measured: the test host
         died with no managed stack in 4 of 5 runs of `ChaosStressTests.Light_2T_50E_NoDelete`, against 6 of 6 passing on main and
         4 of 4 passing once the call was removed. This is the hazard `BaseNodeStorage.GetChild` documents in its own comment.
-  gap the descent ALREADY follows a separator to choose each child, and that separator IS the lower bound. Carrying it out of the
-      descent answers the question with no neighbour read at all - cheaper than the reverted version and safe by construction.
-      That is the next attempt.
+  gap REFUTED 2026-08-10. This field previously read "the descent ALREADY follows a separator to choose each child, and that
+      separator IS the lower bound. Carrying it out of the descent answers the question with no neighbour read at all." The first
+      half is true and the second does not follow: the descent picks the LARGEST separator <= key (`index = ~index - 1`), so
+      `key >= separator` holds by construction at every level. A guard testing `key < carriedSeparator` can never fire. The
+      separator is also the value that goes STALE when a borrow moves keys left, so it cannot be both the thing that is wrong and
+      the thing that detects it. Do not re-propose this.
+  gap what the descent is actually missing is the OLC protocol's SECOND parent validation - the paper's `readUnlockOrRestart`,
+      taken AFTER the child's version is sampled rather than before. `OptimisticDescendToLeaf` validated the parent, then read the
+      child's version, and never re-checked; an SMO landing in that gap is invisible to both checks taken alone, because the parent
+      test has already passed and the child version is sampled after the modification. See IXS-07.
   evidence 6 Remove-NotFound events in 25,701 race-harness iterations, ALL on the general-descent branch, ALL with
            `key < landedLeaf.firstKey` - key 378 on a leaf whose first key is 381, key 88 on one starting at 89 - on leaves
            holding 14 to 21 entries. With the (unsafe) guard in place: 0 in 94,854. The defect is not in doubt.
   on_violation: `Remove` returns false for a key that is present, reachable and correctly chained (#739), and the same descent
                 backs `TryGet`, so the identical false not-found is reachable on the READ path (#297).
   requires IXW-03
+  requires IXS-07
+
+### IXS-07: A descent hop validates the parent twice — once before the child pointer is used, once after the child's version is taken `[silent]`
+
+  invariant for every hop parent -> child, the parent's version is read once and validated TWICE: after reading the child pointer,
+            and again after `ReadVersion()` on the child. Only the second pair makes the hop atomic
+  never treating one validation as sufficient. The first proves the child POINTER was current; it says nothing about the interval
+        in which the child's own version is sampled, and that interval is where an SMO becomes undetectable
+  never reusing a cached `OlcLatch` for the second validation - re-resolve it through the parent `NodeWrapper`. `GetLatch` hands
+        out a reference into the chunk's page, and the child reads in between can evict that page and reuse the slot
+  enforce `BTree.OptimisticDescendToLeaf` and `BTree.DescendRecordingPath` each perform
+          `parent.GetLatch(ref accessor).ValidateVersion(parentVersion)` after the child's `ReadVersion()`, and restart on failure.
+          `DescendRecordingPath` is the ONE descent the iterative write paths share, so this holds for insert and remove without
+          either of them restating it - which is the point, and why the duplicated loops were collapsed in the same change
+  never restating this per write path. The loop existed twice verbatim, and three of the six defects in PR #737 were a guard one
+        copy had and its twin had lost
+  scope: BTree.cs (`OptimisticDescendToLeaf`, `DescendRecordingPath`)
+  gap `FindLeaf` is a FOURTH descent and performs NO version validation at all. Reached from the range-scan cursors,
+      `RangeEnumerator`, `MovePessimistic` and `RemoveCorePessimistic`. Not covered by this rule and not yet assessed
+  rationale: this is the OLC paper's `readUnlockOrRestart`, and the descent shipped without it. With only the first check, a
+             modification completing between it and the child's `ReadVersion()` is invisible to BOTH neighbours: the parent test
+             has already passed, and the child version is sampled after the modification, so the child's own later validation
+             compares against a version that never changes again. The reader then answers for a leaf the separators no longer
+             route the key to. `RemoveLeaf`'s borrow-from-right is the concrete producer - it raises the right sibling's minimum
+             and rewrites the separator in `RightAncestor`, moving a key LEFT, which the B-link right-walk cannot recover from
+             because it can only travel right
+  on_violation: a present key is reported not-found on both the read and the remove path, silently. The window is a couple of
+                instructions wide, so it needs a race harness to see at all: six events in 25,701 iterations, every one with
+                `key < landedLeaf.firstKey`
+  verified: BTreeDescentHopAtomicityTests.ParentVersionChangedWhileTakingTheChildVersion_RestartsTheDescent
 
 ---
 

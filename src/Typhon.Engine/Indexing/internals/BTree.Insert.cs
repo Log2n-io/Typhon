@@ -713,57 +713,13 @@ internal abstract partial class BTree<TKey, TStore>
     {
         completed = false; // descent
         MutationContext ctx = default;
-        var node = Root;
         var relatives = new NodeRelatives();
         ref var sibAccessor = ref args.SiblingAccessor;
 
-        // Phase 1: Descend from root to leaf, recording path + PathVersions for validation.
-        // OLC protocol: read version BEFORE data, validate AFTER — ensures (index, version) are consistent.
-        while (!node.GetIsLeaf(ref accessor))
+        // Phase 1: Descend from root to leaf, recording path + PathVersions for validation. Shared verbatim with RemoveIterative — see DescendRecordingPath.
+        if (!DescendRecordingPath(args.Key, args.KeyComparer, OlcDescentTrace.OpInsert, ref ctx, ref relatives, ref accessor, ref sibAccessor, out var node))
         {
-            var latch = node.GetLatch(ref accessor);
-            int version = latch.ReadVersion();
-            if (version == 0)
-            {
-                return;
-            }
-
-            var index = node.Find(args.Key, args.KeyComparer, ref accessor);
-            if (index < 0)
-            {
-                index = ~index - 1;
-            }
-
-            var child = node.GetChild(index, ref accessor);
-            int parentCount = node.GetCount(ref accessor);
-
-            // Validate: node wasn't modified during our unlocked read
-            if (!latch.ValidateVersion(version))
-            {
-                return;
-            }
-
-            // Defensive: a torn-but-validated read should be impossible after the version check above, but treat zero/invalid child as restart rather than
-            // crashing when the next iteration tries to deref it. Issue #297.
-            if (!child.IsValid)
-            {
-                return;
-            }
-
-            OlcDescentTrace.RecordStep?.Invoke(OlcDescentTrace.OpInsert, node.ChunkId, version, index, child.ChunkId);
-
-            NodeRelatives.Create(child, index, node, parentCount, ref relatives, out var childRelatives, ref accessor, ref sibAccessor);
-
-            ctx.PathNodes[ctx.Depth] = node;
-            ctx.PathChildIndices[ctx.Depth] = index;
-            ctx.PathVersions[ctx.Depth] = version;
-
-            // Store after Create so lazy-resolved siblings are cached in the stored copy
-            ctx.PathRelatives[ctx.Depth] = relatives;
-
-            node = child;
-            relatives = childRelatives;
-            ctx.Depth++;
+            return;
         }
 
         // Phase 1.5A: Lock leaf with version validation.
