@@ -21,10 +21,18 @@ namespace Typhon.Engine.Tests;
 ///   OLC_STRESS_SECONDS — wall duration of the run (default 30)
 ///   OLC_STRESS_NOISE   — count of CPU-saturating noise threads (default = ProcessorCount/2)
 /// One ManagedPagedMMF per scenario, reused across iterations (fresh segment per iter) — avoids per-iter file I/O cost.
+/// <para>
+/// [NonParallelizable] for the same reason <see cref="OlcBTreeStressTests"/> carries it, and it was missing here (#738). The assembly runs
+/// <c>Parallelizable(ParallelScope.Fixtures)</c> at <c>LevelOfParallelism(4)</c>, so without it this fixture — which already spawns five scenario tasks plus
+/// ProcessorCount/2 noise threads of its own — is one of FOUR heavy fixtures running at once. A nightly `Category=Nightly` run in that configuration took the
+/// test host down with it, alongside ChaosStressTests.UltimateStress_AllSubsystems and two others. A harness whose whole purpose is to reproduce one specific
+/// race cannot do that from inside uncontrolled oversubscription: whatever it then reports is a property of the tier, not of the tree.
+/// </para>
 /// </summary>
 [TestFixture]
 [Explicit("Long-running race-stress harness for issue #297")]
 [Category("Nightly")]
+[NonParallelizable]
 public class OlcBTreeRaceStressTests
 {
     private static int _scenarioId;
@@ -736,8 +744,15 @@ public class OlcBTreeRaceStressTests
                         var iterTask = Task.Factory.StartNew(() => s.Body(ctx), TaskCreationOptions.LongRunning);
                         if (!iterTask.Wait(IterationDeadline))
                         {
-                            s.Failures.Add(new FailureRecord(iter, $"HANG: scenario body did not complete within {IterationDeadline.TotalSeconds}s"));
-                            WriteProgress(s.Name, iter, "HANG");
+                            // DEADLINE, not "hang" — this detects nothing about the tree. It reports that one iteration exceeded a wall clock, while
+                            // OLC_STRESS_NOISE CPU-saturating threads run alongside five scenario loops. A slow iteration reaches here identically to a
+                            // deadlocked one: a bounded-but-glacial retry loop (the pessimistic paths allow MaxPessimisticRestarts = 10,000, measured at
+                            // 2m34s single-threaded in #740) trips it exactly as a genuine deadlock would. Reading the old "HANG" label as evidence of a
+                            // lock cycle is what sent five hypotheses to be refuted one at a time in #738. If you need to know which it was, the answer is
+                            // in the STACKS — run with `--blame-hang --blame-hang-timeout <n>` and read the dump; do not infer it from this counter.
+                            s.Failures.Add(new FailureRecord(iter, $"DEADLINE: scenario body exceeded {IterationDeadline.TotalSeconds}s (slow or stuck — "
+                                                                  + "this does not distinguish them; capture stacks to tell)"));
+                            WriteProgress(s.Name, iter, "DEADLINE");
                             // Workers may still be alive — touching the MMF after Dispose() would AV.
                             // Skip cleanup; let the orphan workers churn against live (epoch-protected) memory
                             // until the process exits. Memory leak across HANG iters is bounded by the stress
@@ -826,7 +841,12 @@ public class OlcBTreeRaceStressTests
 
     private static IServiceProvider BuildScenarioProvider()
     {
-        // Unique DB name per scenario invocation so concurrent loops don't collide on the file.
+        // Unique DB name per scenario invocation so concurrent loops don't collide on the file — and unique per PROCESS, which it was not (#738). `_scenarioId`
+        // restarts at 0 in every test host, so run N+1 walked the exact same name sequence as run N. That only matters because the HANG path in
+        // RunScenarioLoop deliberately skips cleanup and leaks the MMF with its file open, so a single deadline expiry left a locked `olcrs_<id>` behind that
+        // every subsequent run then tripped over at the same iteration — `EnsureFileDeleted` cannot remove a file another process still holds, and `LoadFile`
+        // throws IOException. Measured: three consecutive isolated runs failed identically at `olcrs_2397`, and 33,088 leaked database directories had
+        // accumulated under the test bin. Including the process id makes the leak self-contained instead of contagious.
         int id = Interlocked.Increment(ref _scenarioId);
         var sc = new ServiceCollection()
             .AddLogging()
@@ -835,7 +855,7 @@ public class OlcBTreeRaceStressTests
             .AddEpochManager()
             .AddScopedManagedPagedMemoryMappedFile(o =>
             {
-                o.DatabaseName = $"olcrs_{id:x}";
+                o.DatabaseName = $"olcrs_{Environment.ProcessId:x}_{id:x}";
                 // Generously sized — many segments per scenario over a long run.
                 o.DatabaseCacheSize = (ulong)(PagedMMF.MinimumMemPageCount * PagedMMF.PageSize);
                 o.PagesDebugPattern = true;
