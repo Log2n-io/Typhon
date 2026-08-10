@@ -543,16 +543,35 @@ internal abstract partial class BTree<TKey, TStore>
                     }
                     else // merge with either sibling.
                     {
+                        // BOTH branches snapshot the chain pointers BEFORE the merge and never re-read them. They used to re-read from the node the merge had
+                        // just consumed, and the re-read was split across TWO accessors — `accessor` for self, `sibAccessor` for siblings — so one could serve a
+                        // cached view of a page the other had just written through. Reading once, before any write, closes that.
+                        //
+                        // 🔴 This is NOT the fix for #739, and saying so plainly because it was written as one. The crash survived it unchanged and simply moved
+                        // to the `SetPrevious` below, which now consumes the value snapshotted BEFORE the merge — so the chain pointer was already corrupt when
+                        // it was read, and read-after-consume was never the mechanism. Kept anyway because reading once before mutating is correct on its own
+                        // terms and costs nothing, but it buys no correctness against #739.
+                        //
+                        // What the failing value actually says, and where the next attempt should start: `ChunkId=589824` reproduces IDENTICALLY across runs and
+                        // iterations, and 589824 is 0x00090000, which decodes against `Index32Chunk.Control`'s documented layout (flags LSW 16 bits, Start 8
+                        // bits, Count 8 bits) as flags=0, Start=9, Count=0. That is not a chunk id — it is a CONTROL WORD, of an empty node whose Start has
+                        // walked to 9. So a read for `NextChunk` (offset 12) is landing on offset 0, or on a chunk whose memory has been repurposed underneath
+                        // it. That is an offset or lifetime defect, not an ordering one, which is why every ordering fix has bounced off it.
+                        //
+                        // Note also what cannot catch it downstream: `IsValid` is `_storage != null && ChunkId != 0` and takes no accessor, so it cannot
+                        // range-check the id against the segment. A garbage non-zero id passes it and faults later inside `GetChunkLocation`, which is why the
+                        // crash surfaces at `SetPrevious` rather than at the line that read the bad value.
                         if (relatives.HasTrueLeftSibling) // current node will be removed from parent.
                         {
                             merge = true;
-                            GetPrevious(ref accessor).MergeLeft(this, ref sibAccessor); // merge from left to keep items in order.
-                            var p = GetPrevious(ref accessor);
-                            p.SetNext(GetNext(ref accessor), ref sibAccessor); // fix linked list
-                            if (GetNext(ref accessor).IsValid)
+                            var previous = GetPrevious(ref accessor);
+                            var next = GetNext(ref accessor);
+
+                            previous.MergeLeft(this, ref sibAccessor); // merge from left to keep items in order.
+                            previous.SetNext(next, ref sibAccessor); // fix linked list
+                            if (next.IsValid)
                             {
-                                var n = GetNext(ref accessor);
-                                n.SetPrevious(GetPrevious(ref accessor), ref sibAccessor);
+                                next.SetPrevious(previous, ref sibAccessor);
                             }
 
                             Validate();
@@ -561,12 +580,14 @@ internal abstract partial class BTree<TKey, TStore>
                         else if (relatives.HasTrueRightSibling) // right sibling will be removed from parent
                         {
                             merge = true;
-                            MergeLeft(GetNext(ref accessor), ref sibAccessor); // merge from right to keep items in order.
-                            SetNext(GetNext(ref accessor).GetNext(ref sibAccessor), ref accessor); // fix linked list
-                            if (GetNext(ref accessor).IsValid)
+                            var right = GetNext(ref accessor);
+                            var rightNext = right.GetNext(ref sibAccessor);
+
+                            MergeLeft(right, ref sibAccessor); // merge from right to keep items in order.
+                            SetNext(rightNext, ref accessor); // fix linked list
+                            if (rightNext.IsValid)
                             {
-                                var n = GetNext(ref accessor);
-                                n.SetPrevious(this, ref sibAccessor);
+                                rightNext.SetPrevious(this, ref sibAccessor);
                             }
 
                             Validate();
