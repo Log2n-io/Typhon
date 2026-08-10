@@ -72,6 +72,55 @@ internal sealed class CrossStructureChecksTests : IntegrityFixtureBase
     }
 
     /// <summary>
+    /// <c>CLU-03</c> runs, and stays silent on a healthy database.
+    /// </summary>
+    /// <remarks>
+    /// It is gated on a clean shutdown and on deriving the cluster layout, either of which would make it stand down
+    /// invisibly. On this fixture both hold, so the silence is a statement rather than an absence.
+    /// </remarks>
+    [Test]
+    [CancelAfter(30_000)]
+    public void TheClusterCopyCheckRunsAndAgreesOnAHealthyDatabase()
+    {
+        BuildHealthyDatabase();
+
+        var report = DamageKit.Scan(BundlePath, ScanDepth.Deep);
+
+        Assert.That(string.Join("\n", report.Limits.ChecksSkipped), Does.Not.Contain("CHK-CLU-03"),
+            IntegrityReportText.Render(report));
+        Assert.That(report.Findings.Where(f => f.Code == "CHK-CLU-03"), Is.Empty,
+            IntegrityReportText.Render(report));
+    }
+
+    /// <summary>
+    /// A cluster copy that disagrees with its chain head is reported, and reported as losslessly repairable.
+    /// </summary>
+    /// <remarks>
+    /// Both copies stay individually well-formed, so no structural check sees it. This is the D11 shape, and the
+    /// reason the chain is named authoritative in the finding: the repair direction has to be unambiguous or the
+    /// operator is left with two plausible values and no way to choose.
+    /// </remarks>
+    [Test]
+    [CancelAfter(30_000)]
+    public void AClusterCopyThatDisagreesWithItsChainIsReported()
+    {
+        BuildHealthyDatabase();
+        var before = DamageKit.Baseline(BundlePath);
+
+        var damage = DamageKit.DivergeClusterCopyFromChain(BundlePath, out var component);
+        DamageKit.AssertOnlyDeclaredBytesChanged(before, damage);
+
+        var report = DamageKit.Scan(BundlePath, ScanDepth.Deep);
+        DamageKit.AssertDetectedExactly(report, damage);
+
+        var finding = report.Findings.Single(f => f.Code == "CHK-CLU-03");
+        Assert.That(finding.RuleId, Is.EqualTo("RB-03"));
+        Assert.That(finding.Summary, Does.Contain(component));
+        Assert.That(finding.Repair, Is.EqualTo(Repairability.Lossless),
+            "the chain is authoritative, so rewriting the cluster from it loses nothing");
+    }
+
+    /// <summary>
     /// The stranded chain is invisible to every other family, which is the whole reason CHN-06 exists.
     /// </summary>
     /// <remarks>

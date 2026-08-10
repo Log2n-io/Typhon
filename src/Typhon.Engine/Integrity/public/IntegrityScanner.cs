@@ -93,6 +93,7 @@ public static class IntegrityScanner
                 // After the three walks above, never before: CHN-06 compares sets that the chain pass and the map pass
                 // each fill half of, so running it earlier reports the unfilled half as damage.
                 CrossStructureChecks.Run(ctx);
+                ClusterHeadChecks.Run(ctx);
                 BufferChecks.Run(ctx);
                 IndexChecks.Run(ctx);
                 IndexContentChecks.Run(ctx);

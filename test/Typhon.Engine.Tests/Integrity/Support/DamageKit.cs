@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using NUnit.Framework;
 using Typhon.Engine;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests.Integrity;
 
@@ -836,8 +837,15 @@ internal static class DamageKit
             ClusterBreak.ClearLiveKey =>
                 (new[] { ClusterChecks.OccupancyAgreesWithKeys, EntityMapChecks.EntriesResolve }, IntegrityVerdict.DataLoss,
                     $"a live slot of '{archetypeName}' had its entity key zeroed"),
+            // CLU-03 too, and it is the sharpest consequence of the three: the second slot now claims the FIRST
+            // entity's identity while still holding its own component data, so its cluster copy is measured against a
+            // chain that was never its own and disagrees with it.
             ClusterBreak.DuplicateKey =>
-                (new[] { ClusterChecks.NoDuplicateKeys, EntityMapChecks.EntriesResolve }, IntegrityVerdict.Unopenable,
+                (new[]
+                    {
+                        ClusterChecks.NoDuplicateKeys, ClusterHeadChecks.HeadMatchesChain, EntityMapChecks.EntriesResolve
+                    },
+                    IntegrityVerdict.Unopenable,
                     $"two live slots of '{archetypeName}' now claim the same entity"),
             _ => (new[]
                     {
@@ -1452,6 +1460,138 @@ internal static class DamageKit
                 [IndexContentChecks.ValuesResolve, IndexAgreementChecks.ValuesHaveEntries],
                 IntegrityVerdict.Divergent,
                 RepairIsLossless: true);
+    }
+
+    /// <summary>
+    /// <b>D11</b> — rewrites the cluster's copy of a Versioned component, leaving the revision chain untouched.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The divergence <c>RB-03</c> names as a postcondition and nothing at runtime re-checks. A Versioned component is
+    /// stored twice on purpose — the chain is authoritative, the cluster is a read-path copy — so this makes the fast
+    /// path serve a value the slow path says is not current, with both copies individually well-formed.
+    /// </para>
+    /// <para>
+    /// Deliberately damages the <i>copy</i> rather than the chain: the repair direction is then unambiguous and
+    /// lossless, which is what makes the finding actionable rather than merely alarming.
+    /// </para>
+    /// </remarks>
+    /// <param name="bundlePath">The bundle to damage.</param>
+    /// <param name="componentName">Receives the component whose cluster copy was rewritten.</param>
+    internal static DamageRecord DivergeClusterCopyFromChain(string bundlePath, out string componentName)
+    {
+        int filePage;
+        long dataOffset;
+        byte[] replacement;
+
+        using (var source = new OfflineBundlePageSource(bundlePath))
+        {
+            var roots = SweepRoots(source);
+            var manifest = new SchemaCatalogReader(source, roots);
+            manifest.Read(BootstrapReader.Read(source));
+            Assert.That(manifest.IsUsable, Is.True);
+
+            var walker = new SegmentWalker(source);
+            var page = new byte[IntegrityConstants.PageSize];
+
+            ArchetypeView target = null;
+            ClusterLayoutReader layout = null;
+            ComponentView component = null;
+            var componentSlot = -1;
+
+            foreach (var archetype in manifest.Archetypes.Values)
+            {
+                if (archetype.ClusterSegmentRoot == 0)
+                {
+                    continue;
+                }
+
+                var l = ClusterLayoutReader.TryDerive(manifest, archetype);
+                if (l == null)
+                {
+                    continue;
+                }
+
+                for (var slot = 0; slot < l.ComponentNames.Count; slot++)
+                {
+                    if (manifest.Components.TryGetValue(l.ComponentNames[slot], out var c)
+                        && c.StorageMode == StorageMode.Versioned && c.RevisionSegmentRoot != 0 && c.Size > 0)
+                    {
+                        target = archetype;
+                        layout = l;
+                        component = c;
+                        componentSlot = slot;
+                        break;
+                    }
+                }
+
+                if (target != null)
+                {
+                    break;
+                }
+            }
+
+            Assert.That(target, Is.Not.Null, "no archetype with a Versioned component in a cluster was found");
+            componentName = component.Name;
+
+            var segment = walker.WalkSegment(target.ClusterSegmentRoot);
+            Assert.That(source.TryReadPage(segment.Pages[0], page), Is.True);
+            var geometry = ChunkGeometry.FromPage(page);
+
+            // First allocated cluster with a live slot 0.
+            var found = false;
+            filePage = 0;
+            dataOffset = 0;
+            replacement = null;
+
+            for (var chunkId = 0; chunkId < geometry.Capacity(segment.Pages.Count) && !found; chunkId++)
+            {
+                if (!geometry.TryLocate(chunkId, out var ordinal, out var chunkInPage) || ordinal >= segment.Pages.Count)
+                {
+                    continue;
+                }
+
+                if (!source.TryReadPage(segment.Pages[ordinal], page)
+                    || !geometry.IsChunkAllocated(page, ordinal == 0, chunkInPage))
+                {
+                    continue;
+                }
+
+                var at = geometry.OffsetInPage(ordinal, chunkInPage);
+                var occupancy = MemoryMarshal.Read<ulong>(new ReadOnlySpan<byte>(page, at, sizeof(ulong)));
+                if ((occupancy & 1UL) == 0)
+                {
+                    continue;
+                }
+
+                var dataAt = at + layout.ComponentDataOffset(componentSlot, 0);
+                var current = new ReadOnlySpan<byte>(page, dataAt, component.Size).ToArray();
+
+                // Flip every byte, so the copy differs from the chain head no matter what it held.
+                replacement = new byte[component.Size];
+                for (var i = 0; i < replacement.Length; i++)
+                {
+                    replacement[i] = (byte)(current[i] ^ 0xFF);
+                }
+
+                filePage = segment.Pages[ordinal];
+                dataOffset = ((long)filePage * IntegrityConstants.PageSize) + dataAt;
+                found = true;
+            }
+
+            Assert.That(found, Is.True, "no live cluster slot 0 was found to rewrite");
+        }
+
+        var ranges = new List<ByteRange> { WriteBytes(bundlePath, dataOffset, replacement) };
+        ranges.AddRange(RestampPage(bundlePath, filePage));
+
+        return new DamageRecord(
+            "D11",
+            $"the cluster copy of '{componentName}' for one entity no longer matches its chain head",
+            ranges,
+            [ClusterHeadChecks.HeadMatchesChain],
+            IntegrityVerdict.Divergent,
+            RepairIsLossless: true);
     }
 
     /// <summary>Right-pads a key's bytes into 8 so a narrow key can be read as a long.</summary>
