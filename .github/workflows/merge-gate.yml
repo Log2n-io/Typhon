@@ -81,6 +81,11 @@ jobs:
       && needs.changes.outputs.skip_ut != 'true'
       && vars.GATE_RUNNER != 'selfhosted'
     runs-on: ubuntu-latest
+    # ---- COST FAIL-SAFE (#729, 2026-08-09). ----
+    # Same exposure as the self-hosted job below, by a different route: `sky launch` holds a billed VM for as long as this
+    # step runs, so an uncapped step meant an uncapped VM. The step budget is larger than the self-hosted one because it
+    # also pays for cold provisioning (image pull + boot), which the warm persistent box does not.
+    timeout-minutes: 30
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -94,11 +99,19 @@ jobs:
       # Blocking launch: sky propagates the VM's run: exit code, so a test failure on the VM
       # fails this step → this job → the gate. --down tears the instance down either way.
       - name: Run correctness gate on c6id
+        timeout-minutes: 25
         run: |
           sky launch bench/aws/ci.sky.yaml --down -y \
             --env RUN_ENGINE=${{ needs.changes.outputs.engine }} \
             --env RUN_WORKBENCH=${{ needs.changes.outputs.workbench }} \
             --env RUN_ID=${{ github.run_id }}
+
+      # `--down` only tears the cluster down on a normal exit. A step timeout or a cancelled run kills sky mid-flight and
+      # strands the VM — billing with nothing watching it. This runs on every path, including cancellation, and is a no-op
+      # when the cluster is already gone.
+      - name: Tear down the VM (always, including on timeout or cancel)
+        if: always()
+        run: sky down -y typhon-ci-gate || true
 
       # if: always() — we want the report surfaced precisely when the gate FAILED.
       - name: Pull reports from S3
@@ -134,6 +147,16 @@ jobs:
       && needs.changes.outputs.skip_ut != 'true'
       && vars.GATE_RUNNER == 'selfhosted'
     runs-on: [self-hosted, linux, typhon-c6id]
+    # ---- COST FAIL-SAFE (#729, 2026-08-09). ----
+    # This job runs on a BILLED, always-on instance, and it had no timeout at all — so it inherited GitHub's 360-minute
+    # default. A gate that hung held the box for six hours; one that did so overnight would hold it for six hours before
+    # anyone saw it. This was the only workflow in the repo with no cap, and the only one that costs money per minute.
+    #
+    # The suite is 2-3 minutes healthy and 5 is already abnormal, so 10 on the step is a generous ceiling that still
+    # bounds the damage to roughly one suite's worth of compute. The job gets a slightly larger cap so the step timeout
+    # fires FIRST: that way the `if: always()` report and artifact steps still run and the .trx says where it hung,
+    # rather than the whole job being killed with no evidence of why.
+    timeout-minutes: 15
     steps:
       # clean:false keeps the warm bin/obj (untracked) for an incremental build; test DBs live on /nvme (TMPDIR),
       # not the worktree, so nothing accumulates there. git reset --hard reverts any tracked edits for isolation.
@@ -142,6 +165,7 @@ jobs:
         with:
           clean: false
       - name: Run correctness gate on the persistent c6id
+        timeout-minutes: 10
         env:
           RUN_ENGINE: ${{ needs.changes.outputs.engine }}
           RUN_WORKBENCH: ${{ needs.changes.outputs.workbench }}

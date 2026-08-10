@@ -24,6 +24,7 @@ import {
 } from './openSchemaBrowser';
 import { buildProfilerPaletteCommands } from './profilerCommands';
 import { openQueryConsole, toggleViewQueryConsole } from './openQueryConsole';
+import { openIntegrity } from './openIntegrity';
 import { isViewVisible } from '@/shell/viewRegistry';
 import type { ConnectTab } from '@/shell/dialogs/ConnectDialog';
 
@@ -75,6 +76,7 @@ export function buildBaseCommands(): CommandItem[] {
     { id: 'toggle-view-dbmap',                label: 'Toggle View Database File Map',       keywords: 'database file map storage layout pages hilbert fragmentation disk', action: toggleViewDbMap, viewId: 'DbMap' },
     { id: 'toggle-view-storage-health',       label: 'Open Storage Health',                 keywords: 'storage health dashboard segments occupancy dirty reclaimable fragmentation wal disk aggregate', action: toggleViewStorageHealth, viewId: 'StorageHealth' },
     { id: 'toggle-view-dev-fixture',          label: 'Create sample database',              keywords: 'sample playground dev fixture database generate preset advanced destination folder', action: toggleViewDevFixture, viewId: 'DevFixture' },
+    { id: 'check-integrity',                  label: 'Check database integrity…',           keywords: 'integrity check scan repair corrupt damage checksum crc verify recover fix broken unopenable loss', action: () => openIntegrity(), viewId: 'Integrity' },
     { id: 'data-browser',                     label: 'Open Data Browser',                   keywords: 'data browser entities components values inspect crud rows', action: () => toggleViewDataBrowser(), viewId: 'DataBrowserEntities' },
     { id: 'open-query-console',               label: 'Open Query Console',                  keywords: 'query console author run dsl chip filter where archetype indexed', action: () => openQueryConsole(), viewId: 'QueryConsole' },
     { id: 'toggle-view-query-console',        label: 'Toggle View Query Console',           keywords: 'query console author run dsl chip filter where archetype indexed', action: toggleViewQueryConsole, viewId: 'QueryConsole' },

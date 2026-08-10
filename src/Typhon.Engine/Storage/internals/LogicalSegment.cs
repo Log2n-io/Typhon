@@ -106,6 +106,20 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     public ref TStore Store => ref _store;
 
     /// <summary>
+    /// How many bytes of a page's metadata region this segment claims for its own use, and therefore how much is left
+    /// for the per-sector verification footer (which grows down from the end of the region).
+    /// </summary>
+    /// <param name="isRootPage">Whether the page is the segment's directory root, which can have a different chunk count.</param>
+    /// <remarks>
+    /// <b>This must be answered before the page is first written, not after.</b> A page is unlatched and dirty between
+    /// <c>CreateOrGrow</c> initialising it and its owner finishing with it, so a checkpoint can persist it in that window.
+    /// If the page declared a finer geometry than its bitmap allows — even transiently — the footer stamp would land on
+    /// top of the chunk-occupancy bitmap and corrupt chunk allocation. A plain logical segment keeps no bitmap, so the
+    /// base answer is zero and its pages get the finest granularity.
+    /// </remarks>
+    protected virtual int MetadataReservedBytes(bool isRootPage) => 0;
+
+    /// <summary>
     /// Get a typed <see cref="PageAccessor"/> for a segment page via epoch-based protection.
     /// Caller must be inside an <see cref="EpochGuard"/> scope.
     /// </summary>
@@ -450,7 +464,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
 
                     InitHeader(page.Address, PageClearMode.Header,
                         PageBlockFlags.IsLogicalSegment | (isFirstPage ? PageBlockFlags.IsLogicalSegmentRoot : PageBlockFlags.None),
-                        type, 1);
+                        type, 1, MetadataReservedBytes(isFirstPage));
                     isPageDirty = true;
                 }
 
@@ -506,7 +520,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                         {
                             var endMemIdx = RequestExclusiveForGrow(mapIndices[curIndexMapIndex + 1], epoch, verifyCrc: false);
                             var endPage = _store.GetPage(endMemIdx);
-                            InitHeader(endPage.Address, PageClearMode.Header, PageBlockFlags.IsLogicalSegment, type, 1);
+                            InitHeader(endPage.Address, PageClearMode.Header, PageBlockFlags.IsLogicalSegment, type, 1, MetadataReservedBytes(isRootPage: false));
                             changeSet?.AddByMemPageIndex(endMemIdx);
                             endPage.RawData<int>(0, 1)[0] = 0;
                             // Durability: AddByMemPageIndex already bumps DC to 1 via tracked IncrementDirty. Without a
@@ -606,7 +620,8 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                 page.RawData<byte>(offset, PagedMMF.PageRawDataSize - offset).Clear();
             }
 
-            InitHeader(page.Address, PageClearMode.None, PageBlockFlags.IsLogicalSegment | (i == 0 ? PageBlockFlags.IsLogicalSegmentRoot : PageBlockFlags.None), type, 1);
+            InitHeader(page.Address, PageClearMode.None, PageBlockFlags.IsLogicalSegment | (i == 0 ? PageBlockFlags.IsLogicalSegmentRoot : PageBlockFlags.None), type, 1,
+                MetadataReservedBytes(i == 0));
 
             // Update link list of the pages that make the segment
             ref var lsh = ref page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset);
@@ -728,7 +743,18 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     /// <summary>
     /// Initialize page header directly from a raw pointer (epoch-based path).
     /// </summary>
-    internal static unsafe void InitHeader(byte* pageAddr, PageClearMode clearMode, PageBlockFlags flags, PageBlockType type, short formatRevision)
+    /// <param name="pageAddr">Address of the page image.</param>
+    /// <param name="clearMode">How much of the page to zero before stamping.</param>
+    /// <param name="flags">Role flags for the page.</param>
+    /// <param name="type">Block type for the page.</param>
+    /// <param name="formatRevision">Type-scoped format revision.</param>
+    /// <param name="reservedMetadataBytes">
+    /// Bytes of the page metadata region the owning segment will claim for its chunk-occupancy bitmap. Decides how many
+    /// per-sector verification slots fit in what is left (<see cref="PageSectorFooter"/>). Zero for segments with no chunk
+    /// bitmap, which is the common case and yields the finest granularity.
+    /// </param>
+    internal static unsafe void InitHeader(byte* pageAddr, PageClearMode clearMode, PageBlockFlags flags, PageBlockType type, short formatRevision,
+        int reservedMetadataBytes = 0)
     {
         ref var header = ref Unsafe.AsRef<PageBaseHeader>(pageAddr + PageBaseHeader.Offset);
 
@@ -750,6 +776,11 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
         header.Flags = flags;
         header.Type = type;
         header.FormatRevision = formatRevision;
+
+        // Declare the page's per-sector verification geometry AFTER any clear, since the clear would wipe it. A chunk-based
+        // segment re-declares with its real bitmap size once it knows the stride; everything else keeps the finest
+        // granularity, which is correct because a page with no chunk bitmap has the whole metadata region free.
+        PageSectorFooter.DeclareGeometry(new Span<byte>(pageAddr, PagedMMF.PageSize), reservedMetadataBytes);
     }
 
     internal virtual bool Load(int filePageIndex)

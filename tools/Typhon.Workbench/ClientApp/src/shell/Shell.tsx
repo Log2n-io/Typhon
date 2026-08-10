@@ -3,6 +3,8 @@ import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import { useSelectionBootstrap } from '@/hooks/useSelectionBootstrap';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useDensityStore } from '@/stores/useDensityStore';
+import { useIntegrityStore } from '@/stores/useIntegrityStore';
+import IntegrityStandalone from '@/panels/Integrity/IntegrityStandalone';
 import ContextBar from './ContextBar';
 import DevFixtureModal from './dialogs/DevFixtureModal';
 import DockHost from './DockHost';
@@ -14,6 +16,9 @@ export default function Shell() {
   const kind = useSessionStore((s) => s.kind);
   const sessionId = useSessionStore((s) => s.sessionId);
   const density = useDensityStore((s) => s.mode);
+  // The Integrity view's no-session home. It replaces the Welcome screen rather than overlaying it, because
+  // it is a full working surface — scan, plan, consent, repair — not a dialog interrupting one.
+  const integrityStandalone = useIntegrityStore((s) => s.standaloneOpen);
 
   useKeyboardShortcuts();
   useSelectionBootstrap();
@@ -28,7 +33,11 @@ export default function Shell() {
       <MenuBar />
       {kind !== 'none' && <ContextBar />}
       <main className="min-h-0 flex-1">
-        {kind === 'none' ? <WelcomeScreen /> : <DockHost key={sessionId ?? 'none'} />}
+        {kind === 'none' ? (
+          integrityStandalone ? <IntegrityStandalone /> : <WelcomeScreen />
+        ) : (
+          <DockHost key={sessionId ?? 'none'} />
+        )}
       </main>
       <StatusBar />
       {/* Modal fallback for the Dev Fixture surface when there's no dockview to dock into (Welcome state).

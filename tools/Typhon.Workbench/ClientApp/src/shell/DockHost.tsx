@@ -145,6 +145,9 @@ const components: Record<string, React.FC<IDockviewPanelProps>> = {
   PaletteDebug: lazyPanel(() => import('@/panels/PaletteDebug')),
   DbMap: lazyPanel(() => import('@/panels/DbMap/DbMapPanel')),
   StorageHealth: lazyPanel(() => import('@/panels/StorageHealth/StorageHealthPanel')),
+  // #729 Integrity: the docked home of the scan/plan/repair view. It also renders full-bleed in the
+  // no-session shell (Shell.tsx) because a database that will not open has no session to dock into.
+  Integrity: lazyPanel(() => import('@/panels/Integrity/IntegrityPanel')),
   DataBrowserEntities: lazyPanel(() => import('@/panels/DataBrowser/EntityListPanel')),
   // #386 Phase 1: Query Console (chip-mode authoring + DSL editor + result grid + saved queries / history).
   QueryConsole: lazyPanel(() => import('@/panels/QueryConsole/QueryConsolePanel')),

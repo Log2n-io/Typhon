@@ -133,11 +133,16 @@ public class MetaPairTests : AllocatorTestBase
         _mmf.Dispose();
         _mmf = null;
 
-        // Both slots invalid → open must fail loudly, never silently fall back. (The MMF wraps the LoadMeta failure in a
+        // Both slots invalid → open must fail loudly, never silently fall back. (The MMF wraps the failure in a
         // "Virtual Disk Manager initialization error" — assert the loud meta-pair diagnostic on the inner exception.)
+        //
+        // Open-time spine verification now catches this BEFORE the file handle is taken, so the inner exception is a
+        // DatabaseIntegrityException carrying the full report rather than LoadMeta's bare InvalidOperationException. The
+        // rule this test verifies — a corrupt pair fails the open loudly instead of silently falling back — is unchanged;
+        // the diagnostic is simply better. LoadMeta's own throw remains as defence in depth for VerifyOnOpen = None.
         Assert.That(() => _mmf = Open(fresh: false),
-            Throws.Exception.With.InnerException.TypeOf<InvalidOperationException>()
-                .And.InnerException.Message.Contains("Both meta-pair slots"));
+            Throws.Exception.With.InnerException.TypeOf<DatabaseIntegrityException>()
+                .And.InnerException.Message.Contains("meta pair"));
     }
 
     [Test]

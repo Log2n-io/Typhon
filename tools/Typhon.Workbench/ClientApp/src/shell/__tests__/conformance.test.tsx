@@ -19,6 +19,7 @@ import QueryAnalyzerPanel from '@/panels/QueryAnalyzer/QueryAnalyzerPanel';
 import QueryConsolePanel from '@/panels/QueryConsole/QueryConsolePanel';
 import EngineLiveHealthPanel from '@/panels/EngineLiveHealth/EngineLiveHealthPanel';
 import DevFixturePanel from '@/panels/DevFixture/DevFixturePanel';
+import IntegrityPanel from '@/panels/Integrity/IntegrityPanel';
 
 // AC2.11 / AC3.11 — per-view conformance, parameterized over the reintroduced Stage-2/3 views (the conformance
 // doc's suites D + E). Each view is rendered in its **cold** state (no session → hooks disabled → empty/loading)
@@ -70,6 +71,10 @@ const VIEWS: { id: string; label: string; render: () => React.JSX.Element }[] = 
   // Dev Fixture: pure DOM (form + buttons). Capability probe is async — the first render shows
   // "Checking capability…", satisfying PC-2. PC-6 (no broken Open in/Reveal in/Go to) holds trivially.
   { id: 'DevFixture', label: 'Dev Fixture', render: () => <DevFixturePanel {...NO_PROPS} /> },
+  // #729 Integrity: pure DOM (path input + depth radios + report tables). Its cold state — before any scan —
+  // is a sentence explaining what the view does and that reading is safe, which is the PC-2 shape. Enrolled
+  // in its *docked* form; the full-bleed no-session form wraps this same component, so it inherits both.
+  { id: 'Integrity', label: 'Integrity', render: () => <IntegrityPanel /> },
 ];
 
 function mount(view: (typeof VIEWS)[number]) {

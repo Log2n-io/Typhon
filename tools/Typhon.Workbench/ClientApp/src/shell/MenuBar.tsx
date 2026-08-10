@@ -43,6 +43,7 @@ import {
 } from './commands/openSchemaBrowser';
 import { toggleViewCallTree, toggleViewCriticalPath, toggleViewProfiler, toggleViewTopSpans, toggleViewQueryAnalyzer, toggleViewEngineLiveHealth, registerOpenSaveReplay } from './commands/profilerCommands';
 import { toggleViewQueryConsole } from './commands/openQueryConsole';
+import { openIntegrity } from './commands/openIntegrity';
 import { registerOpenConnect } from './commands/baseCommands';
 import { ANY_ZONE_D_VIEW_ACTIVE, isViewVisible } from './viewRegistry';
 import { logError, logInfo } from '@/stores/useLogStore';
@@ -114,6 +115,12 @@ export default function MenuBar() {
  </MenubarItem>
  <MenubarSeparator />
  <MenubarItem onClick={() => openConnect('recent')}>Recent Files…</MenubarItem>
+ <MenubarSeparator />
+ {/* #729 — deliberately in File rather than View. Every View entry opens a panel onto *the current
+     session*; this one acts on a database file, needs no session, and is most useful when the file
+     cannot be opened at all. Filing it under View would put the recovery tool behind the very thing
+     that is broken. */}
+ <MenubarItem onClick={() => openIntegrity()}>Check Database Integrity…</MenubarItem>
  </MenubarContent>
  </MenubarMenu>
 

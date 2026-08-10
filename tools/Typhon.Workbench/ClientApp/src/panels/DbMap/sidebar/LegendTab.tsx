@@ -1,4 +1,7 @@
 import { useDbMapStore } from '@/stores/useDbMapStore';
+import { useIntegrityStore } from '@/stores/useIntegrityStore';
+import { SEVERITY_CANVAS_COLOR, severityByPage } from '@/panels/Integrity/integrityModel';
+import { openIntegrityForSession } from '@/shell/commands/openIntegrity';
 import { formatFileSize } from '@/lib/formatters';
 import { useComponentNames } from '@/hooks/queryConsole/useComponentNames';
 import {
@@ -102,7 +105,69 @@ export function LegendTab(props: LegendTabProps) {
           <PathologyList flags={props.pathologies} segments={props.segments} onFlyToPage={props.onFlyToPage} />
         </section>
       )}
+
+      {lens === 'integrity' && <IntegrityLegend />}
     </div>
+  );
+}
+
+/**
+ * The integrity lens key (#729).
+ *
+ * Also the lens's empty state, because the two are the same surface: with no scan for this database the map
+ * shows nothing and the only useful thing to say is where a scan comes from. A silent unlit lens would read
+ * as "no damage found", which is a claim no one has made.
+ */
+function IntegrityLegend() {
+  const report = useIntegrityStore((s) => s.report);
+  const damagedPages = report ? severityByPage(report.findings).size : 0;
+
+  if (!report) {
+    return (
+      <section className="flex flex-col gap-1" data-testid="dbmap-integrity-legend">
+        <h3 className="text-fs-xs font-semibold uppercase tracking-wide text-muted-foreground">Integrity</h3>
+        <p className="text-fs-sm text-muted-foreground">
+          No scan yet — this lens paints the result of one. Run it from{' '}
+          <button
+            type="button"
+            onClick={openIntegrityForSession}
+            className="text-foreground underline underline-offset-2 hover:text-primary"
+          >
+            Check Database Integrity
+          </button>
+          .
+        </p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="flex flex-col gap-1" data-testid="dbmap-integrity-legend">
+      <h3 className="text-fs-xs font-semibold uppercase tracking-wide text-muted-foreground">Integrity</h3>
+      <p className="text-fs-sm text-muted-foreground">
+        {damagedPages === 0
+          ? 'The last scan flagged no page. Nothing to paint.'
+          : `${damagedPages.toLocaleString()} page${damagedPages === 1 ? '' : 's'} flagged by the last scan, outlined by worst severity.`}
+      </p>
+      {damagedPages > 0 && (
+        <div className="mt-0.5 flex flex-col gap-0.5">
+          {(['Fatal', 'DataLoss', 'Divergence', 'Leak', 'Advisory'] as const).map((s) => (
+            <span key={s} className="flex items-center gap-1.5 text-fs-sm text-muted-foreground">
+              <span
+                className="inline-block h-2.5 w-2.5 rounded-sm border-2"
+                style={{ borderColor: SEVERITY_CANVAS_COLOR[s] }}
+              />
+              {s}
+            </span>
+          ))}
+        </div>
+      )}
+      {/* Same reasoning as the report's Limits block: the map can only paint what a scan found, and a scan
+          verifies internal consistency only. An unmarked page is not a page proven good. */}
+      <p className="mt-1 text-fs-xs text-muted-foreground">
+        Unmarked means "nothing found here", not "verified good".
+      </p>
+    </section>
   );
 }
 

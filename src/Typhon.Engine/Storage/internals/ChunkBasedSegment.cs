@@ -143,6 +143,17 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     /// <summary>Byte offset within a non-root page of this segment where chunk 0 begins.</summary>
     public int OtherDataOffset => PagedMMF.PageHeaderSize + _otherAlignmentPadding;
 
+    /// <inheritdoc />
+    /// <remarks>
+    /// The chunk-occupancy bitmap grows up from the start of the metadata region; the per-sector verification footer grows
+    /// down from its end. This is what keeps them apart, and it is consulted at page <i>initialisation</i> so a page never
+    /// — not even transiently, in the window where it is unlatched and dirty and a checkpoint could persist it — declares
+    /// a finer geometry than its bitmap leaves room for. A page that did would have its footer stamped over its own chunk
+    /// bitmap, which silently corrupts chunk allocation rather than failing loudly.
+    /// </remarks>
+    protected override int MetadataReservedBytes(bool isRootPage) => (isRootPage ? _bitmapLongsRoot : _bitmapLongsOther) * sizeof(long);
+
+
     // ═══════════════════════════════════════════════════════════════════════
     // Segment lifecycle: Create, Load, Grow
     // ═══════════════════════════════════════════════════════════════════════

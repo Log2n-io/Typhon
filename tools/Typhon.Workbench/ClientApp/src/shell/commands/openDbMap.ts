@@ -17,6 +17,21 @@ export function openDbMapForComponent(typeName: string): void {
 }
 
 /**
+ * Integrity finding → map: switch to the integrity lens and centre on the damaged page.
+ *
+ * The lens is switched on as part of the reveal rather than left to the user, because arriving at a page
+ * coloured by ordinary page-type encoding tells you nothing about why you were sent there. The caller is
+ * responsible for only offering this when a live session holds the same bundle the report describes — the
+ * map reads a live engine, the report does not.
+ */
+export function revealPageInDbMap(pageIndex: number): void {
+  const store = useDbMapStore.getState();
+  store.setLens('integrity');
+  store.requestFocusPage(pageIndex);
+  ensureDockPanel('dbmap', 'DbMap', 'Database File Map');
+}
+
+/**
  * Inspector System card → System DAG: highlight the system on the bus, request the canvas to centre + fit its node
  * (the `pendingFocusSystem` reveal signal, distinct from the plain bus highlight so only an explicit reveal recentres),
  * and surface the DAG panel. The panel auto-enables "show engine tracks" if the target is an engine-internal system
