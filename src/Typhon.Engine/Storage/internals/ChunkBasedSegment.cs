@@ -153,6 +153,14 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     /// </remarks>
     protected override int MetadataReservedBytes(bool isRootPage) => (isRootPage ? _bitmapLongsRoot : _bitmapLongsOther) * sizeof(long);
 
+    /// <inheritdoc />
+    /// <remarks>
+    /// This is the value that is otherwise nowhere in the file: it arrives as a constructor argument derived from a CLR
+    /// component type, so a reader without the schema assembly cannot reconstruct it — and without it, cannot find
+    /// chunk <i>n</i> on any page of this segment.
+    /// </remarks>
+    protected override int ChunkStrideForGeometry => Stride;
+
 
     // ═══════════════════════════════════════════════════════════════════════
     // Segment lifecycle: Create, Load, Grow

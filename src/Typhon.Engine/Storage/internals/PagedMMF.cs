@@ -76,7 +76,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     //    stamp per 512 B sector in the free tail of its metadata region, and its PageChecksum field becomes a CRC over that
     //    footer rather than over the whole page. A revision-5 reader would compute a whole-page checksum and report every
     //    such page as corrupt, so the bump is what turns a confusing false alarm into a clean "incompatible format" refusal.
-    internal const int DatabaseFormatRevision   = 6;
+    internal const int DatabaseFormatRevision   = 7;
     internal const ulong MinimumCacheSize       = MinimumMemPageCount * PageSize;      // 8 MiB — the hard floor (see Validate)
     internal const ulong DefaultDatabaseCacheSize   = 256UL * 1024 * 1024;             // 256 MiB — the shipped production default
     internal const ulong RecommendedMinimumCacheSize = 64UL * 1024 * 1024;             // 64 MiB — warn below this (unless TestMode)
