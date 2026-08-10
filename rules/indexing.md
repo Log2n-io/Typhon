@@ -228,6 +228,15 @@ keys.
             `key < landedLeaf.firstKey` - key 378 on a leaf whose first key is 381, key 88 on a leaf starting at 89, on leaves
             holding 14 to 21 entries. After: 94,854 iterations across two runs, ZERO. Iteration throughput rose 63% in the same
             wall time, because the failures had been costing deadline stalls.
+  cost   `BTreeMicroBenchmarks.Lookup_Miss` 197.8 -> 217.4 ns median, 3 runs per side, non-overlapping (worst with-guard 209.4 ns
+         beats best without at 198.2 ns). About +11%, or one extra `GetItem(0)` and one compare on the miss path. Lookup_Hit is
+         untouched because the guard lives inside the `keyIndex < 0` branch a hit never enters. This is a real price paid for a
+         correct answer, not a free win, and it is quoted here so nobody has to re-derive it. Most of the 20 ns is a virtual
+         `BaseNodeStorage.GetItem` call - #765 S8's devirtualisation is what reduces it.
+         🔴 Do NOT read the 5-benchmark table in an earlier form of this work as before/after: both of its runs had the guard,
+         because the change was already committed when the "before" side was measured. What that pair does establish is this
+         benchmark's noise floor on a 7950X - up to 18% run-to-run on IDENTICAL code - which is why the figure above needs three
+         runs a side and a non-overlap test rather than a single pair.
   note this is the same defect class as IXW-04 on the write side - a descent conclusion drawn without asking whether the leaf
        reached is the leaf that owns the key - and it is answered by the same predicate. Four write sites and one read site now
        share it.
