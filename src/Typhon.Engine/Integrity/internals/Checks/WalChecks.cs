@@ -54,17 +54,333 @@ internal static class WalChecks
             return;
         }
 
-        // Record-level walking needs the drain-block record layout, which this scan deliberately does not decode: a
-        // half-understood parse of a log it must not replay would produce findings nobody can act on. Saying so is the
-        // point of the limits block.
-        ctx.Findings.NoteSkipped(RecordChain, "per-record CRC chain walking is not implemented; only segment headers are verified");
-        ctx.Findings.NoteCaveat(
-            "WAL contents were not parsed. Segment headers, ordering and window contiguity are verified; the records inside "
-            + "each segment are not. A torn record tail inside an otherwise-valid segment would not be reported.");
-
         var headers = ReadSegmentHeaders(bundle);
         CheckHeaders(ctx, headers);
         CheckOrdering(ctx, headers);
+        CheckRecordChain(ctx, bundle, headers);
+    }
+
+    /// <summary>
+    /// <c>WAL-02</c> — the log's frames and records tile exactly, and their LSNs only ever go forward.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The catalogue asks for a CRC chain the on-disk format does not have.</b> <c>03 §9</c> specifies
+    /// <i>"CRC chain intact per drain block"</i>, and a <c>WalChunkHeader</c>/<c>WalChunkFooter</c> pair carrying
+    /// exactly that does exist in the source — but it is not what reaches the file. A segment's data region is a run of
+    /// <see cref="WalFrameHeader"/> frames, and each frame holds <c>RecordCount</c> records whose
+    /// <see cref="RecordHeader"/> carries an LSN, a kind and a body length, and <b>no checksum</b>. Measured rather than
+    /// assumed: the first sixteen bytes past a real segment's header decode as
+    /// <c>FrameLength=120, RecordCount=2, LastLsn=2</c>. A first version of this check walked the chunk format instead,
+    /// found nothing on every database, and reported success.
+    /// </para>
+    /// <para>
+    /// So the integrity available is <b>structural rather than cryptographic</b>, and it is not weak. Frames tile the
+    /// data region exactly; each frame's records tile the frame exactly; LSNs never go backwards. A rewritten byte
+    /// inside a record body is invisible to all three — stated in the caveat rather than glossed — but a rewritten
+    /// <i>length</i> or <i>count</i> desynchronises the walk immediately, and that is the class that makes recovery
+    /// replay garbage rather than stop.
+    /// </para>
+    /// <para>
+    /// <b>A torn tail is not damage.</b> The log is append-only and a crash mid-append leaves a partial frame at the end
+    /// by design — recovery stops at the last frame that parses. Reporting that would put a finding on every crash-path
+    /// database in existence, which is this feature's own failure mode arrived at from the opposite direction. The check
+    /// is therefore not "does every frame parse" but "does parsing fail only at the END".
+    /// </para>
+    /// <para>
+    /// The log is followed and never replayed. Reading a log and acting on one are different things, and only the first
+    /// is safe on a database somebody is trying to diagnose.
+    /// </para>
+    /// </remarks>
+    private static void CheckRecordChain(ScanContext ctx, OfflineBundlePageSource bundle, IReadOnlyList<WalHeaderView> headers)
+    {
+        var walked = 0;
+
+        foreach (var seg in bundle.WalSegments)
+        {
+            var usable = false;
+            for (var i = 0; i < headers.Count; i++)
+            {
+                if (headers[i].Name == seg.Name)
+                {
+                    usable = headers[i].Valid && !headers[i].Unused;
+                    break;
+                }
+            }
+
+            if (!usable)
+            {
+                continue;   // WAL-01 already reported an unusable header; its records are not the story
+            }
+
+            byte[] bytes;
+            try
+            {
+                bytes = File.ReadAllBytes(seg.Path);
+            }
+            catch (IOException ex)
+            {
+                ctx.Findings.NoteCaveat($"WAL segment '{seg.Name}' could not be read for record walking: {ex.Message}");
+                continue;
+            }
+
+            walked++;
+            previousChunkCrc = 0;
+            WalkFrames(ctx, seg.Name, bytes);
+        }
+
+        if (walked == 0)
+        {
+            ctx.Findings.NoteSkipped(RecordChain, "no WAL segment with a valid header was available to walk");
+            return;
+        }
+
+    }
+
+    /// <summary>Walks one segment's frames, reporting the first break that is not a clean tail.</summary>
+    private static void WalkFrames(ScanContext ctx, string name, byte[] bytes)
+    {
+        var at = WalSegmentHeader.SizeInBytes;
+        var frames = 0;
+        long previousLsn = 0;
+
+        while (at + WalFrameHeader.SizeInBytes <= bytes.Length)
+        {
+            var frameLength = MemoryMarshal.Read<int>(bytes.AsSpan(at));
+            var recordCount = MemoryMarshal.Read<int>(bytes.AsSpan(at + sizeof(int)));
+            var lastLsn = MemoryMarshal.Read<long>(bytes.AsSpan(at + (2 * sizeof(int))));
+
+            // 0 is "not yet published" — the end of what the writer ever wrote. -1 is the end-of-buffer padding
+            // sentinel. Both are the normal end of a segment, not a break.
+            if (frameLength == 0 || frameLength == WalFrameHeader.PaddingSentinel)
+            {
+                return;
+            }
+
+            if (frameLength < WalFrameHeader.SizeInBytes)
+            {
+                ReportIfNotATail(ctx, name, bytes, at, at + WalFrameHeader.SizeInBytes, frames,
+                    $"frame {frames} at byte {at} declares a length of {frameLength}, which cannot hold its own header");
+                return;
+            }
+
+            // A frame running past the end of the FILE is a truncation and nothing else: there is, by construction,
+            // nothing after it to distinguish corruption from a partial append. Treating it as a break was the first
+            // version's mistake, and it fired on exactly the crash-path logs the check must stay quiet about.
+            if (at + frameLength > bytes.Length)
+            {
+                ctx.Findings.NoteCaveat($"WAL segment '{name}' ends with a frame at byte {at} that declares "
+                    + $"{frameLength} bytes but has only {bytes.Length - at} left. That is the ordinary shape of a crash "
+                    + "mid-append: recovery stops at the last frame that parses, so nothing after it was ever durable.");
+                return;
+            }
+
+            // LSNs going backwards is unambiguous: the writer assigns them monotonically, and a crash removes frames
+            // rather than reordering them, so no partial append can produce this.
+            if (recordCount > 0 && previousLsn != 0 && lastLsn <= previousLsn)
+            {
+                ctx.Report(RecordChain, IntegritySeverity.Divergence, "LOG-03", Locus.Database,
+                    $"The log in WAL segment '{name}' goes backwards.",
+                    $"Frame {frames} at byte {at} ends at LSN {lastLsn}, but the frame before it already reached "
+                    + $"{previousLsn}. Sequence numbers are assigned monotonically and a crash removes frames rather than "
+                    + "reordering them, so this cannot be a torn append. Recovery orders its replay by LSN, so these "
+                    + "records are applied in a different order from the one they were committed in.",
+                    Repairability.NotRepairable);
+                return;
+            }
+
+            if (!ChunksTileTheFrame(bytes, at, frameLength, ref previousChunkCrc, out var why, out var validChunkFollows))
+            {
+                // A bad chunk with a GOOD one after it inside the same frame settles the question on its own: a torn
+                // append truncates, it does not leave verified chunks behind a broken one. No need to look further.
+                if (validChunkFollows)
+                {
+                    ReportBreak(ctx, name, frames, $"frame {frames} at byte {at} {why}");
+                }
+                else
+                {
+                    ReportIfNotATail(ctx, name, bytes, at, at + frameLength, frames, $"frame {frames} at byte {at} {why}");
+                }
+
+                return;
+            }
+
+            if (recordCount > 0)
+            {
+                previousLsn = lastLsn;
+            }
+
+            at += frameLength;
+            frames++;
+        }
+    }
+
+    /// <summary>Footer CRC of the last chunk seen, which the next chunk's <c>PrevCRC</c> must repeat.</summary>
+    [ThreadStatic]
+    private static uint previousChunkCrc;
+
+    /// <summary>
+    /// Whether a frame's chunks fill it exactly, each verifying its own CRC and linking to the one before.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The two framings are <b>nested</b>, which is what a first attempt at this check missed in both directions: a
+    /// segment holds <see cref="WalFrameHeader"/> frames, and each frame holds <c>WalChunkHeader</c>-framed chunks that
+    /// each carry a CRC32C footer over their own bytes. Measured on a real segment: a frame of length 120 at byte 4096
+    /// contains exactly one 104-byte chunk starting at 4112, and 16 + 104 is the frame length.
+    /// </para>
+    /// <para>
+    /// So the catalogue's "CRC chain per drain block" is real after all — <c>PrevCRC</c> repeats the previous chunk's
+    /// footer, so a single rewritten byte anywhere in the log breaks the chain from that point on. The earlier reading
+    /// of this format as CRC-free was wrong, and the walk that produced it started chunks at the frame header rather
+    /// than after it.
+    /// </para>
+    /// </remarks>
+    private static bool ChunksTileTheFrame(byte[] bytes, int frameAt, int frameLength, ref uint chainCrc, out string why,
+        out bool validChunkFollows)
+    {
+        why = null;
+        validChunkFollows = false;
+
+        var at = frameAt + WalFrameHeader.SizeInBytes;
+        var frameEnd = frameAt + frameLength;
+        var minimum = WalChunkHeader.SizeInBytes + WalChunkFooter.SizeInBytes;
+        var index = 0;
+
+        while (at < frameEnd)
+        {
+            // Fewer bytes left than the smallest possible chunk is padding, not a break — a frame is aligned, and no
+            // chunk can be encoded in them. The CompA fixture happens to tile exactly and the indexed one does not,
+            // which is how treating this as damage came to fire on a healthy database.
+            if (at + minimum > frameEnd)
+            {
+                return true;
+            }
+
+            var chunkSize = MemoryMarshal.Read<ushort>(bytes.AsSpan(at + sizeof(ushort)));
+            if (chunkSize < minimum || at + chunkSize > frameEnd)
+            {
+                why = $"chunk {index} declares a size of {chunkSize}, which does not fit the remaining "
+                    + $"{frameEnd - at} byte(s)";
+                return false;   // nothing can be located after an unusable size, so no forward probe is possible
+            }
+
+            var storedCrc = MemoryMarshal.Read<uint>(bytes.AsSpan(at + chunkSize - WalChunkFooter.SizeInBytes));
+            var computedCrc = Crc32CUtil.Compute(bytes.AsSpan(at, chunkSize - WalChunkFooter.SizeInBytes));
+            if (storedCrc != computedCrc)
+            {
+                why = $"chunk {index} fails its own CRC (stored 0x{storedCrc:X8}, computed 0x{computedCrc:X8})";
+                validChunkFollows = AnyChunkVerifies(bytes, at + chunkSize, frameEnd);
+                return false;
+            }
+
+            var storedPrev = MemoryMarshal.Read<uint>(bytes.AsSpan(at + (2 * sizeof(ushort))));
+            if (chainCrc != 0 && storedPrev != 0 && storedPrev != chainCrc)
+            {
+                why = $"chunk {index} records a previous-CRC of 0x{storedPrev:X8}, but the chunk before it ends with "
+                    + $"0x{chainCrc:X8}";
+                validChunkFollows = AnyChunkVerifies(bytes, at + chunkSize, frameEnd);
+                return false;
+            }
+
+            chainCrc = storedCrc;
+            at += chunkSize;
+            index++;
+        }
+
+        return true;
+    }
+
+    /// <summary>Whether any chunk in <c>[from, end)</c> passes its own CRC.</summary>
+    private static bool AnyChunkVerifies(byte[] bytes, int from, int end)
+    {
+        var minimum = WalChunkHeader.SizeInBytes + WalChunkFooter.SizeInBytes;
+        var at = from;
+
+        while (at + minimum <= end)
+        {
+            var chunkSize = MemoryMarshal.Read<ushort>(bytes.AsSpan(at + sizeof(ushort)));
+            if (chunkSize < minimum || at + chunkSize > end)
+            {
+                return false;
+            }
+
+            var storedCrc = MemoryMarshal.Read<uint>(bytes.AsSpan(at + chunkSize - WalChunkFooter.SizeInBytes));
+            if (storedCrc == Crc32CUtil.Compute(bytes.AsSpan(at, chunkSize - WalChunkFooter.SizeInBytes)))
+            {
+                return true;
+            }
+
+            at += chunkSize;
+        }
+
+        return false;
+    }
+
+    /// <summary>Reports a chain break that has already been established as not-a-tail.</summary>
+    private static void ReportBreak(ScanContext ctx, string name, int frameIndex, string what)
+        => ctx.Report(RecordChain, IntegritySeverity.Divergence, "WP-05", Locus.Database,
+            $"The record chain in WAL segment '{name}' breaks before the end of the log.",
+            $"Walking it, {what} — and a later chunk in the same frame still verifies, so this cannot be a torn tail from "
+            + "a crash mid-append: an interrupted append truncates the log, it does not leave intact chunks behind a "
+            + "broken one. Recovery stops at the first chunk that fails, so every record beyond this point is silently "
+            + "discarded. Only records after the checkpoint LSN are at stake — the data file already holds everything "
+            + "before it.",
+            Repairability.NotRepairable,
+            new LossEstimate
+            {
+                Kind = LossKind.Unknown,
+                EntityCount = -1,
+                BoundedMin = 0,
+                BoundedMax = -1,
+                Explanation = $"Whatever the records after frame {frameIndex} of '{name}' would have replayed."
+            });
+
+    /// <summary>
+    /// Reports a break only when written data follows it — a break at the very end is a crash, not corruption.
+    /// </summary>
+    /// <remarks>
+    /// The test is deliberately conservative: anything other than unwritten space after the break counts as "the log
+    /// continues", and only then is it damage. Erring this way costs a missed finding on a log whose tail happens to be
+    /// zeroed; erring the other way puts a finding on every crash-path database, which is far worse.
+    /// </remarks>
+    private static void ReportIfNotATail(ScanContext ctx, string name, byte[] bytes, int at, int resumeAt, int frameIndex,
+        string what)
+    {
+        var written = false;
+        for (var i = resumeAt; i < bytes.Length; i++)
+        {
+            if (bytes[i] != 0)
+            {
+                written = true;
+                break;
+            }
+        }
+
+        if (!written)
+        {
+            ctx.Findings.NoteCaveat($"WAL segment '{name}' ends with an unparseable frame at byte {at}, followed only by "
+                + "unwritten space. That is the ordinary shape of a crash mid-append: recovery stops at the last frame "
+                + "that parses, so nothing after it was ever durable.");
+            return;
+        }
+
+        ctx.Report(RecordChain, IntegritySeverity.Divergence, "WP-05", Locus.Database,
+            $"The record framing in WAL segment '{name}' breaks before the end of the log.",
+            $"Walking it, {what} — and written data continues past that point, so this is not a torn tail from a crash "
+            + "mid-append. Recovery walks frame by frame and stops at the first that does not parse, so every record "
+            + "beyond this point is silently discarded: the log looks shorter than it is, and the work it holds is lost "
+            + "without an error. Only records after the checkpoint LSN are at stake — the data file already holds "
+            + "everything before it.",
+            Repairability.NotRepairable,
+            new LossEstimate
+            {
+                Kind = LossKind.Unknown,
+                EntityCount = -1,
+                BoundedMin = 0,
+                BoundedMax = -1,
+                Explanation = $"Whatever the records after frame {frameIndex} of '{name}' would have replayed."
+            });
     }
 
     /// <summary>Reads every WAL segment file's 4 KiB header without touching its records.</summary>

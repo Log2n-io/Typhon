@@ -29,6 +29,9 @@ internal static class IndexContentChecks
     /// <summary>Check code: keys are ordered within a node, bounded by its high key, and unique where declared unique.</summary>
     public const string KeyOrder = "CHK-IDX-05";
 
+    /// <summary>Check code: a multi-value entry's buffer resolves, terminates, and holds live locations.</summary>
+    public const string MultiValueBuffers = "CHK-IDX-07";
+
     /// <summary>Maximum nodes visited per tree, so a damaged level chain cannot turn into an unbounded walk.</summary>
     private const int MaxNodesPerTree = 1 << 20;
 
@@ -147,7 +150,7 @@ internal static class IndexContentChecks
 
                     if (isLeaf)
                     {
-                        CheckValues(ctx, locus, archetype, field, layout, node, count, chunkId, occupied);
+                        CheckValues(ctx, locus, archetype, field, layout, node, count, chunkId, occupied, segment, geometry);
                     }
                     else
                     {
@@ -274,19 +277,21 @@ internal static class IndexContentChecks
     /// read of memory that belongs to nothing.
     /// </remarks>
     private static void CheckValues(ScanContext ctx, Locus locus, ArchetypeView archetype, FieldView field,
-        IndexNodeLayout layout, ReadOnlySpan<byte> node, int count, int chunkId, Dictionary<long, int> occupied)
+        IndexNodeLayout layout, ReadOnlySpan<byte> node, int count, int chunkId, Dictionary<long, int> occupied,
+        SegmentView segment, ChunkGeometry geometry)
     {
         if (occupied == null || occupied.Count == 0)
         {
             return;   // no cluster occupancy to compare against; ClusterChecks already said why
         }
 
+        var live = new HashSet<int>(occupied.Values);
+
         if (field.IndexAllowMultiple)
         {
-            return;   // a multi-value entry holds a VSBS buffer id, not a location — that is IDX-07's territory
+            CheckMultiValueBuffers(ctx, locus, archetype, field, layout, node, count, chunkId, live, segment, geometry);
+            return;
         }
-
-        var live = new HashSet<int>(occupied.Values);
 
         for (var i = 0; i < count; i++)
         {
@@ -306,6 +311,71 @@ internal static class IndexContentChecks
                 + "cluster data costs nothing.",
                 Repairability.Lossless);
             return;   // one per node keeps a rebuilt-stale index from producing a finding per entry
+        }
+    }
+
+    /// <summary>
+    /// <c>IDX-07</c> — a multi-value entry's buffer resolves, terminates, and every element is a live location.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// On a non-unique index a leaf value is not a location at all — it is a <b>buffer id</b>, and the entities sharing
+    /// that key live in a variable-sized buffer. Two facts make it decodable, and both were misread when this check was
+    /// first declared unrun: the element type is always <c>int</c> (a packed <c>ClusterLocation</c>), not something
+    /// recorded per index; and the buffer lives in the <b>index segment itself</b> rather than in a pooled
+    /// component-collection segment. <c>L64MultipleNodeStorage</c> builds it as
+    /// <c>VariableSizedBufferSegment&lt;int&gt;</c> over the tree's own segment.
+    /// </para>
+    /// <para>
+    /// A dangling buffer id is the more dangerous half. Every entity filed under that key becomes unreachable through
+    /// the index at once — not one row, the whole bucket — and the index still looks structurally perfect, because
+    /// nothing about the node is wrong.
+    /// </para>
+    /// </remarks>
+    private static void CheckMultiValueBuffers(ScanContext ctx, Locus locus, ArchetypeView archetype, FieldView field,
+        IndexNodeLayout layout, ReadOnlySpan<byte> node, int count, int chunkId, HashSet<int> live,
+        SegmentView segment, ChunkGeometry geometry)
+    {
+        var reader = new VsbsReader(ctx.Source);
+        var elements = new List<int>();
+
+        for (var i = 0; i < count; i++)
+        {
+            var bufferId = layout.ValueAt(node, i);
+            if (bufferId <= 0)
+            {
+                continue;   // a key with no buffer yet is not damage
+            }
+
+            if (!reader.TryReadBuffer(segment, geometry, bufferId, elements))
+            {
+                ctx.Report(MultiValueBuffers, IntegritySeverity.Divergence, "IX-06", locus,
+                    $"A key of the index on '{archetype.Name}.{field.Name}' names an unreadable value buffer.",
+                    $"Entry {i} of node {chunkId} — key {layout.Describe(layout.KeyAt(node, i))} — points at buffer "
+                    + $"{bufferId}, whose chunk chain does not resolve or does not terminate. Every entity filed under "
+                    + "that key is unreachable through this index at once, and nothing about the node itself is wrong so "
+                    + "no structural check sees it. Rebuilding the index from cluster data costs nothing.",
+                    Repairability.Lossless);
+                return;   // one per node
+            }
+
+            for (var e = 0; e < elements.Count; e++)
+            {
+                if (live.Contains(elements[e]))
+                {
+                    continue;
+                }
+
+                var (cluster, slot) = ClusterLocation.Unpack(elements[e]);
+                ctx.Report(MultiValueBuffers, IntegritySeverity.Divergence, "IX-06", locus,
+                    $"A value buffer of the index on '{archetype.Name}.{field.Name}' names a slot that holds no entity.",
+                    $"Buffer {bufferId}, reached from key {layout.Describe(layout.KeyAt(node, i))} in node {chunkId}, "
+                    + $"holds a location resolving to cluster {cluster} slot {slot}, which the occupancy word marks free. "
+                    + "A query on that key decodes whatever occupies the slot; RB-04 records that as an access violation "
+                    + "rather than a wrong row.",
+                    Repairability.Lossless);
+                return;
+            }
         }
     }
 

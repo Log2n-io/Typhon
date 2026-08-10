@@ -1594,6 +1594,285 @@ internal static class DamageKit
             RepairIsLossless: true);
     }
 
+    /// <summary>
+    /// <b>D6</b> — points a non-unique index key at a value buffer that does not exist.
+    /// </summary>
+    /// <remarks>
+    /// On a non-unique index a leaf value is a buffer id, so this is four bytes that unreachable every entity sharing
+    /// one key at once — while the node it sits in stays perfect, which is why no structural check sees it.
+    /// </remarks>
+    /// <param name="bundlePath">The bundle to damage.</param>
+    /// <param name="bogusBuffer">Receives the buffer id the key now names.</param>
+    internal static DamageRecord BreakMultiValueBuffer(string bundlePath, out int bogusBuffer)
+    {
+        int filePage;
+        long valueOffset;
+
+        using (var source = new OfflineBundlePageSource(bundlePath))
+        {
+            var roots = SweepRoots(source);
+            var manifest = new SchemaCatalogReader(source, roots);
+            manifest.Read(BootstrapReader.Read(source));
+            Assert.That(manifest.IsUsable, Is.True);
+
+            var walker = new SegmentWalker(source);
+            var reader = new IndexDirectoryReader(source);
+            var page = new byte[IntegrityConstants.PageSize];
+            var entries = new List<IndexTreeEntry>();
+
+            SegmentView segment = null;
+            var geometry = default(ChunkGeometry);
+            var layout = default(IndexNodeLayout);
+            var leafChunk = -1;
+
+            foreach (var archetype in manifest.Archetypes.Values)
+            {
+                foreach (var root in new[] { archetype.IndexRoot, archetype.String64IndexRoot })
+                {
+                    if (root == 0 || leafChunk > 0 || !source.TryReadPage(root, page))
+                    {
+                        continue;
+                    }
+
+                    var g = ChunkGeometry.FromPage(page);
+                    var seg = walker.WalkSegment(root);
+                    if (!g.IsUsable || !reader.TryReadDirectory(seg, g, entries))
+                    {
+                        continue;
+                    }
+
+                    foreach (var entry in entries)
+                    {
+                        if (entry.StableId < 0 || entry.RootChunkId <= 0 || entry.Slot >= archetype.ComponentNames.Count
+                            || !manifest.Components.TryGetValue(archetype.ComponentNames[entry.Slot], out var component))
+                        {
+                            continue;
+                        }
+
+                        // Only a NON-unique field, since only those store buffer ids.
+                        var field = component.Fields.FirstOrDefault(
+                            f => f.FieldId == entry.StableId && f.HasIndex && f.IndexAllowMultiple);
+                        if (field == null)
+                        {
+                            continue;
+                        }
+
+                        var l = IndexNodeLayout.ForFieldType(field.Type);
+                        if (!l.IsUsable)
+                        {
+                            continue;
+                        }
+
+                        var node = entry.RootChunkId;
+                        for (var depth = 0; depth < 32 && node > 0; depth++)
+                        {
+                            if (!reader.IsAllocated(seg, g, node) || !reader.TryGetChunk(seg, g, node, out var bytes))
+                            {
+                                node = 0;
+                                break;
+                            }
+
+                            if (IndexNodeLayout.IsLeaf(bytes))
+                            {
+                                if (IndexDirectoryReader.CountOf(bytes) < 1)
+                                {
+                                    node = 0;
+                                }
+
+                                break;
+                            }
+
+                            node = l.ValueAt(bytes, 0);
+                        }
+
+                        if (node <= 0)
+                        {
+                            continue;
+                        }
+
+                        segment = seg;
+                        geometry = g;
+                        layout = l;
+                        leafChunk = node;
+                        break;
+                    }
+                }
+            }
+
+            Assert.That(leafChunk, Is.GreaterThan(0), "no non-unique index leaf was found");
+
+            reader.TryGetChunk(segment, geometry, leafChunk, out var leaf);
+            bogusBuffer = geometry.Capacity(segment.Pages.Count) + 70_000;
+
+            var slot = layout.PhysicalSlot(leaf, 0);
+            geometry.TryLocate(leafChunk, out var ordinal, out var chunkInPage);
+            filePage = segment.Pages[ordinal];
+            valueOffset = ((long)filePage * IntegrityConstants.PageSize) + geometry.OffsetInPage(ordinal, chunkInPage)
+                + layout.ValuesOffset + (slot * sizeof(int));
+        }
+
+        var ranges = new List<ByteRange> { WriteInt(bundlePath, valueOffset, bogusBuffer) };
+        ranges.AddRange(RestampPage(bundlePath, filePage));
+
+        return new DamageRecord(
+            "D6(multi-value-buffer)",
+            $"a non-unique index key now names value buffer {bogusBuffer}, which its segment cannot contain",
+            ranges,
+            [IndexContentChecks.MultiValueBuffers],
+            IntegrityVerdict.Divergent,
+            RepairIsLossless: true);
+    }
+
+    /// <summary>Segment-header size and frame-header size, mirrored from the durability layer for the WAL primitives.</summary>
+    private const int WalSegmentHeaderSize = 4096;
+
+    /// <summary>Size of a <c>WalFrameHeader</c>: <c>FrameLength</c>, <c>RecordCount</c>, <c>LastLsn</c>.</summary>
+    private const int WalFrameHeaderSize = 16;
+
+    /// <summary>Walks a WAL segment's frames, returning the byte offset of each one that parses.</summary>
+    private static List<int> WalFrameOffsets(byte[] bytes)
+    {
+        var offsets = new List<int>();
+        var at = WalSegmentHeaderSize;
+
+        while (at + WalFrameHeaderSize <= bytes.Length)
+        {
+            var frameLength = MemoryMarshal.Read<int>(bytes.AsSpan(at));
+            if (frameLength == 0 || frameLength == -1 || frameLength < WalFrameHeaderSize || at + frameLength > bytes.Length)
+            {
+                break;
+            }
+
+            offsets.Add(at);
+            at += frameLength;
+        }
+
+        return offsets;
+    }
+
+    /// <summary>
+    /// <b>D8</b> — appends a duplicate frame to the log, then breaks the chunk in the frame before it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The position is the whole point. A log is append-only, so a crash mid-append routinely leaves an unparseable
+    /// chunk at the very end — reporting that would put a finding on every crash-path database in existence. A broken
+    /// chunk with intact, written data <i>after</i> it cannot come from an interrupted append: truncation removes the
+    /// tail, it does not leave good bytes stranded behind a bad one.
+    /// </para>
+    /// <para>
+    /// <b>Why the log is extended rather than merely damaged.</b> The writer coalesces a whole drain into one frame
+    /// holding one chunk, and a checkpoint drops everything before it — so a fixture-sized database produces a log with
+    /// exactly one frame and one chunk, no matter how the writes are batched. That log cannot express "a break before
+    /// the tail" at all. Copying the frame gives the walk something real to reach past the break, and the copy is a
+    /// byte-for-byte duplicate so it parses and verifies exactly as the original does.
+    /// </para>
+    /// </remarks>
+    /// <param name="bundlePath">The bundle whose log to damage.</param>
+    /// <param name="segmentName">Receives the segment file that was damaged.</param>
+    internal static DamageRecord CorruptWalChunkBeforeTheTail(string bundlePath, out string segmentName)
+    {
+        const int ChunkHeaderSize = 8;
+
+        var walDir = Path.Combine(bundlePath, "wal");
+        Assert.That(Directory.Exists(walDir), Is.True, "the bundle has no wal/ directory");
+
+        foreach (var path in Directory.GetFiles(walDir).OrderBy(p => p, StringComparer.Ordinal))
+        {
+            var bytes = File.ReadAllBytes(path);
+            if (bytes.Length <= WalSegmentHeaderSize)
+            {
+                continue;
+            }
+
+            var frames = WalFrameOffsets(bytes);
+            if (frames.Count == 0)
+            {
+                continue;
+            }
+
+            var last = frames[^1];
+            var length = MemoryMarshal.Read<int>(bytes.AsSpan(last));
+            if (last + (2 * length) > bytes.Length)
+            {
+                continue;   // no room to append a copy
+            }
+
+            segmentName = Path.GetFileName(path);
+
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                // Duplicate the final frame immediately after itself, so something written and parseable follows.
+                fs.Seek(last + length, SeekOrigin.Begin);
+                fs.Write(bytes.AsSpan(last, length));
+
+                // Then break a body byte of the FIRST frame's chunk. Its header stays parseable, so the walk reaches
+                // the CRC rather than stopping on the size.
+                var target = frames[0] + WalFrameHeaderSize + ChunkHeaderSize;
+                fs.Seek(target, SeekOrigin.Begin);
+                var b = fs.ReadByte();
+                fs.Seek(target, SeekOrigin.Begin);
+                fs.WriteByte((byte)(b ^ 0xFF));
+                fs.Flush(true);
+            }
+
+            return new DamageRecord(
+                "D8",
+                $"one byte flipped in the first WAL chunk of '{segmentName}', with a parseable frame appended after it",
+                [],   // the WAL lives outside the data file, so the byte-range diff does not apply to it
+                [WalChecks.RecordChain],
+                IntegrityVerdict.Divergent,
+                RepairIsLossless: false);
+        }
+
+        segmentName = null;
+        throw new InvalidOperationException("no WAL segment held a frame that could be duplicated and broken");
+    }
+
+    /// <summary>
+    /// Truncates the last-written WAL segment inside a frame — what a power loss during append leaves.
+    /// </summary>
+    /// <remarks>
+    /// The negative half of the <c>WAL-02</c> pair, and the more important one. A check that reports this is worse than
+    /// no check: every crash-recovered database would carry a finding about damage recovery already handled correctly.
+    /// </remarks>
+    /// <param name="bundlePath">The bundle whose log to truncate.</param>
+    internal static void TruncateWalMidFrame(string bundlePath)
+    {
+        var walDir = Path.Combine(bundlePath, "wal");
+
+        foreach (var path in Directory.GetFiles(walDir).OrderBy(p => p, StringComparer.Ordinal))
+        {
+            var bytes = File.ReadAllBytes(path);
+            if (bytes.Length <= WalSegmentHeaderSize)
+            {
+                continue;
+            }
+
+            var offsets = WalFrameOffsets(bytes);
+            if (offsets.Count == 0)
+            {
+                continue;
+            }
+
+            var last = offsets[^1];
+            var lastLength = MemoryMarshal.Read<int>(bytes.AsSpan(last));
+            if (lastLength <= WalFrameHeaderSize + 4)
+            {
+                continue;
+            }
+
+            // Cut inside the LAST parsing frame, so what remains ends with a partial one and nothing but the truncation
+            // follows it.
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            fs.SetLength(last + WalFrameHeaderSize + ((lastLength - WalFrameHeaderSize) / 2));
+            fs.Flush(true);
+            return;
+        }
+
+        throw new InvalidOperationException("no WAL segment held a frame that could be truncated mid-body");
+    }
+
     /// <summary>Right-pads a key's bytes into 8 so a narrow key can be read as a long.</summary>
     private static ReadOnlySpan<byte> PadTo8(ReadOnlySpan<byte> key)
     {

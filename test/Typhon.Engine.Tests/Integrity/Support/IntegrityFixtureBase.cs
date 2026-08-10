@@ -181,6 +181,102 @@ internal abstract class IntegrityFixtureBase
         CloseEngine();
     }
 
+    /// <summary>
+    /// Builds a database whose archetype carries a <b>non-unique</b> index, and closes it cleanly.
+    /// </summary>
+    /// <remarks>
+    /// A non-unique index does not store locations in its leaves — it stores buffer ids, and the entities sharing a key
+    /// live in a variable-sized buffer inside the index segment. That is a different value shape from every other
+    /// fixture here, and it is the only one that exercises <c>IDX-07</c>. Several entities deliberately share each
+    /// <c>Bucket</c> value, so the buffers actually hold more than one element.
+    /// </remarks>
+    /// <param name="entityCount">How many entities to spawn.</param>
+    /// <param name="bucketCount">How many distinct key values to spread them over.</param>
+    protected void BuildMultiValueIndexedDatabase(int entityCount = 40, int bucketCount = 5)
+    {
+        using (var scope = _serviceProvider.CreateScope())
+        {
+            var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<AxVerMulti>();
+            dbe.InitializeArchetypes();
+
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                for (var i = 0; i < entityCount; i++)
+                {
+                    using var tx = uow.CreateTransaction();
+                    tx.Spawn<AxPureVerMulti>(AxPureVerMulti.P.Set(new AxVerMulti
+                    {
+                        Key = i,
+                        Bucket = i % bucketCount,
+                        Weight = i * 1.5f,
+                        Tag = i
+                    }));
+                    tx.Commit();
+                }
+
+                uow.Flush();
+            }
+
+            dbe.ForceCheckpoint();
+        }
+
+        CloseEngine();
+    }
+
+    /// <summary>
+    /// Builds a database over several flushed units of work, so the WAL holds more than one frame.
+    /// </summary>
+    /// <remarks>
+    /// The single-UoW fixture produces a log with exactly one frame, and a log with one frame cannot express the
+    /// distinction <c>WAL-02</c> exists for: every break in it is also the last thing in the file, which is what a
+    /// crash mid-append looks like. Several flushes give the check something to be wrong about.
+    /// </remarks>
+    /// <param name="batches">How many units of work to flush.</param>
+    /// <param name="perBatch">Entities per unit of work.</param>
+    protected void BuildMultiFrameWalDatabase(int batches = 6, int perBatch = 8)
+    {
+        using (var scope = _serviceProvider.CreateScope())
+        {
+            var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<CompA>();
+            dbe.InitializeArchetypes();
+
+            // Checkpoint FIRST, then write. A checkpoint advances the replayable window, so anything logged before it
+            // is no longer in the log — the obvious ordering (write, then checkpoint) leaves a single frame behind and
+            // the fixture cannot express "a break before the tail" at all.
+            using (var seed = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                using (var tx = seed.CreateTransaction())
+                {
+                    tx.Spawn<CompAArch>(CompAArch.A.Set(new CompA(1, 1, 1)));
+                    tx.Commit();
+                }
+
+                seed.Flush();
+            }
+
+            dbe.ForceCheckpoint();
+
+            var next = 2;
+            for (var b = 0; b < batches; b++)
+            {
+                using var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate);
+                for (var i = 0; i < perBatch; i++, next++)
+                {
+                    using var tx = uow.CreateTransaction();
+                    var comp = new CompA(next, next, next);
+                    tx.Spawn<CompAArch>(CompAArch.A.Set(in comp));
+                    tx.Commit();
+                }
+
+                uow.Flush();
+            }
+        }
+
+        CloseEngine();
+    }
+
     private ServiceProvider BuildProvider(bool minimumCache = false)
     {
         var services = new ServiceCollection();

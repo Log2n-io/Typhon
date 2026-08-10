@@ -163,6 +163,57 @@ internal sealed class IndexChecksTests : IntegrityFixtureBase
     }
 
     /// <summary>
+    /// <c>IDX-07</c> runs over a non-unique index and agrees with it.
+    /// </summary>
+    /// <remarks>
+    /// A non-unique index stores buffer ids in its leaves, not locations — a different value shape from every other
+    /// fixture, and the only one that reaches this check. It was declared unrun on the grounds that the buffer's
+    /// element type is not recorded per index; that was wrong twice over. The element type is always <c>int</c> (a
+    /// packed <c>ClusterLocation</c>), and the buffer lives in the index segment itself rather than a pooled
+    /// collection segment.
+    /// </remarks>
+    [Test]
+    [CancelAfter(30_000)]
+    public void TheMultiValueBufferCheckRunsAndAgrees()
+    {
+        BuildMultiValueIndexedDatabase();
+
+        var report = DamageKit.Scan(BundlePath, ScanDepth.Deep);
+
+        Assert.That(string.Join(" | ", report.Limits.ChecksSkipped), Does.Not.Contain("CHK-IDX-07"),
+            IntegrityReportText.Render(report));
+        Assert.That(report.Findings.Where(f => f.Code == "CHK-IDX-07"), Is.Empty,
+            "the multi-value buffer check fired on an undamaged database: " + IntegrityReportText.Render(report));
+        Assert.That(report.Verdict, Is.EqualTo(IntegrityVerdict.Sound), IntegrityReportText.Render(report));
+    }
+
+    /// <summary>
+    /// A key whose value buffer does not resolve is reported.
+    /// </summary>
+    /// <remarks>
+    /// The severity of this shape is per-key rather than per-row: every entity filed under that key becomes
+    /// unreachable at once, and the node itself stays perfect so no structural check sees it.
+    /// </remarks>
+    [Test]
+    [CancelAfter(30_000)]
+    public void AMultiValueKeyWithAnUnreadableBufferIsReported()
+    {
+        BuildMultiValueIndexedDatabase();
+        var before = DamageKit.Baseline(BundlePath);
+
+        var damage = DamageKit.BreakMultiValueBuffer(BundlePath, out var bogus);
+        DamageKit.AssertOnlyDeclaredBytesChanged(before, damage);
+
+        var report = DamageKit.Scan(BundlePath, ScanDepth.Deep);
+        DamageKit.AssertDetectedExactly(report, damage);
+
+        var finding = report.Findings.First(f => f.Code == "CHK-IDX-07");
+        Assert.That(finding.Detail, Does.Contain(bogus.ToString()));
+        Assert.That(finding.RuleId, Is.EqualTo("IX-06"));
+        Assert.That(finding.Repair, Is.EqualTo(Repairability.Lossless));
+    }
+
+    /// <summary>
     /// A sibling chain that points at itself is Fatal, and the scan still terminates.
     /// </summary>
     /// <remarks>
