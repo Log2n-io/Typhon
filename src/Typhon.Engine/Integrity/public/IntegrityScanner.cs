@@ -87,6 +87,7 @@ public static class IntegrityScanner
                 SegmentChecks.Run(ctx);
                 SweepPages(ctx);
                 ChainChecks.Run(ctx);
+                ClusterChecks.Run(ctx);
                 WalChecks.Run(ctx);
             }
         }

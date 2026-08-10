@@ -679,6 +679,173 @@ internal static class DamageKit
         return roots;
     }
 
+    /// <summary>How to break a cluster slot.</summary>
+    internal enum ClusterBreak
+    {
+        /// <summary>Zero the entity key of a slot the occupancy word says is live.</summary>
+        ClearLiveKey,
+
+        /// <summary>Give a second live slot the same entity key as the first.</summary>
+        DuplicateKey,
+
+        /// <summary>Raise a live slot's entity key past the archetype's restored watermark.</summary>
+        KeyAboveWatermark
+    }
+
+    /// <summary>
+    /// <b>D5</b> — rewrites one live cluster slot's entity key so identity, occupancy or the watermark disagrees.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Eight bytes, at <c>8 + 8·componentCount + 8·slot</c> from the cluster base — an offset that is only computable
+    /// because the archetype's component count is in <c>ArchetypeR1</c>. The slot array holds packed
+    /// <c>EntityId</c>s (routing id in the low 16 bits, key above), so a forged key is shifted into place rather than
+    /// written raw; writing a bare counter here would produce an id belonging to archetype 0 and the damage would be
+    /// about routing rather than about identity.
+    /// </para>
+    /// <para>
+    /// <see cref="ClusterBreak.KeyAboveWatermark"/> expects two codes, and both are true: a key past the watermark is
+    /// <c>CHK-CLU-05</c> seen per entity and <c>CHK-ALO-02</c> seen per archetype — the same disagreement from the two
+    /// ends RB-06 describes.
+    /// </para>
+    /// </remarks>
+    /// <param name="bundlePath">The bundle to damage.</param>
+    /// <param name="how">Which way to break the slot.</param>
+    internal static DamageRecord BreakClusterSlot(string bundlePath, ClusterBreak how)
+    {
+        const int RoutingBits = 16;
+
+        int filePage;
+        long slotOffset;
+        long newRaw;
+        string archetypeName;
+        var ranges = new List<ByteRange>();
+
+        using (var source = new OfflineBundlePageSource(bundlePath))
+        {
+            var roots = SweepRoots(source);
+            var manifest = new SchemaCatalogReader(source, roots);
+            manifest.Read(BootstrapReader.Read(source));
+            Assert.That(manifest.IsUsable, Is.True, "precondition: the manifest must be readable to find a cluster");
+
+            var walker = new SegmentWalker(source);
+            var page = new byte[IntegrityConstants.PageSize];
+
+            ArchetypeView target = null;
+            SegmentView segment = null;
+            var geometry = default(ChunkGeometry);
+            var chunkId = -1;
+            var liveSlots = new List<int>();
+
+            foreach (var a in manifest.Archetypes.Values)
+            {
+                if (a.ClusterSegmentRoot == 0 || !source.TryReadPage(a.ClusterSegmentRoot, page))
+                {
+                    continue;
+                }
+
+                var g = ChunkGeometry.FromPage(page);
+                if (!g.IsUsable)
+                {
+                    continue;
+                }
+
+                var seg = walker.WalkSegment(a.ClusterSegmentRoot);
+                for (var id = 0; id < g.Capacity(seg.Pages.Count) && chunkId < 0; id++)
+                {
+                    if (!g.TryLocate(id, out var ordinal, out var chunkInPage) || ordinal >= seg.Pages.Count)
+                    {
+                        continue;
+                    }
+
+                    if (!source.TryReadPage(seg.Pages[ordinal], page) || !g.IsChunkAllocated(page, ordinal == 0, chunkInPage))
+                    {
+                        continue;
+                    }
+
+                    var at = g.OffsetInPage(ordinal, chunkInPage);
+                    var occupancy = MemoryMarshal.Read<ulong>(new ReadOnlySpan<byte>(page, at, sizeof(ulong)));
+                    liveSlots.Clear();
+                    for (var s = 0; s < 64 && (8 + 8 * a.ComponentCount + s * 8 + 8) <= g.Stride; s++)
+                    {
+                        if ((occupancy & (1UL << s)) != 0)
+                        {
+                            liveSlots.Add(s);
+                        }
+                    }
+
+                    // DuplicateKey needs two live slots in ONE cluster; the others need only one.
+                    if (liveSlots.Count >= (how == ClusterBreak.DuplicateKey ? 2 : 1))
+                    {
+                        target = a;
+                        segment = seg;
+                        geometry = g;
+                        chunkId = id;
+                    }
+                }
+
+                if (chunkId >= 0)
+                {
+                    break;
+                }
+            }
+
+            if (chunkId < 0)
+            {
+                throw new InvalidOperationException($"no cluster with enough live slots was found for {how}");
+            }
+
+            geometry.TryLocate(chunkId, out var ord, out var inPage);
+            filePage = segment.Pages[ord];
+            source.TryReadPage(filePage, page);
+
+            var clusterAt = geometry.OffsetInPage(ord, inPage);
+            var keysAt = clusterAt + 8 + (8 * target.ComponentCount);
+            var victim = how == ClusterBreak.DuplicateKey ? liveSlots[1] : liveSlots[0];
+            slotOffset = ((long)filePage * IntegrityConstants.PageSize) + keysAt + (victim * 8);
+
+            var victimRaw = MemoryMarshal.Read<long>(new ReadOnlySpan<byte>(page, keysAt + victim * 8, sizeof(long)));
+            var routing = victimRaw & ((1L << RoutingBits) - 1);
+
+            newRaw = how switch
+            {
+                ClusterBreak.ClearLiveKey => 0,
+                ClusterBreak.DuplicateKey => MemoryMarshal.Read<long>(
+                    new ReadOnlySpan<byte>(page, keysAt + liveSlots[0] * 8, sizeof(long))),
+                _ => ((target.NextEntityKey + 1000) << RoutingBits) | routing
+            };
+
+            archetypeName = target.Name;
+        }
+
+        ranges.Add(WriteLong(bundlePath, slotOffset, newRaw));
+        ranges.AddRange(RestampPage(bundlePath, filePage));
+
+        var (codes, verdict, description) = how switch
+        {
+            ClusterBreak.ClearLiveKey =>
+                (new[] { ClusterChecks.OccupancyAgreesWithKeys }, IntegrityVerdict.DataLoss,
+                    $"a live slot of '{archetypeName}' had its entity key zeroed"),
+            ClusterBreak.DuplicateKey =>
+                (new[] { ClusterChecks.NoDuplicateKeys }, IntegrityVerdict.Unopenable,
+                    $"two live slots of '{archetypeName}' now claim the same entity"),
+            _ => (new[] { ClusterChecks.KeysBelowWatermark, ClusterChecks.KeyWatermark }, IntegrityVerdict.Unopenable,
+                    $"a live slot of '{archetypeName}' holds a key past the archetype's watermark")
+        };
+
+        return new DamageRecord($"D5({how})", description, ranges, codes, verdict, RepairIsLossless: false);
+    }
+
+    /// <summary>Writes one long at an absolute file offset and returns the range it wrote.</summary>
+    private static ByteRange WriteLong(string bundlePath, long fileOffset, long value)
+    {
+        using var fs = new FileStream(DataPath(bundlePath), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        fs.Seek(fileOffset, SeekOrigin.Begin);
+        fs.Write(BitConverter.GetBytes(value));
+        fs.Flush(true);
+        return new ByteRange(fileOffset, sizeof(long));
+    }
+
     /// <summary>Writes one int at an absolute file offset and returns the range it wrote.</summary>
     private static ByteRange WriteInt(string bundlePath, long fileOffset, int value)
     {

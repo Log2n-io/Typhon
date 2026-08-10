@@ -36,6 +36,12 @@ internal static class ChainChecks
     /// <summary>Check code: no cycles in any chain.</summary>
     public const string NoCycles = "CHK-CHN-04";
 
+    /// <summary>Check code: every chain TSN is below the restored allocator watermark.</summary>
+    public const string TsnBelowWatermark = "CHK-CHN-05";
+
+    /// <summary>Check code: the TSN allocator watermark exceeds every TSN in the file.</summary>
+    public const string TsnWatermark = "CHK-ALO-01";
+
     /// <summary>
     /// Runs the chain family. Requires <see cref="ScanDepth.Deep"/> and a readable manifest — without the manifest there
     /// is no way to know which segments hold revision chains rather than component data.
@@ -60,6 +66,13 @@ internal static class ChainChecks
         // checkpoint leaves the same shape, which is what ChainShapeAtRestTests measured. On a file left by a crash
         // there has been no such consolidation, so asserting it there would report a divergence on a healthy database.
         var (_, cleanShutdown) = ctx.Bootstrap.ReadWatermarks();
+        // The TSN watermark is only meaningful after a clean close. RB-05 is explicit that BK_NextFreeTSN is refreshed
+        // ONLY on clean shutdown, and that recovery recomputes the resumption floor from three terms — so on a
+        // crash-path file the persisted value is stale BY DESIGN and lags every revision the WAL window still holds.
+        // Comparing against it there reports a fatal allocator fault on a database that is behaving exactly as
+        // documented. Measured, not assumed: the G0 crash fixtures produced one CHN-05 per surviving revision.
+        var nextFreeTsn = cleanShutdown ? ReadNextFreeTsn(ctx) : -1;
+        var highestTsn = 0L;
 
         foreach (var component in ctx.Manifest.Components.Values)
         {
@@ -68,7 +81,7 @@ internal static class ChainChecks
                 continue;   // a non-Versioned component has no revision chain, which is not a defect
             }
 
-            WalkSegment(ctx, component, cleanShutdown);
+            WalkSegment(ctx, component, cleanShutdown, nextFreeTsn, ref highestTsn);
         }
 
         if (!cleanShutdown)
@@ -76,9 +89,48 @@ internal static class ChainChecks
             ctx.Findings.NoteSkipped(Collapsed,
                 "the database was not closed cleanly, so its chains have not been through a consolidating checkpoint");
         }
+
+        if (nextFreeTsn < 0)
+        {
+            ctx.Findings.NoteSkipped($"{TsnBelowWatermark}, {TsnWatermark}",
+                cleanShutdown
+                    ? "the bootstrap records no NextFreeTSN, so no TSN watermark could be compared against"
+                    : "the database was not closed cleanly, so its persisted TSN watermark is stale by design (RB-05) "
+                      + "and recovery has not yet recomputed the resumption floor");
+            return;
+        }
+
+        // Strictly greater, for the same reason as the entity-key watermark: NextFreeTSN records the last sequence
+        // number issued, so the newest committed revision carrying exactly it is the normal resting state.
+        if (highestTsn > nextFreeTsn)
+        {
+            // RB-05's third term, and the reason it is worth a check of its own: the failure it prevents is silent,
+            // permanent, and leaves a database that passes every other check. A consolidating checkpoint can advance
+            // committed TSNs into the data file WITHOUT leaving them in the WAL window, so a resumption floor computed
+            // from the checkpoint and the replayed window alone lands BELOW the newest consolidated revision — and every
+            // post-recovery reader then snapshots beneath it while MVCC quietly hides the latest value.
+            ctx.Report(TsnWatermark, IntegritySeverity.Fatal, "RB-05", Locus.Database,
+                "The transaction-sequence allocator is behind the newest revision in the file.",
+                $"The bootstrap records NextFreeTSN = {nextFreeTsn}, but a surviving chain head carries TSN {highestTsn}. "
+                + "Every reader opening this database snapshots below the newest committed revision, so the latest value "
+                + "of those entities is invisible — and the next transaction reuses a sequence number that is already on "
+                + "disk. Nothing surfaces an error; the data simply reads as older than it is.");
+        }
     }
 
-    private static void WalkSegment(ScanContext ctx, ComponentView component, bool cleanShutdown)
+    /// <summary>Reads the persisted TSN watermark, or <c>-1</c> when the bootstrap does not record one.</summary>
+    private static long ReadNextFreeTsn(ScanContext ctx)
+    {
+        if (!ctx.Bootstrap.TryGet("NextFreeTSN", out var value) || value.Type != BootstrapDictionary.ValueType.Long)
+        {
+            return -1;
+        }
+
+        return value.AsLong;
+    }
+
+    private static void WalkSegment(ScanContext ctx, ComponentView component, bool cleanShutdown, long nextFreeTsn,
+        ref long highestTsn)
     {
         if (!ctx.Segments.TryGetValue(component.RevisionSegmentRoot, out var segment))
         {
@@ -131,7 +183,97 @@ internal static class ChainChecks
                 continue;
             }
 
+            InspectElements(ctx, component, segment, geometry, chunk, id, header, nextFreeTsn, ref highestTsn);
             WalkChain(ctx, component, segment, geometry, reader, id, header, capacity, visitedGlobally, cleanShutdown);
+        }
+    }
+
+    /// <summary>
+    /// <c>CHN-01</c> and <c>CHN-05</c> — what the root chunk's own revision elements say.
+    /// </summary>
+    /// <remarks>
+    /// Only the root chunk's elements are read. A continuation chunk's are reachable, but a chain that still has
+    /// continuations has already drawn <see cref="Collapsed"/>, and walking history to re-report the same fact per
+    /// element would bury the finding that matters under one per revision.
+    /// </remarks>
+    private static void InspectElements(ScanContext ctx, ComponentView component, SegmentView segment,
+        ChunkGeometry geometry, ReadOnlySpan<byte> chunk, int chunkId, CompRevStorageHeader header, long nextFreeTsn,
+        ref long highestTsn)
+    {
+        var elementSize = Unsafe.SizeOf<CompRevStorageElement>();
+        var headerSize = Unsafe.SizeOf<CompRevStorageHeader>();
+        var capacity = (chunk.Length - headerSize) / elementSize;
+        if (capacity <= 0)
+        {
+            return;
+        }
+
+        var committed = 0;
+        var live = 0;
+
+        // ItemCount is a claim about the chain, and a damaged one can claim more elements than the chunk holds. Bound by
+        // what is actually there rather than by what the header says.
+        var count = Math.Min((int)header.ItemCount, capacity);
+        for (var i = 0; i < count; i++)
+        {
+            // The chain is a circular buffer, so the i-th item is FirstItemIndex + i modulo the chunk's capacity.
+            var slot = ((header.FirstItemIndex + i) % capacity + capacity) % capacity;
+            var element = MemoryMarshal.Read<CompRevStorageElement>(chunk.Slice(headerSize + (slot * elementSize), elementSize));
+
+            if (element.IsVoid)
+            {
+                continue;
+            }
+
+            live++;
+            if (!element.IsolationFlag)
+            {
+                committed++;
+            }
+
+            if (element.TSN > highestTsn)
+            {
+                highestTsn = element.TSN;
+            }
+
+            if (nextFreeTsn >= 0 && element.TSN > nextFreeTsn)
+            {
+                ctx.Report(TsnBelowWatermark, IntegritySeverity.Divergence, "RB-05", LocusFor(segment, chunkId, geometry),
+                    $"A revision of '{component.Name}' carries a sequence number at or above the allocator's watermark.",
+                    $"Chunk {chunkId} holds a revision at TSN {element.TSN}, while the bootstrap records NextFreeTSN = "
+                    + $"{nextFreeTsn}. The watermark is meant to sit above every sequence number ever issued, so this "
+                    + "revision is invisible to every reader that opens the database and its number will be issued again.",
+                    Repairability.Lossless);
+            }
+        }
+
+        if (live > 0 && committed == 0)
+        {
+            ctx.Report(SingleHead, IntegritySeverity.DataLoss, "RB-03", LocusFor(segment, chunkId, geometry),
+                $"A revision chain for '{component.Name}' holds no committed revision.",
+                $"Chunk {chunkId} carries {live} revision(s), every one of them still flagged as isolated — the state a "
+                + "revision is in before its transaction commits. No reader can see any value for this entity's "
+                + "component, and a scrub has nothing to promote to head.",
+                Repairability.NotRepairable,
+                new LossEstimate
+                {
+                    Kind = LossKind.Values,
+                    EntityCount = 1,
+                    BoundedMin = 1,
+                    BoundedMax = 1,
+                    Component = component.Name,
+                    Explanation = $"The committed value of one entity's '{component.Name}'."
+                });
+        }
+        else if (committed > 1 && header.NextChunkId == 0 && header.ItemCount == 1)
+        {
+            // Only reachable when ItemCount disagrees with the elements actually present, which is itself the finding.
+            ctx.Report(SingleHead, IntegritySeverity.Divergence, "RB-03", LocusFor(segment, chunkId, geometry),
+                $"A collapsed revision chain for '{component.Name}' holds more than one committed revision.",
+                $"Chunk {chunkId} declares ItemCount=1 and no continuation, but {committed} committed revisions are "
+                + "present in it. Whichever the reader picks depends on where it starts, so two readers can legitimately "
+                + "disagree about the entity's current value.",
+                Repairability.Lossless);
         }
     }
 
