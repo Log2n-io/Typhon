@@ -457,6 +457,9 @@ public class OlcBTreeRaceStressTests
                     throw new Exception($"Add_Disjoint: key {i} success={r.IsSuccess} value={r.Value} expected={i * 10} | {where}");
                 }
             }
+            // #765 S1: this scenario checked that every key ANSWERS and never that the tree is sound. Those are different questions, and the gap between them
+            // is where a leaf sits correctly chained, correctly counted, and reachable only by the B-link right-walk.
+            tree.CheckConsistency(ref va);
             va.Dispose();
         }
         finally { em.ExitScope(setupDepth); }
@@ -535,6 +538,16 @@ public class OlcBTreeRaceStressTests
             if (tree.EntryCount != 0)
             {
                 throw new Exception($"Remove_Disjoint: EntryCount={tree.EntryCount} expected=0");
+            }
+            // #765 S1: an emptied tree is exactly where the chain, the counter and the latches most often disagree, and this scenario asserted only the counter.
+            var cva = segment.CreateChunkAccessor();
+            try
+            {
+                tree.CheckConsistency(ref cva);
+            }
+            finally
+            {
+                cva.Dispose();
             }
         }
         finally { em.ExitScope(setupDepth); }

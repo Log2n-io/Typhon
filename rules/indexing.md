@@ -174,6 +174,39 @@ keys.
   note this rule was written for READERS and enforced at two reader sites, and the writers made the identical conflation
        unchecked for as long - see IXW-01, whose livelock (#695) is this rule's `on_violation` reached from the write path.
 
+### IXS-04: A node's items are strictly ascending `[silent]`
+
+  invariant ∀ node n, ∀ i in 1..count-1: n.item[i-1].Key < n.item[i].Key, for LEAF and INTERIOR nodes alike
+  never assuming intra-node order because the node's endpoints look right
+  enforce `BTree.ValidateNodeKeyOrder` walks every node from the root and compares each item against its predecessor
+  scope: BTree.cs (`ValidateNodeKeyOrder`)
+  rationale: this is the one property the key search actually depends on, and until #765 nothing checked it.
+             `NodeWrapper.CheckConsistency` compares each item against the PARENT separator and pins only the endpoints,
+             the chain checks read `GetFirst` and `GetLast` and nothing between, and the separator and HighKey checks read
+             one key each. A leaf holding `[1, 9, 3, 5, 12]` satisfies every one of them.
+  on_violation: a binary or vectorised search answers "not found" for keys that are present, non-deterministically by
+                which half it lands in. That is #297's exact symptom, arriving with no instrument able to say the node
+                was the reason - which is how it stayed open across two closes.
+  verified: BTreeConsistencyValidatorTests.Mutant_KeysOutOfOrderWithinALeaf_AreReported (mutant)
+
+### IXS-05: The descent and the leaf chain reach the same set of leaves `[silent]`
+
+  invariant {leaves reachable by descending from Root} == {leaves reachable by walking `_linkList`}, and `EntryCount`
+            equals the number of items materialised by that walk
+  never trusting one structure to describe the other
+  enforce `BTree.ValidateDescentAndChainAgree` and `BTree.ValidateEntryCountMatchesChain`, both called from
+          `CheckConsistency`, both reporting which ids are in one set and not the other
+  scope: BTree.cs (`ValidateDescentAndChainAgree`, `ValidateEntryCountMatchesChain`)
+  rationale: they are separate structures maintained by separate code, and every defect in this subsystem's history has
+             been one disagreeing with the other. Each individual check walked one of them.
+  on_violation: a leaf on the chain but under no ancestor holds keys no descent reaches - found only by the B-link
+                right-walk, and permanently lost the moment a hop budget or an empty leaf ends that walk early. A leaf
+                under the root but off the chain is invisible to every range scan while lookups still answer from it.
+                A drifted `EntryCount` is worse than either, because it is the number the tests assert on: it hides a
+                lost key here and manufactures a phantom failure somewhere else.
+  verified: BTreeConsistencyValidatorTests.Mutant_LeavesOnTheChainButUnreachableByDescent_AreReported (mutant),
+            BTreeConsistencyValidatorTests.Mutant_EntryCountDisagreeingWithTheChain_IsReported (mutant)
+
 ---
 
 ## Module: IXW — Index writes under OLC
