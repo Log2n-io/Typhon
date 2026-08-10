@@ -60,6 +60,16 @@ internal sealed class ScanContext
     /// </remarks>
     public SchemaCatalogReader Manifest { get; set; }
 
+    /// <summary>
+    /// Live entity ids per archetype name, as read from cluster occupancy. Populated by <c>ClusterChecks</c>.
+    /// </summary>
+    /// <remarks>
+    /// Shared rather than re-derived so <c>MAP-01</c>/<c>MAP-02</c> compare against the SAME view of the cluster the
+    /// <c>CLU</c> checks reported on. Two walks that independently re-read a damaged cluster can disagree, and then a
+    /// finding depends on which check ran first.
+    /// </remarks>
+    public Dictionary<string, HashSet<long>> ClusterEntityIds { get; } = [];
+
     /// <summary>Findings accumulated so far.</summary>
     public FindingCollector Findings { get; init; }
 

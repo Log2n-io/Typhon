@@ -836,6 +836,98 @@ internal static class DamageKit
         return new DamageRecord($"D5({how})", description, ranges, codes, verdict, RepairIsLossless: false);
     }
 
+    /// <summary>
+    /// <b>D6</b> — points an EntityMap directory slot at a chunk id outside its own segment.
+    /// </summary>
+    /// <remarks>
+    /// The shape RB-01 warns about in the sharpest terms: a hash directory holds chunk-id POINTERS, and trusting a torn
+    /// one "dereferences garbage into a hard process crash before any loud-fail can fire". The target is deliberately far
+    /// past the segment's capacity rather than merely free — an in-range-but-free id is a state linear hashing produces
+    /// legitimately mid-split, so it is caveated rather than reported, while an id the segment cannot contain at all is
+    /// unambiguously damage.
+    /// </remarks>
+    /// <param name="bundlePath">The bundle to damage.</param>
+    internal static DamageRecord RedirectEntityMapDirectorySlot(string bundlePath)
+    {
+        int filePage;
+        long slotFileOffset;
+        int bogus;
+        string archetypeName;
+
+        using (var source = new OfflineBundlePageSource(bundlePath))
+        {
+            var roots = SweepRoots(source);
+            var manifest = new SchemaCatalogReader(source, roots);
+            manifest.Read(BootstrapReader.Read(source));
+
+            var walker = new SegmentWalker(source);
+            var page = new byte[IntegrityConstants.PageSize];
+
+            ArchetypeView target = null;
+            SegmentView segment = null;
+            var geometry = default(ChunkGeometry);
+            var directoryChunkId = -1;
+
+            foreach (var a in manifest.Archetypes.Values)
+            {
+                if (a.EntityMapRoot == 0 || !source.TryReadPage(a.EntityMapRoot, page))
+                {
+                    continue;
+                }
+
+                var g = ChunkGeometry.FromPage(page);
+                if (!g.IsUsable)
+                {
+                    continue;
+                }
+
+                var seg = walker.WalkSegment(a.EntityMapRoot);
+
+                // The meta record is chunk 0; its first inline directory id names the chunk to redirect.
+                g.TryLocate(0, out var metaOrd, out var metaInPage);
+                if (metaOrd >= seg.Pages.Count || !source.TryReadPage(seg.Pages[metaOrd], page))
+                {
+                    continue;
+                }
+
+                var metaAt = g.OffsetInPage(metaOrd, metaInPage);
+                var firstDir = MemoryMarshal.Read<int>(new ReadOnlySpan<byte>(page, metaAt + 28, sizeof(int)));
+                if (firstDir <= 0)
+                {
+                    continue;
+                }
+
+                target = a;
+                segment = seg;
+                geometry = g;
+                directoryChunkId = firstDir;
+                break;
+            }
+
+            if (directoryChunkId < 0)
+            {
+                throw new InvalidOperationException("no EntityMap with an inline directory chunk was found");
+            }
+
+            geometry.TryLocate(directoryChunkId, out var ord, out var inPage);
+            filePage = segment.Pages[ord];
+            slotFileOffset = ((long)filePage * IntegrityConstants.PageSize) + geometry.OffsetInPage(ord, inPage);
+            bogus = geometry.Capacity(segment.Pages.Count) + 100_000;
+            archetypeName = target.Name;
+        }
+
+        var ranges = new List<ByteRange> { WriteInt(bundlePath, slotFileOffset, bogus) };
+        ranges.AddRange(RestampPage(bundlePath, filePage));
+
+        return new DamageRecord(
+            "D6(map-directory)",
+            $"the EntityMap for '{archetypeName}' now names bucket chunk {bogus}, which its segment cannot contain",
+            ranges,
+            [EntityMapChecks.PointersResolve],
+            IntegrityVerdict.Divergent,
+            RepairIsLossless: true);
+    }
+
     /// <summary>Writes one long at an absolute file offset and returns the range it wrote.</summary>
     private static ByteRange WriteLong(string bundlePath, long fileOffset, long value)
     {

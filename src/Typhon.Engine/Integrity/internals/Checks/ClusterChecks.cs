@@ -125,6 +125,12 @@ internal static class ClusterChecks
         }
 
         var seen = new Dictionary<long, string>();
+
+        // Published for MAP-01/02, which compare the map's identities against these rather than following entries into
+        // bucket values — a step that would need the per-entry record size, which is not on disk.
+        var liveIds = new HashSet<long>();
+        ctx.ClusterEntityIds[archetype.Name] = liveIds;
+
         var maxKey = 0L;
         var occupiedTotal = 0;
         var loadedPage = -1;
@@ -183,6 +189,14 @@ internal static class ClusterChecks
                 if (occupied)
                 {
                     occupiedTotal++;
+                    if (key != 0)
+                    {
+                        // The KEY, not the packed id. The EntityMap is per-archetype, so its routing bits would be
+                        // constant and are not stored: its keys are the bare entity key. Publishing the packed value
+                        // here makes the two sets disjoint and MAP-01/02 fire on every healthy database.
+                        liveIds.Add(key);
+                    }
+
                     CheckOccupiedSlot(ctx, archetype, locus, chunkId, slot, key, seen, ref maxKey, cleanShutdown);
                 }
                 else if (key != 0)
