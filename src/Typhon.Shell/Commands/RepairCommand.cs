@@ -111,7 +111,8 @@ internal sealed class RepairCommand : Command<RepairCommand.Settings>
         RepairOutcome outcome;
         try
         {
-            outcome = DatabaseRepair.Apply(settings.Bundle, plan, settings.AllowLoss, !settings.NoBackupFirst, settings.DryRun);
+            outcome = DatabaseRepair.Apply(settings.Bundle, plan, settings.AllowLoss, !settings.NoBackupFirst, settings.DryRun,
+                DerivedStructureRegeneration.Run);
         }
         catch (InvalidOperationException ex)
         {

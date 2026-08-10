@@ -182,8 +182,10 @@ describe('normalizePlan', () => {
   it('normalizes a missing reason to null rather than an empty string', () => {
     // ASP.NET omits nulls; an absent field must not become '' — that is falsy but not null, and every
     // downstream check would then be a truthiness test that happened to work.
+    // `as unknown` first: the point of the test is to hand normalizePlan a shape the DTO says is impossible, so a
+    // direct cast is rightly rejected by the compiler rather than being a mistake to work around.
     const raw = { ...base } as Record<string, unknown>;
     delete raw.blockedReason;
-    expect(normalizePlan(raw as RepairPlanDto).blockedReason).toBeNull();
+    expect(normalizePlan(raw as unknown as RepairPlanDto).blockedReason).toBeNull();
   });
 });
