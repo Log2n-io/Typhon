@@ -65,7 +65,28 @@ internal abstract partial class BTree<TKey, TStore>
                 // reports and Stress_MoveSameLeaf has been printing and discarding since it was written (#765). Measured: with the default `true`, a
                 // SINGLE-THREADED sweep of 200 moves over one key range breaks a separator/leaf pair every run; with `false`, zero. Insert has always passed
                 // false here and says so at BTree.Insert.cs — Move is the copy that never received it.
-                var (newLeafId, newVersion, _) = OptimisticDescendToLeaf(newKey, ref opAccessor, false);
+                // #221: skip the second descent entirely when the leaf we are already standing on demonstrably owns newKey's range. A same-leaf move — which is
+                // what "shift an entity to an adjacent slot" is — was paying two full root-to-leaf descents to reach a conclusion the first one already
+                // contains. The test is the complement of the leaf-authority predicate: newKey at or above this leaf's first key, and below its HighKey (or the
+                // leaf is rightmost, where HighKey bounds nothing). If either bound fails, fall through and descend properly.
+                //
+                // Safe because it can only ever return the SAME leaf the general path would have picked: it concludes only when both bounds hold on a
+                // version-validated read, and the authority check under the lock below re-asks the identical question. A wrong answer costs a restart, never a
+                // misplaced key.
+                int newLeafId;
+                int newVersion;
+                var standingLeaf = _storage.LoadNode(oldLeafId);
+                if (!KeyOutsideLeafAuthority(standingLeaf, newKey, Comparer, ref opAccessor)
+                    && standingLeaf.GetLatch(ref opAccessor).ValidateVersion(oldVersion))
+                {
+                    newLeafId = oldLeafId;
+                    newVersion = oldVersion;
+                }
+                else
+                {
+                    (newLeafId, newVersion, _) = OptimisticDescendToLeaf(newKey, ref opAccessor, false);
+                }
+
                 if (newLeafId == 0)
                 {
                     Interlocked.Increment(ref _optimisticRestarts);
