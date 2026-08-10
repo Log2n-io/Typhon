@@ -58,4 +58,4 @@ t.Commit();
 - Sibling: [Page Integrity — CRC32C, Seqlock Snapshots & A/B Page Pairing](../../Storage/page-integrity.md) — storage-layer description of the same A/B slot-pairing mechanism
 
 <!-- Deep dive: claude/design/Durability/MinimalWal/04-checkpoint.md §4, claude/overview/06-durability.md §6.4 -->
-<!-- Rules: claude/rules/durability.md — rule CK-05 -->
+<!-- Rules: rules/durability.md — rule CK-05 -->

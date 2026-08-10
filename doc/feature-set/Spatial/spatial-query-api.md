@@ -84,5 +84,5 @@ var rayHits = t.Query<UnitArch>()
 
 <!-- Deep dive: claude/design/Spatial/SpatialIndex/04-query-api.md (API surface, traversal algorithms per query type) -->
 <!-- Deep dive: claude/design/Spatial/SpatialIndex/08-game-features.md (category filtering, Count Queries feature rationale) -->
-<!-- Rules: claude/rules/spatial.md (Module: Queries — SQ-01 through SQ-05) -->
+<!-- Rules: rules/spatial.md (Module: Queries — SQ-01 through SQ-05) -->
 <!-- ADR: claude/adr/044-spatial-rtree-architecture.md -->

@@ -62,4 +62,4 @@ foreach (var seg in db.EnumerateStorageSegments())
 
 <!-- Deep dive: claude/design/Storage/database-file-format.md §3–4 (root header, bootstrap dictionary, occupancy map structure) -->
 <!-- Overview: claude/overview/03-storage.md §3.2 (ManagedPagedMMF) -->
-<!-- Rules: claude/rules/durability.md — CK-09 (occupancy bitmap is derived, re-derived on crash) -->
+<!-- Rules: rules/durability.md — CK-09 (occupancy bitmap is derived, re-derived on crash) -->

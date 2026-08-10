@@ -15,7 +15,7 @@ namespace Typhon.Engine.Internals;
 /// this grid. Per-archetype cluster lists live inside each <see cref="ArchetypeClusterState"/>'s own <c>CellClusterPool</c>.</para>
 /// <para><b>Thread safety.</b> Parallel fence workers mutate <see cref="EntityCount"/> / <see cref="ClusterCount"/> concurrently — all writes MUST go through
 /// <see cref="System.Threading.Interlocked.Increment(ref int)"/> / <see cref="System.Threading.Interlocked.Decrement(ref int)"/>. The cache-line padding here
-/// is what makes those atomics scale across cores without inter-cell ping-pong. See rule MD-03 in <c>claude/rules/spatial.md</c>.</para>
+/// is what makes those atomics scale across cores without inter-cell ping-pong. See rule MD-03 in <c>rules/spatial.md</c>.</para>
 /// </remarks>
 [StructLayout(LayoutKind.Explicit, Size = 64)]
 internal struct CellState

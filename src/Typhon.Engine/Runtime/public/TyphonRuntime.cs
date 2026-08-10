@@ -2109,7 +2109,7 @@ public sealed partial class TyphonRuntime : IDisposable
     /// exec systems (Prep → Migrate → AabbRefresh → Finalize) via the declared <c>.After()</c> edges — each phase's typed <c>Prepare(FenceContext)</c> builds
     /// its plan and sets the dynamic chunk count. Aggregates the highest WAL LSN across tables + Finalize and publishes it via
     /// <see cref="DatabaseEngine.UpdateLastTickFenceLSNAtomic"/>. See <c>claude/design/Spatial/SpatialTiers/01-spatial-clusters.md</c>
-    /// §"Parallel migration apply" and rule MD-02 in <c>claude/rules/spatial.md</c>.
+    /// §"Parallel migration apply" and rule MD-02 in <c>rules/spatial.md</c>.
     /// </summary>
     private void RunParallelFence(DagScheduler scheduler)
     {

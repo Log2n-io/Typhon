@@ -22,10 +22,10 @@ an application developer (or their auditor) can actually go read.
 
 ## ⚙️ How it works (in brief)
 
-Three artifacts, each covering a different failure mode. **Invariant rules** (`claude/rules/durability.md`) are a
+Three artifacts, each covering a different failure mode. **Invariant rules** (`rules/durability.md`) are a
 curated, numbered database of pseudo-code predicates grouped by module — `LOG` (log format/append), `AP` (commit
 pipeline / apply), `CK` (checkpoint), `RB` (rebuild), `CM` (Committed discipline) — each naming the source files
-that enforce it and the test(s) that verify it. **TLA+ specifications** (`claude/rules/tla/`) model the checkpoint protocol, the commit/recovery protocol, and
+that enforce it and the test(s) that verify it. **TLA+ specifications** (`rules/tla/`) model the checkpoint protocol, the commit/recovery protocol, and
 Committed discipline's stage/append/publish race against checkpoint as state machines (S1–S3) and exhaustively
 check them with TLC over every crash-at-any-step interleaving within small bounds; each spec ships a
 deliberately-broken "mutant" variant that TLC must report as a violation, so a vacuously-green spec can't hide. **The crash-simulation sweep**
@@ -96,6 +96,6 @@ var engine = serviceProvider.GetRequiredService<DatabaseEngine>();   // throws C
 - Related features: [Crash Recovery (RecoveryDriver)](./crash-recovery/README.md), [Checkpoint v2](./checkpoint-v2/README.md)
 
 <!-- Deep dive: claude/overview/06-durability.md §6.9 — Formal Proofs & Rules -->
-<!-- Rules database: claude/rules/durability.md, conventions in claude/rules/README.md -->
-<!-- TLA+ specs: claude/rules/tla/README.md -->
+<!-- Rules database: rules/durability.md, conventions in rules/README.md -->
+<!-- TLA+ specs: rules/tla/README.md -->
 <!-- Proof plan / acceptance criteria: claude/design/Durability/MinimalWal/08-test-plan.md -->

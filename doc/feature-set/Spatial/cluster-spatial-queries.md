@@ -82,4 +82,4 @@ var nearby = t.Query<AntArch>()
 
 <!-- Deep dive: claude/design/Spatial/SpatialTiers/02-cluster-rtree.md (full design + phase history) -->
 <!-- Deep dive: claude/design/Spatial/spatial-grid-api.md (public API surface inventory) -->
-<!-- Rules: claude/rules/spatial.md (Module: Cluster Spatial AABBs — CA-01) -->
+<!-- Rules: rules/spatial.md (Module: Cluster Spatial AABBs — CA-01) -->

@@ -87,5 +87,5 @@ protected override void Configure(SystemBuilder b) => b
 
 <!-- Deep dive: claude/design/Runtime/07-system-access-declarations.md -->
 <!-- Deep dive: claude/design/Runtime/02-system-scheduling.md -->
-<!-- Deep dive: claude/rules/runtime-scheduling.md -->
+<!-- Deep dive: rules/runtime-scheduling.md -->
 <!-- Deep dive: claude/adr/052-track-dag-partitioning-hierarchy.md -->

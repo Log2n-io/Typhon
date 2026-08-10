@@ -72,4 +72,4 @@ triggers.DestroyRegion(zone);
 - Related catalog entry: [Spatial Category Filtering](./spatial-category-filtering.md), [Spatial R-Tree Index](./spatial-rtree-index/README.md)
 
 <!-- Deep dive: claude/design/Spatial/SpatialIndex/08-game-features.md (Feature F3 — Trigger Volumes: algorithm, static-cache strategy, frequency budget) -->
-<!-- Rules: claude/rules/spatial.md (Module: Trigger Volumes — TV-01 event completeness, TV-02 frequency contract) -->
+<!-- Rules: rules/spatial.md (Module: Trigger Volumes — TV-01 event completeness, TV-02 frequency contract) -->

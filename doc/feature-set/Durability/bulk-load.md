@@ -84,4 +84,4 @@ catch (BulkLoadCheckpointTimeoutException)
 <!-- Deep dive: claude/overview/06-durability.md §6.8 -->
 <!-- Design: claude/design/Durability/BulkLoad/README.md (01-api, 02-write-path, 03-recovery, 04-manifest-format, 05-invariants) -->
 <!-- ADR: 053-bulk-load-write-path (claude/adr/053-bulk-load-write-path.md) -->
-<!-- Rules: claude/rules/durability.md — module BulkLoad (BL-01..04) -->
+<!-- Rules: rules/durability.md — module BulkLoad (BL-01..04) -->

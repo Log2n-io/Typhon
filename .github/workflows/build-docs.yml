@@ -28,6 +28,7 @@ on:
       - coverage/docs-affected-map.json   # the map-integrity gate validates this
       - scripts/docs-affected.py
       - scripts/check-doc-links.py        # the link/path lint runs as a gate step below
+      - rules/**                          # #747: the lint covers rules/ too, so a rule edit must trigger it
   pull_request:
     branches: [main]
     paths:
@@ -42,6 +43,7 @@ on:
       - coverage/docs-affected-map.json
       - scripts/docs-affected.py
       - scripts/check-doc-links.py
+      - rules/**
   workflow_dispatch:
 
 permissions:

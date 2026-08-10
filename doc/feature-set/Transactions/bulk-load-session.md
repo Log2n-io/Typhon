@@ -78,4 +78,4 @@ session.CompleteBulkLoad();   // blocks: commit + forced checkpoint + manifest d
 
 <!-- Design: claude/design/Durability/BulkLoad/README.md -->
 <!-- ADR: 053-bulk-load-write-path — claude/adr/053-bulk-load-write-path.md -->
-<!-- Rules: claude/rules/durability.md — module BulkLoad (BL-01..04) -->
+<!-- Rules: rules/durability.md — module BulkLoad (BL-01..04) -->

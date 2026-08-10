@@ -78,4 +78,4 @@ schedule.CallbackSystem("TierAssignment", ctx =>
 <!-- Deep dive: claude/design/Spatial/spatial-grid-api.md (full public API inventory) -->
 <!-- Deep dive: claude/design/Spatial/SpatialTiers/03-tier-dispatch.md (tier assignment, dispatch, amortization, dormancy) -->
 <!-- ADR: claude/adr/046-spatial-tiers-architecture.md -->
-<!-- Rules: claude/rules/spatial.md (modules SC-01, TI-01..TI-03) -->
+<!-- Rules: rules/spatial.md (modules SC-01, TI-01..TI-03) -->
