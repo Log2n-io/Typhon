@@ -3,6 +3,7 @@ using NUnit.Framework;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Typhon.Engine.Internals;
 
@@ -99,8 +100,8 @@ internal sealed class SchemaCatalogIsInTheFileTests : IntegrityFixtureBase
             }
         }
 
-        report.Add($"sizeof(ComponentR1) = {Marshal.SizeOf<ComponentR1>()}");
-        report.Add($"sizeof(ArchetypeR1) = {Marshal.SizeOf<ArchetypeR1>()}");
+        report.Add($"sizeof(ComponentR1) = {Unsafe.SizeOf<ComponentR1>()}");
+        report.Add($"sizeof(ArchetypeR1) = {Unsafe.SizeOf<ArchetypeR1>()}");
         Assert.That(componentSized, Is.GreaterThan(0), "no chunk-based segment carried a stride");
 
         // The catalog's own segment is named by the bootstrap — no guessing, no sweep heuristic.
@@ -116,7 +117,7 @@ internal sealed class SchemaCatalogIsInTheFileTests : IntegrityFixtureBase
 
         // One row per chunk, and the stride IS the row size. That equality is what makes the catalog decodable with no
         // schema knowledge at all: the stride is on the page (revision 7), so the row size is on the page too.
-        Assert.That(catalogGeometry.Stride, Is.EqualTo(Marshal.SizeOf<ComponentR1>()),
+        Assert.That(catalogGeometry.Stride, Is.EqualTo(Unsafe.SizeOf<ComponentR1>()),
             "the catalog segment's stride must be the row size, or rows cannot be sliced from it:\n  " + string.Join("\n  ", report));
 
         var rows = ReadCatalogRows(source, catalog, catalogGeometry, report);
@@ -147,21 +148,130 @@ internal sealed class SchemaCatalogIsInTheFileTests : IntegrityFixtureBase
         // The catalog describes ITSELF — its own row's ComponentSPI is the segment the row was read from. A decoder
         // reading the wrong offsets could not produce that fixed point by accident.
         var selfRow = rows.Find(r => r.ComponentSPI == catalogRoot);
-        Assert.That(selfRow.CompSize, Is.EqualTo(Marshal.SizeOf<ComponentR1>()),
+        Assert.That(selfRow.CompSize, Is.EqualTo(Unsafe.SizeOf<ComponentR1>()),
             "the catalog must contain its own definition, and it must agree with the stride:\n  " + string.Join("\n  ", report));
 
-        // And the archetype catalog is reachable from here — the row whose schema revision is 2, matching
-        // [Component(SchemaName, 2)] on ArchetypeR1. ArchetypeR1 is what carries ComponentCount and NextEntityKey, the
-        // two values 09 §1 recorded as being nowhere in the file.
-        var archetypeRow = rows.Find(r => r.SchemaRevision == 2);
-        Assert.That(archetypeRow.ComponentSPI, Is.Not.Zero,
-            "the archetype catalog's own segment must be named by a component-catalog row:\n  " + string.Join("\n  ", report));
+        // Names decode inline. String64 is a `fixed byte[64]` of UTF-8, not a handle into the string table — reading it
+        // needs no indirection at all, which is one fewer thing between an offline reader and the manifest.
+        var byName = new Dictionary<string, ComponentR1>(StringComparer.Ordinal);
+        foreach (var r in rows)
+        {
+            byName[r.Name.AsString ?? ""] = r;
+        }
+
+        Assert.That(byName.Keys, Does.Contain(ComponentR1.SchemaName).And.Contain(ArchetypeR1.SchemaName),
+            "the manifest must name itself and the archetype catalog:\n  " + string.Join("\n  ", report));
+
+        // The archetype catalog, reached by NAME rather than by a revision number that happened to be unique.
+        var archetypeRow = byName[ArchetypeR1.SchemaName];
+        Assert.That(archetypeRow.ComponentSPI, Is.Not.Zero);
         Assert.That(roots, Does.Contain(archetypeRow.ComponentSPI));
+
+        // THE TRAP, and it is not hypothetical: ArchetypeR1's persisted row is 108 bytes while the CLR struct is 112.
+        // The engine stores the component's own size; the CLR rounds the type up to its alignment, and `long
+        // NextEntityKey` forces that to a multiple of 8. So `MemoryMarshal.Read<ArchetypeR1>(chunk)` over a 108-byte
+        // chunk reads four bytes it does not own — the next row's, or past the page's raw-data area on the last chunk of
+        // a page, where it throws instead. An offline reader must copy the persisted bytes into a full-size buffer.
+        //
+        // ComponentR1 hides this: its 160 bytes already land on an 8-boundary, so stride and struct size agree and a
+        // reader built and tested only against the component catalog works right up until it meets the archetype one.
+        Assert.That(archetypeRow.CompSize, Is.LessThanOrEqualTo(Unsafe.SizeOf<ArchetypeR1>()),
+            "the persisted row cannot be LARGER than the struct a reader slices with — that would mean the reader is "
+            + "silently dropping fields:\n  " + string.Join("\n  ", report));
+
+        // ── The payoff: ComponentCount and NextEntityKey, read from the file ──────────────────────────────────────
+        var archetypes = ReadArchetypeRows(source, walker, archetypeRow.ComponentSPI, report);
+
+        Assert.That(archetypes, Is.Not.Empty,
+            "no archetype row decoded, so ComponentCount is still out of reach:\n  " + string.Join("\n  ", report));
+
+        foreach (var a in archetypes)
+        {
+            Assert.That(a.ComponentCount, Is.GreaterThan(0),
+                $"archetype '{a.Name.AsString}' reports no components:\n  " + string.Join("\n  ", report));
+
+            // NextEntityKey is the allocator watermark ALO-02 compares against, and every key the cluster holds must
+            // sit below it. Reading it here is what makes that check possible offline.
+            Assert.That(a.NextEntityKey, Is.GreaterThan(0),
+                $"archetype '{a.Name.AsString}' has no entity-key watermark:\n  " + string.Join("\n  ", report));
+
+            if (a.ClusterSegmentSPI != 0)
+            {
+                Assert.That(roots, Does.Contain(a.ClusterSegmentSPI),
+                    $"archetype '{a.Name.AsString}' names a cluster segment that does not exist");
+            }
+
+            if (a.EntityMapSPI != 0)
+            {
+                Assert.That(roots, Does.Contain(a.EntityMapSPI),
+                    $"archetype '{a.Name.AsString}' names an EntityMap segment that does not exist");
+            }
+        }
 
         // Guard the conclusion itself. If a later change stops persisting these, this is the test that says so before
         // seven cross-structure checks quietly start reporting nothing.
         Assert.That(rows, Has.Count.GreaterThanOrEqualTo(5),
             "the self-describing manifest lost rows; the cross-structure checks read it:\n  " + string.Join("\n  ", report));
+    }
+
+    /// <summary>Reads every allocated chunk of the archetype catalog's segment as an <see cref="ArchetypeR1"/> row.</summary>
+    private static List<ArchetypeR1> ReadArchetypeRows(OfflineBundlePageSource source, SegmentWalker walker, int root,
+        List<string> report)
+    {
+        var seg = walker.WalkSegment(root);
+        var page = new byte[IntegrityConstants.PageSize];
+        source.TryReadPage(root, page);
+        var geometry = ChunkGeometry.FromPage(page);
+
+        report.Add($"archetype catalog @{root}: stride {geometry.Stride}, {seg.Pages.Count} pages");
+
+        var rows = new List<ArchetypeR1>();
+        var capacity = geometry.Capacity(seg.Pages.Count);
+
+        for (var id = 0; id < capacity; id++)
+        {
+            if (!geometry.TryLocate(id, out var ordinal, out var chunkInPage) || ordinal >= seg.Pages.Count)
+            {
+                continue;
+            }
+
+            if (!source.TryReadPage(seg.Pages[ordinal], page) || !geometry.IsChunkAllocated(page, ordinal == 0, chunkInPage))
+            {
+                continue;
+            }
+
+            var chunk = new ReadOnlySpan<byte>(page, geometry.OffsetInPage(ordinal, chunkInPage), geometry.Stride);
+            var row = ReadRow<ArchetypeR1>(chunk);
+            var name = row.Name.AsString;
+            if (string.IsNullOrEmpty(name))
+            {
+                continue;   // the reserved sentinel chunk
+            }
+
+            rows.Add(row);
+            report.Add($"  archetype '{name}': components={row.ComponentCount} routingId={row.RoutingId} "
+                + $"nextEntityKey={row.NextEntityKey} clusterSPI={row.ClusterSegmentSPI} mapSPI={row.EntityMapSPI} "
+                + $"idxSPI={row.ClusterIndexSPI}");
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// Decodes one persisted row, tolerating a chunk that is <b>smaller</b> than the CLR struct.
+    /// </summary>
+    /// <remarks>
+    /// The engine persists a component's own size; the CLR rounds its type up to the alignment of its widest field. When
+    /// those differ — <c>ArchetypeR1</c> is 108 on disk and 112 in memory — a direct
+    /// <see cref="MemoryMarshal.Read{T}(ReadOnlySpan{byte})"/> reads past the row it was handed. Copying into a
+    /// zero-filled buffer of the struct's own size is the only form that is correct in both directions.
+    /// </remarks>
+    private static T ReadRow<T>(ReadOnlySpan<byte> chunk) where T : unmanaged
+    {
+        Span<byte> buffer = stackalloc byte[Unsafe.SizeOf<T>()];
+        buffer.Clear();
+        chunk[..Math.Min(chunk.Length, buffer.Length)].CopyTo(buffer);
+        return MemoryMarshal.Read<T>(buffer);
     }
 
     /// <summary>Reads every allocated chunk of the catalog segment as a <see cref="ComponentR1"/> row.</summary>
@@ -190,7 +300,7 @@ internal sealed class SchemaCatalogIsInTheFileTests : IntegrityFixtureBase
             }
 
             var chunk = new ReadOnlySpan<byte>(page, geometry.OffsetInPage(ordinal, chunkInPage), geometry.Stride);
-            var row = MemoryMarshal.Read<ComponentR1>(chunk);
+            var row = ReadRow<ComponentR1>(chunk);
 
             // Chunk 0 is the segment's reserved null sentinel and decodes as all-zero. Skipping it on CompSize rather
             // than on the id keeps this honest about what it is filtering.
@@ -200,7 +310,7 @@ internal sealed class SchemaCatalogIsInTheFileTests : IntegrityFixtureBase
             }
 
             rows.Add(row);
-            report.Add($"  row chunk {id}: CompSize={row.CompSize} overhead={row.CompOverhead} "
+            report.Add($"  row chunk {id}: '{row.Name.AsString}' CompSize={row.CompSize} overhead={row.CompOverhead} "
                 + $"fields={row.FieldCount} compSPI={row.ComponentSPI} verSPI={row.VersionSPI} rev={row.SchemaRevision}");
         }
 
