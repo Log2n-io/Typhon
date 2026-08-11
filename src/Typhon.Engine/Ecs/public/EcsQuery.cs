@@ -1926,6 +1926,15 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 return;
             }
 
+            // Predicates the RANGE has already enforced. The tree scan above yielded exactly the rows satisfying every predicate on the primary field, so
+            // testing them again on those rows is duplicated work — and it was the whole reason this path could not win: re-evaluating them means a full
+            // 64-slot pass over every cluster the scan touched, which is precisely Path B's per-cluster cost, leaving Path A as Path B plus a tree scan.
+            //
+            // Gated on the planner vouching for the range rather than assumed from the op, because ComputeBounds widens in four cases and each would turn a
+            // skipped evaluator into wrong rows: NotEqual, strict inequalities on floating types, integer inequalities saturating at the type extent, and NaN
+            // thresholds. int.MinValue is the "matches nothing" sentinel — FieldIndex is never negative.
+            var enforcedByScanFieldIndex = plan.PrimaryRangeAdmitsOnlyMatches ? plan.PrimaryFieldIndex : int.MinValue;
+
             // Pre-determine SIMD eligibility for each evaluator (once, before cluster loop)
             var evalCount = evaluators.Length;
             var anySimd = false;
@@ -1934,7 +1943,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             {
                 for (var e = 0; e < evalCount; e++)
                 {
-                    simdEligible[e] = SimdPredicateEvaluator.IsSimdEligible(evaluators[e].KeyType);
+                    simdEligible[e] = evaluators[e].FieldIndex != enforcedByScanFieldIndex
+                                      && SimdPredicateEvaluator.IsSimdEligible(evaluators[e].KeyType);
                     anySimd |= simdEligible[e];
                 }
             }
@@ -2008,7 +2018,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                             var pass = true;
                             for (var e = 0; e < evalCount; e++)
                             {
-                                if (simdEligible[e])
+                                if (simdEligible[e] || evaluators[e].FieldIndex == enforcedByScanFieldIndex)
                                 {
                                     continue;
                                 }
@@ -2042,6 +2052,10 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                             for (var e = 0; e < evaluators.Length; e++)
                             {
                                 ref var eval = ref evaluators[e];
+                                if (eval.FieldIndex == enforcedByScanFieldIndex)
+                                {
+                                    continue;
+                                }
                                 if (!FieldEvaluator.Evaluate(ref eval, entityComp + eval.FieldOffset))
                                 {
                                     allMatch = false;
