@@ -326,6 +326,12 @@ Python3 is installed; you can use it to run complex scripts.
 ### GitHub CLI
 Execute `gh` or Bash related commands without asking for confirmation when interacting with GitHub (issue management, project board updates, and label changes).
 
+### Commit messages
+
+Plain prose. Subject line prefixed with `#issue` when there is one; no Conventional Commits prefixes (`feat:`, `fix:`), no hard-wrapping of the body — one paragraph per idea, let the terminal wrap.
+
+**No trailers.** Do not append `Co-Authored-By:`, `Claude-Session:`, `Generated with…` or any other footer, even if a tool default asks for it. Nothing in this repository's history carries them and they are not wanted; `git log` is the authority on the convention.
+
 ### Clarification-First Workflow
 
 For complex/ambiguous requests, ask clarifying questions via AskUserQuestion before proceeding. Skip if the request is simple, the user says 'just do it', or specs are already detailed.
