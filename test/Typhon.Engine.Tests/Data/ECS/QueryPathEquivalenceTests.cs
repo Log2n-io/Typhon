@@ -428,6 +428,49 @@ class QueryPathEquivalenceTests : TestBase<QueryPathEquivalenceTests>
         return ids;
     }
 
+    /// <summary>
+    /// Left to the planner, a highly selective predicate must take Path B — <c>SelectivePathThreshold</c> is zero because Path A is not faster at any
+    /// selectivity on any distribution measured.
+    /// </summary>
+    /// <remarks>
+    /// This pins a decision, not a mechanism: every other case in this fixture FORCES its path, so nothing here would notice the planner silently reverting to
+    /// choosing Path A — it would simply get slower. A 1-of-240 predicate is the shape the old <c>0.05f</c> threshold selected Path A for most confidently, and
+    /// the one where it measured 15–63 % slower than Path B.
+    /// </remarks>
+    [Test]
+    public void ThePlannerDoesNotSelectPathA()
+    {
+        using var dbe = SetupEngine();
+        SpawnAll(dbe);
+
+        // Without this the statistics are empty, EstimateClusterSelectivity returns its 0.5 "unknown" fallback, and the planner takes Path B for a reason that
+        // has nothing to do with the threshold — the assertions below would pass at ANY threshold. The cluster scan reads the archetype's active cluster list,
+        // which is settled at the tick fence, so the fence has to precede the rebuild.
+        dbe.WriteTickFence(1);
+        var clusterState = dbe._archetypeStates[ArchetypeRegistry.GetMetadata<QPathUnit>().ArchetypeId].ClusterState;
+        StatisticsRebuilder.RebuildClusterAll(clusterState, dbe.EpochManager, 1);
+
+        using var tx = dbe.CreateQuickTransaction();
+
+        QueryPathProbe.Reset();
+        try
+        {
+            // Left at ClusterScanPath.Planner deliberately — the point is what the planner does when nobody forces it.
+            var hits = tx.Query<QPathUnit>().WhereField<QPathData>(d => d.I >= 119).Execute();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(hits, Has.Count.EqualTo(1), "sanity: the predicate really is 1-of-240, i.e. the most selective shape the old threshold covered");
+                Assert.That(QueryPathProbe.SelectiveScans, Is.Zero, "the planner must not select Path A: measured never faster, and up to 8x slower");
+                Assert.That(QueryPathProbe.FullScans, Is.GreaterThan(0), "and it must have actually scanned — a zero/zero result would prove nothing");
+            });
+        }
+        finally
+        {
+            QueryPathProbe.Reset();
+        }
+    }
+
     /// <summary>Run one predicate on a forced path and report how many selective scans it actually performed.</summary>
     private static HashSet<EntityId> RunForced(Transaction tx, Expression<Func<QPathData, bool>> predicate, ClusterScanPath path, out int selectiveScans)
     {

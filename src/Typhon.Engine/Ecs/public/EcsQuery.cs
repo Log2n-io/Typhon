@@ -1756,9 +1756,48 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         {
             ClusterScanPath.Selective => true,
             ClusterScanPath.FullScan => false,
-            _ => EstimateClusterSelectivity(plan, clusterState) < 0.05f
+
+            // `SelectivePathThreshold > 0f` is a compile-time constant the JIT folds away, so a disabled Path A costs nothing and does not even pay for the
+            // estimate. Written as a guard rather than as `< 0f` so the intent is legible and re-enabling is a one-character change.
+            _ => SelectivePathThreshold > 0f && EstimateClusterSelectivity(plan, clusterState) < SelectivePathThreshold
         };
     }
+
+    /// <summary>
+    /// Estimated selectivity below which the planner prefers Path A. <b>Zero — the planner does not select Path A</b>, because it is not faster at any
+    /// selectivity on any distribution measured.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This was <c>0.05f</c>, and nothing had measured it. Forcing each path over 10 000 entities, four value distributions × four selectivities
+    /// (Path B time as a fraction of Path A's — below 1.00 means Path B won):
+    /// </para>
+    /// <code>
+    ///                 0.1%    1%      5%      20%
+    ///   Sequential    0.84    0.37    0.17    0.12
+    ///   Random        0.85    0.45    0.22    0.13
+    ///   Banded        0.85    0.50    0.25    0.14
+    ///   LowCard       1.07    1.08    0.99    0.93
+    /// </code>
+    /// <para>
+    /// The old threshold selected Path A across a band where Path B is 15–63 % faster. Only low-cardinality data favours Path A, by 7–8 %, and its two
+    /// leftmost cells are one measurement rather than two — with 50 distinct keys, "top 10" and "top 100" resolve to the same cut-off value. Scattered data
+    /// was expected to favour Path A, on the theory that zone maps cannot prune it; measured, it does not.
+    /// </para>
+    /// <para>
+    /// The reason is structural rather than a matter of tuning. Path A range-scans the tree to narrow the candidate set, then <b>throws that narrowing away</b>:
+    /// its verification loop evaluates EVERY evaluator — including the primary one the tree just answered exactly — with
+    /// <c>SimdPredicateEvaluator.EvaluateCluster</c> over all 64 slots of each cluster it touched. That is precisely Path B's per-cluster work, so Path A is
+    /// Path B plus a tree scan whenever the two visit the same clusters, and the tree scan is what the ratios above are measuring.
+    /// </para>
+    /// <para>
+    /// Making Path A worth selecting means skipping the primary evaluator during verification, which needs the planner to report whether the scan range
+    /// <i>exactly</i> implements the primary predicate — true for ordered comparisons, false for <c>!=</c>, which <c>KeyRange.Intersect</c> folds into a
+    /// superset. Until that exists the path stays reachable through <see cref="QueryPathProbe.Forced"/>, so <c>QueryPathEquivalenceTests</c> keeps proving the
+    /// two paths agree; what changes here is only that production stops paying for the slower one.
+    /// </para>
+    /// </remarks>
+    private const float SelectivePathThreshold = 0f;
 
     /// <summary>
     /// Estimate selectivity for the primary predicate of a cluster query. Returns a value in [0, 1] where lower = more selective.
