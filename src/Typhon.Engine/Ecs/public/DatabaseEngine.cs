@@ -2633,7 +2633,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     movedComp.Comp.Name = (String64)schemaName;
                     _persistedComponents[schemaName] = movedComp;
                 }
-                if (_persistedFieldsByComponent.Remove(persistedKey, out var movedFields))
+                if (_persistedFieldsByComponent!.Remove(persistedKey, out var movedFields))
                 {
                     _persistedFieldsByComponent[schemaName] = movedFields;
                 }
@@ -3535,14 +3535,34 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// see a stable epoch. Crash-path only; runs after the seal (see call site) so it sees the final page ownership, and the dirtied bitmap pages are held dirty until
     /// the next checkpoint / clean shutdown consolidates them.
     /// </summary>
-    private void RederiveOccupancyOnCrash()
+    internal void RederiveOccupancyOnCrash()
     {
         if (DisableOccupancyRederiveForTest)
         {
             return;
         }
 
-        var owned = BuildOwnedPageBitmap(out _);
+        // A clean shutdown consolidated the bitmap on its way out, so there is nothing to heal and the persisted copy is authoritative. WalFilesPresentAtOpen —
+        // the flag that brought us here — means "WAL segments exist on disk", which a clean shutdown does not preclude, so on its own it is not a statement
+        // that this session is recovering from a crash (#771). Checked here rather than by narrowing WalFilesPresentAtOpen itself: that flag also gates
+        // the RB-01 secondary-index clear+rebuild and the page-checksum mode, and those two must keep agreeing by reading one flag.
+        if (DurabilityWatermarks.ReadCleanShutdown(MMF))
+        {
+            return;
+        }
+
+        var owned = BuildOwnedPageBitmap(out _, out var unresolvedPersistedSpis);
+
+        // CK-09 adopts this bitmap WHOLESALE — a full replacement, not a read-then-diff — so every page it fails to attribute is written as free. That is only
+        // sound when the reconstruction is total. If a persisted segment pointer could not be read, "I found no claimant" and "there is no claimant" are
+        // different statements and only the second licenses the write, so refuse loudly rather than free pages that may hold live data (#771).
+        if (unresolvedPersistedSpis > 0)
+        {
+            ThrowHelper.ThrowInvalidOp(
+                $"Occupancy re-derive refused: {unresolvedPersistedSpis} persisted archetype segment pointer(s) could not be read, so the reconstructed "
+                + "ownership bitmap is partial. Adopting it wholesale would mark live pages free and the next allocation could hand one to a second owner "
+                + "(rule CK-09). The database is left exactly as it was on disk; run `typhon check` to see what is unreadable.");
+        }
 
         using var guard = EpochGuard.Enter(EpochManager);
         var changeSet = MMF.CreateChangeSet();
