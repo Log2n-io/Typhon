@@ -700,7 +700,8 @@ internal ref struct ComponentRevisionManager
             {
                 // The descriptor's offset is within the component struct; content chunks prefix it with ComponentOverhead
                 // (Versioned = 0, SingleVersion = 8 for the entity PK). Cluster slots have no overhead.
-                var bufferId = compContentAccessor.GetChunkAsReadOnlySpan(chunkId).Slice(ct.ComponentOverhead + f.OffsetInComponentStorage).Cast<byte, int>()[0];
+                var bufferId = compContentAccessor.GetChunkAsReadOnlySpan(chunkId)
+                    .Slice(ct.ComponentOverhead + f.OffsetInComponentStorage).Cast<byte, int>()[0];
                 var collAccessor = f.Vsbs.Segment.CreateChunkAccessor();
                 f.Vsbs.BufferRelease(bufferId, ref collAccessor);
                 collAccessor.Dispose();

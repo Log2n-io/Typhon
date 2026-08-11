@@ -21,8 +21,9 @@ namespace Typhon.Engine.Tests;
 /// </para>
 /// <para>
 /// <b>Reopen is not covered here, deliberately, and it is covered elsewhere.</b> These cases are in-session; the durable question lives in
-/// <c>AxisArchetypesTests.EveryDurableCollectionCell_KeepsItsElementsAcrossAReopen</c>, which is where the kit's reopen harness (durable WAL, seed-crash-reopen)
-/// actually exists. #389's plan asked for this filter to be LIFTED — it must not be. This fixture's bodies never reopen anything, so removing the narrowing
+/// <c>AxisArchetypesTests.EveryDurableCollectionCell_KeepsItsElementsAcrossAReopen</c>, which is where the kit's reopen harness (durable WAL,
+/// seed-crash-reopen) actually exists. #389's plan asked for this filter to be LIFTED — it must not be. This fixture's bodies never reopen anything, so
+/// removing the narrowing
 /// would generate duplicate in-session cases whose NAMES advertise a reopen that never happens: #704's trap 2, a green case claiming coverage it does not have.
 /// Stated rather than left to inference — a green matrix that silently skipped the durable question would be the illusion this epic removes.
 /// </para>

@@ -10,9 +10,9 @@ namespace Typhon.Engine.Internals;
 // BUILDING the full record then InsertNew once, mirroring the live FinalizeSpawns (approach B; the live engine has no in-place location update — a Versioned
 // location is written once at spawn and stays fixed, revisions append within the chain). Both the flat (non-cluster) path and the cluster path are wired:
 // a cluster-eligible archetype reconstructs the entity into a CLUSTER slot (ClaimSlot + SoA value write + ClusterEntityRecord), mirroring the live
-// FinalizeSpawns cluster branch — this is what makes Commit-discipline SingleVersion values WAL-recoverable (#392 AC-2/AC-7). Destroy / SetEnabledBits /
-// collections follow in later increments. Runs single-threaded under one epoch scope with a dedicated ChangeSet (so applied page mutations are captured by the
-// sealing checkpoint). See 03-recovery.md §3.
+// FinalizeSpawns cluster branch — this is what makes Commit-discipline SingleVersion values WAL-recoverable (#392 AC-2/AC-7). Destroy, SetEnabledBits and
+// collections (#389: ApplyCollectionFolds, which MUST run after an entity's Slot apply) are all wired. Runs single-threaded under one epoch scope with a
+// dedicated ChangeSet (so applied page mutations are captured by the sealing checkpoint). See 03-recovery.md §3.
 
 internal sealed unsafe class RecoveryApplier : IDisposable
 {
@@ -535,9 +535,9 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     /// element, so a handle written only to the cache would be replaced by the chain's stale one.
     /// </para>
     /// <para>
-    /// Idempotent (AP-12): re-applying the same window recomputes the same element list and calls <see cref="VariableSizedBufferSegmentBase{TStore}.SetElementsRaw"/>
-    /// again, which releases the buffer the previous pass created and allocates an equivalent one. Content and refcount converge; only the buffer id differs,
-    /// which AP-13 tolerates by design.
+    /// Idempotent (AP-12): re-applying the same window recomputes the same element list and calls
+    /// <see cref="VariableSizedBufferSegmentBase{TStore}.SetElementsRaw"/> again, which releases the buffer the previous pass created and allocates an
+    /// equivalent one. Content and refcount converge; only the buffer id differs, which AP-13 tolerates by design.
     /// </para>
     /// </remarks>
     public void ApplyCollectionFolds(long entityIdRaw, IReadOnlyDictionary<(ushort Slot, ushort FieldId), List<byte[]>> folds)

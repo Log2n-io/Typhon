@@ -692,7 +692,8 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
         SetElementsRaw(bufferId, MemoryMarshal.AsBytes(elements), ref accessor);
 
     /// <summary>
-    /// Typed forwarder to <see cref="VariableSizedBufferSegmentBase{TStore}.ReadAllElementsRaw"/> — returns the number of elements copied into <paramref name="dest"/>.
+    /// Typed forwarder to <see cref="VariableSizedBufferSegmentBase{TStore}.ReadAllElementsRaw"/> — returns the number of elements copied into
+    /// <paramref name="dest"/>.
     /// </summary>
     public int ReadAllElements(int bufferId, Span<T> dest, ref ChunkAccessor<TStore> accessor) =>
         ReadAllElementsRaw(bufferId, MemoryMarshal.AsBytes(dest), ref accessor);

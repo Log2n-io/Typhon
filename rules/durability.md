@@ -1540,7 +1540,7 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
        | `NextFreeTSN` | `ScrubVersionedChains` + `RecoveryDriver` | ✅ RB-05 |
        | `ArchetypeEngineState.NextEntityKey` | `RebuildEntityMaps*` (persisted base) + `RecoveryDriver` (replayed window) | ✅ fixed #697 / #705 |
        | WAL LSN (`WalCommitBuffer._lsnBase`) | `DatabaseEngine.InitializeWal` via `Math.Max(lastValidLSN, checkpointLsn)` | 🔴 **#712** — both terms are 0 when the prior session crashed without checkpointing, because WAL v2 recovery has not run yet at that point; the writer restarts at 1 and collides with the window it is about to replay |
-       | VSBS buffer free-list | — | 🔴 **#389** — restarts from empty, re-issuing handles live recovered entities still hold |
+       | VSBS buffer free-list | — | 🔴 **#770** — restarts from empty, re-issuing handles live recovered entities still hold. Retargeted from #389 on 2026-08-11: #389 fixed collection CONTENT redo and explicitly does not touch this allocator, so leaving the pointer on a closed issue would have read as fixed |
        | Cluster slot cursors | derived from the cluster occupancy at rebuild | ✅ |
 
        The two open rows are the same defect shape as #697, on different allocators. #697's own acceptance asked

@@ -92,7 +92,10 @@ public partial class DatabaseEngine
     [ThreadStatic]
     private static RecordCodec.FenceBlockDescriptor[] _fenceBlocks;
 
-    /// <summary>Per-thread arena for the collection-content batch that accompanies a columnar fence (#389). Separate from <see cref="_fenceArena"/>: the two are never live at once, but a cluster fence and a flat fence are different call paths and sharing one arena between them buys nothing.</summary>
+    /// <summary>
+    /// Per-thread arena for the collection-content batch that accompanies a columnar fence (#389). Separate from <see cref="_fenceArena"/>: the two are
+    /// never live at once, but a cluster fence and a flat fence are different call paths and sharing one arena between them buys nothing.
+    /// </summary>
     [ThreadStatic]
     private static CommitBatchArena _fenceCollectionArena;
 

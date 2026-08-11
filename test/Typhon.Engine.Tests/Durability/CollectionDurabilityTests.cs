@@ -180,8 +180,8 @@ internal sealed class CollectionDurabilityTests
     /// <remarks>
     /// <para>
     /// The rule's own <c>verified:</c> field spells out what a genuine verifier has to do — "drive the real emit path
-    /// (CommitBatchBuilder/RecordCodec via a live commit) and assert no page index / chunk id / bufferId / chain topology appears in the emitted bytes" — because
-    /// the two fixtures that claimed the rule until #703 hand-built their records and so could never observe the emitter. This is that verifier.
+    /// (CommitBatchBuilder/RecordCodec via a live commit) and assert no page index / chunk id / bufferId / chain topology appears in the emitted bytes" —
+    /// because the two fixtures that claimed the rule until #703 hand-built their records and so could never observe the emitter. This is that verifier.
     /// </para>
     /// <para>
     /// It covers both emitters. <c>BuildCommitBatch</c> writes per-entity Slot records and passes the table's packed handle ranges to the codec; the tick
@@ -263,7 +263,8 @@ internal sealed class CollectionDurabilityTests
     /// <remarks>
     /// Shared by the verifier and its mutant, deliberately: a mutant that exercised a different assertion would prove nothing about the one that ships.
     /// </remarks>
-    private static void AssertNoBufferIdOnTheWire(IReadOnlyList<WalScanner.Record> records, IReadOnlyList<HandleWindow> windows, bool requireBothEmitters = false)
+    private static void AssertNoBufferIdOnTheWire(
+        IReadOnlyList<WalScanner.Record> records, IReadOnlyList<HandleWindow> windows, bool requireBothEmitters = false)
     {
         var fromCommitBatch = 0;
         var fromFenceBlock = 0;
@@ -714,6 +715,57 @@ internal sealed class CollectionDurabilityTests
 
         fold.Apply(CollectionOp.SetCount, 3, null, "t");
         Assert.That(fold.Elements, Has.Count.EqualTo(3), "SetCount extends with zero-filled elements");
+    }
+
+    /// <summary>
+    /// A rolled-back transaction must not leave its appends in an already-committed collection.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Atomicity, not durability — no crash required. <c>ComponentCollectionAccessor.Add</c> writes straight into VSBS pages at call time, and neither it nor
+    /// <c>ChunkAccessor.CommitChanges</c> has an undo path, so a rolled-back append could plausibly persist. The existing
+    /// <c>SvComponentCollectionTests.SvCc_Rollback_FreesCollection</c> covers a rolled-back <b>spawn</b> (the accessor-allocated buffer is freed) — a
+    /// different question from mutating a collection that was already committed by an earlier transaction.
+    /// </para>
+    /// <para>
+    /// Written to settle the question rather than to assert a conclusion: <c>todo.md</c> §8 raised it as code-derived and unmeasured, and a bug filed from
+    /// reading rather than running is how refuted findings get into a tracker.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    public void RolledBackAppend_DoesNotSurvive()
+    {
+        using var scope = _serviceProvider.CreateScope();
+        var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        RegisterBoth(dbe);
+        var (versioned, _) = SeedBoth(dbe);
+
+        var target = versioned[0];
+        const int sentinel = 0x5EED;
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var v = tx.OpenMut(target).Write(CcVersionedArch.C);
+            using (var cca = tx.CreateComponentCollectionAccessor(ref v.Items))
+            {
+                cca.Add(sentinel);
+            }
+
+            tx.Rollback();
+        }
+
+        using (var read = dbe.CreateQuickTransaction())
+        {
+            var v = read.Open(target).Read(CcVersionedArch.C);
+            using var cca = read.CreateComponentCollectionAccessor(ref v.Items);
+            var actual = new int[cca.ElementCount];
+            cca.GetAllElements(actual);
+
+            Assert.That(actual, Does.Not.Contain(sentinel),
+                "a rolled-back transaction's append is visible after rollback — an atomicity violation on the happy path, no crash required");
+            Assert.That(actual, Has.Length.EqualTo(ElementCountOf(0)), "the collection must hold exactly what the committed transaction put there");
+        }
     }
 
     // ── recovered-state assertions ──────────────────────────────────────────────────────────────────────────────────────────────────────────
