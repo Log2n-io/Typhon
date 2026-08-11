@@ -48,7 +48,7 @@ Isolation and durability aren't one selector — they're **three orthogonal knob
 |---|---|---|---|---|
 | **`StorageMode`** | per **component type**, fixed at registration | `Versioned` · `SingleVersion` · `Transient` | `Versioned` | memory **layout** + whether MVCC/isolation exists at all |
 | **`CommitDiscipline`** | per **transaction** (only on `SingleVersion` layout) | `TickFence` · `Commit` | `TickFence` | whether a SingleVersion write **participates in the transaction** — isolation, rollback and durability move together |
-| **`DurabilityMode`** | per **UnitOfWork** | `Deferred` · `GroupCommit` · `Immediate` | `GroupCommit` (typical) | *when* the WAL is flushed to disk |
+| **`DurabilityMode`** | per **UnitOfWork** | `Deferred` · `GroupCommit` · `Immediate` | `Deferred` | *when* the WAL is flushed to disk |
 
 They compose freely. A `SingleVersion` component written under the `Commit` discipline inside an `Immediate` UoW is a real, valid combination — layout says "one in-place slot," discipline says "stage and make this write atomic + zero-loss," mode says "fsync before `Commit()` returns."
 

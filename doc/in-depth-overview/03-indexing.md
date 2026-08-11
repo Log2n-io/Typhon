@@ -8,7 +8,7 @@ description: 'Indexing in Typhon is one mechanism: a B+Tree specialised at compi
 
 **Code:** [`src/Typhon.Engine/Indexing/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Indexing)
 
-Indexing in Typhon is one mechanism: a **B+Tree** specialised at compile time for the key width. There is no separate "primary key index", "secondary index" or "uniqueness constraint" implementation — the same `BTree<TKey, TStore>` powers all three. The variants (`L16BTree`, `L32BTree`, `L64BTree`, `String64BTree`) exist purely to size the node layout to the key width so that every node is exactly **256 bytes** (or 64 B for `String64BTree`), keying capacity off the key size rather than off some configured fan-out.
+Indexing in Typhon is one mechanism: a **B+Tree** specialised at compile time for the key width. There is no separate "primary key index", "secondary index" or "uniqueness constraint" implementation — the same `BTree<TKey, TStore>` powers all three. The variants (`L16BTree`, `L32BTree`, `L64BTree`, `String64BTree`) exist purely to size the node layout to the key width so that every numeric node is exactly **256 bytes** (`String64BTree` is the exception at **356 bytes** — see §2), keying capacity off the key size rather than off some configured fan-out.
 
 The tree is **concurrent** by design: readers descend lock-free via Optimistic Lock Coupling ([`OlcLatch`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/OlcLatch.cs)), writers use a two-phase spin-then-yield lock that never pays the Windows 15 ms timer-tick penalty, and obsolete nodes are reclaimed via epoch deferral ([01-foundation §4](01-foundation.md)). It's also a **B-link tree** — every node carries a `HighKey` upper bound and a `NextChunk` pointer so a writer can split a node without coordinating with traversing readers; the readers follow the right-link to find the key that's now on the new sibling.
 
@@ -31,9 +31,11 @@ The user-facing handle is [`IndexRef`](https://github.com/Log2n-io/Typhon/blob/m
 
 ---
 
-## 2. Node layout — 256 B = 4 cache lines
+## 2. Node layout — 256 B = 4 cache lines (numeric variants)
 
-Every node is one segment chunk, and the segment's stride is exactly the node struct size. Nodes are 256 bytes for all numeric-keyed variants (filling four cache lines) and 64 bytes for the String64 variant.
+Every node is one segment chunk, and the segment's stride is exactly the node struct size. Nodes are 256 bytes for all numeric-keyed variants (filling four cache lines), asserted at `Initialize` time in each of `L16BTree.cs`, `L32BTree.cs` and `L64BTree.cs`.
+
+`String64BTree` is the exception: `IndexString64Chunk` is **356 bytes** — `4×5` header ints + a 64 B `HighKey` + `4×4` values + `4×64` keys. It carries no size assertion, only `segment.Stride == sizeof(IndexString64Chunk)`, so the stride follows the struct. The struct's own *"we want to keep this struct 64 bytes"* comment is a stale design aspiration: a 64-byte node cannot hold even one 64-byte key, and the B-link `HighKey` added in #297 put the question beyond doubt.
 
 The 256 B size isn't arbitrary: modern CPUs (Zen 4+, recent Intel) have an **Adjacent Line Prefetcher** that pulls the paired 64 B cache line within a 128 B region. Two ALP triggers therefore cover the full node — a node descent fetches one entry's data with at most two cache-line latencies, not four.
 
@@ -66,7 +68,7 @@ Key invariants and constants:
 | `MaxOptimisticRestarts` | 3 | OLC reader restart budget before falling back to pessimistic |
 | `ContentionSplitThreshold` | 3 | `ContentionHint` value at which a hot leaf gets proactively split |
 | `DirectoryChunkCount` | 4 | Reserved chunks at the start of the segment for the BTree directory |
-| `MaxDirectoryEntries` | 20 | Hard cap on indexes per shared segment (PK + 19 secondary, or 20 standalone) |
+| `MaxDirectoryEntriesFor(stride)` | 84 at stride 256 | Hard cap on B+Trees per shared segment. Stride-dependent, not a constant — see §7 |
 
 ---
 
@@ -79,7 +81,7 @@ Each numeric variant is a 256 B struct sized so the key/value arrays plus the fi
 | `L16BTree` | `sbyte`, `byte`, `short`, `ushort`, `char` | 2 B (slot-wise) | **38** | 256 B | [`L16BTree.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/L16BTree.cs) — `Index16Chunk.Capacity = 38` |
 | `L32BTree` | `int`, `uint`, `float` | 4 B | **29** | 256 B | [`L32BTree.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/L32BTree.cs) — `Index32Chunk.Capacity = 29` |
 | `L64BTree` | `long`, `ulong`, `double` | 8 B | **19** | 256 B | [`L64BTree.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/L64BTree.cs) — `Index64Chunk.Capacity = 19` |
-| `String64BTree` | `String64` | 64 B | **4** | 64 B × 5 segments | [`String64BTree.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/String64BTree.cs) — `IndexString64Chunk.Capacity = 4` |
+| `String64BTree` | `String64` | 64 B | **4** | 356 B | [`String64BTree.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/String64BTree.cs) — `IndexString64Chunk.Capacity = 4` |
 
 The L16 storage is slightly subtle: keys are stored as 2 B regardless of whether `TKey` is 1 B (sbyte/byte) or 2 B (short/ushort/char). The variant exists per key type to give the JIT a monomorphised search routine.
 
@@ -271,7 +273,7 @@ A single `ChunkBasedSegment<TStore>` can host **multiple B+Trees** — most comm
 
 ### Layout
 
-The first **4 chunks** of every BTree-bearing segment (`DirectoryChunkCount = 4`) are reserved for the directory. A maximum of **20 entries** fits across those four chunks (`MaxDirectoryEntries = 20`).
+The first **4 chunks** of every BTree-bearing segment (`DirectoryChunkCount = 4`) are reserved for the directory. How many entries fit depends on the segment's node stride, so it is computed rather than hardcoded — [`BTreeBase.MaxDirectoryEntriesFor(stride)`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/BTreeBase.cs): chunk 0 loses `BTreeDirectoryHeader` (2 B) to its header and chunks 1-3 are pure entry storage, at `BTreeDirectoryEntry` = 12 B each. That gives **84** at the 256-byte numeric stride and **116** at `String64BTree`'s 356-byte stride. (A hardcoded `MaxDirectoryEntries = 20` — the figure for a 64-byte stride — was removed in #657; the cap must stay exactly what the reserved chunks hold, since entry *n+1* would land in the first node chunk.)
 
 ```
 Chunk 0:  [ BTreeDirectoryHeader (2 B EntryCount) ] [ entry₀ ][ entry₁ ]...

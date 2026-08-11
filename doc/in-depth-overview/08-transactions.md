@@ -75,7 +75,7 @@ tx1.Commit();
 
 [`Transactions/public/DurabilityMode.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/DurabilityMode.cs)
 
-Three values, all sit at the UoW level (per-transaction override exists in the type system as `DurabilityOverride` but is not wired into any commit overload — Commit takes only `(ref UnitOfWorkContext, ConcurrencyConflictHandler)`).
+Three values, all sit at the UoW level — there is no per-transaction override; `Commit` takes only `(ref UnitOfWorkContext, ConcurrencyConflictHandler)`.
 
 | Mode | When records become crash-safe | Commit latency | Data-at-risk window |
 |---|---|---|---|
@@ -148,7 +148,7 @@ public bool Commit(ref UnitOfWorkContext ctx, ConcurrencyConflictHandler handler
 public bool Commit(ConcurrencyConflictHandler handler = null); // synthesizes ctx from TimeoutOptions.Current.DefaultCommitTimeout
 ```
 
-There is no `Commit(DurabilityOverride)` overload — `DurabilityOverride` is defined in [`DurabilityMode.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/DurabilityMode.cs) but is not referenced by any production code path. Likewise no `tx.Durability` property, no `tx.WaitForDurability()` method, no `DurabilityGuarantee` enum — those exist in older design sketches and never reached the engine.
+There is no per-transaction durability parameter on `Commit`. [`DurabilityMode.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/DurabilityMode.cs) declares only `DurabilityMode` and `UnitOfWorkState` — the `DurabilityOverride` enum sketched for a per-transaction escalation knob was never committed. Likewise no `tx.Durability` property, no `tx.WaitForDurability()` method, no `DurabilityGuarantee` enum — those exist in older design sketches and never reached the engine.
 
 Commit walks every modified component type and, per entity:
 
@@ -255,7 +255,7 @@ The chain stores live transactions in memory; the **registry** stores UoW slots 
 | `Reserved3` | 8 |
 | **Total** | **40** |
 
-40 bytes divides evenly into both page layouts: **`RootCapacity = 150`** (6000 / 40) and **`OverflowCapacity = 200`** (8000 / 40). Zero waste. **`MaxUowId = 32767`** — 15-bit ID space (the 16th bit on revision elements is the `IsolationFlag`).
+Since the v4 *directory-only root*, there is one page layout, not two: page 0 is a pure page directory holding no entries, and every data page holds **`PerPageCapacity = 200`** entries (8000 / 40). Zero waste. The earlier `RootCapacity` / `OverflowCapacity` split no longer exists. **`MaxUowId = 32767`** — 15-bit ID space (the 16th bit on revision elements is the `IsolationFlag`).
 
 `State = 0 (Free)` means a zeroed page is interpreted as all-free, so growth doesn't need explicit initialization.
 

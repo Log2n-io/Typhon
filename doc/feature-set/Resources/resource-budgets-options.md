@@ -21,10 +21,10 @@ fixed allocations that don't fit the declared memory budget — at startup inste
 property maps to one bounded resource's limit (page cache pages, max active transactions, WAL ring
 bytes, WAL segment count/size, shadow buffer pages, checkpoint thresholds) and ships with a sane
 default. Components never see this object directly — each receives only its own limit at
-construction. Calling `Validate()` sums the resources that are allocated immediately at startup
-(page cache, WAL ring + segments, shadow buffer) and throws if that total exceeds
-`TotalMemoryBudgetBytes`. Growable resources (active transaction count, index nodes, query
-buffers) are intentionally excluded — they're bounded by runtime caps, not upfront allocation.
+construction. There is no overall memory budget and no manual validation call: the
+`TotalMemoryBudgetBytes` property and the `Validate()` method were removed in #148 as vestigial
+(they governed no allocation). Each wired knob is range-checked automatically at DI resolution by
+`DatabaseEngineOptionsValidator`.
 
 ## 💻 Usage
 ```csharp
@@ -42,11 +42,9 @@ services.AddDatabaseEngine(opt =>
         WalMaxSegments = 4,
         WalMaxSegmentSizeBytes = 64L << 20,   // 64 MB each
         ShadowBufferPages = 512,              // 4 MB
-        TotalMemoryBudgetBytes = 4L << 30,    // 4 GB ceiling for fixed allocations
     };
 
-    // Throws InvalidOperationException if fixed allocations exceed TotalMemoryBudgetBytes.
-    opt.Resources.Validate();
+    // No Validate() call — every wired knob is range-checked at DI resolution.
 });
 ```
 
@@ -62,7 +60,6 @@ services.AddDatabaseEngine(opt =>
 | `CheckpointMaxDirtyPages` | 10000 | Dirty-page threshold that forces an early checkpoint |
 | `CheckpointIntervalMs` | 30000 | Idle checkpoint cadence |
 | `ShadowBufferPages` | 512 (4 MB) | CoW backup buffer; writers block when full |
-| `TotalMemoryBudgetBytes` | 4 GB | Ceiling checked by `Validate()` against fixed allocations |
 
 ## ⚠️ Guarantees & limits
 - Set once at construction; there is no supported way to change `ResourceOptions` after the engine

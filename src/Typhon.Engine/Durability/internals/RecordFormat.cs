@@ -11,7 +11,7 @@ namespace Typhon.Engine.Internals;
 // order still resolves each record correctly. One codec (RecordCodec) is the sole reader/writer of these bytes (LOG-02). All multi-byte fields little-endian;
 // layouts are exact and binding — changing one is a format-version bump.
 
-/// <summary>Discriminates the four WAL v2 record kinds (02 §3.0, RecordHeader.RecordKind).</summary>
+/// <summary>Discriminates the five WAL v2 record kinds (02 §3.0, RecordHeader.RecordKind).</summary>
 [PublicAPI]
 internal enum RecordKind : byte
 {

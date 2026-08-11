@@ -22,7 +22,7 @@ You don't need to read this doc front-to-back to *use* Typhon. You'll want it wh
 
 ## 1. Synchronization primitives
 
-Three lock types — different bit budgets, different access models. All three encode the holder thread ID in **16 bits**, giving headroom for 65 535 hardware threads (way past current server cores).
+Three lock types — different bit budgets, different access models. All three encode the holder thread ID in **16 bits**, but the usable range differs: `AccessControl` stores it in a `ushort` field and reaches **65 535**, while `AccessControlSmall` and `ResourceAccessControl` pack it into bits 16-31 of a *signed* `int`, so a thread id of 32 768 or above would set the sign bit and `LockedByThreadId` would sign-extend on read — capping them at **32 767**. Design to the tightest of the three; it is still way past current server cores, and managed thread ids are recycled on thread death, so this bounds *simultaneously-live* threads rather than threads over the process lifetime.
 
 ### `AccessControl` — 64-bit reader-writer lock
 

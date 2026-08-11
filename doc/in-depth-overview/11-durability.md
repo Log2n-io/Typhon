@@ -90,13 +90,13 @@ The default is sized for **tail latency, not throughput** (#559). Measured on a 
 
 Under `Immediate`, the commit path calls `WalManager.RequestFlush()` and then blocks in `WalManager.WaitForDurable(highLsn, ref ctx)` until the LSN is on stable media.
 
-### `DurabilityOverride`
+### Per-transaction durability escalation
 
-[`DurabilityOverride`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/DurabilityMode.cs) is a `Default`/`Immediate` enum declared for a *planned* per-transaction escalation knob (ADR-005), but it is **not wired into the engine** — there is no `tx.Commit(DurabilityOverride.Immediate)` overload; `Transaction.Commit` has no `DurabilityOverride` parameter in either overload (`Commit(ref UnitOfWorkContext, ConcurrencyConflictHandler)` and the convenience `Commit(ConcurrencyConflictHandler)`). To give one critical operation zero-loss durability inside an otherwise-`Deferred`/`GroupCommit` batch today, commit it through its own `DurabilityMode.Immediate` UoW — `dbe.CreateQuickTransaction(DurabilityMode.Immediate)`, or `ctx.CreateSideTransaction(DurabilityMode.Immediate)` from a scheduled system.
+There is **no per-transaction override**. `DurabilityMode` is chosen per `UnitOfWork` and `Transaction.Commit` takes no durability parameter in either overload (`Commit(ref UnitOfWorkContext, ConcurrencyConflictHandler)` and the convenience `Commit(ConcurrencyConflictHandler)`). A `DurabilityOverride` enum was sketched for this (ADR-005) but was never committed to the engine — do not look for it in `DurabilityMode.cs`, which declares only `DurabilityMode` and `UnitOfWorkState`. To give one critical operation zero-loss durability inside an otherwise-`Deferred`/`GroupCommit` batch, commit it through its own `DurabilityMode.Immediate` UoW — `dbe.CreateQuickTransaction(DurabilityMode.Immediate)`, or `ctx.CreateSideTransaction(DurabilityMode.Immediate)` from a scheduled system.
 
-### `CommitDiscipline` (separate enum — not an extension of `DurabilityOverride`)
+### `CommitDiscipline` (a separate, orthogonal enum)
 
-[`CommitDiscipline`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/CommitDiscipline.cs) is a **distinct enum** — `TickFence` (default) and `Commit` — selecting the per-component *commit discipline* for a **SingleVersion**-layout component. It is **not** a new `DurabilityOverride` value and **not** a new `StorageMode`: it is an orthogonal axis layered on the existing per-UoW timing knob. `TickFence` keeps the default in-place, last-writer-wins, tick-fence-batched behavior (≤1-tick loss). `Commit` stages writes per transaction and makes them atomic + zero-loss durable at `Transaction.Commit` via a logical-redo WAL record, then publishes in place — read-committed, O(1) rollback, **no revision chain**. It applies only to SingleVersion (Versioned is always commit-scoped; Transient is never durable). Authoritative spec: `claude/design/Ecs/committed-storage-mode.md`.
+[`CommitDiscipline`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/CommitDiscipline.cs) is a **distinct enum** — `TickFence` (default) and `Commit` — selecting the per-component *commit discipline* for a **SingleVersion**-layout component. It is **not** a per-transaction durability override and **not** a new `StorageMode`: it is an orthogonal axis layered on the existing per-UoW timing knob. `TickFence` keeps the default in-place, last-writer-wins, tick-fence-batched behavior (≤1-tick loss). `Commit` stages writes per transaction and makes them atomic + zero-loss durable at `Transaction.Commit` via a logical-redo WAL record, then publishes in place — read-committed, O(1) rollback, **no revision chain**. It applies only to SingleVersion (Versioned is always commit-scoped; Transient is never durable). Authoritative spec: `claude/design/Ecs/committed-storage-mode.md`.
 
 ---
 
@@ -161,6 +161,9 @@ After the header, the body carries the **logical address** (`EntityId : long`, p
 | `2` | `Lifecycle` | EntityId + spawn / destroy / set-enabled-bits | spawn-if-absent / destroy-if-present / absolute mask |
 | `3` | `CollectionDelta` | EntityId, slot, FieldId, op, index, element | folded, then applied as a `Set` |
 | `4` | `BulkManifest` | sessionId, begin LSN, entity/component counts | orphan detection only |
+| `5` | `FenceBlock` | archetype + cluster id, a contiguous range of entity slots (`FirstSlot`, `SlotSpan`), a `DirtyMask`, the entity-key column and each durable component's SoA column | expanded back into per-`(entity, slot)` values, then applied as `Slot` would be |
+
+`FenceBlock` (#559) is what the cluster tick fence emits instead of per-`(entity, component)` `Slot` records: a cluster's storage is already Structure-of-Arrays, so each column is one bulk copy straight out of the cluster page. Entities inside the emitted range that were clean ride along and are redundant, never wrong. It is therefore one of the most frequently written kinds for cluster archetypes, and `RecoveryDriver` counts the expansions (`FenceBlockRecordsExpanded`) so a test can tell a recovered value from an untouched one.
 
 **Record flags** ([`RecordFlags`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/RecordFormat.cs)):
 
@@ -169,7 +172,7 @@ After the header, the body carries the **logical address** (`EntityId : long`, p
 - `FenceRecord` — a tick-fence snapshot record (committed individually, no Tx markers).
 - `Committed` — Committed-discipline marker. Tags records produced under `CommitDiscipline.Commit`; per rule CM-06, a Commit-discipline spawn WAL-logs its SingleVersion values (a `Slot` upsert per spawn value) so a cluster all-SV archetype recovers exactly across a crash with no checkpoint.
 
-The batch is built by [`CommitBatchBuilder`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/CommitBatchBuilder.cs), which buckets entries by category so the codec always emits them in **LOG-07 order** (Spawn → Slot/CollectionDelta → Destroy/SetEnabledBits → BulkManifest) — a mis-ordered batch is unconstructible by API shape, so a `Slot` can never arrive before its entity's `Spawn`.
+The batch is built by [`CommitBatchBuilder`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/CommitBatchBuilder.cs), which buckets entries by category so the codec always emits them in **LOG-07 order** (Spawn → Slot/CollectionDelta → Destroy/SetEnabledBits → BulkManifest) — a mis-ordered batch is unconstructible by API shape, so a `Slot` can never arrive before its entity's `Spawn`. Tick-fence batches are built by the same builder in fence mode and carry `FenceBlock` records with their own `CollectionDelta` records alongside; they are committed individually and carry no Tx markers (the `FenceRecord` flag above).
 
 > **`WalRecordHeader.cs` is legacy.** The 32-byte `WalRecordHeader` struct from v1 still exists in the tree but is **not** the logical-record format — `RecordFormat.RecordHeader` (24 B) is what `RecordCodec` reads and writes.
 
