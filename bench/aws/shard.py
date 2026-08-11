@@ -161,9 +161,9 @@ def cmd_plan(k, trx_paths):
 
 # ── run (CI) ────────────────────────────────────────────────────────────────
 
-def run_one(label, flt, results_dir):
+def run_one(label, flt, results_dir, project=None):
     trx = f"shard{label}.trx"
-    cmd = ["dotnet", "test", TESTPROJ, "-c", CFG, "--no-build",
+    cmd = ["dotnet", "test", project or TESTPROJ, "-c", CFG, "--no-build",
            "--filter", flt, "--settings", RUNSETTINGS,
            "--logger", f"trx;LogFileName={trx}", "--results-directory", results_dir]
     t0 = time.time()
@@ -317,6 +317,55 @@ def cmd_run(results_dir):
     print(f"[shard] OVERALL={'PASS' if overall == 0 else 'FAIL'}{tail}", flush=True)
     return overall
 
+# ── retry (any project) ─────────────────────────────────────────────────────
+
+def cmd_retry(trx_path, project, results_dir, label):
+    """Re-run the failures recorded in `trx_path`, alone, under the same policy `cmd_run` applies to the shards.
+
+    The engine suite got this net when it was sharded (#405); the Workbench suite never did, because `run-gate.sh`
+    invokes it with a bare `dotnet test`. That asymmetry means an identical-probability timing flake is absorbed in
+    one project and hard-red in the other — a property of which directory a file sits in, not of the test. This is
+    the same policy, same trx parsing and same MAX_RETRIES, applied through the same `run_one`.
+
+    It deliberately does NOT weaken the verdict: a test that fails every attempt still returns non-zero. `#774` is
+    the worked example — reliably red, so no number of retries may turn it green, and quarantine is the only honest
+    way to take it off the gate.
+    """
+    failed = {k for k, o in all_results(trx_path).items() if o == "Failed"}
+    if not failed:
+        # A non-zero exit with no recorded failure is a real failure of a different kind: a crashed host, a build
+        # error, a zero-test run. Absorbing it here would be exactly the false green this file's plan-integrity
+        # check exists to prevent.
+        print(f"[retry] {os.path.basename(trx_path)} records no failed test — nothing to retry, verdict unchanged.",
+              flush=True)
+        return 1
+
+    flaked = set()
+    for attempt in range(1, MAX_RETRIES + 1):
+        if not failed:
+            break
+        classes = sorted({c for c, _ in failed})
+        rflt = _excluded() + "&(" + "|".join(f"FullyQualifiedName~{c}." for c in classes) + ")"
+        print(f"\n[retry] {attempt}/{MAX_RETRIES}: re-running {len(failed)} failed test(s) in {len(classes)} "
+              f"class(es), alone (workers=1)...", flush=True)
+        _, _, rdt, rtrx = run_one(f"{label}R{attempt}", rflt, results_dir, project=project)
+        res = all_results(rtrx)
+        recovered = {t for t in failed if res.get(t) == "Passed"}
+        flaked |= recovered
+        failed -= recovered
+        print(f"[retry]   R{attempt}  {rdt:5.0f}s  recovered {len(recovered)}, still failing {len(failed)}", flush=True)
+
+    if flaked:
+        print("[retry] FLAKED — failed then passed on retry (low-prob timing flakes, investigate, NON-blocking):",
+              flush=True)
+        for c, n in sorted(flaked):
+            print(f"          ~ {c}.{n}", flush=True)
+    if failed:
+        print(f"[retry] STILL FAILING after {MAX_RETRIES} retries (BLOCKING — likely a real regression):", flush=True)
+        for c, n in sorted(failed):
+            print(f"          x {c}.{n}", flush=True)
+    return 0 if not failed else 1
+
 # ── main ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -325,8 +374,14 @@ if __name__ == "__main__":
     pr = sub.add_parser("run");  pr.add_argument("--results-dir", required=True)
     pp = sub.add_parser("plan"); pp.add_argument("--k", type=int, default=8)
     pp.add_argument("--trx", required=True, nargs="+")
+    pt = sub.add_parser("retry"); pt.add_argument("--trx", required=True)
+    pt.add_argument("--project", required=True)
+    pt.add_argument("--results-dir", required=True)
+    pt.add_argument("--label", default="W")
     a = ap.parse_args()
     if a.cmd == "plan":
         cmd_plan(a.k, a.trx)
+    elif a.cmd == "retry":
+        sys.exit(cmd_retry(a.trx, a.project, a.results_dir, a.label))
     else:
         sys.exit(cmd_run(a.results_dir))
