@@ -37,10 +37,10 @@ internal enum ClusterCountPath : byte
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Why forcing is necessary and not a shortcut.</b> The choice is made from an estimate
-/// (<c>EstimateClusterSelectivity(...) &lt; 0.05f</c>), so a test that simply runs a selective query and hopes Path A is taken asserts nothing durable: the day
-/// a statistic shifts it silently becomes a second Path B test, still green, still counted as coverage. Forcing makes "which path ran" an input rather than an
-/// accident, which is what lets one fixture assert the two paths agree.
+/// <b>Why forcing is necessary and not a shortcut.</b> The choice is made from the primary index's fan-out (<c>EcsQuery.HasFanOutForSelectiveScan</c>), a
+/// property of the DATA rather than of the query, so a test that simply runs a selective query and hopes Path A is taken asserts nothing durable: the day a
+/// fixture's key distribution shifts it silently becomes a second Path B test, still green, still counted as coverage. Forcing makes "which path ran" an input
+/// rather than an accident, which is what lets one fixture assert the two paths agree.
 /// </para>
 /// <para>
 /// <b>Everything here is <see cref="ThreadStaticAttribute"/>, and both reasons matter.</b> For the counters it is contention: plain statics would be written by

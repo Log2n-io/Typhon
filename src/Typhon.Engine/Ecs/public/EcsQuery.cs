@@ -1349,11 +1349,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     continue;
                 }
 
-                // Query planner: choose Path A (B+Tree selective) vs Path B (zone map + eval) based on selectivity.
+                // Query planner: choose Path A (B+Tree selective) vs Path B (zone map + eval) on the primary index's fan-out.
                 // A Transient home always takes Path B. Path A range-scans the tree, and the collector is typed to BTreeBase<PersistentStore>; Path B never
                 // touches a tree at all, so it is correct for either home. Selecting it here costs a full SoA scan instead of a selective one — a performance
                 // gap, not a correctness one, and one that #665 revisits when it unfreezes cluster selectivity statistics (#655).
-                if (ChooseSelectivePath(plan, clusterState, transientHome))
+                if (ChooseSelectivePath(plan, clusterState, engineState, ixSlotIdx, transientHome))
                 {
                     QueryPathProbe.SelectiveScans++;
                     ScanPerArchetypeBTreeSelective(plan, evaluators, clusterState, meta, ref sink);
@@ -1745,7 +1745,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// <c>BTreeBase&lt;PersistentStore&gt;</c> for the collector to walk, and without a primary field there is no range to scan. Only the selectivity
     /// judgement — the part that is an estimate — answers to <see cref="QueryPathProbe.Forced"/>.
     /// </remarks>
-    private static bool ChooseSelectivePath(ExecutionPlan plan, ArchetypeClusterState clusterState, bool transientHome)
+    private static bool ChooseSelectivePath(ExecutionPlan plan, ArchetypeClusterState clusterState, ArchetypeEngineState engineState, int ixSlotIdx,
+        bool transientHome)
     {
         if (transientHome || !plan.UsesSecondaryIndex)
         {
@@ -1756,11 +1757,87 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         {
             ClusterScanPath.Selective => true,
             ClusterScanPath.FullScan => false,
-
-            // `SelectivePathThreshold > 0f` is a compile-time constant the JIT folds away, so a disabled Path A costs nothing and does not even pay for the
-            // estimate. Written as a guard rather than as `< 0f` so the intent is legible and re-enabling is a one-character change.
-            _ => SelectivePathThreshold > 0f && EstimateClusterSelectivity(plan, clusterState) < SelectivePathThreshold
+            _ => HasFanOutForSelectiveScan(plan, clusterState, engineState, ixSlotIdx)
         };
+    }
+
+    /// <summary>
+    /// Whether the primary index's <b>fan-out</b> — rows per distinct key — is high enough for the selective scan to be worth taking.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Fan-out, not selectivity. The two paths pay for different things: Path A pays per KEY in range (a leaf step and a buffer walk each), Path B pays per
+    /// CLUSTER it cannot prune (a 64-slot SIMD pass each). Writing <c>keysInRange = matches / fanOut</c> and giving Path B its BEST case — zone maps pruning
+    /// to <c>matches / ClusterSize</c> clusters — cancels <c>matches</c> from both sides and leaves <c>fanOut > k * ClusterSize</c>. The match count drops
+    /// out entirely, which is why the selectivity estimate this used to consult was measuring the wrong property: at a fixed fan-out the ratio between the
+    /// two paths barely moves across three decades of selectivity.
+    /// </para>
+    /// <para>
+    /// Measured over 10 000 rows, both paths forced, as Path B's time divided by Path A's — above 1.00 means Path A won. <c>Strided</c> assigns
+    /// <c>key = i % keys</c> so equal keys spread over every cluster and zone maps prune nothing; <c>Clustered</c> assigns <c>key = i / fanOut</c> so equal
+    /// keys are adjacent and pruning is perfect. Each cell is the range matching 1 % / 10 % of the key space:
+    /// </para>
+    /// <code>
+    ///   fan-out      1       8      40     200    1000
+    ///   Strided    0.36    0.76    1.29    1.66    1.23     (1 % of keys)
+    ///              0.13    0.63    1.18    1.22    1.38     (10 % of keys)
+    ///   Clustered  0.36    0.75    1.06    0.93    1.04     (1 % of keys)
+    ///              0.14    0.53    0.87    0.94    0.98     (10 % of keys)
+    /// </code>
+    /// <para>
+    /// The honest reading of the <c>Clustered</c> rows: against perfectly-pruned data Path A is a WASH at high fan-out, never a win. Selecting it is a bet
+    /// that key values and insert order are decorrelated — which pays 20-66 % when they are and costs about 6 % when they are not. The bet is only good
+    /// above the crossover; at fan-out 8 and below Path B wins on BOTH layouts by 1.3x to 7x, which is the band the threshold exists to exclude.
+    /// </para>
+    /// </remarks>
+    private static bool HasFanOutForSelectiveScan(ExecutionPlan plan, ArchetypeClusterState clusterState, ArchetypeEngineState engineState, int ixSlotIdx)
+    {
+        // Structural, not a preference, and first because it is the cheapest: unless the scan range exactly implements every predicate on the primary field,
+        // Path A must re-evaluate that predicate over all 64 slots of every cluster it touched — which IS Path B's per-cluster work, leaving Path A as Path B
+        // plus a tree scan. It cannot win at ANY fan-out, so no threshold rescues it. This is what the table above measures on its skip-eligible side.
+        if (!plan.PrimaryRangeAdmitsOnlyMatches)
+        {
+            return false;
+        }
+
+        var ixSlots = clusterState.IndexSlots;
+        if (ixSlots == null || (uint)ixSlotIdx >= (uint)ixSlots.Length)
+        {
+            return false;
+        }
+
+        var fields = ixSlots[ixSlotIdx].Fields;
+        if (fields == null || (uint)plan.PrimaryFieldIndex >= (uint)fields.Length)
+        {
+            return false;
+        }
+
+        ref var primaryField = ref fields[plan.PrimaryFieldIndex];
+
+        // A unique index stores one entry per row, so its fan-out is 1 by construction and the arithmetic below would reject it anyway. Asked explicitly
+        // because it also states the precondition the entry count relies on: only for AllowMultiple is an entry a DISTINCT KEY rather than a row.
+        if (!primaryField.AllowMultiple)
+        {
+            return false;
+        }
+
+        var distinctKeys = primaryField.Index?.EntryCount ?? 0;
+        if (distinctKeys <= 0)
+        {
+            return false;
+        }
+
+        // The archetype's live row count, read from the EntityMap in O(1). NOT `ActiveClusterCount * ClusterSize`: that is an upper bound, and dividing an
+        // upper bound by the key count inflates fan-out by the reciprocal of cluster occupancy — an archetype left 10 % full by destroys would read as ten
+        // times the fan-out it has and take Path A into the band where Path B wins outright.
+        var rows = engineState?.EntityMap?.EntryCount ?? 0;
+        if (rows <= 0)
+        {
+            return false;
+        }
+
+        // rows / distinctKeys >= MinFanOutClusters * ClusterSize, kept as a multiply so no division and no float enters a per-archetype decision.
+        return rows >= (long)distinctKeys * MinFanOutClustersForSelectiveScan * clusterState.Layout.ClusterSize;
     }
 
     /// <summary>
@@ -1797,38 +1874,32 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// two paths agree; what changes here is only that production stops paying for the slower one.
     /// </para>
     /// </remarks>
-    private const float SelectivePathThreshold = 0f;
-
     /// <summary>
-    /// Estimate selectivity for the primary predicate of a cluster query. Returns a value in [0, 1] where lower = more selective.
-    /// Uses the plan's EstimatedCounts (from selectivity estimator) divided by total entity count in this archetype's clusters.
-    /// Falls back to 0.5 (moderate selectivity → Path B) when estimates are unavailable.
+    /// How many whole clusters one distinct key's rows must be able to fill before the planner will take the selective scan — the threshold of
+    /// <see cref="HasFanOutForSelectiveScan"/>, expressed in clusters rather than rows so it tracks the archetype's actual geometry.
     /// </summary>
-    private static float EstimateClusterSelectivity(ExecutionPlan plan, ArchetypeClusterState clusterState)
-    {
-        if (plan.EstimatedCounts == null || plan.EstimatedCounts.Length == 0)
-        {
-            return 0.5f;
-        }
-
-        // EstimatedCounts[0] = estimated match count for the most selective predicate. A plan is built per ComponentTable while the trees live per
-        // archetype, so the planner cannot know how many entries THIS archetype's tree holds — one may be empty and the next full. Treat 0 as "unknown"
-        // → Path B, which is correct whichever home the index is in.
-        var estimated = plan.EstimatedCounts[0];
-        if (estimated <= 0)
-        {
-            return 0.5f;
-        }
-
-        // Total entity estimate: ActiveClusterCount * ClusterSize (upper bound)
-        var total = (long)clusterState.ActiveClusterCount * clusterState.Layout.ClusterSize;
-        if (total <= 0)
-        {
-            return 0.5f;
-        }
-
-        return (float)estimated / total;
-    }
+    /// <remarks>
+    /// <para>
+    /// <b>Two, and the band it excludes is the reason.</b> Measured at <c>ClusterSize</c> 64 (so a fan-out threshold of 128), Path B's time over Path A's:
+    /// </para>
+    /// <code>
+    ///   fan-out    1        8         40                  80          125         200                 1000
+    ///   Strided    .13-.36  .63-.76   1.01 1.18 1.29 1.34  0.85 1.26  1.20 1.84  1.18 1.22 1.66 1.67  1.23 1.38
+    ///   Clustered  .14-.36  .53-.75   0.87 0.97 1.02 1.06  0.94 0.96  0.94 0.98  0.93 0.94 0.97 0.98  0.98 1.04
+    /// </code>
+    /// <para>
+    /// Fan-out 40-80 is MARGINAL — two runs of the same cell disagreed in sign (0.85 against 1.26) — while every cell at 125 and above wins on decorrelated
+    /// data and is a wash on correlated data. The threshold sits above the marginal band rather than inside it, which deliberately forgoes the measured
+    /// 1.20-1.84 at fan-out 125 for being a hair under. Lowering it to one cluster is the obvious next experiment and wants evidence, not intuition: the
+    /// constant it replaced was <c>0.05f</c>, chosen by nobody and measured by nobody, and it cost a 15-63 % regression across the band it selected.
+    /// </para>
+    /// <para>
+    /// Scaling by <c>ClusterSize</c> rather than hard-coding 128 follows the cost model — Path B's per-cluster SIMD pass covers <c>ClusterSize</c> slots, so
+    /// break-even fan-out is proportional to it — but that proportionality is predicted, not measured: every cell above was taken at the maximum
+    /// <c>ClusterSize</c> of 64 (<see cref="ClusterLocation.MaxClusterSize"/>).
+    /// </para>
+    /// </remarks>
+    private const int MinFanOutClustersForSelectiveScan = 2;
 
     /// <summary>
     /// Find the per-archetype index slot that owns <see cref="_whereComponentTable"/>, in EITHER index home. Returns an index into

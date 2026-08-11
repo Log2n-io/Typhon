@@ -275,7 +275,8 @@ class ClusterIndexStatisticsTests : TestBase<ClusterIndexStatisticsTests>
     /// <remarks>
     /// Asserted at this seam rather than through a query result on purpose. The planner's choice is a PERFORMANCE decision — Path A and Path B return the
     /// same entities — so no observable behaviour distinguishes a good plan from a bad one, and a test that went through <c>Execute()</c> would pass either
-    /// way. What the estimate feeds is <c>EstimateClusterSelectivity</c>, which reads a 0 count as "unknown" and takes Path B every time.
+    /// way. What the estimate feeds is the plan's <c>EstimatedCounts</c>, which orders the filter chain and picks the primary scan stream; the cluster scan
+    /// path itself is chosen separately, from the index's fan-out rather than from any estimate (<c>EcsQuery.HasFanOutForSelectiveScan</c>).
     /// </remarks>
     /// <remarks>
     /// The second assertion used to check the FALLBACK — <c>StatsFlatArch</c> was pure-Versioned, so it had no cluster state and the planner had to keep

@@ -65,6 +65,7 @@ public class ClusterRegressionBenchmarks : IDisposable
         _dbe.RegisterComponentFromAccessor<AaVcHealth>();
         _dbe.RegisterComponentFromAccessor<AaBenchIdxData>();
         _dbe.RegisterComponentFromAccessor<AaVcRanked>();
+        _dbe.RegisterComponentFromAccessor<AaBenchFanOutData>();
         _dbe.InitializeArchetypes();
 
         var rng = new Random(42);
@@ -113,6 +114,16 @@ public class ClusterRegressionBenchmarks : IDisposable
             _idxVersionedIds[i] = tx.Spawn<AaBenchIdxVersionedCluster>(
                 AaBenchIdxVersionedCluster.Position.Set(in pos),
                 AaBenchIdxVersionedCluster.Ranked.Set(in ranked));
+        });
+
+        // ── Spawn high-fan-out indexed entities (AaBenchFanOutUnit) ─
+        // 10 000 rows over 50 keys = fan-out 200, well past the selective scan's threshold, with `i % 50` decorrelating
+        // the key from insert order so zone maps cannot prune. This is the only fixture whose shape reaches Path A.
+        SpawnInBatches(EntityCount, (tx, i) =>
+        {
+            var pos = new AaBenchPosition(i, 0);
+            var data = new AaBenchFanOutData(i % 50, i);
+            tx.Spawn<AaBenchFanOutUnit>(AaBenchFanOutUnit.Position.Set(in pos), AaBenchFanOutUnit.Data.Set(in data));
         });
 
         // Tick fence to populate zone maps and cluster indexes
@@ -236,6 +247,25 @@ public class ClusterRegressionBenchmarks : IDisposable
         using var tx = _dbe.CreateQuickTransaction();
         var results = tx.Query<AaBenchIdxUnit>()
             .WhereField<AaBenchIdxData>(d => d.Score >= 9900)
+            .Execute();
+        return results.Count;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 4b. High-fan-out indexed query — the shape the planner selects the
+    //     selective B+Tree scan for (fan-out 200, keys decorrelated from
+    //     insert order). Every other indexed benchmark here is fan-out 1
+    //     or 12.5 and therefore takes the full scan whatever the planner
+    //     does, so without this one the selective path has no tracked
+    //     coverage at all.
+    // ═══════════════════════════════════════════════════════════════════
+
+    [Benchmark]
+    public int IndexedQuery_HighFanOut()
+    {
+        using var tx = _dbe.CreateQuickTransaction();
+        var results = tx.Query<AaBenchFanOutUnit>()
+            .WhereField<AaBenchFanOutData>(d => d.Bucket >= 45)
             .Execute();
         return results.Count;
     }
