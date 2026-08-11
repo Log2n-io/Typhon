@@ -150,7 +150,7 @@
       href: Hosting/engine-options-configuration/README.md
       items:
         - name: Options Validation Hooks
-          href: Hosting/engine-options-configuration/options-validation-stubs.md
+          href: Hosting/engine-options-configuration/options-validation.md
 - name: Indexing
   href: Indexing/README.md
   items:

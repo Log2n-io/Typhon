@@ -252,23 +252,26 @@ Lives inside `DatabaseEngineOptions` and is consumed by the components at constr
 
 > **Page-cache size is not a `ResourceOptions` knob.** It lives on `PagedMMFOptions.DatabaseCacheSize` (bytes, default **256 MiB**) — set it via `TyphonOptions.PageCacheSize(...)`. The former `PageCachePages`/`MaxPageCachePages` entries were removed in #148.
 
+`ResourceOptions` carries **five** properties. That is the whole type:
+
 | Property | Default | Meaning |
 |---|---:|---|
 | `MaxActiveTransactions` | `1000` | Hard limit on concurrent transactions; `FailFast` beyond |
-| `TransactionPoolSize` | `16` | Pooled `Transaction` objects; overflow → allocate (`Degrade`) |
-| `WalRingBufferSizeBytes` | `64 << 20` (**64 MB** total, 2 × 32 MB halves) | In-memory WAL stage; sized for tail latency (#559) |
-| `WalBackPressureThreshold` | `0.8` | At this fill ratio, commits start blocking |
-| `WalMaxSegmentSizeBytes` | `64L << 20` (**64 MB**) | Single segment file size |
-| `WalMaxSegments` | `4` | Segments before forced checkpoint |
-| `CheckpointMaxDirtyPages` | `10000` | Dirty pages before forced checkpoint |
+| `WalRingBufferSizeBytes` | `64 * 1024 * 1024` (**64 MB** total, 2 × 32 MB halves) | In-memory WAL stage; sized for tail latency (#559) |
+| `PageChecksumVerification` | `OnLoad` | CRC every load · only during recovery · recovery-suspect mode |
 | `CheckpointIntervalMs` | `30000` (**30 s**) | Idle checkpoint cadence |
-| `PageChecksumVerification` | `OnLoad` | CRC every load vs. only during recovery |
-| `ShadowBufferPages` | `512` (**4 MB**) | Reserved for CoW backup writer (forward-looking; no Backup subsystem node yet) |
-| `PageSizeBytes` | `8192` (const) | Page size for sizing math |
+| `CheckpointBarrierTimeoutMs` | `30000` (**30 s**) | How long a checkpoint waits for its barrier |
 
-There is **no overall memory budget and no manual validation step**. `ResourceOptions` had a `TotalMemoryBudgetBytes` property and a `Validate()` / `CalculateAvailableBudgetBytes()` pair, both removed in #148 as vestigial — they governed no allocation. Each wired knob is instead range-checked automatically at DI resolution by `DatabaseEngineOptionsValidator`, so an out-of-range value fails at startup with no call for you to remember. Real cache size lives on `PagedMMFOptions.DatabaseCacheSize`, WAL segment sizing on `WalWriterOptions`.
+#148 removed the rest — `PageCachePages`, `MaxPageCachePages`, `TransactionPoolSize`, `WalBackPressureThreshold`, `WalMaxSegments`, `WalMaxSegmentSizeBytes`, `CheckpointMaxDirtyPages`, `ShadowBufferPages`, `PageSizeBytes` — as **vestigial**: they were read by nothing and bounded no allocation. If you are looking for one of them, the live knob is elsewhere:
 
-> ⚠️ **Stale table above.** Several rows name properties #148 also removed (`PageCachePages`, `MaxPageCachePages`, `TransactionPoolSize`, `WalBackPressureThreshold`, `WalMaxSegments`, `WalMaxSegmentSizeBytes`, `CheckpointMaxDirtyPages`, `ShadowBufferPages`). Today's `ResourceOptions` carries five: `MaxActiveTransactions`, `WalRingBufferSizeBytes`, `PageChecksumVerification`, `CheckpointIntervalMs`, `CheckpointBarrierTimeoutMs`. Tracked separately from this pass.
+| Looking for | Now lives on |
+|---|---|
+| page-cache size | `PagedMMFOptions.DatabaseCacheSize` (bytes, default **256 MiB**), via `TyphonOptions.PageCacheSize(...)` |
+| WAL segment size / count / staging | `WalWriterOptions.SegmentSize`, `PreAllocateSegments`, `StagingBufferSize` |
+| group-commit cadence | `WalWriterOptions.GroupCommitIntervalMs` |
+| transaction pool size | not configurable — `TransactionChain.PoolMaxSize` is a `const 16` |
+
+There is likewise **no overall memory budget and no manual validation step**. The `TotalMemoryBudgetBytes` property and the `Validate()` / `CalculateAvailableBudgetBytes()` pair went with the same purge. Instead, `DatabaseEngineOptionsValidator` — a real `IValidateOptions<DatabaseEngineOptions>`, registered by `AddDatabaseEngine` — range-checks `MaxActiveTransactions`, `WalRingBufferSizeBytes`, `CheckpointIntervalMs` and `CheckpointBarrierTimeoutMs`, plus `WalWriterOptions`' `SegmentSize`, `PreAllocateSegments`, `StagingBufferSize` and `GroupCommitIntervalMs`, at DI resolution. An out-of-range value fails at startup, with no call for you to remember.
 
 ---
 

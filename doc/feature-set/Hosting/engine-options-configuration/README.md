@@ -101,7 +101,7 @@ var engine   = provider.GetRequiredService<DatabaseEngine>();
   canonical setup is all-singleton.
 - `MemoryAllocatorOptions` and `ResourceRegistryOptions` are configurable but, in practice, only
   expose a diagnostics `Name` today — there is nothing else to tune on them.
-- See [Options Validation Hooks](./options-validation-stubs.md) for what configuration mistakes
+- See [Options Validation](./options-validation.md) for what configuration mistakes
   are — and are not — caught before they reach the engine.
 
 ## 🧪 Tests
@@ -112,7 +112,7 @@ var engine   = provider.GetRequiredService<DatabaseEngine>();
 ## 🔗 Related
 
 - Source: [`TyphonBuilderExtensions.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Hosting/public/TyphonBuilderExtensions.cs), [`DatabaseEngine.cs` — `DatabaseEngineOptions`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/DatabaseEngine.cs), [`PagedMMFOptions.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PagedMMFOptions.cs), [`WalWriterOptions.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/public/WalWriterOptions.cs)
-- Sub-features: [Options Validation Hooks](./options-validation-stubs.md)
+- Sub-features: [Options Validation](./options-validation.md)
 - Sibling: [DI Engine Bootstrap Chain](../di-bootstrap-chain/README.md) — the `Add*()` calls this surface's `configure` delegates bind options onto.
 
 <!-- Deep dive: claude/design/Hosting/di-extensions.md — Options Reference (Quick), claude/overview/README.md -->
