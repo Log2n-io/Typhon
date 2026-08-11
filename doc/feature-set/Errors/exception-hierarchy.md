@@ -49,6 +49,7 @@ catch (TyphonException ex)
 |---|---|---|---|
 | `TyphonTimeoutException` | `TyphonException` | `true` | `WaitDuration` |
 | `LockTimeoutException`, `TransactionTimeoutException`, `PageCacheBackpressureTimeoutException`, `WalBackPressureTimeoutException` | `TyphonTimeoutException` | `true` | see [Timeout Exceptions & Deadlines](./timeout-exceptions-deadlines.md) |
+| `SnapshotExpiredException` | `TyphonException` | `false` | `SnapshotTsn`, `RetainedMinTsn` |
 | `StorageException` | `TyphonException` | `false` | — |
 | `CorruptionException` / `PageCorruptionException` | `StorageException` | `false` | `ComponentName`, `PageIndex` / `ExpectedCrc`, `ComputedCrc` |
 | `DatabaseLockedException` | `StorageException` | `false` | `OwnerPid`, `OwnerMachine`, `StartedAt` |

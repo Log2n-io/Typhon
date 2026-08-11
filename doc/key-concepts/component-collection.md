@@ -12,7 +12,7 @@ description: 'A per-entity variable-length list — owned values or entity-refer
 
 The API is append-and-bulk-read: mutate through `Transaction.CreateComponentCollectionAccessor` (`Add`, `ElementCount`, `GetAllElements`); iterate read-only through `Transaction.GetReadOnlyCollectionEnumerator`. There is no per-element remove/replace, and no index over contents. Storage follows the component's [mode](xref:concept-storage-mode): `SingleVersion` owns its buffer in place; `Versioned` shares by reference count and clones **copy-on-write** on first mutation, so an older MVCC snapshot keeps seeing what it read. `Transient` is **rejected at startup** — its buffer would outlive the data meant to reference it.
 
-> ⚠️ **Durability is checkpoint-bounded, not commit-bounded.** Collection *content* reaches disk at the next checkpoint, not via WAL redo — a crash between a collection write and that checkpoint recovers the buffer id but not the new elements. This is a known, separately-tracked gap; don't treat collection writes as commit-durable.
+Collection content is WAL-logged at commit and recovers the same way as any other component field (per the UoW's `DurabilityMode`). A recovered buffer gets a fresh buffer id — the elements, not the physical handle, are what recovery preserves.
 
 ## How it relates
 

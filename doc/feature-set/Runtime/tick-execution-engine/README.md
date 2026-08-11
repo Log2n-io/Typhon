@@ -48,9 +48,12 @@ underlying resources.
   exists. `Start()` is the only call that launches worker threads and the TickDriver.
 - `OnFirstTick` and `OnShutdown` each receive their own `TickContext` with a dedicated `Transaction`
   — `OnShutdown`'s is Immediate durability, so its writes are crash-safe before `Shutdown()` returns.
-- `Shutdown()` is synchronous: it stops the subscription server, runs `OnShutdown`, then blocks until
-  every worker thread has joined. There is no async/timeout-bounded shutdown overload — a system
-  that deadlocks blocks `Shutdown()` indefinitely.
+- `Shutdown()` is synchronous: it stops the subscription server, runs `OnShutdown`, then signals
+  workers to stop and joins them (5 s per thread; a worker that misses the window is reported via
+  an Error log entry rather than waited on indefinitely). A tick already in flight when
+  `Shutdown()` is called may be abandoned — if no system completes for 250 ms because the workers
+  have already exited the dispatch loop, the completion barrier gives up and remaining systems in
+  that tick are skipped.
 - `Dispose()` must run after `Shutdown()` to release worker-pool resources; disposing without
   shutting down first does not run `OnShutdown`.
 

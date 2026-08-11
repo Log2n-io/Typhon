@@ -24,8 +24,10 @@ Every B+Tree index instance carries a handful of `long` counters — bumped only
 paths (version-check failures, optimistic→pessimistic fallbacks, splits, merges) — so the steady-state lookup
 and insert paths pay nothing extra. They give a coarse signal of how much retry/fallback traffic an index is
 absorbing under concurrent load. Separately, `tsh`'s `btree-validate` command walks an index from root to leaf
-under an epoch guard, checking key ordering, parent/child linkage, and B-link sibling chaining, and reports
-pass/fail with the first violation found — useful after a stress run, a crash-recovery rebuild, or whenever
+under an epoch guard, checking: separator/HighKey bounds between parent and child, within-node key ordering
+(items strictly ascending inside each node), descent/chain agreement (leaves reachable by root descent must
+equal leaves reachable via the leaf chain), `EntryCount` consistency, and B-link sibling linkage. Multiple
+violation classes can surface in one call — useful after a stress run, a crash-recovery rebuild, or whenever
 you suspect corruption rather than just contention.
 
 ## 💻 Usage
@@ -75,8 +77,9 @@ TestContext.Out.WriteLine(
   persisted, checkpointed, or aggregated across indexes.
 - `btree-validate` is read-only and safe to run against a live database; it runs under an epoch guard so it
   observes a consistent epoch, but it is a point-in-time walk, not a continuous monitor.
-- `btree-validate` checks structural soundness (key ordering, child linkage, B-link sibling chaining) — it does
-  not check that index entries match the component data they're supposed to reference.
+- `btree-validate` checks structural soundness (separator/HighKey bounds, within-node key ordering, descent/chain
+  agreement, `EntryCount` consistency, B-link sibling linkage) — it does not check that index entries match the
+  component data they're supposed to reference.
 - The contention counters and the descent-trace forensic hook used for deep OLC bug investigation are
   engine-internal; they require `InternalsVisibleTo` access (as `tsh`, the test suite, and benchmarks have) and
   are not part of the stable public `Typhon.Engine` API.

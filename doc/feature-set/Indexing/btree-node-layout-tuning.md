@@ -43,7 +43,7 @@ using var found = tx.EnumerateIndex<Player, int>(idIndex, minKey: 100, maxKey: 2
 | `OlcVersion` | 4 B | per-node optimistic-lock-coupling latch |
 | `PrevChunk` / `NextChunk` | 4+4 B | doubly-linked sibling pointers (B-link right-link) |
 | `LeftValue` | 4 B | leftmost child pointer (internal nodes) |
-| `HighKey` | `sizeof(TKey)` | B-link upper bound, `== Next.firstKey` |
+| `HighKey` | `sizeof(TKey)` | B-link upper bound; must not exceed `Next.firstKey` (a HighKey *below* the right sibling's first key is normal after a removal) |
 | `Keys[N]` / `Values[N]` | remainder | sorted key array + parallel value array |
 
 ## ⚠️ Guarantees & limits

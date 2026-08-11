@@ -62,7 +62,7 @@ Constructed via `tx.Query<TArchetype>()` (polymorphic — includes descendant ar
 
 `Where<T>(Func<T, bool>)` takes a compiled delegate — opaque to the planner, evaluated post-scan via `tx.Open(id).TryRead<T>(...)`. It chains as AND.
 
-`WhereField<T>(Expression<Func<T, bool>>)` is the **planner-visible** form. The lambda gets parsed by `ExpressionParser`, broken into DNF, indexed-field-resolved, and folded into the execution plan. Multiple `WhereField` calls cross-product as **AND of ORs** (DNF normalization at `EcsQuery.cs:299-321`). Required for incremental views.
+`WhereField<T>(Expression<Func<T, bool>>)` is the **planner-visible** form. The lambda gets parsed by `ExpressionParser`, broken into DNF, indexed-field-resolved, and folded into the execution plan. Multiple `WhereField` calls on the **same component** cross-product as **AND of ORs** (DNF normalization at `EcsQuery.cs:299-321`); a second call on a **different** component throws `InvalidOperationException` — use `.Where<T>(lambda)` for the second component. Required for incremental views.
 
 ### Spatial predicates
 
