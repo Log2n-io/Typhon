@@ -39,6 +39,56 @@ discipline (MVCC revision chains vs in-place SV vs heap-backed Transient), so re
   scope: ArchetypeRegistry.DeclareComponent (ComponentTypeIds / ComponentTypeById / ComponentTypeIdsBySchemaName / NextComponentTypeId), Comp<T>
   on_violation: static handles disagree with an engine's slot map → wrong-component reads/writes
 
+### SCHEMA-03: An archetype catalog id and a routing id are never interchangeable `[fatal][silent]`
+  invariant an archetype has TWO ids that are both `ushort` and usually differ: the per-PROCESS **catalog id** (`ArchetypeMetadata.ArchetypeId`, assigned in
+            registration order by `GetOrAssignCatalogId`, capped at 4095, NEVER persisted) and the per-DATABASE **routing id** (`ArchetypeR1.RoutingId`,
+            persisted, re-matched by name on reopen, embedded in the low 16 bits of every `EntityId`)
+  never a catalog id is compared to, joined against, or substituted for a routing id — in either direction
+  never `entityId.ArchetypeId == someEvent.ArchetypeId` (the left side is a routing id; the right side, in every profiler event, is a catalog id)
+  enforce (engine) cross the boundary only through `DatabaseEngine.RoutingIdOf(meta)` / `RoutingIdForCatalog(catalogId)`; `NoRoutingId` (0xFFFF) means "this DB
+          has no such archetype" and must be handled, not treated as an id
+  enforce (trace) a `.typhon-trace` records BOTH: events carry the catalog id, and the v12 archetype table carries the matching routing id
+          (`ArchetypeRecord.RoutingId`). Consumers resolve through `TraceArchetypeIdentity`, which is also the one place that honours
+          `TraceHeaderFlags.MultipleEnginesObserved` — under which the routing ids are absent, not merely suspect (#614 D-3/D-9)
+  on_violation: a plausible but WRONG archetype for every archetype whose registration order differs from its persisted routing order. **It cannot be caught by
+                a fixture**: in a freshly-created database the two orders coincide, so the mistake passes every test written against one and fails only on a
+                database that gained archetypes over time — i.e. on real user data.
+  rationale: two dense small-integer id spaces over the same domain, with no type distinction, is a trap that reads as correct at the call site. The design that
+             surfaced it is claude/design/Apps/Workbench/10-database-and-profiles.md §5.3.
+  verified: RoutingIdTests, TraceV12SelfDescribingTests, CaptureIdentityFromLiveEngineTests [VerifiesRule]
+
+### SCHEMA-04: A rename is journalled at the instant it is carried forward, or the mapping is lost forever `[silent]`
+  invariant whenever a `PreviousName` match causes a persisted row to be re-keyed to a new name, a `SchemaHistoryR1` row with
+            `Kind = SchemaChangeKind.Rename` is written recording `(PreviousName → ComponentName, Target, FromRevision → ToRevision)`
+  never a re-key without a journal entry — that carry-forward is the ONLY moment at which both names are simultaneously known
+  scope: DatabaseEngine.RecordSchemaRename; the carry-forward blocks in DatabaseEngine.RegisterComponentFromAccessor and DatabaseEngine.PersistNewArchetypes
+  enforce exactly one row per hop: both call sites are reached only while the persisted row is still keyed by the old name, so a reopen after carry-forward
+          cannot re-journal. Repeated renames therefore leave a chain, walkable forward oldest-first, not a single hop.
+  enforce a rename that coincides with a field change writes TWO rows — the schema-change row and the rename row — so neither `Kind` is ambiguous and the
+          field counters stay attached to the change that moved fields
+  requires SCHEMA-05 (the system-schema gate), since the journal fields live in a system component
+  on_violation: the mapping is **unrecoverable**. `[Component(PreviousName=…)]` / `[Archetype(PreviousName=…)]` are explicitly intended to be deleted from
+                source once the row has been re-keyed (`DatabaseEngine.cs`, the carry-forward comments). After that the old name exists in no source file and
+                in no database row, while profiling captures months older still refer to it — so every name-based bridge fails to match with no way to tell a
+                rename from a deletion.
+  rationale: robustness that cannot be retrofitted — the evidence is destroyed by the passage of a release, not by a bug. See
+             claude/design/Apps/Workbench/10-database-and-profiles.md D-4 / §5.6.
+  verified: SchemaRenameHistoryTests [VerifiesRule]
+
+### SCHEMA-05: A system component's layout is gated by `BK_SystemSchemaRevision` `[fatal][silent]`
+  invariant a database whose recorded `BK_SystemSchemaRevision` differs from `DatabaseEngine.CurrentSystemSchemaRevision` is REFUSED at open, in both
+            directions (older data, and data written by a newer build)
+  never a system component (`ComponentR1`, `SchemaHistoryR1`, `ArchetypeR1`, `AssemblyR1`) changes layout without bumping the constant
+  scope: DatabaseEngine.CurrentSystemSchemaRevision, DatabaseEngine.LoadSystemSchemaR1, DatabaseEngine.CreateSystemSchemaR1
+  requires the check runs BEFORE the system tables are constructed — everything after rebuilds them from the CLR types at the current layout
+  on_violation: system components do not go through schema evolution. `LoadSystemSchemaR1` rebuilds their tables directly from the CLR types, bypassing the
+                `SchemaDiff` / `FieldIdResolver` / migration machinery that user components get on registration, and their chunk stride is fixed when the
+                table is created. A layout change therefore reinterprets existing rows under a new stride **with no error at all** — including in an
+                otherwise-empty table, since the stride alone is enough to corrupt the read.
+  rationale: the audit trail is what the Workbench consults to explain schema drift; a silently misread audit trail is worse than none. Bumping the constant
+             requires no migration code, only that every existing database be recreated — the accepted pre-alpha trade (#615).
+  verified: SystemSchemaRevisionGateTests [VerifiesRule]
+
 ---
 
 ## Module: CLUSTERWALK — Concurrent cluster enumeration vs structural mutation
