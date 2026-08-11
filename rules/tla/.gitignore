@@ -1,0 +1,8 @@
+# TLA+ toolchain — downloaded jar + TLC scratch output are never committed (run-tlc.sh fetches the jar on demand).
+.tools/
+states/
+*.out
+*.st
+MC*.tla
+MC*.cfg
+*.toolbox/

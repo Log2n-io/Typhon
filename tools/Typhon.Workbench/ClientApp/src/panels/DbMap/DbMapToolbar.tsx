@@ -83,6 +83,10 @@ export function DbMapToolbar(props: DbMapToolbarProps) {
         <option value="fragmentation">Fragmentation</option>
         <option value="freeSpace">Free space</option>
         <option value="pathology">Pathology</option>
+        {/* #729 — dims to the pages an integrity scan flagged and outlines each in its severity colour.
+            Selectable even with no report: the lens then falls back to no dimming and the Legend tab says
+            why, which is more useful than an option that silently isn't there. */}
+        <option value="integrity">Integrity</option>
       </select>
 
       <button

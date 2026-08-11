@@ -80,4 +80,4 @@ schedule.QuerySystem("Pheromone_Diffuse", ctx =>
 
 <!-- Deep dive: claude/design/Spatial/SpatialTiers/04-tick-integration.md § Checkerboard Parallel Dispatch -->
 <!-- ADR: claude/adr/046-spatial-tiers-architecture.md (Decision 6 — one DAG node, two internal phases) -->
-<!-- Rules: claude/rules/spatial.md (module Checkerboard Partition, CB-01, CB-02) -->
+<!-- Rules: rules/spatial.md (module Checkerboard Partition, CB-01, CB-02) -->

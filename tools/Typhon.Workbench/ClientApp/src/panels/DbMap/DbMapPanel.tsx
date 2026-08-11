@@ -38,6 +38,9 @@ import {
 } from '@/libs/dbmap/types';
 import { buildRegions } from '@/libs/dbmap/dbMapRegions';
 import { findUnderFilledPages, LOW_FILL_THRESHOLD } from '@/libs/dbmap/dbMapPathology';
+import type { IntegrityMark } from '@/libs/dbmap/types';
+import { useIntegrityStore } from '@/stores/useIntegrityStore';
+import { SEVERITY_CANVAS_COLOR, severityByPage } from '@/panels/Integrity/integrityModel';
 import {
   contiguousRuns,
   fillDensity,
@@ -152,6 +155,7 @@ interface L0HoverInfo {
  */
 export default function DbMapPanel(_props: IDockviewPanelProps) {
   const sessionId = useSessionStore((s) => s.sessionId);
+  const sessionFilePath = useSessionStore((s) => s.filePath);
   const encoding = useDbMapStore((s) => s.encoding);
   const pageOrder = useDbMapStore((s) => s.pageOrder);
   const segmentOverlay = useDbMapStore((s) => s.segmentOverlay);
@@ -164,6 +168,7 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
   const lensSegmentId = useDbMapStore((s) => s.lensSegmentId);
   const filter = useDbMapStore((s) => s.filter);
   const pendingFocusType = useDbMapStore((s) => s.pendingFocusType);
+  const pendingFocusPage = useDbMapStore((s) => s.pendingFocusPage);
   const clearPendingFocus = useDbMapStore((s) => s.clearPendingFocus);
   const select = useSelectionStore((s) => s.select);
   const clearLeaf = useSelectionStore((s) => s.clearLeaf);
@@ -272,6 +277,29 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
 
   const regions = useMemo(() => (data ? buildRegions(data, tiles) : []), [data, tiles]);
   const pathologyFlags = useMemo(() => (data ? findUnderFilledPages(data, tiles) : []), [data, tiles]);
+
+  // #729 integrity lens — the worst severity per damaged page, from the last scan run in the Integrity view.
+  //
+  // Guarded on the report describing *this* database. The Integrity view is path-scoped and can be pointed at
+  // any bundle on disk, so without this check a scan of some other file would paint damage markers over the
+  // open database's map — page indices are just integers and would land somewhere plausible-looking.
+  const integrityReport = useIntegrityStore((s) => s.report);
+  const integrityForThisDb =
+    integrityReport && sessionFilePath && integrityReport.source.toLowerCase().includes(sessionFilePath.toLowerCase())
+      ? integrityReport
+      : null;
+  const integrityMarks = useMemo<IntegrityMark[]>(() => {
+    if (!integrityForThisDb || !data) {
+      return [];
+    }
+    const marks: IntegrityMark[] = [];
+    for (const [page, severity] of severityByPage(integrityForThisDb.findings)) {
+      if (page < data.pageCount) {
+        marks.push({ page, color: SEVERITY_CANVAS_COLOR[severity] });
+      }
+    }
+    return marks;
+  }, [integrityForThisDb, data]);
   const composition = useMemo(() => (data ? freeSpaceComposition(data) : null), [data]);
   const searchMatches = useMemo(() => (data ? searchDbMap(searchQuery, data, shortLabel) : []), [searchQuery, data, shortLabel]);
   const filterMask = useMemo(() => (data ? buildFilterMask(data, filter) : null), [data, filter]);
@@ -647,6 +675,29 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     }
   }, [data, pendingFocusType, clearPendingFocus, flyToRegion, select, pulseSegment]);
 
+  // #729 — an integrity finding asked to reveal one damaged page. Unlike the component reveal above there is
+  // no segment to frame: the target is a single cell, and the interesting context is its neighbours (damage
+  // is often contiguous). So the fly-to spans a small window around it rather than the page alone, which at
+  // full zoom would fill the viewport with one featureless square.
+  useEffect(() => {
+    if (!data || pendingFocusPage == null) {
+      return;
+    }
+    const page = pendingFocusPage;
+    clearPendingFocus();
+    if (page < 0 || page >= data.pageCount) {
+      return;
+    }
+    const window = 64;
+    const first = Math.max(0, page - window / 2);
+    flyToRegion(first, Math.min(window, data.pageCount - first), {
+      label: `Page ${page.toLocaleString()}`,
+      fillFraction: 0.5,
+      startFromDatabaseFit: true,
+    });
+    select('page', { kind: 'page', pageIndex: page });
+  }, [data, pendingFocusPage, clearPendingFocus, flyToRegion, select]);
+
   // Construct the renderer once the canvas element exists.
   useLayoutEffect(() => {
     if (!canvasRef.current) {
@@ -813,7 +864,15 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     }
     // The fragmentation lens needs a focused segment; without one (e.g. restored from a persisted session where
     // the segment id no longer applies) treat it as no lens so the map isn't dimmed-to-nothing on open.
-    if (!data || lens === 'none' || (lens === 'fragmentation' && lensSegmentId == null)) {
+    // The integrity lens with no report for this database is the same shape of problem as the fragmentation
+    // lens with no segment — a persisted lens choice that no longer applies. Dimming the whole map to nothing
+    // would read as "everything is damaged", the worst possible false reading, so fall back to no lens.
+    if (
+      !data ||
+      lens === 'none' ||
+      (lens === 'fragmentation' && lensSegmentId == null) ||
+      (lens === 'integrity' && !integrityForThisDb)
+    ) {
       renderer.setLens('none', null);
       scheduleRender();
       return;
@@ -845,10 +904,26 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
       for (const flag of pathologyFlags) {
         mask[flag.pageIndex] = 1;
       }
+    } else if (lens === 'integrity') {
+      for (const mark of integrityMarks) {
+        mask[mark.page] = 1;
+      }
     }
     renderer.setLens(lens, mask);
     scheduleRender();
-  }, [lens, lensSegmentId, data, tiles, pathologyFlags, scheduleRender]);
+  }, [lens, lensSegmentId, data, tiles, pathologyFlags, integrityMarks, integrityForThisDb, scheduleRender]);
+
+  // Integrity markers are fed independently of the lens so a finding revealed from the report outlines its
+  // page even before the user switches lens — the reveal is a jump to a specific page, and arriving at an
+  // unmarked cell would leave them hunting for what they were sent to see.
+  useEffect(() => {
+    const renderer = rendererRef.current;
+    if (!renderer) {
+      return;
+    }
+    renderer.setIntegrityMarks(integrityMarks);
+    scheduleRender();
+  }, [integrityMarks, scheduleRender]);
 
   // Filter-to-dim changed — hand the renderer the new pass/fail mask (§4.6). The mask is O(pageCount) but
   // recomputed only on a filter / data change, and composes on top of the active lens inside the renderer.

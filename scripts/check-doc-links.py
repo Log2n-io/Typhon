@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mechanical link/path guard for `doc/` — the cheap half of the doc-accuracy net.
+"""Mechanical link/path guard for `doc/` and `rules/` — the cheap half of the doc-accuracy net.
 
 Why this exists
 ---------------
@@ -27,6 +27,11 @@ What it checks
    lands nowhere is invisible until a reader clicks it.
 
 Generated trees (`doc/_site/`, `doc/api/`) are skipped — they are build output and regenerate from source.
+
+`rules/` is linted on the same terms (#747). It used to be covered by the knowledge base's own
+`check-doc-drift.py`, in the `ENFORCED_DIRS` tier, and moving the database here without picking that up would
+have silently dropped it: `check-rule-scopes.py` validates `scope:` symbols, which is a different check from
+"the `src/...` path this rule cites in prose still exists".
 
 Escape hatch
 ------------
@@ -96,9 +101,9 @@ def collect_anchors(md_path):
     return anchors
 
 
-def doc_files(doc_root):
-    for path in sorted(doc_root.rglob("*.md")):
-        if any(part in SKIP_DIRS for part in path.relative_to(doc_root).parts):
+def doc_files(lint_root):
+    for path in sorted(lint_root.rglob("*.md")):
+        if any(part in SKIP_DIRS for part in path.relative_to(lint_root).parts):
             continue
         yield path
 
@@ -111,59 +116,58 @@ def ignored(lines, i):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Mechanical link/path lint for doc/.")
+    ap = argparse.ArgumentParser(description="Mechanical link/path lint for doc/ and rules/.")
     ap.add_argument("--repo-root", default=None, help="Repository root (default: parent of this script's dir).")
     ap.add_argument("--quiet", action="store_true", help="Summary only.")
     ap.add_argument("--warn", action="store_true", help="Report findings but always exit 0.")
     args = ap.parse_args()
 
     root = Path(args.repo_root).resolve() if args.repo_root else Path(__file__).resolve().parent.parent
-    doc_root = root / "doc"
 
-    # A missing src/ or doc/ means a broken checkout — fail loudly rather than scanning nothing and
+    # A missing src/, doc/ or rules/ means a broken checkout — fail loudly rather than scanning nothing and
     # reporting a cheerful green (the same trap check-doc-drift.py guards against).
-    if not doc_root.is_dir():
-        print(f"check-doc-links: FATAL — no doc/ under {root}", file=sys.stderr)
-        return 2
-    if not (root / "src").is_dir():
-        print(f"check-doc-links: FATAL — no src/ under {root}; wrong --repo-root?", file=sys.stderr)
-        return 2
+    lint_roots = [root / "doc", root / "rules"]
+    for needed in [*lint_roots, root / "src"]:
+        if not needed.is_dir():
+            print(f"check-doc-links: FATAL — no {needed.name}/ under {root}; wrong --repo-root?", file=sys.stderr)
+            return 2
 
     anchor_cache = {}
     bad_paths, bad_links, bad_anchors = [], [], []
     files_scanned = paths_checked = links_checked = 0
 
-    for md in doc_files(doc_root):
-        files_scanned += 1
-        rel = md.relative_to(root).as_posix()
-        lines = md.read_text(encoding="utf-8", errors="replace").splitlines()
+    for lint_root in lint_roots:
+        for md in doc_files(lint_root):
+            files_scanned += 1
+            rel = md.relative_to(root).as_posix()
+            lines = md.read_text(encoding="utf-8", errors="replace").splitlines()
 
-        for i, line in enumerate(lines):
-            if ignored(lines, i):
-                continue
-
-            # ── 1. source paths ──────────────────────────────────────────────────────────────────────
-            for m in SRC_PATH.finditer(line):
-                paths_checked += 1
-                target = root / m.group(1)
-                if not target.exists():
-                    bad_paths.append((rel, i + 1, m.group(1)))
-
-            # ── 2. cross-document links ──────────────────────────────────────────────────────────────
-            for m in MD_LINK.finditer(line):
-                href, frag = m.group(1), (m.group(2) or "")
-                if href.startswith(("http://", "https://", "/")):
+            for i, line in enumerate(lines):
+                if ignored(lines, i):
                     continue
-                links_checked += 1
-                target = (md.parent / href).resolve()
-                if not target.is_file():
-                    bad_links.append((rel, i + 1, href))
-                    continue
-                if frag and len(frag) > 1:
-                    if target not in anchor_cache:
-                        anchor_cache[target] = collect_anchors(target)
-                    if frag[1:].lower() not in anchor_cache[target]:
-                        bad_anchors.append((rel, i + 1, f"{href}{frag}"))
+
+                # ── 1. source paths ──────────────────────────────────────────────────────────────────
+                for m in SRC_PATH.finditer(line):
+                    paths_checked += 1
+                    target = root / m.group(1)
+                    if not target.exists():
+                        bad_paths.append((rel, i + 1, m.group(1)))
+
+                # ── 2. cross-document links ──────────────────────────────────────────────────────────
+                for m in MD_LINK.finditer(line):
+                    href, frag = m.group(1), (m.group(2) or "")
+                    if href.startswith(("http://", "https://", "/")):
+                        continue
+                    links_checked += 1
+                    target = (md.parent / href).resolve()
+                    if not target.is_file():
+                        bad_links.append((rel, i + 1, href))
+                        continue
+                    if frag and len(frag) > 1:
+                        if target not in anchor_cache:
+                            anchor_cache[target] = collect_anchors(target)
+                        if frag[1:].lower() not in anchor_cache[target]:
+                            bad_anchors.append((rel, i + 1, f"{href}{frag}"))
 
     findings = len(bad_paths) + len(bad_links) + len(bad_anchors)
 

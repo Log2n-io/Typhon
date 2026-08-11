@@ -94,4 +94,4 @@ foreach (var seg in engine.EnumerateStorageSegments())
 
 <!-- Deep dive: claude/overview/06-durability.md §6.5 — Crash Recovery (RecoveryDriver) -->
 <!-- Design: claude/design/Durability/MinimalWal/03-recovery.md §6 — Phase 4 SCRUB + orphan sweep -->
-<!-- Rules: claude/rules/durability.md — RB-02 (rebuild ordering), RB-03 (chain scrub postcondition), RB-05 (TSN resumption) -->
+<!-- Rules: rules/durability.md — RB-02 (rebuild ordering), RB-03 (chain scrub postcondition), RB-05 (TSN resumption) -->

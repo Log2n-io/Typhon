@@ -21,10 +21,18 @@ namespace Typhon.Engine.Tests;
 ///   OLC_STRESS_SECONDS — wall duration of the run (default 30)
 ///   OLC_STRESS_NOISE   — count of CPU-saturating noise threads (default = ProcessorCount/2)
 /// One ManagedPagedMMF per scenario, reused across iterations (fresh segment per iter) — avoids per-iter file I/O cost.
+/// <para>
+/// [NonParallelizable] for the same reason <see cref="OlcBTreeStressTests"/> carries it, and it was missing here (#738). The assembly runs
+/// <c>Parallelizable(ParallelScope.Fixtures)</c> at <c>LevelOfParallelism(4)</c>, so without it this fixture — which already spawns five scenario tasks plus
+/// ProcessorCount/2 noise threads of its own — is one of FOUR heavy fixtures running at once. A nightly `Category=Nightly` run in that configuration took the
+/// test host down with it, alongside ChaosStressTests.UltimateStress_AllSubsystems and two others. A harness whose whole purpose is to reproduce one specific
+/// race cannot do that from inside uncontrolled oversubscription: whatever it then reports is a property of the tier, not of the tree.
+/// </para>
 /// </summary>
 [TestFixture]
 [Explicit("Long-running race-stress harness for issue #297")]
 [Category("Nightly")]
+[NonParallelizable]
 public class OlcBTreeRaceStressTests
 {
     private static int _scenarioId;
@@ -232,6 +240,24 @@ public class OlcBTreeRaceStressTests
         }
     }
 
+    /// <summary>
+    /// One line of a tree's diagnostic counters, safe to call from a thread other than the one driving the tree.
+    /// </summary>
+    /// <remarks>
+    /// Every property here reads through <c>Interlocked.Read</c> and touches no ChunkAccessor, which is what makes it legal to call while the iteration being
+    /// described is still running and still owns its accessors.
+    /// </remarks>
+    private static long[] DescribeCounters(IntSingleBTree<PersistentStore> tree)
+        => [tree.OptimisticRestarts, tree.PessimisticFallbacks, tree.WriteLockFailures, tree.SplitCount, tree.MergeCount, tree.EntryCount];
+
+    private static readonly string[] CounterNames = ["Restarts", "Fallbacks", "WriteLockFails", "Splits", "Merges", "Entries"];
+
+    // Index into the arrays above. Which counter moved is the whole diagnosis, so these are named rather than spelled as literals at the comparison site.
+    private const int CtrRestarts = 0;
+    private const int CtrFallbacks = 1;
+    private const int CtrWriteLockFails = 2;
+    private const int CtrEntries = 5;
+
     // ====== Scenario bodies (mirror OlcBTreeTests bodies, allocate fresh segment per iter) ======
 
     private static unsafe void AddSplitsBody(ScenarioContext ctx)
@@ -247,6 +273,7 @@ public class OlcBTreeRaceStressTests
         {
             var setupA = segment.CreateChunkAccessor();
             var tree = new IntSingleBTree<PersistentStore>(segment);
+            ctx.CounterSnapshot = () => DescribeCounters(tree);
             setupA.Dispose();
 
             using var barrier = new Barrier(threadCount);
@@ -383,6 +410,7 @@ public class OlcBTreeRaceStressTests
         {
             var setupA = segment.CreateChunkAccessor();
             var tree = new IntSingleBTree<PersistentStore>(segment);
+            ctx.CounterSnapshot = () => DescribeCounters(tree);
             setupA.Dispose();
 
             using var barrier = new Barrier(threadCount);
@@ -429,6 +457,9 @@ public class OlcBTreeRaceStressTests
                     throw new Exception($"Add_Disjoint: key {i} success={r.IsSuccess} value={r.Value} expected={i * 10} | {where}");
                 }
             }
+            // #765 S1: this scenario checked that every key ANSWERS and never that the tree is sound. Those are different questions, and the gap between them
+            // is where a leaf sits correctly chained, correctly counted, and reachable only by the B-link right-walk.
+            tree.CheckConsistency(ref va);
             va.Dispose();
         }
         finally { em.ExitScope(setupDepth); }
@@ -453,6 +484,7 @@ public class OlcBTreeRaceStressTests
         {
             var sa = segment.CreateChunkAccessor();
             var tree = new IntSingleBTree<PersistentStore>(segment);
+            ctx.CounterSnapshot = () => DescribeCounters(tree);
             for (int i = 1; i <= totalKeys; i++)
             {
                 tree.Add(i, i * 10, ref sa);
@@ -507,6 +539,16 @@ public class OlcBTreeRaceStressTests
             {
                 throw new Exception($"Remove_Disjoint: EntryCount={tree.EntryCount} expected=0");
             }
+            // #765 S1: an emptied tree is exactly where the chain, the counter and the latches most often disagree, and this scenario asserted only the counter.
+            var cva = segment.CreateChunkAccessor();
+            try
+            {
+                tree.CheckConsistency(ref cva);
+            }
+            finally
+            {
+                cva.Dispose();
+            }
         }
         finally { em.ExitScope(setupDepth); }
     }
@@ -525,6 +567,7 @@ public class OlcBTreeRaceStressTests
         {
             var sa = segment.CreateChunkAccessor();
             var tree = new IntSingleBTree<PersistentStore>(segment);
+            ctx.CounterSnapshot = () => DescribeCounters(tree);
             for (int i = 1; i <= totalKeys; i++)
             {
                 tree.Add(i, i * 10, ref sa);
@@ -611,6 +654,7 @@ public class OlcBTreeRaceStressTests
         {
             var sa = segment.CreateChunkAccessor();
             var tree = new IntSingleBTree<PersistentStore>(segment);
+            ctx.CounterSnapshot = () => DescribeCounters(tree);
             for (int i = 1; i <= initialEntries; i++)
             {
                 tree.Add(i, i * 10, ref sa);
@@ -688,6 +732,20 @@ public class OlcBTreeRaceStressTests
     {
         public ManagedPagedMMF Mpmmf;
         public EpochManager EpochManager;
+
+        /// <summary>
+        /// Published by the scenario body once it owns a tree, so the deadline handler can sample the tree's counters from OUTSIDE the stuck iteration.
+        /// </summary>
+        /// <remarks>
+        /// This is what turns "DEADLINE" from a label into a diagnosis. A wall clock expiring cannot tell a livelock from a slow loop, and reading the old
+        /// "HANG" as evidence of a lock cycle is what sent five #738 hypotheses to be refuted one at a time. Sampling the counters twice does distinguish them:
+        /// restarts still climbing means the iteration is making attempts and is merely slow, restarts frozen means it is not attempting anything.
+        /// <para>
+        /// Read from a different thread than the one that writes it, and only over <c>Interlocked.Read</c> counters — it must never touch a ChunkAccessor,
+        /// because the iteration it is describing still owns one.
+        /// </para>
+        /// </remarks>
+        public volatile Func<long[]> CounterSnapshot;
     }
 
     private sealed class Scenario
@@ -696,6 +754,7 @@ public class OlcBTreeRaceStressTests
         public readonly Action<ScenarioContext> Body;
         public int Iterations;
         public int DetailsCaptured;
+        public int Deadlines;
         public readonly ConcurrentBag<FailureRecord> Failures = new();
 
         public Scenario(string name, Action<ScenarioContext> body)
@@ -736,14 +795,28 @@ public class OlcBTreeRaceStressTests
                         var iterTask = Task.Factory.StartNew(() => s.Body(ctx), TaskCreationOptions.LongRunning);
                         if (!iterTask.Wait(IterationDeadline))
                         {
-                            s.Failures.Add(new FailureRecord(iter, $"HANG: scenario body did not complete within {IterationDeadline.TotalSeconds}s"));
-                            WriteProgress(s.Name, iter, "HANG");
-                            // Workers may still be alive — touching the MMF after Dispose() would AV.
-                            // Skip cleanup; let the orphan workers churn against live (epoch-protected) memory
-                            // until the process exits. Memory leak across HANG iters is bounded by the stress
-                            // duration and acceptable for a diagnostic harness. See issue #297 follow-up.
+                            // A wall clock expiring reports that one iteration took too long while OLC_STRESS_NOISE CPU-saturating threads run alongside five
+                            // scenario loops. On its own that says NOTHING about the tree: a bounded-but-glacial retry loop (the pessimistic paths allow
+                            // MaxPessimisticRestarts = 10,000, measured at 2m34s single-threaded in #740) trips it exactly as a genuine deadlock would.
+                            // Reading the old "HANG" label as evidence of a lock cycle is what sent five #738 hypotheses to be refuted one at a time.
+                            // So do not report the label — report the measurement that separates the two. See ScenarioContext.CounterSnapshot.
+                            s.Failures.Add(new FailureRecord(iter, DiagnoseDeadline(s, iter, ctx, iterTask)));
+                            // Workers may still be alive — touching the MMF after Dispose() would AV. Skip cleanup and let the orphan workers churn against
+                            // live (epoch-protected) memory until the process exits.
                             hadHangInThisIter = true;
-                            break;
+
+                            // Do NOT break. The old code retired the scenario for the rest of the run on its first deadline, so a 30-second harness that hit
+                            // one slow iteration at second 2 spent the remaining 28 seconds not testing that scenario — and reported a per-scenario failure
+                            // RATE computed over the handful of iterations it managed before quitting. The leak is what the break was really protecting, so
+                            // bound the leak instead: a fresh provider is built per iteration, so tolerating a few costs a few MMFs, not unbounded growth.
+                            if (Interlocked.Increment(ref s.Deadlines) >= MaxDeadlinesPerScenario)
+                            {
+                                s.Failures.Add(new FailureRecord(iter, $"RETIRED: {MaxDeadlinesPerScenario} deadlines in this scenario; stopping its loop to "
+                                                                      + "bound the leaked MMFs. Everything after this point is untested for this scenario."));
+                                WriteProgress(s.Name, iter, "RETIRED");
+                                break;
+                            }
+                            continue;
                         }
                         if (iterTask.IsFaulted)
                         {
@@ -790,6 +863,191 @@ public class OlcBTreeRaceStressTests
 
     private static readonly TimeSpan IterationDeadline = TimeSpan.FromSeconds(ParseEnvInt("OLC_STRESS_ITER_DEADLINE_SECONDS", 10));
 
+    // A deadlined iteration leaks its MMF by design (its workers may still be running), so the count of them has to be bounded somewhere. It used to be
+    // bounded at one, by quitting the scenario — which bought a small leak at the price of not testing that scenario again for the rest of the run.
+    private const int MaxDeadlinesPerScenario = 3;
+
+    // How long to wait between the two counter samples. Long enough that a working-but-slow iteration demonstrably moves a counter, short enough not to eat the
+    // harness budget. A Thread.Sleep is the measurement here, not a synchronisation shortcut: there is no event to wait on, the question IS "what changed over
+    // an interval".
+    private static readonly TimeSpan DeadlineSampleWindow = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// Samples the stuck iteration's tree counters twice and reports whether it is progressing, so the record says what happened instead of that a clock expired.
+    /// </summary>
+    private static string DiagnoseDeadline(Scenario s, int iter, ScenarioContext ctx, Task iterTask)
+    {
+        var snapshot = ctx.CounterSnapshot;
+        if (snapshot == null)
+        {
+            WriteProgress(s.Name, iter, "DEADLINE (no tree published — stuck before setup)");
+            return $"DEADLINE after {IterationDeadline.TotalSeconds}s with no tree published: the body did not get as far as constructing its tree, so this is "
+                 + "segment allocation or epoch setup, not the B+Tree.";
+        }
+
+        long[] first, second;
+        try
+        {
+            first = snapshot();
+            Thread.Sleep(DeadlineSampleWindow);
+            second = snapshot();
+        }
+        catch (Exception ex)
+        {
+            return $"DEADLINE after {IterationDeadline.TotalSeconds}s; counter sampling threw {ex.GetType().Name}: {ex.Message}";
+        }
+
+        var deltas = new long[first.Length];
+        bool anyMoved = false;
+        for (int i = 0; i < first.Length; i++)
+        {
+            deltas[i] = second[i] - first[i];
+            anyMoved |= deltas[i] != 0;
+        }
+
+        // WHICH counter moved is the diagnosis. These three are materially different defects and the old single "HANG" label collapsed them into one, which is
+        // how #738 accumulated five hypotheses that all assumed a lock cycle.
+        string label, verdict;
+
+        // Ask FIRST whether the iteration is even still running. `Wait` timing out and the body finishing are not mutually exclusive: a body that completes a
+        // millisecond after the deadline leaves every counter frozen for the whole sample window, and a naive reading of that is "STUCK — nothing is being
+        // attempted", which is the opposite of what happened. This harness has already sent five #738 hypotheses chasing a lock cycle on the strength of a label;
+        // a classifier that manufactures a sixth would be worse than the "HANG" string it replaced. Checked before the counters are interpreted, not after.
+        if (iterTask.IsCompleted)
+        {
+            WriteProgress(s.Name, iter, "DEADLINE/LATE");
+            return $"DEADLINE after {IterationDeadline.TotalSeconds}s — LATE: the iteration finished on its own shortly after the wall clock expired, so this is "
+                 + "a budget too tight for a loaded box, not a defect. Raise OLC_STRESS_ITER_DEADLINE_SECONDS before reading anything into it.";
+        }
+
+        if (!anyMoved)
+        {
+            label = "STUCK";
+            // "...and the only thing that will tell you more is a stack dump" is what this verdict used to end with, which left the reader to go and get one
+            // from a process that had usually died by the time they read it. The stall is the ONLY state in which the stacks answer anything, and it is detected
+            // right here, so it is taken right here. Everything above this line is a counter saying something is not moving; this is the first instrument that
+            // can say WHAT.
+            // The verdict deliberately no longer NAMES a cause. It used to end "this is the shape a lock cycle or a wait-forever has", and the first stack dump
+            // taken here refuted that outright: 28 threads, not one blocked on a lock, five inside the bounded retry loops and four of those asleep in
+            // SpinWait.SpinOnce -> Thread.Sleep(1). Frozen counters mean the sample window landed in a sleep convoy, which on a box oversubscribed by the noise
+            // threads stretches Sleep(1) far past a millisecond. Counters can say "nothing moved"; only the stacks can say why, so the stacks are what this
+            // returns and the guess is what it drops. #738's five refuted hypotheses all began as a label that sounded like a diagnosis.
+            verdict = "not one counter moved in the sample window while the iteration was still running. That is a statement about the COUNTERS, not a diagnosis "
+                    + "— read the stacks below for what the threads are actually doing before naming a cause.\n" + CaptureManagedStacks(s.Name, iter);
+        }
+        else if (deltas[CtrWriteLockFails] > 0 && deltas[CtrRestarts] == 0 && deltas[CtrFallbacks] == 0 && deltas[CtrEntries] == 0)
+        {
+            label = "SPINNING";
+            verdict = $"only WriteLockFailures moved, by {deltas[CtrWriteLockFails]:N0} in {DeadlineSampleWindow.TotalSeconds}s. The operation is not restarting "
+                    + "and not completing: it is inside a write-lock spin that never acquires. That is lock-acquisition livelock, NOT a restart storm — the "
+                    + "restart-bound story does not apply and MaxPessimisticRestarts will never fire here.";
+        }
+        else if (deltas[CtrRestarts] > 0 || deltas[CtrFallbacks] > 0)
+        {
+            label = "RESTARTING";
+            verdict = $"restarts moved by {deltas[CtrRestarts]:N0} and fallbacks by {deltas[CtrFallbacks]:N0}. The operation keeps re-attempting and losing — a "
+                    + "restart storm. Find what invalidates the version between read and lock; a guard stronger than the invariant it protects does exactly this "
+                    + "(#740).";
+        }
+        else
+        {
+            label = "SLOW";
+            verdict = "the tree is still changing, so the iteration is progressing and merely exceeded a wall clock set while CPU-saturating noise threads run. "
+                    + "Suspect the budget before the tree.";
+        }
+
+        var sb = new StringBuilder();
+
+        // The delta is printed for EVERY counter, including the zeros, and the header says total(+delta) rather than "deltas". The previous form was headed
+        // "deltas over 1s" and then printed `first[i]` — the running TOTAL — appending "(+n)" only when the delta was non-zero. A frozen counter with a large
+        // total therefore rendered as a large number under a heading promising a delta, so a genuine STUCK record read as heavy activity. That is not a
+        // hypothetical: it misread exactly that way on first encounter, minutes after the record was produced, by someone who had just written the classifier
+        // above it. A label that has to be cross-checked against the code that printed it is not evidence, and this harness's whole purpose is producing
+        // evidence.
+        sb.Append($"DEADLINE after {IterationDeadline.TotalSeconds}s — {label}: {verdict}\n  total(+delta over {DeadlineSampleWindow.TotalSeconds}s):");
+        for (int i = 0; i < deltas.Length; i++)
+        {
+            sb.Append($" {CounterNames[i]}={first[i]:N0}(+{deltas[i]:N0})");
+        }
+
+        WriteProgress(s.Name, iter, $"DEADLINE/{label}");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Managed stacks of every thread in THIS process, taken at the instant a stall is detected, via <c>dotnet-stack report</c> over the diagnostics IPC socket.
+    /// </summary>
+    /// <remarks>
+    /// Self-attach rather than an external watcher, because the stall is what has to be caught and this method is the only code that knows it is happening. An
+    /// outside observer would have to guess when. The runtime services the diagnostics request on its own thread, so a process whose worker threads are wedged
+    /// still answers — which is precisely the case this exists for.
+    /// <para>
+    /// Everything about it is best-effort and bounded: a missing tool, a PATH miss and a hang all degrade to a one-line note in the report rather than taking
+    /// the run down. A diagnostic that can fail the thing it is diagnosing is worse than no diagnostic.
+    /// </para>
+    /// </remarks>
+    private static string CaptureManagedStacks(string scenario, int iter)
+    {
+        string path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"olc-stuck-{Environment.ProcessId:x}-{scenario}-{iter}.txt");
+        try
+        {
+            string exe = "dotnet-stack";
+            var local = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dotnet", "tools", "dotnet-stack.exe");
+            if (System.IO.File.Exists(local))
+            {
+                exe = local;   // do not rely on PATH inside a test host; the tool lives in a known place when it is installed at all
+            }
+
+            var psi = new ProcessStartInfo(exe, $"report -p {Environment.ProcessId}")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+
+            using var proc = Process.Start(psi);
+            if (proc == null)
+            {
+                return "  stack capture: could not start dotnet-stack.";
+            }
+
+            string stdout = proc.StandardOutput.ReadToEnd();
+            string stderr = proc.StandardError.ReadToEnd();
+            if (!proc.WaitForExit(90_000))
+            {
+                try { proc.Kill(entireProcessTree: true); } catch { /* best-effort */ }
+                return "  stack capture: dotnet-stack did not return within 90s — the diagnostics endpoint is itself unresponsive, which is a finding.";
+            }
+
+            if (string.IsNullOrWhiteSpace(stdout))
+            {
+                return $"  stack capture: dotnet-stack produced nothing (exit {proc.ExitCode}). stderr: {stderr.Trim()}";
+            }
+
+            System.IO.File.WriteAllText(path, stdout);
+
+            // The full report is every thread in a test host — hundreds of frames of NUnit, the thread pool and the noise generators. Inline only the threads
+            // that are actually inside the tree, which is the question being asked, and leave the rest on disk for when it is not.
+            var interesting = new StringBuilder();
+            int kept = 0;
+            foreach (var block in stdout.Split("\nThread ", StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (block.Contains("Typhon.Engine.Internals.BTree", StringComparison.Ordinal))
+                {
+                    interesting.Append("\nThread ").Append(block.TrimEnd()).Append('\n');
+                    kept++;
+                }
+            }
+
+            return $"  stacks: {kept} thread(s) inside BTree; full report at {path}\n{interesting}";
+        }
+        catch (Exception ex)
+        {
+            return $"  stack capture failed: {ex.GetType().Name}: {ex.Message}";
+        }
+    }
+
     private static readonly string _progressLogPath = Environment.GetEnvironmentVariable("OLC_STRESS_LOG")
         ?? System.IO.Path.Combine(System.IO.Path.GetTempPath(), "olc-race-stress.log");
 
@@ -826,7 +1084,12 @@ public class OlcBTreeRaceStressTests
 
     private static IServiceProvider BuildScenarioProvider()
     {
-        // Unique DB name per scenario invocation so concurrent loops don't collide on the file.
+        // Unique DB name per scenario invocation so concurrent loops don't collide on the file — and unique per PROCESS, which it was not (#738). `_scenarioId`
+        // restarts at 0 in every test host, so run N+1 walked the exact same name sequence as run N. That only matters because the HANG path in
+        // RunScenarioLoop deliberately skips cleanup and leaks the MMF with its file open, so a single deadline expiry left a locked `olcrs_<id>` behind that
+        // every subsequent run then tripped over at the same iteration — `EnsureFileDeleted` cannot remove a file another process still holds, and `LoadFile`
+        // throws IOException. Measured: three consecutive isolated runs failed identically at `olcrs_2397`, and 33,088 leaked database directories had
+        // accumulated under the test bin. Including the process id makes the leak self-contained instead of contagious.
         int id = Interlocked.Increment(ref _scenarioId);
         var sc = new ServiceCollection()
             .AddLogging()
@@ -835,7 +1098,7 @@ public class OlcBTreeRaceStressTests
             .AddEpochManager()
             .AddScopedManagedPagedMemoryMappedFile(o =>
             {
-                o.DatabaseName = $"olcrs_{id:x}";
+                o.DatabaseName = $"olcrs_{Environment.ProcessId:x}_{id:x}";
                 // Generously sized — many segments per scenario over a long run.
                 o.DatabaseCacheSize = (ulong)(PagedMMF.MinimumMemPageCount * PagedMMF.PageSize);
                 o.PagesDebugPattern = true;

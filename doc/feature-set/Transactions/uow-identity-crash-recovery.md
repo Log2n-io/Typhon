@@ -73,5 +73,5 @@ catch (ResourceExhaustedException ex)
 ## 🔗 Related
 - Related features: [Unit of Work (durability boundary)](./unit-of-work.md), [Commit/Rollback Pipeline](./commit-rollback-pipeline.md), [Durability Modes](./durability-modes/README.md)
 
-<!-- Deep dive: claude/design/Transactions/05-unit-of-work.md §6 — UoW Registry, claude/rules/durability.md — Module: UoW Registry (UR-01..UR-07) -->
+<!-- Deep dive: claude/design/Transactions/05-unit-of-work.md §6 — UoW Registry, rules/durability.md — Module: UoW Registry (UR-01..UR-07) -->
 <!-- Overview: claude/overview/02-execution.md — UoW Lifecycle / UoW ID Recycling (#uow-id-recycling) -->

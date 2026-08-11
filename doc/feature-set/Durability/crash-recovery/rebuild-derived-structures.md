@@ -88,4 +88,4 @@ catch (CorruptionException ex)
 <!-- Deep dive: claude/overview/06-durability.md §6.6 — Torn-Page Safety (no FPI) -->
 <!-- Design: claude/design/Durability/MinimalWal/03-recovery.md §6–7 -->
 <!-- Historical (superseded): claude/design/Durability/fpi-durability.md -->
-<!-- Rules: claude/rules/durability.md — module RB (RB-01..05), CK-09 -->
+<!-- Rules: rules/durability.md — module RB (RB-01..05), CK-09 -->

@@ -19,7 +19,7 @@ namespace Typhon.Engine.Internals;
 /// AND <c>BulkEnd.LSN ≤ DurableLSN</c>. Otherwise <c>WalRecovery</c>'s Phase 3b frees every page in the manifest
 /// via <c>BitmapL3.FreeRange</c> and removes the bulk segments from the registry (wholesale discard). See
 /// <c>claude/design/Durability/BulkLoad/03-recovery.md</c> for the full state machine and
-/// <c>claude/rules/durability.md</c> module <b>BulkLoad</b> for the invariants (BL-01..BL-04).
+/// <c>rules/durability.md</c> module <b>BulkLoad</b> for the invariants (BL-01..BL-04).
 /// </para>
 /// <para>
 /// <b>WP-07 compliance:</b> <see cref="Lsn"/> sits at body offset 0 so <c>WalSegmentReader.LastValidLSN</c>

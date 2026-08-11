@@ -78,4 +78,4 @@ A third mode, `RecoverySuspect`, exists only on the crash-recovery path — the 
 <!-- Overview: claude/overview/03-storage.md — Page Checksums, Seqlock & CRC Integration -->
 <!-- Overview: claude/overview/06-durability.md §6.6 Torn-Page Safety, §6.7 Page Checksums & Seqlock Snapshots -->
 <!-- ADR: claude/adr/015-crc32c-page-checksums.md -->
-<!-- Rules: claude/rules/durability.md — modules CK-05 (A/B pairing), RB-01/RB-04 (rebuild-or-loud-fail), SQ-01..06 (seqlock) -->
+<!-- Rules: rules/durability.md — modules CK-05 (A/B pairing), RB-01/RB-04 (rebuild-or-loud-fail), SQ-01..06 (seqlock) -->

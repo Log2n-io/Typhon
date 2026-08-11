@@ -223,9 +223,19 @@ internal abstract partial class BTree<TKey, TStore>
                     // been temporarily violated by a concurrent operation). If broken, fall through to split which is range-self-contained.
                     var prevForSpill = GetPrevious(ref accessor);
                     var nextForSpill = GetNext(ref accessor);
-                    bool spillLeftOk = !forceSplit && CanSpillTo(prevForSpill, ref sibAccessor)
+
+                    // The ancestor check is load-bearing and was missing. Both spill branches finish by rewriting the separator that routes between this leaf and
+                    // the neighbour it spilled into, and they reach that separator through relatives.LeftAncestor / RightAncestor. Eligibility, however, was
+                    // decided purely from the LEAF CHAIN — GetPrevious/GetNext plus a sort-invariant check — and a chain neighbour is not necessarily a cousin
+                    // under a shared ancestor: it can sit in a different subtree, in which case the corresponding ancestor is `default` and the separator write
+                    // dereferences a NodeWrapper with a null storage. Measured: one NullReferenceException in NodeWrapper.GetItem, from InsertLeaf via
+                    // InsertIterative, in 94,814 race-harness iterations (#765 S7 run, 2026-08-10). Rare because it needs a full leaf whose chain neighbour has
+                    // room AND lives across a subtree boundary.
+                    // Falling through to split is the documented, always-correct alternative — the comment above already calls split "range-self-contained" —
+                    // so this strictly narrows when a spill is attempted and never changes what a legal spill does.
+                    bool spillLeftOk = !forceSplit && relatives.LeftAncestor.IsValid && CanSpillTo(prevForSpill, ref sibAccessor)
                                        && SpillLeftSortInvariantHolds(prevForSpill, ref sibAccessor, ref accessor);
-                    bool spillRightOk = !forceSplit && CanSpillTo(nextForSpill, ref sibAccessor)
+                    bool spillRightOk = !forceSplit && relatives.RightAncestor.IsValid && CanSpillTo(nextForSpill, ref sibAccessor)
                                         && SpillRightSortInvariantHolds(nextForSpill, ref sibAccessor, ref accessor);
                     if (spillLeftOk)
                     {
@@ -533,16 +543,35 @@ internal abstract partial class BTree<TKey, TStore>
                     }
                     else // merge with either sibling.
                     {
+                        // BOTH branches snapshot the chain pointers BEFORE the merge and never re-read them. They used to re-read from the node the merge had
+                        // just consumed, and the re-read was split across TWO accessors — `accessor` for self, `sibAccessor` for siblings — so one could serve a
+                        // cached view of a page the other had just written through. Reading once, before any write, closes that.
+                        //
+                        // 🔴 This is NOT the fix for #739, and saying so plainly because it was written as one. The crash survived it unchanged and simply moved
+                        // to the `SetPrevious` below, which now consumes the value snapshotted BEFORE the merge — so the chain pointer was already corrupt when
+                        // it was read, and read-after-consume was never the mechanism. Kept anyway because reading once before mutating is correct on its own
+                        // terms and costs nothing, but it buys no correctness against #739.
+                        //
+                        // What the failing value actually says, and where the next attempt should start: `ChunkId=589824` reproduces IDENTICALLY across runs and
+                        // iterations, and 589824 is 0x00090000, which decodes against `Index32Chunk.Control`'s documented layout (flags LSW 16 bits, Start 8
+                        // bits, Count 8 bits) as flags=0, Start=9, Count=0. That is not a chunk id — it is a CONTROL WORD, of an empty node whose Start has
+                        // walked to 9. So a read for `NextChunk` (offset 12) is landing on offset 0, or on a chunk whose memory has been repurposed underneath
+                        // it. That is an offset or lifetime defect, not an ordering one, which is why every ordering fix has bounced off it.
+                        //
+                        // Note also what cannot catch it downstream: `IsValid` is `_storage != null && ChunkId != 0` and takes no accessor, so it cannot
+                        // range-check the id against the segment. A garbage non-zero id passes it and faults later inside `GetChunkLocation`, which is why the
+                        // crash surfaces at `SetPrevious` rather than at the line that read the bad value.
                         if (relatives.HasTrueLeftSibling) // current node will be removed from parent.
                         {
                             merge = true;
-                            GetPrevious(ref accessor).MergeLeft(this, ref sibAccessor); // merge from left to keep items in order.
-                            var p = GetPrevious(ref accessor);
-                            p.SetNext(GetNext(ref accessor), ref sibAccessor); // fix linked list
-                            if (GetNext(ref accessor).IsValid)
+                            var previous = GetPrevious(ref accessor);
+                            var next = GetNext(ref accessor);
+
+                            previous.MergeLeft(this, ref sibAccessor); // merge from left to keep items in order.
+                            previous.SetNext(next, ref sibAccessor); // fix linked list
+                            if (next.IsValid)
                             {
-                                var n = GetNext(ref accessor);
-                                n.SetPrevious(GetPrevious(ref accessor), ref sibAccessor);
+                                next.SetPrevious(previous, ref sibAccessor);
                             }
 
                             Validate();
@@ -551,12 +580,14 @@ internal abstract partial class BTree<TKey, TStore>
                         else if (relatives.HasTrueRightSibling) // right sibling will be removed from parent
                         {
                             merge = true;
-                            MergeLeft(GetNext(ref accessor), ref sibAccessor); // merge from right to keep items in order.
-                            SetNext(GetNext(ref accessor).GetNext(ref sibAccessor), ref accessor); // fix linked list
-                            if (GetNext(ref accessor).IsValid)
+                            var right = GetNext(ref accessor);
+                            var rightNext = right.GetNext(ref sibAccessor);
+
+                            MergeLeft(right, ref sibAccessor); // merge from right to keep items in order.
+                            SetNext(rightNext, ref accessor); // fix linked list
+                            if (rightNext.IsValid)
                             {
-                                var n = GetNext(ref accessor);
-                                n.SetPrevious(this, ref sibAccessor);
+                                rightNext.SetPrevious(this, ref sibAccessor);
                             }
 
                             Validate();

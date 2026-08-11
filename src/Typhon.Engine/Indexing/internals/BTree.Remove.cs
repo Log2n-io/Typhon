@@ -322,6 +322,17 @@ internal abstract partial class BTree<TKey, TStore>
     }
 
     /// <summary>
+    /// Page-cache admission followed by the write lock, as one step, so a caller cannot order them apart. Both are only ever legitimate on a node that passed
+    /// <see cref="NodeWrapper.IsValid"/>, and pairing them here is what keeps that precondition next to the two calls it protects.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private WriteLockOutcome SpinWriteLockAfterPreDirty(NodeWrapper node, ref ChunkAccessor<TStore> accessor)
+    {
+        node.PreDirtyForWrite(ref accessor);
+        return SpinWriteLock(node.GetLatch(ref accessor));
+    }
+
+    /// <summary>
     /// Pessimistic remove fallback: uses WriteLock/WriteUnlock on individual nodes so concurrent OLC readers detect changes. No global lock — concurrency is
     /// handled by per-node OLC latches and latch-coupled SMO in RemoveIterative.
     /// </summary>
@@ -338,11 +349,23 @@ internal abstract partial class BTree<TKey, TStore>
             // Begin-remove fast path (WriteLock protects against concurrent OLC writers)
             {
                 var ll = _linkList;
-                ll.PreDirtyForWrite(ref accessor);
+
+                // #765: the field can be `default`, not merely stale. The path that empties the tree writes `Root = _linkList = _reverseLinkList = default`
+                // (below), and `IsEmpty()` at the top of this method is a TOCTOU — another thread can empty the tree between that check and this line. A default
+                // NodeWrapper carries a NULL `_storage`, and `IsValid` is `_storage != null && ChunkId != 0` precisely because of it, so `GetLatch` dereferences
+                // null and the worker dies with a bare NullReferenceException. `PreDirtyForWrite` reads only ChunkId, which is why the crash lands on the LOCK
+                // and not on the line above it. Measured once in 26,848 `Remove_Disjoint` iterations.
+                //
+                // The OLC twin of this fast path opens with `if (!ll.IsValid) return Restart;` and always has. This copy never got it — the same drift that
+                // produced three of the six defects in PR #737, in its fourth instance.
+                if (!ll.IsValid)
+                {
+                    // Nothing to lock: fall through to the general path, which re-descends from the root.
+                }
                 // #716: `_linkList` is a cached pointer, so it can name a leaf a concurrent merge already detached. Popping the first entry out of a detached
                 // node reports a successful removal while the value stays reachable from the root. On obsolete no lock is held — fall through to the general
                 // path, which re-descends.
-                if (SpinWriteLock(ll.GetLatch(ref accessor)) == WriteLockOutcome.Obsolete)
+                else if (SpinWriteLockAfterPreDirty(ll, ref accessor) == WriteLockOutcome.Obsolete)
                 {
                     Interlocked.Increment(ref _obsoleteRestarts);
                 }
@@ -390,8 +413,12 @@ internal abstract partial class BTree<TKey, TStore>
             // End-remove fast path
             {
                 var rll = _reverseLinkList;
-                rll.PreDirtyForWrite(ref accessor);
-                if (SpinWriteLock(rll.GetLatch(ref accessor)) == WriteLockOutcome.Obsolete)   // #716 — see the begin fast path above
+                if (!rll.IsValid)
+                {
+                    // #765 — the symmetric twin of the begin fast path's guard above, and fixed with it rather than after the next crash. Its OLC counterpart
+                    // in TryRemoveOlc has always had `if (!rll.IsValid) return Restart;`. Fall through to the general path.
+                }
+                else if (SpinWriteLockAfterPreDirty(rll, ref accessor) == WriteLockOutcome.Obsolete)   // #716 — see the begin fast path above
                 {
                     Interlocked.Increment(ref _obsoleteRestarts);
                 }
@@ -502,58 +529,13 @@ internal abstract partial class BTree<TKey, TStore>
     {
         completed = false;
         MutationContext ctx = default;
-        var node = Root;
         var relatives = new NodeRelatives();
         ref var sibAccessor = ref args.SiblingAccessor;
 
-        // Phase 1: Descend from root to leaf, recording path + PathVersions for validation.
-        // OLC protocol: read version BEFORE data, validate AFTER — ensures (index, version) are consistent.
-        while (!node.GetIsLeaf(ref accessor))
+        // Phase 1: Descend from root to leaf, recording path + PathVersions for validation. Shared verbatim with InsertIterative — see DescendRecordingPath.
+        if (!DescendRecordingPath(args.Key, args.Comparer, OlcDescentTrace.OpRemove, ref ctx, ref relatives, ref accessor, ref sibAccessor, out var node))
         {
-            var latch = node.GetLatch(ref accessor);
-            int version = latch.ReadVersion();
-            if (version == 0)
-            {
-                return false; // node locked or obsolete — restart
-            }
-
-            var index = node.Find(args.Key, args.Comparer, ref accessor);
-            if (index < 0)
-            {
-                index = ~index - 1;
-            }
-
-            var child = node.GetChild(index, ref accessor);
-            int parentCount = node.GetCount(ref accessor);
-
-            // Validate: node wasn't modified during our unlocked read
-            if (!latch.ValidateVersion(version))
-            {
-                return false; // node modified between version read and data read — restart
-            }
-
-            // Defensive: a torn-but-validated read should be impossible after the version
-            // check above, but treat zero/invalid child as restart rather than crashing
-            // when the next iteration tries to deref it. Issue #297.
-            if (!child.IsValid)
-            {
-                return false;
-            }
-
-            OlcDescentTrace.RecordStep?.Invoke(OlcDescentTrace.OpRemove, node.ChunkId, version, index, child.ChunkId);
-
-            NodeRelatives.Create(child, index, node, parentCount, ref relatives, out var childRelatives, ref accessor, ref sibAccessor);
-
-            ctx.PathNodes[ctx.Depth] = node;
-            ctx.PathChildIndices[ctx.Depth] = index;
-            ctx.PathVersions[ctx.Depth] = version;
-
-            // Store after Create so lazy-resolved siblings are cached in the stored copy
-            ctx.PathRelatives[ctx.Depth] = relatives;
-
-            node = child;
-            relatives = childRelatives;
-            ctx.Depth++;
+            return false;
         }
 
         // Phase 1.5A: Lock leaf with version validation.
@@ -606,10 +588,15 @@ internal abstract partial class BTree<TKey, TStore>
         // direction only. Measured in Remove_Merges: key 584 removed by nobody, still on the chain, with Remove reporting not-found.
         // An empty leaf is inconclusive for the same reason and gets the same treatment — merges empty a leaf before unlinking it, so meeting one says nothing
         // about where the key is. Both cases release without a version bump (nothing was modified) and let the bounded outer loop re-descend.
+        // #740 twin: this tested `key < leaf.firstKey`, the predicate KeyBelowLeafLowerBound was created to replace on the insert side and which was left
+        // standing here — one copy fixed, one forgotten, which is the drift IXW-03 exists to stop and which its own scope line originally failed to cover.
+        // A leaf's first key equals the separator routing to it only until something is removed from the front; after that the band
+        // `previousHighKey <= key < firstKey` is one this leaf IS authoritative for, and answering "not authoritative" there releases the latch and re-descends
+        // to the same leaf. Unlike the insert side this is NOT single-threaded reachable — TryRemoveOlc answers NotFound from the descent before the count
+        // check, so an absent key never arrives here; it needs the descent to FIND the key, the leaf to be underfull enough to defer to the pessimistic path,
+        // and a concurrent writer to raise the leaf's first key above it in between. Concurrency-gated, and the #738 class rather than #740's.
         int leafCount = node.GetCount(ref accessor);
-        bool leftOfLeaf = leafCount > 0
-                          && args.Compare(args.Key, node.GetFirst(ref accessor).Key) < 0
-                          && node.GetPrevious(ref accessor).IsValid;
+        bool leftOfLeaf = KeyBelowLeafLowerBound(node, args.Key, args.Comparer, ref accessor);
         bool emptyAndLinked = leafCount == 0 && (node.GetPrevious(ref accessor).IsValid || node.GetNext(ref accessor).IsValid);
         if (leftOfLeaf || emptyAndLinked)
         {

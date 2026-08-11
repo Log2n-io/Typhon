@@ -58,5 +58,5 @@ the DAG gets *built* changed.
 - Sub-features: [Track → DAG → Phase Partitioning](./track-dag-phase-partitioning.md), [Access Declarations & Build-Time Conflict Detection](./access-conflict-detection.md)
 
 <!-- Deep dive: claude/design/Runtime/07-system-access-declarations.md -->
-<!-- Deep dive: claude/rules/runtime-scheduling.md -->
+<!-- Deep dive: rules/runtime-scheduling.md -->
 <!-- Deep dive: claude/adr/052-track-dag-partitioning-hierarchy.md -->

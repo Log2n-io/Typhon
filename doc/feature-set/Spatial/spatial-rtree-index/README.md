@@ -52,5 +52,5 @@ Annotate a component field holding an `AABB2F`/`AABB3F`/`BSphere2F`/`BSphere3F` 
 <!-- Deep dive: claude/design/Spatial/SpatialIndex/01-architecture.md (two-layer design, storage-mode compatibility, archetype convergence) -->
 <!-- Deep dive: claude/design/Spatial/SpatialIndex/02-node-layout.md (SOA node layout, variant capacities) -->
 <!-- Deep dive: claude/design/Spatial/SpatialIndex/03-tree-operations.md (insert/split/remove, fat-AABB protocol, correctness invariants) -->
-<!-- Rules: claude/rules/spatial.md (R-Tree structure, query, fat-AABB invariants) -->
+<!-- Rules: rules/spatial.md (R-Tree structure, query, fat-AABB invariants) -->
 <!-- ADR: claude/adr/044-spatial-rtree-architecture.md -->

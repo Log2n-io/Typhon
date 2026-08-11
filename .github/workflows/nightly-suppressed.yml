@@ -12,8 +12,11 @@ name: Nightly suppressed tier
 #     February 2026.
 # A marker that removes a test from the gate is only honest if some tier still runs it. This is that tier.
 #
-# NON-BLOCKING by design: a nightly is a signal, not a merge gate, and it is never a required check. What it is
-# NOT allowed to be is quiet — see the "selected zero tests" guard below, which is the whole point of the job.
+# NON-BLOCKING ABOUT KNOWN REDS, BLOCKING ABOUT NEW ONES. A nightly is a signal, not a merge gate, and it is
+# never a required check — but "non-blocking" was implemented as a bare `continue-on-error: true`, which made the
+# job green with any number of reds in it. That is this workflow committing the defect it was built to expose.
+# The tests it may skip are those carrying [Category("Quarantine")], documented in QUARANTINE.md and excluded
+# by the filter; anything else that fails — or a run that does not finish at all — fails the job.
 
 on:
   schedule:
@@ -58,7 +61,9 @@ jobs:
       # reads the filter as naming it. The gate's 305-term class filter does not qualify, which is precisely why
       # these fixtures never ran there. Keep this filter narrow — widening it re-hides them.
       - name: Run the Nightly tier
-        continue-on-error: true      # a red here reports; it does not fail the workflow (non-blocking by design)
+        # continue-on-error so a red does not abort the job before the reporting steps run — NOT so a red goes unnoticed.
+        # "Assert the tier finished and was green" below is blocking and decides the verdict (#765 S0).
+        continue-on-error: true
         run: |
           set -uo pipefail
           mkdir -p ci-out
@@ -69,7 +74,7 @@ jobs:
           # Sequence_*.xml, which the artifact upload below preserves.
           dotnet test test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj \
             -c Release --no-build \
-            --filter "Category=Nightly" \
+            --filter "Category=Nightly&Category!=Quarantine" \
             --settings bench/aws/nightly.runsettings \
             --blame-hang --blame-hang-timeout 300s \
             --logger "trx;LogFileName=nightly.trx" \
@@ -109,39 +114,90 @@ jobs:
           PY
           cat summary.md >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Report the tier's failures
+      # ── The verdict ───────────────────────────────────────────────────────────────────────────────────────────
+      # Blocking, and deliberately so. "Non-blocking" used to be a bare `continue-on-error: true`, which made this job
+      # green with any number of reds in it — the workflow committing the very defect it was built to expose.
+      #
+      # There is no allowlist here, and that is a correction rather than an omission. The first version of this step
+      # carried a hand-maintained list of test names in bench/aws/nightly-known-red.txt, which duplicated a mechanism
+      # this repository already had: a known-bad test carries [Category("Quarantine")] and gets a row in
+      # test/Typhon.Engine.Tests/QUARANTINE.md naming its issue. The tier's filter now excludes that category, so
+      # everything it still runs is expected to pass and ANY failure is news. One source of truth, no name list to drift
+      # out of date, and quarantining something stays a deliberate act recorded next to the test.
+      - name: Assert the tier finished and was green
         if: always()
         run: |
           set -uo pipefail
-          {
           python3 - <<'PY'
-          import glob, xml.etree.ElementTree as ET
+          import glob, re, sys, xml.etree.ElementTree as ET
           NS = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
-          rows = []
-          for f in glob.glob("ci-out/*.trx"):
+          NL = chr(10)
+
+          # ── Did the run actually FINISH? ────────────────────────────────────────────────────────────────────────
+          # Asked first, because the answer changes what every other number in the trx means. When --blame-hang kills
+          # the host, vstest still writes a trx — a PARTIAL one, holding only the tests that completed before the kill.
+          # Measured on PR #768: 2 results from a tier that runs hundreds, and this step cheerfully rendered a verdict
+          # on them. A checker reporting confidently on incomplete input is the exact defect #765 exists to remove, and
+          # it does not get to live inside the instrument built to remove it. The "selected zero tests" guard above does
+          # not catch this either: it tests total == 0, and 2-out-of-hundreds sails straight through.
+          aborted, incomplete = [], []
+          for f in glob.glob("ci-out/**/*.trx", recursive=True):
+              for ri in ET.parse(f).getroot().iter(NS + "RunInfo"):
+                  text = (ri.findtext(NS + "Text") or "").strip()
+                  if re.search(r"abort|host process crashed|inactivity time", text, re.I):
+                      aborted.append(text.splitlines()[0][:200])
+
+          # Blame records the running order and marks the one that never came back, which names the hang directly
+          # instead of leaving it to be inferred from where the log stops.
+          for f in glob.glob("ci-out/**/Sequence_*.xml", recursive=True):
+              for t in ET.parse(f).getroot().iter("Test"):
+                  if t.get("Completed") == "False":
+                      incomplete.append(t.get("Name", "?"))
+
+          out = ["## Nightly verdict", ""]
+
+          if aborted:
+              for a in dict.fromkeys(aborted):
+                  print("::error::The Nightly tier did not finish: " + a)
+              for n in dict.fromkeys(incomplete):
+                  print("::error::Never completed (this is the hang): `" + n + "`")
+              out += ["### The run ABORTED — no verdict is possible", ""]
+              out += ["- " + a for a in dict.fromkeys(aborted)]
+              if incomplete:
+                  out += ["", "**Never completed:**"] + ["- `" + n + "`" for n in dict.fromkeys(incomplete)]
+              out += ["", "The trx describes only the tests that finished before the host was killed, so the pass/fail "
+                          "counts above it are a fraction of the tier. Fix the hang, or quarantine it deliberately per "
+                          "QUARANTINE.md. Do not read the partial results, and do not silence this step."]
+              open("verdict.md", "w", encoding="utf-8").write(NL.join(out) + NL)
+              sys.exit(1)
+
+          failed = set()
+          for f in glob.glob("ci-out/**/*.trx", recursive=True):
               root = ET.parse(f).getroot()
               names = {}
-              for ut in root.iter(f"{NS}UnitTest"):
-                  tm = ut.find(f"{NS}TestMethod")
-                  if ut.get("id") and tm is not None:
-                      names[ut.get("id")] = f'{tm.get("className")}.{tm.get("name")}'
-              for r in root.iter(f"{NS}UnitTestResult"):
+              for ut in root.iter(NS + "UnitTest"):
+                  tm = ut.find(NS + "TestMethod")
+                  if ut.get("id") is not None and tm is not None:
+                      names[ut.get("id")] = tm.get("className").split(".")[-1] + "." + tm.get("name")
+              for r in root.iter(NS + "UnitTestResult"):
                   if r.get("outcome") == "Failed":
-                      rows.append(names.get(r.get("testId"), r.get("testName", "?")))
-          if rows:
-              print("### Failures\n")
-              for r in sorted(set(rows)):
-                  print(f"- `{r}`")
-              print("\nThese are tracked reds of the Nightly tier — file or update an issue, do NOT re-suppress "
-                    "(#703). Known:\n"
-                    "- #695 — BTree.SpinWriteLock livelock (ChaosStressTests.CreateDeleteRecreate_RapidLifecycle)\n"
-                    "- #696 — ChaosStressTests deterministic concurrent value/index failures\n"
-                    "- #297 — OlcRaceStress_FourScenariosUnderCpuNoise: the OLC B+Tree loses a present key on a\n"
-                    "  concurrent read (~0.8% of Add iterations). REOPENED 2026-08-07 on this tier's first run since\n"
-                    "  February; the fixture had been [Explicit] with no tier, so the issue was closed in May on\n"
-                    "  evidence its own harness now contradicts.")
+                      failed.add(names.get(r.get("testId"), r.get("testName", "?")).split("(")[0])
+
+          if failed:
+              for n in sorted(failed):
+                  print("::error::`" + n + "` failed. This tier excludes Category=Quarantine, so everything it runs is "
+                        "expected to pass — that is either a regression or a test somebody needs to quarantine on purpose.")
+              out += ["### Failures", ""] + ["- `" + n + "`" for n in sorted(failed)]
+              out += ["", "To quarantine one deliberately: add `[Category(\"Quarantine\")]` to the test and a row in "
+                          "`test/Typhon.Engine.Tests/QUARANTINE.md` naming its issue. That is the only supported way to "
+                          "make this step stop reporting it."]
+          else:
+              out += ["The tier ran to completion with no failures."]
+
+          open("verdict.md", "w", encoding="utf-8").write(NL.join(out) + NL)
+          sys.exit(1 if failed else 0)
           PY
-          } >> "$GITHUB_STEP_SUMMARY"
+          cat verdict.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload raw artifacts (.trx / logs)
         if: always()
@@ -218,7 +274,7 @@ jobs:
           total = passed = failed = 0
           names = {}
           rows = []
-          for f in glob.glob("ci-out/*.trx"):
+          for f in glob.glob("ci-out/**/*.trx", recursive=True):
               root = ET.parse(f).getroot()
               c = root.find(f"{NS}ResultSummary/{NS}Counters")
               if c is not None:

@@ -26,8 +26,10 @@ const ZONE_D_GATED_OFF = [] as const;
 // Out-of-stage: DevFixture — the standalone fixture-creation panel (formerly the Connect-dialog tab). DEBUG-only
 // on the server; client always-active so the View menu / palette entries render in dev builds, with the panel
 // itself handling the "not available" cold state when the server's #if DEBUG endpoints are absent.
+// `Integrity` (#729) is listed here even though it is the one zone-D view that is *also* reachable with no
+// session at all — the flag gates only its docked form, which is a plain zone-D panel like the rest.
 const ZONE_D_ACTIVE = [
-  'DataBrowserEntities', 'DbMap', 'StorageHealth', 'Profiler', 'TopSpans', 'CallTree', 'SourcePreview', 'DataFlow', 'SystemDag', 'CriticalPath', 'QueryAnalyzer', 'QueryConsole', 'EngineLiveHealth', 'DevFixture',
+  'DataBrowserEntities', 'DbMap', 'StorageHealth', 'Profiler', 'TopSpans', 'CallTree', 'SourcePreview', 'DataFlow', 'SystemDag', 'CriticalPath', 'QueryAnalyzer', 'QueryConsole', 'EngineLiveHealth', 'DevFixture', 'Integrity',
 ] as const;
 
 // The full registry key set = gated-off ∪ active. Used to assert the registry covers exactly the documented set.

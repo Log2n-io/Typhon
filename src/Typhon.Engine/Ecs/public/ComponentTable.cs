@@ -310,7 +310,48 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     internal IndexedFieldInfo[] IndexedFieldInfos { get; private set; }
     internal ViewRegistry ViewRegistry { get; private set; }
 
-    internal Dictionary<int, VariableSizedBufferSegmentBase<PersistentStore>> ComponentCollectionVSBSByOffset { get; private set; }
+    /// <summary>
+    /// One collection-typed field of this component: where its buffer handle sits inside the component's VALUE bytes, the schema field id that identifies it
+    /// on the wire, and the segment holding its elements.
+    /// </summary>
+    /// <remarks>
+    /// Replaces the former <c>ComponentCollectionVSBSByOffset</c> dictionary. #389 needs two more facts per field — the <see cref="FieldId"/> that a
+    /// CollectionDelta record carries, and the packed byte range the codec zeroes so no bufferId reaches the log (LOG-06) — and carrying those in structures
+    /// parallel to the dictionary is exactly how the three drift apart. The array also suits the copy-on-write ref-count path, which runs on every Versioned
+    /// write to a collection-bearing component and was paying a hash lookup per field over a set that is almost always one element long.
+    /// </remarks>
+    internal readonly struct CollectionFieldInfo
+    {
+        /// <summary>Byte offset of the buffer handle within the component's value bytes — i.e. excluding <see cref="ComponentOverhead"/>.</summary>
+        public readonly int OffsetInComponentStorage;
+
+        /// <summary>Byte width of the handle (the <c>_bufferId</c>), from the schema.</summary>
+        public readonly int HandleSize;
+
+        /// <summary>Schema field index — the collection's durable identity inside a CollectionDelta record (02 §3.3).</summary>
+        public readonly ushort FieldId;
+
+        /// <summary>Segment holding this field's element buffers.</summary>
+        public readonly VariableSizedBufferSegmentBase<PersistentStore> Vsbs;
+
+        /// <summary>Creates the descriptor for one collection field.</summary>
+        public CollectionFieldInfo(int offsetInComponentStorage, int handleSize, ushort fieldId, VariableSizedBufferSegmentBase<PersistentStore> vsbs)
+        {
+            OffsetInComponentStorage = offsetInComponentStorage;
+            HandleSize = handleSize;
+            FieldId = fieldId;
+            Vsbs = vsbs;
+        }
+    }
+
+    /// <summary>The component's collection-typed fields, in schema field order. Empty (never null) when <see cref="HasCollections"/> is <c>false</c>.</summary>
+    internal CollectionFieldInfo[] CollectionFields { get; private set; } = [];
+
+    /// <summary>
+    /// The collection handles' byte ranges packed as <c>(offset &lt;&lt; 16) | length</c>, ready to hand to <c>CommitBatchBuilder.AddSlot</c> so the codec
+    /// zeroes them out of the logged payload (LOG-06). Offsets are relative to the component's VALUE bytes, which is exactly the span a Slot record carries.
+    /// </summary>
+    internal uint[] CollectionHandleRanges { get; private set; } = [];
 
     /// <summary>
     /// Monotonically increasing counter incremented each time index layout changes (e.g., schema migration adds/removes indexes).
@@ -496,17 +537,13 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         BuildIndexedFieldInfo(true, changeSet, newIndexFieldIds);
         ViewRegistry = new ViewRegistry(IndexedFieldInfos.Length);
 
-        // On reopen, restore HasCollections + the offset→VSBS map — but ONLY for user tables (restoreCollectionInfo). User-table load sites pass true; they run
-        // AFTER the component-collection segment pool has been reloaded, so GetComponentCollectionVSBS reconnects to the existing segment. The system tables
-        // (e.g. ComponentR1.Fields) are constructed BEFORE that reload and re-derive their CC from runtime registration, so they pass false — calling
+        // On reopen, restore HasCollections + the collection-field table — but ONLY for user tables (restoreCollectionInfo). User-table load sites pass true;
+        // they run AFTER the component-collection segment pool has been reloaded, so GetComponentCollectionVSBS reconnects to the existing segment. The system
+        // tables (e.g. ComponentR1.Fields) are constructed BEFORE that reload and re-derive their CC from runtime registration, so they pass false — calling
         // BuildComponentCollectionInfo there would fresh-allocate and orphan the persisted segment (losing the field definitions → corrupt migration). See #387.
         if (restoreCollectionInfo)
         {
             BuildComponentCollectionInfo(changeSet);
-        }
-        else
-        {
-            ComponentCollectionVSBSByOffset = new Dictionary<int, VariableSizedBufferSegmentBase<PersistentStore>>();
         }
 
         if (storageMode == StorageMode.SingleVersion)
@@ -537,15 +574,11 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         BuildIndexedFieldInfo(true, changeSet, newIndexFieldIds);
         ViewRegistry = new ViewRegistry(IndexedFieldInfos.Length);
 
-        // See the load ctor: restore CC info only for user tables (restoreCollectionInfo). Migration may shift field offsets, so the map is rebuilt from the NEW
-        // definition. Migrated user tables are constructed after the segment-pool reload, so reconnection is safe; system tables never use this ctor.
+        // See the load ctor: restore CC info only for user tables (restoreCollectionInfo). Migration may shift field offsets, so the table is rebuilt from the
+        // NEW definition. Migrated user tables are constructed after the segment-pool reload, so reconnection is safe; system tables never use this ctor.
         if (restoreCollectionInfo)
         {
             BuildComponentCollectionInfo(changeSet);
-        }
-        else
-        {
-            ComponentCollectionVSBSByOffset = new Dictionary<int, VariableSizedBufferSegmentBase<PersistentStore>>();
         }
     }
 
@@ -587,7 +620,6 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
 
         BuildIndexedFieldInfo(false);
         ViewRegistry = new ViewRegistry(IndexedFieldInfos.Length);
-        ComponentCollectionVSBSByOffset = new Dictionary<int, VariableSizedBufferSegmentBase<PersistentStore>>();
 
         if (IndexedFieldInfos.Length > 0)
         {
@@ -770,7 +802,7 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
 
     private void BuildComponentCollectionInfo(ChangeSet changeSet = null)
     {
-        ComponentCollectionVSBSByOffset = new Dictionary<int, VariableSizedBufferSegmentBase<PersistentStore>>();
+        List<CollectionFieldInfo> fields = null;
         foreach (var field in Definition.FieldsByName.Values)
         {
             if (field.Type != FieldType.Collection)
@@ -779,8 +811,26 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
             }
 
             var vsbs = DBE.GetComponentCollectionVSBS(field.DotNetUnderlyingType, changeSet);
-            ComponentCollectionVSBSByOffset.Add(field.OffsetInComponentStorage, vsbs);
+            (fields ??= []).Add(new CollectionFieldInfo(field.OffsetInComponentStorage, field.FieldSize, (ushort)field.FieldId, vsbs));
             _flags |= ComponentTableFlags.HasCollections;
+        }
+
+        if (fields == null)
+        {
+            CollectionFields = [];
+            CollectionHandleRanges = [];
+            return;
+        }
+
+        // Field order follows FieldsByName enumeration, which is not offset order. Sort by offset so the emitted CollectionDelta records — and therefore the
+        // recovery fold's per-field keys — appear in a layout-stable order regardless of how the schema dictionary happens to enumerate.
+        fields.Sort(static (a, b) => a.OffsetInComponentStorage.CompareTo(b.OffsetInComponentStorage));
+
+        CollectionFields = [.. fields];
+        CollectionHandleRanges = new uint[fields.Count];
+        for (var i = 0; i < fields.Count; i++)
+        {
+            CollectionHandleRanges[i] = ((uint)fields[i].OffsetInComponentStorage << 16) | (uint)(ushort)fields[i].HandleSize;
         }
     }
 

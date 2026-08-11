@@ -65,4 +65,4 @@ dbe.ForceCheckpoint();
 
 <!-- Deep dive: claude/overview/06-durability.md §6.4, claude/design/Durability/MinimalWal/04-checkpoint.md -->
 <!-- ADR: claude/adr/025-checkpoint-manager-sole-fsync-owner.md -->
-<!-- Rules: claude/rules/durability.md — module CK -->
+<!-- Rules: rules/durability.md — module CK -->

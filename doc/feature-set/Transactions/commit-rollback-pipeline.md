@@ -70,5 +70,5 @@ tx.Rollback();    // infinite deadline (UnitOfWorkContext.None)
 - Related features: [Commit Pipeline](../Durability/commit-pipeline.md) (the append-before-publish mechanics in depth), [Deadline & Cooperative Cancellation](./deadline-cancellation.md), [Optimistic Conflict Resolution](./optimistic-conflict-resolution.md), [Unit of Work](./unit-of-work.md)
 
 <!-- Deep dive: claude/design/Transactions/transaction-overview.md §4-5, claude/design/Transactions/04-transaction-api.md -->
-<!-- Rules: claude/rules/durability.md — Module AP -->
+<!-- Rules: rules/durability.md — Module AP -->
 <!-- ADR: 038 — Transaction CRUD Throws on Invalid State — claude/adr/038-transaction-throw-on-invalid-state.md -->

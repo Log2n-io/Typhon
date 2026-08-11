@@ -24,6 +24,10 @@ export const ZONE_D_VIEW_ACTIVE: Readonly<Record<string, boolean>> = {
   DbMap: true,
   // Stage 2 Phase 3: Storage Health — the aggregate dashboard complement to the File Map (GAP-16).
   StorageHealth: true,
+  // #729: Database Integrity — offline scan / repair-plan / repair. Unlike every other zone-D view this one
+  // is also reachable with no session at all (Shell renders it full-bleed over the Welcome screen), so this
+  // flag gates only its *docked* form.
+  Integrity: true,
   // Profile (P-B) — profiler deep views.
   // Stage 3 Phase 1: the Profiler timeline (the global time-scope owner) + Top Spans are reintroduced onto the
   // finished shell. Selection already mirrors to the unified bus (Stage 1); flipping these on mounts them into
@@ -115,6 +119,9 @@ const VIEW_SESSION_SCOPE: Readonly<Record<string, ViewSessionScope>> = {
   SystemsQueriesNav: 'profiler',
   // Session-independent (generates/opens regardless of the current session)
   DevFixture: 'any',
+  // Integrity reads the bundle off disk rather than through an engine, so it is not merely session-independent —
+  // it is most useful with *no* session, on a database that cannot be opened at all.
+  Integrity: 'any',
 };
 
 /** The session-kind scope of a view (or view-bound command). Unlisted / undefined ids are `any`. */

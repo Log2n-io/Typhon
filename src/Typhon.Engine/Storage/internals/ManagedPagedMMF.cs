@@ -106,6 +106,18 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     // (directory only) · 3 occ-root-twin · 4 occ-first-data (L0 bits) · 5 occ-data-reserve · 6 occ-mapext-reserve ·
     // 7 occ-mapext-twin-reserve.
     internal const int InitialReservedPageCount = 8;
+
+    /// <summary>
+    /// The fewest pages a Typhon data file can physically contain: the meta pair (0, 1), the occupancy segment's
+    /// directory root (2) and its twin (3), and the first page of occupancy data (4).
+    /// </summary>
+    /// <remarks>
+    /// Deliberately <b>not</b> <see cref="InitialReservedPageCount"/>. That constant counts occupancy <i>bits</i> set
+    /// aside at genesis — pages 5, 6 and 7 are reserved so the occupancy map can grow later without needing to allocate
+    /// through itself — but nothing writes them, so the file is five pages long until real data arrives. Confusing the
+    /// reserved count with the physical count makes a freshly-created database look truncated.
+    /// </remarks>
+    internal const int MinimumPhysicalPageCount = OccupancyFirstDataPageIndex + 1;
     private const int OccupancySegmentRootPageIndex = 2;
     private const int OccupancyRootTwinPageIndex = 3;
     // The occupancy bitmap's first data page. The directory-only root (v4) carries no bitmap words, so the first L0 page must
@@ -414,6 +426,13 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
         cs.SaveChanges();
         PersistMetaNow();
     }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// This is the layer that owns the meta pair, the bootstrap dictionary and the occupancy segment, so it is the layer
+    /// where verifying them means anything.
+    /// </remarks>
+    protected override void VerifyOnOpen() => VerifyBundleSpineOnOpen();
 
     protected override void OnFileLoading()
     {
@@ -863,7 +882,13 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
 
             var nextGen = _metaGeneration + 1;
             PageBaseHeader.WritePairGeneration(pageSpan, nextGen);
-            ((PageBaseHeader*)pageAddr)->PageChecksum = Crc32CUtil.ComputeSkipping(pageSpan, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+
+            // The meta page is the one page that CANNOT carry a per-sector footer: its metadata region holds the root
+            // identity header, and the bootstrap stream starts immediately after and runs to the end of the page, so the
+            // footer's bytes are occupied by real content. Clear the declaration explicitly rather than relying on it
+            // never having been set — a stray value there would make a reader verify this page the wrong way.
+            PageSectorFooter.ClearGeometry(pageSpan);
+            StampPageForWrite(pageSpan, MetaSlotA);
 
             // Write the full image to the alternate slot and fsync BEFORE flipping the current pointer.
             var targetSlot = MetaSlotA + MetaSlotB - _metaCurrentSlot;   // the other slot
@@ -944,9 +969,9 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     private static bool IsPairSlotValid(ReadOnlySpan<byte> slot, out ulong generation)
     {
         generation = 0;
-        var storedCrc = MemoryMarshal.Read<uint>(slot.Slice(PageBaseHeader.PageChecksumOffset));
-        var computedCrc = Crc32CUtil.ComputeSkipping(slot, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
-        if (storedCrc != computedCrc)
+        // Geometry-aware: a directory page carries a per-sector footer (declared at page init), the meta page does not.
+        // Verifying either one the wrong way would reject a perfectly good slot and could fail an open on a healthy database.
+        if (!VerifyPageImage(slot, out _))
         {
             return false;
         }
@@ -1038,7 +1063,11 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
 
             var span = new Span<byte>(image, PageSize);
             PageBaseHeader.WritePairGeneration(span, newGen);
-            ((PageBaseHeader*)image)->PageChecksum = Crc32CUtil.ComputeSkipping(span, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+
+            // Stamp the PRIMARY index, not the alternate slot this image is about to land in: a protected page alternates
+            // between two physical slots by design, so the logical index is what identifies it. Stamping the slot would
+            // make every legitimate flip look like a misdirected write.
+            StampPageForWrite(span, primaryPageIndex);
 
             WritePageDirect(alternate, span);
             FlushToDisk();

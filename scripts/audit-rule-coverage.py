@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-audit-rule-coverage.py — cross-check `claude/rules/*.md` against the tests that claim to verify them.
+audit-rule-coverage.py — cross-check `rules/*.md` against the tests that claim to verify them.
 
 WHY (issue #703 Part 2 / design `Infrastructure/test-strategy.md` §5.5): a rule whose verifier cannot fail is
 WORSE than a rule with no verifier, because it reports confidence. `VerifiesRuleAttribute.cs` has declared this
@@ -29,9 +29,13 @@ baseline is data, not a target; it exists so a verifier cannot be quietly delete
 Usage:
     python3 scripts/audit-rule-coverage.py                       # audit + ratchet
     python3 scripts/audit-rule-coverage.py --update-baseline     # accept the current counts
-    python3 scripts/audit-rule-coverage.py --rules-dir DIR       # point at a rules checkout (CI)
 
-Exit code: 0 clean · 1 violation or ratchet regression · 2 usage error (incl. a missing rules dir when required).
+`rules/` is in this repository (#747), so the audit always has something to audit. It used to carry a
+`--skip-if-no-rules` escape hatch for fork PRs, where GitHub withholds the secret needed to check out the
+private knowledge base and the rules simply were not there. A gate that can decline to run is one a reader
+has to check the logs to trust; that hatch is gone, and the audit now fails if `rules/` is missing.
+
+Exit code: 0 clean · 1 violation or ratchet regression · 2 usage error (incl. a missing rules dir).
 """
 import argparse
 import json
@@ -294,20 +298,14 @@ def main(argv):
     repo = os.path.dirname(here)
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--rules-dir", default=os.path.join(repo, "claude", "rules"))
+    ap.add_argument("--rules-dir", default=os.path.join(repo, "rules"))
     ap.add_argument("--tests-dir", default=os.path.join(repo, "test"))
     ap.add_argument("--baseline", default=os.path.join(repo, "coverage", "rule-coverage-baseline.json"))
     ap.add_argument("--matrix", default=os.path.join(repo, "coverage", "rule-coverage.md"))
     ap.add_argument("--update-baseline", action="store_true")
-    ap.add_argument("--skip-if-no-rules", action="store_true",
-                    help="exit 0 when the rules dir is absent (fork PRs cannot check out the private repo)")
     args = ap.parse_args(argv)
 
     if not os.path.isdir(args.rules_dir):
-        if args.skip_if_no_rules:
-            print(f"SKIPPED: no rules at {args.rules_dir} (the private knowledge base is not checked out here). "
-                  f"This run proves NOTHING about rule coverage — do not read it as a pass.")
-            return 0
         print(f"ERROR: --rules-dir {args.rules_dir} does not exist", file=sys.stderr)
         return 2
 

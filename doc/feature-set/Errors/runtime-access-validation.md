@@ -90,5 +90,5 @@ catch (InvalidAccessException ex)
 - Sibling: [Access Conflict Detection](../Runtime/declarative-scheduling/access-conflict-detection.md) — `Build()`-time declared-conflict detection; this validator is the runtime, per-call complement
 
 <!-- Deep dive: claude/design/Runtime/07-system-access-declarations.md (Q6, Unit 4) -->
-<!-- Deep dive: claude/rules/runtime-scheduling.md (DV-01..DV-03) -->
+<!-- Deep dive: rules/runtime-scheduling.md (DV-01..DV-03) -->
 <!-- Overview: claude/overview/10-errors.md, claude/overview/13-runtime.md -->

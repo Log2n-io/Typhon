@@ -60,4 +60,4 @@ catch (CommitDurabilityUncertainException ex)
 
 <!-- Deep dive: claude/overview/06-durability.md §6.2 -->
 <!-- Design: claude/design/Durability/MinimalWal/01-architecture.md §5 -->
-<!-- Rules: claude/rules/durability.md — module AP -->
+<!-- Rules: rules/durability.md — module AP -->

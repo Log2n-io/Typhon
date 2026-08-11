@@ -40,6 +40,12 @@ interface DbMapStoreState {
    * (§13 A4 AC1) — cross-links identify components by type name. The panel consumes it once and clears it.
    */
   pendingFocusType: string | null;
+  /**
+   * A physical page index an integrity finding asked the map to reveal. Distinct from
+   * {@link pendingFocusType} because a finding identifies damage by page, not by component — a corrupt page
+   * may belong to a segment whose component type is exactly what the damage made unreadable.
+   */
+  pendingFocusPage: number | null;
   /** The active filter-to-dim predicate, or null when no filter is applied (§4.6). */
   filter: DbMapFilter | null;
   /** Saved viewports, keyed by database name — the only persisted slice (§13 A4 AC3). */
@@ -56,7 +62,9 @@ interface DbMapStoreState {
   setActiveTab: (tab: DbMapTab) => void;
   /** Requests the panel focus a component type's segment on its next render — the cross-link entry point. */
   requestFocusComponent: (typeName: string) => void;
-  /** Clears a consumed cross-link focus request. */
+  /** Requests the panel centre on a physical page — the integrity-finding entry point. */
+  requestFocusPage: (pageIndex: number) => void;
+  /** Clears a consumed cross-link focus request (both the type and page forms). */
   clearPendingFocus: () => void;
   /** Sets the filter-to-dim predicate; null clears it. */
   setFilter: (filter: DbMapFilter | null) => void;
@@ -89,6 +97,7 @@ export const useDbMapStore = create<DbMapStoreState>()(
       railCollapsed: false,
       activeTab: 'legend',
       pendingFocusType: null,
+      pendingFocusPage: null,
       filter: null,
       bookmarks: {},
       setEncoding: (encoding) => set({ encoding }),
@@ -102,7 +111,8 @@ export const useDbMapStore = create<DbMapStoreState>()(
       toggleRail: () => set((s) => ({ railCollapsed: !s.railCollapsed })),
       setActiveTab: (tab) => set({ activeTab: tab }),
       requestFocusComponent: (typeName) => set({ pendingFocusType: typeName }),
-      clearPendingFocus: () => set({ pendingFocusType: null }),
+      requestFocusPage: (pageIndex) => set({ pendingFocusPage: pageIndex }),
+      clearPendingFocus: () => set({ pendingFocusType: null, pendingFocusPage: null }),
       setFilter: (filter) => set({ filter }),
       addBookmark: (databaseName, bookmark) =>
         set((s) => ({
@@ -127,10 +137,11 @@ export const useDbMapStore = create<DbMapStoreState>()(
       name: 'workbench-dbmap',
       storage: safeStorage(),
       // Persist the view configuration so the panel reopens the way the user left it — encoding, lens, overlay
-      // toggles, filter, and rail layout — alongside the per-database bookmarks. `lensSegmentId` and
-      // `pendingFocusType` are deliberately NOT persisted: they reference a specific segment / cross-link that
-      // may not exist next session, so they reset (the panel guards a restored fragmentation lens with no
-      // segment so it doesn't dim the whole map on open).
+      // toggles, filter, and rail layout — alongside the per-database bookmarks. `lensSegmentId`,
+      // `pendingFocusType` and `pendingFocusPage` are deliberately NOT persisted: they reference a specific
+      // segment / cross-link / damaged page that may not exist next session, so they reset (the panel guards
+      // a restored fragmentation lens with no segment so it doesn't dim the whole map on open, and guards a
+      // restored integrity lens with no report the same way).
       partialize: (s) => ({
         bookmarks: s.bookmarks,
         encoding: s.encoding,

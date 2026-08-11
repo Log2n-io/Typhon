@@ -45,10 +45,12 @@ jobs:
               - 'tools/Typhon.Workbench/**'
             tla:
               - 'src/Typhon.Engine/Durability/**'
-            # #703: re-audit when a rule CITATION or the audit itself changes. The rule database
-            # lives in the private repo, so its own edits cannot trigger this — the nightly
-            # doc-drift job in that repo covers that direction.
+              - 'rules/tla/**'
+            # #703: re-audit when a rule, a rule CITATION, or the audit itself changes. `rules/**` was absent
+            # from this list until #747 — not an oversight but an impossibility, because the database lived in
+            # a different repository and a path filter cannot see one. Editing a rule triggered no audit at all.
             rules:
+              - 'rules/**'
               - 'test/**/*.cs'
               - 'scripts/audit-rule-coverage.py'
               - 'scripts/tests/**'
@@ -81,6 +83,11 @@ jobs:
       && needs.changes.outputs.skip_ut != 'true'
       && vars.GATE_RUNNER != 'selfhosted'
     runs-on: ubuntu-latest
+    # ---- COST FAIL-SAFE (#729, 2026-08-09). ----
+    # Same exposure as the self-hosted job below, by a different route: `sky launch` holds a billed VM for as long as this
+    # step runs, so an uncapped step meant an uncapped VM. The step budget is larger than the self-hosted one because it
+    # also pays for cold provisioning (image pull + boot), which the warm persistent box does not.
+    timeout-minutes: 30
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -94,11 +101,19 @@ jobs:
       # Blocking launch: sky propagates the VM's run: exit code, so a test failure on the VM
       # fails this step → this job → the gate. --down tears the instance down either way.
       - name: Run correctness gate on c6id
+        timeout-minutes: 25
         run: |
           sky launch bench/aws/ci.sky.yaml --down -y \
             --env RUN_ENGINE=${{ needs.changes.outputs.engine }} \
             --env RUN_WORKBENCH=${{ needs.changes.outputs.workbench }} \
             --env RUN_ID=${{ github.run_id }}
+
+      # `--down` only tears the cluster down on a normal exit. A step timeout or a cancelled run kills sky mid-flight and
+      # strands the VM — billing with nothing watching it. This runs on every path, including cancellation, and is a no-op
+      # when the cluster is already gone.
+      - name: Tear down the VM (always, including on timeout or cancel)
+        if: always()
+        run: sky down -y typhon-ci-gate || true
 
       # if: always() — we want the report surfaced precisely when the gate FAILED.
       - name: Pull reports from S3
@@ -134,6 +149,16 @@ jobs:
       && needs.changes.outputs.skip_ut != 'true'
       && vars.GATE_RUNNER == 'selfhosted'
     runs-on: [self-hosted, linux, typhon-c6id]
+    # ---- COST FAIL-SAFE (#729, 2026-08-09). ----
+    # This job runs on a BILLED, always-on instance, and it had no timeout at all — so it inherited GitHub's 360-minute
+    # default. A gate that hung held the box for six hours; one that did so overnight would hold it for six hours before
+    # anyone saw it. This was the only workflow in the repo with no cap, and the only one that costs money per minute.
+    #
+    # The suite is 2-3 minutes healthy and 5 is already abnormal, so 10 on the step is a generous ceiling that still
+    # bounds the damage to roughly one suite's worth of compute. The job gets a slightly larger cap so the step timeout
+    # fires FIRST: that way the `if: always()` report and artifact steps still run and the .trx says where it hung,
+    # rather than the whole job being killed with no evidence of why.
+    timeout-minutes: 15
     steps:
       # clean:false keeps the warm bin/obj (untracked) for an incremental build; test DBs live on /nvme (TMPDIR),
       # not the worktree, so nothing accumulates there. git reset --hard reverts any tracked edits for isolation.
@@ -142,6 +167,7 @@ jobs:
         with:
           clean: false
       - name: Run correctness gate on the persistent c6id
+        timeout-minutes: 10
         env:
           RUN_ENGINE: ${{ needs.changes.outputs.engine }}
           RUN_WORKBENCH: ${{ needs.changes.outputs.workbench }}
@@ -167,6 +193,14 @@ jobs:
           if-no-files-found: ignore
 
   # ---- TLA+ specs on a free runner (Java only — must NOT consume the c6id). ----
+  #
+  # The specs live at rules/tla/. Until #747 they were in the private knowledge-base repo, so this job checked
+  # that repo out with a PAT and then GUESSED which of its branches belonged to this PR by matching the branch
+  # NAME — because a spec change and the implementation change it models could not land in one commit. Both the
+  # credential and the guess are gone: they are one checkout now.
+  #
+  # This also absorbs the near-identical job that ran in the docs repo (tla-check.yml), which is deleted. Its
+  # *.cfg glob is the version kept — see below.
   tla:
     needs: changes
     if: ${{ needs.changes.outputs.tla == 'true' }}
@@ -174,69 +208,59 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # The specs live in the separate typhon-claude repo (claude/ is gitignored here).
-      - name: Checkout typhon-claude (TLA specs)
-        uses: actions/checkout@v5
-        with:
-          repository: Log2n-io/Typhon-Claude
-          # Cross-repo private checkout: the default GITHUB_TOKEN is scoped to this repo only and 404s on Typhon-Claude.
-          # A fine-grained PAT (Contents:read on Typhon-Claude) resolves the ref and auths the fetch. ref pins to main.
-          ref: main
-          token: ${{ secrets.TYPHON_CLAUDE_TOKEN }}
-          path: typhon-claude
-
-      # Same reasoning as the rule-coverage job below: a PR that changes a TLA spec and the code it models spans
-      # both repos on same-named branches, and pinning `main` here would model-check the OLD spec against the NEW
-      # code. It has not bitten yet only because no PR has changed a spec and its implementation together.
-      - name: Prefer the PR's companion docs branch, if it exists
-        if: ${{ github.event_name == 'pull_request' }}
-        continue-on-error: true
-        working-directory: typhon-claude
-        run: |
-          set -uo pipefail
-          branch='${{ github.head_ref }}'
-          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
-            git fetch --depth=1 origin "$branch"
-            git checkout -q FETCH_HEAD
-            echo "specs: typhon-claude branch '$branch' @ $(git rev-parse --short HEAD)"
-          else
-            echo "specs: typhon-claude main @ $(git rev-parse --short HEAD) (no branch '$branch' there)"
-          fi
-
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '11'    # runs the pinned tla2tools v1.7.4
 
-      - name: Model-check all specs + genuineness mutants
-        # Typhon-Claude's repo root IS the claude/ content, so the specs sit at rules/tla (no extra claude/ segment).
-        working-directory: typhon-claude/rules/tla
+      - name: Cache tla2tools.jar
+        uses: actions/cache@v5
+        with:
+          path: rules/tla/.tools
+          key: tla2tools-v1.7.4
+
+      # Globbed, not a hardcoded spec list. This job used to name three specs explicitly while the docs repo's
+      # copy globbed *.cfg; when the two disagreed the hardcoded one silently checked less. A spec is now
+      # model-checked the day it lands rather than the day someone remembers to add it here.
+      - name: Model-check every spec (green) + every mutant (must violate)
+        working-directory: rules/tla
         run: |
-          set -e
-          # Invoke via `bash` (not ./) so a missing exec bit — common when the script is committed from Windows —
-          # doesn't fail the run with "Permission denied".
-          for spec in CheckpointProtocol CommitRecovery CommittedDiscipline; do
-            echo "::group::TLC $spec (expect GREEN)"
-            bash run-tlc.sh "$spec"
-            echo "::endgroup::"
-            echo "::group::TLC $spec mutant (expect VIOLATION)"
-            bash run-tlc.sh "$spec" mutant --expect-violation
-            echo "::endgroup::"
+          set -euo pipefail
+          shopt -s nullglob
+          # Invoked via `bash` (not ./) so a missing exec bit — common when the script is committed from
+          # Windows — doesn't fail the run with "Permission denied".
+          for cfg in *.cfg; do
+            spec="${cfg%.cfg}"
+            case "$spec" in
+              *-mutant)
+                base="${spec%-mutant}"
+                echo "::group::genuineness — $base mutant must violate"
+                bash run-tlc.sh "$base" mutant --expect-violation
+                echo "::endgroup::"
+                ;;
+              *)
+                echo "::group::model-check — $spec"
+                bash run-tlc.sh "$spec"
+                echo "::endgroup::"
+                ;;
+            esac
           done
 
   # ---- Rule-coverage audit on a free runner (#703 Part 2). ----
   #
-  # Cross-checks `claude/rules/*.md` against the tests that claim to verify them, in BOTH directions, and ratchets
+  # Cross-checks `rules/*.md` against the tests that claim to verify them, in BOTH directions, and ratchets
   # the counts so a verifier cannot be quietly deleted. It fails on: a duplicate rule id (README requires ids unique
   # across the whole database — `CX-01..05` were defined twice with different meanings until #703), a `verified:`
   # naming a test that does not exist, a [VerifiesRule] naming a rule that does not exist, and any DECREASE in
   # coverage. A verifier with no [RuleMutant] is reported, not blocking — see the audit's own docstring for why
   # forcing 15 mutants in one push would move the dishonesty rather than remove it.
   #
-  # Shaped exactly like the `tla` job below-left: the rules live in the PRIVATE Typhon-Claude repo, so this needs
-  # the PAT and is path-gated to keep it off unrelated PRs. `--skip-if-no-rules` makes a fork PR (where GitHub
-  # withholds the secret, so the checkout produces nothing) SKIP loudly rather than red-out — and the skip message
-  # says the run proves nothing, so it cannot be mistaken for a pass.
+  # Self-contained since #747, where the rule database moved into this repository. It previously needed a PAT, a
+  # cross-repo checkout, a branch-name guess at the companion docs branch, and a `--skip-if-no-rules` hatch so a
+  # fork PR — GitHub withholds the secret from those, and this repo has 19 forks — skipped instead of redding out.
+  # All four are deleted. The deadlock they were patching around is gone too: a rule, its [VerifiesRule] test and
+  # the code it scopes now land in ONE commit, so there is no merge order to get right (#705 was the case that
+  # proved there wasn't one — a new rule RB-06 and its verifier, un-mergeable in either direction).
   rule-coverage:
     needs: changes
     if: ${{ needs.changes.outputs.rules == 'true' }}
@@ -244,49 +268,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Checkout typhon-claude (rule database)
-        continue-on-error: true    # fork PRs get no secret; the audit then skips rather than failing the gate
-        uses: actions/checkout@v5
-        with:
-          repository: Log2n-io/Typhon-Claude
-          ref: main
-          token: ${{ secrets.TYPHON_CLAUDE_TOKEN }}
-          path: typhon-claude
-
-      # A change that adds a RULE and the test that verifies it spans both repos, and the two halves travel on
-      # branches of the same name. Auditing against `main` compares this PR's code to rules that do not yet contain
-      # its changes, which makes the pair un-mergeable in either order: the code PR stays red until the docs PR
-      # merges, and the docs PR has no gate of its own to show it is safe to merge first. #705 hit exactly this —
-      # a new rule (RB-06) and its [VerifiesRule] test, reported as "names a rule that does not exist".
-      #
-      # The fallback is announced rather than silent: a green run must say WHICH rules it audited, or it cannot be
-      # told apart from a green run that audited the wrong ones.
-      - name: Prefer the PR's companion docs branch, if it exists
-        if: ${{ github.event_name == 'pull_request' }}
-        continue-on-error: true      # no checkout on a fork PR — the audit's own --skip-if-no-rules handles that
-        working-directory: typhon-claude
-        run: |
-          set -uo pipefail
-          branch='${{ github.head_ref }}'
-          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
-            git fetch --depth=1 origin "$branch"
-            git checkout -q FETCH_HEAD
-            echo "rules: typhon-claude branch '$branch' @ $(git rev-parse --short HEAD)"
-          else
-            echo "rules: typhon-claude main @ $(git rev-parse --short HEAD) (no branch '$branch' there)"
-          fi
-
       - name: Audit rule coverage + ratchet
-        run: |
-          python3 scripts/audit-rule-coverage.py \
-            --rules-dir typhon-claude/rules \
-            --skip-if-no-rules
+        run: python3 scripts/audit-rule-coverage.py
 
-      # The audit is itself tested — planted duplicate id, planted dangling `verified:`, planted always-green
-      # verifier, planted ratchet regression. An audit that has never rejected anything is the same false green it
-      # exists to remove. Runs unconditionally: it needs no rules checkout and no secret.
-      - name: Audit self-tests
-        run: python3 -m unittest discover -s scripts/tests -v
+      # The audit's own self-tests — planted duplicate id, planted dangling `verified:`, planted always-green
+      # verifier, planted ratchet regression — are NOT run here. They live in `scripts/tests/` and the `invariants`
+      # job below discovers that whole directory unconditionally, which is strictly better than this path-gated
+      # job: the audit stays tested even on a PR that touches no rule.
 
   # ---- Cheap source-invariant gate on a free runner (must NOT consume the c6id). ----
   #
@@ -306,6 +294,12 @@ jobs:
   #     the private knowledge base from a workflow step.
   # The doc↔code comparison now runs the other way round — a nightly job in the PRIVATE claude repo pulling
   # the PUBLIC code, needing no credential at all. See typhon-claude/.github/workflows/doc-drift.yml.
+  #
+  # That inversion still holds for `design/`, `overview/` and `adr/`, which stay private. The RULE half came back
+  # here in #747, and the scope check below is it — it belongs in this job specifically because an unresolved
+  # `scope:` symbol is a SOURCE-side defect: renaming a type in src/ is what falsifies a rule that was correct,
+  # and no rule file changes when it happens. Gating it on `rules/**` would therefore miss the entire failure
+  # mode it exists to catch. Unconditional, ~1s, no credential.
   invariants:
     runs-on: ubuntu-latest
     steps:
@@ -321,10 +315,17 @@ jobs:
             echo "::error::LOG-02 violated — RecordFormat's byte offsets are referenced outside Durability/internals/."
             echo "$hits"
             echo "WAL record bytes must be produced and consumed only by RecordCodec; reaching for the raw"
-            echo "offsets elsewhere is how producer/recovery format drift starts. See claude/rules/durability.md LOG-02."
+            echo "offsets elsewhere is how producer/recovery format drift starts. See rules/durability.md LOG-02."
             exit 1
           fi
           echo "LOG-02: RecordFormat confined to Durability/internals/"
+
+      # Every `scope:` symbol in rules/ must exist in src/. Nine rules were scoped to symbols deleted months
+      # earlier when this was first run by hand — a rule citing a dead name reads as obsolete when it is not,
+      # which is worse than no rule. Blocking, and no longer carrying the `--baseline-rules` mode that demoted a
+      # not-yet-landed citation to a warning: with the rules in this repo there is nothing left to wait for.
+      - name: "Rule scopes — every scope: symbol resolves in src/"
+        run: python3 scripts/check-rule-scopes.py
 
       # ---- #703: a suppressed test must say WHY, and expire. ----
       #

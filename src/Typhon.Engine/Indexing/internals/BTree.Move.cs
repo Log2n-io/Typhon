@@ -12,6 +12,19 @@ internal abstract partial class BTree<TKey, TStore>
     /// Uses OLC: same-leaf fast path (single lock), different-leaf (dual lock by ChunkId order).
     /// Falls back to pessimistic after <see cref="MaxOptimisticRestarts"/>.
     /// </summary>
+    /// <remarks>
+    /// <b>Unlock discipline (#765 S3).</b> A bail that wrote nothing releases with <c>AbortWriteLock</c>, never <c>WriteUnlock</c>. The two differ in one bit of
+    /// behaviour and a lot of consequence: <c>WriteUnlock</c> bumps the node's version, which tells every optimistic reader and writer holding a snapshot of
+    /// that node that their snapshot is stale, and they restart. When the node was genuinely modified that is exactly right. When it was not — a version
+    /// validation that failed, a key that turned out to be absent, a full-leaf bail to the pessimistic path — it is a lie, and the threads it restarts go around
+    /// and contend for the same latch again.
+    /// <para>
+    /// This file used to hold 31 <c>WriteUnlock</c> calls and zero <c>AbortWriteLock</c>, of which only ten follow an actual mutation; #679 named those spurious
+    /// bumps as the MEASURED cause of its restart storm. Ten remain, and each one is downstream of a leaf mutation or a VSBS buffer write. Anything that touches
+    /// storage keeps <c>WriteUnlock</c> even where the leaf's own items are unchanged — a bail that has already written to a buffer is not a no-op, and this is
+    /// not the place to be clever about it.
+    /// </para>
+    /// </remarks>
     /// <returns>True if the old key was found and moved; false if old key not found.</returns>
     public bool Move(TKey oldKey, TKey newKey, int value, ref ChunkAccessor<TStore> accessor)
     {
@@ -45,7 +58,35 @@ internal abstract partial class BTree<TKey, TStore>
                     continue; // stale read, restart
                 }
 
-                var (newLeafId, newVersion, _) = OptimisticDescendToLeaf(newKey, ref opAccessor);
+                // followRightLink: false — this descent picks an INSERTION target, and the B-link right-walk answers a different question. The walk exists so a
+                // reader that lands left of a concurrently-split leaf still finds an EXISTING key; it hops right until the key falls inside a leaf's real
+                // contents. newKey exists nowhere yet, so for it the walk never terminates on a match and instead runs past the leaf whose separator range owns
+                // the key, into the next one. Move then inserted there, below that leaf's separator — which is precisely the state ValidateLeafSeparators
+                // reports and Stress_MoveSameLeaf has been printing and discarding since it was written (#765). Measured: with the default `true`, a
+                // SINGLE-THREADED sweep of 200 moves over one key range breaks a separator/leaf pair every run; with `false`, zero. Insert has always passed
+                // false here and says so at BTree.Insert.cs — Move is the copy that never received it.
+                // #221: skip the second descent entirely when the leaf we are already standing on demonstrably owns newKey's range. A same-leaf move — which is
+                // what "shift an entity to an adjacent slot" is — was paying two full root-to-leaf descents to reach a conclusion the first one already
+                // contains. The test is the complement of the leaf-authority predicate: newKey at or above this leaf's first key, and below its HighKey (or the
+                // leaf is rightmost, where HighKey bounds nothing). If either bound fails, fall through and descend properly.
+                //
+                // Safe because it can only ever return the SAME leaf the general path would have picked: it concludes only when both bounds hold on a
+                // version-validated read, and the authority check under the lock below re-asks the identical question. A wrong answer costs a restart, never a
+                // misplaced key.
+                int newLeafId;
+                int newVersion;
+                var standingLeaf = _storage.LoadNode(oldLeafId);
+                if (!KeyOutsideLeafAuthority(standingLeaf, newKey, Comparer, ref opAccessor)
+                    && standingLeaf.GetLatch(ref opAccessor).ValidateVersion(oldVersion))
+                {
+                    newLeafId = oldLeafId;
+                    newVersion = oldVersion;
+                }
+                else
+                {
+                    (newLeafId, newVersion, _) = OptimisticDescendToLeaf(newKey, ref opAccessor, false);
+                }
+
                 if (newLeafId == 0)
                 {
                     Interlocked.Increment(ref _optimisticRestarts);
@@ -68,7 +109,17 @@ internal abstract partial class BTree<TKey, TStore>
                     // Validate version (detects concurrent modification between our read and lock)
                     if (!latch.ValidateVersion(oldVersion | 1))
                     {
-                        latch.WriteUnlock();
+                        latch.AbortWriteLock();
+                        Interlocked.Increment(ref _optimisticRestarts);
+                        continue;
+                    }
+
+                    // Leaf authority for the key being WRITTEN. Dropping the right-link walk above means the descent can now stop short of the leaf that owns
+                    // newKey's range, and an unchecked insert there would either misplace the key or miss an existing duplicate sitting one leaf right.
+                    // AbortWriteLock, not WriteUnlock — nothing has been modified, so bumping the version would only restart other threads for free (#679).
+                    if (KeyOutsideLeafAuthority(leaf, newKey, Comparer, ref opAccessor))
+                    {
+                        latch.AbortWriteLock();
                         Interlocked.Increment(ref _optimisticRestarts);
                         continue;
                     }
@@ -77,7 +128,7 @@ internal abstract partial class BTree<TKey, TStore>
                     var oi = leaf.Find(oldKey, Comparer, ref opAccessor);
                     if (oi < 0)
                     {
-                        latch.WriteUnlock();
+                        latch.AbortWriteLock();
                         return false; // old key gone
                     }
 
@@ -85,7 +136,7 @@ internal abstract partial class BTree<TKey, TStore>
                     var ni = leaf.Find(newKey, Comparer, ref opAccessor);
                     if (ni >= 0)
                     {
-                        latch.WriteUnlock();
+                        latch.AbortWriteLock();
                         return false; // newKey already exists — no modification
                     }
 
@@ -122,7 +173,7 @@ internal abstract partial class BTree<TKey, TStore>
                     var secondLatch = secondLeaf.GetLatch(ref opAccessor);
                     if (!secondLatch.TryWriteLock())
                     {
-                        firstLatch.WriteUnlock();
+                        firstLatch.AbortWriteLock();
                         Interlocked.Increment(ref _optimisticRestarts);
                         continue;
                     }
@@ -130,8 +181,8 @@ internal abstract partial class BTree<TKey, TStore>
                     // Validate both versions
                     if (!firstLatch.ValidateVersion(firstVersion | 1) || !secondLatch.ValidateVersion(secondVersion | 1))
                     {
-                        secondLatch.WriteUnlock();
-                        firstLatch.WriteUnlock();
+                        secondLatch.AbortWriteLock();
+                        firstLatch.AbortWriteLock();
                         Interlocked.Increment(ref _optimisticRestarts);
                         continue;
                     }
@@ -140,12 +191,22 @@ internal abstract partial class BTree<TKey, TStore>
                     var oldLeaf = oldLeafId == firstId ? firstLeaf : secondLeaf;
                     var newLeaf = oldLeafId == firstId ? secondLeaf : firstLeaf;
 
+                    // Same leaf-authority question as the same-leaf path, asked of the leaf that will receive the key. Aborting rather than unlocking: the two
+                    // leaves are untouched at this point.
+                    if (KeyOutsideLeafAuthority(newLeaf, newKey, Comparer, ref opAccessor))
+                    {
+                        secondLatch.AbortWriteLock();
+                        firstLatch.AbortWriteLock();
+                        Interlocked.Increment(ref _optimisticRestarts);
+                        continue;
+                    }
+
                     // Safety check: if newLeaf is full (insert would overflow) or oldLeaf would underflow, bail to pessimistic which handles structural
                     // modifications properly
                     if (newLeaf.GetIsFull(ref opAccessor) || !oldLeaf.GetIsHalfFull(ref opAccessor))
                     {
-                        secondLatch.WriteUnlock();
-                        firstLatch.WriteUnlock();
+                        secondLatch.AbortWriteLock();
+                        firstLatch.AbortWriteLock();
                         break; // fall to pessimistic
                     }
 
@@ -153,8 +214,8 @@ internal abstract partial class BTree<TKey, TStore>
                     var oi = oldLeaf.Find(oldKey, Comparer, ref opAccessor);
                     if (oi < 0)
                     {
-                        secondLatch.WriteUnlock();
-                        firstLatch.WriteUnlock();
+                        secondLatch.AbortWriteLock();
+                        firstLatch.AbortWriteLock();
                         return false;
                     }
 
@@ -162,8 +223,8 @@ internal abstract partial class BTree<TKey, TStore>
                     if (ni >= 0)
                     {
                         // newKey already exists — fail without modification
-                        secondLatch.WriteUnlock();
-                        firstLatch.WriteUnlock();
+                        secondLatch.AbortWriteLock();
+                        firstLatch.AbortWriteLock();
                         return false;
                     }
                     ni = ~ni;
@@ -273,7 +334,8 @@ internal abstract partial class BTree<TKey, TStore>
                     continue;
                 }
 
-                var (newLeafId, newVersion, _) = OptimisticDescendToLeaf(newKey, ref opAccessor);
+                // followRightLink: false, for the same reason as Move — see the note there. This is the AllowMultiple twin and carries the identical hole.
+                var (newLeafId, newVersion, _) = OptimisticDescendToLeaf(newKey, ref opAccessor, false);
                 if (newLeafId == 0)
                 {
                     Interlocked.Increment(ref _optimisticRestarts);
@@ -294,7 +356,16 @@ internal abstract partial class BTree<TKey, TStore>
 
                     if (!latch.ValidateVersion(oldVersion | 1))
                     {
-                        latch.WriteUnlock();
+                        latch.AbortWriteLock();
+                        Interlocked.Increment(ref _optimisticRestarts);
+                        continue;
+                    }
+
+                    // Leaf authority for newKey, asked BEFORE the buffer mutation below — past that point a bail has to undo storage writes, which is why this
+                    // sits here rather than next to the Insert call it protects.
+                    if (KeyOutsideLeafAuthority(leaf, newKey, Comparer, ref opAccessor))
+                    {
+                        latch.AbortWriteLock();
                         Interlocked.Increment(ref _optimisticRestarts);
                         continue;
                     }
@@ -303,7 +374,7 @@ internal abstract partial class BTree<TKey, TStore>
                     var oi = leaf.Find(oldKey, Comparer, ref opAccessor);
                     if (oi < 0)
                     {
-                        latch.WriteUnlock();
+                        latch.AbortWriteLock();
                         oldHeadBufferId = -1;
                         newHeadBufferId = -1;
                         return -1;
@@ -407,15 +478,15 @@ internal abstract partial class BTree<TKey, TStore>
                     var secondLatch = secondLeaf.GetLatch(ref opAccessor);
                     if (!secondLatch.TryWriteLock())
                     {
-                        firstLatch.WriteUnlock();
+                        firstLatch.AbortWriteLock();
                         Interlocked.Increment(ref _optimisticRestarts);
                         continue;
                     }
 
                     if (!firstLatch.ValidateVersion(firstVersion | 1) || !secondLatch.ValidateVersion(secondVersion | 1))
                     {
-                        secondLatch.WriteUnlock();
-                        firstLatch.WriteUnlock();
+                        secondLatch.AbortWriteLock();
+                        firstLatch.AbortWriteLock();
                         Interlocked.Increment(ref _optimisticRestarts);
                         continue;
                     }
@@ -423,14 +494,23 @@ internal abstract partial class BTree<TKey, TStore>
                     var oldLeaf = oldLeafId == firstId ? firstLeaf : secondLeaf;
                     var newLeaf = oldLeafId == firstId ? secondLeaf : firstLeaf;
 
+                    // Leaf authority for newKey — the fourth and last write site that lacked it.
+                    if (KeyOutsideLeafAuthority(newLeaf, newKey, Comparer, ref opAccessor))
+                    {
+                        secondLatch.AbortWriteLock();
+                        firstLatch.AbortWriteLock();
+                        Interlocked.Increment(ref _optimisticRestarts);
+                        continue;
+                    }
+
                     // Pre-check: if newLeaf is full and newKey doesn't exist, bail to pessimistic (we'd need to insert a new entry which could cause overflow)
                     if (newLeaf.GetIsFull(ref opAccessor))
                     {
                         var preNi = newLeaf.Find(newKey, Comparer, ref opAccessor);
                         if (preNi < 0)
                         {
-                            secondLatch.WriteUnlock();
-                            firstLatch.WriteUnlock();
+                            secondLatch.AbortWriteLock();
+                            firstLatch.AbortWriteLock();
                             break; // fall to pessimistic
                         }
                     }
@@ -439,8 +519,8 @@ internal abstract partial class BTree<TKey, TStore>
                     var oi = oldLeaf.Find(oldKey, Comparer, ref opAccessor);
                     if (oi < 0)
                     {
-                        secondLatch.WriteUnlock();
-                        firstLatch.WriteUnlock();
+                        secondLatch.AbortWriteLock();
+                        firstLatch.AbortWriteLock();
                         oldHeadBufferId = -1;
                         newHeadBufferId = -1;
                         return -1;

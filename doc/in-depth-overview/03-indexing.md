@@ -335,7 +335,7 @@ These are **payload-less spans** — 37 B header, 53 B with trace context. The e
 ## See also
 
 - [01-foundation](01-foundation.md) — `OlcLatch`/`SpinWait`/`EpochManager` are described in their primitive form; this doc shows how the BTree composes them.
-- [`rules/indexing.md`](https://github.com/Log2n-io/Typhon/blob/main/claude/rules/indexing.md) — what a range scan owes its caller under OLC: strictly monotonic keys, resume by key rather than by leaf position, and re-descend on an obsolete leaf rather than spin (`IXS-01..03`).
+- [`rules/indexing.md`](https://github.com/Log2n-io/Typhon/blob/main/rules/indexing.md) — what a range scan owes its caller under OLC: strictly monotonic keys, resume by key rather than by leaf position, and re-descend on an obsolete leaf rather than spin (`IXS-01..03`).
 - [02-storage](02-storage.md) — `IPageStore`, `ChunkBasedSegment`, `ChunkAccessor`. BTree nodes are chunks; everything here is built on top of those.
 - [05-revision](05-revision.md) — MVCC revision chains. They are **not** B+Tree-addressed: `CompRevTableSegment` is a plain `ChunkBasedSegment<PersistentStore>`, and the temporal index that once tied the two together was removed in #666, so point-in-time reads walk the chain directly. What the B+Tree contributes is `RemoveValue`, the element-precise delete that removes exactly one entity from a multi-value key's buffer without evicting its siblings.
 - [12-observability](12-observability.md) — typed event kinds, gating, span shapes (`BTreeInsertEvent` et al.).

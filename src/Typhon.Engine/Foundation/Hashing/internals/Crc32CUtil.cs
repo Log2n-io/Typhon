@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics.X86;
@@ -16,8 +17,14 @@ namespace Typhon.Engine.Internals;
 /// Castagnoli polynomial required for database checksums is only available via the SSE4.2/ARM hardware intrinsics directly.
 /// </para>
 /// <para>
-/// Performance: ~1.3us per 8KB page (sequential) on SSE4.2 x64. The CRC32 instruction has 3-cycle latency but 1-cycle throughput,
-/// yielding ~8 bytes/3 cycles at ~4 GHz.
+/// Performance: ~670 ns per 8 KiB page as a single sequential chain on SSE4.2 x64 (measured, Zen 4 @ 4.5 GHz). The CRC32 instruction has
+/// 3-cycle latency but 1-cycle throughput, so a single chain is <b>latency-bound</b> at ~8 bytes / 3 cycles and leaves most of the unit idle.
+/// Splitting the same 8 KiB into independent regions breaks the dependency and is materially faster — 16 × 512 B measures ~500 ns — which is
+/// why <see cref="PageSectorFooter"/> costs less than the whole-page checksum it replaces rather than more.
+/// </para>
+/// <para>
+/// Detection strength is also better at smaller block sizes: CRC-32C holds HD=6 only up to 2045-byte datawords, so an 8 KiB dataword is HD=4
+/// (all &lt;= 3-bit errors caught) while a 512-byte one is HD=6 (all &lt;= 5-bit errors, plus every burst &lt;= 32 bits).
 /// </para>
 /// </remarks>
 internal static class Crc32CUtil
@@ -52,6 +59,49 @@ internal static class Crc32CUtil
         if (afterSkip < data.Length)
         {
             crc = ComputePartial(crc, data[afterSkip..]);
+        }
+
+        return crc ^ 0xFFFFFFFF;
+    }
+
+    /// <summary>
+    /// Compute CRC32C over a data span, skipping <b>two</b> disjoint regions that are treated as zeros.
+    /// </summary>
+    /// <remarks>
+    /// Needed by the per-sector page footer: sector 0 carries both the page's own checksum field and the sector array
+    /// itself, and each is written after the value that covers it — so both must be excluded from the sector's own CRC.
+    /// The two regions must not overlap and must be given in ascending offset order.
+    /// </remarks>
+    /// <param name="data">The complete data span including both skip regions.</param>
+    /// <param name="skip0Offset">Byte offset of the first region to skip.</param>
+    /// <param name="skip0Length">Length of the first skip region.</param>
+    /// <param name="skip1Offset">Byte offset of the second region to skip; must be at or after the end of the first.</param>
+    /// <param name="skip1Length">Length of the second skip region.</param>
+    public static uint ComputeSkippingPair(ReadOnlySpan<byte> data, int skip0Offset, int skip0Length, int skip1Offset, int skip1Length)
+    {
+        Debug.Assert(skip1Offset >= skip0Offset + skip0Length, "Skip regions must be disjoint and ascending.");
+
+        uint crc = 0xFFFFFFFF;
+
+        if (skip0Offset > 0)
+        {
+            crc = ComputePartial(crc, data[..skip0Offset]);
+        }
+
+        crc = ComputePartialZeros(crc, skip0Length);
+
+        var afterFirst = skip0Offset + skip0Length;
+        if (skip1Offset > afterFirst)
+        {
+            crc = ComputePartial(crc, data[afterFirst..skip1Offset]);
+        }
+
+        crc = ComputePartialZeros(crc, skip1Length);
+
+        var afterSecond = skip1Offset + skip1Length;
+        if (afterSecond < data.Length)
+        {
+            crc = ComputePartial(crc, data[afterSecond..]);
         }
 
         return crc ^ 0xFFFFFFFF;

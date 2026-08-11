@@ -54,7 +54,7 @@ existing labels, current Issue Type, and the `number`/`id`. For a sweep, first
 
 ### 2. Analyze against the source of truth
 - Read the code paths the report implicates (`file:line`), the relevant `claude/` design docs and
-  `claude/rules/` invariants, and any related tests. **Docs are the source of truth — read them before
+  `rules/` invariants, and any related tests. **Docs are the source of truth — read them before
   reasoning** (see root `CLAUDE.md`).
 - Cross-check `test/Typhon.Engine.Tests/QUARANTINE.md` and existing issues for known / duplicate reports.
 - Try to reproduce the claim mentally (or with a quick POC per `CLAUDE.md`) and cite concrete evidence.

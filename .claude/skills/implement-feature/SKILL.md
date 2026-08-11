@@ -73,7 +73,7 @@ From the design doc + the selected scope, construct an implementation plan. The 
 2. **Acceptance Criteria** — a numbered, checkable list. *Completion is defined as every AC met.* Each AC must be concrete and verifiable — a specific behavior, API, file, or passing test — never vague.
 3. **Implementation details** — the files, types, and changes mapped to each AC; the approach and the order of work; integration points. Grounded in the design doc. Any deviation from the design MUST be called out explicitly and approved (root `CLAUDE.md`: never deviate from specs silently).
 4. **Tests** — the tests to write so the feature is *proven to work* and *protected from regression*: unit tests per AC, plus integration / Playwright tests where the design calls for them. Follow Typhon test conventions — NUnit, `TestBase<T>`, `scripts/test-affected.py`, the 15 s timeout rule, full suite before done (root `CLAUDE.md`).
-5. **Code review gate** — an explicit final step: before the scope is declared complete, a code review **MUST** be performed and **pass** (correctness, AC coverage, quality, adherence to `.editorconfig` + `CLAUDE.md` standards, no `claude/rules/` invariant violated).
+5. **Code review gate** — an explicit final step: before the scope is declared complete, a code review **MUST** be performed and **pass** (correctness, AC coverage, quality, adherence to `.editorconfig` + `CLAUDE.md` standards, no `rules/` invariant violated).
 
 Draft the plan and present it for approval using **plan mode** — call `ExitPlanMode` with the full plan. **Implementation must not begin until the user approves the plan.** If the user requests changes, revise and re-present.
 
@@ -124,7 +124,7 @@ Develop autonomously, but **STOP and talk to the user** the moment an *important
 - An Acceptance Criterion cannot be met as specified.
 - A required dependency, API, or a prior phase the work depends on is missing or broken.
 - Implementation reveals the design itself is wrong or infeasible.
-- The only way forward would violate a `claude/rules/` correctness invariant or a coding standard, with no clean path.
+- The only way forward would violate a `rules/` correctness invariant or a coding standard, with no clean path.
 
 When this happens: **stop. Do not hack around it.** Clearly state the impediment, the options you see, and your recommendation — then engage the user in conversation to find a solution together. Resume autonomous development once it is resolved.
 

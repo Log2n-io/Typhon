@@ -66,6 +66,23 @@ internal static class Program
                     .WithExample(["docs"])
                     .WithExample(["docs", "guide/getting-started"]);
 
+                // `typhon check <bundle>` reports what is wrong with a database without changing a byte of it, and carries
+                // the verdict in its exit code (0 sound · 1 leaks · 2 divergent · 3 data loss · 4 unopenable · 64 scan
+                // failed) so it drops straight into cron or a CI gate. It reads the bundle as bytes with no engine, which
+                // is what lets it diagnose the database that will not open — the case that most justifies having it.
+                config.AddCommand<CheckCommand>("check")
+                    .WithDescription("Check a database's integrity and report what is wrong. Read-only.")
+                    .WithExample(["check", "game.typhon"])
+                    .WithExample(["check", "game.typhon", "--depth", "deep"])
+                    .WithExample(["check", "game.typhon", "--format", "json", "--out", "report.json"]);
+
+                // `typhon repair <bundle>` is two steps on purpose: --plan writes a reviewable description and mutates
+                // nothing, --apply re-scans and refuses if the database moved since the plan was made.
+                config.AddCommand<RepairCommand>("repair")
+                    .WithDescription("Plan and apply a repair, with an explicit account of anything it would cost.")
+                    .WithExample(["repair", "game.typhon", "--plan"])
+                    .WithExample(["repair", "game.typhon", "--apply"]);
+
                 // `typhon telemetry …` authors typhon.telemetry.json in the working directory (#522). Scriptable
                 // verbs over the source-generated flag catalog; the interactive tree lives under `edit`.
                 config.AddBranch("telemetry", tel =>

@@ -248,4 +248,4 @@ worst-case stress configuration. See
 - [`claude/overview/13-runtime.md`](../../../claude/overview/13-runtime.md) — the scheduler and system dispatch this demo exercises
 - [`claude/design/Runtime/07-system-access-declarations.md`](../../../claude/design/Runtime/07-system-access-declarations.md) — how access declarations become a DAG
 - [`claude/overview/04-data.md`](../../../claude/overview/04-data.md) — MVCC, component tables, storage modes
-- [`claude/rules/runtime-scheduling.md`](../../../claude/rules/runtime-scheduling.md) — the invariants the schedule is validated against at startup
+- [`rules/runtime-scheduling.md`](../../../rules/runtime-scheduling.md) — the invariants the schedule is validated against at startup

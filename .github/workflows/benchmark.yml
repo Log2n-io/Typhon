@@ -29,6 +29,11 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       github.event.label.name == 'run-benchmark'
     runs-on: ubuntu-latest
+    # ---- COST FAIL-SAFE (#729, 2026-08-09). ----
+    # `sky launch` holds a billed VM for exactly as long as this job runs, and an uncapped job inherits GitHub's
+    # 360-minute default — so a hang here strands a z1d.metal — the most expensive instance any workflow here launches for six hours. Opt-in-only triggers make that unlikely,
+    # not impossible, and the cost of being wrong is the whole point of capping it.
+    timeout-minutes: 120
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -48,6 +53,12 @@ jobs:
           sky launch bench/aws/benchmark.sky.yaml --down -y \
             --env PROFILE="$PROFILE" \
             --env RUN_ID=${{ github.run_id }}
+
+      # `--down` only fires on a normal exit. A step timeout or a cancelled run kills sky mid-flight and strands the VM,
+      # billing with nothing watching it. This runs on every path, including cancellation, and no-ops if it is already gone.
+      - name: Tear down the VM (always, including on timeout or cancel)
+        if: always()
+        run: sky down -y typhon-benchmark || true
 
       - name: Pull results from S3
         if: always()

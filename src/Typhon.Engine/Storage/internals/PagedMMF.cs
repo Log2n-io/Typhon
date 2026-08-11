@@ -13,6 +13,7 @@ using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics.X86;
 using System.Text.Json;
 using System.Threading;
@@ -71,7 +72,11 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     // cluster record finds ClusterChunkId where Location[0] lived, and a v4 index leaf read as a ClusterLocation
     // resolves to a plausible-looking but wrong cluster slot. Both silently serve corrupt data rather than failing.
     // Pre-alpha means no migration is owed — it does NOT mean a stale file may open and answer wrongly.
-    internal const int DatabaseFormatRevision   = 5;
+    // 6: per-sector page verification (PageSectorFooter). A page that declares sector geometry stores a CRC32C + currency
+    //    stamp per 512 B sector in the free tail of its metadata region, and its PageChecksum field becomes a CRC over that
+    //    footer rather than over the whole page. A revision-5 reader would compute a whole-page checksum and report every
+    //    such page as corrupt, so the bump is what turns a confusing false alarm into a clean "incompatible format" refusal.
+    internal const int DatabaseFormatRevision   = 7;
     internal const ulong MinimumCacheSize       = MinimumMemPageCount * PageSize;      // 8 MiB — the hard floor (see Validate)
     internal const ulong DefaultDatabaseCacheSize   = 256UL * 1024 * 1024;             // 256 MiB — the shipped production default
     internal const ulong RecommendedMinimumCacheSize = 64UL * 1024 * 1024;             // 64 MiB — warn below this (unless TestMode)
@@ -649,6 +654,11 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     private void LoadFile()
     {
+        // Verify BEFORE taking a handle, so a structurally-broken database is never touched at all. The clean-shutdown
+        // flag says the last process closed properly; it says nothing about whether the bytes are still correct, and
+        // damage that happens while a database is closed is otherwise served silently.
+        VerifyOnOpen();
+
         // Create the Files
         var filePathName = Options.BuildDatabasePathFileName();
         _fileHandle = File.OpenHandle(filePathName, FileMode.Open, FileAccess.ReadWrite, FileShare.Read, FileOptions.Asynchronous | FileOptions.RandomAccess);
@@ -667,6 +677,86 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     {
         var handler = LoadingEvent;
         handler?.Invoke(this, null!);
+    }
+
+    /// <summary>
+    /// Runs the configured open-time verification, if this store has a structural spine to verify.
+    /// </summary>
+    /// <remarks>
+    /// A no-op on the base paged file, which is a bare page container: it has no meta pair, no bootstrap dictionary and no
+    /// occupancy segment, so every spine check would be asking about structures that were never supposed to exist. Only
+    /// <see cref="ManagedPagedMMF"/> — the layer that owns those structures — overrides this. Getting that split wrong
+    /// makes verification report a healthy raw file as unopenable, which is the worst possible failure mode for a feature
+    /// whose entire value is that its findings can be trusted.
+    /// </remarks>
+    protected virtual void VerifyOnOpen()
+    {
+    }
+
+    /// <summary>
+    /// Verifies a bundle's structural spine before it is opened and refuses the open on a
+    /// <see cref="IntegritySeverity.Fatal"/> finding.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A <c>Fatal</c> finding means the spine is broken — both meta slots invalid, an unparseable bootstrap, a segment
+    /// pointer that does not resolve. Opening anyway is the most harmful possible response: the engine follows those
+    /// pointers into garbage. Lesser findings do <b>not</b> block the open, because a database with a divergent index is
+    /// still a working database and refusing it would be the cure being worse than the disease; they are logged so the
+    /// operator learns about them.
+    /// </para>
+    /// <para>
+    /// The scan is skipped when the bundle cannot be read, since there is then nothing to verify — verification must never
+    /// be the thing that breaks an open it was meant to protect.
+    /// </para>
+    /// </remarks>
+    protected void VerifyBundleSpineOnOpen()
+    {
+        var mode = Options.VerifyOnOpen;
+        if (mode == OpenVerification.None)
+        {
+            LogOpenVerificationDisabled();
+            return;
+        }
+
+        var depth = mode switch
+        {
+            OpenVerification.Quick => ScanDepth.Quick,
+            OpenVerification.Standard => ScanDepth.Standard,
+            _ => ScanDepth.Spine
+        };
+
+        IntegrityReport report;
+        try
+        {
+            using var source = new OfflineBundlePageSource(Options.BundleDirectory);
+            report = IntegrityScanner.Scan(source, new IntegrityOptions { Depth = depth });
+        }
+        catch (Exception ex) when (ex is IOException or DirectoryNotFoundException or FileNotFoundException or UnauthorizedAccessException)
+        {
+            // Nothing to verify (a fresh or non-bundle store, or a file another process is exclusively holding). The
+            // ordinary open path reports those far better than a checker would.
+            return;
+        }
+
+        var fatal = 0;
+        for (var i = 0; i < report.Findings.Count; i++)
+        {
+            if (report.Findings[i].Severity == IntegritySeverity.Fatal)
+            {
+                fatal++;
+            }
+        }
+
+        if (fatal > 0)
+        {
+            throw new DatabaseIntegrityException(report);
+        }
+
+        if (report.Findings.Count > 0)
+        {
+            LogOpenVerificationFindings(report.Findings.Count, report.Verdict.ToString());
+        }
     }
     
     public bool IsDatabaseFileCreating { get; }
@@ -1499,19 +1589,19 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // Read stored CRC from the page header
             var pageAddr = (PageBaseHeader*)(_memPagesAddr + (memPageIndex * (long)PageSize));
             var storedCrc = pageAddr->PageChecksum;
+            var pageSpan = new ReadOnlySpan<byte>((byte*)pageAddr, PageSize);
 
-            // CRC == 0 means the page has never been checkpointed (pre-FPI pages) — skip
-            if (storedCrc == 0)
+            // CRC == 0 means the page has never been checkpointed — skip. The sentinel only applies to whole-page
+            // checksumming: a page carrying a per-sector footer was definitionally written by the stamping path, so its
+            // checksum field is a footer CRC that may legitimately be any value including zero.
+            var sectorCount = PageSectorFooter.ReadSectorCount(pageSpan);
+            if (storedCrc == 0 && sectorCount == 0)
             {
                 pi.CrcVerified = true;
                 return;
             }
 
-            // Compute CRC over the page, skipping the checksum field itself
-            var pageSpan = new ReadOnlySpan<byte>((byte*)pageAddr, PageSize);
-            var computedCrc = Crc32CUtil.ComputeSkipping(pageSpan, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
-
-            if (computedCrc == storedCrc)
+            if (VerifyPageImage(pageSpan, out var computedCrc))
             {
                 pi.CrcVerified = true;
                 return;
@@ -1535,6 +1625,71 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         {
             pi.StateSyncRoot.ExitExclusiveAccess();
         }
+    }
+
+    /// <summary>
+    /// Stamps a page image's identity and integrity fields immediately before it is written to disk.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Two things are stamped. The page's own <b>logical index</b>, which makes a misdirected write — a page landing at the
+    /// wrong file offset — detectable with certainty; without it such a write is invisible, because the page's checksum is
+    /// perfectly valid and it is simply the wrong page.
+    /// </para>
+    /// <para>
+    /// And the <b>checksum</b>, in whichever form the page declared at initialisation. A page that declared per-sector
+    /// geometry gets one CRC32C per sector plus a currency stamp, and its <c>PageChecksum</c> field becomes a CRC over that
+    /// footer — so the array protecting the sectors is itself protected. A page that declared none keeps the single
+    /// whole-page checksum. The per-sector form is not merely finer, it is also <i>cheaper</i>: independent CRC chains
+    /// break the <c>crc32</c> instruction's 3-cycle latency dependency that makes one 8 KiB chain leave the execution unit
+    /// mostly idle.
+    /// </para>
+    /// <para>
+    /// Callers must have advanced <see cref="PageBaseHeader.ChangeRevision"/> first — the per-sector currency stamp is
+    /// derived from it.
+    /// </para>
+    /// </remarks>
+    /// <param name="page">The page image about to be written.</param>
+    /// <param name="logicalPageIndex">The page's logical file-page index.</param>
+    /// <param name="allowSectorFooter">
+    /// <c>false</c> for A/B protected pages. They are already covered against a torn write by their twin, so the finer
+    /// granularity buys nothing, and keeping them on the whole-page checksum leaves the pair-selection predicate untouched.
+    /// </param>
+    internal static void StampPageForWrite(Span<byte> page, int logicalPageIndex, bool allowSectorFooter = true)
+    {
+        PageSectorFooter.StampFilePageIndex(page, logicalPageIndex);
+
+        var sectors = allowSectorFooter ? PageSectorFooter.ReadSectorCount(page) : 0;
+        if (sectors > 0)
+        {
+            PageSectorFooter.Stamp(page, sectors);
+            return;
+        }
+
+        var crc = Crc32CUtil.ComputeSkipping(page, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+        MemoryMarshal.Write(page[PageBaseHeader.PageChecksumOffset..], in crc);
+    }
+
+    /// <summary>
+    /// Verifies a page image the same way <see cref="StampPageForWrite"/> stamped it, honouring the page's own declared
+    /// geometry so a reader never has to consult a directory to know how to check a page.
+    /// </summary>
+    /// <param name="page">The page image.</param>
+    /// <param name="computed">Receives the computed whole-page checksum when the page uses that form; <c>0</c> otherwise.</param>
+    /// <returns><c>true</c> when the page verifies.</returns>
+    internal static bool VerifyPageImage(ReadOnlySpan<byte> page, out uint computed)
+    {
+        var sectors = PageSectorFooter.ReadSectorCount(page);
+        if (sectors == 0)
+        {
+            computed = Crc32CUtil.ComputeSkipping(page, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+            return computed == MemoryMarshal.Read<uint>(page[PageBaseHeader.PageChecksumOffset..]);
+        }
+
+        computed = 0;
+        Span<bool> sectorOk = stackalloc bool[PageSectorFooter.MaxSectorCount];
+        PageSectorFooter.Verify(page, sectors, sectorOk, out var failed);
+        return failed == 0;
     }
 
     /// <summary>
@@ -1965,7 +2120,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 }
                 else
                 {
-                    stagingHeader->PageChecksum = Crc32CUtil.ComputeSkipping(staging.Span, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+                    StampPageForWrite(staging.Span, filePageIndex);
                 }
             }
 
@@ -2023,24 +2178,38 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         // The common structural flush touches ZERO protected pages (pure data), so scan first — a cheap dictionary probe per
         // page, no allocation — and only build the partitioned `normalPages` list when a protected page is actually present.
         // (The previous version allocated a full-length List<int> on EVERY flush and discarded it whenever protectedCount==0.)
+        // The same partition must ALSO exclude externally-persisted pages (the CK-05 meta pair). They are written only by
+        // PersistMetaNow, which alternates slots and stamps a fresh CRC; the in-place path below skips the CRC stamp for
+        // file page 0 (its `FilePageIndex > 0` guard) but did NOT skip the WRITE, so a structural flush that happened to
+        // carry logical page 0 overwrote meta slot 0 with an image whose stored checksum no longer matched its content.
+        // The pair then silently ran on one copy: the surviving slot still opened the database, so nothing complained —
+        // until that slot tore too, at which point BOTH slots read invalid and the database became permanently unopenable.
+        // That is precisely the failure CK-05 exists to make impossible, so the exclusion belongs here and not only in
+        // CollectDirtyMemPageIndices (which had it all along — this path is fed by a ChangeSet, not by that scan).
         int[] normalPages = memPageIndices;
-        var hasProtected = false;
+        var needsPartition = false;
         for (int i = 0; i < memPageIndices.Length; i++)
         {
             var filePageIdx = _memPagesInfo[memPageIndices[i]].FilePageIndex;
-            if (filePageIdx > 0 && IsProtectedPage(filePageIdx))
+            if (IsExternallyPersisted(filePageIdx) || (filePageIdx > 0 && IsProtectedPage(filePageIdx)))
             {
-                hasProtected = true;
+                needsPartition = true;
                 break;
             }
         }
 
-        if (hasProtected)
+        if (needsPartition)
         {
             var normal = new List<int>(memPageIndices.Length);
             for (int i = 0; i < memPageIndices.Length; i++)
             {
                 var pi = _memPagesInfo[memPageIndices[i]];
+                if (IsExternallyPersisted(pi.FilePageIndex))
+                {
+                    // Owned by PersistMetaNow. Not written here at all — the continuation still releases its DirtyCounter.
+                    continue;
+                }
+
                 if (pi.FilePageIndex > 0 && IsProtectedPage(pi.FilePageIndex))
                 {
                     // Wait for any pending IO read so the live page is complete, bump ChangeRevision, then redirect the write.
@@ -2100,9 +2269,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 var headerAddr = (PageBaseHeader*)(memPageBaseAddr + (curPageInfo.MemPageIndex * PageSize));
                 ++headerAddr->ChangeRevision;
 
-                // Compute CRC over the updated page so the on-disk copy is self-consistent (CP-07 equivalent for SavePages)
-                var pageSpan = new ReadOnlySpan<byte>((byte*)headerAddr, PageSize);
-                headerAddr->PageChecksum = Crc32CUtil.ComputeSkipping(pageSpan, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+                // Stamp identity + checksum over the updated page so the on-disk copy is self-consistent (CP-07 equivalent for SavePages)
+                StampPageForWrite(new Span<byte>((byte*)headerAddr, PageSize), curPageInfo.FilePageIndex);
             }
 
             var nextMemPageIndex = normalPages[i];
@@ -2134,8 +2302,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             var headerAddr = (PageBaseHeader*)(memPageBaseAddr + (curPageInfo.MemPageIndex * PageSize));
             ++headerAddr->ChangeRevision;
 
-            var pageSpan = new ReadOnlySpan<byte>((byte*)headerAddr, PageSize);
-            headerAddr->PageChecksum = Crc32CUtil.ComputeSkipping(pageSpan, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+            StampPageForWrite(new Span<byte>((byte*)headerAddr, PageSize), curPageInfo.FilePageIndex);
         }
 
         // Don't forget to add the last operation

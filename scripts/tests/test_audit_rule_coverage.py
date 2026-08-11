@@ -182,18 +182,17 @@ class TestRatchet(AuditCase):
         self.assertEqual(self.run_audit(), 1)
 
 
-class TestForkSafety(AuditCase):
-    def test_absent_rules_dir_without_the_flag_is_a_usage_error(self):
+class TestMissingRules(AuditCase):
+    def test_absent_rules_dir_is_a_usage_error(self):
+        """There is no longer any legitimate reason for `rules/` to be absent, so absence is a broken checkout.
+
+        This used to have a sibling covering `--skip-if-no-rules`, which let a fork PR — where GitHub withholds
+        the secret needed to check out the then-private rule database — exit 0 rather than red out. `rules/` is
+        in this repository now (#747), so a fork checkout has it like everyone else and the hatch is gone.
+        """
         rc = audit.main(["--rules-dir", os.path.join(self.tmp.name, "nope"),
                          "--tests-dir", self.tests, "--baseline", self.baseline, "--matrix", self.matrix])
         self.assertEqual(rc, 2)
-
-    def test_absent_rules_dir_with_the_flag_skips_cleanly(self):
-        """Fork PRs cannot check out the private knowledge base; the job must skip, not red-out."""
-        rc = audit.main(["--rules-dir", os.path.join(self.tmp.name, "nope"),
-                         "--tests-dir", self.tests, "--baseline", self.baseline, "--matrix", self.matrix,
-                         "--skip-if-no-rules"])
-        self.assertEqual(rc, 0)
 
 
 if __name__ == "__main__":

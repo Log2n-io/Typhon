@@ -86,4 +86,4 @@ catch (CorruptionException ex)
 <!-- Deep dive: claude/overview/06-durability.md §6.5 -->
 <!-- Design: claude/design/Durability/MinimalWal/03-recovery.md -->
 <!-- Testing strategy: claude/design/Durability/crash-recovery-testing.md (recovery *model* section is historical — see its banner; the deterministic fault-injection *approach* shipped) -->
-<!-- Rules: claude/rules/durability.md — modules LOG, AP -->
+<!-- Rules: rules/durability.md — modules LOG, AP -->

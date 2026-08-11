@@ -73,4 +73,4 @@ foreach (var hit in dbe.ClusterSpatialQuery<UnitArch>().AABB(box, categoryMask: 
 - Related catalog entry: [Spatial Query API](./spatial-query-api.md), [Spatial Query Predicates](../Querying/spatial-predicates.md)
 
 <!-- Deep dive: claude/design/Spatial/SpatialIndex/08-game-features.md (Feature F1 — Category Filtering: design rationale, bit-width choice, node-layout impact) -->
-<!-- Rules: claude/rules/spatial.md (ST-02 union mask correctness, SQ-01/SQ-02 query completeness and AND-conjunctive semantics) -->
+<!-- Rules: rules/spatial.md (ST-02 union mask correctness, SQ-01/SQ-02 query completeness and AND-conjunctive semantics) -->

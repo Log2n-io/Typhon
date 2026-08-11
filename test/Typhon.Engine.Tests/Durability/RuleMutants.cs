@@ -28,7 +28,7 @@ internal static class RuleMutants
     /// Asserts that <paramref name="violatingScenario"/> — a scenario that breaks <paramref name="ruleId"/> — is
     /// rejected by the verifier's own assertion, identified by <paramref name="expectedFailureMarker"/>.
     /// </summary>
-    /// <param name="ruleId">The rule from <c>claude/rules/</c> whose verifier is being proven falsifiable.</param>
+    /// <param name="ruleId">The rule from <c>rules/</c> whose verifier is being proven falsifiable.</param>
     /// <param name="expectedFailureMarker">
     /// A distinctive substring of the message the VERIFIER emits when it rejects. This is the positive evidence:
     /// it must come from the assertion under test, not from the mutant's own scaffolding, or the check degenerates

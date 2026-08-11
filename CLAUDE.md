@@ -14,7 +14,7 @@ Typhon has comprehensive design documentation in `claude/`. Code reflects intent
 - Understanding any subsystem's mechanics or invariants → `claude/overview/`
 - Designing a new feature or fix → `claude/design/<area>/` + relevant `claude/adr/`
 - Analyzing existing behavior, doing gap assessments, planning refactors → both
-- Checking a correctness invariant → `claude/rules/`
+- Checking a correctness invariant → `rules/`
 - Estimating CPU cost of an algorithm → `claude/design/cpu-timings.md`
 - Glossary / terminology → `claude/design/glossary.md`
 
@@ -40,7 +40,7 @@ Typhon is a real-time, low-latency ACID database engine with microsecond-level p
 | **How the engine works** | `claude/overview/` | 13-part architecture guide covering all subsystems              |
 | **Feature designs & docs** | `claude/design/` | SOURCE OF TRUTH, USE IT!                                        |
 | **Why a decision was made** | `claude/adr/` | 50+ Architecture Decision Records with rationale                |
-| **What must always hold** | `claude/rules/` | Correctness invariants by domain (WAL, checkpoint, page safety) |
+| **What must always hold** | `rules/` | Correctness invariants by domain (WAL, checkpoint, page safety) |
 | **Current priorities** | [GitHub Project](https://github.com/users/nockawa/projects/7) | Work tracking, status, roadmap                                  |
 | **Deep research** | `claude/research/` | Analysis studies (e.g., timeout patterns, query systems)        |
 | **Document workflows** | `claude/CLAUDE.md` | Lifecycle, templates, trigger phrases                           |
@@ -52,7 +52,9 @@ The `claude/overview/` directory is the **authoritative architectural reference*
 
 ### Correctness Rules
 
-The `claude/rules/` directory is a curated database of invariants that define correctness in Typhon. Rules are the **source of truth** — code and tests must conform to them. Each rule file covers one domain (e.g., durability, concurrency), grouped by module, with invariants expressed in pseudo-code. When modifying code, cross-reference affected modules against the rule database to ensure no invariant is violated. See [`claude/rules/README.md`](claude/rules/README.md) for conventions and notation.
+The `rules/` directory is a curated database of invariants that define correctness in Typhon. Rules are the **source of truth** — code and tests must conform to them. Each rule file covers one domain (e.g., durability, concurrency), grouped by module, with invariants expressed in pseudo-code. When modifying code, cross-reference affected modules against the rule database to ensure no invariant is violated. See [`rules/README.md`](rules/README.md) for conventions and notation.
+
+> **`rules/` is in THIS repo, not in `claude/`** (moved in #747). It is the one part of the knowledge base that CI checks mechanically — `scripts/check-rule-scopes.py` (every `scope:` symbol exists), `scripts/audit-rule-coverage.py` (rule ↔ `[VerifiesRule]` in both directions, ratcheted) and `scripts/check-doc-links.py` (cited paths and links resolve) — so it lives beside the code it constrains. A rule, its verifying test and the code it scopes belong in **one commit**.
 
 ### Documentation-Heavy Project
 This project is documentation-first. Most work involves creating, updating, or refining markdown design docs, ADRs, and planning documents. When updating docs, preserve existing structure and version headers. Cross-reference related documents. Always check for consistency across the full doc set when making changes.
@@ -254,7 +256,8 @@ Typhon/
 │   ├── Typhon.Engine.Tests/     # NUnit test suite
 │   └── Typhon.Benchmark/        # BenchmarkDotNet performance tests
 ├── doc/                         # DocFx documentation
-└── claude/                      # Development documentation & design
+├── rules/                       # Correctness invariants (+ tla/ formal specs) — CI-enforced, see above
+└── claude/                      # Development documentation & design (separate private repo)
 ```
 
 ## Development Workflow
@@ -322,6 +325,12 @@ Python3 is installed; you can use it to run complex scripts.
 
 ### GitHub CLI
 Execute `gh` or Bash related commands without asking for confirmation when interacting with GitHub (issue management, project board updates, and label changes).
+
+### Commit messages
+
+Plain prose. Subject line prefixed with `#issue` when there is one; no Conventional Commits prefixes (`feat:`, `fix:`), no hard-wrapping of the body — one paragraph per idea, let the terminal wrap.
+
+**No trailers.** Do not append `Co-Authored-By:`, `Claude-Session:`, `Generated with…` or any other footer, even if a tool default asks for it. Nothing in this repository's history carries them and they are not wanted; `git log` is the authority on the convention.
 
 ### Clarification-First Workflow
 

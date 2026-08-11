@@ -92,6 +92,83 @@ public partial class DatabaseEngine
     [ThreadStatic]
     private static RecordCodec.FenceBlockDescriptor[] _fenceBlocks;
 
+    /// <summary>
+    /// Per-thread arena for the collection-content batch that accompanies a columnar fence (#389). Separate from <see cref="_fenceArena"/>: the two are
+    /// never live at once, but a cluster fence and a flat fence are different call paths and sharing one arena between them buys nothing.
+    /// </summary>
+    [ThreadStatic]
+    private static CommitBatchArena _fenceCollectionArena;
+
+    /// <summary>
+    /// Emits the full <c>ComponentCollection</c> content of every dirty entity in a cluster fence, as its own fence batch of CollectionDelta records.
+    /// </summary>
+    /// <remarks>
+    /// A second walk of the same dirty bits the block loop used. It could have been folded into that loop, but the block loop's job is to describe contiguous
+    /// slot RANGES for bulk copying, while this one is inherently per-entity and per-field — merging them would put a scalar-rate loop inside a bulk-rate one
+    /// for the benefit of the rare archetype that carries a collection at all.
+    /// </remarks>
+    private unsafe long AppendClusterCollectionContent(
+        ArchetypeEngineState engineState,
+        long[] dirtyBits,
+        ref ChunkAccessor<PersistentStore> accessor,
+        int entityIdsOffset,
+        ReadOnlySpan<int> slotIndices,
+        ReadOnlySpan<int> componentSizes,
+        ReadOnlySpan<int> componentOffsets,
+        long tickNumber)
+    {
+        var arena = _fenceCollectionArena ??= new CommitBatchArena();
+        arena.Reset();
+        var batch = new CommitBatchBuilder(arena, tickNumber, 0, fenceMode: true);
+        var batchBytes = 0;
+        long highestLSN = 0;
+
+        for (var wi = 0; wi < dirtyBits.Length; wi++)
+        {
+            var word = dirtyBits[wi];
+            while (word != 0)
+            {
+                var slotIdx = BitOperations.TrailingZeroCount((ulong)word);
+                word &= word - 1;
+
+                var clusterBase = accessor.GetChunkAddress(wi);
+                var entityId = *(long*)(clusterBase + entityIdsOffset + (slotIdx * sizeof(long)));
+                if (entityId == 0)
+                {
+                    continue;   // unoccupied cluster slot
+                }
+
+                for (var c = 0; c < slotIndices.Length; c++)
+                {
+                    var table = engineState.SlotToComponentTable[slotIndices[c]];
+                    if (!table.HasCollections)
+                    {
+                        continue;
+                    }
+
+                    var compSize = componentSizes[c];
+                    var value = new ReadOnlySpan<byte>(clusterBase + componentOffsets[c] + (slotIdx * compSize), compSize);
+                    batchBytes += CollectionContentEmitter.Emit(ref batch, table, entityId, (ushort)slotIndices[c], value);
+                }
+
+                if (batchBytes > MaxFenceBatchBytes)
+                {
+                    highestLSN = Math.Max(highestLSN, AppendFenceBatch(ref batch));
+                    arena.Reset();
+                    batch = new CommitBatchBuilder(arena, tickNumber, 0, fenceMode: true);
+                    batchBytes = 0;
+                }
+            }
+        }
+
+        if (!batch.IsEmpty)
+        {
+            highestLSN = Math.Max(highestLSN, AppendFenceBatch(ref batch));
+        }
+
+        return highestLSN;
+    }
+
     private long AppendFenceBlockBatch(
         RecordCodec.FenceBlockDescriptor[] blocks,
         int count,
@@ -101,12 +178,13 @@ public partial class DatabaseEngine
         ReadOnlySpan<int> slotIndices,
         ReadOnlySpan<int> componentSizes,
         ReadOnlySpan<int> componentOffsets,
-        int totalComponentSize)
+        int totalComponentSize,
+        ReadOnlySpan<ulong> columnHandleRanges)
     {
         var wc = WaitContext.FromDeadline(Deadline.FromTimeout(TimeoutOptions.Current.DefaultCommitTimeout));
         return DurabilityLog.AppendFenceBlocks(
             blocks.AsSpan(0, count), archetypeId, tickNumber, entityKeysOffset,
-            slotIndices, componentSizes, componentOffsets, totalComponentSize, ref wc);
+            slotIndices, componentSizes, componentOffsets, totalComponentSize, columnHandleRanges, ref wc);
     }
 
     /// <summary>
@@ -194,8 +272,15 @@ public partial class DatabaseEngine
 
                             // Wire identity is the per-archetype slot (LOG-06); resolve from this entity's archetype (routing id in the PK).
                             var slot = (ushort)GetMetaByRouting(EntityId.FromRaw(entityPk).ArchetypeId).GetSlot(componentTypeId);
-                            batch.AddSlot(entityPk, slot, src.Slice(overhead, stride));
+                            var value = src.Slice(overhead, stride);
+                            batch.AddSlot(entityPk, slot, value, table.CollectionHandleRanges);
                             batchBytes += recOverhead + stride;
+                            if (table.HasCollections)
+                            {
+                                // Mandatory, not opportunistic: the Slot payload's handle is zeroed (LOG-06), so applying it without a fold to follow would
+                                // empty a collection whose content was previously safe on the checkpoint timeline. See CollectionContentEmitter.
+                                batchBytes += CollectionContentEmitter.Emit(ref batch, table, entityPk, slot, value);
+                            }
                         }
                     }
 
@@ -910,6 +995,28 @@ public partial class DatabaseEngine
             compSizes = compSizes[..columnCount];
             compOffsets = compOffsets[..columnCount];
 
+            // LOG-06 for the columnar path: collect the collection-handle byte ranges of every emitted column so the codec can zero them out of the copied
+            // SoA bytes. A cluster slot carries no component overhead, so a field's value-relative offset IS its slot-relative one — the same identity that
+            // lets ClusterCollectionSlot share the table's descriptor. Almost always empty; the two loops cost nothing when it is.
+            var handleRangeCount = 0;
+            for (var c = 0; c < columnCount; c++)
+            {
+                handleRangeCount += engineState.SlotToComponentTable[slotIndices[c]].CollectionFields.Length;
+            }
+
+            Span<ulong> columnHandleRanges = handleRangeCount == 0 ? default : stackalloc ulong[handleRangeCount];
+            if (handleRangeCount > 0)
+            {
+                var hr = 0;
+                for (var c = 0; c < columnCount; c++)
+                {
+                    foreach (var f in engineState.SlotToComponentTable[slotIndices[c]].CollectionFields)
+                    {
+                        columnHandleRanges[hr++] = RecordCodec.PackColumnHandleRange(c, f.OffsetInComponentStorage, f.HandleSize);
+                    }
+                }
+            }
+
             // Columnar emission (#559): one FenceBlock record per dirty cluster instead of one Slot record per (entity, component).
             // A cluster's entity keys and each component's values are already contiguous in the SoA, so every part of the payload
             // is a single bulk copy — the codec copies straight out of the page into the WAL claim, with no staging arena.
@@ -936,7 +1043,7 @@ public partial class DatabaseEngine
                 if (blockCount > 0 && (batchBytes + recWire > MaxFenceBatchBytes || blockCount == blocks.Length))
                 {
                     highestLSN = Math.Max(highestLSN, AppendFenceBlockBatch(blocks, blockCount, meta.ArchetypeId, tickNumber,
-                        entityIdsOffset, slotIndices, compSizes, compOffsets, totalCompSize));
+                        entityIdsOffset, slotIndices, compSizes, compOffsets, totalCompSize, columnHandleRanges));
                     blockCount = 0;
                     batchBytes = 0;
                 }
@@ -949,7 +1056,17 @@ public partial class DatabaseEngine
             if (blockCount > 0)
             {
                 highestLSN = Math.Max(highestLSN, AppendFenceBlockBatch(blocks, blockCount, meta.ArchetypeId, tickNumber,
-                    entityIdsOffset, slotIndices, compSizes, compOffsets, totalCompSize));
+                    entityIdsOffset, slotIndices, compSizes, compOffsets, totalCompSize, columnHandleRanges));
+            }
+
+            // #389: the columnar record carries the SoA bytes with every collection handle zeroed, so on its own it would RESTORE a collection as empty —
+            // including one whose content was already safe on the checkpoint timeline. The content therefore rides alongside, in its own fence batch of
+            // CollectionDelta records. A separate Append rather than a new record kind inside the block: fence records are individually committed (LOG-04),
+            // so ordering between the two batches is by LSN, and recovery folds per (entity, slot, field) and flushes after the Slot apply regardless.
+            if (handleRangeCount > 0)
+            {
+                highestLSN = Math.Max(highestLSN, AppendClusterCollectionContent(
+                    engineState, dirtyBits, ref accessor, entityIdsOffset, slotIndices, compSizes, compOffsets, tickNumber));
             }
         }
         finally

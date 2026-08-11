@@ -96,4 +96,4 @@ schedule.QuerySystem("IdleDrift", ctx =>
 - Sibling: [Cluster Dormancy (Sleep/Wake)](../Runtime/spatial-tiers-adaptive-dispatch/cluster-dormancy.md) — same feature cataloged from the Runtime/dispatch angle rather than the spatial-grid angle
 
 <!-- Deep dive: claude/design/Spatial/SpatialTiers/03-tier-dispatch.md § Cluster-Level Dormancy -->
-<!-- Rules: claude/rules/spatial.md (module Dormancy, DM-01..DM-03) -->
+<!-- Rules: rules/spatial.md (module Dormancy, DM-01..DM-03) -->
