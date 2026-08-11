@@ -208,6 +208,12 @@ export interface RepairPlan {
   /** The full enumeration. This *is* the consent — never render a count in its place. */
   loss: LossEstimate[];
   unaddressed: string[];
+  /**
+   * Why applying is refused outright, or `null`. Deliberately not folded into `steps.length === 0`: an empty
+   * plan means nothing needs repairing, a blocked one means this build must not be the one to try, and
+   * showing the first message for the second case is the most misleading thing this panel could say.
+   */
+  blockedReason: string | null;
 }
 
 export interface RepairStepResult {
@@ -343,6 +349,9 @@ export function normalizePlan(raw: RepairPlanDto): RepairPlan {
     steps: list(raw.steps).map(normalizeStep).sort((a, b) => a.order - b.order),
     loss: list(raw.loss).map(normalizeLoss),
     unaddressed: list(raw.unaddressed),
+    // `str()` would flatten a missing reason to '', which is falsy but not null, and every downstream test
+    // would then be a truthiness check that happened to work. Keep the two states distinguishable.
+    blockedReason: raw.blockedReason ? String(raw.blockedReason) : null,
   };
 }
 

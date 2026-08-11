@@ -162,24 +162,58 @@ internal static class BootstrapChecks
             return;
         }
 
-        if (b.FormatRevision > PagedMMF.DatabaseFormatRevision)
-        {
-            ctx.Report(Identity, IntegritySeverity.Advisory, "", new Locus(b.SelectedSlot),
-                $"The database is format revision {b.FormatRevision}; this build understands up to {PagedMMF.DatabaseFormatRevision}.",
-                "Structures introduced after this build's revision are not decoded, so the scan's coverage is incomplete. "
-                + "Repair is refused outright on a newer format: repairing a layout the tool does not fully understand is how "
-                + "a tool corrupts a database it was asked to save.");
-            ctx.Findings.NoteCaveat(
-                $"The database is format revision {b.FormatRevision}, newer than this build's {PagedMMF.DatabaseFormatRevision}; "
-                + "structures added after this revision were not checked.");
-        }
-        else if (b.FormatRevision <= 0)
+        if (b.FormatRevision <= 0)
         {
             ctx.Report(Identity, IntegritySeverity.Fatal, "", new Locus(b.SelectedSlot),
                 $"Page 0 records an impossible format revision ({b.FormatRevision}).",
                 "The signature matched but the revision field did not, so the identity header is partially damaged.");
             ctx.StopScan = true;
+            return;
         }
+
+        if (b.FormatRevision != PagedMMF.DatabaseFormatRevision)
+        {
+            ReportRevisionMismatch(ctx, b.FormatRevision, b.SelectedSlot);
+        }
+    }
+
+    /// <summary>
+    /// Reports a format revision this build does not speak — in <b>either</b> direction — as an advisory, and never stops
+    /// the scan.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The split is by verb (<c>05-repair.md</c> §7, OQ-7). <b>Diagnosis degrades; mutation does not.</b> Refusing to read
+    /// a database because its revision is unfamiliar is the opposite of what a scanner is for — the operator reaching for
+    /// one has already lost the happy path. So the scan runs, states what it could not interpret, and lets
+    /// <see cref="DatabaseRepair"/> be the thing that refuses.
+    /// </para>
+    /// <para>
+    /// <b>Older is not safer than newer,</b> which is the half this check was missing. Pre-alpha carries no compatibility
+    /// obligation, so a revision bump is free to re-mean bytes that a previous revision left unused — revision 7 did
+    /// exactly that, claiming <c>[54,56)</c> for the chunk stride. Those bytes are <i>zero</i> on a revision-6 page, and
+    /// zero is not "unknown"; it is this build's sentinel for "this segment has no chunks". A reader that shrugged at an
+    /// older revision would therefore not fail — it would conclude the precise opposite of the truth about a segment full
+    /// of them, and every cross-structure check downstream would agree with it.
+    /// </para>
+    /// </remarks>
+    private static void ReportRevisionMismatch(ScanContext ctx, int found, int slot)
+    {
+        var mine = PagedMMF.DatabaseFormatRevision;
+        var direction = found > mine ? "newer than" : "older than";
+
+        ctx.Report(Identity, IntegritySeverity.Advisory, "", new Locus(slot),
+            $"The database is format revision {found}; this build speaks revision {mine}.",
+            $"Revision {found} is {direction} this build's, so structures whose layout differs between the two are not "
+            + "decoded and the scan's coverage is incomplete. Repair is refused outright on any revision mismatch: "
+            + "repairing a layout the tool does not fully understand is how a tool corrupts a database it was asked to "
+            + $"save. Run this database's own build to check or repair it, or a build that speaks revision {found}.",
+            Repairability.NotRepairable);
+
+        ctx.Findings.NoteCaveat(
+            $"The database is format revision {found}, {direction} this build's {mine}; any structure whose meaning changed "
+            + "between the two revisions was read under this build's interpretation, so cross-structure conclusions may be "
+            + "wrong rather than merely absent.");
     }
 
     private static void CheckStream(ScanContext ctx)

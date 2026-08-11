@@ -96,8 +96,13 @@ public sealed record RepairStepDto(int Order, string Action, string Class, strin
 /// <param name="Steps">The ordered steps.</param>
 /// <param name="Loss">The full loss enumeration. This is the consent, not a summary of it.</param>
 /// <param name="Unaddressed">Findings this build cannot repair, with the reason and the escalation path.</param>
+/// <param name="BlockedReason">
+/// Why applying is refused outright, or <c>null</c>. Distinct from an empty step list: empty means nothing needs repairing,
+/// blocked means this build must not be the one to try.
+/// </param>
 public sealed record RepairPlanDto(string Source, string Fingerprint, string Verdict, bool RequiresLossyConsent,
-    IReadOnlyList<RepairStepDto> Steps, IReadOnlyList<IntegrityLossDto> Loss, IReadOnlyList<string> Unaddressed);
+    IReadOnlyList<RepairStepDto> Steps, IReadOnlyList<IntegrityLossDto> Loss, IReadOnlyList<string> Unaddressed,
+    string BlockedReason);
 
 /// <summary>Request body for applying a repair.</summary>
 /// <param name="Path">Path to the bundle.</param>

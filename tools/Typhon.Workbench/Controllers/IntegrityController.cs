@@ -202,7 +202,7 @@ public sealed class IntegrityController : ControllerBase
         }
 
         return new RepairPlanDto(plan.Source, plan.DatabaseFingerprint, plan.Verdict.ToString(), plan.RequiresLossyConsent,
-            steps, losses, plan.Unaddressed);
+            steps, losses, plan.Unaddressed, plan.BlockedReason);
     }
 
     private static RepairOutcomeDto Map(RepairOutcome outcome)

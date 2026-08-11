@@ -71,6 +71,7 @@ internal sealed class MetaPairStructuralFlushTests
     /// </summary>
     [Test]
     [CancelAfter(30_000)]
+    [VerifiesRule("CK-05")]
     public void FullEngineLifecycle_LeavesBothMetaSlotsValid()
     {
         var writes = RunLifecycle();
@@ -99,6 +100,56 @@ internal sealed class MetaPairStructuralFlushTests
             Assert.That(writes[i], Is.Not.EqualTo(writes[i - 1]),
                 $"meta-pair writes must strictly alternate; observed [{string.Join(", ", writes)}]");
         }
+    }
+
+    /// <summary>
+    /// The genuineness proof for <see cref="FullEngineLifecycle_LeavesBothMetaSlotsValid"/>: a database with only one
+    /// valid slot must FAIL that test's assertion.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Without this, the verifier above could be wired so that it cannot fail — asserting on the wrong buffer, or with
+    /// a matcher that accepts anything — and it would stay green in the same build as the bug it exists to catch. That
+    /// is not hypothetical for this rule: the violation it guards survived for months precisely because every other
+    /// CK-05 test checked the pair's read selection or its write protocol, and the database opened fine from the one
+    /// surviving slot.
+    /// </para>
+    /// <para>
+    /// The mutant is the exact state the bug produced — one slot whose stored checksum no longer matches its content —
+    /// and it drives the verifier's real assertion path rather than a re-implementation of it.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(30_000)]
+    [RuleMutant("CK-05")]
+    public void Mutant_OneValidSlotDoesNotSatisfyThePairProperty()
+    {
+        RunLifecycle();
+
+        var dataPath = Path.Combine(BundlePath, IntegrityConstants.DataFileName);
+        ClobberSlot(dataPath, 1);
+
+        RuleMutants.AssertDetects(
+            "CK-05",
+            "meta slot 1 must be checksum-valid",
+            () =>
+            {
+                var slot0 = ReadPage(dataPath, 0);
+                var slot1 = ReadPage(dataPath, 1);
+                var report = Describe(slot0, 0) + "\n" + Describe(slot1, 1);
+
+                Assert.That(IsValid(slot0), Is.True, "meta slot 0 must be checksum-valid:\n" + report);
+                Assert.That(IsValid(slot1), Is.True, "meta slot 1 must be checksum-valid:\n" + report);
+            });
+    }
+
+    /// <summary>Overwrites a range inside one meta slot, leaving the page parseable but checksum-invalid.</summary>
+    private static void ClobberSlot(string dataPath, int slot)
+    {
+        using var fs = new FileStream(dataPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        fs.Seek((long)slot * IntegrityConstants.PageSize + 200, SeekOrigin.Begin);
+        fs.Write(new byte[64]);
+        fs.Flush(true);
     }
 
     /// <summary>Runs a representative lifecycle and returns the physical meta-pair page indices written during shutdown.</summary>

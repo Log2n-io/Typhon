@@ -50,6 +50,55 @@ internal sealed class ScanContext
     /// <summary>The page-allocation bitmap, or <c>null</c> when it could not be read.</summary>
     public OccupancyView Occupancy { get; set; }
 
+    /// <summary>
+    /// The database's own schema manifest, or <c>null</c> when it was not read (shallow depths) or not recoverable.
+    /// </summary>
+    /// <remarks>
+    /// Every cross-structure check hangs off this. It is what turns a bag of segments into named archetypes with
+    /// component counts, entity-key watermarks and cluster/EntityMap roots — and it is read from the file, not from a
+    /// schema assembly, which is the correction recorded in <c>09 §1.1</c>.
+    /// </remarks>
+    public SchemaCatalogReader Manifest { get; set; }
+
+    /// <summary>
+    /// Live entity ids per archetype name, as read from cluster occupancy. Populated by <c>ClusterChecks</c>.
+    /// </summary>
+    /// <remarks>
+    /// Shared rather than re-derived so <c>MAP-01</c>/<c>MAP-02</c> compare against the SAME view of the cluster the
+    /// <c>CLU</c> checks reported on. Two walks that independently re-read a damaged cluster can disagree, and then a
+    /// finding depends on which check ran first.
+    /// </remarks>
+    public Dictionary<string, HashSet<long>> ClusterEntityIds { get; } = [];
+
+    /// <summary>
+    /// Where each live entity actually sits, as a packed <c>ClusterLocation</c>, per archetype. Populated by
+    /// <c>ClusterChecks</c>.
+    /// </summary>
+    /// <remarks>
+    /// What turns <c>MAP-01</c> from <i>"this identity exists somewhere"</i> into the catalogue's actual claim —
+    /// <i>"the entry resolves to an occupied slot"</i>. An EntityMap value record carries a cluster chunk id and a slot
+    /// index, so an entry can name a real entity and still point at the wrong slot; only comparing the location catches
+    /// that, and it is the shape a rebuild over stale state leaves behind.
+    /// </remarks>
+    public Dictionary<string, Dictionary<long, int>> ClusterEntityLocations { get; } = [];
+
+    /// <summary>
+    /// Revision-chain roots found by walking each component's revision segment: component name to (chunk id, owning
+    /// entity key). Populated by <c>ChainChecks</c>.
+    /// </summary>
+    public Dictionary<string, Dictionary<int, long>> ChainRoots { get; } = [];
+
+    /// <summary>
+    /// Chain roots the EntityMap's value records actually reference, per component name. Populated by
+    /// <c>EntityMapChecks</c>.
+    /// </summary>
+    /// <remarks>
+    /// The other half of <c>CHN-06</c>. An entity record carries one <c>compRevFirstChunkId</c> per Versioned slot, so
+    /// the map is the authority on which chains are still owned — a root nobody references is storage that recovery
+    /// will never reclaim, because nothing knows it is there.
+    /// </remarks>
+    public Dictionary<string, HashSet<int>> ReferencedChainRoots { get; } = [];
+
     /// <summary>Findings accumulated so far.</summary>
     public FindingCollector Findings { get; init; }
 

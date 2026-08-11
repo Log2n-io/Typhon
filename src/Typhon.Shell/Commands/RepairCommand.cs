@@ -94,6 +94,14 @@ internal sealed class RepairCommand : Command<RepairCommand.Settings>
             return report.ExitCode;
         }
 
+        // Blocked is checked before empty. A blocked plan HAS no steps, so testing IsEmpty first would answer "nothing to
+        // repair" about a database that may be full of findings this build simply must not touch.
+        if (plan.IsBlocked)
+        {
+            AnsiConsole.MarkupLine($"[red]Refused:[/] {Markup.Escape(plan.BlockedReason)}");
+            return CheckCommand.ScanFailedExitCode;
+        }
+
         if (plan.IsEmpty)
         {
             AnsiConsole.MarkupLine("[green]Nothing to repair.[/]");
@@ -103,7 +111,8 @@ internal sealed class RepairCommand : Command<RepairCommand.Settings>
         RepairOutcome outcome;
         try
         {
-            outcome = DatabaseRepair.Apply(settings.Bundle, plan, settings.AllowLoss, !settings.NoBackupFirst, settings.DryRun);
+            outcome = DatabaseRepair.Apply(settings.Bundle, plan, settings.AllowLoss, !settings.NoBackupFirst, settings.DryRun,
+                DerivedStructureRegeneration.Run);
         }
         catch (InvalidOperationException ex)
         {
@@ -125,7 +134,11 @@ internal sealed class RepairCommand : Command<RepairCommand.Settings>
         sb.Append("  diagnosis: ").Append(plan.Verdict).Append(", ").Append(report.Findings.Count).Append(" finding(s)\n");
         sb.Append("  fingerprint: ").Append(plan.DatabaseFingerprint).Append('\n').Append('\n');
 
-        if (plan.IsEmpty)
+        if (plan.IsBlocked)
+        {
+            sb.Append("  REPAIR REFUSED\n    ").Append(plan.BlockedReason).Append('\n');
+        }
+        else if (plan.IsEmpty)
         {
             sb.Append("  No repairable problems were found.\n");
         }
@@ -138,7 +151,9 @@ internal sealed class RepairCommand : Command<RepairCommand.Settings>
             sb.Append("     addresses: ").Append(string.Join(", ", step.Addresses)).Append('\n').Append('\n');
         }
 
-        if (plan.Unaddressed.Count > 0)
+        // A blocked plan's sole Unaddressed entry IS the refusal already printed above; repeating it verbatim under a
+        // second heading reads as two separate problems.
+        if (plan.Unaddressed.Count > 0 && !plan.IsBlocked)
         {
             sb.Append("  NOT ADDRESSED BY THIS PLAN\n");
             for (var i = 0; i < plan.Unaddressed.Count; i++)

@@ -120,6 +120,16 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     protected virtual int MetadataReservedBytes(bool isRootPage) => 0;
 
     /// <summary>
+    /// The chunk stride to record on every page of this segment, or <c>0</c> for a segment that has no chunks.
+    /// </summary>
+    /// <remarks>
+    /// Consulted at page init for the same reason as <see cref="MetadataReservedBytes"/>: the value must be on the page
+    /// before anything can write it out, and a post-hoc stamp would race a checkpoint that caught the page in between.
+    /// See <see cref="SegmentGeometry"/> for why the file needs it at all.
+    /// </remarks>
+    protected virtual int ChunkStrideForGeometry => 0;
+
+    /// <summary>
     /// Get a typed <see cref="PageAccessor"/> for a segment page via epoch-based protection.
     /// Caller must be inside an <see cref="EpochGuard"/> scope.
     /// </summary>
@@ -464,7 +474,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
 
                     InitHeader(page.Address, PageClearMode.Header,
                         PageBlockFlags.IsLogicalSegment | (isFirstPage ? PageBlockFlags.IsLogicalSegmentRoot : PageBlockFlags.None),
-                        type, 1, MetadataReservedBytes(isFirstPage));
+                        type, 1, MetadataReservedBytes(isFirstPage), ChunkStrideForGeometry);
                     isPageDirty = true;
                 }
 
@@ -520,7 +530,8 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                         {
                             var endMemIdx = RequestExclusiveForGrow(mapIndices[curIndexMapIndex + 1], epoch, verifyCrc: false);
                             var endPage = _store.GetPage(endMemIdx);
-                            InitHeader(endPage.Address, PageClearMode.Header, PageBlockFlags.IsLogicalSegment, type, 1, MetadataReservedBytes(isRootPage: false));
+                            InitHeader(endPage.Address, PageClearMode.Header, PageBlockFlags.IsLogicalSegment, type, 1, MetadataReservedBytes(isRootPage: false),
+                                ChunkStrideForGeometry);
                             changeSet?.AddByMemPageIndex(endMemIdx);
                             endPage.RawData<int>(0, 1)[0] = 0;
                             // Durability: AddByMemPageIndex already bumps DC to 1 via tracked IncrementDirty. Without a
@@ -621,7 +632,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
             }
 
             InitHeader(page.Address, PageClearMode.None, PageBlockFlags.IsLogicalSegment | (i == 0 ? PageBlockFlags.IsLogicalSegmentRoot : PageBlockFlags.None), type, 1,
-                MetadataReservedBytes(i == 0));
+                MetadataReservedBytes(i == 0), ChunkStrideForGeometry);
 
             // Update link list of the pages that make the segment
             ref var lsh = ref page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset);
@@ -753,8 +764,12 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     /// per-sector verification slots fit in what is left (<see cref="PageSectorFooter"/>). Zero for segments with no chunk
     /// bitmap, which is the common case and yields the finest granularity.
     /// </param>
+    /// <param name="chunkStride">
+    /// Chunk stride recorded on the page so an offline reader can locate chunk <i>n</i> without the schema assembly
+    /// (<see cref="SegmentGeometry"/>). Zero for segments that hold no chunks.
+    /// </param>
     internal static unsafe void InitHeader(byte* pageAddr, PageClearMode clearMode, PageBlockFlags flags, PageBlockType type, short formatRevision,
-        int reservedMetadataBytes = 0)
+        int reservedMetadataBytes = 0, int chunkStride = 0)
     {
         ref var header = ref Unsafe.AsRef<PageBaseHeader>(pageAddr + PageBaseHeader.Offset);
 
@@ -781,6 +796,11 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
         // segment re-declares with its real bitmap size once it knows the stride; everything else keeps the finest
         // granularity, which is correct because a page with no chunk bitmap has the whole metadata region free.
         PageSectorFooter.DeclareGeometry(new Span<byte>(pageAddr, PagedMMF.PageSize), reservedMetadataBytes);
+
+        // Record the chunk arithmetic on the page itself, for the same reason and at the same moment: after any clear,
+        // before the page can be written out. Without it an offline reader can classify a page but not locate a chunk
+        // inside it, which is what blocks every cross-structure check.
+        SegmentGeometry.WriteStride(new Span<byte>(pageAddr, PagedMMF.PageSize), chunkStride);
     }
 
     internal virtual bool Load(int filePageIndex)

@@ -82,9 +82,22 @@ public static class IntegrityScanner
             {
                 DiscoverStructure(ctx);
                 ReadOccupancy(ctx);
+                ReadManifest(ctx);
                 BootstrapChecks.RunLate(ctx);
                 SegmentChecks.Run(ctx);
                 SweepPages(ctx);
+                ChainChecks.Run(ctx);
+                ClusterChecks.Run(ctx);
+                EntityMapChecks.Run(ctx);
+
+                // After the three walks above, never before: CHN-06 compares sets that the chain pass and the map pass
+                // each fill half of, so running it earlier reports the unfilled half as damage.
+                CrossStructureChecks.Run(ctx);
+                ClusterHeadChecks.Run(ctx);
+                BufferChecks.Run(ctx);
+                IndexChecks.Run(ctx);
+                IndexContentChecks.Run(ctx);
+                IndexAgreementChecks.Run(ctx);
                 WalChecks.Run(ctx);
             }
         }
@@ -328,6 +341,39 @@ public static class IntegrityScanner
 
         ctx.Findings.NoteCaveat("No occupancy segment was found, so page-allocation state could not be compared against the "
             + "reachability walk. Leak and phantom detection are unavailable.");
+    }
+
+    /// <summary>
+    /// Reads the database's own schema manifest — the catalogs that name every component and archetype.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Runs after the structural sweep because every pointer the manifest carries is validated against the segments the
+    /// sweep found, rather than against the manifest's own claims. That is the same primary-over-derived discipline the
+    /// rest of the catalogue applies, and it is what keeps a damaged catalog row from steering a check at somebody
+    /// else's segment.
+    /// </para>
+    /// <para>
+    /// It is not fatal for this to fail. A database whose manifest is unreadable still gets a physical and structural
+    /// report; it just loses the cross-structure families, which say so through <c>Limits.ChecksSkipped</c> rather than
+    /// silently reporting nothing.
+    /// </para>
+    /// </remarks>
+    private static void ReadManifest(ScanContext ctx)
+    {
+        if (!ctx.AtLeast(ScanDepth.Deep))
+        {
+            return;
+        }
+
+        var reader = new SchemaCatalogReader(ctx.Source, ctx.Segments.Keys);
+        reader.Read(ctx.Bootstrap);
+        ctx.Manifest = reader;
+
+        for (var i = 0; i < reader.Diagnostics.Count; i++)
+        {
+            ctx.Findings.NoteCaveat(reader.Diagnostics[i]);
+        }
     }
 
     private static void SweepPages(ScanContext ctx)
