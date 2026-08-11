@@ -126,8 +126,12 @@ public class BTreeConcurrentWriteBenchmarks
     /// With whole-tree lock: throughput plateaus at 1 thread (all serialize on _access).
     /// After OLC: threads hitting different leaves proceed in parallel → near-linear scaling.
     /// </summary>
+    // #765 S4. "Regression" is what puts a benchmark into benchmark/history: bench/aws/benchmark.sky.yaml maps the default profile to
+    // `--allCategories Regression`, and all 19 classes ever recorded carry it. This class carried BTree/Concurrency/BTreeMedium, which only the manually
+    // dispatched btree-medium profile selects — and nobody ever dispatched it, so the concurrency numbers this whole design was justified by have never once
+    // been recorded. Same shape as the [Explicit] finding in S0: a label that quietly removes something from the only tier that runs it.
     [Benchmark(OperationsPerInvoke = OpsPerInvocation)]
-    [BenchmarkCategory("BTreeFast")]
+    [BenchmarkCategory("BTreeFast", "Regression")]
     public void ConcurrentInsert_Random()
     {
         var opsPerThread = OpsPerInvocation / ThreadCount;
@@ -155,6 +159,21 @@ public class BTreeConcurrentWriteBenchmarks
     /// After OLC Phase 1: still serialized on rightmost leaf (same node).
     /// After OLC Phase 2 (Contention Split): hot leaf splits proactively → distributes load.
     /// </summary>
+    // Deliberately NOT [BenchmarkCategory("Regression")], unlike its two siblings, and this is a measurement decision rather than an oversight.
+    //
+    // The workload mutates the thing it measures and never resets it: every operation inserts a NEW key drawn from a shared counter, so the tree grows by
+    // OpsPerInvocation every iteration and keeps growing through warmup. Iteration 5 measures a materially taller tree than iteration 1. That is not noise an
+    // average removes, it is drift, and it shows: measured 2026-08-10 on a 7950X at 5 iterations, the error half-widths were 648 ns on a 1,087 ns mean at 4
+    // threads and 2,895 ns on a 2,948 ns mean at 16 — roughly the size of the measurement. Its siblings, which reuse a fixed key set, came in at 3.76 ns on
+    // 196 ns and 50 ns on 302 ns.
+    //
+    // Tracking a metric whose error bar is its own magnitude produces alarms nobody can act on, and this feature exists because of instruments nobody could
+    // act on. To qualify this one, give it an [IterationSetup] that rebuilds the tree to a fixed size — then the number means "insert into a 10k-key tree"
+    // instead of "insert into a tree of some size between 10k and 260k depending on when you looked".
+    //
+    // Recorded anyway because the SHAPE is unambiguous and monotone across five points, which noise does not produce: 517.6 ns at 1 thread, 1,086.6 at 4,
+    // 1,700.8 at 8, 2,948.0 at 16, 4,138.3 at 32. That is 8x SLOWER at 32 threads than at 1, on the workload whose docstring claims contention splits
+    // distribute the load. Whatever the contention-split mechanism is doing for the rightmost-leaf case, it is not this.
     [Benchmark(OperationsPerInvoke = OpsPerInvocation)]
     public void ConcurrentInsert_Monotonic()
     {
@@ -178,6 +197,7 @@ public class BTreeConcurrentWriteBenchmarks
     /// Real-world: entity cleanup/GC while other operations are in flight.
     /// </summary>
     [Benchmark(OperationsPerInvoke = OpsPerInvocation)]
+    [BenchmarkCategory("Regression")]
     public void ConcurrentDelete_Random()
     {
         var opsPerThread = OpsPerInvocation / ThreadCount;

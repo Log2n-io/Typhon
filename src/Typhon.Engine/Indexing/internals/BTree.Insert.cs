@@ -57,14 +57,54 @@ internal abstract partial class BTree<TKey, TStore>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool KeyBelowLeafLowerBound(NodeWrapper leaf, TKey key, IComparer<TKey> comparer, ref ChunkAccessor<TStore> accessor)
     {
-        if (leaf.GetCount(ref accessor) == 0 || comparer.Compare(key, leaf.GetFirst(ref accessor).Key) >= 0)
+        if (leaf.GetCount(ref accessor) == 0 || CompareKeys(key, leaf.GetFirst(ref accessor).Key, comparer) >= 0)
         {
             return false;
         }
 
         var previous = leaf.GetPrevious(ref accessor);
-        return previous.IsValid && comparer.Compare(key, previous.GetHighKey(ref accessor)) < 0;
+        return previous.IsValid && CompareKeys(key, previous.GetHighKey(ref accessor), comparer) < 0;
     }
+
+    /// <summary>
+    /// True when <paramref name="key"/> reaches at or past <paramref name="leaf"/>'s exclusive <c>HighKey</c>, i.e. the key's range belongs to a leaf further
+    /// right and writing it here would place it past its own separator.
+    /// </summary>
+    /// <remarks>
+    /// The mirror of <see cref="KeyBelowLeafLowerBound"/>. This condition was already being tested inline on the OLC general insert path; naming it is what lets
+    /// a second write path ask the same question instead of re-deriving it — <c>Move</c> asked it nowhere and that is #765's first finding.
+    /// <para>
+    /// Conditioned on a valid right sibling because the rightmost leaf's <c>HighKey</c> bounds nothing: it owns every key above its separator, which is what the
+    /// append fast paths rely on.
+    /// </para>
+    /// <para>
+    /// The <c>HighKey</c> comparison is tested BEFORE the right-sibling read, and the order is deliberate. Both conjuncts are required, so the result is
+    /// identical either way, but the overwhelmingly common answer is "no, the key is in range" — and in that case this order short-circuits after one
+    /// <c>GetHighKey</c> instead of paying a <c>GetNext</c> first. Every node access here is a virtual <c>BaseNodeStorage</c> call, so dropping one from the
+    /// hot answer is worth more than it looks (#765 S8).
+    /// </para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool KeyAboveLeafUpperBound(NodeWrapper leaf, TKey key, IComparer<TKey> comparer, ref ChunkAccessor<TStore> accessor)
+        => leaf.GetCount(ref accessor) > 0
+           && CompareKeys(key, leaf.GetHighKey(ref accessor), comparer) >= 0
+           && leaf.GetNext(ref accessor).IsValid;
+
+    /// <summary>
+    /// True when <paramref name="leaf"/> does not own <paramref name="key"/>'s range and therefore must not receive a write of it. Callers restart.
+    /// </summary>
+    /// <remarks>
+    /// "Leaf authority" is the single question every write path has to answer before it mutates: is THIS the leaf the descent's separators claim owns this key?
+    /// Both halves are needed and each was learned separately — the upper bound from concurrent splits, the lower bound from #297/#679 mode 1 and then corrected
+    /// in #740 — so stating them as one predicate is the point. A path that asks only one half is the shape every one of those defects had.
+    /// <para>
+    /// Cheap by construction: the common in-range case pays one <c>GetCount</c>, one <c>GetNext</c>, one <c>GetHighKey</c> and one <c>GetFirst</c> with two
+    /// compares, and the extra sibling reads happen only once a bound has already failed.
+    /// </para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool KeyOutsideLeafAuthority(NodeWrapper leaf, TKey key, IComparer<TKey> comparer, ref ChunkAccessor<TStore> accessor)
+        => KeyAboveLeafUpperBound(leaf, key, comparer, ref accessor) || KeyBelowLeafLowerBound(leaf, key, comparer, ref accessor);
 
     /// <summary>Creates the insert value, handling AllowMultiple buffer creation.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -379,7 +419,7 @@ internal abstract partial class BTree<TKey, TStore>
         }
         // Range check: stale separator may route to wrong leaf after a concurrent split.
         // High key is an exclusive upper bound, so key >= highKey means we're out of range.
-        if (leaf.GetCount(ref accessor) > 0 && leaf.GetNext(ref accessor).IsValid && args.Compare(args.Key, leaf.GetHighKey(ref accessor)) >= 0)
+        if (KeyAboveLeafUpperBound(leaf, args.Key, args.KeyComparer, ref accessor))
         {
             leafLatch.WriteUnlock();
             return OlcInsertResult.Restart;
@@ -673,57 +713,13 @@ internal abstract partial class BTree<TKey, TStore>
     {
         completed = false; // descent
         MutationContext ctx = default;
-        var node = Root;
         var relatives = new NodeRelatives();
         ref var sibAccessor = ref args.SiblingAccessor;
 
-        // Phase 1: Descend from root to leaf, recording path + PathVersions for validation.
-        // OLC protocol: read version BEFORE data, validate AFTER — ensures (index, version) are consistent.
-        while (!node.GetIsLeaf(ref accessor))
+        // Phase 1: Descend from root to leaf, recording path + PathVersions for validation. Shared verbatim with RemoveIterative — see DescendRecordingPath.
+        if (!DescendRecordingPath(args.Key, args.KeyComparer, OlcDescentTrace.OpInsert, ref ctx, ref relatives, ref accessor, ref sibAccessor, out var node))
         {
-            var latch = node.GetLatch(ref accessor);
-            int version = latch.ReadVersion();
-            if (version == 0)
-            {
-                return;
-            }
-
-            var index = node.Find(args.Key, args.KeyComparer, ref accessor);
-            if (index < 0)
-            {
-                index = ~index - 1;
-            }
-
-            var child = node.GetChild(index, ref accessor);
-            int parentCount = node.GetCount(ref accessor);
-
-            // Validate: node wasn't modified during our unlocked read
-            if (!latch.ValidateVersion(version))
-            {
-                return;
-            }
-
-            // Defensive: a torn-but-validated read should be impossible after the version check above, but treat zero/invalid child as restart rather than
-            // crashing when the next iteration tries to deref it. Issue #297.
-            if (!child.IsValid)
-            {
-                return;
-            }
-
-            OlcDescentTrace.RecordStep?.Invoke(OlcDescentTrace.OpInsert, node.ChunkId, version, index, child.ChunkId);
-
-            NodeRelatives.Create(child, index, node, parentCount, ref relatives, out var childRelatives, ref accessor, ref sibAccessor);
-
-            ctx.PathNodes[ctx.Depth] = node;
-            ctx.PathChildIndices[ctx.Depth] = index;
-            ctx.PathVersions[ctx.Depth] = version;
-
-            // Store after Create so lazy-resolved siblings are cached in the stored copy
-            ctx.PathRelatives[ctx.Depth] = relatives;
-
-            node = child;
-            relatives = childRelatives;
-            ctx.Depth++;
+            return;
         }
 
         // Phase 1.5A: Lock leaf with version validation.
@@ -779,8 +775,10 @@ internal abstract partial class BTree<TKey, TStore>
         // lock coupling (lock next before releasing current) until we find the correct leaf. Forward progress is guaranteed:
         // all movement is strictly rightward with no cycle, and SpinWriteLock waits for busy siblings. // move-right
         bool movedRight = false;
-        // High key is an exclusive upper bound, so key >= highKey means we're out of range.
-        while (node.GetCount(ref accessor) > 0 && node.GetNext(ref accessor).IsValid && args.Compare(args.Key, node.GetHighKey(ref accessor)) >= 0)
+        // The loop condition IS the upper-bound half of leaf authority, and this was its fourth longhand copy. The pessimistic path answers it differently from
+        // the optimistic one — it walks right until the leaf owns the key, rather than restarting, because mid-SMO it has no restart point — but the QUESTION is
+        // the same one, and a question asked in four places is a question that will eventually be asked four different ways (#765 S2).
+        while (KeyAboveLeafUpperBound(node, args.Key, args.KeyComparer, ref accessor))
         {
             Interlocked.Increment(ref _moveRightCount);
             var nextNode = node.GetNext(ref accessor);

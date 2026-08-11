@@ -856,6 +856,42 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     }
 
     /// <summary>
+    /// Compares two keys, bypassing the <see cref="IComparer{T}"/> interface dispatch for the primitive key types. Falls back to
+    /// <paramref name="comparer"/> for everything else.
+    /// </summary>
+    /// <remarks>
+    /// <c>typeof(TKey)</c> against a concrete type is a JIT intrinsic for value types, so every branch but one is eliminated when the generic is instantiated
+    /// and this becomes a direct <c>CompareTo</c>. The same trick already lives inside <c>InsertArguments.Compare</c> and <c>RemoveArguments.Compare</c>; the
+    /// leaf-authority guards sit on the same hot paths but are handed a bare <see cref="IComparer{T}"/>, so without this they would pay a virtual call per
+    /// insert for a comparison the surrounding code does directly.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static int CompareKeys(TKey left, TKey right, IComparer<TKey> comparer)
+    {
+        if (typeof(TKey) == typeof(int))
+        {
+            return ((int)(object)left).CompareTo((int)(object)right);
+        }
+        if (typeof(TKey) == typeof(long))
+        {
+            return ((long)(object)left).CompareTo((long)(object)right);
+        }
+        if (typeof(TKey) == typeof(short))
+        {
+            return ((short)(object)left).CompareTo((short)(object)right);
+        }
+        if (typeof(TKey) == typeof(uint))
+        {
+            return ((uint)(object)left).CompareTo((uint)(object)right);
+        }
+        if (typeof(TKey) == typeof(ulong))
+        {
+            return ((ulong)(object)left).CompareTo((ulong)(object)right);
+        }
+        return comparer.Compare(left, right);
+    }
+
+    /// <summary>
     /// Converts a <typeparamref name="TKey"/> to <see cref="long"/> using the same encoding as
     /// <see cref="QueryResolverHelper.EncodeThreshold"/>. JIT eliminates dead branches for each concrete TKey.
     /// </summary>
@@ -1008,6 +1044,20 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
 
     private NodeWrapper _linkList;
     private NodeWrapper _reverseLinkList;
+
+    /// <summary>
+    /// Structural handles for tests only: the root, and the head of the leaf chain. Never call these from engine code.
+    /// </summary>
+    /// <remarks>
+    /// They exist so the <c>[RuleMutant]</c> tests can BREAK a tree on purpose and require the consistency validators to notice. Without a way to author a
+    /// violating tree, every one of those validators is a green light nobody has ever seen turn red — which is the exact state #765 found the whole checker in,
+    /// and is worth strictly less than no check at all because it also stops anyone looking. Read-only handles: mutation goes through <c>NodeWrapper</c>'s own
+    /// API, so this widens visibility, not capability.
+    /// </remarks>
+    internal NodeWrapper DiagnosticRoot => Root;
+
+    /// <inheritdoc cref="DiagnosticRoot"/>
+    internal NodeWrapper DiagnosticLeafChainHead => _linkList;
 
     // Volatile height: atomically readable by concurrent readers under OLC.
     // Only modified under exclusive lock; volatile prevents compiler reordering for readers.
@@ -1322,10 +1372,15 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
             stack.Push((Root, 1, "root"));
         }
 
-        while (stack.Count > 0 && visited < 1_000_000)
+        while (stack.Count > 0)
         {
+            // #765 S1: a cap that truncates the walk and then renders a verdict is a checker reporting PASSED on the part of the tree it never looked at.
+            if (++visited > MaxNodesVisited)
+            {
+                return $"depth walk exceeded {MaxNodesVisited:N0} nodes — the tree is cyclic or impossibly large; no verdict is possible";
+            }
+
             var (node, depth, path) = stack.Pop();
-            visited++;
             if (!node.IsValid)
             {
                 continue;
@@ -1404,10 +1459,14 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
             stack.Push(Root);
         }
 
-        while (stack.Count > 0 && visited < 1_000_000)
+        while (stack.Count > 0)
         {
+            if (++visited > MaxNodesVisited)
+            {
+                return $"separator walk exceeded {MaxNodesVisited:N0} nodes — the tree is cyclic or impossibly large; no verdict is possible";
+            }
+
             var node = stack.Pop();
-            visited++;
             if (!node.IsValid || node.GetIsLeaf(ref accessor))
             {
                 continue;
@@ -1474,8 +1533,13 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         List<string> broken = null;
         int links = 0;
         var cur = _linkList;
-        for (int guard = 0; cur.IsValid && guard < 1_000_000; guard++)
+        for (int guard = 0; cur.IsValid; guard++)
         {
+            if (guard >= MaxNodesVisited)
+            {
+                return $"HighKey walk exceeded {MaxNodesVisited:N0} leaves — see ValidateLeafChain, which names the cycle; no verdict is possible";
+            }
+
             var next = cur.GetNext(ref accessor);
             if (next.IsValid && cur.GetCount(ref accessor) > 0 && next.GetCount(ref accessor) > 0)
             {
@@ -1541,6 +1605,282 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         return null;
     }
 
+    /// <summary>
+    /// The bound every structural walk in this file shares. Exceeding it is a FAILURE, never a silent truncation.
+    /// </summary>
+    /// <remarks>
+    /// The walks used to be written <c>while (stack.Count > 0 &amp;&amp; visited &lt; 1_000_000)</c> and then rendered a verdict on whatever they had seen. A tree
+    /// that trips this cap is either far larger than any test builds or structurally cyclic, and in both cases "PASSED" is the one answer that cannot be right.
+    /// </remarks>
+    private const int MaxNodesVisited = 1_000_000;
+
+    /// <summary>
+    /// Validates that every node's items are strictly ascending. Returns <c>null</c> when sound, else a detail string. Test/diagnostic use only.
+    /// </summary>
+    /// <remarks>
+    /// The one property the SIMD key search actually depends on, and nothing checked it. <c>NodeWrapper.CheckConsistency</c> compares each item against the
+    /// PARENT separator and pins only the endpoints, so a leaf holding <c>[1, 9, 3, 5, 12]</c> satisfies every assertion in this file: its first key is above the
+    /// separator, its last is below the next one, and the chain ordering only ever reads <c>GetFirst</c> and <c>GetLast</c>. A binary or vectorised search over
+    /// that node returns "not found" for keys that are present, which is the #297 symptom exactly, and no instrument could tell you the node was the reason.
+    /// </remarks>
+    internal string ValidateNodeKeyOrder(ref ChunkAccessor<TStore> accessor, int maxReported = 6)
+    {
+        List<string> broken = null;
+        int visited = 0;
+        var stack = new Stack<NodeWrapper>();
+        if (Root.IsValid)
+        {
+            stack.Push(Root);
+        }
+
+        while (stack.Count > 0)
+        {
+            if (++visited > MaxNodesVisited)
+            {
+                return $"node walk exceeded {MaxNodesVisited:N0} nodes — the tree is cyclic or impossibly large; no verdict is possible";
+            }
+
+            var node = stack.Pop();
+            if (!node.IsValid)
+            {
+                continue;
+            }
+
+            int count = node.GetCount(ref accessor);
+            for (int i = 1; i < count; i++)
+            {
+                var previous = node.GetItem(i - 1, ref accessor).Key;
+                var current = node.GetItem(i, ref accessor).Key;
+                if (Comparer.Compare(previous, current) >= 0)
+                {
+                    broken ??= [];
+                    if (broken.Count < maxReported)
+                    {
+                        broken.Add($"chunk={node.ChunkId} leaf={node.GetIsLeaf(ref accessor)} slot {i - 1}->{i}: {previous} then {current}");
+                    }
+                }
+            }
+
+            if (node.GetIsLeaf(ref accessor))
+            {
+                continue;
+            }
+
+            var left = node.GetLeft(ref accessor);
+            if (left.IsValid)
+            {
+                stack.Push(left);
+            }
+            for (int i = 0; i < count; i++)
+            {
+                var child = node.GetChild(i, ref accessor);
+                if (child.IsValid)
+                {
+                    stack.Push(child);
+                }
+            }
+        }
+
+        return broken == null ? null : $"{broken.Count}+ node(s) hold keys out of order :: {string.Join(" ;; ", broken)}";
+    }
+
+    /// <summary>
+    /// Validates that the set of leaves reachable by descending from the root is exactly the set reachable by walking the sibling chain. Returns <c>null</c> when
+    /// sound.
+    /// </summary>
+    /// <remarks>
+    /// The two are separate structures maintained by separate code, and every defect in this subsystem's history has been one of them disagreeing with the other.
+    /// A leaf on the chain but not under the root holds keys no descent can reach and only the B-link right-walk ever finds — #297's "present key reported
+    /// missing", one stale hop away. A leaf under the root but not on the chain is invisible to every range scan while lookups still return its keys.
+    /// </remarks>
+    internal string ValidateDescentAndChainAgree(ref ChunkAccessor<TStore> accessor, int maxReported = 10)
+    {
+        var byDescent = new HashSet<int>();
+        int visited = 0;
+        var stack = new Stack<NodeWrapper>();
+        if (Root.IsValid)
+        {
+            stack.Push(Root);
+        }
+
+        while (stack.Count > 0)
+        {
+            if (++visited > MaxNodesVisited)
+            {
+                return $"descent walk exceeded {MaxNodesVisited:N0} nodes — the tree is cyclic or impossibly large; no verdict is possible";
+            }
+
+            var node = stack.Pop();
+            if (!node.IsValid)
+            {
+                continue;
+            }
+            if (node.GetIsLeaf(ref accessor))
+            {
+                byDescent.Add(node.ChunkId);
+                continue;
+            }
+
+            int count = node.GetCount(ref accessor);
+            var left = node.GetLeft(ref accessor);
+            if (left.IsValid)
+            {
+                stack.Push(left);
+            }
+            for (int i = 0; i < count; i++)
+            {
+                var child = node.GetChild(i, ref accessor);
+                if (child.IsValid)
+                {
+                    stack.Push(child);
+                }
+            }
+        }
+
+        var byChain = new HashSet<int>();
+        var cur = _linkList;
+        int chainSteps = 0;
+        while (cur.IsValid)
+        {
+            if (++chainSteps > MaxNodesVisited)
+            {
+                return $"chain walk exceeded {MaxNodesVisited:N0} nodes — see ValidateLeafChain, which names the cycle";
+            }
+            byChain.Add(cur.ChunkId);
+            cur = cur.GetNext(ref accessor);
+        }
+
+        var chainOnly = new List<int>();
+        foreach (var id in byChain)
+        {
+            if (!byDescent.Contains(id))
+            {
+                chainOnly.Add(id);
+            }
+        }
+        var descentOnly = new List<int>();
+        foreach (var id in byDescent)
+        {
+            if (!byChain.Contains(id))
+            {
+                descentOnly.Add(id);
+            }
+        }
+
+        if (chainOnly.Count == 0 && descentOnly.Count == 0)
+        {
+            return null;
+        }
+
+        chainOnly.Sort();
+        descentOnly.Sort();
+        return $"descent and chain disagree: {byDescent.Count} leaves by descent, {byChain.Count} on the chain"
+             + (chainOnly.Count > 0 ? $" :: on the chain but unreachable by descent: {Join(chainOnly, maxReported)}" : "")
+             + (descentOnly.Count > 0 ? $" :: reachable by descent but off the chain: {Join(descentOnly, maxReported)}" : "");
+    }
+
+    /// <summary>
+    /// Validates that <c>EntryCount</c> equals the number of items actually present on the leaf chain. Returns <c>null</c> when sound.
+    /// </summary>
+    /// <remarks>
+    /// <c>EntryCount</c> is maintained by <c>IncCount</c>/<c>Interlocked.Decrement</c> calls scattered across the write paths, and every one of them is a chance
+    /// to count an insert that did not happen or miss one that did. It is also the number the tests assert on most often, so a drifted counter both hides a lost
+    /// key and manufactures a phantom failure elsewhere. Comparing it against the materialised cardinality is the only way to know which of the two it is.
+    /// </remarks>
+    internal string ValidateEntryCountMatchesChain(ref ChunkAccessor<TStore> accessor)
+    {
+        long counted = 0;
+        int steps = 0;
+        var cur = _linkList;
+        while (cur.IsValid)
+        {
+            if (++steps > MaxNodesVisited)
+            {
+                return $"chain walk exceeded {MaxNodesVisited:N0} nodes — see ValidateLeafChain, which names the cycle";
+            }
+            counted += cur.GetCount(ref accessor);
+            cur = cur.GetNext(ref accessor);
+        }
+
+        return counted == EntryCount
+            ? null
+            : $"EntryCount is {EntryCount} but the leaf chain holds {counted} item(s) across {steps} leaf(s) — drift of {EntryCount - counted}";
+    }
+
+    /// <summary>
+    /// Validates that no reachable node is left write-locked or marked obsolete once the tree is quiescent. Returns <c>null</c> when sound.
+    /// </summary>
+    /// <remarks>
+    /// Only meaningful with no concurrent writer, which is exactly the state the stress fixtures are in when they check. A latch still held after every worker
+    /// has joined is a write path that returned without unlocking, and the next writer to reach that node spins on it forever — the shape #695 was. Obsolete is
+    /// equally terminal: the node is reachable from the root and every descent that touches it must restart, so the tree still answers, just never from here.
+    /// </remarks>
+    internal string ValidateNoLatchResidue(ref ChunkAccessor<TStore> accessor, int maxReported = 6)
+    {
+        List<string> stuck = null;
+        int visited = 0;
+        var stack = new Stack<NodeWrapper>();
+        if (Root.IsValid)
+        {
+            stack.Push(Root);
+        }
+
+        while (stack.Count > 0)
+        {
+            if (++visited > MaxNodesVisited)
+            {
+                return $"latch walk exceeded {MaxNodesVisited:N0} nodes — the tree is cyclic or impossibly large; no verdict is possible";
+            }
+
+            var node = stack.Pop();
+            if (!node.IsValid)
+            {
+                continue;
+            }
+
+            // ReadVersion answers 0 for locked OR obsolete; both are illegal at quiescence and the caller needs to know which, so report the raw word.
+            if (node.GetLatch(ref accessor).ReadVersion() == 0)
+            {
+                stuck ??= [];
+                if (stuck.Count < maxReported)
+                {
+                    stuck.Add($"chunk={node.ChunkId} leaf={node.GetIsLeaf(ref accessor)}");
+                }
+            }
+
+            if (node.GetIsLeaf(ref accessor))
+            {
+                continue;
+            }
+
+            int count = node.GetCount(ref accessor);
+            var left = node.GetLeft(ref accessor);
+            if (left.IsValid)
+            {
+                stack.Push(left);
+            }
+            for (int i = 0; i < count; i++)
+            {
+                var child = node.GetChild(i, ref accessor);
+                if (child.IsValid)
+                {
+                    stack.Push(child);
+                }
+            }
+        }
+
+        return stuck == null
+            ? null
+            : $"{stuck.Count}+ node(s) are still locked or obsolete with no writer running :: {string.Join(" ;; ", stuck)}";
+    }
+
+    private static string Join(List<int> ids, int max)
+    {
+        var take = Math.Min(max, ids.Count);
+        var shown = string.Join(", ", ids.GetRange(0, take));
+        return ids.Count > take ? $"{shown}, … (+{ids.Count - take} more)" : shown;
+    }
+
     public override void CheckConsistency(ref ChunkAccessor<TStore> accessor)
     {
         // Recursive check from Root to leaf
@@ -1567,6 +1907,18 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         ConsistencyAssert(separatorDetail == null, separatorDetail);
         var highKeyDetail = ValidateLeafHighKeys(ref accessor);
         ConsistencyAssert(highKeyDetail == null, highKeyDetail);
+
+        // #765 S1. Four properties the checks above cannot see, ordered cheapest-diagnosis-first so the message names the most specific thing that is wrong.
+        // Intra-node ordering comes first because everything below it — every Find, every separator comparison, the SIMD search — assumes it and reports
+        // nonsense without it. Then the two structures agreeing with each other, then the counter, then the latches.
+        var keyOrderDetail = ValidateNodeKeyOrder(ref accessor);
+        ConsistencyAssert(keyOrderDetail == null, keyOrderDetail);
+        var reachabilityDetail = ValidateDescentAndChainAgree(ref accessor);
+        ConsistencyAssert(reachabilityDetail == null, reachabilityDetail);
+        var countDetail = ValidateEntryCountMatchesChain(ref accessor);
+        ConsistencyAssert(countDetail == null, countDetail);
+        var latchDetail = ValidateNoLatchResidue(ref accessor);
+        ConsistencyAssert(latchDetail == null, latchDetail);
 
         // Debug/test-only: runs without locks (caller must ensure no concurrent modification)
         Root.CheckConsistency(default, NodeWrapper.CheckConsistencyParent.Root, Comparer, Height, ref accessor);
@@ -1947,17 +2299,26 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
             return WriteLockOutcome.Acquired; // no contention
         }
 
+        // #765 S3: spins are counted in a LOCAL and published once on the way out. The increment used to sit inside both loops, so every spinning thread issued
+        // a locked read-modify-write to the same shared field on every iteration — an unbounded phase-2 wait turns that into millions of them. Measured by the
+        // race harness's deadline sampler: 2,861,200 increments in ONE second on a single iteration, while restarts, fallbacks, splits and entry count all sat
+        // frozen. That is a diagnostic counter generating the cross-core traffic it exists to report, and it lands on the same cache line the spinners are
+        // already fighting over. The published total is unchanged — still spin iterations, not distinct acquisitions — so the numbers stay comparable.
+        int spins = 0;
+
         // Phase 1: tight PAUSE spin — stays on-core, covers typical latch hold time + cross-core coherence
         for (int i = 0; i < 64; i++)
         {
             if (latch.IsObsolete)
             {
+                PublishWriteLockSpins(spins);
                 return WriteLockOutcome.Obsolete;
             }
-            Interlocked.Increment(ref _writeLockFailures);
+            spins++;
             Thread.SpinWait(1);
             if (latch.TryWriteLock())
             {
+                PublishWriteLockSpins(spins);
                 return WriteLockOutcome.AcquiredContended;
             }
         }
@@ -1969,13 +2330,28 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         {
             if (latch.IsObsolete)
             {
+                PublishWriteLockSpins(spins);
                 return WriteLockOutcome.Obsolete;
             }
-            Interlocked.Increment(ref _writeLockFailures);
+            spins++;
             spin.SpinOnce(-1);
         }
-        while (!latch.TryWriteLock());
+        while (!latch.TryWriteLock());
+
+        PublishWriteLockSpins(spins);
         return WriteLockOutcome.AcquiredContended;
+    }
+
+    /// <summary>
+    /// Adds a spin tally to <c>_writeLockFailures</c> in one interlocked operation, or none at all when there was no contention.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void PublishWriteLockSpins(int spins)
+    {
+        if (spins != 0)
+        {
+            Interlocked.Add(ref _writeLockFailures, spins);
+        }
     }
 
     /// <summary>
@@ -1986,9 +2362,10 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     private void SpinWriteLockOnSmoPath(OlcLatch latch)
     {
         bool acquired = latch.TryWriteLockOnSmoPath(out var wasObsolete);
+        int spins = 0;   // #765 S3, same reason as SpinWriteLock: tally locally, publish once.
         for (int i = 0; !acquired && i < 64; i++)
         {
-            Interlocked.Increment(ref _writeLockFailures);
+            spins++;
             Thread.SpinWait(1);
             acquired = latch.TryWriteLockOnSmoPath(out wasObsolete);
         }
@@ -1996,10 +2373,12 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         SpinWait spin = default;
         while (!acquired)
         {
-            Interlocked.Increment(ref _writeLockFailures);
+            spins++;
             spin.SpinOnce(-1);
             acquired = latch.TryWriteLockOnSmoPath(out wasObsolete);
         }
+
+        PublishWriteLockSpins(spins);
 
         if (wasObsolete)
         {
@@ -2089,6 +2468,101 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     }
 
     /// <summary>
+    /// The Phase 1 descent shared by the iterative write paths: root to leaf, recording the path, the child index and an OLC version per level into
+    /// <paramref name="ctx"/> for the escalation phases to validate against. Returns false when the descent could not vouch for its own path and the caller
+    /// must restart.
+    /// </summary>
+    /// <remarks>
+    /// This loop existed twice, verbatim — <c>InsertIterative</c> and <c>RemoveIterative</c> differed only in <c>args.Comparer</c> vs <c>args.KeyComparer</c>,
+    /// the trace opcode, and <c>return</c> vs <c>return false</c>. That is not a style complaint: three of the six defects fixed in PR #737 were a guard one
+    /// copy had and its twin had lost, and across #765 the same guard was added by hand to two copies four separate times. A descent that exists once is a
+    /// descent whose protocol can be corrected once — IXS-07's second parent validation is in here, and both write paths get it without either of them
+    /// mentioning it.
+    /// <para>
+    /// It deliberately does NOT sample the LEAF's version. Phase 1.5A owns that, because it needs <c>leafVersion == 0</c> to tell LOCKED (wait for the holder,
+    /// then restart on a fresh baseline) from OBSOLETE (restart at once — the node will never become valid), which is rule IXW-01 and the distinction #695 came
+    /// from collapsing. Sampling it here and bailing would reintroduce that shape. The final hop into the leaf keeps the protection it already has: Phase 1.5A's
+    /// locked validation plus <c>KeyOutsideLeafAuthority</c>.
+    /// </para>
+    /// </remarks>
+    private bool DescendRecordingPath(TKey key, IComparer<TKey> comparer, int traceOp, ref MutationContext ctx, ref NodeRelatives relatives,
+                                      ref ChunkAccessor<TStore> accessor, ref ChunkAccessor<TStore> sibAccessor, out NodeWrapper leaf)
+    {
+        var node = Root;
+        var parent = default(NodeWrapper);
+        int parentVersion = 0;
+        bool hopped = false;   // explicit rather than `parent.IsValid`: chunk id 0 is the invalid sentinel, so keying off it would silently skip the check below
+                               // for the root hop if the root ever occupied chunk 0 — a guard that disables itself on one node is how this subsystem got here
+
+        // OLC protocol: read version BEFORE data, validate AFTER — ensures (index, version) are consistent.
+        while (!node.GetIsLeaf(ref accessor))
+        {
+            var latch = node.GetLatch(ref accessor);
+            int version = latch.ReadVersion();
+            if (version == 0)
+            {
+                leaf = default;
+                return false; // node locked or obsolete — restart
+            }
+
+            // IXS-07 — the OLC paper's readUnlockOrRestart, for the hop that brought us HERE. The check below proves the child POINTER was current when it was
+            // read; this one proves it is still current now that the child's own version is in hand, and only the pair makes a hop atomic. An SMO completing
+            // between them is invisible to either alone. Skipped on the first pass, where `node` is the root and no hop has been made yet.
+            if (hopped && !parent.GetLatch(ref accessor).ValidateVersion(parentVersion))
+            {
+                leaf = default;
+                return false;
+            }
+
+            var index = node.Find(key, comparer, ref accessor);
+            if (index < 0)
+            {
+                index = ~index - 1;
+            }
+
+            var child = node.GetChild(index, ref accessor);
+            int parentCount = node.GetCount(ref accessor);
+
+            // Validate: node wasn't modified during our unlocked read
+            if (!latch.ValidateVersion(version))
+            {
+                leaf = default;
+                return false; // node modified between version read and data read — restart
+            }
+
+            // Defensive: a torn-but-validated read should be impossible after the version check above, but treat zero/invalid child as restart rather than
+            // crashing when the next iteration tries to deref it. Issue #297.
+            if (!child.IsValid)
+            {
+                leaf = default;
+                return false;
+            }
+
+            OlcDescentTrace.RecordStep?.Invoke(traceOp, node.ChunkId, version, index, child.ChunkId);
+
+            NodeRelatives.Create(child, index, node, parentCount, ref relatives, out var childRelatives, ref accessor, ref sibAccessor);
+
+            ctx.PathNodes[ctx.Depth] = node;
+            ctx.PathChildIndices[ctx.Depth] = index;
+            ctx.PathVersions[ctx.Depth] = version;
+
+            // Store after Create so lazy-resolved siblings are cached in the stored copy
+            ctx.PathRelatives[ctx.Depth] = relatives;
+
+            parent = node;
+            parentVersion = version;
+            hopped = true;
+
+            node = child;
+            relatives = childRelatives;
+            ctx.Depth++;
+        }
+
+        leaf = node;
+        return true;
+    }
+
+    /// <summary>
     /// Optimistic descent from root to leaf using OLC version validation.
     /// Returns (leafChunkId, leafVersion, keyIndex). leafChunkId=0 signals restart needed.
     /// Zero writes to shared state — readers never acquire any lock.
@@ -2132,12 +2606,34 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
                 return (0, 0, -1); // invalid child — restart
             }
             OlcDescentTrace.RecordStep?.Invoke(OlcDescentTrace.OpDescend, node.ChunkId, version, index, child.ChunkId);
+
+            var parent = node;
+            int parentVersion = version;
+
             node = child;
             latch = node.GetLatch(ref accessor);
             version = latch.ReadVersion();
             if (version == 0)
             {
                 return (0, 0, -1); // locked or obsolete — restart
+            }
+
+            // The OLC protocol's readUnlockOrRestart, and the half this descent was missing. The validation above answers "was the child pointer I read still
+            // current when I read it"; this one answers "is it still current now that I hold a version for the child", and only the pair makes the hop atomic.
+            // Between them sits the whole of GetLatch/ReadVersion on the child, and an SMO landing in that gap is invisible to both neighbours taken alone: the
+            // parent check already passed, and the child version is sampled AFTER the modification, so the child's own later validation sees a version that
+            // never changes again. The reader then answers for a leaf the separators no longer route this key to.
+            //
+            // That is #739/#297's residual, and the shape matches what was measured: six Remove-NotFound events in 25,701 iterations, every one of them with
+            // key < landedLeaf.firstKey — a borrow having moved the key LEFT (RemoveLeaf's borrow-from-right raises the right sibling's minimum and rewrites the
+            // separator in RightAncestor) while the descent was between these two lines.
+            //
+            // Re-resolving the latch through `parent` rather than reusing the `latch` local is deliberate: GetLatch hands out a reference into the chunk's page,
+            // and the child reads in between can evict that page and reuse the slot for another chunk. The established pattern here is to re-load by chunk id
+            // (see the leaf re-validation in TryGetValue), which costs an accessor lookup and is correct under eviction.
+            if (!parent.GetLatch(ref accessor).ValidateVersion(parentVersion))
+            {
+                return (0, 0, -1); // parent changed while we were taking the child's version — the hop was not atomic, restart
             }
         }
 
@@ -2172,6 +2668,18 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
                         {
                             return (0, 0, -1);
                         }
+
+                        // #739. This loop tests only the UPPER side — "is the key past this leaf" — and it can only travel right, so overshooting is
+                        // unrecoverable by construction: land one leaf too far right and `key <= leaf.last` is trivially true, the loop calls itself
+                        // conclusive, and every caller reads that as "definitively not in the tree". Measured in the race harness across 25,701 iterations:
+                        // six Remove-NotFound events, ALL of them branch 3 (this one), and in all six `key < landedLeaf.firstKey` — key 378 on a leaf whose
+                        // first key is 381, key 88 on a leaf starting at 89, and so on, on leaves holding 14 to 21 entries. A concurrent merge or borrow moved
+                        // the key LEFT between the separator read and the leaf read, and the descent answered for the leaf it happened to reach.
+                        //
+                        // The naive guard — restart whenever `key < firstKey` — is #740 again: that band is LEGITIMATE for a genuinely absent key, because
+                        // removing a leaf's first key raises its minimum above the separator that still routes to it, and restarting there never terminates.
+                        // KeyBelowLeafLowerBound is the predicate that already draws that line correctly, against the PREVIOUS leaf's HighKey, so an absent key
+                        // in the residue band still answers NotFound and only a key that provably belongs further left restarts.
                         conclusive = true;
                         break;
                     }

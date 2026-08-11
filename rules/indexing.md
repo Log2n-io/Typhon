@@ -174,6 +174,102 @@ keys.
   note this rule was written for READERS and enforced at two reader sites, and the writers made the identical conflation
        unchecked for as long - see IXW-01, whose livelock (#695) is this rule's `on_violation` reached from the write path.
 
+### IXS-04: A node's items are strictly ascending `[silent]`
+
+  invariant ∀ node n, ∀ i in 1..count-1: n.item[i-1].Key < n.item[i].Key, for LEAF and INTERIOR nodes alike
+  never assuming intra-node order because the node's endpoints look right
+  enforce `BTree.ValidateNodeKeyOrder` walks every node from the root and compares each item against its predecessor
+  scope: BTree.cs (`ValidateNodeKeyOrder`)
+  rationale: this is the one property the key search actually depends on, and until #765 nothing checked it.
+             `NodeWrapper.CheckConsistency` compares each item against the PARENT separator and pins only the endpoints,
+             the chain checks read `GetFirst` and `GetLast` and nothing between, and the separator and HighKey checks read
+             one key each. A leaf holding `[1, 9, 3, 5, 12]` satisfies every one of them.
+  on_violation: a binary or vectorised search answers "not found" for keys that are present, non-deterministically by
+                which half it lands in. That is #297's exact symptom, arriving with no instrument able to say the node
+                was the reason - which is how it stayed open across two closes.
+  verified: BTreeConsistencyValidatorTests.Mutant_KeysOutOfOrderWithinALeaf_AreReported (mutant)
+
+### IXS-05: The descent and the leaf chain reach the same set of leaves `[silent]`
+
+  invariant {leaves reachable by descending from Root} == {leaves reachable by walking `_linkList`}, and `EntryCount`
+            equals the number of items materialised by that walk
+  never trusting one structure to describe the other
+  enforce `BTree.ValidateDescentAndChainAgree` and `BTree.ValidateEntryCountMatchesChain`, both called from
+          `CheckConsistency`, both reporting which ids are in one set and not the other
+  scope: BTree.cs (`ValidateDescentAndChainAgree`, `ValidateEntryCountMatchesChain`)
+  rationale: they are separate structures maintained by separate code, and every defect in this subsystem's history has
+             been one disagreeing with the other. Each individual check walked one of them.
+  on_violation: a leaf on the chain but under no ancestor holds keys no descent reaches - found only by the B-link
+                right-walk, and permanently lost the moment a hop budget or an empty leaf ends that walk early. A leaf
+                under the root but off the chain is invisible to every range scan while lookups still answer from it.
+                A drifted `EntryCount` is worse than either, because it is the number the tests assert on: it hides a
+                lost key here and manufactures a phantom failure somewhere else.
+  verified: BTreeConsistencyValidatorTests.Mutant_LeavesOnTheChainButUnreachableByDescent_AreReported (mutant),
+            BTreeConsistencyValidatorTests.Mutant_EntryCountDisagreeingWithTheChain_IsReported (mutant)
+
+### IXS-06: A descent answers NOT-FOUND only for a leaf that owns the key's lower bound `[UNBUILT]`
+
+  status WITHDRAWN 2026-08-10, same day it was written, then SUPERSEDED by IXS-07 later the same day. The invariant is right and
+         the defect it names is real (#739/#297); the ENFORCEMENT shipped with it was not, and is reverted. Kept unbuilt rather
+         than deleted because it states the OUTCOME (a descent must not answer for a leaf that does not own the key) while IXS-07
+         states the MECHANISM that was actually missing (the hop was never atomic). If a residual overshoot is ever measured with
+         IXS-07 in place, this is the rule to build, and the way to build it is a stored per-node LowKey mirroring HighKey - NOT a
+         neighbour read, and NOT a carried separator. Both of those were tried; see below.
+  invariant before `OptimisticDescendToLeaf` reports `keyIndex < 0` as conclusive, the leaf it stopped at must not be one the key
+            provably belongs to the LEFT of. When it does, the descent overshot and the caller must restart
+  never treating `key <= leaf.lastKey` as sufficient evidence that the key is not in the tree
+  never enforcing this by calling `KeyBelowLeafLowerBound` from the descent - that predicate reads `leaf.GetPrevious()` and then
+        DEREFERENCES it for its HighKey. On the write paths the leaf is locked and that is safe; on the lock-free descent the
+        neighbour id can be torn, and dereferencing it faults before any validation can signal a restart. Measured: the test host
+        died with no managed stack in 4 of 5 runs of `ChaosStressTests.Light_2T_50E_NoDelete`, against 6 of 6 passing on main and
+        4 of 4 passing once the call was removed. This is the hazard `BaseNodeStorage.GetChild` documents in its own comment.
+  gap REFUTED 2026-08-10. This field previously read "the descent ALREADY follows a separator to choose each child, and that
+      separator IS the lower bound. Carrying it out of the descent answers the question with no neighbour read at all." The first
+      half is true and the second does not follow: the descent picks the LARGEST separator <= key (`index = ~index - 1`), so
+      `key >= separator` holds by construction at every level. A guard testing `key < carriedSeparator` can never fire. The
+      separator is also the value that goes STALE when a borrow moves keys left, so it cannot be both the thing that is wrong and
+      the thing that detects it. Do not re-propose this.
+  gap what the descent is actually missing is the OLC protocol's SECOND parent validation - the paper's `readUnlockOrRestart`,
+      taken AFTER the child's version is sampled rather than before. `OptimisticDescendToLeaf` validated the parent, then read the
+      child's version, and never re-checked; an SMO landing in that gap is invisible to both checks taken alone, because the parent
+      test has already passed and the child version is sampled after the modification. See IXS-07.
+  evidence 6 Remove-NotFound events in 25,701 race-harness iterations, ALL on the general-descent branch, ALL with
+           `key < landedLeaf.firstKey` - key 378 on a leaf whose first key is 381, key 88 on one starting at 89 - on leaves
+           holding 14 to 21 entries. With the (unsafe) guard in place: 0 in 94,854. The defect is not in doubt.
+  on_violation: `Remove` returns false for a key that is present, reachable and correctly chained (#739), and the same descent
+                backs `TryGet`, so the identical false not-found is reachable on the READ path (#297).
+  requires IXW-03
+  requires IXS-07
+
+### IXS-07: A descent hop validates the parent twice — once before the child pointer is used, once after the child's version is taken `[silent]`
+
+  invariant for every hop parent -> child, the parent's version is read once and validated TWICE: after reading the child pointer,
+            and again after `ReadVersion()` on the child. Only the second pair makes the hop atomic
+  never treating one validation as sufficient. The first proves the child POINTER was current; it says nothing about the interval
+        in which the child's own version is sampled, and that interval is where an SMO becomes undetectable
+  never reusing a cached `OlcLatch` for the second validation - re-resolve it through the parent `NodeWrapper`. `GetLatch` hands
+        out a reference into the chunk's page, and the child reads in between can evict that page and reuse the slot
+  enforce `BTree.OptimisticDescendToLeaf` and `BTree.DescendRecordingPath` each perform
+          `parent.GetLatch(ref accessor).ValidateVersion(parentVersion)` after the child's `ReadVersion()`, and restart on failure.
+          `DescendRecordingPath` is the ONE descent the iterative write paths share, so this holds for insert and remove without
+          either of them restating it - which is the point, and why the duplicated loops were collapsed in the same change
+  never restating this per write path. The loop existed twice verbatim, and three of the six defects in PR #737 were a guard one
+        copy had and its twin had lost
+  scope: BTree.cs (`OptimisticDescendToLeaf`, `DescendRecordingPath`)
+  gap `FindLeaf` is a FOURTH descent and performs NO version validation at all. Reached from the range-scan cursors,
+      `RangeEnumerator`, `MovePessimistic` and `RemoveCorePessimistic`. Not covered by this rule and not yet assessed
+  rationale: this is the OLC paper's `readUnlockOrRestart`, and the descent shipped without it. With only the first check, a
+             modification completing between it and the child's `ReadVersion()` is invisible to BOTH neighbours: the parent test
+             has already passed, and the child version is sampled after the modification, so the child's own later validation
+             compares against a version that never changes again. The reader then answers for a leaf the separators no longer
+             route the key to. `RemoveLeaf`'s borrow-from-right is the concrete producer - it raises the right sibling's minimum
+             and rewrites the separator in `RightAncestor`, moving a key LEFT, which the B-link right-walk cannot recover from
+             because it can only travel right
+  on_violation: a present key is reported not-found on both the read and the remove path, silently. The window is a couple of
+                instructions wide, so it needs a race harness to see at all: six events in 25,701 iterations, every one with
+                `key < landedLeaf.firstKey`
+  verified: BTreeDescentHopAtomicityTests.ParentVersionChangedWhileTakingTheChildVersion_RestartsTheDescent
+
 ---
 
 ## Module: IXW — Index writes under OLC
@@ -244,9 +340,6 @@ written for the read path; these are the write-path obligations that went unwrit
           returns `key < previous.HighKey`. The two extra chunk reads are paid only after the first-key comparison has failed, so
           the common in-range insert still costs one `GetCount`, one `GetFirst` and one compare.
   scope: BTree.Insert.cs (`KeyBelowLeafLowerBound` and its call sites), BTree.Remove.cs (`RemoveIterative`), BTree.Move.cs
-  gap BTree.Move.cs performs leaf inserts with NO lower-bound guard at all. It is not a drifted copy, it is a missing one, and
-      collapsing the five hand-maintained leaf-insert copies onto one authority is the only fix that scales - see the assessment
-      in claude/research/Indexing/.
   on_violation: every re-descent reaches the same leaf and fails the same test, so the bounded pessimistic loop of IXW-01 burns all
                 10,000 restarts and throws. Measured single-threaded on the INSERT side, no contention of any kind: 2 m 34 s to the
                 throw. On the REMOVE side it is concurrency-gated - `TryRemoveOlc` answers NotFound from the descent before its
@@ -264,3 +357,41 @@ written for the read path; these are the write-path obligations that went unwrit
              the suite removed a leaf's first key and re-inserted it on a tree large enough to have interior leaves.
   verified: BtreeTests.RemoveThenReinsertLeafFirstKey_DoesNotStallInsert (2 m 34 s and failing before, 130 ms and green after)
   requires IXW-01 (its bound is what turns this into a diagnosable throw instead of a hang)
+
+### IXW-04: A write picks its target leaf with an insert-mode descent, and proves that leaf's authority before mutating `[silent]`
+
+  invariant a descent whose result will be WRITTEN to passes `followRightLink: false`, and the leaf it returns is checked against
+            BOTH bounds - `key < leaf.HighKey` when a right sibling exists, and IXW-03's lower bound - before any mutation
+  never choosing an insertion target with the reader's descent
+  never asking only one of the two bounds
+  enforce `BTree.KeyOutsideLeafAuthority` states the pair once; `Move`, `MoveValue` and the OLC general insert path all call it and
+          restart when it holds. A bail before mutation uses `AbortWriteLock`, not `WriteUnlock` - nothing changed, so bumping the
+          version would only restart other threads for free.
+  enforce the PESSIMISTIC path answers the upper bound differently and must still ask it through the same predicate:
+          `InsertIterative`'s B-link move-right loop is `while (KeyAboveLeafUpperBound(...))`, walking right until the leaf owns the
+          key rather than restarting, because mid-SMO it has no restart point. Same question, different response.
+  enforce the append and prepend fast paths answer both bounds STRUCTURALLY rather than by predicate, and that is sufficient:
+          `PushLast` requires `!rl.GetNext().IsValid` (the leaf is genuinely rightmost, so no upper bound exists) plus
+          `key > rl.GetLast()`; `PushFirst` requires `!ll.GetPrevious().IsValid` (genuinely leftmost, so no separator routes to it).
+  scope: BTree.Insert.cs (`KeyAboveLeafUpperBound`, `KeyOutsideLeafAuthority`), BTree.Move.cs
+  audit  all 14 leaf-write sites, 2026-08-10: Move.cs x4 via `KeyOutsideLeafAuthority`; Insert.cs OLC general path via both halves;
+         `InsertIterative` x3 via the move-right loop and `KeyBelowLeafLowerBound`; the two `PushLast` and two `PushFirst` fast paths
+         structurally; two new-root inserts have no siblings and no separator, so the question does not arise.
+  rationale: the B-link right-walk answers "where does this EXISTING key live", by hopping right until the key falls inside a leaf's
+             real contents. A key being inserted exists nowhere, so the walk cannot terminate on a match and instead runs one leaf
+             PAST the one whose separator range owns the key. `Move` used the default `true` and inserted into that leaf, below its
+             separator. Reads survived it - the same right-walk that caused it also recovers from it - which is exactly why it
+             stood: the INSERT path passes `false` on purpose and cannot recover, so the damage was one stale separator away from a
+             lost key.
+  on_violation: separators stop bounding their leaves. Descent for every key in the resulting gap routes left and is recovered only
+                by the right-walk, at one extra hop per read; `ValidateLeafSeparators` reports the leaf, and because the state is
+                benign for reads the report reads as a false positive and gets suppressed. That suppression is the real cost - it is
+                what made the checker unusable and kept #297/#679 undetectable for 160 days.
+  measured: `Stress_MoveSameLeaf` emitted 2-3 of these on EVERY run and reported PASSED, because its `TryCheckConsistency` helper
+            discarded the result. One violation was byte-identical across five consecutive runs. It reproduces with ONE thread and
+            ONE key range - no concurrency of any kind - and after the fix: 0 violations in 10 consecutive runs. Fixing it also
+            REMOVED work: same-leaf moves stopped being routed down the two-leaf path, taking `Stress_MoveSameLeaf` from 12 restarts
+            and 109 pessimistic fallbacks to 0 and 0.
+  verified: BTreeMoveLeafAuthorityTests.MoveEvenToOdd_SingleThreaded_KeepsEverySeparatorRoutingToItsLeaf
+            (mutant: BTreeMoveLeafAuthorityTests.Mutant_AKeyMissingFromItsAuthoritativeLeaf_IsReported)
+  requires IXW-03 (it is the lower-bound half of this pair)

@@ -26,6 +26,8 @@ public class BTreeMicroBenchmarks
     private const int PreFillCount = 10_000;
     private long _nextInsertKey = PreFillCount + 1;
     private long _deleteKeyToggle;
+    private long _moveToggle;
+    private long _moveCrossToggle;
     private long[] _randomInsertKeys;
     private int _randomInsertIndex;
 
@@ -65,6 +67,12 @@ public class BTreeMicroBenchmarks
         {
             _tree.Add(i, i * 10, ref accessor);
         }
+        // #765 S8: punch two holes so the Move benchmarks have a free destination. The pre-fill is 1..10000 with no gaps, so without this there is no vacant
+        // slot to move INTO and Move would return false without doing any work — a benchmark measuring a rejection. 4001 sits beside 4000 in the same leaf;
+        // 8001 is far enough from 2000 to guarantee a different one.
+        _tree.Remove(4001, out _, ref accessor);
+        _tree.Remove(8001, out _, ref accessor);
+
         accessor.Dispose();
 
         // Pre-generate random keys for Insert_Random benchmark.
@@ -154,6 +162,55 @@ public class BTreeMicroBenchmarks
         accessor.Dispose();
     }
 
+
+    /// <summary>
+    /// Move a key to a free adjacent slot and back. Both keys live in the same leaf, which is what a spatial or positional index does on almost every update.
+    /// </summary>
+    /// <remarks>
+    /// #765 S8. There was no <c>Move</c> benchmark anywhere in this project, which is the reason #221's original "40-50%" claim could never be checked and why
+    /// the assessment had to re-derive it from source reading. Move is a compound operation with its own OLC protocol — two descents, a same-leaf fast path and
+    /// a two-leaf path with ordered locking — and none of it was measured by anything.
+    /// <para>
+    /// The pair moves 4000 to 4001 and back, so the tree returns to its starting state every two invocations and the measurement cannot drift the way
+    /// <c>ConcurrentInsert_Monotonic</c> does. <c>GlobalSetup</c> removes 4001 from the gapless pre-fill to create the vacant destination — without it, Move
+    /// would find the key occupied, return false immediately, and the benchmark would be timing a rejection.
+    /// </para>
+    /// </remarks>
+    [Benchmark]
+    [BenchmarkCategory("Regression")]
+    public void Move_SameLeaf()
+    {
+        var accessor = _segment.CreateChunkAccessor();
+        // Alternate direction so the tree returns to its initial state every two invocations and the measurement cannot drift.
+        if ((_moveToggle++ & 1) == 0)
+        {
+            _tree.Move(4000, 4001, 40_000, ref accessor);
+        }
+        else
+        {
+            _tree.Move(4001, 4000, 40_000, ref accessor);
+        }
+        accessor.Dispose();
+    }
+
+    /// <summary>
+    /// Move a key to a slot far enough away that it lands in a different leaf, exercising the two-leaf path with ChunkId-ordered locking.
+    /// </summary>
+    [Benchmark]
+    [BenchmarkCategory("Regression")]
+    public void Move_CrossLeaf()
+    {
+        var accessor = _segment.CreateChunkAccessor();
+        if ((_moveCrossToggle++ & 1) == 0)
+        {
+            _tree.Move(2000, 8001, 20_000, ref accessor);
+        }
+        else
+        {
+            _tree.Move(8001, 2000, 20_000, ref accessor);
+        }
+        accessor.Dispose();
+    }
 
     /// <summary>
     /// Read 100 consecutive keys. Measures sequential access locality in the B+Tree.

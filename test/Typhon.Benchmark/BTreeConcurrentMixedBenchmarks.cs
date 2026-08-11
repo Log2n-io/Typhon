@@ -83,7 +83,9 @@ public class BTreeConcurrentMixedBenchmarks
     /// Expected: dramatic throughput improvement at high thread counts.
     /// </summary>
     [Benchmark(OperationsPerInvoke = OpsPerInvocation)]
-    [BenchmarkCategory("BTreeFast")]
+    // #765 S4: promoted into the Regression category, which is what bench/aws/benchmark.sky.yaml's default profile selects and therefore the only
+    // route into benchmark/history. This class sat in BTreeMedium, a profile that has to be dispatched by hand and never was.
+    [BenchmarkCategory("BTreeFast", "Regression")]
     public void Mixed_95Read_5Write()
     {
         RunMixedWorkload(readPercent: 95);

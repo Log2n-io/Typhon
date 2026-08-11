@@ -68,21 +68,29 @@ public class OlcBTreeStressTests
     }
 
     /// <summary>
-    /// Runs CheckConsistency in a try-catch. Under high-contention stress, internal node separator keys
-    /// can become stale (known limitation). Returns true if consistent, false if violations found.
+    /// Runs <c>CheckConsistency</c> and lets it fail the test.
     /// </summary>
-    private bool TryCheckConsistency<TKey>(BTree<TKey, PersistentStore> tree, ChunkBasedSegment<PersistentStore> segment, string context = null) where TKey : unmanaged
+    /// <remarks>
+    /// This replaces a <c>TryCheckConsistency</c> that caught the exception, printed it and returned a bool eight of its nine callers discarded — the ninth
+    /// counted into a variable that was written to the log and never asserted. Its doc comment excused the swallowing as a "known limitation" of high-contention
+    /// stress; the limitation it was describing was #297. Measured before removing it: this fixture emitted 2-3 real separator violations on EVERY run, in five
+    /// consecutive runs, and reported PASSED each time. One of them was byte-identical across all five and reproduced single-threaded with one key range — see
+    /// <see cref="BTreeMoveLeafAuthorityTests"/>, which is where that defect ended up. A checker whose result nobody reads is not a checker, and the cost of
+    /// finding that out was 160 days.
+    /// <para>
+    /// Nothing here is tolerated by design. If this throws, the tree is wrong: fix the tree or fix the invariant, but do not restore the catch.
+    /// </para>
+    /// </remarks>
+    private void CheckConsistency<TKey>(BTree<TKey, PersistentStore> tree, ChunkBasedSegment<PersistentStore> segment, string context = null) where TKey : unmanaged
     {
         var accessor = segment.CreateChunkAccessor();
         try
         {
             tree.CheckConsistency(ref accessor);
-            return true;
         }
         catch (Exception ex)
         {
-            TestContext.Out.WriteLine($"Consistency check{(context != null ? $" ({context})" : "")}: {ex.Message}");
-            return false;
+            throw new AssertionException($"Consistency check failed{(context != null ? $" ({context})" : "")}: {ex.Message}", ex);
         }
         finally
         {
@@ -218,7 +226,7 @@ public class OlcBTreeStressTests
             Assert.That(readErrors, Is.EqualTo(0), "Safe-range reads should all be correct");
             Assert.That(tree.OptimisticRestarts, Is.GreaterThan(0), "Mixed workload should cause restarts");
 
-            TryCheckConsistency(tree, segment);
+            CheckConsistency(tree, segment);
             LogDiagnostics(tree);
         }
         finally
@@ -287,7 +295,7 @@ public class OlcBTreeStressTests
             TestContext.Out.WriteLine($"ContentionSplitCount={tree.ContentionSplitCount} (not asserted — scheduling-dependent)");
 
             // Verify tree structural consistency
-            TryCheckConsistency(tree, segment);
+            CheckConsistency(tree, segment);
 
             // Verify every key is present by enumerating all leaves
             var verifyAccessor = segment.CreateChunkAccessor();
@@ -425,7 +433,7 @@ public class OlcBTreeStressTests
             // resolves faster and the hint may not accumulate. Log for diagnostics, don't assert.
             TestContext.Out.WriteLine($"ContentionSplitCount={tree.ContentionSplitCount} (not asserted — scheduling-dependent)");
 
-            TryCheckConsistency(tree, segment);
+            CheckConsistency(tree, segment);
             LogDiagnostics(tree);
         }
         finally
@@ -519,7 +527,7 @@ public class OlcBTreeStressTests
             Assert.That(moveErrors, Is.EqualTo(0), "All moves should succeed (disjoint ranges)");
             Assert.That(tree.EntryCount, Is.EqualTo(totalKeys), "Move should not change total entry count");
 
-            TryCheckConsistency(tree, segment);
+            CheckConsistency(tree, segment);
             LogDiagnostics(tree);
         }
         finally
@@ -603,7 +611,7 @@ public class OlcBTreeStressTests
             TestContext.Out.WriteLine($"Cross-leaf move errors: {moveErrors} of {threadCount * movesPerThread}");
             Assert.That(tree.EntryCount, Is.EqualTo(totalKeys), "Move should not change total entry count");
 
-            TryCheckConsistency(tree, segment);
+            CheckConsistency(tree, segment);
             LogDiagnostics(tree);
         }
         finally
@@ -702,7 +710,7 @@ public class OlcBTreeStressTests
 
             Assert.That(moveErrors, Is.EqualTo(0), "Successfully moved values should be readable");
 
-            TryCheckConsistency(tree, segment);
+            CheckConsistency(tree, segment);
             LogDiagnostics(tree);
         }
         finally
@@ -829,7 +837,7 @@ public class OlcBTreeStressTests
             Assert.That(enumErrors, Is.EqualTo(0), "Enumeration should not throw exceptions");
             Assert.That(enumCount, Is.GreaterThan(0), "Enumerators should have counted entries");
 
-            TryCheckConsistency(tree, segment);
+            CheckConsistency(tree, segment);
             LogDiagnostics(tree);
         }
         finally
@@ -869,8 +877,6 @@ public class OlcBTreeStressTests
 
             tree.ResetDiagnostics();
 
-            int consistencyErrors = 0;
-
             // 5 batches of concurrent inserts, with consistency check between each
             for (int batch = 0; batch < batchCount; batch++)
             {
@@ -906,19 +912,15 @@ public class OlcBTreeStressTests
                 Task.WaitAll(tasks);
 
                 // Consistency check between batches — single-threaded, no concurrent modification
-                if (!TryCheckConsistency(tree, segment, $"batch {batch}"))
-                {
-                    Interlocked.Increment(ref consistencyErrors);
-                }
+                CheckConsistency(tree, segment, $"batch {batch}");
             }
 
             int expectedCount = initialKeys + batchCount * writerCount * batchSize;
             Assert.That(tree.EntryCount, Is.EqualTo(expectedCount),
                 $"Expected {expectedCount} entries after {batchCount} batches");
-            TestContext.Out.WriteLine($"Consistency violations: {consistencyErrors} of {batchCount} checkpoints");
 
             // Final consistency check
-            TryCheckConsistency(tree, segment);
+            CheckConsistency(tree, segment);
             LogDiagnostics(tree);
         }
         finally
