@@ -787,7 +787,11 @@ public partial class DatabaseEngine
     /// matching the occupancy bitmap's own word count.
     /// </summary>
     /// <param name="segClaimedPages">Count of segment-claimed pages within the file (diagnostic, surfaced by the integrity report).</param>
-    internal long[] BuildOwnedPageBitmap(out int segClaimedPages)
+    /// <param name="unresolvedPersistedSpis">
+    /// Number of persisted archetype segment pointers this reconstruction could not read. Non-zero means the returned bitmap is a PARTIAL view of page
+    /// ownership, which is safe to compare against but must never be adopted wholesale — see <see cref="RederiveOccupancyOnCrash"/> (#771).
+    /// </param>
+    internal long[] BuildOwnedPageBitmap(out int segClaimedPages, out int unresolvedPersistedSpis)
     {
         var pageCount = MMF.StorageFilePageCount;
         var capacity = MMF.OccupancyCapacityPages;
@@ -823,6 +827,56 @@ public partial class DatabaseEngine
                         owned[p >> 6] |= 1L << (p & 0x3F);
                     }
                 }
+            }
+        }
+
+        // Persisted archetypes this session did NOT materialize (#771). InitializeArchetypes iterates ArchetypeRegistry.GetAllArchetypes() — the CLR types the
+        // CALLER registered — so an archetype whose type is absent is never visited and its four segments never reach RegisteredSegments. That is correct for
+        // the session (nothing can spawn or read an archetype with no accessor), but this bitmap is a claim about the FILE, and it is adopted WHOLESALE by the
+        // crash-path re-derive. Omitting those pages marks live data free, and the next allocation hands one of them to a second owner — CK-09's on_violation,
+        // exactly. Opening with a subset of the schema is supported (a repair or forensic tool has no schema assembly at all), so ownership must not depend on
+        // what happened to be registered.
+        //
+        // The persisted record is consulted ONLY where the session has no live view, and that restriction is load-bearing in the other direction: for a
+        // materialized archetype the registry is NEWER. A migrating open abandons the old segments, fresh-allocates, and frees the old pages, while ArchetypeR1
+        // still names the old roots until the next checkpoint persists the new SPIs — claiming those would invent phantoms over genuinely free pages, which is
+        // the mirror image of the bug being fixed here.
+        unresolvedPersistedSpis = 0;
+        if (_persistedArchetypes != null && _persistedArchetypes.Count > 0)
+        {
+            var materializedArchetypes = MaterializedArchetypeNames();
+            using var spiGuard = EpochGuard.Enter(EpochManager);
+            foreach (var kv in _persistedArchetypes)
+            {
+                if (materializedArchetypes.Contains(kv.Key))
+                {
+                    continue;
+                }
+
+                var arch = kv.Value.Arch;
+                ClaimPersistedSegment(arch.EntityMapSPI, spiGuard.Epoch, owned, pageCount, ref claimed, ref unresolvedPersistedSpis);
+                ClaimPersistedSegment(arch.ClusterSegmentSPI, spiGuard.Epoch, owned, pageCount, ref claimed, ref unresolvedPersistedSpis);
+                ClaimPersistedSegment(arch.ClusterIndexSPI, spiGuard.Epoch, owned, pageCount, ref claimed, ref unresolvedPersistedSpis);
+                ClaimPersistedSegment(arch.ClusterString64IndexSPI, spiGuard.Epoch, owned, pageCount, ref claimed, ref unresolvedPersistedSpis);
+            }
+        }
+
+        // The same argument for component-owned segments. A ComponentTable is built by RegisterComponentFromAccessor, so an unregistered component's data and
+        // revision segments are as absent from the registry as its archetype's are, and just as owned.
+        if (_persistedComponents != null && _persistedComponents.Count > 0)
+        {
+            var materializedComponents = MaterializedComponentNames();
+            using var compGuard = EpochGuard.Enter(EpochManager);
+            foreach (var kv in _persistedComponents)
+            {
+                if (materializedComponents.Contains(kv.Key))
+                {
+                    continue;
+                }
+
+                var comp = kv.Value.Comp;
+                ClaimPersistedSegment(comp.ComponentSPI, compGuard.Epoch, owned, pageCount, ref claimed, ref unresolvedPersistedSpis);
+                ClaimPersistedSegment(comp.VersionSPI, compGuard.Epoch, owned, pageCount, ref claimed, ref unresolvedPersistedSpis);
             }
         }
 
@@ -862,6 +916,163 @@ public partial class DatabaseEngine
     }
 
     /// <summary>
+    /// Claims the pages of one persisted segment pointer by walking its page directory <b>in place</b>, without constructing or registering a
+    /// <see cref="LogicalSegment{TStore}"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="ManagedPagedMMF.TryLoadChunkBasedSegment"/> is deliberately NOT used here: it inserts into the segment registry, which would make
+    /// <see cref="BuildOwnedPageBitmap"/> — documented and relied upon as read-only, and called from <see cref="RunStorageIntegrityCheck"/> on a live engine —
+    /// mutate the engine it is describing. It would also need a stride this caller has no schema to compute.
+    /// </para>
+    /// <para>
+    /// A pointer of <c>0</c> means the archetype has no such segment, which is not a failure. A root page that is already claimed was reached through
+    /// <see cref="ManagedPagedMMF.RegisteredSegments"/> and needs no second walk. Anything else that cannot be read increments
+    /// <c>unresolved</c> so the caller can refuse to adopt an incomplete picture.
+    /// </para>
+    /// </remarks>
+    private void ClaimPersistedSegment(int rootPageIndex, long epoch, long[] owned, int pageCount, ref int claimed, ref int unresolved)
+    {
+        if (rootPageIndex <= 0 || (uint)rootPageIndex >= (uint)pageCount)
+        {
+            // 0 is "this archetype has no such segment". A pointer outside the file is a different statement — the directory names a page that does not
+            // exist — and it is exactly the case that must not be silently treated as "nothing to claim".
+            if (rootPageIndex != 0)
+            {
+                unresolved++;
+            }
+
+            return;
+        }
+
+        if (((owned[rootPageIndex >> 6] >> (rootPageIndex & 0x3F)) & 1) != 0)
+        {
+            // Already claimed — two persisted records naming the same root, or a root that is also another segment's twin. Walking it twice is harmless but
+            // pointless; the caller has already skipped the materialized archetypes, so this is not the "session loaded it" case.
+            return;
+        }
+
+        try
+        {
+            var store = new PersistentStore(MMF);
+            store.RequestPageEpoch(rootPageIndex, epoch, out var memPageIndex);
+            var page = store.GetPage(memPageIndex);
+
+            owned[rootPageIndex >> 6] |= 1L << (rootPageIndex & 0x3F);
+            claimed++;
+            ClaimDirectoryTwin(page, owned, pageCount);
+
+            // Same directory traversal as LogicalSegment.Load: the root's index section, then each map-extension page in the LogicalSegmentNextMapPBID chain.
+            // The extension pages are themselves owned (they are bit-set but appear in no segment's Pages list), so they are claimed as they are walked.
+            var rd = page.RawDataReadOnly<int>(0, LogicalSegment<PersistentStore>.RootHeaderIndexSectionCount);
+            var maxIndicesForPage = LogicalSegment<PersistentStore>.RootHeaderIndexSectionCount;
+            var i = 0;
+            var walkedExtensions = 0;
+
+            while (rd[i] != 0)
+            {
+                var dataPage = rd[i];
+                if ((uint)dataPage < (uint)pageCount && ((owned[dataPage >> 6] >> (dataPage & 0x3F)) & 1) == 0)
+                {
+                    owned[dataPage >> 6] |= 1L << (dataPage & 0x3F);
+                    claimed++;
+                }
+
+                if (++i != maxIndicesForPage)
+                {
+                    continue;
+                }
+
+                var next = page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).LogicalSegmentNextMapPBID;
+                if (next == 0 || (uint)next >= (uint)pageCount || ++walkedExtensions > MaxDirectoryMapExtensionWalk)
+                {
+                    break;
+                }
+
+                // A map-extension page is bit-set but in no segment's Pages list, so it is claimed without advancing the counter — same
+                // treatment the registered path's CollectDirectoryMapExtensionPages block gives it.
+                owned[next >> 6] |= 1L << (next & 0x3F);
+
+                store.RequestPageEpoch(next, epoch, out memPageIndex);
+                page = store.GetPage(memPageIndex);
+                ClaimDirectoryTwin(page, owned, pageCount);
+                rd = page.RawDataReadOnly<int>(0, LogicalSegment<PersistentStore>.NextHeadersIndexSectionCount);
+                maxIndicesForPage = LogicalSegment<PersistentStore>.NextHeadersIndexSectionCount;
+                i = 0;
+            }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or IndexOutOfRangeException or ArgumentOutOfRangeException)
+        {
+            // A torn or unreadable directory. Recording it is the point: the caller must not overwrite the persisted bitmap with a reconstruction that is
+            // missing a segment it knows exists.
+            unresolved++;
+        }
+    }
+
+    /// <summary>
+    /// Claims the CK-05 (C2) twin of one directory page, read from that page's own <c>TwinPageIndex</c>.
+    /// </summary>
+    /// <remarks>
+    /// The registered path gets its twins from <see cref="ManagedPagedMMF.DirectoryPairs"/>, which is populated by
+    /// <c>ResolveDirectoryPairsForLoad</c> — and that runs only inside a segment <i>load</i>. A segment claimed without loading therefore contributes no pair,
+    /// so its twin has to come from where the pair state itself reads it: the primary's header. A twin is bit-set in the occupancy bitmap while belonging to no
+    /// segment's page list, so it is exactly the kind of page a reconstruction drops silently.
+    /// </remarks>
+    /// <remarks>
+    /// Sets the ownership bit but does NOT advance <c>segClaimedPages</c>: that counter means "pages listed in some segment's
+    /// <c>Pages</c>", and a twin belongs to no segment's page list — which is precisely why it needs claiming separately.
+    /// The registered path's twin and map-extension blocks do not advance it either, so counting here would make the same
+    /// database report a different total depending on whether its schema was registered.
+    /// </remarks>
+    private static void ClaimDirectoryTwin(PageAccessor page, long[] owned, int pageCount)
+    {
+        var twin = page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).TwinPageIndex;
+        if (twin == 0 || (uint)twin >= (uint)pageCount)
+        {
+            return;
+        }
+
+        owned[twin >> 6] |= 1L << (twin & 0x3F);
+    }
+
+    /// <summary>Names of the archetypes this session actually materialized, whose live segments are already in the registry.</summary>
+    private HashSet<string> MaterializedArchetypeNames()
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        var byRouting = _metaByRouting;
+        if (byRouting == null)
+        {
+            return names;
+        }
+
+        for (var i = 0; i < byRouting.Length; i++)
+        {
+            var meta = byRouting[i];
+            if (meta != null)
+            {
+                names.Add(meta.Name);
+            }
+        }
+
+        return names;
+    }
+
+    /// <summary>Schema names of the components this session actually registered, whose live segments are already in the registry.</summary>
+    private HashSet<string> MaterializedComponentNames()
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var table in GetAllComponentTables())
+        {
+            names.Add(table.Definition.Name);
+        }
+
+        return names;
+    }
+
+    /// <summary>Cycle guard for the directory-map extension chain — a segment cannot legitimately exceed the file's page count in extensions.</summary>
+    private const int MaxDirectoryMapExtensionWalk = 4096;
+
+    /// <summary>
     /// Audits storage-level invariants and returns every violation found. Pure read-only — touches the occupancy bitmap, the segment registry, and each
     /// segment's forward header chain; no data-page mutation, no allocation beyond a small issue list. Safe to call at any time on a live engine.
     /// </summary>
@@ -894,7 +1105,9 @@ public partial class DatabaseEngine
         MMF.ReadOccupancyBits(words);
 
         // Pass 2: the authoritative "owned" bitmap (every claimant). Shared with the crash-path occupancy re-derive so the canary and the heal agree by construction.
-        var owned = BuildOwnedPageBitmap(out var segClaimedTotal);
+        // The canary only COMPARES, so an incomplete reconstruction costs it accuracy (a phantom it cannot explain), never data — the opposite of the
+        // re-derive, which writes it. Hence the count is read and reported rather than fatal here.
+        var owned = BuildOwnedPageBitmap(out var segClaimedTotal, out _);
 
         // Compare word-by-word — orphans = bits set in `words` but not in `owned`, phantoms = vice versa.
         var bitsSet = 0;
@@ -956,7 +1169,7 @@ public partial class DatabaseEngine
             {
                 if (seg.Pages.Length == 0) continue;
                 LogicalSegment<PersistentStore> ls = null;
-                if (MMF.RegisteredSegments is ICollection<LogicalSegment<PersistentStore>> coll)
+                if (MMF.RegisteredSegments is { } coll)
                 {
                     foreach (var s in coll)
                     {
@@ -1093,7 +1306,7 @@ public partial class DatabaseEngine
             var died = Volatile.Read(ref clusterState.ClusterAnyDied);
 
             var rootPage = clusterState.ClusterSegment?.RootPageIndex ?? 0;
-            for (var c = 0; c < clusterCount && c < maxBorn.Length; c++)
+            for (var c = 0; c < clusterCount && c < maxBorn!.Length; c++)
             {
                 var actualBorn = recompute.MaxBorn[c];
                 if (actualBorn == NoEntityInCluster)

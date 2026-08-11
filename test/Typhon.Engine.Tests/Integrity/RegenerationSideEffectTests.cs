@@ -20,9 +20,6 @@ namespace Typhon.Engine.Tests.Integrity;
 /// </para>
 /// </remarks>
 [TestFixture]
-[Ignore("#771 — SEG-02 only now; the WAL-04 half of that issue was a check bug and is fixed. These tests ARE the "
-    + "reproducer and stay written rather than deleted, because the question they ask — does opening a database change "
-    + "it — is G3's precondition.")]
 internal sealed class RegenerationSideEffectTests : IntegrityFixtureBase
 {
     private void Regenerate(bool checkpoint = true)

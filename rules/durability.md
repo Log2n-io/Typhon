@@ -417,9 +417,19 @@ CK-08 (flush-only cycles) are later increments.
 
 ### CK-09: Occupancy bitmap is derived — re-derived on crash `[fatal]` `[silent]`
   invariant the occupancy bitmap is a DERIVED structure: on the crash path it is never trusted, but rebuilt WHOLESALE from the
-            authoritative page ownership — `owned[p] = 1` iff page `p` belongs to a registered segment's `Pages`, its
+            authoritative page ownership — `owned[p] = 1` iff page `p` belongs to any segment the FILE records, its
             directory-map-extension chain, the reserved root range, the occupancy reserves, or a CK-05 directory twin
-            (`DatabaseEngine.BuildOwnedPageBitmap`). The persisted L0 words are overwritten with `owned`
+            (`DatabaseEngine.BuildOwnedPageBitmap`). "Any segment the file records" is load-bearing and was violated until
+            2026-08-11 (#771): the reconstruction enumerated `MMF.RegisteredSegments`, which holds only the segments THIS
+            session loaded, and `InitializeArchetypes` loads them by iterating `ArchetypeRegistry.GetAllArchetypes()` — the
+            CLR types the CALLER registered. Opening with a subset of the schema is supported (a repair or forensic tool has
+            no schema assembly), so ownership was caller-dependent: a plain open-and-close of a healthy database freed 36
+            live pages. The persisted `ArchetypeR1` / `ComponentR1` segment pointers are now walked in addition, so `owned`
+            is a function of the file alone. A reconstruction that cannot read a pointer it knows exists is PARTIAL and MUST
+            NOT be adopted — `RederiveOccupancyOnCrash` refuses rather than freeing pages it merely failed to attribute.
+            The heal is also skipped entirely when the previous shutdown was clean: `WalFilesPresentAtOpen` means "WAL
+            segments exist on disk", which a clean shutdown does not preclude, so it alone does not establish a crash.
+            The persisted L0 words are overwritten with `owned`
             (`BitmapL3.OverwriteFromDerived`) and the L1/L2 skip summaries recomputed — a full replacement, NOT a read-then-diff,
             so a CRC-torn occupancy page is healed by replacement (the FPI substitute) and any page a torn checkpoint leaked
             (bit set, no claimant) is reclaimed
@@ -434,7 +444,10 @@ CK-08 (flush-only cycles) are later increments.
                 corruption), or a stale set bit leaks the page forever
   verified: TornOccupancyPage_WithFpiDisabled_RecoversViaRederive (FPI off + torn checkpointed occupancy page ⇒
             `RunStorageIntegrityCheck` reports 0 orphans / 0 phantoms; `LastOpenOccupancyRederiveWordsChanged > 0` genuineness)
-            [VerifiesRule]
+            [VerifiesRule]; OwnedBitmapIsIdenticalWithAndWithoutSchema (#771 — the file-only property itself: the derived
+            `owned` set is bit-identical with and without the schema registered) [VerifiesRule];
+            RederiveRefusesWhenAPersistedSpiCannotBeAccounted (a partial reconstruction refuses and leaves the bitmap
+            untouched); CleanShutdownReopenDoesNotRederive (the heal does not run on the clean path)
 
 ### CK-10: A checkpoint persists the per-archetype segment pointers it consolidates `[fatal]` `[silent]`
   invariant a checkpoint that consolidates a cluster / EntityMap / per-archetype-index segment's DATA pages into the data file MUST
