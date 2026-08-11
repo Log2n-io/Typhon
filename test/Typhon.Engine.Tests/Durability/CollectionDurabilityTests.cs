@@ -768,6 +768,147 @@ internal sealed class CollectionDurabilityTests
         }
     }
 
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // Phase 5 — the BulkLoad path sits outside all of this (AC 5.5)
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// A bulk session that spawns collection-bearing components puts nothing on the wire for them — no Slot, no CollectionDelta (BL-01).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// #389's last acceptance criterion asks that BulkLoad's collection path be verified unaffected — that the hole was the interactive/tick commit path only.
+    /// It is, structurally: all three emitters live in <c>Transaction.BuildCommitBatch</c>, whose single caller is <c>AppendToWal</c>, behind the
+    /// <c>SuppressWalSerialization</c> gate a bulk UoW sets. This test is the executable form of that argument, so a later refactor that hoists an emitter
+    /// above the gate is caught here rather than by a bulk session that suddenly logs its entire input.
+    /// </para>
+    /// <para>
+    /// The control matters more than the assertion. A normal commit runs in the same session and its <c>CollectionDelta</c> records are required to be present,
+    /// because "the bulk emitted nothing" holds just as well on a scan that read nothing at all — and a scan reading nothing is a real failure mode here, not a
+    /// hypothetical one (<c>BulkLoadRecoveryTests</c> documents the reader's drain-gap).
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    public void BulkLoad_WithCollections_PutsNothingOnTheWire()
+    {
+        EntityId[] bulkVersioned;
+        EntityId[] bulkSingle;
+
+        using (var scope = _serviceProvider.CreateScope())
+        {
+            var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            (bulkVersioned, bulkSingle) = BulkSpawnBoth(dbe);
+
+            // The control: an ordinary commit of the same two archetypes, whose records must show up in the same scan.
+            SeedBoth(dbe);
+        }
+
+        var records = WalScanner.ScanAll(_walDir);
+        var fromTheBulk = new HashSet<long>();
+        foreach (var id in bulkVersioned)
+        {
+            fromTheBulk.Add((long)id.RawValue);
+        }
+
+        foreach (var id in bulkSingle)
+        {
+            fromTheBulk.Add((long)id.RawValue);
+        }
+
+        Assert.That(records.Any(r => r.Kind == RecordKind.CollectionDelta && !fromTheBulk.Contains(r.EntityId)), Is.True,
+            "the scan found no CollectionDelta from the control commit — nothing reached the log, so 'the bulk emitted none' would be vacuously true");
+
+        var leaked = records.Where(r => fromTheBulk.Contains(r.EntityId)).ToList();
+        Assert.That(leaked, Is.Empty,
+            "BL-01: a bulk session must append no records at all, yet these carry bulk-spawned entities: "
+            + string.Join(", ", leaked.Select(r => $"{r.Kind} lsn={r.Lsn} entity=0x{r.EntityId:X}")));
+    }
+
+    /// <summary>
+    /// A bulk-spawned entity whose collection is filled afterwards by an ordinary commit keeps its elements across a hard crash (AC 5.5).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The other half of the AC, and the one that could actually have broken. Bulk rows reach the data file through <c>CompleteBulkLoad</c>'s forced
+    /// checkpoint, on the checkpoint timeline; the elements added afterwards ride the WAL. Recovery has to compose the two, and it is exactly the composition
+    /// that #389's zeroing made fragile — a Slot applied over a checkpointed row now clears the handle, so the fold behind it is what puts the content back.
+    /// </para>
+    /// <para>
+    /// <b>The bulk session spawns EMPTY collections, and that is not a shortcut.</b> <c>ComponentCollectionAccessor</c> can only be obtained from
+    /// <see cref="Transaction.CreateComponentCollectionAccessor{T}"/>, and <c>BulkLoadSession</c> exposes no transaction — so a bulk session cannot put an
+    /// element in a collection at all. A collection-bearing component with a null handle is the only bulk shape that exists to test.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    public void BulkSpawned_ThenFilled_CollectionsSurviveAHardCrash()
+    {
+        EntityId[] versioned;
+        EntityId[] single;
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            (versioned, single) = BulkSpawnBoth(dbe);
+            FillAfterTheFact(dbe, versioned, single);
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            AssertRecoveredContent(dbe, versioned, single);
+        }
+    }
+
+    /// <summary>Spawns both archetypes through a bulk session and closes it with its durability barrier.</summary>
+    private static (EntityId[] Versioned, EntityId[] Single) BulkSpawnBoth(DatabaseEngine dbe)
+    {
+        var versioned = new EntityId[EntityCount];
+        var single = new EntityId[EntityCount];
+
+        using (var bulk = dbe.BeginBulkLoad())
+        {
+            for (var i = 0; i < EntityCount; i++)
+            {
+                var v = new CcVersioned { Seq = i };
+                versioned[i] = bulk.Spawn<CcVersionedArch>(CcVersionedArch.C.Set(in v));
+
+                var s = new CcSingle { Seq = i };
+                single[i] = bulk.Spawn<CcSingleArch>(CcSingleArch.C.Set(in s));
+            }
+
+            bulk.CompleteBulkLoad();
+        }
+
+        return (versioned, single);
+    }
+
+    /// <summary>Fills the collections of already-existing entities from an ordinary transaction — the only route a bulk-spawned collection can be filled by.</summary>
+    private static void FillAfterTheFact(DatabaseEngine dbe, IReadOnlyList<EntityId> versioned, IReadOnlyList<EntityId> single)
+    {
+        using var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate);
+        using (var tx = uow.CreateTransaction(CommitDiscipline.Commit))
+        {
+            for (var i = 0; i < versioned.Count; i++)
+            {
+                ref var v = ref tx.OpenMut(versioned[i]).Write(CcVersionedArch.C);
+                FillCollection(tx, ref v.Items, i);
+
+                ref var s = ref tx.OpenMut(single[i]).Write(CcSingleArch.C);
+                FillCollection(tx, ref s.Items, i);
+            }
+
+            Assert.That(tx.Commit(), Is.True, "the post-bulk fill must commit");
+        }
+
+        uow.Flush();
+    }
+
     // ── recovered-state assertions ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     private static void AssertRecoveredContent(DatabaseEngine dbe, IReadOnlyList<EntityId> versioned, IReadOnlyList<EntityId> single)
