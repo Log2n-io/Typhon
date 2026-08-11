@@ -47,9 +47,10 @@ internal sealed class DerivedRegenerationRoundTripTests : IntegrityFixtureBase
     /// </summary>
     [Test]
     [CancelAfter(60_000)]
-    [Ignore("#771 — the open-and-close cycle this repair performs leaves SEG-02 on ANY database, so the post-repair "
-        + "verification cannot come back Sound however well the regeneration itself works. The WAL-04 half of #771 is "
-        + "fixed; this is what remains.")]
+    [Ignore("#755 — RETARGETED from #771, whose SEG-02 is fixed: this now fails on CHK-MAP-04 instead, i.e. the damage "
+        + "is simply not repaired. Regenerate() opens without registering CompA, so the archetype is never materialized "
+        + "and its EntityMap is never rebuilt. That is G3's real blocker and it is the same theme one layer down — "
+        + "repair-by-opening cannot regenerate derived state for archetypes whose CLR types it does not have.")]
     public void ADamagedEntityMapIsRegeneratedWithoutLoss()
     {
         BuildHealthyDatabase();
@@ -83,8 +84,8 @@ internal sealed class DerivedRegenerationRoundTripTests : IntegrityFixtureBase
     /// </remarks>
     [Test]
     [CancelAfter(60_000)]
-    [Ignore("#771 (SEG-02) makes the post-repair scan non-Sound regardless of whether the entities survived, so the "
-        + "assertion this test exists to make cannot be reached yet.")]
+    [Ignore("#755 — RETARGETED from #771 (SEG-02 fixed). Same cause as the test above: the regeneration never happens "
+        + "for an archetype the repair process did not register, so the map is still damaged when this counts through it.")]
     public void EveryEntitySurvivesTheRegeneration()
     {
         const int Entities = 64;
@@ -117,9 +118,9 @@ internal sealed class DerivedRegenerationRoundTripTests : IntegrityFixtureBase
     /// </remarks>
     [Test]
     [CancelAfter(60_000)]
-    [Ignore("#771 (SEG-02) blocks the verification, and separately CLU-03 is not healed by an open-and-close: G3's design "
-        + "says wire RebuildClusterFromChains to a PER-PAGE damage trigger, and a plain open does not arm one. Two "
-        + "distinct reasons, both real, neither fixed by editing this test.")]
+    [Ignore("#755 — RETARGETED from #771 (SEG-02 fixed). CLU-03 is still not healed by an open-and-close: G3's design "
+        + "says wire RebuildClusterFromChains to a PER-PAGE damage trigger, and a plain open arms none. That was always "
+        + "the second of this test's two reasons; it is now the only one.")]
     public void ADivergedClusterCopyIsRebuiltFromItsChain()
     {
         BuildHealthyDatabase();
