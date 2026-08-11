@@ -2829,6 +2829,14 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 continue;
             }
 
+            if (TryCountViaOccupancy(engineState, hasT2, txTsn, out var occupancyCount))
+            {
+                total += occupancyCount;
+                continue;
+            }
+
+            QueryPathProbe.MapProbeCounts++;
+
             var accessor = engineState.EntityMap.Segment.CreateChunkAccessor();
             var pred = new BroadScanPredicate
             {
@@ -2847,6 +2855,87 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         }
 
         return total;
+    }
+
+    /// <summary>
+    /// Count one archetype's snapshot-visible entities by summing <c>PopCount</c> over its clusters' occupancy words. Returns false — having counted nothing —
+    /// when the archetype does not qualify, leaving the caller on the per-entity EntityMap probe.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The map probe evaluates <see cref="BroadScanPredicate"/> per entity over a hash map: ~8 ns each with random access, so counting 10 000 entities costs
+    /// ~88 µs. Since #629 every archetype is cluster-backed, and a cluster already carries the answer in its header — one 64-bit occupancy word per up-to-64
+    /// entities. For 10 000 entities that is ~157 popcounts instead of 10 000 probes.
+    /// </para>
+    /// <para>
+    /// What makes the substitution legal is exactly the four conditions the predicate tests, and each is answered here rather than assumed:
+    /// </para>
+    /// <list type="bullet">
+    /// <item><b>Born after the snapshot / died before it.</b> The occupancy word is CURRENT — it knows nothing about the reader's snapshot.
+    /// <see cref="ArchetypeClusterState.IsClusterFullyVisibleAt"/> is the same per-cluster summary the SoA scan uses (H1): it is true only when every entity in
+    /// the cluster was born at or before <paramref name="txTsn"/> and none has ever carried a <c>DiedTSN</c>. It is conservative by construction — an unsized
+    /// array or an unestablished maximum answers false — so a bail is always safe and only ever costs performance.</item>
+    /// <item><b>Enabled/disabled (T2) predicates.</b> Occupancy is liveness, not enabled bits, so any T2 requirement disqualifies the archetype outright.</item>
+    /// <item><b>Entities pending destroy in this transaction.</b> Their occupancy bit is still set, so a non-empty set disqualifies the archetype.</item>
+    /// <item><b>Pending spawns.</b> Not a hazard, and deliberately not a bail: <c>ClaimSlot</c> runs from <c>FinalizeSpawns</c> at commit, so a spawn still
+    /// pending in this transaction owns no slot and cannot be double-counted against the caller's separate pending pass.</item>
+    /// </list>
+    /// <para>
+    /// All-or-nothing per archetype, on purpose. A cluster that fails the summary would have to be counted through the EntityMap by entity id, and a point
+    /// lookup there costs ~80 ns against the ~8 ns of the sequential scan the fallback already does — so a hybrid would be slower than the path it replaces on
+    /// exactly the clusters it was meant to rescue. The cost of bailing is the cluster headers touched before the first failure, which the fallback scan reads
+    /// anyway. <c>ClusterAnyDied</c> is never cleared, so a long-lived archetype with churn settles onto the probe; that is a known ceiling, not a defect.
+    /// </para>
+    /// </remarks>
+    private bool TryCountViaOccupancy(ArchetypeEngineState engineState, bool hasT2, long txTsn, out int count)
+    {
+        count = 0;
+
+        if (QueryPathProbe.ForcedCount == ClusterCountPath.MapProbe)
+        {
+            return false;
+        }
+
+        if (hasT2 || _tx.PendingDestroys is { Count: > 0 })
+        {
+            return false;
+        }
+
+        var clusterState = engineState.ClusterState;
+        if (clusterState?.ClusterSegment == null || clusterState.ActiveClusterIds == null)
+        {
+            return false;
+        }
+
+        var accessor = clusterState.ClusterSegment.CreateChunkAccessor();
+        try
+        {
+            var total = 0;
+            for (var c = 0; c < clusterState.ActiveClusterCount; c++)
+            {
+                var clusterChunkId = clusterState.ActiveClusterIds[c];
+
+                // Occupancy BEFORE the summary, and with acquire ordering: NoteClusterBorn stores the maximum plainly, on the premise that the reader reaches
+                // it only after an acquire-ordered read of this word. Reading them the other way round could pair a fresh maximum with a stale occupancy word.
+                var clusterBase = accessor.GetChunkAddress(clusterChunkId);
+                var occupancy = Volatile.Read(ref *(ulong*)clusterBase);
+
+                if (!clusterState.IsClusterFullyVisibleAt(clusterChunkId, txTsn))
+                {
+                    return false;
+                }
+
+                total += System.Numerics.BitOperations.PopCount(occupancy);
+            }
+
+            count = total;
+            QueryPathProbe.OccupancyCounts++;
+            return true;
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
     }
 
     /// <summary>
