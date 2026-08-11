@@ -30,6 +30,13 @@ internal sealed class RecoveryDriver
         public int FenceBlockRecordsExpanded;
 
         /// <summary>
+        /// Collection fields whose folded content was written back (#389). Surfaced for the same reason as
+        /// <see cref="FenceBlockRecordsExpanded"/>: a recovered collection is indistinguishable from one that was never touched, so without a counter
+        /// "the fold ran" is unfalsifiable — which is exactly how this defect stayed invisible while a green oracle reported no differences.
+        /// </summary>
+        public int CollectionFoldsFlushed;
+
+        /// <summary>
         /// True when the scan stopped at a corruption boundary (LOG-03 / REC-01) rather than running out of segments.
         /// </summary>
         /// <remarks>
@@ -50,9 +57,97 @@ internal sealed class RecoveryDriver
         public long EntityId;
         public ushort ArchetypeId;
         public ushort SlotIndex; // Slot record: per-archetype component slot (LOG-06), resolved via EntityId's routing id
+        public ushort FieldId;   // CollectionDelta: which collection field of that slot's component (02 §3.3)
         public ushort EnabledBits;
+        public int Index;        // CollectionDelta: element index (RemoveAt/UpdateAt) or new count (SetCount)
         public bool IsFence;
         public byte[] Payload;
+    }
+
+    /// <summary>
+    /// One collection's replayed state, folded across the window per (EntityId, slot, FieldId) — 03-recovery.md §5.
+    /// </summary>
+    /// <remarks>
+    /// <c>EnsureBase</c> is absent, and that is not an omission. The design has the fold read a collection's pre-window content whenever an op needs it, but
+    /// under Option B the emitter always logs the FULL content behind a <c>Clear</c>, so <c>baseDiscarded</c> is set before any element op is folded and the
+    /// base is never consulted. That matters because <c>EnsureBase</c> cannot be implemented as specified: once LOG-06 zeroes the handle there is no route
+    /// from a record back to the buffer it describes — a collection is reachable only through its row's inline <c>_bufferId</c>, there is no reverse index,
+    /// and the buffer root carries no owner back-pointer. The non-Clear ops are still folded because the record format defines them and the fold is where
+    /// they are cheap; nothing emits them today.
+    /// </remarks>
+    internal sealed class CollectionFold
+    {
+        public readonly List<byte[]> Elements = [];
+
+        /// <summary>True once a <see cref="CollectionOp.Clear"/> has been folded — under Option B that is always, before any element op.</summary>
+        public bool BaseDiscarded;
+
+        /// <summary>
+        /// Folds one delta. <paramref name="where"/> is a caller-supplied location string used only in failure messages.
+        /// </summary>
+        /// <remarks>
+        /// Takes the op's fields rather than the driver's record type so the fold can be driven directly by a test. The out-of-range branches are otherwise
+        /// unreachable — nothing emits <c>RemoveAt</c> / <c>UpdateAt</c> today — and an unreachable loud-failure path that has never been seen to fire is
+        /// indistinguishable from one that silently clamps.
+        /// </remarks>
+        public void Apply(CollectionOp op, int index, byte[] element, string where)
+        {
+            switch (op)
+            {
+                case CollectionOp.Clear:
+                    BaseDiscarded = true;
+                    Elements.Clear();
+                    break;
+
+                case CollectionOp.Append:
+                    Elements.Add(element ?? []);
+                    break;
+
+                case CollectionOp.RemoveAt:
+                    RequireInRange(index, Elements.Count, "RemoveAt", where);
+                    Elements.RemoveAt(index);
+                    break;
+
+                case CollectionOp.UpdateAt:
+                    RequireInRange(index, Elements.Count, "UpdateAt", where);
+                    Elements[index] = element ?? [];
+                    break;
+
+                case CollectionOp.SetCount:
+                    if (index < 0)
+                    {
+                        ThrowHelper.ThrowInvalidOp($"Recovery fold: SetCount with a negative count {index} at {where}.");
+                    }
+
+                    while (Elements.Count > index)
+                    {
+                        Elements.RemoveAt(Elements.Count - 1);
+                    }
+
+                    while (Elements.Count < index)
+                    {
+                        Elements.Add([]);   // extend-with-zero; the applier widens each to the segment's element size
+                    }
+
+                    break;
+
+                default:
+                    ThrowHelper.ThrowInvalidOp($"Recovery fold: unknown collection op {(byte)op} at {where}.");
+                    break;
+            }
+        }
+
+        // 03-recovery.md §9.e: an out-of-range index is a structural impossibility — the producer and this reader disagree about the collection's shape.
+        // Never best-effort: clamping would silently write a collection that never existed, which is the failure mode this whole issue is about.
+        private static void RequireInRange(int index, int count, string op, string where)
+        {
+            if ((uint)index >= (uint)count)
+            {
+                ThrowHelper.ThrowInvalidOp(
+                    $"Recovery fold: {op} index {index} is out of range for a {count}-element collection at {where}. This is producer corruption, not crash "
+                    + "damage — recovery fails loudly rather than guessing.");
+            }
+        }
     }
 
     // Accumulates one committed entity's records across the window (records of a transaction are NOT grouped by entity on the
@@ -71,6 +166,20 @@ internal sealed class RecoveryDriver
         // order, so overwriting collapses each component's history to its final value (and avoids allocating an orphaned chain per superseded revision).
         // Keyed by per-archetype slot (the wire identity).
         public readonly Dictionary<ushort, RecoveryApplier.SlotData> Slots = [];
+
+        /// <summary>Folded collection content per (slot, FieldId), flushed after this entity's Slot apply (#389).</summary>
+        public Dictionary<(ushort Slot, ushort FieldId), CollectionFold> Collections;
+
+        public CollectionFold FoldFor(ushort slot, ushort fieldId)
+        {
+            Collections ??= [];
+            if (!Collections.TryGetValue((slot, fieldId), out var fold))
+            {
+                Collections[(slot, fieldId)] = fold = new CollectionFold();
+            }
+
+            return fold;
+        }
     }
 
     /// <summary>
@@ -172,8 +281,14 @@ internal sealed class RecoveryDriver
                         {
                             Lsn = view.Lsn, Tsn = view.Tsn, Kind = view.Kind, Op = view.Op,
                             EntityId = view.EntityId, ArchetypeId = view.ArchetypeId,
-                            SlotIndex = view.SlotIndex, EnabledBits = view.EnabledBits, IsFence = view.IsFence,
-                            Payload = view.Kind == RecordKind.Slot && view.Payload.Length > 0 ? view.Payload.ToArray() : null,
+                            SlotIndex = view.SlotIndex, FieldId = view.FieldId, EnabledBits = view.EnabledBits,
+                            Index = view.Index, IsFence = view.IsFence,
+                            // CollectionDelta element bytes are copied too (#389). They used to be discarded here, one line before the switch that was
+                            // documented as deferring the apply — so a CollectionDelta was gutted at SCAN, and adding an apply case alone could never have
+                            // worked.
+                            Payload = (view.Kind == RecordKind.Slot || view.Kind == RecordKind.CollectionDelta) && view.Payload.Length > 0
+                                ? view.Payload.ToArray()
+                                : null,
                         });
                     }
                 }
@@ -244,7 +359,13 @@ internal sealed class RecoveryDriver
                     enableAgg.HasEnabledChange = true;
                     break;
 
-                // CollectionDelta / BulkManifest are applied in later increments (TSN still tracked above).
+                case RecordKind.CollectionDelta:
+                    // Folded per (EntityId, slot, FieldId) in LSN order, flushed after the entity's Slot apply (03-recovery.md §5, #389).
+                    GetAgg(entities, r.EntityId).FoldFor(r.SlotIndex, r.FieldId).Apply(
+                        (CollectionOp)r.Op, r.Index, r.Payload, $"LSN {r.Lsn} (entity 0x{r.EntityId:X}, slot {r.SlotIndex}, field {r.FieldId})");
+                    break;
+
+                // BulkManifest is orphan-detection only and is applied in a later increment (TSN still tracked above).
             }
         }
 
@@ -279,6 +400,7 @@ internal sealed class RecoveryDriver
                     result.RecordsApplied += agg.Slots.Count;
                 }
 
+                result.CollectionFoldsFlushed += FlushCollections(applier, entityIdRaw, agg);
                 continue;
             }
 
@@ -292,6 +414,7 @@ internal sealed class RecoveryDriver
 
             applier.ApplySpawnedEntity(entityIdRaw, agg.ArchetypeId, agg.EnabledBits, agg.Tsn, agg.Slots.Values);
             result.RecordsApplied++;
+            result.CollectionFoldsFlushed += FlushCollections(applier, entityIdRaw, agg);
         }
 
         result.TxCommitted = committed.Count;
@@ -319,6 +442,32 @@ internal sealed class RecoveryDriver
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Flushes one entity's folded collections, AFTER its Slot apply. Returns the number of collection fields written.
+    /// </summary>
+    /// <remarks>
+    /// The ordering is load-bearing and the design never states it. A Slot apply overwrites the entire component value, so a flush that ran first would be
+    /// clobbered; and since LOG-06 zeroes the handle in every Slot payload, the apply leaves the row pointing at nothing, so the flush is also what gives the
+    /// collection back its buffer. Both call sites are immediately after their apply for that reason — hence one helper rather than two inline calls that
+    /// could drift apart.
+    /// </remarks>
+    private static int FlushCollections(RecoveryApplier applier, long entityIdRaw, EntityAgg agg)
+    {
+        if (agg.Collections == null || agg.Collections.Count == 0)
+        {
+            return 0;
+        }
+
+        var folded = new Dictionary<(ushort Slot, ushort FieldId), List<byte[]>>(agg.Collections.Count);
+        foreach (var (key, fold) in agg.Collections)
+        {
+            folded[key] = fold.Elements;
+        }
+
+        applier.ApplyCollectionFolds(entityIdRaw, folded);
+        return folded.Count;
     }
 
     private static EntityAgg GetAgg(Dictionary<long, EntityAgg> entities, long entityId)

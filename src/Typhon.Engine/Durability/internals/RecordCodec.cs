@@ -297,6 +297,7 @@ internal static class RecordCodec
         ReadOnlySpan<int> componentSizes,
         ReadOnlySpan<int> componentOffsets,
         int totalComponentSize,
+        ReadOnlySpan<ulong> columnHandleRanges = default,
         int maxChunkSize = DefaultMaxChunkSize)
     {
         var columnCount = slotIndices.Length;
@@ -344,7 +345,15 @@ internal static class RecordCodec
             {
                 var size = componentSizes[c];
                 var colBytes = b.SlotSpan * size;
-                new ReadOnlySpan<byte>(clusterBase + componentOffsets[c] + (b.FirstSlot * size), colBytes).CopyTo(dest[writeOffset..]);
+                var colDst = dest.Slice(writeOffset, colBytes);
+                new ReadOnlySpan<byte>(clusterBase + componentOffsets[c] + (b.FirstSlot * size), colBytes).CopyTo(colDst);
+
+                // LOG-06: a collection-handle field is a bufferId, and a bufferId must never reach the log. The per-record Slot path zeroes handles via
+                // ZeroHandleRanges; the columnar path has to do the same, once per entity in the column, because a handle survives the copy exactly as the
+                // scalar bytes beside it do. This is not merely hygiene here: the fence's Slot expansion is the LATEST value recovery sees for the entity,
+                // so an unzeroed handle would be written back into the recovered row and dangle — the #389 shape, restored by the very path that is meant
+                // to be logical-truth-only.
+                ZeroColumnHandleRanges(colDst, c, size, b.SlotSpan, columnHandleRanges);
                 writeOffset += colBytes;
             }
 
@@ -551,6 +560,41 @@ internal static class RecordCodec
         }
 
         return RecordHeader.SizeInBytes + bodyLen;
+    }
+
+    /// <summary>
+    /// Packs one collection-handle range of a FenceBlock column into the wire-agnostic form <see cref="WriteFenceBlocks"/> consumes:
+    /// <c>(column &lt;&lt; 32) | (offset &lt;&lt; 16) | length</c>.
+    /// </summary>
+    /// <remarks>
+    /// A single self-describing span rather than the parallel (ranges, per-column counts) pair: the emitter builds this once per archetype from each
+    /// column's <c>ComponentTable.CollectionHandleRanges</c>, and one span cannot get out of step with itself the way two can.
+    /// </remarks>
+    internal static ulong PackColumnHandleRange(int column, int offsetInComponent, int length) =>
+        ((ulong)(uint)column << 32) | ((uint)offsetInComponent << 16) | (uint)(ushort)length;
+
+    /// <summary>Zeroes every collection handle belonging to <paramref name="column"/> across all <paramref name="slotSpan"/> entities of that column.</summary>
+    private static void ZeroColumnHandleRanges(Span<byte> column0, int column, int componentSize, int slotSpan, ReadOnlySpan<ulong> packedRanges)
+    {
+        foreach (var packed in packedRanges)
+        {
+            if ((int)(packed >> 32) != column)
+            {
+                continue;
+            }
+
+            var offset = (int)((packed >> 16) & 0xFFFF);
+            var length = (int)(packed & 0xFFFF);
+            if (length <= 0 || offset + length > componentSize)
+            {
+                continue;
+            }
+
+            for (var i = 0; i < slotSpan; i++)
+            {
+                column0.Slice((i * componentSize) + offset, length).Clear();
+            }
+        }
     }
 
     private static void ZeroHandleRanges(Span<byte> payload, ReadOnlySpan<uint> packedRanges)

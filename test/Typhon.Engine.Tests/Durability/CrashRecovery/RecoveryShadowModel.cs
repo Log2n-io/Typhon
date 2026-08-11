@@ -112,7 +112,7 @@ internal sealed class RecoveryShadowModel
             e.EnabledBySlot = new bool[n];
             for (int s = 0; s < n; s++)
             {
-                e.ValueBytesBySlot[s] = er.ReadRaw(s).ToArray();
+                e.ValueBytesBySlot[s] = MaskCollectionHandles(dbe, id.ArchetypeId, s, er.ReadRaw(s));
                 e.EnabledBySlot[s] = er.IsEnabled((byte)s);
             }
 
@@ -194,11 +194,12 @@ internal sealed class RecoveryShadowModel
 
             for (int s = 0; s < e.ComponentCount; s++)
             {
-                if (!er.ReadRaw(s).SequenceEqual(e.ValueBytesBySlot[s]))
+                var actualBytes = MaskCollectionHandles(recoveredDbe, id.ArchetypeId, s, er.ReadRaw(s));
+                if (!actualBytes.AsSpan().SequenceEqual(e.ValueBytesBySlot[s]))
                 {
                     diffs.Add(
                         $"{id} slot {s} ({er.GetComponentName(s)}): value bytes differ — expected [{BitConverter.ToString(e.ValueBytesBySlot[s])}], "
-                        + $"got [{BitConverter.ToString(er.ReadRaw(s).ToArray())}]");
+                        + $"got [{BitConverter.ToString(actualBytes)}]");
                 }
 
                 if (er.IsEnabled((byte)s) != e.EnabledBySlot[s])
@@ -265,6 +266,43 @@ internal sealed class RecoveryShadowModel
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Copies a component's storage bytes with every <c>ComponentCollection</c> handle zeroed, so the byte comparison sees the VALUE and not the descriptor.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The class doc above already says why: for a collection field those bytes are a buffer descriptor, "so the comparison is wrong in both directions — a
+    /// rebuilt buffer holding the right contents can differ, and a descriptor that survives intact can point at a buffer that has been emptied." Only the
+    /// second half could actually happen until #389, so only the second half was defended (by requiring an <see cref="ICollectionProjector"/>). Now that
+    /// recovery REBUILDS the buffer, the first half is live: the recovered handle is a fresh allocation and legitimately differs from the pre-crash one.
+    /// </para>
+    /// <para>
+    /// Masking rather than tolerating a mismatch, because a wrong handle is not something the oracle can usefully check at all. AP-13 states that placements
+    /// chosen at apply may differ from pre-crash; what must hold is that the handle resolves to the right CONTENT, and that is precisely what the projector
+    /// comparison in <see cref="DiffCollections"/> asserts. Zeroing the four bytes moves the question to the check that can answer it.
+    /// </para>
+    /// </remarks>
+    private static byte[] MaskCollectionHandles(DatabaseEngine dbe, ushort routingId, int slot, ReadOnlySpan<byte> raw)
+    {
+        var bytes = raw.ToArray();
+        var state = routingId < dbe._stateByRouting.Length ? dbe._stateByRouting[routingId] : null;
+        var tables = state?.SlotToComponentTable;
+        if (tables == null || slot >= tables.Length || tables[slot] is not { HasCollections: true } table)
+        {
+            return bytes;
+        }
+
+        foreach (var f in table.CollectionFields)
+        {
+            if (f.OffsetInComponentStorage + f.HandleSize <= bytes.Length)
+            {
+                bytes.AsSpan(f.OffsetInComponentStorage, f.HandleSize).Clear();
+            }
+        }
+
+        return bytes;
     }
 
     private HashSet<ushort> DistinctArchetypeIds()

@@ -905,13 +905,13 @@ internal sealed class DifferentialRecoveryOracleTests
     /// The payload axes across a hard crash: collection elements, <c>String64</c> and the spatial box must all recover.
     /// </summary>
     /// <remarks>
-    /// <b>Quarantined against #389</b> — <c>ComponentCollection</c> buffer mutations are not WAL-redo-logged, so the buffer contents do not survive a crash in
-    /// the WAL window. Kept as the regression lock for when #389 is fixed: it fails today for exactly the reason the issue documents, and it is the first test
-    /// in the suite that CAN fail for that reason.
+    /// <b>Un-quarantined by #389 (2026-08-11).</b> It was red because <c>ComponentCollection</c> content was never brought under the commit protocol at all —
+    /// the emit side had no production caller and the apply side discarded the record at scan — so the buffer did not survive a crash inside the WAL window.
+    /// Green now that a commit logs the collection's full content and recovery folds it back (Option B). This test going green <b>is</b> the acceptance
+    /// criterion for #389; it is the regression lock, and it must never be quarantined again to keep a gate green.
     /// </remarks>
     [Test]
     [CancelAfter(20_000)]
-    [Category("Quarantine")]
     public void PayloadAxes_SurviveACrash()
     {
         var workload = new PayloadPayloadWorkload(8);

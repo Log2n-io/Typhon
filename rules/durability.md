@@ -86,13 +86,21 @@ gating) land with the `RecoveryDriver` in P1.2; LOG-05 (DurableLsn honesty) ship
   rationale (#514 Phase 2): the old dense ComponentTypeId-on-wire coupled replay to registration order → a crash→reopen under a shifted order could mis-map
            post-checkpoint records (silent data loss). (routingId, slot) is stable across crash→reopen by construction — this dissolves that risk.
   scope: RecordCodec.cs, RecordFormat.cs (SlotRecordBody.SlotIndex, CollectionDeltaRecordBody.SlotIndex); recovery RecoveryApplier maps (routingId, slot) → table
+         ComponentTable.CollectionHandleRanges (the packed ranges the codec zeroes); RecordCodec.PackColumnHandleRange (the columnar twin)
   on_violation: the log is coupled to physical layout OR to registration order → replay breaks under page relocation / compaction / shifted schema order
-  verified: NOT COVERED — retired 2026-08-07 (#703). Both fixtures that claimed this rule
-    (RecordCodecPropertyTests, FenceBlockCodecTests) are "Pure — no engine, no recovery": they construct records
-    themselves and round-trip them, so neither can observe the EMITTER placing a physical identifier on the wire,
-    which is what this rule constrains. They stayed green in the same build as a red production probe (#389).
-    A genuine verifier must drive the real emit path (CommitBatchBuilder/RecordCodec via a live commit) and assert
-    no page index / chunk id / bufferId / chain topology appears in the emitted bytes.
+  verified: CollectionDurabilityTests.Commit_WithCollections_PutsNoBufferIdOnTheWire [VerifiesRule],
+    Log06Verifier_RejectsABufferIdOnTheWire [RuleMutant] — re-covered 2026-08-11 (#389) after the 2026-08-07
+    retirement (#703). The retired fixtures (RecordCodecPropertyTests, FenceBlockCodecTests) are "Pure — no engine,
+    no recovery": they construct records themselves and round-trip them, so neither can observe the EMITTER placing
+    a physical identifier on the wire, which is what this rule constrains. They stayed green in the same build as a
+    red production probe (#389). The verifier now drives a LIVE commit and reads the bytes back off the on-disk WAL
+    (WalScanner), asserting no bufferId appears at any collection-handle offset. It covers BOTH emitters — the
+    per-entity CommitBatchBuilder path and the columnar FenceBlock path (#559), which bulk-copies component columns
+    straight out of the cluster page and had no zeroing at all until #389 — and fails if a run inspected only one.
+  note the emit side was UNWIRED, not merely unverified, until #389: all four production AddSlot sites omitted the
+       optional handleRanges argument, so RecordCodec.ZeroHandleRanges iterated an empty span on every commit. The
+       zeroing code was correct and never executed. This is why the rule's coverage and its implementation landed
+       together — a verifier written first would have been red, and a fix without one would have been unfalsifiable.
 
 ### LOG-07: Batch internal order
   invariant within one transaction's batch the record order is Spawn lifecycle → Slot/CollectionDelta →
@@ -217,20 +225,65 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
 ### AP-12: Apply idempotence `[fatal]`
   invariant ∀ base B, window W, prefix P ⊆ W: Apply(Apply(B,P), W) ≡ Apply(B, W) — spawn-if-absent, destroy-if-present,
             absolute EnabledBits, value overwrite, collections folded-then-Set
-  scope: RecoveryApplier.ApplySpawnedEntity / ApplyDestroyToExisting / ApplySetEnabledBitsToExisting
-  🔵 collections clause UNBUILT: "collections folded-then-Set" is not implemented on either side — the builder's
-     AddCollectionDelta has no production caller and the driver defers CollectionDelta apply.
-  🔴 TEST-TAG WARNING (2026-07-28): four tests carry `[VerifiesRule("AP-12")]` and NONE of them re-applies anything —
-     they are single-pass crash → reopen → assert. The one genuine idempotence test drives RecoveryApplier directly and
-     applies the same spawn twice, and it carries NO tag. The coverage gate therefore scores AP-12 as covered four
-     times over while the property is tested once, for spawn-if-absent only. Move the tag; do not trust the count.
-  spec: rules/tla/CommitRecovery.tla (S2) — AP12_ApplyIdempotent (where idempotence is actually proven today)
+  scope: RecoveryApplier.ApplySpawnedEntity / ApplyDestroyToExisting / ApplySetEnabledBitsToExisting / ApplyCollectionFolds
+         VariableSizedBufferSegmentBase.SetElementsRaw (the "Set" the collections clause names)
+  ✅ collections clause BUILT (2026-08-11, #389). Was UNBUILT on both sides: AddCollectionDelta had no production caller
+     and the driver deferred CollectionDelta apply. Now the emitter logs a collection's full content behind every Slot
+     record (Clear + Append x N) and the driver folds it per (EntityId, slot, FieldId), flushing via SetElementsRaw AFTER
+     the entity's Slot apply. Idempotence holds by construction: Set allocates a fresh buffer and releases the previous
+     one, so a re-applied window converges in content and refcount — only the buffer id differs, which AP-13 permits.
+  🔴 FLUSH ORDER IS LOAD-BEARING and the design does not state it: FoldFlush must run AFTER the Slot apply for the same
+     entity. A Slot apply overwrites the whole component value, so an earlier flush is clobbered; and because LOG-06
+     zeroes the handle in every Slot payload, the apply leaves the row pointing at NO buffer — the flush is what gives
+     it one back. A Slot record applied with no fold behind it empties the collection.
+  🔴 TEST-TAG WARNING (2026-07-28, still true for the four pre-existing tags): four tests carry `[VerifiesRule("AP-12")]`
+     and NONE of them re-applies anything — they are single-pass crash → reopen → assert. Do not copy their shape.
+     CollectionDurabilityTests.ReapplyingTheWindow_ConvergesInContentAndRefcount does re-apply: it replays
+     RecoveryDriver.Run over a SNAPSHOT of the segments taken at crash time, because CK-04 recycles the live WAL once
+     the first recovery seals — without the snapshot a "re-run" silently replays nothing and passes vacuously.
+  spec: rules/tla/CommitRecovery.tla (S2) — AP12_ApplyIdempotent (where idempotence is also proven)
   on_violation: a crash during recovery corrupts on re-run
+  verified: CollectionDurabilityTests.ReapplyingTheWindow_ConvergesInContentAndRefcount (collections clause),
+    VsbsSetElementsTests.Set_AppliedTwice_ConvergesInContentAndRefcount (the Set primitive itself)
 
 ### AP-13: Allocation tolerance
   invariant physical placement chosen at apply may differ from pre-crash; all references (EntityMap, cluster bookkeeping) are
             updated through the same path; orphans are swept in Phase 4
   scope: RecoveryDriver.cs Phase 3–4
+  note a recovered ComponentCollection's bufferId is a fresh allocation and will NOT equal the pre-crash one. That is this
+       rule, not a defect — the oracle masks collection-handle bytes and compares the ELEMENTS instead
+       (RecoveryShadowModel.MaskCollectionHandles). A verifier that byte-compared the handle would fail on correct recovery.
+
+### DC-01: No dangling durable reference `[fatal]` `[silent]`
+  invariant ∀ record R in the log, ∀ value X referenced by R via handle | id | index | cursor:
+            X is reconstructible from the log alone
+            OR X is durable strictly before R becomes durable
+  scope: RecordCodec.ZeroHandleRanges, RecordCodec.PackColumnHandleRange (the codec's handle-zeroing paths);
+         ComponentTable.CollectionHandleRanges; CollectionContentEmitter.Emit; RecoveryApplier.ApplyCollectionFolds;
+         RecoveryDriver.Run (the allocator watermarks it restores)
+  on_violation: dangling durable reference — silent data loss, escalating to cross-entity data disclosure when the
+                referent's allocator re-issues the reference (#389, #697)
+  rationale a reference and its referent on different durability timelines cannot both survive an arbitrary crash point.
+            Either the log can rebuild the referent, or the referent must already be on disk when the reference lands.
+            Derived from three defects with one shape: #389 (a _bufferId in a Slot payload vs VSBS contents on the
+            checkpoint timeline), #697 (a recovered EntityId vs the entity-key high-water mark), #389b/RB-06 (a recovered
+            buffer handle vs the VSBS free-list cursor). The 104 pre-existing rules describe MECHANISMS — how the WAL
+            frames, how the checkpoint pairs slots — and none describes COMPOSITION between subsystems, which is exactly
+            where all three live.
+  note satisfiable two ways, and both already exist in the engine: (a) log-reconstructible — a revision chain's
+       ComponentChunkId is safe precisely because the chunk's content IS the WAL payload, which is why chains were never
+       on the bug list; (b) durable-first — checkpoint ordering for protected pages (CK-05 A/B slot pairing). #389 chose
+       (a): the handle is zeroed out of the log and the collection's full content is emitted behind the Slot record, so
+       replay rebuilds the buffer and re-points the handle.
+  note OUT OF SCOPE, both real and tracked separately: (1) the VSBS free-list is not restored at recovery (RB-06) — it
+       restarts empty and re-issues handles live recovered entities still hold; (2) schema-catalog collections stay
+       checkpoint-only by design, because SaveInSystemSchema / PersistSchemaChanges / PersistNewArchetypes construct
+       their accessors OUTSIDE any transaction and so have no commit to ride. The second is a decision, not an oversight;
+       it is stated here so the next reader does not re-file it.
+  verified: CollectionDurabilityTests.Commit_WithCollections_PutsNoBufferIdOnTheWire [VerifiesRule],
+    Log06Verifier_RejectsABufferIdOnTheWire [RuleMutant], Collections_SurviveAHardCrash,
+    AxisArchetypesTests.EveryDurableCollectionCell_KeepsItsElementsAcrossAReopen,
+    DifferentialRecoveryOracleTests.PayloadAxes_SurviveACrash
 
 ---
 
@@ -1487,7 +1540,7 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
        | `NextFreeTSN` | `ScrubVersionedChains` + `RecoveryDriver` | ✅ RB-05 |
        | `ArchetypeEngineState.NextEntityKey` | `RebuildEntityMaps*` (persisted base) + `RecoveryDriver` (replayed window) | ✅ fixed #697 / #705 |
        | WAL LSN (`WalCommitBuffer._lsnBase`) | `DatabaseEngine.InitializeWal` via `Math.Max(lastValidLSN, checkpointLsn)` | 🔴 **#712** — both terms are 0 when the prior session crashed without checkpointing, because WAL v2 recovery has not run yet at that point; the writer restarts at 1 and collides with the window it is about to replay |
-       | VSBS buffer free-list | — | 🔴 **#389** — restarts from empty, re-issuing handles live recovered entities still hold |
+       | VSBS buffer free-list | — | 🔴 **#770** — restarts from empty, re-issuing handles live recovered entities still hold. Retargeted from #389 on 2026-08-11: #389 fixed collection CONTENT redo and explicitly does not touch this allocator, so leaving the pointer on a closed issue would have read as fixed |
        | Cluster slot cursors | derived from the cluster occupancy at rebuild | ✅ |
 
        The two open rows are the same defect shape as #697, on different allocators. #697's own acceptance asked
