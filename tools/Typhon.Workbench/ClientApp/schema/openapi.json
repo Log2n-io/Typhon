@@ -6,7 +6,7 @@
   },
   "servers": [
     {
-      "url": "http://localhost:5200/"
+      "url": "http://127.0.0.1:5200/"
     }
   ],
   "paths": {
@@ -1357,6 +1357,50 @@
         ]
       }
     },
+    "/api/fixtures/damaged": {
+      "post": {
+        "tags": [
+          "Fixtures"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DamagedFixtureRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DamagedFixtureRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/DamagedFixtureRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DamagedFixtureResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
     "/health": {
       "get": {
         "tags": [
@@ -1365,6 +1409,138 @@
         "responses": {
           "200": {
             "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/integrity/scan": {
+      "post": {
+        "tags": [
+          "Integrity"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IntegrityScanRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IntegrityScanRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/IntegrityScanRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrityReportDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/integrity/plan": {
+      "post": {
+        "tags": [
+          "Integrity"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IntegrityScanRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IntegrityScanRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/IntegrityScanRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepairPlanDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/integrity/apply": {
+      "post": {
+        "tags": [
+          "Integrity"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RepairApplyRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RepairApplyRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/RepairApplyRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepairOutcomeDto"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -5037,6 +5213,64 @@
           }
         }
       },
+      "DamagedFixtureRequestDto": {
+        "required": [
+          "path"
+        ],
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "variant": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "default": "meta-slot"
+          }
+        }
+      },
+      "DamagedFixtureResponseDto": {
+        "required": [
+          "path",
+          "variant",
+          "verdict",
+          "findingCount"
+        ],
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "variant": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "verdict": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "findingCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          }
+        }
+      },
       "DecodedChunkDto": {
         "required": [
           "fromTick",
@@ -6133,6 +6367,446 @@
               "null",
               "string"
             ]
+          }
+        }
+      },
+      "IntegrityFindingDto": {
+        "required": [
+          "code",
+          "severity",
+          "confidence",
+          "summary",
+          "detail",
+          "ruleId",
+          "repair",
+          "occurrences",
+          "locus",
+          "loss"
+        ],
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "severity": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "confidence": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "summary": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "detail": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "ruleId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "repair": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "occurrences": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "locus": {
+            "$ref": "#/components/schemas/IntegrityLocusDto"
+          },
+          "loss": {
+            "$ref": "#/components/schemas/IntegrityLossDto"
+          }
+        }
+      },
+      "IntegrityIdentityDto": {
+        "required": [
+          "name",
+          "formatRevision",
+          "pageCount",
+          "sizeBytes",
+          "checkpointLsn",
+          "cleanShutdown",
+          "walSegmentCount",
+          "walBytes"
+        ],
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "formatRevision": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "pageCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "sizeBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "checkpointLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "cleanShutdown": {
+            "type": "boolean"
+          },
+          "walSegmentCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "walBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "IntegrityLimitsDto": {
+        "required": [
+          "structural",
+          "checksSkipped",
+          "caveats"
+        ],
+        "type": "object",
+        "properties": {
+          "structural": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "checksSkipped": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "caveats": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "IntegrityLocusDto": {
+        "required": [
+          "filePageIndex",
+          "segmentRootPage",
+          "kind",
+          "archetype",
+          "component",
+          "text"
+        ],
+        "type": "object",
+        "properties": {
+          "filePageIndex": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "segmentRootPage": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "kind": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "archetype": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "component": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "text": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "IntegrityLossDto": {
+        "required": [
+          "kind",
+          "count",
+          "archetype",
+          "component",
+          "explanation"
+        ],
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "count": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "archetype": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "component": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "explanation": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "IntegrityReportDto": {
+        "required": [
+          "verdict",
+          "exitCode",
+          "source",
+          "mode",
+          "depth",
+          "durationMs",
+          "identity",
+          "totals",
+          "findings",
+          "limits"
+        ],
+        "type": "object",
+        "properties": {
+          "verdict": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "exitCode": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "source": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "mode": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "depth": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "durationMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "identity": {
+            "$ref": "#/components/schemas/IntegrityIdentityDto"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/IntegrityTotalsDto"
+          },
+          "findings": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/IntegrityFindingDto"
+            }
+          },
+          "limits": {
+            "$ref": "#/components/schemas/IntegrityLimitsDto"
+          }
+        }
+      },
+      "IntegrityScanRequestDto": {
+        "required": [
+          "path"
+        ],
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "depth": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "default": "standard"
+          }
+        }
+      },
+      "IntegrityTotalsDto": {
+        "required": [
+          "pagesScanned",
+          "pagesAllocated",
+          "checksumFailures",
+          "pagesWithSectorFooters",
+          "sectorFailures",
+          "segmentsWalked",
+          "bytesLeaked"
+        ],
+        "type": "object",
+        "properties": {
+          "pagesScanned": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "pagesAllocated": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "checksumFailures": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "pagesWithSectorFooters": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "sectorFailures": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "segmentsWalked": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "bytesLeaked": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
           }
         }
       },
@@ -7741,6 +8415,231 @@
       "QueueTickSummary": {
         "type": "object",
         "description": "Per-(tick, queue) rollup row in CacheSectionId.QueueTickSummaries. One row per queue per tick. Folded from the new `QueueTickEnd` wire\r\nevent the engine emits at end-of-tick per active event queue."
+      },
+      "RepairApplyRequestDto": {
+        "required": [
+          "path",
+          "fingerprint"
+        ],
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "fingerprint": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "allowLoss": {
+            "type": "boolean",
+            "default": false
+          },
+          "backupFirst": {
+            "type": "boolean",
+            "default": true
+          },
+          "dryRun": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "RepairOutcomeDto": {
+        "required": [
+          "succeeded",
+          "backupPath",
+          "results",
+          "verification"
+        ],
+        "type": "object",
+        "properties": {
+          "succeeded": {
+            "type": "boolean"
+          },
+          "backupPath": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "results": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/RepairStepResultDto"
+            }
+          },
+          "verification": {
+            "$ref": "#/components/schemas/IntegrityReportDto"
+          }
+        }
+      },
+      "RepairPlanDto": {
+        "required": [
+          "source",
+          "fingerprint",
+          "verdict",
+          "requiresLossyConsent",
+          "steps",
+          "loss",
+          "unaddressed",
+          "blockedReason"
+        ],
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "fingerprint": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "verdict": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "requiresLossyConsent": {
+            "type": "boolean"
+          },
+          "steps": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/RepairStepDto"
+            }
+          },
+          "loss": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/IntegrityLossDto"
+            }
+          },
+          "unaddressed": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "blockedReason": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "RepairStepDto": {
+        "required": [
+          "order",
+          "action",
+          "class",
+          "description",
+          "rationale",
+          "addresses"
+        ],
+        "type": "object",
+        "properties": {
+          "order": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "action": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "class": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "description": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "rationale": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "addresses": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "RepairStepResultDto": {
+        "required": [
+          "order",
+          "action",
+          "outcome",
+          "detail"
+        ],
+        "type": "object",
+        "properties": {
+          "order": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "action": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "outcome": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "detail": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
       },
       "ResourceGraphDto": {
         "required": [
@@ -31767,6 +32666,9 @@
     },
     {
       "name": "Health"
+    },
+    {
+      "name": "Integrity"
     },
     {
       "name": "Profiles"
