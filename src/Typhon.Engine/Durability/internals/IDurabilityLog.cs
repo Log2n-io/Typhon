@@ -28,6 +28,10 @@ internal interface IDurabilityLog
     /// Appends a run of columnar tick-fence blocks (#559), copying each cluster's SoA columns straight into the WAL claim with
     /// no intermediate staging. Returns the highest LSN published, or 0 for an empty run. Throws on back-pressure timeout (LOG-01).
     /// </summary>
+    /// <remarks>
+    /// <paramref name="columnHandleRanges"/> carries the collection-handle byte ranges to zero out of the copied columns (LOG-06), packed by
+    /// <see cref="RecordCodec.PackColumnHandleRange"/>. It is empty when no emitted column carries a <c>ComponentCollection</c> field.
+    /// </remarks>
     long AppendFenceBlocks(
         ReadOnlySpan<RecordCodec.FenceBlockDescriptor> blocks,
         ushort archetypeId,
@@ -37,6 +41,7 @@ internal interface IDurabilityLog
         ReadOnlySpan<int> componentSizes,
         ReadOnlySpan<int> componentOffsets,
         int totalComponentSize,
+        ReadOnlySpan<ulong> columnHandleRanges,
         ref WaitContext ctx);
 
     /// <summary>Requests an explicit flush of buffered WAL data (Deferred durability).</summary>

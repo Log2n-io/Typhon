@@ -40,6 +40,7 @@ internal sealed class DurabilityLog : IDurabilityLog
         ReadOnlySpan<int> componentSizes,
         ReadOnlySpan<int> componentOffsets,
         int totalComponentSize,
+        ReadOnlySpan<ulong> columnHandleRanges,
         ref WaitContext ctx)
     {
         if (blocks.Length == 0)
@@ -55,7 +56,7 @@ internal sealed class DurabilityLog : IDurabilityLog
         {
             var written = RecordCodec.WriteFenceBlocks(
                 claim.DataSpan, blocks, archetypeId, claim.FirstLSN, tsn,
-                entityKeysOffset, slotIndices, componentSizes, componentOffsets, totalComponentSize);
+                entityKeysOffset, slotIndices, componentSizes, componentOffsets, totalComponentSize, columnHandleRanges);
 
             // Zero the frame-alignment slack after the last chunk, as Append does: stale bytes from a prior claim would
             // otherwise be misread as a chunk header during recovery.

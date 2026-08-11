@@ -1272,13 +1272,13 @@ public unsafe partial class Transaction
             // reference the same collection storage, so RefCounter must reflect that.
             if (table.HasCollections)
             {
-                foreach (var kvp in table.ComponentCollectionVSBSByOffset)
+                foreach (var f in table.CollectionFields)
                 {
-                    int bufferId = *(int*)(newPtr + table.ComponentOverhead + kvp.Key);
+                    int bufferId = *(int*)(newPtr + table.ComponentOverhead + f.OffsetInComponentStorage);
                     if (bufferId != 0)
                     {
-                        var accessor = kvp.Value.Segment.CreateChunkAccessor(_changeSet);
-                        kvp.Value.BufferAddRef(bufferId, ref accessor);
+                        var accessor = f.Vsbs.Segment.CreateChunkAccessor(_changeSet);
+                        f.Vsbs.BufferAddRef(bufferId, ref accessor);
                         accessor.Dispose();
                     }
                 }

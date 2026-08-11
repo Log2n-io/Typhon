@@ -80,6 +80,50 @@ internal sealed class AxisArchetypesTests : TestBase<AxisArchetypesTests>
         }
     }
 
+    /// <summary>
+    /// The collection carrier across a reopen — the axis <c>ComponentCollectionMatrixTests</c> cannot cover, because its cases are in-session (#389).
+    /// </summary>
+    /// <remarks>
+    /// Same durability contract as <see cref="DurableReopenCells"/>: a clean close persists everything, a hard crash keeps SingleVersion values only under
+    /// <see cref="CommitDiscipline.Commit"/>. A collection is not exempt from that — its content is now logged behind the Slot record that carries its
+    /// component, so it is durable exactly when that component's value is.
+    /// </remarks>
+    public static IEnumerable<TestCaseData> DurableCollectionReopenCells() =>
+        EngineAxes.PairwiseWhere(c => AxisArchetypes.SupportsCollection(c)
+            && (c.Reopen == ReopenKind.Clean || (c.Reopen == ReopenKind.Crash && AxisArchetypes.SvValuesAreCrashDurable(c))));
+
+    /// <summary>
+    /// A <c>ComponentCollection</c>'s ELEMENTS survive a reopen, across every storage shape that can carry one (#389, AC 5.3).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is where the reopen axis for collections belongs. <c>ComponentCollectionMatrixTests</c> narrows to <see cref="ReopenKind.None"/> and #389's plan
+    /// asked for that filter to be lifted — but the kit implements no reopen for those fixtures, so lifting it would have produced duplicate in-session cases
+    /// whose NAMES advertise a reopen the body never performs. That is #704's trap 2 verbatim. The harness that does reopen is here, so the cases are here.
+    /// </para>
+    /// <para>
+    /// The storage-shape axis is what makes this cover the matrix #389 asks for: <c>PureVersioned</c> and <c>PureSv</c> reach the flat revision-chain and the
+    /// cluster SoA homes respectively, and the mixed shapes cross them.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [TestCaseSource(nameof(DurableCollectionReopenCells))]
+    public void EveryDurableCollectionCell_KeepsItsElementsAcrossAReopen(Cell cell)
+    {
+        var ids = SeedAndReopen(cell);
+
+        using var scope2 = ServiceProvider.CreateScope();
+        using var dbe2 = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        AxisArchetypes.Register(dbe2, cell);
+        dbe2.InitializeArchetypes();
+
+        using var read = dbe2.CreateQuickTransaction();
+        for (var i = 0; i < EntityCount; i++)
+        {
+            AxisArchetypes.AssertCollectionRoundTrip(read, cell, ids[i], i);
+        }
+    }
+
     [Test]
     [TestCaseSource(nameof(DurableReopenCells))]
     public void EveryDurableCell_SurvivesItsReopen(Cell cell)
