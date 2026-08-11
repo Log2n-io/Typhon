@@ -88,12 +88,12 @@ The engine manages its own memory: a paged, memory-mapped store with a cache, th
 })
 .AddScopedDatabaseEngine(o =>
 {
-    o.Resources.TotalMemoryBudgetBytes = 4L << 30;   // overall budget — call o.Resources.Validate() yourself to enforce it
+    o.Resources.MaxActiveTransactions = 1000;        // per-knob limits — range-checked automatically at DI resolution
     o.Wal = new WalWriterOptions();                  // enable the WAL (durability)
 });
 ```
 
-The defaults are intentionally *small* — a 2 MB cache out of the box — so development exercises the cache machinery instead of hiding behind RAM. Size it up for real workloads. Call `options.Resources.Validate()` yourself after configuring — it throws if the fixed allocations (cache + WAL + buffers) don't fit inside `TotalMemoryBudgetBytes`. **The engine does not call this automatically at boot** — an oversized configuration is silently accepted unless you validate it yourself.
+The page cache defaults to **256 MiB** (`PagedMMFOptions.DefaultCacheSizeBytes`) — a production-shaped default, not a development one. Size it to your workload's transaction working set; the permitted range is 8 MiB to 4 GiB. Every wired `Resources` knob is **range-checked automatically at DI resolution** by `DatabaseEngineOptionsValidator`, so an out-of-range configuration fails at startup rather than at first use — there is no manual validation step to remember.
 
 > 💡 **Cache size is not a database-size cap.** `DatabaseCacheSize` bounds the *resident working set*, not how much you can store — the on-disk database can be many times the cache; cold pages live on disk and page in on demand (persistent data, indexes, and the entity map all page out — only *Transient* components stay RAM-resident). Size the cache for throughput/latency, not capacity. This is the SQL/SQLite model, and it's what sets Typhon apart from in-memory ECS frameworks.
 
@@ -178,4 +178,4 @@ Where to go from here:
 
 **Concepts:** [DatabaseEngine](../key-concepts/database-engine.md) · [Page cache & paged store](../key-concepts/page-cache.md) · [WAL & checkpoint](../key-concepts/wal-checkpoint.md).
 
-**Exact calls:** `AddTyphonObservabilityBridge` / `ObservabilityBridgeOptions` · `typhon.telemetry.json` (profiler config) · `.typhon-trace` (recorded run) / `.typhon-replay` (saved attach session) · the Workbench (`tools/Typhon.Workbench`, `http://localhost:5173`) · `DatabaseCacheSize` · `DatabaseEngineOptions.Resources` (`TotalMemoryBudgetBytes`) · `WalWriterOptions` · `TyphonException` (`ErrorCode` / `IsTransient`) · `TyphonTimeoutException` · `ResourceExhaustedException` · `UniqueConstraintViolationException` · `SchemaValidationException`.
+**Exact calls:** `AddTyphonObservabilityBridge` / `ObservabilityBridgeOptions` · `typhon.telemetry.json` (profiler config) · `.typhon-trace` (recorded run) / `.typhon-replay` (saved attach session) · the Workbench (`tools/Typhon.Workbench`, `http://localhost:5173`) · `DatabaseCacheSize` · `DatabaseEngineOptions.Resources` (`MaxActiveTransactions`, `WalRingBufferSizeBytes`, `PageChecksumVerification`, `CheckpointIntervalMs`, `CheckpointBarrierTimeoutMs`) · `WalWriterOptions` · `TyphonException` (`ErrorCode` / `IsTransient`) · `TyphonTimeoutException` · `ResourceExhaustedException` · `UniqueConstraintViolationException` · `SchemaValidationException`.

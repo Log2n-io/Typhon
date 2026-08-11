@@ -64,7 +64,7 @@ catch (BulkLoadCheckpointTimeoutException)
 
 - **Exclusive** — only one `BulkLoadSession` per engine; a second `BeginBulkLoad` while one is open throws `BulkSessionAlreadyActiveException`.
 - **Thread-affine** — only the thread that called `BeginBulkLoad` may call methods on the returned session.
-- **No per-row WAL** — the only WAL traffic for the session is the `BulkBegin`/`BulkEnd` manifest pair (plus unrelated TickFence activity); `DurabilityMode`/`DurabilityOverride` don't apply inside a session.
+- **No per-row WAL** — the only WAL traffic for the session is the `BulkBegin`/`BulkEnd` manifest pair (plus unrelated TickFence activity); `DurabilityMode` doesn't apply inside a session.
 - **Session-granularity atomicity, not per-row** — `CompleteBulkLoad` returning is the only success signal: every spawn/update/destroy in the session becomes durable and visible together, or (on `Dispose` without `CompleteBulkLoad`, or a crash) none of them do.
 - **Concurrent readers unaffected** — regular `UnitOfWork`s keep running during the session and see the pre-bulk MVCC snapshot; bulk-spawned entities aren't visible to them until `CompleteBulkLoad` returns.
 - **Update/Destroy scope** — only target entities spawned earlier in the *same* session; mutating pre-existing entities requires the standard `UnitOfWork` path.

@@ -71,9 +71,9 @@ void GrantRareDrop(ref TickContext ctx, EntityId playerId, ItemId item)
 
 - Escalation only raises durability (`Deferred`/`GroupCommit` → `Immediate`); there is no mechanism to lower a
   UoW's mode for a single commit.
-- The `DurabilityOverride` enum (`Default` / `Immediate`) is declared on the public API surface
-  (`DurabilityMode.cs`) per ADR-005 as a future
-  `Commit(DurabilityOverride)` parameter, but it is **not yet wired into `Transaction.Commit()`** — there is no
+- A `DurabilityOverride` enum (`Default` / `Immediate`) was sketched per ADR-005 as a future
+  `Commit(DurabilityOverride)` parameter, but it **does not exist on the API surface** —
+  `DurabilityMode.cs` declares only `DurabilityMode` and `UnitOfWorkState`, and there is no
   single-call escalation today. Use a dedicated `Immediate`-mode UoW (`CreateQuickTransaction`) or
   side-transaction (`ctx.CreateSideTransaction`) for the escalated operation instead; both reuse the same
   WAL-writer signal/wait path the override was designed around.

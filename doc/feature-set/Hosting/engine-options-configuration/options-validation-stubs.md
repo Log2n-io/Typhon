@@ -23,12 +23,15 @@ subsystem, without changing any `Add*()` call signature when it does.
 Every `Add*` extension that accepts a `configure` delegate attaches
 `optionsBuilder.Validate(_ => { /* TODO */ return true; })` right after `.Configure(configure)`.
 All four sites currently return `true` unconditionally — the hook fires but never rejects
-anything. Two option types separately expose their own real, standalone validation you can call
-yourself: `ResourceOptions.Validate()` (throws `InvalidOperationException` if page cache + WAL +
-shadow-buffer sizing exceeds `TotalMemoryBudgetBytes`) and `PagedMMFOptions.IsValid` /
-`Validate(bool silent, out string)` (checks `DatabaseName`, `DatabaseDirectory`, and
-`DatabaseCacheSize` well-formedness). Neither is wired into the `Add*()`/DI path — invoking them
-is on you.
+anything. `PagedMMFOptions` separately exposes its own standalone validation you can call
+yourself: `PagedMMFOptions.IsValid` / `Validate(bool silent, out string)` (checks `DatabaseName`,
+`DatabaseDirectory`, and `DatabaseCacheSize` well-formedness).
+
+> ⚠️ **This page describes a mechanism #148 replaced.** `ResourceOptions.Validate()` and
+> `TotalMemoryBudgetBytes` no longer exist, and the `Add*()` sites no longer carry
+> `Validate(_ => true)` stubs: `DatabaseEngineOptionsValidator` is registered as a real
+> `IValidateOptions<DatabaseEngineOptions>` and range-checks the wired `Resources` knobs plus
+> `WalWriterOptions` at DI resolution. The page needs a rewrite; tracked separately from this pass.
 
 ## 💻 Usage
 
@@ -65,17 +68,17 @@ services
   `OptionsValidationException`, regardless of how invalid the configured values are.
 - The hook is only attached when a `configure` delegate is passed to the `Add*()` call — calling
   it with no delegate skips even the stub.
-- `ResourceOptions.Validate()` and `PagedMMFOptions.IsValid` / `Validate(bool, out string)` are
-  real, independent, and callable today — but nothing in the `Add*()`/DI path calls them for you.
-- Do not rely on `BuildServiceProvider()` or `GetRequiredService<DatabaseEngine>()` to surface a
-  configuration mistake (oversized cache, invalid database name, WAL sizing over budget) — none
-  of these are caught before the engine attempts to open its backing files.
-- Until the stubs are implemented, calling `ResourceOptions.Validate()` / `PagedMMFOptions.IsValid`
-  yourself — before or inside your `configure` delegate — is the only fail-fast path available.
+- `PagedMMFOptions.IsValid` / `Validate(bool, out string)` is real, independent, and callable
+  today — but nothing in the `Add*()`/DI path calls it for you.
+- `ResourceOptions` no longer has a `Validate()` of its own (#148). Its wired knobs, and
+  `WalWriterOptions`, are range-checked by `DatabaseEngineOptionsValidator` at DI resolution.
+- Do not rely on `BuildServiceProvider()` or `GetRequiredService<DatabaseEngine>()` to surface
+  *every* configuration mistake — an invalid database name or an oversized cache is still not
+  caught before the engine attempts to open its backing files.
 
 ## 🧪 Tests
 
-- [ResourceOptionsTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Resources/ResourceOptionsTests.cs) — the real, callable `ResourceOptions.Validate()`: passes on defaults/large budgets, throws `InvalidOperationException` with a readable message when fixed allocations exceed `TotalMemoryBudgetBytes`; no test exercises the `Add*()`-wired `.Validate(_ => true)` stub itself (there is nothing to assert — it never rejects)
+- [ResourceOptionsTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Resources/ResourceOptionsTests.cs) — asserts the shipped `ResourceOptions` defaults are sensible, plus the `ExhaustionPolicy` / `ResourceExhaustedException` surface. It no longer covers a `ResourceOptions.Validate()`, that method having been removed in #148
 
 ## 🔗 Related
 

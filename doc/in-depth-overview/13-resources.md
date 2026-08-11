@@ -264,10 +264,11 @@ Lives inside `DatabaseEngineOptions` and is consumed by the components at constr
 | `CheckpointIntervalMs` | `30000` (**30 s**) | Idle checkpoint cadence |
 | `PageChecksumVerification` | `OnLoad` | CRC every load vs. only during recovery |
 | `ShadowBufferPages` | `512` (**4 MB**) | Reserved for CoW backup writer (forward-looking; no Backup subsystem node yet) |
-| `TotalMemoryBudgetBytes` | `4L << 30` (**4 GB**) | Validated at startup |
 | `PageSizeBytes` | `8192` (const) | Page size for sizing math |
 
-`Validate()` rejects configurations where the **fixed** allocations (page cache + WAL ring + WAL segments + shadow buffer) exceed `TotalMemoryBudgetBytes`. Growable resources (active transactions, index nodes, query buffers) have runtime caps and are excluded from the upfront check. `CalculateAvailableBudgetBytes()` returns what's left for growable resources.
+There is **no overall memory budget and no manual validation step**. `ResourceOptions` had a `TotalMemoryBudgetBytes` property and a `Validate()` / `CalculateAvailableBudgetBytes()` pair, both removed in #148 as vestigial — they governed no allocation. Each wired knob is instead range-checked automatically at DI resolution by `DatabaseEngineOptionsValidator`, so an out-of-range value fails at startup with no call for you to remember. Real cache size lives on `PagedMMFOptions.DatabaseCacheSize`, WAL segment sizing on `WalWriterOptions`.
+
+> ⚠️ **Stale table above.** Several rows name properties #148 also removed (`PageCachePages`, `MaxPageCachePages`, `TransactionPoolSize`, `WalBackPressureThreshold`, `WalMaxSegments`, `WalMaxSegmentSizeBytes`, `CheckpointMaxDirtyPages`, `ShadowBufferPages`). Today's `ResourceOptions` carries five: `MaxActiveTransactions`, `WalRingBufferSizeBytes`, `PageChecksumVerification`, `CheckpointIntervalMs`, `CheckpointBarrierTimeoutMs`. Tracked separately from this pass.
 
 ---
 

@@ -72,9 +72,9 @@ tx2.Commit();                  // blocks ~15-85µs — durable on the data file'
 - `Immediate` raises `CommitDurabilityUncertainException` rather than rolling back if the post-append fsync
   wait doesn't confirm in time — the transaction is already committed and visible; this is "durability
   unconfirmed," never a rollback signal. See the [Commit Pipeline](../commit-pipeline.md) feature.
-- **Known gap:** the `DurabilityOverride` enum (`Default`/`Immediate`, escalating a single transaction inside an
-  otherwise `Deferred`/`GroupCommit` UoW) is declared on the public API surface (`DurabilityMode.cs`) per
-  ADR-005, but is not yet wired into
+- **Known gap:** a `DurabilityOverride` enum (`Default`/`Immediate`, escalating a single transaction inside an
+  otherwise `Deferred`/`GroupCommit` UoW) was sketched per ADR-005 but was never committed — it is absent from
+  `DurabilityMode.cs` and from
   `Transaction.Commit()` — there is currently no single-call escalation path for a commit within an existing
   UoW. Today's workaround for a critical operation inside an otherwise low-durability workload: commit it
   through its own `DurabilityMode.Immediate` UoW (`dbe.CreateQuickTransaction(DurabilityMode.Immediate)`), or,

@@ -44,12 +44,14 @@ tsh> btree Player.Name
   Total nodes:     128
   Chunk capacity:  512
   Fill factor:     25.0%
-  Node size:       256 bytes
+  Node size:       356 bytes
 
 tsh> btree-validate Player.Name
   Validating B+Tree Player.Name...
   Validation passed
 ```
+
+`Player.Name` is a `String64` key, so it reports the `String64BTree` node size of **356 bytes**. A numeric-keyed index reports **256**. See [B+Tree Node Layout & Tuning](./btree-node-layout-tuning.md).
 
 | Command | Purpose |
 |---------|---------|
