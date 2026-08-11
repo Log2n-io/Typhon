@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { IDockviewPanelProps } from 'dockview-react';
-import { useSessionStore } from '@/stores/useSessionStore';
+import { useSessionStore, useDatabasePaused } from '@/stores/useSessionStore';
+import DatabasePausedNotice from '@/shell/banners/DatabasePausedNotice';
 import { useDbMapStore } from '@/stores/useDbMapStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { isDbMapLeafType } from '@/libs/dbmap/dbMapSelection';
@@ -187,6 +188,7 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
   const renameBookmark = useDbMapStore((s) => s.renameBookmark);
 
   const { data, isLoading, isError, refetch } = useDbMap(sessionId);
+  const databasePaused = useDatabasePaused();
 
   // Same smart short-name labeller the Query Console uses (common-prefix stripping over all registered components).
   // A segment's `typeName` is the FULL registered/CLR name of its owning component or archetype; this turns
@@ -1767,7 +1769,12 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
             />
           )}
           {isLoading && <p className="absolute left-3 top-2 text-fs-sm text-muted-foreground">Loading map…</p>}
-          {isError && (
+          {databasePaused && (
+            <div className="absolute left-0 top-0">
+              <DatabasePausedNotice subject="The file map" testId="dbmap-paused" />
+            </div>
+          )}
+          {!databasePaused && isError && (
             <p className="absolute left-3 top-2 text-fs-sm text-destructive">Failed to load the file map.</p>
           )}
           {hover && <HoverTooltip info={hover} />}

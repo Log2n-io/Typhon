@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import type { IDockviewPanelProps } from 'dockview-react';
 import { RefreshCw } from 'lucide-react';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { useSessionStore } from '@/stores/useSessionStore';
+import { useSessionStore, useDatabasePaused } from '@/stores/useSessionStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useDbMapHealth } from '@/hooks/dbmap/useDbMapHealth';
 import { useComponentNames } from '@/hooks/queryConsole/useComponentNames';
@@ -11,6 +11,7 @@ import { segmentRgb, rgbCss } from '@/libs/dbmap/dbMapColors';
 import { sortHealthSegments, type HealthSortKey } from './storageHealthModel';
 import { formatBytes } from '@/libs/formatBytes';
 import IntegrityStrip from './IntegrityStrip';
+import DatabasePausedNotice from '@/shell/banners/DatabasePausedNotice';
 
 /**
  * Storage Health (Stage 2 Phase 3, GAP-16) — the *aggregate* storage dashboard, the non-spatial complement to
@@ -22,6 +23,7 @@ export default function StorageHealthPanel(_props: IDockviewPanelProps) {
   const sessionId = useSessionStore((s) => s.sessionId);
   const { data, isLoading, isError, refetch, isFetching } = useDbMapHealth(sessionId);
   const select = useSelectionStore((s) => s.select);
+  const databasePaused = useDatabasePaused();
   // Friendly component name for component-table segments (matches the File Map's segment labels); non-component
   // segments carry no typeName and fall back to `#<id>`.
   const { label: componentName } = useComponentNames();
@@ -42,6 +44,15 @@ export default function StorageHealthPanel(_props: IDockviewPanelProps) {
     }
   };
 
+  // Ahead of both branches below: while the database is released the rollup 409s AND `data` stays undefined, so
+  // without this the panel would sit on "Loading storage health…" forever, or blame a failure (#621).
+  if (databasePaused) {
+    return (
+      <div data-testid="storage-health">
+        <DatabasePausedNotice subject="Storage health" testId="storage-health-paused" />
+      </div>
+    );
+  }
   if (isError) {
     return <div data-testid="storage-health" className="p-3 text-fs-base text-destructive">Failed to load storage health.</div>;
   }

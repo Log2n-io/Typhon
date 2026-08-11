@@ -4,6 +4,8 @@ import { useQueryConsoleStore } from '@/stores/useQueryConsoleStore';
 import { useComponentNames } from '@/hooks/queryConsole/useComponentNames';
 import type { QueryResultDto } from '@/api/generated/model/queryResultDto';
 import type { QueryCellDto } from '@/api/generated/model/queryCellDto';
+import { useDatabasePaused } from '@/stores/useSessionStore';
+import DatabasePausedNotice from '@/shell/banners/DatabasePausedNotice';
 
 const ROW_HEIGHT_PX = 22; // Workbench convention — matches Data Browser grid
 const ENTITY_ID_WIDTH_PX = 128; // fixed; entityId is always a decimal long, no need to flex
@@ -22,7 +24,19 @@ export function ResultGrid() {
   const runState = useQueryConsoleStore((s) => s.runState);
   const errorCode = useQueryConsoleStore((s) => s.runErrorCode);
   const errorMessage = useQueryConsoleStore((s) => s.runErrorMessage);
+  const databasePaused = useDatabasePaused();
 
+  // Ahead of every other state, including idle. A run against a released database comes back 409 `database_paused`,
+  // which the store records like any other failure — so the console would frame a routine handoff as a red query
+  // error beside a code the user cannot act on. And the idle prompt is no better while paused: "Press Run" invites
+  // an action that is guaranteed to fail (#621).
+  if (databasePaused) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <DatabasePausedNotice subject="Query results" testId="query-console-paused" />
+      </div>
+    );
+  }
   if (runState === 'idle') {
     return (
       <div className="flex h-full items-center justify-center text-sm text-muted-foreground">

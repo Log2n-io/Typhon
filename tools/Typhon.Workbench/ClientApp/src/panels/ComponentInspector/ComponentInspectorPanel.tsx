@@ -24,6 +24,8 @@ import { pickPrimaryArchetype } from '@/hooks/dataBrowser/pickArchetype';
 import AccessChips from '@/panels/SchemaInspector/AccessChips';
 import SchemaRelationshipsGraph from '@/panels/SchemaInspector/SchemaRelationshipsGraph';
 import SchemaLayoutCanvas from './SchemaLayoutCanvas';
+import { useDatabasePaused } from '@/stores/useSessionStore';
+import DatabasePausedNotice from '@/shell/banners/DatabasePausedNotice';
 
 /**
  * Component Inspector (Stage 2, GAP-02) — the flagship deep view for one component TYPE (type-global facts).
@@ -53,6 +55,7 @@ const STORAGE_MODE_NOTES: Record<string, string> = {
 export default function ComponentInspectorPanel(props: IDockviewPanelProps) {
   const { list: components, isLoading: cLoading, isError } = useComponentList();
   const select = useSelectionStore((s) => s.select);
+  const databasePaused = useDatabasePaused();
 
   // Self-addressing target (PC-9): the bus `component` leaf when there is one, else an auto-pick over the
   // loaded component types — so this deep view is never an empty dead-end. Drilling into a field sets the
@@ -93,6 +96,15 @@ export default function ComponentInspectorPanel(props: IDockviewPanelProps) {
 
   const summary = targetId ? components.find((c) => c.typeName === targetId || c.fullName === targetId) ?? null : null;
 
+  // Ahead of the error branch: a released database 409s every schema request AND returns an empty component list, so
+  // the error and the no-target branches would both fire, each describing a different wrong thing (#621).
+  if (databasePaused) {
+    return (
+      <div data-testid="component-inspector">
+        <DatabasePausedNotice subject="Component types" testId="component-inspector-paused" />
+      </div>
+    );
+  }
   if (isError) {
     return <div data-testid="component-inspector" className="p-3 text-fs-base text-destructive">Failed to load schema.</div>;
   }

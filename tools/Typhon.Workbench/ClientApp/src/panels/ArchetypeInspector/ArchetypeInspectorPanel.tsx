@@ -16,6 +16,8 @@ import { useInspectorTarget } from '@/panels/schemaCommon/useInspectorTarget';
 import { useArchetypeNames } from '@/hooks/queryConsole/useArchetypeNames';
 import type { TargetCandidate } from '@/panels/schemaCommon/inspectorTarget';
 import { findArchetype, resolveArchetypeComponents, indexedComponents } from './archetypeInspectorModel';
+import { useDatabasePaused } from '@/stores/useSessionStore';
+import DatabasePausedNotice from '@/shell/banners/DatabasePausedNotice';
 
 /**
  * Archetype Inspector (Stage 2, GAP-02) — the deep view for one archetype: tabs Components · Entities ·
@@ -36,6 +38,7 @@ const TABS: { id: Tab; label: string }[] = [
 export default function ArchetypeInspectorPanel(_props: IDockviewPanelProps) {
   const { list: archetypes, isLoading: aLoading, isError } = useArchetypeList();
   const { list: components } = useComponentList();
+  const databasePaused = useDatabasePaused();
   const select = useSelectionStore((s) => s.select);
   const { label: archName } = useArchetypeNames();
 
@@ -65,6 +68,15 @@ export default function ArchetypeInspectorPanel(_props: IDockviewPanelProps) {
 
   const archetype = findArchetype(archetypes, targetId);
 
+  // Before the error branch: while the database is released every schema request 409s, and the archetype list comes
+  // back empty — so both the error and the no-target branch below would fire, each blaming the wrong thing (#621).
+  if (databasePaused) {
+    return (
+      <div data-testid="archetype-inspector">
+        <DatabasePausedNotice subject="Archetypes" testId="archetype-inspector-paused" />
+      </div>
+    );
+  }
   if (isError) {
     return (
       <div data-testid="archetype-inspector" className="p-3 text-fs-base text-destructive">
