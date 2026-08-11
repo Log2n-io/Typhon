@@ -576,6 +576,199 @@ internal sealed class CollectionDurabilityTests
         }
     }
 
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // Phase 4 — carry and apply
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Collection content survives a hard crash, for both storage homes (the #389 acceptance shape, AC 5.3).
+    /// </summary>
+    [Test]
+    [CancelAfter(20_000)]
+    public void Collections_SurviveAHardCrash()
+    {
+        EntityId[] versioned;
+        EntityId[] single;
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            (versioned, single) = SeedBoth(dbe);
+            TouchSingleVersionEntities(dbe, single);
+            dbe.WriteTickFence(1);
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            AssertRecoveredContent(dbe, versioned, single);
+        }
+    }
+
+    /// <summary>
+    /// Applying the same recovery window TWICE converges — AP-12, proven by actually re-applying it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>rules/durability.md</c> warns that the four existing tests tagged <c>[VerifiesRule("AP-12")]</c> never re-apply anything, so none of them can
+    /// observe a non-idempotent apply. This one drives <c>RecoveryDriver.Run</c> a second time over the same segments with a checkpoint frontier of 0, which
+    /// is the situation the design's §4 describes for real: a crash during recovery leaves the data file further along while <c>CheckpointLSN</c> still points
+    /// before the window, so the re-run sees the same records over an already-applied base.
+    /// </para>
+    /// <para>
+    /// Collections are the sharpest case for it. A naive fold-flush allocates a fresh buffer on every pass, so a second apply would double the segment's
+    /// allocation and leave the first pass's buffer unreachable — content would still look right while storage grew without bound per recovery.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    public void ReapplyingTheWindow_ConvergesInContentAndRefcount()
+    {
+        EntityId[] versioned;
+        EntityId[] single;
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            (versioned, single) = SeedBoth(dbe);
+            dbe.SimulateHardCrash();
+        }
+
+        // Snapshot the segments before reopening. The first recovery ends in a seal checkpoint, and CK-04 releases the WAL for recycling only after that seal
+        // — so by the time the engine is up, the window this test needs to replay has been recycled out from under it. The copy is the window as it stood at
+        // the crash, which is exactly what a recovery re-run would see.
+        var snapshotDir = _walDir + "-snapshot";
+        Directory.CreateDirectory(snapshotDir);
+        foreach (var f in Directory.GetFiles(_walDir))
+        {
+            File.Copy(f, Path.Combine(snapshotDir, Path.GetFileName(f)), overwrite: true);
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+
+            // Open ran recovery once. Capture what that produced, then replay the identical window over it.
+            AssertRecoveredContent(dbe, versioned, single);
+            var refcountsAfterOnce = RefCountsOf(dbe, versioned, single);
+
+            var second = new RecoveryDriver().Run(new WalFileIO(), snapshotDir, dbe, 0);
+            Assert.That(second.CollectionFoldsFlushed, Is.GreaterThan(0),
+                "the re-run flushed no collection fold — it did not actually re-apply the window, so convergence was never exercised");
+
+            AssertRecoveredContent(dbe, versioned, single);
+            Assert.That(RefCountsOf(dbe, versioned, single), Is.EqualTo(refcountsAfterOnce).AsCollection,
+                "re-applying the window must not change any collection's refcount — a buffer left over from the first pass is a leak per recovery");
+        }
+    }
+
+    /// <summary>
+    /// An out-of-range <c>RemoveAt</c> or <c>UpdateAt</c> must fail loudly, never be clamped (AC 4.2, 03-recovery.md §9.e).
+    /// </summary>
+    /// <remarks>
+    /// The fold is driven directly because nothing emits these ops — Option B emits only <c>Clear</c> and <c>Append</c>. They are implemented anyway because
+    /// the record format defines them and the fold is where they are cheap, and an unreachable loud-failure path that has never been seen to fire is
+    /// indistinguishable from one that silently guesses. That is the distinction #703 was about.
+    /// </remarks>
+    [Test]
+    [TestCase(CollectionOp.RemoveAt)]
+    [TestCase(CollectionOp.UpdateAt)]
+    public void Fold_WithAnOutOfRangeIndex_FailsLoudly(CollectionOp op)
+    {
+        var fold = new RecoveryDriver.CollectionFold();
+        fold.Apply(CollectionOp.Clear, 0, null, "test");
+        fold.Apply(CollectionOp.Append, 0, BitConverter.GetBytes(1), "test");
+
+        var ex = Assert.Throws<InvalidOperationException>(() => fold.Apply(op, 5, BitConverter.GetBytes(2), "test-location"));
+        Assert.That(ex.Message, Does.Contain("out of range"), "the failure must name what went wrong");
+        Assert.That(ex.Message, Does.Contain("test-location"), "the failure must localise the offending record");
+        Assert.That(ex.Message, Does.Contain("producer corruption"), "the failure must say this is not crash damage — best-effort would be wrong here");
+    }
+
+    /// <summary>The five fold ops all behave, even though Option B emits only two of them (AC 4.1).</summary>
+    [Test]
+    public void Fold_ImplementsAllFiveOps()
+    {
+        var fold = new RecoveryDriver.CollectionFold();
+        fold.Apply(CollectionOp.Clear, 0, null, "t");
+        Assert.That(fold.BaseDiscarded, Is.True, "Clear must mark the base discarded — that is what makes EnsureBase unnecessary under Option B");
+
+        fold.Apply(CollectionOp.Append, 0, BitConverter.GetBytes(10), "t");
+        fold.Apply(CollectionOp.Append, 0, BitConverter.GetBytes(20), "t");
+        fold.Apply(CollectionOp.Append, 0, BitConverter.GetBytes(30), "t");
+        Assert.That(fold.Elements.Select(static e => BitConverter.ToInt32(e)), Is.EqualTo(new[] { 10, 20, 30 }).AsCollection);
+
+        fold.Apply(CollectionOp.UpdateAt, 1, BitConverter.GetBytes(99), "t");
+        Assert.That(BitConverter.ToInt32(fold.Elements[1]), Is.EqualTo(99));
+
+        fold.Apply(CollectionOp.RemoveAt, 0, null, "t");
+        Assert.That(fold.Elements.Select(static e => BitConverter.ToInt32(e)), Is.EqualTo(new[] { 99, 30 }).AsCollection);
+
+        fold.Apply(CollectionOp.SetCount, 1, null, "t");
+        Assert.That(fold.Elements, Has.Count.EqualTo(1), "SetCount truncates");
+
+        fold.Apply(CollectionOp.SetCount, 3, null, "t");
+        Assert.That(fold.Elements, Has.Count.EqualTo(3), "SetCount extends with zero-filled elements");
+    }
+
+    // ── recovered-state assertions ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    private static void AssertRecoveredContent(DatabaseEngine dbe, IReadOnlyList<EntityId> versioned, IReadOnlyList<EntityId> single)
+    {
+        using var tx = dbe.CreateQuickTransaction();
+        for (var i = 0; i < versioned.Count; i++)
+        {
+            Assert.That(tx.IsAlive(versioned[i]), Is.True, $"{versioned[i]} must be recovered alive");
+            var v = tx.Open(versioned[i]).Read(CcVersionedArch.C);
+            AssertElements(tx, ref v.Items, i, $"Versioned {versioned[i]}");
+        }
+
+        for (var i = 0; i < single.Count; i++)
+        {
+            Assert.That(tx.IsAlive(single[i]), Is.True, $"{single[i]} must be recovered alive");
+            var s = tx.Open(single[i]).Read(CcSingleArch.C);
+            AssertElements(tx, ref s.Items, i, $"SingleVersion {single[i]}");
+        }
+    }
+
+    private static void AssertElements(Transaction tx, ref ComponentCollection<int> field, int i, string what)
+    {
+        using var cca = tx.CreateComponentCollectionAccessor(ref field);
+        var expected = new int[ElementCountOf(i)];
+        for (var el = 0; el < expected.Length; el++)
+        {
+            expected[el] = ElementValue(i, el);
+        }
+
+        var actual = new int[cca.ElementCount];
+        cca.GetAllElements(actual);
+        Assert.That(actual, Is.EqualTo(expected).AsCollection, $"{what}: recovered collection content");
+    }
+
+    private static List<int> RefCountsOf(DatabaseEngine dbe, IReadOnlyList<EntityId> versioned, IReadOnlyList<EntityId> single)
+    {
+        var counts = new List<int>();
+        using var tx = dbe.CreateQuickTransaction();
+        foreach (var id in versioned)
+        {
+            var v = tx.Open(id).Read(CcVersionedArch.C);
+            counts.Add(tx.GetComponentCollectionRefCounter(ref v.Items));
+        }
+
+        foreach (var id in single)
+        {
+            var s = tx.Open(id).Read(CcSingleArch.C);
+            counts.Add(tx.GetComponentCollectionRefCounter(ref s.Items));
+        }
+
+        return counts;
+    }
+
     /// <summary>Writes a scalar on every SingleVersion entity under the TickFence discipline, so the next fence has dirty slots to emit columnarly.</summary>
     private static void TouchSingleVersionEntities(DatabaseEngine dbe, IReadOnlyList<EntityId> single)
     {

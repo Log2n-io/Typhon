@@ -1,4 +1,5 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using Typhon.Schema.Definition;
 
@@ -46,6 +47,29 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     // routingId → highest entity key this recovery applied for that archetype (#697). Keyed by the EntityId's per-DB ROUTING id, so the driver resolves it
     // through DatabaseEngine._stateByRouting — NOT _archetypeStates, which is indexed by the per-process catalog id and is a different space entirely.
     private readonly Dictionary<ushort, long> _maxEntityKeyByArchetype = new();
+
+    // ── Per-entity collection state (#389), valid only between an apply and the ApplyCollectionFolds that follows it ──
+
+    /// <summary>
+    /// slot → the content chunk this apply wrote the component's value into.
+    /// </summary>
+    /// <remarks>
+    /// Recorded rather than re-derived: for a Versioned slot the EntityMap location is the chain ROOT, and the value lives in the head revision's content
+    /// chunk, which only the code that just created or appended that revision knows without walking the chain. The fold flush has to write the new buffer
+    /// handle into exactly those bytes.
+    /// </remarks>
+    private readonly Dictionary<ushort, int> _appliedContentChunkBySlot = new();
+
+    /// <summary>
+    /// (slot, fieldId) → the collection handle the row held BEFORE this apply overwrote it, for storage that is overwritten in place.
+    /// </summary>
+    /// <remarks>
+    /// Only SingleVersion storage populates this, and the asymmetry is the point. An SV value is rewritten in place, so the buffer the row used to own becomes
+    /// unreachable the instant the payload is copied — the fold flush must release it or it leaks on every recovery. A Versioned apply instead appends a NEW
+    /// revision, leaving the previous one (and its buffer) referenced until Phase-4 SCRUB frees the content chunk, which releases the buffer with it. Releasing
+    /// it here as well would double-decrement.
+    /// </remarks>
+    private readonly Dictionary<(ushort Slot, ushort FieldId), int> _preApplyHandles = new();
 
     public RecoveryApplier(DatabaseEngine dbe)
     {
@@ -99,6 +123,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         Track(bornTsn);
         TrackEntityKey(entityIdRaw);
         EnsureArchetype(archetypeId);
+        BeginEntity();  // a spawn builds fresh storage, so there is no prior handle to release — only the content chunks to remember
 
         if (_hasClusterAccessor)
         {
@@ -140,12 +165,21 @@ internal sealed unsafe class RecoveryApplier : IDisposable
                 }
 
                 var table = _engineState.SlotToComponentTable[slotIndex];
-                locations[slotIndex] = table.StorageMode switch
+                switch (table.StorageMode)
                 {
-                    StorageMode.Versioned => CreateVersionedChainRoot(table, entityIdRaw, slot.Tsn, slot.Payload),
-                    StorageMode.SingleVersion => CreateSingleVersionContent(table, slot.Payload),
-                    _ => 0, // Transient values are never logged
-                };
+                    case StorageMode.Versioned:
+                        locations[slotIndex] = CreateVersionedChainRoot(table, entityIdRaw, slot.Tsn, slot.Payload, out var versionedContent);
+                        _appliedContentChunkBySlot[slotIndex] = versionedContent;
+                        break;
+                    case StorageMode.SingleVersion:
+                        var svContent = CreateSingleVersionContent(table, slot.Payload);
+                        locations[slotIndex] = svContent;
+                        _appliedContentChunkBySlot[slotIndex] = svContent;
+                        break;
+                    default:
+                        locations[slotIndex] = 0;   // Transient values are never logged
+                        break;
+                }
             }
         }
 
@@ -211,8 +245,9 @@ internal sealed unsafe class RecoveryApplier : IDisposable
                     int vi = layout.SlotToVersionedIndex[slotIndex];
                     if (vi >= 0)
                     {
-                        var chainRoot = CreateVersionedChainRoot(table, entityIdRaw, slot.Tsn, slot.Payload);
+                        var chainRoot = CreateVersionedChainRoot(table, entityIdRaw, slot.Tsn, slot.Payload, out var contentChunkId);
                         ClusterEntityRecordAccessor.SetCompRevFirstChunkId(recordPtr, vi, chainRoot);
+                        _appliedContentChunkBySlot[slotIndex] = contentChunkId;
                     }
                 }
             }
@@ -294,6 +329,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
 
         var eid = EntityId.FromRaw(entityIdRaw);
         EnsureArchetype(eid.ArchetypeId);
+        BeginEntity();
 
         var key = eid.EntityKey;
         byte* readBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
@@ -328,12 +364,14 @@ internal sealed unsafe class RecoveryApplier : IDisposable
                     {
                         // The base record has no chain for this slot (the component was never written before the checkpoint). Build one, exactly as a spawn
                         // would, and repoint the location — there is no prior chain to append to and none to orphan.
-                        locations[slotIndex] = CreateVersionedChainRoot(table, entityIdRaw, slot.Tsn, slot.Payload);
+                        locations[slotIndex] = CreateVersionedChainRoot(table, entityIdRaw, slot.Tsn, slot.Payload, out var newChainContent);
+                        _appliedContentChunkBySlot[slotIndex] = newChainContent;
                         rewritten = true;
                     }
                     else
                     {
-                        AppendVersionedRevision(table, root, slot.Tsn, slot.Payload);
+                        AppendVersionedRevision(table, root, slot.Tsn, slot.Payload, out var appendedContent);
+                        _appliedContentChunkBySlot[slotIndex] = appendedContent;
                     }
 
                     break;
@@ -342,14 +380,18 @@ internal sealed unsafe class RecoveryApplier : IDisposable
                     var content = locations[slotIndex];
                     if (content == 0)
                     {
-                        locations[slotIndex] = CreateSingleVersionContent(table, slot.Payload);
+                        var freshContent = CreateSingleVersionContent(table, slot.Payload);
+                        locations[slotIndex] = freshContent;
+                        _appliedContentChunkBySlot[slotIndex] = freshContent;
                         rewritten = true;
                     }
                     else
                     {
                         var info = GetRecoveryInfo(table);
                         var dst = info.CompContentAccessor.GetChunkAsSpan(content, true);
+                        CapturePreApplyHandles(table, slotIndex, dst[info.ComponentOverhead..]);
                         slot.Payload.AsSpan().CopyTo(dst[info.ComponentOverhead..]);
+                        _appliedContentChunkBySlot[slotIndex] = content;
                     }
 
                     break;
@@ -392,6 +434,14 @@ internal sealed unsafe class RecoveryApplier : IDisposable
 
             var compSize = layout.ComponentSize(slotIndex);
             byte* dst = clusterBase + layout.ComponentOffset(slotIndex) + slotIdx * compSize;
+
+            // A cluster slot is overwritten in place, so this is the last moment the previous collection handle exists (SingleVersion only — a Versioned slot's
+            // prior buffer stays referenced by the prior revision until SCRUB frees it).
+            if (table.StorageMode == StorageMode.SingleVersion)
+            {
+                CapturePreApplyHandles(table, slotIndex, new ReadOnlySpan<byte>(dst, compSize));
+            }
+
             slot.Payload.AsSpan().CopyTo(new Span<byte>(dst, compSize));
 
             // Versioned in a cluster: the SoA slot is the HEAD cache over the chain, so the chain has to carry the value too or the scrub would collapse the
@@ -404,7 +454,8 @@ internal sealed unsafe class RecoveryApplier : IDisposable
                     var root = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(recordPtr, vi);
                     if (root != 0)
                     {
-                        AppendVersionedRevision(table, root, slot.Tsn, slot.Payload);
+                        AppendVersionedRevision(table, root, slot.Tsn, slot.Payload, out var appendedContent);
+                        _appliedContentChunkBySlot[slotIndex] = appendedContent;
                     }
                 }
             }
@@ -415,12 +466,15 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     /// Appends one committed revision carrying <paramref name="payload"/> to the chain rooted at <paramref name="chainRootChunkId"/>.
     /// </summary>
     /// <remarks>
-    /// Mirrors <see cref="CreateVersionedChainRoot"/>'s end state — content written at <c>ComponentOverhead</c>, element committed so its isolation flag is
+    /// Mirrors <c>CreateVersionedChainRoot</c>'s end state — content written at <c>ComponentOverhead</c>, element committed so its isolation flag is
     /// clear — but through <see cref="ComponentRevisionManager.AddCompRev"/>, which allocates the content chunk and grows the chain when the current one is
     /// full. <c>lockAlreadyHeld</c> stays false: recovery is single-threaded, and taking the chain lock costs nothing here while keeping this path identical
     /// to the live one rather than a second implementation that has to be kept in step.
     /// </remarks>
-    private void AppendVersionedRevision(ComponentTable table, int chainRootChunkId, long tsn, byte[] payload)
+    private void AppendVersionedRevision(ComponentTable table, int chainRootChunkId, long tsn, byte[] payload) =>
+        AppendVersionedRevision(table, chainRootChunkId, tsn, payload, out _);
+
+    private void AppendVersionedRevision(ComponentTable table, int chainRootChunkId, long tsn, byte[] payload, out int contentChunkId)
     {
         var info = GetRecoveryInfo(table);
         var compRevInfo = new ComponentInfo.CompRevInfo
@@ -431,12 +485,171 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         };
 
         ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, 0, false);
+        contentChunkId = compRevInfo.CurCompContentChunkId;
 
         byte* contentBase = info.CompContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId, true);
         payload.AsSpan().CopyTo(new Span<byte>(contentBase + info.ComponentOverhead, payload.Length));
 
         var handle = ComponentRevisionManager.GetRevisionElement(ref info.CompRevTableAccessor, chainRootChunkId, compRevInfo.CurRevisionIndex);
         handle.Commit(tsn);
+    }
+
+    /// <summary>Resets the per-entity scratch that <see cref="ApplyCollectionFolds"/> consumes. Called at the top of every entity apply.</summary>
+    private void BeginEntity()
+    {
+        _appliedContentChunkBySlot.Clear();
+        _preApplyHandles.Clear();
+    }
+
+    /// <summary>Records the collection handles a component's value holds right now, before an in-place overwrite destroys them.</summary>
+    private void CapturePreApplyHandles(ComponentTable table, ushort slotIndex, ReadOnlySpan<byte> currentValue)
+    {
+        if (!table.HasCollections)
+        {
+            return;
+        }
+
+        foreach (var f in table.CollectionFields)
+        {
+            if (currentValue.Length >= f.OffsetInComponentStorage + f.HandleSize)
+            {
+                _preApplyHandles[(slotIndex, f.FieldId)] = BinaryPrimitives.ReadInt32LittleEndian(currentValue[f.OffsetInComponentStorage..]);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Writes the folded collection content back into the entity — the <c>FoldFlush</c> of 03-recovery.md §5, and the step that makes a
+    /// <c>ComponentCollection</c> crash-durable at all (#389).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This MUST run after the entity's Slot apply, never before.</b> The design does not state the ordering, and it is load-bearing in two directions. A
+    /// Slot apply overwrites the whole component value, so a flush that ran first would be clobbered outright. And because LOG-06 zeroes the handle in every
+    /// Slot payload, the apply leaves the row pointing at no buffer — this flush is what gives it one again. Recovery aggregates all of an entity's Slot
+    /// records into a single apply before calling here, so "after the apply" is one well-defined point rather than a race between records.
+    /// </para>
+    /// <para>
+    /// <b>The handle is written to every home the value has.</b> A flat entity has one (the content chunk); a cluster entity has the SoA slot, and if the
+    /// component is Versioned, the head revision's content chunk as well — the SoA is a cache over the chain, and SCRUB collapses the chain to its highest-TSN
+    /// element, so a handle written only to the cache would be replaced by the chain's stale one.
+    /// </para>
+    /// <para>
+    /// Idempotent (AP-12): re-applying the same window recomputes the same element list and calls <see cref="VariableSizedBufferSegmentBase{TStore}.SetElementsRaw"/>
+    /// again, which releases the buffer the previous pass created and allocates an equivalent one. Content and refcount converge; only the buffer id differs,
+    /// which AP-13 tolerates by design.
+    /// </para>
+    /// </remarks>
+    public void ApplyCollectionFolds(long entityIdRaw, IReadOnlyDictionary<(ushort Slot, ushort FieldId), List<byte[]>> folds)
+    {
+        if (folds == null || folds.Count == 0)
+        {
+            BeginEntity();
+            return;
+        }
+
+        var eid = EntityId.FromRaw(entityIdRaw);
+        EnsureArchetype(eid.ArchetypeId);
+
+        byte* recordPtr = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        if (!_engineState.EntityMap.TryGet(eid.EntityKey, recordPtr, ref _mapAccessor))
+        {
+            BeginEntity();
+            return;     // the entity is not alive after this window (spawned-and-destroyed, or never recovered) — its collections go with it
+        }
+
+        foreach (var ((slotIndex, fieldId), elements) in folds)
+        {
+            if (slotIndex >= _metadata.ComponentCount)
+            {
+                continue;   // foreign / malformed record — tolerated exactly as the slot paths tolerate it
+            }
+
+            var table = _engineState.SlotToComponentTable[slotIndex];
+            if (!TryGetCollectionField(table, fieldId, out var field))
+            {
+                continue;   // the schema no longer has this collection field (a migration dropped it) — nothing to restore it into
+            }
+
+            var content = Flatten(elements, field.Vsbs.ElementSize);
+            var oldBufferId = _preApplyHandles.TryGetValue((slotIndex, fieldId), out var captured) ? captured : 0;
+
+            var vsbsAccessor = field.Vsbs.Segment.CreateChunkAccessor(_changeSet);
+            int newBufferId;
+            try
+            {
+                newBufferId = field.Vsbs.SetElementsRaw(oldBufferId, content, ref vsbsAccessor);
+            }
+            finally
+            {
+                vsbsAccessor.CommitChanges();
+                vsbsAccessor.Dispose();
+            }
+
+            WriteCollectionHandle(recordPtr, table, slotIndex, field, newBufferId);
+        }
+
+        BeginEntity();
+    }
+
+    /// <summary>Concatenates a fold's per-element byte arrays into one contiguous span, validating each against the segment's element width.</summary>
+    private static ReadOnlySpan<byte> Flatten(List<byte[]> elements, int elementSize)
+    {
+        var buffer = new byte[elements.Count * elementSize];
+        for (var i = 0; i < elements.Count; i++)
+        {
+            var e = elements[i];
+            if (e.Length != elementSize)
+            {
+                // §9.e: a structural impossibility, not crash damage. An element whose width disagrees with the schema means the producer and this reader
+                // disagree about the format, and writing it anyway would silently shift every following element.
+                ThrowHelper.ThrowInvalidOp(
+                    $"Recovery collection fold: element {i} is {e.Length} bytes, but the segment stores {elementSize}-byte elements. The log and the schema "
+                    + "disagree about this field's element type — recovery fails loudly rather than writing a misaligned buffer.");
+            }
+
+            e.CopyTo(buffer.AsSpan(i * elementSize));
+        }
+
+        return buffer;
+    }
+
+    private static bool TryGetCollectionField(ComponentTable table, ushort fieldId, out ComponentTable.CollectionFieldInfo field)
+    {
+        foreach (var f in table.CollectionFields)
+        {
+            if (f.FieldId == fieldId)
+            {
+                field = f;
+                return true;
+            }
+        }
+
+        field = default;
+        return false;
+    }
+
+    /// <summary>Writes a freshly-set buffer handle into every storage home the component's value occupies.</summary>
+    private void WriteCollectionHandle(byte* recordPtr, ComponentTable table, ushort slotIndex, in ComponentTable.CollectionFieldInfo field, int bufferId)
+    {
+        if (_hasClusterAccessor)
+        {
+            var layout = _engineState.ClusterState.Layout;
+            var clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(recordPtr);
+            var slotIdx = ClusterEntityRecordAccessor.GetSlotIndex(recordPtr);
+            byte* clusterBase = _clusterAccessor.GetChunkAddress(clusterChunkId, true);
+            var compSize = layout.ComponentSize(slotIndex);
+
+            // A cluster slot carries no component overhead, so the field's value-relative offset is already slot-relative.
+            *(int*)(clusterBase + layout.ComponentOffset(slotIndex) + (slotIdx * compSize) + field.OffsetInComponentStorage) = bufferId;
+        }
+
+        if (_appliedContentChunkBySlot.TryGetValue(slotIndex, out var contentChunkId) && contentChunkId != 0)
+        {
+            var info = GetRecoveryInfo(table);
+            byte* contentBase = info.CompContentAccessor.GetChunkAddress(contentChunkId, true);
+            *(int*)(contentBase + info.ComponentOverhead + field.OffsetInComponentStorage) = bufferId;
+        }
     }
 
     /// <summary>
@@ -463,11 +676,15 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     // Allocates a content chunk holding the payload and a committed single-element revision chain pointing at it — exactly the
     // spawn→commit end-state the live ComponentRevisionManager produces (AllocCompRevStorage creates the isolated element, then
     // the live ElementRevisionHandle.Commit clears the isolation flag). Returns the chain-root chunk id (the slot's location).
-    private int CreateVersionedChainRoot(ComponentTable table, long pk, long tsn, byte[] payload)
+    private int CreateVersionedChainRoot(ComponentTable table, long pk, long tsn, byte[] payload) =>
+        CreateVersionedChainRoot(table, pk, tsn, payload, out _);
+
+    private int CreateVersionedChainRoot(ComponentTable table, long pk, long tsn, byte[] payload, out int contentChunkIdOut)
     {
         var info = GetRecoveryInfo(table);
 
         var contentChunkId = table.ComponentSegment.AllocateChunk(false, _changeSet);
+        contentChunkIdOut = contentChunkId;
         byte* contentBase = info.CompContentAccessor.GetChunkAddress(contentChunkId, true);
         // Value lives at offset ComponentOverhead (the read/write paths skip the overhead) — symmetric with the slot emit.
         payload.AsSpan().CopyTo(new Span<byte>(contentBase + info.ComponentOverhead, payload.Length));
