@@ -52,9 +52,18 @@ if [ "$RUN_WORKBENCH" = "true" ]; then
   if [ "${PIPESTATUS[0]}" -eq 0 ]; then echo "- ✅ client toolchain (typecheck/lint/vitest/build) passed" >> "$S"
   else RC=1; echo "- ❌ client toolchain FAILED" >> "$S"
   fi
+  # The retry net the engine suite has had since #405, applied here too (#774). It was engine-only because that
+  # suite is sharded through shard.py and this one is a bare `dotnet test` — so an identical timing flake was
+  # absorbed there and hard-red here, decided by which directory the test file sits in rather than by the test.
+  # `retry` re-runs only the recorded failures, alone, and still fails the gate when they fail every attempt.
   if dotnet test test/Typhon.Workbench.Tests/Typhon.Workbench.Tests.csproj -c Release --no-build \
        --logger "trx;LogFileName=workbench.trx" --results-directory "$OUT" 2>&1 | tee "$OUT/workbench-dotnet.log"
   then echo "- ✅ workbench .NET tests passed" >> "$S"
+  elif SHARD_REPO="$REPO" SHARD_CONFIG=Release python3 bench/aws/shard.py retry \
+         --trx "$OUT/workbench.trx" \
+         --project test/Typhon.Workbench.Tests/Typhon.Workbench.Tests.csproj \
+         --results-dir "$OUT" --label W 2>&1 | tee -a "$OUT/workbench-dotnet.log"
+  then echo "- ✅ workbench .NET tests passed (after retry — see the FLAKED list)" >> "$S"
   else RC=1; echo "- ❌ workbench .NET tests FAILED" >> "$S"
   fi
   echo "" >> "$S"

@@ -212,38 +212,8 @@ public sealed class FixtureConfigTests
         if (!expectedValid) Assert.That(error, Is.Not.Null.And.Not.Empty);
     }
 
-    /// <summary>
-    /// Back-pressure regression gate on the feature-complete (regular, non-bulk) path. The SWG schema is heavier
-    /// per entity than the old flat fixture (Player alone = 5 components + indexes), and the enable/disable + cascade
-    /// passes add post-spawn Open/Destroy churn — so this exercises the page-cache dirty-counter drain harder than
-    /// the prior fixture did (project memory: DC inflation issue #133). MUST complete without
-    /// <see cref="PageCacheBackpressureTimeoutException"/>. Tagged <c>Slow</c> — skipped by default; run via
-    /// <c>--filter "Category=Slow"</c>. (Huge multi-million-entity scale is covered by the BulkLoad path test.)
-    /// </summary>
-    [Test]
-    [Category("Slow")]
-    public void Stress_Config_Completes_Without_Backpressure_Timeout()
-    {
-        var stress = FixtureConfig.Default with
-        {
-            ResourceTypeCount = 1_000,
-            GuildCount = 500,
-            RecipeCount = 2_000,
-            PlayerCount = 40_000,
-            DepositCount = 10_000,
-            HarvesterCount = 10_000,
-            FactoryCount = 2_000,
-            ItemCount = 40_000,
-        };
-
-        FixtureGenerationResult result = default;
-        Assert.DoesNotThrow(
-            () => result = FixtureDatabase.CreateOrReuse(_tempDir, force: true, stress),
-            "Stress config should complete without page-cache back-pressure timeout. If this throws "
-            + nameof(PageCacheBackpressureTimeoutException) + ", the per-batch DC drain is insufficient.");
-
-        Assert.That(result.WasCreated, Is.True);
-        Assert.That(result.TotalEntities, Is.EqualTo(stress.TotalSpawnEstimate));
-        Assert.That(result.TotalEntities, Is.EqualTo(105_500));
-    }
+    // The back-pressure stress case that used to live here now sits in
+    // `Typhon.Engine.Tests/Data/SwgFixtureStressTests.cs`. It asserts an ENGINE property — that the commit path
+    // sustains 105,500 spawns without the page cache raising back-pressure — and the gate runs this project only
+    // when `tools/Typhon.Workbench/**` changes, so an engine-only change never executed it. See #774.
 }
