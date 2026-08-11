@@ -294,9 +294,27 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var dbe = _tx.DBE;
         IndexStatistics[] found = null;
 
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        // Walk the archetype ids this query's mask can select, not the registry's enumerator. GetAllArchetypes() scans
+        // the registry's full 4096-entry capacity through a `yield return` iterator, so the enumerable allocates and
+        // every step is an interface-dispatched MoveNext that cannot inline. That is the right shape for its other
+        // callers — schema validation and the Workbench inspector, both once per process — and the wrong one here,
+        // because this runs on EVERY plan build. Measured at ~3 us per call against a ~5 us query, which is what
+        // doubled ClusterRegressionBenchmarks.IndexedQuery_1Percent when #665 introduced this method (#629).
+        //
+        // The set is identical: Archetypes is indexed BY archetype id (GetMetadata is a plain array read),
+        // MaxArchetypeId bounds the live range, and a null slot is an unregistered id — the same entries
+        // GetAllArchetypes() skips. Testing the mask BEFORE resolving the metadata is also what turns the remaining
+        // work into a bit test per id instead of a dereference per archetype.
+        var maxId = ArchetypeRegistry.MaxArchetypeId;
+        for (var id = 0; id <= maxId; id++)
         {
-            if (!MaskTest(meta.ArchetypeId))
+            if (!MaskTest((ushort)id))
+            {
+                continue;
+            }
+
+            var meta = ArchetypeRegistry.GetMetadata((ushort)id);
+            if (meta == null)
             {
                 continue;
             }
