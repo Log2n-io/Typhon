@@ -81,10 +81,9 @@ foreach (ref readonly Waypoint wp in tx.GetReadOnlyCollectionEnumerator(ref read
   remove/replace through `ComponentCollectionAccessor<T>`.
 - Insertion order is preserved; there is no secondary index over collection contents — finding "the entity whose
   collection contains X" requires an application-level scan, not a query.
-- **Crash safety caveat:** collection buffer *content* reaches disk only at checkpoint, not WAL-redo-logged. A crash
-  between a collection write and the next checkpoint can lose that write (the field's buffer id is recovered; the
-  new elements are not). Collection durability is checkpoint-bounded, not commit-bounded — a known gap tracked
-  separately, distinct from the rest of the commit path.
+- **Crash safety:** collection content is WAL-logged at commit alongside the component value — durability follows
+  the unit of work's `DurabilityMode`, the same as any other component field. A recovered buffer gets a fresh
+  buffer id (the id is not stored in the WAL; the *elements* are what recovery preserves).
 - `T` must be `unmanaged` (no references) — same constraint as any component field.
 
 ## 🧪 Tests
