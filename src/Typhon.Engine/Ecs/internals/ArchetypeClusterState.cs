@@ -33,7 +33,11 @@ internal sealed unsafe class ArchetypeClusterState
     /// <summary>Precomputed layout info (offsets, sizes, cluster size N).</summary>
     public ArchetypeClusterInfo Layout;
 
-    /// <summary>Compact array of chunk IDs for clusters with occupancy > 0.</summary>
+    /// <summary>
+    /// Compact array of chunk IDs for active clusters. Occupancy &gt; 0 for every entry <b>except</b> inside the deferred-drain window: a Migrate-phase worker
+    /// that clears a cluster's last bit does not remove it here, so a drained-but-not-yet-finalized cluster stays listed until
+    /// <see cref="DrainPendingClusterFinalizations"/> runs in Finalize. Readers that need "occupancy &gt; 0" must check the occupancy word, not membership.
+    /// </summary>
     public int[] ActiveClusterIds;
 
     /// <summary>Number of active clusters (valid entries in <see cref="ActiveClusterIds"/>).</summary>
@@ -43,11 +47,19 @@ internal sealed unsafe class ArchetypeClusterState
     public int FreeClusterHead;
 
     // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-    // Parallel-fence migration finalize latch. Single per-archetype exclusive latch acquired only on the rare path where an occupancy clear flips the LAST
-    // bit of a cluster — the worker that drained the cluster enters the finalize section (FinaliseEmptyClusterCellState + RemoveFromActiveList + segment
-    // FreeChunk) while other workers continue their migration work undisturbed. Padded to 64 bytes so the latch field owns a full cache line and uncontended
-    // acquisitions don't ping-pong with adjacent hot fields like ActiveClusterCount / MigrationHint / LastTickMigrationCount.
-    // See rule MD-03 in rules/spatial.md.
+    // Per-archetype structural-mutation latch. Despite the name it does NOT guard a finalize section — nothing ever takes it to finalize a drained cluster
+    // (see the deferred-drain banner below for how that is actually made safe). It serializes the paths that GROW or APPEND to shared per-archetype state
+    // while sibling Migrate-phase workers run, and nothing else. Every acquisition, exhaustively:
+    //   ApplyDirtyBitDeltas            — batch-apply a worker's local dirty-bit deltas into FenceDirtyBits
+    //   GrowFenceDirtyBitsForChunkId   — Array.Resize of FenceDirtyBits
+    //   RecordClusterDrain             — fallback grow of _drainedClusterIds ONLY; the normal append is lock-free
+    //   TryClaimSlotInCluster (x2)     — new-cluster slow path: lockstep dual-segment AllocateChunk, AddToActiveList, CellClusterPool.AddCluster,
+    //                                    ClusterCellMap back-pointer. The hot path (CAS into an existing cluster) does not take it.
+    //   EnqueueMigrationsBulk          — bulk append to PendingMigrations
+    // Note the asymmetry this leaves: AddToActiveList runs under the latch, RemoveFromActiveList never does — removal happens only from serial contexts
+    // (Finalize, or a single-threaded Transaction.Destroy). No reader takes it either, so the latch orders writers against writers, not readers.
+    // Padded to 64 bytes so the latch field owns a full cache line and uncontended acquisitions don't ping-pong with adjacent hot fields like
+    // ActiveClusterCount / MigrationHint / LastTickMigrationCount. See rule MD-03 in rules/spatial.md.
     // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
     [StructLayout(LayoutKind.Explicit, Size = 64)]
@@ -61,8 +73,10 @@ internal sealed unsafe class ArchetypeClusterState
     // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     // Deferred-drain list. Migrate-phase workers atomically clear slot bits — when a clear flips the LAST bit of a cluster, the worker DOES NOT immediately
     // finalize-and-free the chunk (would race with concurrent ClaimSlotInCell on the same cluster: the claimant could CAS-set a fresh bit between the AND
-    // and the finalize lock, then we'd free a chunk that has live data). Instead, the worker records the chunkId here. FinalizeArchetypeFence walks the
-    // list serially (per-archetype atomic), re-checks occupancy under _finalizeLock, and frees only clusters that are still empty. See review C-1.
+    // and any subsequent lock, then we'd free a chunk that has live data). Instead, the worker records the chunkId here. FinalizeArchetypeFence walks the
+    // list serially (one atomic work item per archetype, dispatched after the Migrate and AabbRefresh phase barriers), re-checks occupancy, and frees only
+    // clusters that are still empty. The re-check needs NO lock: the barriers mean no ClaimSlotInCell or ReleaseSlot can be in flight for this archetype by
+    // then. Deferral plus the barrier is what makes the finalize safe — not mutual exclusion. See review C-1.
     //
     // Slot reservation is lock-free: Interlocked.Increment on _drainedCount, then write into _drainedClusterIds[slot].
     // Capacity is pre-sized by PreSizeMigrationBuffers to PendingMigrationCount (one migration releases at most one source slot, so cluster-drain
@@ -307,8 +321,8 @@ internal sealed unsafe class ArchetypeClusterState
     /// <summary>
     /// Record a cluster that's been drained to empty by ReleaseSlot. Lock-free append via <see cref="Interlocked.Increment(ref int)"/>. Capacity is guaranteed
     /// by <see cref="PreSizeMigrationBuffers"/>. Same cluster may legitimately be recorded twice if a previous tick's drain wasn't followed by a finalize and
-    /// this tick re-empties it after a refill+drain cycle — <see cref="DrainPendingClusterFinalizations"/> re-checks occupancy under the finalize lock and
-    /// skips non-empty entries.
+    /// this tick re-empties it after a refill+drain cycle — <see cref="DrainPendingClusterFinalizations"/> re-checks occupancy after the phase barrier and
+    /// skips non-empty entries. The <see cref="_finalizeLock"/> acquisition below covers only the fallback grow, never the append or the later re-check.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void RecordClusterDrain(int clusterChunkId)
@@ -2705,9 +2719,11 @@ internal sealed unsafe class ArchetypeClusterState
     /// hint only — the claim path validates the head still has a free bit before using it.
     /// </para>
     /// <para>
-    /// <b>Threading.</b> Caller owns the writer mutex for this <see cref="ArchetypeClusterState"/> when <paramref name="deferFinalize"/> = false. When deferred,
-    /// the caller is the parallel fence path where workers operate on disjoint clusters; <see cref="RecordClusterDrain"/> uses
-    /// <see cref="System.Threading.Interlocked.Increment(ref int)"/> to reserve a slot in the per-archetype drain list, so concurrent drain records are safe.
+    /// <b>Threading.</b> There is no mutex on either path. When <paramref name="deferFinalize"/> = false the caller is single-threaded for this
+    /// <see cref="ArchetypeClusterState"/> (<c>Transaction.Destroy</c> and friends) — that, not a lock, is what makes the inline finalize-and-free safe, so a
+    /// concurrent caller on this path would be a defect no lock currently prevents. When deferred, the caller is the parallel fence path where workers operate
+    /// on disjoint clusters; <see cref="RecordClusterDrain"/> uses <see cref="System.Threading.Interlocked.Increment(ref int)"/> to reserve a slot in the
+    /// per-archetype drain list, so concurrent drain records are safe.
     /// </para>
     /// </remarks>
     /// <param name="accessor">Chunk accessor bound to the <see cref="PersistentStore"/> segment — provides the in-memory address of the cluster chunk for
@@ -2902,8 +2918,10 @@ internal sealed unsafe class ArchetypeClusterState
             return;
         }
         // Issue #229 Q10: per-archetype pool removal. Only decrements the global CellState.ClusterCount if the pool actually owned this cluster id.
-        // Called inside the per-archetype _finalizeLock (parallel-fence migration path), so the CellClusterPool mutation is serialized — but the cell
-        // descriptor counter is shared across archetypes, so it still needs Interlocked.
+        // Both callers are serial for this archetype — DrainPendingClusterFinalizations runs once per archetype after the fence phase barriers, and the
+        // inline ReleaseSlot path has a single-threaded caller — so the CellClusterPool mutation needs no lock. (It does NOT run under _finalizeLock; that
+        // latch guards growth/append only.) The cell descriptor counter is shared ACROSS archetypes, which are not serialized against each other, so that
+        // one still needs Interlocked.
         if (CellClusterPool.RemoveCluster(cellKey, clusterChunkId))
         {
             Interlocked.Decrement(ref grid.GetCell(cellKey).ClusterCount);
@@ -2923,7 +2941,8 @@ internal sealed unsafe class ArchetypeClusterState
     /// <summary>
     /// Atomically clear EnabledBits, OccupancyBit, and EntityId for a slot (store-agnostic pointer math). Returns the PRE-AND occupancy word so the caller
     /// can detect "this clear flipped the last bit" via <c>(prev &amp; slotMask) != 0 &amp;&amp; (prev &amp; ~slotMask) == 0</c>. The parallel-fence migration
-    /// path uses this last-bit-wins signal to decide which worker enters the finalize section under <see cref="_finalizeLock"/>.
+    /// path uses this last-bit-wins signal to decide which worker <see cref="RecordClusterDrain">records the drain</see>; no worker finalizes anything, and
+    /// no lock is entered on the strength of it.
     /// </summary>
     /// <remarks>
     /// All bit mutations use <see cref="Interlocked.And(ref long, long)"/> so concurrent releases of different slots in the same cluster (parallel workers

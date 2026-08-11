@@ -289,9 +289,17 @@
     src cell.EntityCount decrement uses Interlocked.Decrement(ref CellState.EntityCount)
     dst cell.EntityCount / ClusterCount increment uses Interlocked.Increment(ref CellState.*)
     src/dst dirtyBits flips use Interlocked.And / Interlocked.Or on the per-cluster long word
-    cluster-fully-drains path (popcount(prev & ~mask) == 0) enters per-archetype _finalizeLock
-      exclusive section before CellClusterPool.RemoveCluster, RemoveClusterFromPerCellIndex,
-      RemoveFromActiveList, ClusterSegment.FreeChunk
+    cluster-fully-drains path (popcount(prev & ~mask) == 0) does NOT finalize in the worker:
+      it records the chunkId via RecordClusterDrain (Interlocked.Increment slot reservation)
+      and returns. CellClusterPool.RemoveCluster, RemoveClusterFromPerCellIndex,
+      RemoveFromActiveList and ClusterSegment.FreeChunk run later, in
+      DrainPendingClusterFinalizations, which re-checks occupancy and skips refilled clusters
+  invariant DrainPendingClusterFinalizations runs exactly once per archetype per fence, from
+    FinalizeArchetypeFence, AFTER the Migrate and AabbRefresh phase barriers. It takes no lock,
+    and must not: its safety is that the barriers exclude every concurrent ClaimSlotInCell and
+    ReleaseSlot for this archetype, so the occupancy re-check and the free are single-threaded.
+    A lock here would not substitute for the barrier — finalizing while a claimer holds a
+    CAS-won slot frees a live chunk no matter who holds what
   invariant FenceDirtyBits is pre-sized to PrimarySegmentCapacity + PendingMigrationCount
     in PrepareArchetypeFence's tail BEFORE any Migrate-phase worker observes it — no Array.Resize
     from worker threads
@@ -299,13 +307,17 @@
     by TickDriver between Prep and Migrate dispatches, so each worker slice owns disjoint dst cells
   invariant PendingMigrationCount = 0 reset happens once per fence in FinalizeArchetypeFence
     AFTER all Migrate-phase slices complete, never inside ExecuteMigrationsSlice
-  scope: DatabaseEngine.ExecuteMigrations, ArchetypeClusterState.ClearSlotMetadata,
+  scope: DatabaseEngine.ExecuteMigrations, DatabaseEngine.FinalizeArchetypeFence,
+    ArchetypeClusterState.ClearSlotMetadata,
     ReleaseSlot (Persistent + Transient overloads), DecrementCellEntityCountOnRelease,
-    FinaliseEmptyClusterCellState, ClaimSlotInCell (both overloads)
+    FinaliseEmptyClusterCellState, ClaimSlotInCell (both overloads),
+    RecordClusterDrain, DrainPendingClusterFinalizations
   on_violation:
     plain ++/-- on cell counters → torn updates across workers → drift in EntityCount/ClusterCount
     plain occupancy clear → lost concurrent slot release → ghost entity in cluster
-    finalize without lock → CellClusterPool race → corrupted per-cell cluster list
+    worker finalizes inline instead of recording the drain → frees a chunk a concurrent
+      ClaimSlotInCell has already CAS-claimed → live entity written into a freed chunk
+    finalize pass moved before the phase barriers → same race, now unconditional
     Array.Resize from worker → lost Interlocked.Or writes from siblings holding old reference
 
 ### MD-03: False-sharing avoidance for concurrent-mutation state `[perf][fatal]`
