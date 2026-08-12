@@ -196,15 +196,34 @@ keys.
   never trusting one structure to describe the other
   enforce `BTree.ValidateDescentAndChainAgree` and `BTree.ValidateEntryCountMatchesChain`, both called from
           `CheckConsistency`, both reporting which ids are in one set and not the other
-  scope: BTree.cs (`ValidateDescentAndChainAgree`, `ValidateEntryCountMatchesChain`)
+  enforce for the count specifically, `InsertArguments.Added` must mean "a new leaf entry was created" and not "the value was
+          read": a duplicate key on an `AllowMultiple` index stores its value by appending to the EXISTING entry's buffer, so
+          every such site reads through `InsertArguments.ValueForExistingKey` and only the entry-creating sites through
+          `GetValue`
+  scope: BTree.cs (`ValidateDescentAndChainAgree`, `ValidateEntryCountMatchesChain`, `ValueForExistingKey`),
+         `NodeWrapper.InsertLeaf` (the one duplicate-append site that reaches the counting tail)
   rationale: they are separate structures maintained by separate code, and every defect in this subsystem's history has
              been one disagreeing with the other. Each individual check walked one of them.
   on_violation: a leaf on the chain but under no ancestor holds keys no descent reaches - found only by the B-link
                 right-walk, and permanently lost the moment a hop budget or an empty leaf ends that walk early. A leaf
                 under the root but off the chain is invisible to every range scan while lookups still answer from it.
                 A drifted `EntryCount` is worse than either, because it is the number the tests assert on: it hides a
-                lost key here and manufactures a phantom failure somewhere else.
-  verified: BTreeConsistencyValidatorTests.Mutant_LeavesOnTheChainButUnreachableByDescent_AreReported (mutant),
+                lost key here and manufactures a phantom failure somewhere else. It is also the number the PLANNER reads:
+                `IndexStatistics.EntryCount` reports it as the index's distinct-key count, so a drifted count silently
+                re-costs every query over that index.
+  occurred: #783. The count drifted UP by one per duplicate row on an `AllowMultiple` index, because the general descent ends in
+            `if (args.Added) { IncCount(); }` while `Added` was set as a side effect of `GetValue()` - which the duplicate-append
+            branch called to read the value it appends to the existing key's buffer. Insertion ORDER decides whether it bites and
+            is why it survived: a duplicate whose key is the leaf chain's current last (or first, or the tree's only leaf) is
+            handled by an OLC fast path that returns before that tail, so ascending-order inserts counted correctly and every
+            existing test built its trees that way. Cyclic keys route through the general descent instead - 2 000 rows over 50
+            distinct keys reported 1 142. The tree itself stayed correct throughout: 50 leaf entries, no duplicate keys, every
+            row returned by query. Only the counter lied, and both cited mutants stayed green because they test that the
+            VALIDATOR reports an injected violation, not that the tree maintains the invariant.
+  verified: BTreeEntryCountTests.EntryCountEqualsTheDistinctKeysTheChainHolds (the tree maintains it - asserts the chain BEFORE
+            the counter, so "one entry per row" fails differently from "counter drifted"),
+            BTreeEntryCountTests.TheStatisticsDistinctKeyCountSurvivesCyclicInsertion (asserted where the planner reads it),
+            BTreeConsistencyValidatorTests.Mutant_LeavesOnTheChainButUnreachableByDescent_AreReported (mutant),
             BTreeConsistencyValidatorTests.Mutant_EntryCountDisagreeingWithTheChain_IsReported (mutant)
 
 ### IXS-06: A descent answers NOT-FOUND only for a leaf that owns the key's lower bound `[UNBUILT]`

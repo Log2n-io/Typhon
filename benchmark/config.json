@@ -3,6 +3,7 @@
     "regression_pct": 15.0,
     "improvement_pct": 15.0,
     "min_runs_for_trend": 1,
+    "max_baseline_age_days": 7,
     "min_measurable_ns": 1.0,
     "max_cov_pct": 30.0,
     "min_delta_ns": 0.5
@@ -53,18 +54,43 @@
     "Concurrency"
   ],
   "categories": {
-    "Epoch": { "regression_pct": 8.0 },
-    "ChunkAccessor": { "regression_pct": 8.0 },
-    "Concurrency": { "regression_pct": 10.0 },
-    "EndToEnd": { "regression_pct": 20.0 },
-    "MVCC": { "regression_pct": 10.0 },
-    "Primitives": { "regression_pct": 8.0 },
-    "Collections": { "regression_pct": 10.0 },
-    "Workload": { "regression_pct": 20.0 },
-    "Index": { "regression_pct": 20.0 },
-    "BTreeSecondaryIndex": { "regression_pct": 15.0 },
-    "BTreeConcurrency": { "regression_pct": 25.0, "max_cov_pct": 40.0 },
-    "ECS": { "regression_pct": 20.0 }
+    "Epoch": {
+      "regression_pct": 8.0
+    },
+    "ChunkAccessor": {
+      "regression_pct": 8.0
+    },
+    "Concurrency": {
+      "regression_pct": 10.0
+    },
+    "EndToEnd": {
+      "regression_pct": 20.0
+    },
+    "MVCC": {
+      "regression_pct": 10.0
+    },
+    "Primitives": {
+      "regression_pct": 8.0
+    },
+    "Collections": {
+      "regression_pct": 10.0
+    },
+    "Workload": {
+      "regression_pct": 20.0
+    },
+    "Index": {
+      "regression_pct": 20.0
+    },
+    "BTreeSecondaryIndex": {
+      "regression_pct": 15.0
+    },
+    "BTreeConcurrency": {
+      "regression_pct": 25.0,
+      "max_cov_pct": 40.0
+    },
+    "ECS": {
+      "regression_pct": 20.0
+    }
   },
   "benchmarks": {
     "EpochGuardBenchmarks.EnterExit": {

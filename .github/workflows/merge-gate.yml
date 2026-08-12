@@ -139,6 +139,80 @@ jobs:
           path: ci-out/**
           if-no-files-found: ignore
 
+  # ---- Wake the persistent box so the gate below has somewhere to run. ----
+  #
+  # The box stops itself after two idle minutes (bench/aws/runner/idle-stop.sh), and until this job existed the ONLY
+  # thing that started it again was a `workflow_job:queued` webhook -> API Gateway -> Lambda -> ec2:StartInstances.
+  # That is one delivery with no backstop, and on 2026-08-12 it was missed: `aws-gate-selfhosted` sat queued for eight
+  # hours against an offline runner while every ubuntu-latest job in the same run got its webhook normally. The likely
+  # trigger is the `cancel-in-progress` above — a second push cancels the in-flight run mid-lifecycle, and the queued
+  # event for the replacement gate job never arrived. Rapid successive pushes are therefore exactly when the toggle is
+  # least reliable, which is exactly when a PR is being iterated on.
+  #
+  # Asking for the box HERE removes the dependency on GitHub delivering that event at all: the workflow says what it
+  # needs instead of hoping something noticed. The webhook stays as the fast path (it fires before this job is even
+  # scheduled, so the box is usually already resuming); this is the guaranteed one. `start-instances` is idempotent,
+  # so the two racing costs nothing.
+  #
+  # Deliberately NOT a `needs:` of the gate. A wake failure must be loud — it means the gate is about to hang — but
+  # blocking the gate on it would turn a transient AWS hiccup into a skipped required check, which reads as "gate did
+  # not run" and is worse than the hang it prevents.
+  wake-gate-runner:
+    needs: changes
+    if: >-
+      (needs.changes.outputs.engine == 'true' || needs.changes.outputs.workbench == 'true')
+      && needs.changes.outputs.skip_ut != 'true'
+      && vars.GATE_RUNNER == 'selfhosted'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: eu-west-1
+      INSTANCE_ID: ${{ vars.GATE_RUNNER_INSTANCE_ID }}
+    steps:
+      - name: Start the c6id runner box (idempotent)
+        run: |
+          set -uo pipefail
+          if [ -z "${INSTANCE_ID}" ]; then
+            echo "::error::GATE_RUNNER_INSTANCE_ID repo variable is not set — cannot wake the gate runner."
+            exit 1
+          fi
+
+          # `stopping` is the one state start-instances rejects, and it is a state the idle-stopper can genuinely leave
+          # the box in for a few seconds when a push lands just as it gives up. Retry across it rather than failing the
+          # job for a condition that resolves itself.
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            state=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
+                      --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || echo unknown)
+            echo "attempt ${attempt}: instance is ${state}"
+
+            case "$state" in
+              running|pending)
+                echo "box is ${state} — nothing to do"
+                exit 0
+                ;;
+              stopped)
+                if aws ec2 start-instances --instance-ids "$INSTANCE_ID" >/dev/null; then
+                  echo "start requested; the runner service auto-reconnects on boot (~19 s resume)"
+                  exit 0
+                fi
+                echo "start-instances failed, retrying"
+                ;;
+              stopping)
+                echo "still stopping — waiting for it to settle before starting"
+                ;;
+              *)
+                echo "unexpected state '${state}' — retrying"
+                ;;
+            esac
+
+            sleep 10
+          done
+
+          echo "::error::Could not bring ${INSTANCE_ID} to a running state; aws-gate-selfhosted will queue until it is started manually."
+          exit 1
+
   # ---- Same gate, on the PERSISTENT self-hosted c6id (repo variable GATE_RUNNER=selfhosted). DORMANT until the
   #      box + power-toggle exist — see bench/aws/runner/ + design/Infrastructure/ci-gate-persistent-runner.md (#466).
   #      Warm toolchain + bin/obj on the box → incremental build; test DBs on the local NVMe (TMPDIR=/nvme). ----

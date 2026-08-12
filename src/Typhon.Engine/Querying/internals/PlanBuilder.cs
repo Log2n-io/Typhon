@@ -197,6 +197,11 @@ internal class PlanBuilder
         // Try to find a secondary index for the primary stream
         var (primaryFieldIndex, primaryKeyType, scanMin, scanMax) = SelectPrimaryStream(orderedEvaluators, table, orderByFieldIndex);
 
+        // Only the NARROWING selection can enforce its own predicates. Computed here and never revised, so both fallbacks below leave it false: the full-scan
+        // stream exists precisely because nothing could narrow (in practice an NE-only predicate), and the last-resort branch names no field at all.
+        var primaryRangeAdmitsOnlyMatches = primaryFieldIndex >= 0
+            && KeyRange.RangeAdmitsOnlyMatches(orderedEvaluators, primaryFieldIndex, primaryKeyType);
+
         // Phase 7: Query:Plan:PrimarySelect instant — fires once per BuildPlan, after the candidate decision is made.
         // candidates = total evaluator count, winnerIdx = chosen field idx (or 0xFF if PK fallback), reason: 0 = secondary-index, 1 = PK fallback.
         TyphonEvent.EmitQueryPlanPrimarySelect(
@@ -222,7 +227,8 @@ internal class PlanBuilder
             scanMax = long.MaxValue;
         }
 
-        return new ExecutionPlan(primaryFieldIndex, primaryKeyType, scanMin, scanMax, descending, orderedEvaluators, estimates);
+        return new ExecutionPlan(primaryFieldIndex, primaryKeyType, scanMin, scanMax, descending, orderedEvaluators, estimates,
+            primaryRangeAdmitsOnlyMatches);
     }
 
     /// <summary>

@@ -215,7 +215,29 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
             SiblingAccessor = ref sibAccessor;
         }
         public readonly TKey Key;
+
+        /// <summary>
+        /// Whether this insert created a NEW leaf entry, which is what <see cref="BTree{TKey,TStore}.IncCount"/> counts — not whether a value was stored.
+        /// The two differ for an <see cref="BTree{TKey,TStore}.AllowMultiple"/> index, where a duplicate key stores its value by appending to the EXISTING
+        /// entry's buffer and adds no entry at all.
+        /// </summary>
+        /// <remarks>
+        /// Set by <see cref="GetValue"/> rather than by the insert sites themselves, so a path that reads the value for a duplicate key must read it through
+        /// <see cref="ValueForExistingKey"/> instead. That coupling is also what makes a unique index's duplicate detection work: its duplicate branch never
+        /// reads the value, so <see cref="Added"/> stays false and the caller raises the constraint violation (#783).
+        /// </remarks>
         public bool Added { get; private set; }
+
+        /// <summary>
+        /// The value to store, WITHOUT claiming a new leaf entry was created — the accessor for appending into an EXISTING key's buffer.
+        /// </summary>
+        /// <remarks>
+        /// Reading through <see cref="GetValue"/> here is what broke IXS-05: the general descent path ends in <c>if (args.Added) { IncCount(); }</c>, so a
+        /// duplicate append through it incremented the entry count without adding an entry. The tree stayed structurally correct — the drift was confined to
+        /// the counter — but the counter is what <see cref="IndexStatistics.EntryCount"/> reports as the index's distinct-key count, so every selectivity
+        /// estimate over an <c>AllowMultiple</c> index built in non-sorted key order was computed from a number that grew with the row count (#783).
+        /// </remarks>
+        public readonly int ValueForExistingKey => _value;
 
         public int ElementId;
         public int BufferRootId;
@@ -227,6 +249,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         private readonly int _value;
         private readonly IComparer<TKey> _keyComparer;
 
+        /// <summary>The value to store, marking this insert as having created a new leaf entry. See <see cref="Added"/> and <see cref="ValueForExistingKey"/>.</summary>
         public int GetValue()
         {
             Added = true;

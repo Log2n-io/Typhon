@@ -342,10 +342,16 @@ internal abstract partial class BTree<TKey, TStore>
                 if (_storage.Owner.AllowMultiple)
                 {
                     var curItem = GetItem(index, ref accessor);
-                    args.ElementId = _storage.Append(curItem.Value, args.GetValue(), ref sibAccessor);
+
+                    // ValueForExistingKey, not GetValue: this appends into the buffer of a key that is ALREADY in the leaf, so no entry is created and the
+                    // count must not move. This is the one duplicate-append site the `if (args.Added) { IncCount(); }` tail in AddOrUpdateCore can actually
+                    // reach — the OLC fast paths all return Completed first — so reading through GetValue here inflated EntryCount by one per duplicate,
+                    // violating IXS-05 (#783). Only insertions routed through the general descent were affected, which is why sorted-order inserts counted
+                    // correctly and cyclic ones did not: 50 distinct keys over 2 000 rows reported 1 142.
+                    args.ElementId = _storage.Append(curItem.Value, args.ValueForExistingKey, ref sibAccessor);
                     args.BufferRootId = curItem.Value;
                 }
-                // Unique index: GetValue() not called, so Added stays false.
+                // Unique index: neither accessor marks Added, so it stays false.
                 // AddOrUpdateCore detects !Added && !AllowMultiple and throws UniqueConstraintViolationException.
             }
 

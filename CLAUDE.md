@@ -117,7 +117,28 @@ The script:
 1. Edit a file.
 2. `python3 scripts/test-affected.py <file>` — fast feedback (1–3 s typical).
 3. Once green, run the **full suite** once before declaring the change done: `dotnet test test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj -c Debug --no-build`.
-4. For perf-claim work (measuring wall-clock impact), run Release × 3 with `--logger trx`.
+4. **Before pushing, run `bash scripts/pre-push.sh`** — see below.
+5. For perf-claim work (measuring wall-clock impact), run Release × 3 with `--logger trx`.
+
+### Before pushing — `scripts/pre-push.sh`
+
+Steps 1-3 above run the **engine** project in **Debug**. The merge gate runs **both** test projects in **Release**, plus
+six policy scripts. That gap is not academic: of the 17 gate failures in the week to 2026-08-12, **nine** were policy
+jobs whose scripts live in this repo and cost seconds to run, and **five** were one bug reaching the gate through
+`test/Typhon.Workbench.Tests` — a project this workflow never mentioned, so nobody ran it locally. Every one of those
+was discovered on a billed c6id instance instead of on the dev box.
+
+```bash
+bash scripts/pre-push.sh            # policy checks + both suites (Release) — full gate parity
+bash scripts/pre-push.sh --policy   # policy checks only (seconds; covers the nine free-runner failures)
+```
+
+Each line names the gate job it corresponds to, so a local failure is the same failure CI would have reported. It is
+**not** installed as a git hook — symlink it into `.git/hooks/pre-push` if you want it automatic.
+
+**What it deliberately does NOT reproduce:** the 8-way sharding and the serial `Sensitive` pass. Those change
+CONTENTION, which is a real source of gate-only failures. If a test reddens the gate but passes here, that is the first
+suspect, and `bench/aws/shard.py run` is the tool for it.
 
 **Rebuilding the map:** the builder is **incremental**.
 - `python3 scripts/build-test-affected-map.py` — re-collects only fixtures whose test source has changed since the cached XML. ~0.3 s when nothing changed; ~5 s per touched fixture.

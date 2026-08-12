@@ -531,10 +531,16 @@ public class DagSchedulerTests
             .CallbackSystem("A", _ => Thread.SpinWait(1000))
             .Build(_registry.Runtime);
         scheduler.Start();
-        SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= 3, TimeSpan.FromSeconds(5));
+
+        // Wait on the recorded count, not on the tick NUMBER. `CurrentTickNumber` advances when a tick starts and
+        // `TotalTicksRecorded` when one finishes being recorded, so waiting on the former lets `Shutdown()` cut the
+        // last tick short and leaves the ring one entry short of the assertion below. Same shape as the flake that hit
+        // `TyphonRuntimeTests.Telemetry_EntitiesProcessed_RecordedForQuerySystem` on the gate; fixed here before it
+        // spends anyone's afternoon too.
+        var ring = scheduler.Telemetry;
+        SpinWait.SpinUntil(() => ring.TotalTicksRecorded >= 3, TimeSpan.FromSeconds(5));
         scheduler.Shutdown();
 
-        var ring = scheduler.Telemetry;
         Assert.That(ring.TotalTicksRecorded, Is.GreaterThanOrEqualTo(3));
 
         ref readonly var tick = ref ring.GetTick(ring.NewestTick);

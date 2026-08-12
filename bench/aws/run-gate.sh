@@ -56,7 +56,14 @@ if [ "$RUN_WORKBENCH" = "true" ]; then
   # suite is sharded through shard.py and this one is a bare `dotnet test` — so an identical timing flake was
   # absorbed there and hard-red here, decided by which directory the test file sits in rather than by the test.
   # `retry` re-runs only the recorded failures, alone, and still fails the gate when they fail every attempt.
+  # Honour the SAME category exclusion the sharded engine suite applies. This ran unfiltered until #774, so a
+  # [Category("Quarantine")] test in this project would have executed and reddened the gate anyway — quarantine was a
+  # property of which script launched the suite rather than of the repository. The string comes from shard.py so there
+  # is one definition of "excluded from the gate" and not two that drift apart.
+  WB_FILTER="$(python3 bench/aws/shard.py filter)"
+  echo "[workbench] filter: ${WB_FILTER}"
   if dotnet test test/Typhon.Workbench.Tests/Typhon.Workbench.Tests.csproj -c Release --no-build \
+       --filter "$WB_FILTER" \
        --logger "trx;LogFileName=workbench.trx" --results-directory "$OUT" 2>&1 | tee "$OUT/workbench-dotnet.log"
   then echo "- ✅ workbench .NET tests passed" >> "$S"
   elif SHARD_REPO="$REPO" SHARD_CONFIG=Release python3 bench/aws/shard.py retry \
