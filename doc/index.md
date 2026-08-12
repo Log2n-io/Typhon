@@ -14,7 +14,7 @@
 | **[Technical Overview](in-depth-overview/README.md)** | How the engine is built — 14 chapters spanning storage, MVCC, indexing, durability, runtime, and errors. |
 | **[Tools](tools/index.md)** | The **Workbench** GUI (`typhon ui`) and the **`typhon` CLI** — Typhon is a complete toolchain, not just a library. |
 | **[API Reference](api/index.md)** | Generated reference for the public API (engine + Profiler + Protocol + Schema.Definition). |
-| **[Demos](demos/index.md)** | **AntHill** — a persistent world larger than RAM, proving Typhon's beyond-RAM ECS thesis. |
+| **[Demos](demos/index.md)** | **SpaceBattle** — a deterministic headless real-time battle benchmark — and **AntHill**, a persistent world larger than RAM. |
 | **[Benchmarks](../benchmark/reports/latest.md)** | The latest regression report, run on CI reference hardware. |
 
 ## Who is Typhon for?

@@ -1,4 +1,6 @@
 - name: Overview
   href: index.md
+- name: SpaceBattle
+  href: space-battle.md
 - name: AntHill
   href: anthill.md

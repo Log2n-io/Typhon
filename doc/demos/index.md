@@ -25,7 +25,16 @@ AntHill is built to exercise capabilities no all-memory ECS can offer:
 
 AntHill uses a **four-tier simulation architecture** (full sim near the camera, movement-only nearby, coarse amortized ticking further out, statistical aggregate for the rest) so the world stays alive everywhere without simulating every entity at full fidelity every tick — the same "living world at O(observers) cost" pattern that production MMOs use.
 
-## The demo
+## The demos
+
+The repository contains both a headless benchmark and a graphical showcase. Use the demo page that matches the question you want to answer:
+
+| Demo | Best for |
+|---|---|
+| **[SpaceBattle](space-battle.md)** | A deterministic 50,000-ship real-time workload covering ECS, runtime scheduling, spatial clustering, tick-fence persistence, pause/recovery, and asynchronous performance/resource observations. |
+| **[AntHill](anthill.md)** | A Godot 4 showcase of a persistent world larger than RAM, hot/cold paging, multiple storage modes, spatial queries, and parallel dispatch. |
+
+### AntHill
 
 **[AntHill](anthill.md)** — a 3D forest-floor microcosm: an ant colony with emergent pheromone foraging, predators, fire, and interactive god-game tools, built on Typhon + Godot 4. Buildable today (phases 0–6 working). See the [AntHill page](anthill.md) for the full breakdown.
 
