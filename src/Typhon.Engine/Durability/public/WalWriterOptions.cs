@@ -23,7 +23,27 @@ public sealed class WalWriterOptions
     /// <summary>Size of each WAL segment file in bytes. Default: 64 MB.</summary>
     public uint SegmentSize { get; set; } = 64 * 1024 * 1024;
 
-    /// <summary>Number of segments to pre-allocate ahead of the write position. Default: 4.</summary>
+    /// <summary>
+    /// Size of the FIRST segment created when the WAL opens, in bytes. Default: 16 MB. Clamped to <see cref="SegmentSize"/>
+    /// when larger; 0 means "use <see cref="SegmentSize"/>", restoring the pre-#784 behaviour.
+    /// </summary>
+    /// <remarks>
+    /// A database that never fills a segment never rotates, so this one file IS its entire WAL for the lifetime of the
+    /// bundle. Sizing it for steady-state throughput therefore charged every small database the full
+    /// <see cref="SegmentSize"/> on disk forever — a 1.8 MB database carried a 320 MiB <c>wal/</c> directory. Segments
+    /// created by rotation are unaffected: from the first rotation on, everything is <see cref="SegmentSize"/> as before,
+    /// so a busy database's steady state is unchanged.
+    /// </remarks>
+    public uint InitialSegmentSize { get; set; } = 16 * 1024 * 1024;
+
+    /// <summary>
+    /// Number of segments to pre-allocate ahead of the write position. Default: 4.
+    /// </summary>
+    /// <remarks>
+    /// The pool is built on the FIRST ROTATION, not at open — until a database has actually filled a segment there is no
+    /// evidence it ever will, and pre-allocating eagerly left <c>PreAllocateSegments * SegmentSize</c> of empty, headerless
+    /// files that WAL reclamation cannot see (they are never sealed, so they never enter the reclaim list). See #784.
+    /// </remarks>
     public int PreAllocateSegments { get; set; } = 4;
 
     /// <summary>

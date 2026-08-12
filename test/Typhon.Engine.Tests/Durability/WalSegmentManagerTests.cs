@@ -60,17 +60,36 @@ public class WalSegmentManagerTests
     }
 
     [Test]
-    public void Initialize_PreAllocatesSegments()
+    public void Initialize_DoesNotPreAllocate_UntilTheFirstRotation()
     {
         using var mgr = CreateManager(preAllocCount: 4);
 
         mgr.Initialize(lastSegmentId: 0, firstLSN: 1);
 
-        // Active segment = 1, pre-allocated = 2, 3, 4, 5
-        Assert.That(_fileIO.Exists(mgr.GetSegmentPath(2)), Is.True);
+        // #784: the pool is built on the first rotation, not at open. Before a database has filled a segment there is no
+        // evidence it ever will, and the placeholders are never sealed — so reclamation cannot see them and they would sit
+        // on disk forever (4 x 64 MiB at the defaults).
+        Assert.That(_fileIO.Exists(mgr.GetSegmentPath(1)), Is.True, "the active segment exists");
+        Assert.That(_fileIO.Exists(mgr.GetSegmentPath(2)), Is.False);
+        Assert.That(_fileIO.Exists(mgr.GetSegmentPath(3)), Is.False);
+        Assert.That(_fileIO.Exists(mgr.GetSegmentPath(4)), Is.False);
+        Assert.That(_fileIO.Exists(mgr.GetSegmentPath(5)), Is.False);
+    }
+
+    [Test]
+    public void FirstRotation_BuildsTheFullPreAllocationPool()
+    {
+        using var mgr = CreateManager(preAllocCount: 4);
+        mgr.Initialize(lastSegmentId: 0, firstLSN: 1);
+
+        mgr.RotateSegment(firstLSN: 100, prevLastLSN: 99);
+
+        // active = 2, pool ahead of it = 3, 4, 5, 6 — the same depth as before #784, just paid for on demand.
+        Assert.That(mgr.ActiveSegment.SegmentId, Is.EqualTo(2));
         Assert.That(_fileIO.Exists(mgr.GetSegmentPath(3)), Is.True);
         Assert.That(_fileIO.Exists(mgr.GetSegmentPath(4)), Is.True);
         Assert.That(_fileIO.Exists(mgr.GetSegmentPath(5)), Is.True);
+        Assert.That(_fileIO.Exists(mgr.GetSegmentPath(6)), Is.True);
     }
 
     [Test]

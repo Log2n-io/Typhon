@@ -86,6 +86,13 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
 
     private uint _lastFooterCrc;
 
+    /// <summary>
+    /// Highest LSN whose bytes are already written into the active segment. <see cref="WalSegmentContext.LastLSN"/> is only
+    /// stamped at rotation time, so the fit-driven rotation at step 4a — which happens BEFORE a batch is written and must
+    /// therefore seal the outgoing segment at the PREVIOUS batch's high LSN — has nothing else to read. Writer-thread only.
+    /// </summary>
+    private long _lastWrittenLsn;
+
     // ═══════════════════════════════════════════════════════════════
     // Error state
     // ═══════════════════════════════════════════════════════════════
@@ -347,6 +354,23 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
                     // 4. Copy to staging buffer with 4096-byte alignment
                     var bytesToWrite = AlignUp(data.Length, PageSize);
 
+                    // 4a. Fit-driven rotation (WR-03 / #785). The threshold check at step 8 runs AFTER the write, so on its
+                    // own it cannot stop a batch bigger than the room left from being appended past the segment's declared
+                    // end — where WalSegmentReader, which bounds its scan by the header's declared SegmentSize, can never
+                    // see it. Rotating HERE is what makes "every written record lies inside a declared segment" structural
+                    // rather than a coincidence of how SegmentSize and the commit-buffer capacity happen to be configured.
+                    // Must precede the staging copy: PatchChunkCrcs continues the _lastFooterCrc chain, which resets per
+                    // segment, so the rotation has to be visible before this batch's CRCs are computed.
+                    if (!_segmentManager.ActiveSegmentCanHold(bytesToWrite))
+                    {
+                        var sealAt = Math.Max(_lastWrittenLsn, _segmentManager.ActiveSegment.FirstLSN - 1);
+                        Logger?.LogInformation("WAL batch of {Bytes} bytes does not fit the active segment, rotating before the write (sealing at LSN {LastLsn})",
+                            bytesToWrite, sealAt);
+                        using var fitRotateScope = TyphonEvent.BeginWalSegmentRotate((int)(_segmentManager.ActiveSegment?.SegmentId ?? -1));
+                        _segmentManager.RotateSegment(sealAt + 1, sealAt, bytesToWrite);
+                        _lastFooterCrc = 0; // Reset CRC chain for new segment
+                    }
+
                     // Phase 8: Buffer span — covers the staging-buffer copy + zero-pad + CRC patch.
                     var bufferScope = TyphonEvent.BeginDurabilityWalBuffer(bytesToWrite, bytesToWrite - data.Length);
                     try
@@ -431,6 +455,10 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
                     }
 
                     Interlocked.Increment(ref _totalFlushes);
+
+                    // This batch's bytes are now in the active segment — record where it ends so the next batch's fit check
+                    // (step 4a) can seal the segment at the right LSN if it has to rotate before writing.
+                    _lastWrittenLsn = batchHighLsn;
 
                     // 8. Check segment rotation threshold
                     if (_segmentManager.ActiveSegmentUtilization >= RotationThreshold)

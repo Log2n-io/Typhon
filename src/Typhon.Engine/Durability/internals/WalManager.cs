@@ -99,7 +99,8 @@ internal sealed class WalManager : ResourceNode
             ThrowHelper.ThrowInvalidOp("WalManager is already initialized.");
         }
 
-        SegmentManager = new WalSegmentManager(_fileIO, _options.WalDirectory, _options.SegmentSize, _options.PreAllocateSegments, _options.UseFUA);
+        SegmentManager = new WalSegmentManager(_fileIO, _options.WalDirectory, _options.SegmentSize, _options.PreAllocateSegments, _options.UseFUA,
+            _options.InitialSegmentSize);
         SegmentManager.Initialize(lastSegmentId, firstLSN, checkpointLsn);
         // Continue the LSN sequence from the active segment's first-record LSN. The commit buffer's counter is constructed at 1; on a reopen (firstLSN > 1) it must be
         // advanced to match, or record LSNs restart at 1 below the segment header AND below a prior session's CheckpointLSN — the latter makes recovery drop the whole
