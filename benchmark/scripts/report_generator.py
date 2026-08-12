@@ -330,6 +330,27 @@ def _baseline_age_days(latest_ts, previous_ts):
     return (a - b).total_seconds() / 86400.0
 
 
+# Environment fields that invalidate a comparison when they change. Age is only a PROXY for "did anything other than the
+# code change?"; these are the part of that question the run record can actually answer.
+_ENV_FIELDS = ("dotnetVersion", "cpu", "os")
+
+
+def _environment_drift(latest_env, previous_env):
+    """A human-readable description of the first environment field that differs, or None when they match.
+
+    A one-day-old baseline produced 28 false regressions on 2026-08-12 — including `EpochGuard.EnterExit` at +29.5 % and
+    `AccessControl.SharedLock_Uncontended` at +25.7 %, primitives the diff could not reach — because the runtime moved
+    from .NET 10.0.10 to 10.0.11 between the two runs. Age alone would never have caught it.
+    """
+    if not latest_env or not previous_env:
+        return None
+    for field in _ENV_FIELDS:
+        a, b = latest_env.get(field), previous_env.get(field)
+        if a and b and a != b:
+            return f"{field} changed: {b} -> {a}"
+    return None
+
+
 def analyze_regressions(latest_run, all_history, config):
     """Analyze each benchmark in the latest run against the immediately previous run.
 
@@ -360,13 +381,17 @@ def analyze_regressions(latest_run, all_history, config):
     history_index = {}
     for run in prior_runs:
         run_ts = run.get("timestamp")
+        run_env = run.get("environment", {})
         for result in run.get("results", []):
             key = _benchmark_key(result)
             history_index.setdefault(key, []).append({
                 "mean_ns": result["mean_ns"],
                 "stddev_ns": result.get("stddev_ns", 0.0),
                 "timestamp": run_ts,
+                "environment": run_env,
             })
+
+    latest_env = latest_run.get("environment", {})
 
     analysis = []
     for result in latest_run.get("results", []):
@@ -422,9 +447,14 @@ def analyze_regressions(latest_run, all_history, config):
             abs_delta = abs(current - previous)
             is_noisy = current < min_measurable or cov_pct > max_cov or abs_delta < min_delta
 
-            # Age first: a stale baseline makes the comparison meaningless whatever the delta looks like, so saying
-            # "noisy" or "stable" about it would be a claim the data cannot support either way.
-            if max_baseline_age is not None and age_days is not None and age_days > max_baseline_age:
+            # Comparability first: if the baseline is too old, or the machine it ran on is not the machine this ran on,
+            # the delta means nothing whatever it looks like — calling it "noisy" or "stable" would be a claim the data
+            # cannot support either way.
+            env_drift = _environment_drift(latest_env, past_entries[-1].get("environment"))
+            if env_drift is not None:
+                status = "stale_baseline"
+                noise_reason = env_drift
+            elif max_baseline_age is not None and age_days is not None and age_days > max_baseline_age:
                 status = "stale_baseline"
                 noise_reason = f"baseline is {age_days:.0f} days old (limit {max_baseline_age:.0f})"
             elif is_noisy:
@@ -885,11 +915,17 @@ def generate_report(latest_run, analysis, config, output_dir):
     w("")
 
     if stale:
+        reasons = sorted({a.get("noise_reason") for a in stale if a.get("noise_reason")})
         w("> [!CAUTION]")
-        w(f"> The previous run is {baseline_age:.0f} days old, so {len(stale)} benchmark(s) are reported as "
-          "`stale_baseline` rather than as regressions. A gap this size accumulates machine drift AND unrelated "
-          "commits, and both push the same way — a stale baseline can only invent regressions, never hide them. "
-          "Re-measure anything you care about against its own parent commit in one session before investigating it.")
+        w(f"> The baseline is not comparable with this run, so {len(stale)} benchmark(s) are reported as "
+          "`stale_baseline` rather than as regressions or improvements:")
+        w(">")
+        for reason in reasons:
+            w(f"> - {reason}")
+        w(">")
+        w("> Machine drift and unrelated commits both push the same way, so an incomparable baseline can only invent "
+          "regressions, never hide them. Re-measure anything you care about against its own parent commit, in one "
+          "session, on one machine, before investigating it.")
         w("")
 
     # Summary table
@@ -951,16 +987,16 @@ def generate_report(latest_run, analysis, config, output_dir):
     # Stale baseline — shown expanded when present, because these are the numbers a reader would otherwise have read as
     # regressions. The delta is still printed: it is information, it is just not a verdict.
     if stale:
-        w(f"## Not judged — baseline {baseline_age:.0f} days old ({len(stale)})")
+        w(f"## Not judged — baseline not comparable ({len(stale)})")
         w("")
-        w("| Benchmark | Current | Previous | Change (NOT a verdict) |")
-        w("|-----------|---------|----------|------------------------|")
+        w("| Benchmark | Current | Previous | Change (NOT a verdict) | Why not judged |")
+        w("|-----------|---------|----------|------------------------|----------------|")
         for entry in _sorted_by_change(stale, reverse=True):
             name = _display_name(entry)
             current = format_time(entry["current_ns"])
             previous = format_time(entry.get("previous_ns"))
             change = _format_change(entry.get("change_pct"))
-            w(f"| {name} | {current} | {previous} | {change} |")
+            w(f"| {name} | {current} | {previous} | {change} | {entry.get('noise_reason', '')} |")
         w("")
 
     # Stable (collapsed)
@@ -1095,8 +1131,11 @@ def print_summary(analysis):
 
     if stale:
         print("")
-        print(f"  !! Baseline is {baseline_age:.0f} days old — {len(stale)} benchmark(s) NOT judged.")
-        print("     Re-measure against the parent commit in one session before investigating.")
+        reasons = sorted({a.get("noise_reason") for a in stale if a.get("noise_reason")})
+        print(f"  !! Baseline not comparable — {len(stale)} benchmark(s) NOT judged:")
+        for reason in reasons:
+            print(f"       {reason}")
+        print("     Re-measure against the parent commit in one session, on one machine.")
 
     if regressions:
         print("")
