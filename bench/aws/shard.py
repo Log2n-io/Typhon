@@ -378,8 +378,17 @@ if __name__ == "__main__":
     pt.add_argument("--project", required=True)
     pt.add_argument("--results-dir", required=True)
     pt.add_argument("--label", default="W")
+
+    # Print the gate's category exclusion so a suite that is NOT sharded can apply the same one. The Workbench suite is
+    # a bare `dotnet test`, and it honoured no exclusion at all until #774 — which is precisely the hole the comment on
+    # SENSITIVE_FILTER warns about: the one filter in the run that ignores GATE_EXCLUDED is how an excluded test gets
+    # back in. Exposing the string keeps ONE definition rather than a second copy that drifts.
+    sub.add_parser("filter")
+
     a = ap.parse_args()
-    if a.cmd == "plan":
+    if a.cmd == "filter":
+        print(_excluded())
+    elif a.cmd == "plan":
         cmd_plan(a.k, a.trx)
     elif a.cmd == "retry":
         sys.exit(cmd_retry(a.trx, a.project, a.results_dir, a.label))
