@@ -358,10 +358,17 @@ class TyphonRuntimeTests : TestBase<TyphonRuntimeTests>
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
 
         runtime.Start();
-        SpinWait.SpinUntil(() => executeCount >= 2, TimeSpan.FromSeconds(5));
+
+        // Wait for the quantity this test ASSERTS, not for a proxy that merely correlates with it. `executeCount` is
+        // incremented inside the system body — i.e. part-way THROUGH a tick — while `TotalTicksRecorded` only moves
+        // once a tick has finished being recorded. Waiting on the counter therefore returned while tick 2 was still in
+        // flight, `Shutdown()` cut it short before its telemetry was written, and the ring held one tick: exactly the
+        // `Expected: >= 2, But was: 1` this failed with on the gate, twice, while passing every time locally. A proxy
+        // wait is always green on the machine it was written on.
+        var ring = runtime.Telemetry;
+        SpinWait.SpinUntil(() => ring.TotalTicksRecorded >= 2 && Volatile.Read(ref executeCount) >= 2, TimeSpan.FromSeconds(5));
         runtime.Shutdown();
 
-        var ring = runtime.Telemetry;
         Assert.That(ring.TotalTicksRecorded, Is.GreaterThanOrEqualTo(2));
 
         // Check per-system entity count
