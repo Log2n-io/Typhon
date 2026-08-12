@@ -56,7 +56,7 @@ foreach (var itemId in rt.GetReadOnlyCollectionEnumerator(ref loaded.Inventory))
 - No random-element access by index; reading means sequentially enumerating the buffer (`GetAllElements` / the enumerator).
 - `Versioned` components get copy-on-write sharing automatically — the application never manages the ref-count directly; divergence cost is paid only on the first write to a shared buffer, not on every revision.
 - `SingleVersion` components mutate the buffer in place — cheapest path, no MVCC sharing applies.
-- **Crash safety caveat:** buffer *content* reaches disk only at the next checkpoint — collection writes are not WAL-redo-logged. A crash between a collection write and the following checkpoint can lose that write (the component's buffer id itself is recovered; the new elements are not). Collection durability is checkpoint-bounded, not commit-bounded — treat collections as you would deferred-durability data, not as commit-durable state.
+- **Crash safety:** collection content is WAL-logged at commit alongside the component value — durability follows the unit of work's `DurabilityMode`, the same as any other component field. A recovered buffer gets a fresh buffer id (the id is not stored in the WAL; the *elements* are what recovery preserves).
 - `ComponentCollectionAccessor<T>` and the read-only enumerator are transaction-affine, like all other component access — use them only from the owning transaction's thread, and dispose them (`using`) to release the underlying chunk accessor.
 - Persists across reopen — pools reload as ordinary segments and component tables reconnect to existing buffer ids automatically.
 
