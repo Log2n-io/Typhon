@@ -312,24 +312,60 @@ def _benchmark_key(result):
     return (result["fullName"], params)
 
 
+def _parse_ts(ts):
+    """Parse a run timestamp, or None when absent/unparseable (older history entries predate the field)."""
+    if not ts:
+        return None
+    try:
+        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def _baseline_age_days(latest_ts, previous_ts):
+    """Days between the baseline run and the run being judged, or None when either timestamp is missing."""
+    a, b = _parse_ts(latest_ts), _parse_ts(previous_ts)
+    if a is None or b is None:
+        return None
+    return (a - b).total_seconds() / 86400.0
+
+
 def analyze_regressions(latest_run, all_history, config):
     """Analyze each benchmark in the latest run against the immediately previous run.
 
     Noise filtering suppresses false positives from:
     - Sub-nanosecond measurements (below BDN's resolution)
     - High coefficient-of-variation benchmarks (inherently noisy)
+    - A baseline run too OLD to be comparable (see below)
+
+    Baseline age
+    ------------
+    The comparison is against the immediately previous run whenever one exists, and until 2026-08 nothing checked how
+    old that run was. `min_runs_for_trend` is 1, so a single run of any age became the yardstick: the 2026-08-11 report
+    judged itself against 2026-07-03, thirty-nine days and many commits earlier, and flagged twelve regressions. Three
+    that were investigated in depth all dissolved when the SAME comparison was re-measured in one session — one went
+    from +38.8 % to +10 %, two others (`Insert_Sequential`, `Lookup_Hit`) turned out never to have regressed at all.
+
+    The bias is one-directional, which is what makes it worth a guard rather than a caveat: machine state and unrelated
+    commits both accumulate against the newer run, so a stale baseline can only ever manufacture regressions, never
+    hide them. A run older than `max_baseline_age_days` is therefore reported as `stale_baseline` — the delta is still
+    shown, because it is information, but it is not called a regression and does not fail the build.
     """
     # Build per-benchmark history (excluding the latest run itself)
     prior_runs = all_history[:-1] if len(all_history) > 1 else []
 
-    # Index: key -> list of {mean_ns, stddev_ns} in chronological order
+    # Index: key -> list of {mean_ns, stddev_ns, timestamp} in chronological order.
+    # The timestamp rides along because a comparison is only meaningful if the two runs are CLOSE IN TIME — see
+    # _baseline_age_days below.
     history_index = {}
     for run in prior_runs:
+        run_ts = run.get("timestamp")
         for result in run.get("results", []):
             key = _benchmark_key(result)
             history_index.setdefault(key, []).append({
                 "mean_ns": result["mean_ns"],
                 "stddev_ns": result.get("stddev_ns", 0.0),
+                "timestamp": run_ts,
             })
 
     analysis = []
@@ -348,6 +384,11 @@ def analyze_regressions(latest_run, all_history, config):
         min_measurable = float(resolve_threshold(config, bm_type, method, category, "min_measurable_ns", parameters))
         max_cov = float(resolve_threshold(config, bm_type, method, category, "max_cov_pct", parameters))
         min_delta = float(resolve_threshold(config, bm_type, method, category, "min_delta_ns", parameters))
+
+        # None disables the age guard entirely (the CI reference box runs on every labelled PR, so its baseline is
+        # never stale and the guard would only add noise to its report).
+        raw_max_age = resolve_threshold(config, bm_type, method, category, "max_baseline_age_days", parameters)
+        max_baseline_age = None if raw_max_age is None else float(raw_max_age)
 
         past_entries = history_index.get(key, [])
 
@@ -374,13 +415,19 @@ def analyze_regressions(latest_run, all_history, config):
             # Compare against the immediately previous run (trend, not averaged baseline)
             previous = past_entries[-1]["mean_ns"]
             change_pct = ((current - previous) / previous * 100) if previous != 0 else 0.0
+            age_days = _baseline_age_days(latest_run.get("timestamp"), past_entries[-1].get("timestamp"))
 
             # Noise detection: CoV of current measurement, below resolution, or sub-ns absolute change
             cov_pct = (current_stddev / current * 100) if current > 0 else 0.0
             abs_delta = abs(current - previous)
             is_noisy = current < min_measurable or cov_pct > max_cov or abs_delta < min_delta
 
-            if is_noisy:
+            # Age first: a stale baseline makes the comparison meaningless whatever the delta looks like, so saying
+            # "noisy" or "stable" about it would be a claim the data cannot support either way.
+            if max_baseline_age is not None and age_days is not None and age_days > max_baseline_age:
+                status = "stale_baseline"
+                noise_reason = f"baseline is {age_days:.0f} days old (limit {max_baseline_age:.0f})"
+            elif is_noisy:
                 if current < min_measurable:
                     noise_reason = "below measurement resolution"
                 elif cov_pct > max_cov:
@@ -405,6 +452,7 @@ def analyze_regressions(latest_run, all_history, config):
                 "threshold_pct": regression_pct,
                 "cov_pct": cov_pct,
                 "noise_reason": noise_reason,
+                "baseline_age_days": age_days,
             })
 
         analysis.append(entry)
@@ -816,6 +864,12 @@ def generate_report(latest_run, analysis, config, output_dir):
     stable = [a for a in analysis if a["status"] == "stable"]
     noisy = [a for a in analysis if a["status"] == "noisy"]
     insufficient = [a for a in analysis if a["status"] == "insufficient_data"]
+    stale = [a for a in analysis if a["status"] == "stale_baseline"]
+
+    # How old is what this report is judging itself against? Stated up front because it is the first thing that decides
+    # whether any number below is worth acting on.
+    ages = [a["baseline_age_days"] for a in analysis if a.get("baseline_age_days") is not None]
+    baseline_age = max(ages) if ages else None
 
     lines = []
     w = lines.append
@@ -825,7 +879,18 @@ def generate_report(latest_run, analysis, config, output_dir):
     w(f"**Date:** {timestamp}")
     w(f"**Commit:** {commit} ({branch})")
     w(f"**Environment:** {cpu} | {os_name} | .NET {dotnet}")
+    if baseline_age is not None:
+        freshness = "fresh" if baseline_age <= 1 else ("recent" if baseline_age <= 7 else "**STALE**")
+        w(f"**Baseline age:** {baseline_age:.1f} days ({freshness})")
     w("")
+
+    if stale:
+        w("> [!CAUTION]")
+        w(f"> The previous run is {baseline_age:.0f} days old, so {len(stale)} benchmark(s) are reported as "
+          "`stale_baseline` rather than as regressions. A gap this size accumulates machine drift AND unrelated "
+          "commits, and both push the same way — a stale baseline can only invent regressions, never hide them. "
+          "Re-measure anything you care about against its own parent commit in one session before investigating it.")
+        w("")
 
     # Summary table
     w("## Summary")
@@ -836,6 +901,7 @@ def generate_report(latest_run, analysis, config, output_dir):
     w(f"| Improvement | {len(improvements)} |")
     w(f"| Stable | {len(stable)} |")
     w(f"| Noisy (filtered) | {len(noisy)} |")
+    w(f"| Stale baseline (not judged) | {len(stale)} |")
     w(f"| Insufficient Data | {len(insufficient)} |")
     w("")
 
@@ -880,6 +946,21 @@ def generate_report(latest_run, analysis, config, output_dir):
         w("")
     else:
         w("No improvements detected.")
+        w("")
+
+    # Stale baseline — shown expanded when present, because these are the numbers a reader would otherwise have read as
+    # regressions. The delta is still printed: it is information, it is just not a verdict.
+    if stale:
+        w(f"## Not judged — baseline {baseline_age:.0f} days old ({len(stale)})")
+        w("")
+        w("| Benchmark | Current | Previous | Change (NOT a verdict) |")
+        w("|-----------|---------|----------|------------------------|")
+        for entry in _sorted_by_change(stale, reverse=True):
+            name = _display_name(entry)
+            current = format_time(entry["current_ns"])
+            previous = format_time(entry.get("previous_ns"))
+            change = _format_change(entry.get("change_pct"))
+            w(f"| {name} | {current} | {previous} | {change} |")
         w("")
 
     # Stable (collapsed)
@@ -993,6 +1074,10 @@ def print_summary(analysis):
     stable = [a for a in analysis if a["status"] == "stable"]
     noisy = [a for a in analysis if a["status"] == "noisy"]
     insufficient = [a for a in analysis if a["status"] == "insufficient_data"]
+    stale = [a for a in analysis if a["status"] == "stale_baseline"]
+
+    ages = [a["baseline_age_days"] for a in analysis if a.get("baseline_age_days") is not None]
+    baseline_age = max(ages) if ages else None
 
     print("")
     print("=" * 60)
@@ -1002,8 +1087,16 @@ def print_summary(analysis):
     print(f"  Improvements:      {len(improvements)}")
     print(f"  Stable:            {len(stable)}")
     print(f"  Noisy (filtered):  {len(noisy)}")
+    print(f"  Stale baseline:    {len(stale)}")
     print(f"  Insufficient Data: {len(insufficient)}")
+    if baseline_age is not None:
+        print(f"  Baseline age:      {baseline_age:.1f} days")
     print("=" * 60)
+
+    if stale:
+        print("")
+        print(f"  !! Baseline is {baseline_age:.0f} days old — {len(stale)} benchmark(s) NOT judged.")
+        print("     Re-measure against the parent commit in one session before investigating.")
 
     if regressions:
         print("")
