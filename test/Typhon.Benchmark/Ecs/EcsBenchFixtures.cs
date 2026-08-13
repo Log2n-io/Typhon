@@ -194,3 +194,33 @@ partial class AaBenchIdxUnit3 : Archetype<AaBenchIdxUnit3>
     public static readonly Comp<AaBenchPosition> Position = Register<AaBenchPosition>();
     public static readonly Comp<AaBenchIdxData> Data = Register<AaBenchIdxData>();
 }
+
+// ── High-fan-out AllowMultiple index — the shape the selective scan is SELECTED for ─────────────────────────────────
+// Every other indexed fixture here is either unique (AaBenchIdxData, fan-out 1) or low fan-out (AaVcRanked, 12.5 over
+// 100 rows), so none of them reaches EcsQuery.HasFanOutForSelectiveScan's threshold and the tracked suite had no
+// coverage at all of the path the planner chooses above it. A regression there would have been invisible.
+//
+// Fan-out 200 over 10 000 rows with keys assigned `i % 50`, i.e. DECORRELATED from insert order: equal keys land in
+// every cluster, so zone maps prune nothing and Path B pays a 64-slot pass per cluster. That is the case the sweep
+// measured Path A winning 1.18-1.67x. The correlated variant (equal keys adjacent) is where it is a wash, and is not
+// what this benchmark holds — one shape per fixture, named for what it is.
+[Component("Typhon.Bench.AA.FanOut", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+struct AaBenchFanOutData
+{
+    [Index(AllowMultiple = true)] public int Bucket;
+    public int Payload;
+
+    public AaBenchFanOutData(int bucket, int payload)
+    {
+        Bucket = bucket;
+        Payload = payload;
+    }
+}
+
+[Archetype]
+partial class AaBenchFanOutUnit : Archetype<AaBenchFanOutUnit>
+{
+    public static readonly Comp<AaBenchPosition> Position = Register<AaBenchPosition>();
+    public static readonly Comp<AaBenchFanOutData> Data = Register<AaBenchFanOutData>();
+}

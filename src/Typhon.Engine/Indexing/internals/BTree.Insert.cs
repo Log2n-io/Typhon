@@ -310,7 +310,7 @@ internal abstract partial class BTree<TKey, TStore>
                                 return OlcInsertResult.Restart;
                             }
                             var bufferRootId = actualLast.Value;
-                            args.ElementId = _storage.Append(bufferRootId, args.GetValue(), ref args.SiblingAccessor);
+                            args.ElementId = _storage.Append(bufferRootId, args.ValueForExistingKey, ref args.SiblingAccessor);
                             args.BufferRootId = bufferRootId;
                             latch.WriteUnlock();
                             return OlcInsertResult.Completed;
@@ -385,7 +385,7 @@ internal abstract partial class BTree<TKey, TStore>
                                 return OlcInsertResult.Restart;
                             }
                             var bufferRootId = ll.GetFirst(ref accessor).Value;
-                            args.ElementId = _storage.Append(bufferRootId, args.GetValue(), ref args.SiblingAccessor);
+                            args.ElementId = _storage.Append(bufferRootId, args.ValueForExistingKey, ref args.SiblingAccessor);
                             args.BufferRootId = bufferRootId;
                             llLatch.WriteUnlock();
                             return OlcInsertResult.Completed;
@@ -453,7 +453,7 @@ internal abstract partial class BTree<TKey, TStore>
         if (AllowMultiple)
         {
             var curItem = leaf.GetItem(keyIndex, ref accessor);
-            args.ElementId = _storage.Append(curItem.Value, args.GetValue(), ref args.SiblingAccessor);
+            args.ElementId = _storage.Append(curItem.Value, args.ValueForExistingKey, ref args.SiblingAccessor);
             args.BufferRootId = curItem.Value;
             leafLatch.WriteUnlock();
             return OlcInsertResult.Completed;
@@ -556,7 +556,7 @@ internal abstract partial class BTree<TKey, TStore>
                             var lastEntry = rl.GetLast(ref accessor);
                             if (args.Compare(args.Key, lastEntry.Key) == 0)
                             {
-                                args.ElementId = _storage.Append(lastEntry.Value, args.GetValue(), ref args.SiblingAccessor);
+                                args.ElementId = _storage.Append(lastEntry.Value, args.ValueForExistingKey, ref args.SiblingAccessor);
                                 args.BufferRootId = lastEntry.Value;
                                 rlLatch.WriteUnlock();
                                 return;
@@ -627,7 +627,7 @@ internal abstract partial class BTree<TKey, TStore>
                             var firstEntry = ll.GetFirst(ref accessor);
                             if (args.Compare(args.Key, firstEntry.Key) == 0)
                             {
-                                args.ElementId = _storage.Append(firstEntry.Value, args.GetValue(), ref args.SiblingAccessor);
+                                args.ElementId = _storage.Append(firstEntry.Value, args.ValueForExistingKey, ref args.SiblingAccessor);
                                 args.BufferRootId = firstEntry.Value;
                                 llLatch.WriteUnlock();
                                 return;
@@ -711,7 +711,8 @@ internal abstract partial class BTree<TKey, TStore>
     /// </summary>
     private void InsertIterative(ref InsertArguments args, ref ChunkAccessor<TStore> accessor, out bool completed)
     {
-        completed = false; // descent
+        completed = false;
+ // descent
         MutationContext ctx = default;
         var relatives = new NodeRelatives();
         ref var sibAccessor = ref args.SiblingAccessor;
@@ -724,8 +725,10 @@ internal abstract partial class BTree<TKey, TStore>
 
         // Phase 1.5A: Lock leaf with version validation.
         // Between Phase 1 descent and lock acquisition, a concurrent writer may have split/modified this leaf. Snapshot the version before locking,
-        // then validate after. // INSIDE leaf PreDirtyForWrite — page-cache admission, blocks without spinning
-        node.PreDirtyForWrite(ref accessor); // leaf lock
+        // then validate after.
+ // INSIDE leaf PreDirtyForWrite — page-cache admission, blocks without spinning
+        node.PreDirtyForWrite(ref accessor);
+ // leaf lock
         var leafLatch = node.GetLatch(ref accessor);
         int leafVersion = leafLatch.ReadVersion();
         if (leafVersion == 0)
@@ -773,7 +776,8 @@ internal abstract partial class BTree<TKey, TStore>
 
         // B-link move_right (Lehman & Yao): if the key is beyond this leaf's range, a concurrent split moved some keys to a right sibling. Chain right using
         // lock coupling (lock next before releasing current) until we find the correct leaf. Forward progress is guaranteed:
-        // all movement is strictly rightward with no cycle, and SpinWriteLock waits for busy siblings. // move-right
+        // all movement is strictly rightward with no cycle, and SpinWriteLock waits for busy siblings.
+ // move-right
         bool movedRight = false;
         // The loop condition IS the upper-bound half of leaf authority, and this was its fourth longhand copy. The pessimistic path answers it differently from
         // the optimistic one — it walks right until the leaf owns the key, rather than restarting, because mid-SMO it has no restart point — but the QUESTION is
@@ -881,7 +885,8 @@ internal abstract partial class BTree<TKey, TStore>
         // Slow path: leaf full or contention split — structural modification needed.
         // For contention split, skip leafPrev lock (no spill needed — item already in, only need right neighbor for linked list).
         // On lock failure: contention split uses WriteUnlock + completed=true (item is in); regular uses AbortWriteLock + restart.
-        // Sibling locking: load sibling pages into the sibling CA to avoid evicting parent path pages from the primary CA // sibling locks
+        // Sibling locking: load sibling pages into the sibling CA to avoid evicting parent path pages from the primary CA
+ // sibling locks
         var leafPrev = itemAlreadyInserted ? default : node.GetPrevious(ref accessor);
         var leafNext = node.GetNext(ref accessor);
         if (leafPrev.IsValid)
@@ -913,7 +918,8 @@ internal abstract partial class BTree<TKey, TStore>
             node.GetLatch(ref accessor).AbortWriteLock();
             return;
         }
- // path locks
+
+ // path locks
         // Lock path nodes bottom-up with version validation.
         // Required for ancestor key updates during spill and split propagation.
         for (int i = ctx.Depth - 1; i >= 0; i--)
@@ -969,7 +975,8 @@ internal abstract partial class BTree<TKey, TStore>
                 return;
             }
         }
- // insert/split at leaf
+
+ // insert/split at leaf
         // All needed nodes locked — Phase 2: Insert at leaf (may spill or split) or contention split
         KeyValueItem? promoted;
         if (itemAlreadyInserted)
@@ -997,7 +1004,8 @@ internal abstract partial class BTree<TKey, TStore>
         {
             node.GetLatch(ref accessor).WriteUnlock();
         }
- // propagate
+
+ // propagate
         // Phase 3: Propagate splits upward through internal nodes
         while (ctx.Depth > 0 && promoted != null)
         {
@@ -1055,7 +1063,8 @@ internal abstract partial class BTree<TKey, TStore>
         //
         // Issue #297: hold newRoot's write lock around the structural writes (SetLeft + Insert). Without it, a concurrent thread reading the just-published
         // `Root` field can observe newRoot with count=0 (Insert(0, promoted) hasn't written yet) and descend through the leftmost child path, missing the
-        // promoted subtree entirely. The lock forces the racer to restart on a locked latch until WriteUnlock publishes a consistent state. // root split
+        // promoted subtree entirely. The lock forces the racer to restart on a locked latch until WriteUnlock publishes a consistent state.
+ // root split
         if (promoted != null)
         {
             var newRoot = AllocNode(NodeStates.None, ref accessor);
@@ -1070,7 +1079,8 @@ internal abstract partial class BTree<TKey, TStore>
             newRootLatch.WriteUnlock();
             node.GetLatch(ref accessor).WriteUnlock(); // release old root after publishing new root
         }
- // done
+
+ // done
         completed = true;
     }
 }

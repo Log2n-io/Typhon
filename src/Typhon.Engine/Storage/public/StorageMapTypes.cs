@@ -190,7 +190,7 @@ public enum StorageIntegrityIssueKind : byte
 
     /// <summary>
     /// A cluster's in-memory MVCC visibility summary claims MORE visibility than the entities it holds justify — its <c>ClusterMaxBornTsn</c> is below an
-    /// entity's actual <c>BornTSN</c>, or its <c>ClusterAnyDied</c> bit is clear while an entity carries a non-zero <c>DiedTSN</c>. The cluster-granularity
+    /// entity's actual <c>BornTSN</c>, or its <c>ClusterMaxDiedTsn</c> is below a <c>DiedTSN</c> an entity carries. The cluster-granularity
     /// gate the SoA scan uses to skip its per-entity EntityMap probe would then pass, and the scan would emit a phantom — an entity committed after the
     /// reader's snapshot, or a tombstone. Always a maintenance bug at a site that associates an entity with a cluster (spawn commit, WAL replay, either
     /// reopen rebuild, spatial cluster migration) and failed to fold the entity's TSNs into the summary.

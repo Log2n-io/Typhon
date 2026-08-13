@@ -49,8 +49,12 @@ public readonly struct ExecutionPlan
     /// <param name="descending">Sets <see cref="Descending"/>: iterate the primary stream in descending order.</param>
     /// <param name="orderedEvaluators">Sets <see cref="OrderedEvaluators"/>: filters ordered most-selective first.</param>
     /// <param name="estimatedCounts">Sets <see cref="EstimatedCounts"/>: estimated cardinality per evaluator (parallel to <paramref name="orderedEvaluators"/>).</param>
-    public ExecutionPlan(int primaryFieldIndex, KeyType primaryKeyType, long scanMin, long scanMax, bool descending, FieldEvaluator[] orderedEvaluators, 
-        long[] estimatedCounts)
+    /// <param name="primaryRangeAdmitsOnlyMatches">
+    /// Sets <see cref="PrimaryRangeAdmitsOnlyMatches"/>: the scan range enforces every predicate on the primary field, so an executor may skip re-evaluating
+    /// them. Defaults to <c>false</c>, the always-safe answer.
+    /// </param>
+    public ExecutionPlan(int primaryFieldIndex, KeyType primaryKeyType, long scanMin, long scanMax, bool descending, FieldEvaluator[] orderedEvaluators,
+        long[] estimatedCounts, bool primaryRangeAdmitsOnlyMatches = false)
     {
         PrimaryFieldIndex = primaryFieldIndex;
         PrimaryKeyType = primaryKeyType;
@@ -59,7 +63,19 @@ public readonly struct ExecutionPlan
         Descending = descending;
         OrderedEvaluators = orderedEvaluators;
         EstimatedCounts = estimatedCounts;
+        PrimaryRangeAdmitsOnlyMatches = primaryRangeAdmitsOnlyMatches;
     }
+
+    /// <summary>
+    /// True when <see cref="PrimaryScanMin"/>..<see cref="PrimaryScanMax"/> admits only rows satisfying every predicate on <see cref="PrimaryFieldIndex"/>, so
+    /// an executor driven by that range may skip re-evaluating them on the rows it yields.
+    /// </summary>
+    /// <remarks>
+    /// Defaults to <c>false</c>, which is the answer that is always safe: re-evaluating a predicate the range already enforced costs time, whereas skipping one
+    /// it did not enforce returns wrong rows. Set from <see cref="KeyRange.RangeAdmitsOnlyMatches"/>, which declines <c>NotEqual</c>, strict inequalities on
+    /// floating types, integer inequalities whose step saturated at the type extent, and NaN thresholds.
+    /// </remarks>
+    public readonly bool PrimaryRangeAdmitsOnlyMatches;
 
     /// <summary>True when the primary stream uses a secondary index (not PK scan).</summary>
     public bool UsesSecondaryIndex => PrimaryFieldIndex >= 0;

@@ -187,6 +187,83 @@ internal static class KeyRange
         }
     }
 
+    /// <summary>
+    /// True when every value the scan range admits also satisfies <paramref name="eval"/> — i.e. the range can produce no FALSE POSITIVE for this predicate,
+    /// so a scan driven by it need not re-evaluate the predicate on what it yields.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Deliberately one-directional. A range that is a strict SUBSET of the predicate still qualifies: it loses rows, which is a separate (pre-existing)
+    /// concern of whoever built the bound, and skipping an evaluator cannot make a row that was never scanned appear. What must never qualify is a range wider
+    /// than the predicate, because then the skipped evaluator was the only thing rejecting the extra rows.
+    /// </para>
+    /// <para>
+    /// Three ways <see cref="ComputeBounds"/> deliberately widens, each of which disqualifies:
+    /// <c>NotEqual</c> cannot narrow a contiguous range at all and yields the full extent; a strict inequality on a FLOATING type stays inclusive, because the
+    /// next representable float is not the threshold ± 1 in the encoded domain; and a strict inequality on an integer type saturates at the extent rather than
+    /// wrapping, admitting the threshold itself when it sits at the end.
+    /// </para>
+    /// <para>
+    /// A <b>NaN threshold</b> is the fourth, and the one that does not look like widening. Every comparison against NaN is false, so the predicate matches
+    /// nothing — while NaN sorts below negative infinity in the encoded total order, so <see cref="ComputeBounds"/> hands back a range covering everything.
+    /// Only the evaluator can answer that, which is what the ordering remarks on <see cref="Compare"/> mean by "they simply select nothing once the evaluators
+    /// run". Data-side NaNs need no such guard: being below <see cref="TypeMin"/> they fall outside every range, so no scan yields them.
+    /// </para>
+    /// </remarks>
+    internal static bool AdmitsOnlyMatches(ref FieldEvaluator eval, KeyType keyType)
+    {
+        if (keyType == KeyType.Float && float.IsNaN(BitConverter.Int32BitsToSingle((int)eval.Threshold)))
+        {
+            return false;
+        }
+
+        if (keyType == KeyType.Double && double.IsNaN(BitConverter.Int64BitsToDouble(eval.Threshold)))
+        {
+            return false;
+        }
+
+        switch (eval.CompareOp)
+        {
+            case CompareOp.Equal:
+            case CompareOp.GreaterThanOrEqual:
+            case CompareOp.LessThanOrEqual:
+                return true;
+            case CompareOp.GreaterThan:
+                return IsIntegerKeyType(keyType) && Compare(eval.Threshold, TypeMax(keyType), keyType) < 0;
+            case CompareOp.LessThan:
+                return IsIntegerKeyType(keyType) && Compare(eval.Threshold, TypeMin(keyType), keyType) > 0;
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// True when the intersected range over <paramref name="fieldIndex"/> admits only rows that satisfy EVERY predicate on that field, so a scan driven by it
+    /// may skip all of them. False when the field carries no predicate at all — there is then nothing to skip, and saying "yes" would only invite a caller to
+    /// draw a conclusion this has not checked.
+    /// </summary>
+    internal static bool RangeAdmitsOnlyMatches(FieldEvaluator[] evaluators, int fieldIndex, KeyType keyType)
+    {
+        var any = false;
+        for (var e = 0; e < evaluators.Length; e++)
+        {
+            ref var eval = ref evaluators[e];
+            if (eval.FieldIndex != fieldIndex)
+            {
+                continue;
+            }
+
+            if (!AdmitsOnlyMatches(ref eval, keyType))
+            {
+                return false;
+            }
+
+            any = true;
+        }
+
+        return any;
+    }
+
     /// <summary>The next value above <paramref name="value"/>, saturating at <paramref name="typeMax"/> instead of wrapping.</summary>
     /// <remarks>
     /// Wrapping is the dangerous direction: <c>long.MaxValue + 1</c> is <c>long.MinValue</c>, which turns "greater than the largest value" — an empty range —

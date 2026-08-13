@@ -161,10 +161,15 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
     }
 
     /// <summary>
-    /// A cleared death bit is the tombstone twin: the gate passes for readers whose snapshot postdates the death, and the scan emits a destroyed entity.
+    /// An under-recorded death watermark is the tombstone twin: the gate passes for readers whose snapshot sits between the recorded value and the real death,
+    /// and the scan misses a tombstone those readers must still see.
     /// </summary>
+    /// <remarks>
+    /// Stronger than the cleared-flag check it replaced (#722). A boolean could only be wrong by being absent; a maximum can also be wrong by being too small,
+    /// which admits exactly the readers in the gap — so the mutation here lowers the watermark rather than clearing a bit.
+    /// </remarks>
     [Test]
-    public void ClearedDiedBit_IsReported()
+    public void UnderRecordedDiedWatermark_IsReported()
     {
         using var dbe = SetupEngine();
         var ids = Populate(dbe);
@@ -177,9 +182,9 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
 
         var cs = ClusterStateOf(dbe);
         var cluster = -1;
-        for (var c = 0; c < cs.ClusterMaxBornTsn.Length && cluster < 0; c++)
+        for (var c = 0; c < cs.ClusterMaxDiedTsn.Length && cluster < 0; c++)
         {
-            if ((cs.ClusterAnyDied[c >> 6] & (1UL << (c & 63))) != 0)
+            if (cs.ClusterMaxDiedTsn[c] != 0)
             {
                 cluster = c;
             }
@@ -188,12 +193,77 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
         Assert.That(cluster, Is.GreaterThanOrEqualTo(0), "the destroy path must have recorded the death in the summary");
         Assert.That(VisibilityIssues(dbe, out _), Is.Empty, "baseline must be clean, or the assertion below proves nothing");
 
-        cs.ClusterAnyDied[cluster >> 6] &= ~(1UL << (cluster & 63));
+        cs.ClusterMaxDiedTsn[cluster] -= 1;   // one TSN too low: a reader at exactly that snapshot now passes the gate and misses the tombstone
 
         var issues = VisibilityIssues(dbe, out _);
         Assert.That(issues, Has.Count.EqualTo(1), "the cluster holding the tombstone must be reported exactly once");
-        Assert.That(issues[0].Detail, Does.Contain($"cluster {cluster}").And.Contain("ClusterAnyDied"),
-            "the issue must name the death bit rather than the born bound");
+        Assert.That(issues[0].Detail, Does.Contain($"cluster {cluster}").And.Contain("ClusterMaxDiedTsn"),
+            "the issue must name the death watermark rather than the born bound");
+    }
+
+    // ── The fold must precede the store that publishes the slot, not merely accompany it ──────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The born summary must already bound the incoming entity <b>at the moment the claim returns</b> — because the claim is what publishes the occupancy bit,
+    /// and a reader consumes the two together.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>What this catches that the audit above cannot.</b> Every assertion in this fixture so far inspects a settled engine, where the fold has certainly
+    /// happened by the time anything looks. The defect this test guards is purely one of ORDER: the spawn path used to publish the occupancy bit inside
+    /// <c>ClaimSlot</c> and fold the watermark ~80 lines later at the call site, next to the <c>BornTSN</c> write. Between those two stores a reader that
+    /// sampled the occupancy word saw the new entity's bit set while the summary still predated it, so
+    /// <see cref="ArchetypeClusterState.IsClusterFullyVisibleAt"/> vouched for a cluster holding an entity born after that reader's snapshot — and
+    /// <c>TryCountViaOccupancy</c>, which popcounts the word on the strength of exactly that vouch, over-counted. Both states are momentary and both settle
+    /// correct, which is why 5 000 tests and a from-scratch recomputation audit all pass either way.
+    /// </para>
+    /// <para>
+    /// <b>Why it is deterministic.</b> Racing two threads to catch the window would be flaky and would prove nothing when green. Moving the fold inside the
+    /// claim makes the ordering observable single-threaded: call the claim and look before doing anything else. Restore the fold to the caller and this test
+    /// fails on every run, because on return the summary would still hold its pre-claim value.
+    /// </para>
+    /// <para>
+    /// <b>Why the claim is invoked directly.</b> No public API exposes the instant between the bit and the fold — <c>Commit</c> runs the whole of
+    /// <c>FinalizeSpawns</c> before returning. The claimed slot is deliberately left orphaned (bit set, no EntityMap entry), so this test must not run the
+    /// integrity check afterwards; the engine is disposed instead.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [VerifiesRule("CLUSTERVIS-01")]
+    public void ClaimingASlot_BoundsTheClusterBeforeItPublishesTheOccupancyBit()
+    {
+        using var dbe = SetupEngine();
+        Populate(dbe);
+
+        var cs = ClusterStateOf(dbe);
+        Assert.That(cs.FreeClusterHead, Is.GreaterThanOrEqualTo(0),
+            "PRECONDITION: 80 entities must leave the second cluster partly free, so the claim below takes the existing-cluster CAS path and needs no ChangeSet");
+
+        var settled = cs.ClusterMaxBornTsn[cs.FreeClusterHead];
+        Assert.That(settled, Is.Not.EqualTo(ArchetypeClusterState.VisibilityUnknown), "the spawns above must have established this cluster's bound");
+
+        // A TSN far beyond anything the engine has issued, so "the summary moved" cannot be confused with "the summary was already there".
+        var incoming = settled + 1000;
+
+        using var epoch = EpochGuard.Enter(dbe.EpochManager);   // a ChunkAccessor may only exist inside an epoch scope
+        var accessor = cs.ClusterSegment.CreateChunkAccessor();
+        int claimed;
+        try
+        {
+            (claimed, _) = cs.ClaimSlot(ref accessor, null, incoming);
+
+            // Nothing between the claim and this read. If the fold happened after the publishing store, the summary is still `settled` here.
+            Assert.That(cs.ClusterMaxBornTsn[claimed], Is.GreaterThanOrEqualTo(incoming),
+                "the claim must fold the incoming BornTSN into the cluster summary BEFORE it publishes the occupancy bit");
+            Assert.That(cs.IsClusterFullyVisibleAt(claimed, incoming - 1), Is.False,
+                "a reader whose snapshot predates the claimed entity must be denied the whole-cluster shortcut the instant the slot exists");
+            Assert.That(cs.IsClusterFullyVisibleAt(claimed, incoming), Is.True,
+                "GENUINENESS: a reader at or past the incoming TSN must still get the shortcut — the gate must be bounded, not merely switched off");
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
     }
 
     // ── The conservative direction is a legal state, not a finding ────────────────────────────────────────────────────────────────────────────────────────
@@ -212,7 +282,7 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
         var cluster = FirstEstablishedCluster(cs);
 
         cs.ClusterMaxBornTsn[cluster] = ArchetypeClusterState.VisibilityUnknown;   // "cannot tell" — the gate rejects it outright
-        cs.ClusterAnyDied[cluster >> 6] |= 1UL << (cluster & 63);                  // a death that never happened — costs a probe, emits nothing wrong
+        cs.ClusterMaxDiedTsn[cluster] = long.MaxValue;                            // a death that never happened — costs a probe, emits nothing wrong
 
         Assert.That(VisibilityIssues(dbe, out _), Is.Empty, "an over-pessimistic summary is slower, never wrong, and must not be reported as a defect");
     }

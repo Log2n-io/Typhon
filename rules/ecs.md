@@ -81,8 +81,9 @@ applied synchronously inside `Commit()`, not at the fence.
   enforce `AddToActiveList` stores the grown array plainly and publishes the count with `Volatile.Write`; the release
           cannot let the preceding array store sink past it, so acquiring the count guarantees seeing the array. Caching
           either into a local first is what must NOT be done — it widens the writer's own window and reintroduces the fault.
-  scope: ArchetypeClusterState.AddToActiveList / RemoveFromActiveList (writer), TyphonRuntime.ReadActiveClusterList and its
-         five callers — the dormancy promote, the checkerboard promote, and three chunk-partition sites
+  scope: ArchetypeClusterState.AddToActiveList / RemoveFromActiveList (writer), ArchetypeClusterState.ReadActiveClusterList
+         (the one reader) and its callers — TyphonRuntime.ReadActiveClusterList, which now only delegates, and through it the
+         dormancy promote, the checkerboard promote and three chunk-partition sites, plus EcsQuery.TryCountViaOccupancy
   on_violation: `IndexOutOfRangeException` out of the parallel-query prepare, on a worker thread. LOUD, which is the only
                 good thing about it.
   rationale: #582 face 2. Note what this rule does NOT give: it makes the pair CONSISTENT, not the walk SAFE. A walker
@@ -93,3 +94,57 @@ applied synchronously inside `Commit()`, not at the fence.
             does not work: a 40 000-add spin, about twelve resizes, landed inside the two-instruction window zero times in
             three runs, so a stress test would assert only that a safe order is safe. One case positively demonstrates the
             removed order producing `count > ids.Length` rather than merely asserting the new one does not.
+
+## Module: CLUSTERVIS — The per-cluster MVCC visibility summary (H1)
+
+A cluster carries two watermarks, `ClusterMaxBornTsn` and `ClusterMaxDiedTsn`, and `IsClusterFullyVisibleAt(c, txTsn)` is
+true only when a reader at `txTsn` may skip the per-entity `EntityMap` probe for that whole cluster. It is a conservative
+approximation: false is always safe and merely slower. Its consumers differ in what a wrong TRUE costs them — `EcsQuery`'s
+SoA and Path-A scans keep a per-entity probe, so a bad grant only loses performance, while `EcsQuery.TryCountViaOccupancy`
+popcounts the occupancy word on the strength of the grant alone and has nothing to catch it.
+
+### CLUSTERVIS-01: The watermark is folded before the store that publishes the slot `[fatal][silent]`
+  invariant at every instant a slot's occupancy bit is observable as SET, the cluster's summary already bounds the entity
+            occupying it
+  never folding the watermark after the claim returns. The claim is what publishes the bit, so a caller-side fold leaves a
+        window in which a reader sees the bit paired with a maximum that predates the entity.
+  enforce `NoteClusterBorn` runs inside the claim, ahead of the publishing CAS; `NoteClusterDied` runs ahead of
+          `ReleaseSlot`'s clear. The reader's half is the mirror — acquire-read the occupancy word, THEN the watermarks.
+  enforce a FRESHLY allocated cluster is left at `VisibilityUnknown` by the claim and established by the caller once the
+          slot has contents. The two directions need opposite treatment: for an existing cluster the hazard is an OLDER
+          reader (fix: raise before publishing), for a fresh one it is a NEWER reader seeing a bit whose EntityId tail and
+          EntityMap record do not exist yet (fix: deny until established). Establishing from the sentinel is sound ONLY on a
+          fresh cluster, which holds exactly one entity, so the value is exact.
+  enforce `ResetClusterVisibility` runs at every site that frees a cluster chunk, before the id can be recycled. Chunk ids
+          come from a free list, so without it a "fresh" cluster inherits the previous occupant's watermarks and the clause
+          above silently does nothing.
+  enforce both folds are `Interlocked` on the element AND re-read the array reference after the CAS. Concurrent claimants
+          fold into the same cluster (#708: Transient spawns commit concurrently), and a fold can otherwise land in an array
+          a grower has already copied and is about to replace.
+  scope: ArchetypeClusterState.NoteClusterBorn, ArchetypeClusterState.NoteClusterDied, ArchetypeClusterState.ClaimSlot,
+         ArchetypeClusterState.ClaimSlotInCell, ArchetypeClusterState.ResetClusterVisibility,
+         ArchetypeClusterState.IsClusterFullyVisibleAt, ArchetypeClusterState.EnsureClusterVisibilityCapacity
+  on_violation: `Count()` returns a number no scan agrees with, and the scans emit an entity that does not exist at the
+                reader's snapshot. Silent both ways — every value looks plausible.
+  rationale: found in review, not by tests. 5 300 tests pass with the fold on either side of the publish, because both
+             states are momentary and both settle correct.
+  verified: ClusterVisibilitySummaryIntegrityTests.ClaimingASlot_BoundsTheClusterBeforeItPublishesTheOccupancyBit
+            [VerifiesRule] — calls the claim and reads the summary with NOTHING in between, so the ordering is asserted
+            single-threaded instead of raced for. Move the fold back to the caller and it fails every run, together with the
+            from-scratch audit in the same fixture.
+
+### CLUSTERVIS-02: A tombstone that keeps its occupancy bit must deny the gate outright `[fatal][silent]`
+  invariant a cluster holding a slot whose entity is dead while its bit is still set never reports fully-visible
+  never folding a real `DiedTSN` at a site that does not clear the bit. The died watermark's entire argument is that a
+        reader past the last death is exact BECAUSE occupancy already reflects it; where the bit survives, that is false and
+        every reader past that TSN is granted over a tombstone.
+  enforce the two sites in that shape — WAL replay (`RecoveryApplier.ApplyDestroyToExisting`, whose cleanup is deferred to
+          the orphan sweep) and cluster migration (which sets a dst bit and releases only the src slot) — fold
+          `VisibilityUnknown`, restoring the permanent deny the pre-#722 sticky flag gave for free.
+  scope: RecoveryApplier.ApplyDestroyToExisting, DatabaseEngine.ExecuteMigrations, ArchetypeClusterState.NoteClusterDied
+  on_violation: permanent over-count after any recovery that replays a below-frontier destroy; `Count()` returns N+1 while
+                the scan returns N.
+  rationale: #722 replaced a sticky "has anything ever died here" bit with a recovering maximum, which is the point — a
+             churning archetype used to latch onto the per-entity probe forever. The cost is that "the bit is cleared at
+             destroy" became load-bearing for every caller, and two callers never held it.
+  requires CLUSTERVIS-01 (same summary, the publication half)

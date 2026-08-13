@@ -1086,7 +1086,7 @@ public partial class DatabaseEngine
     /// the page-allocator machinery. Any orphan (bit set, no claimant) or phantom (claimant, bit clear) is reported as a hard durability/structural bug.</item>
     /// <item><b>Chunk-segment capacity</b> — for every <see cref="ChunkBasedSegment{TStore}"/>, <c>AllocatedChunkCount + FreeChunkCount</c> must equal
     /// <c>ChunkCapacity</c>. Desync indicates the segment's chunk free-list drifted from its on-page chunk bitmaps.</item>
-    /// <item><b>Cluster MVCC visibility summary</b> — every cluster's <c>ClusterMaxBornTsn</c> / <c>ClusterAnyDied</c> pair, recomputed from the archetype's
+    /// <item><b>Cluster MVCC visibility summary</b> — every cluster's <c>ClusterMaxBornTsn</c> / <c>ClusterMaxDiedTsn</c> pair, recomputed from the archetype's
     /// EntityMap and compared against the maintained one. A summary that claims more visibility than its entities justify makes the SoA scan skip its
     /// per-entity probe and emit a phantom; see <see cref="StorageIntegrityIssueKind.ClusterVisibilitySummaryUnsound"/>.</item>
     /// </list>
@@ -1232,7 +1232,7 @@ public partial class DatabaseEngine
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>Why this exists.</b> The summary (<c>ClusterMaxBornTsn</c> / <c>ClusterAnyDied</c> on <see cref="ArchetypeClusterState"/>) lets the SoA scan skip its
+    /// <b>Why this exists.</b> The summary (<c>ClusterMaxBornTsn</c> / <c>ClusterMaxDiedTsn</c> on <see cref="ArchetypeClusterState"/>) lets the SoA scan skip its
     /// per-entity EntityMap probe for a whole cluster. It is maintained by five sites — spawn commit, WAL replay, both reopen rebuilds, and spatial cluster
     /// migration — and a sixth site added later that forgets to fold produces a phantom rather than a failure. Enumerating the sites is the weaker move;
     /// checking the invariant is the stronger one.
@@ -1290,7 +1290,7 @@ public partial class DatabaseEngine
             {
                 ClusterCount = clusterCount,
                 MaxBorn = new long[clusterCount],
-                AnyDied = new ulong[(clusterCount + 63) >> 6],
+                MaxDied = new long[clusterCount],
             };
             Array.Fill(recompute.MaxBorn, NoEntityInCluster);
 
@@ -1303,7 +1303,7 @@ public partial class DatabaseEngine
             // every record the walk compared against it. Reading it before instead would race with a concurrent spawn that grows and replaces the array, and
             // report a phantom that was never there — a false positive is how an invariant check gets disabled.
             var maxBorn = Volatile.Read(ref clusterState.ClusterMaxBornTsn);
-            var died = Volatile.Read(ref clusterState.ClusterAnyDied);
+            var died = Volatile.Read(ref clusterState.ClusterMaxDiedTsn);
 
             var rootPage = clusterState.ClusterSegment?.RootPageIndex ?? 0;
             for (var c = 0; c < clusterCount && c < maxBorn!.Length; c++)
@@ -1327,16 +1327,17 @@ public partial class DatabaseEngine
                         $"any snapshot in [{claimedBorn}..{actualBorn - 1}] passes the cluster gate, skips the per-entity probe and emits an unborn entity"));
                 }
 
-                // A died array that is absent or too short reads as "cannot tell" at the gate, which is conservative — only a CLEAR bit inside a sized array
-                // is unsound.
-                var word = c >> 6;
-                var bit = 1UL << (c & 63);
-                if ((recompute.AnyDied[word] & bit) != 0 && died != null && (uint)word < (uint)died.Length && (died[word] & bit) == 0)
+                // A died array that is absent or too short reads as "cannot tell" at the gate, which is conservative — only an UNDER-recorded watermark inside
+                // a sized array is unsound. This is strictly stronger than the flag it replaced: a boolean could only catch a death recorded nowhere, whereas
+                // a maximum also catches one recorded with too small a TSN, which admits exactly the readers in between (#722).
+                var actualDied = recompute.MaxDied[c];
+                if (actualDied != 0 && died != null && (uint)c < (uint)died.Length && died[c] < actualDied)
                 {
                     issues.Add(new StorageIntegrityIssue(
                         StorageIntegrityIssueKind.ClusterVisibilitySummaryUnsound, rootPage, -1, 0,
-                        $"archetype '{meta.Name}' cluster {c}: ClusterAnyDied bit is clear but an entity in it carries a non-zero DiedTSN — a reader whose " +
-                        "snapshot postdates the death passes the cluster gate, skips the per-entity probe and emits a tombstone"));
+                        $"archetype '{meta.Name}' cluster {c}: ClusterMaxDiedTsn={died[c]} but an entity in it died at {actualDied} — a reader at any " +
+                        $"snapshot in [{died[c]}..{actualDied - 1}] passes the cluster gate, skips the per-entity probe and misses a tombstone it must "
+                        + "still see"));
                 }
             }
         }
@@ -1353,8 +1354,8 @@ public partial class DatabaseEngine
         /// <summary>Recomputed maximum <c>BornTSN</c> per cluster, <see cref="NoEntityInCluster"/> where no record named the cluster.</summary>
         public long[] MaxBorn;
 
-        /// <summary>Recomputed "any entity here carries a non-zero DiedTSN" bitmap, same word/bit layout as the maintained one.</summary>
-        public ulong[] AnyDied;
+        /// <summary>Recomputed maximum <c>DiedTSN</c> per cluster, 0 where no record in it carries one.</summary>
+        public long[] MaxDied;
 
         public unsafe bool Process(long key, byte* value)
         {
@@ -1371,9 +1372,9 @@ public partial class DatabaseEngine
                 MaxBorn[chunkId] = born;
             }
 
-            if (header.DiedTSN != 0)
+            if (header.DiedTSN > MaxDied[chunkId])
             {
-                AnyDied[chunkId >> 6] |= 1UL << (chunkId & 63);
+                MaxDied[chunkId] = header.DiedTSN;
             }
 
             return true;

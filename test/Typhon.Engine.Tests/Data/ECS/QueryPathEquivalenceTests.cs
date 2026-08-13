@@ -105,9 +105,9 @@ class QPathCritterUnit : Archetype<QPathCritterUnit, QPathCreatureUnit>
 /// been caught by the ~4 000 tests that existed, because every one of them asserted the query RESULT of whichever path the planner happened to pick.
 /// </para>
 /// <para>
-/// <b>Why the path is forced rather than provoked.</b> The choice is made from an estimate (<c>EstimateClusterSelectivity(...) &lt; 0.05f</c>). A test that
-/// writes a very selective predicate and hopes Path A is taken asserts nothing durable: the day a statistic shifts it silently becomes a second Path B test,
-/// still green, still counted in the coverage number. <see cref="QueryPathProbe"/> makes the path an INPUT, and every Path A run here additionally asserts
+/// <b>Why the path is forced rather than provoked.</b> The choice is made from the primary index's fan-out (<c>EcsQuery.HasFanOutForSelectiveScan</c>), which
+/// is a property of the DATA. A test that writes a very selective predicate and hopes Path A is taken asserts nothing durable: this fixture's own columns are
+/// near-distinct per entity, so provoking Path A here is not merely fragile but impossible. <see cref="QueryPathProbe"/> makes the path an INPUT, and every Path A run here additionally asserts
 /// that the selective scan actually ran — so "the fixture quietly stopped testing Path A" is itself a failure.
 /// </para>
 /// <para>
@@ -426,6 +426,57 @@ class QueryPathEquivalenceTests : TestBase<QueryPathEquivalenceTests>
 
         tx.Commit();
         return ids;
+    }
+
+    /// <summary>
+    /// Left to the planner, a highly selective predicate over this fixture's data must still take Path B — because SELECTIVITY is not what the choice is made
+    /// on. Every column here holds a near-distinct value per entity, so the fan-out is 1 and Path A's cost is one tree entry per row.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This pins a decision, not a mechanism: every other case in this fixture FORCES its path, so nothing here would notice the planner silently choosing
+    /// Path A — it would simply get slower. A 1-of-240 predicate is the shape the old <c>0.05f</c> threshold selected Path A for most confidently, and the one
+    /// where it measured 15–63 % slower than Path B.
+    /// </para>
+    /// <para>
+    /// It is deliberately kept after the switch to fan-out (<c>EcsQuery.HasFanOutForSelectiveScan</c>), because it is the case that says the two properties
+    /// are not the same one: maximum selectivity and minimum fan-out coincide here, and the answer must follow the fan-out.
+    /// <see cref="QueryPathSelectionTests"/> covers the boundary from the other side.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void ThePlannerDoesNotSelectPathAOnAFanOutOfOne()
+    {
+        using var dbe = SetupEngine();
+        SpawnAll(dbe);
+
+        // The cluster scan reads the archetype's active cluster list, which is settled at the tick fence.
+        //
+        // No statistics rebuild is needed any more, and its absence is load-bearing rather than an omission: fan-out is read from the tree's live entry count
+        // and the archetype's EntityMap, so the planner sees the same numbers here that it sees in production. Under the old selectivity estimate a fresh
+        // fixture had no statistics at all, the estimator returned its "unknown" fallback, and this test passed at ANY threshold.
+        dbe.WriteTickFence(1);
+
+        using var tx = dbe.CreateQuickTransaction();
+
+        QueryPathProbe.Reset();
+        try
+        {
+            // Left at ClusterScanPath.Planner deliberately — the point is what the planner does when nobody forces it.
+            var hits = tx.Query<QPathUnit>().WhereField<QPathData>(d => d.I >= 119).Execute();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(hits, Has.Count.EqualTo(1), "sanity: the predicate really is 1-of-240, i.e. the most selective shape the old threshold covered");
+                Assert.That(QueryPathProbe.SelectiveScans, Is.Zero,
+                    "fan-out is 1 row per key here, which is Path A's worst case however selective the predicate is");
+                Assert.That(QueryPathProbe.FullScans, Is.GreaterThan(0), "and it must have actually scanned — a zero/zero result would prove nothing");
+            });
+        }
+        finally
+        {
+            QueryPathProbe.Reset();
+        }
     }
 
     /// <summary>Run one predicate on a forced path and report how many selective scans it actually performed.</summary>
