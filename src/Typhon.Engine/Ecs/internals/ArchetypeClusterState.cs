@@ -56,6 +56,11 @@ internal sealed unsafe class ArchetypeClusterState
     //   TryClaimSlotInCluster (x2)     — new-cluster slow path: lockstep dual-segment AllocateChunk, AddToActiveList, CellClusterPool.AddCluster,
     //                                    ClusterCellMap back-pointer. The hot path (CAS into an existing cluster) does not take it.
     //   EnqueueMigrationsBulk          — bulk append to PendingMigrations
+    //   EnsureClusterVisibilityCapacity — GROWTH ONLY, behind a double-checked length compare; the fold itself never takes it. Serializing growers against
+    //                                    each other is not the whole fix — see NoteClusterBorn for why a fold must also re-read the array reference after
+    //                                    its CAS — but it is the half that stops two growers dropping each other's copy.
+    // This list is load-bearing: it is what the next person reasons about lock order from, so an acquisition added without a line here is worse than one
+    // added with a wrong line. EnsureClusterVisibilityCapacity was added in #722 and this entry with it.
     // Note the asymmetry this leaves: AddToActiveList runs under the latch, RemoveFromActiveList never does — removal happens only from serial contexts
     // (Finalize, or a single-threaded Transaction.Destroy). No reader takes it either, so the latch orders writers against writers, not readers.
     // Padded to 64 bytes so the latch field owns a full cache line and uncontended acquisitions don't ping-pong with adjacent hot fields like
