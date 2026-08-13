@@ -8,6 +8,10 @@
     <LangVersion>default</LangVersion>
   </PropertyGroup>
   <ItemGroup>
+    <!-- Telemetry gate configuration — read by TelemetryConfig from the assembly directory. -->
+    <Content Include="typhon.telemetry.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\..\..\src\Typhon.Engine\Typhon.Engine.csproj" />
     <ProjectReference Include="..\..\..\src\Typhon.Schema.Definition\Typhon.Schema.Definition.csproj" />
     <ProjectReference Include="..\..\..\src\Typhon.Profiler\Typhon.Profiler.csproj" />

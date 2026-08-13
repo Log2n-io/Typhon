@@ -16,6 +16,7 @@ internal static class Program
 
         var databaseLocation = Path.Combine(AppContext.BaseDirectory, $"{RunName}.typhon");
         ConfigureDeepProfiling(databaseLocation);
+        SimulationDefinition definition = BuildDefinition();
         using var cancellation = new CancellationTokenSource();
         Console.CancelKeyPress += (_, eventArgs) =>
         {
@@ -24,7 +25,7 @@ internal static class Program
         };
 
         using var simulation = SpaceBattleHost.Start(
-            SimulationDefinition.Default,
+            definition,
             databaseLocation,
             cancellation.Token,
             new ConsoleObservationSink());
@@ -76,6 +77,37 @@ internal static class Program
         Console.WriteLine("已在完成当前模拟 tick 后暂停；下次启动将继续运行。");
         return 0;
     }
+
+    /// <summary>
+    /// 常规运行使用 <see cref="SimulationDefinition.Default"/>。开启 deep profiling 时改用有界 tick 上限，
+    /// 让进程自然到达终态并优雅关闭——trace exporter 只有在正常 Stop() 时才会 drain 队列并 flush。
+    /// 通过 SPACEBATTLE_TRACE_TICKS / SPACEBATTLE_TRACE_SHIPS 覆盖，便于调整采集规模。
+    /// </summary>
+    private static SimulationDefinition BuildDefinition()
+    {
+        if (!IsDeepProfilingEnabled())
+        {
+            return SimulationDefinition.Default;
+        }
+
+        SimulationDefinition template = SimulationDefinition.Default;
+        return new SimulationDefinition(
+            runName: template.RunName,
+            shipCount: ReadIntOverride("SPACEBATTLE_TRACE_SHIPS", template.ShipCount),
+            seed: template.Seed,
+            rulesetVersion: template.RulesetVersion,
+            worldSize: template.WorldSize,
+            maximumHealth: template.MaximumHealth,
+            stagingTicks: template.StagingTicks,
+            spatialCellSize: template.SpatialCellSize,
+            spatialMargin: template.SpatialMargin,
+            maximumCompletedTicks: (ulong)ReadIntOverride("SPACEBATTLE_TRACE_TICKS", 400));
+    }
+
+    private static int ReadIntOverride(string variableName, int defaultValue) =>
+        int.TryParse(Environment.GetEnvironmentVariable(variableName), out int parsed) && parsed > 0
+            ? parsed
+            : defaultValue;
 
     private static void ConfigureDeepProfiling(string databaseLocation)
     {
