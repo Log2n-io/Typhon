@@ -1648,11 +1648,16 @@ public unsafe partial class Transaction
                         // Mixed or pure-SV/V: PersistentStore is primary
                         if (useCellClaim)
                         {
-                            (clusterChunkId, slotIdx) = ctx.ClusterState.ClaimSlotInCell(computedCellKey, ref ctx.ClusterAccessor, _changeSet, ctx.SpatialGridCached);
+                            (clusterChunkId, slotIdx) = ctx.ClusterState.ClaimSlotInCell(
+                                computedCellKey,
+                                ref ctx.ClusterAccessor,
+                                _changeSet,
+                                ctx.SpatialGridCached,
+                                TSN);
                         }
                         else
                         {
-                            (clusterChunkId, slotIdx) = ctx.ClusterState.ClaimSlot(ref ctx.ClusterAccessor, _changeSet);
+                            (clusterChunkId, slotIdx) = ctx.ClusterState.ClaimSlot(ref ctx.ClusterAccessor, _changeSet, TSN);
                         }
                         clusterBase = ctx.ClusterAccessor.GetChunkAddress(clusterChunkId, true);
                         if (ctx.HasClusterTransientAccessor)
@@ -1665,11 +1670,15 @@ public unsafe partial class Transaction
                         // Pure-Transient: TransientStore is primary
                         if (useCellClaim)
                         {
-                            (clusterChunkId, slotIdx) = ctx.ClusterState.ClaimSlotInCell(computedCellKey, ref ctx.ClusterTransientAccessor, ctx.SpatialGridCached);
+                            (clusterChunkId, slotIdx) = ctx.ClusterState.ClaimSlotInCell(
+                                computedCellKey,
+                                ref ctx.ClusterTransientAccessor,
+                                ctx.SpatialGridCached,
+                                TSN);
                         }
                         else
                         {
-                            (clusterChunkId, slotIdx) = ctx.ClusterState.ClaimSlot(ref ctx.ClusterTransientAccessor);
+                            (clusterChunkId, slotIdx) = ctx.ClusterState.ClaimSlot(ref ctx.ClusterTransientAccessor, TSN);
                         }
                         clusterBase = ctx.ClusterTransientAccessor.GetChunkAddress(clusterChunkId, true);
                     }
@@ -1724,9 +1733,10 @@ public unsafe partial class Transaction
                     ClusterEntityRecordAccessor.InitializeRecord(recordPtr, ctx.Meta.VersionedSlotCount);
                     ref var clusterHeader = ref ClusterEntityRecordAccessor.GetHeader(recordPtr);
                     clusterHeader.BornTSN = TSN;
-                    // H1 visibility summary: fold this entity's BornTSN into its cluster's maximum so a scan can skip the per-match EntityMap probe for
-                    // clusters that were entirely committed before the reader's snapshot. Must sit with the BornTSN write, not near ClaimSlot — the summary
-                    // has to bound the value the gate will actually read.
+                    // H1 visibility summary. For an EXISTING cluster the claim already raised the bound before publishing the occupancy bit — TSN is passed in
+                    // for exactly that — and this call is then an idempotent no-op. It is NOT redundant: a freshly allocated cluster is deliberately left
+                    // unestablished by the claim so the gate denies it until its slot has contents, and this is what establishes it. See
+                    // ArchetypeClusterState.FreshClusterStaysUnknown for why the two directions need opposite treatment.
                     ctx.ClusterState.NoteClusterBorn(clusterChunkId, TSN);
                     clusterHeader.EnabledBits = enabledBits;
                     ClusterEntityRecordAccessor.SetClusterChunkId(recordPtr, clusterChunkId);
@@ -2359,7 +2369,11 @@ public unsafe partial class Transaction
                     lastArchId = entityId.ArchetypeId;
                     hasAccessor = true;
 
-                    // Set up cluster accessor if applicable
+                    // Set up cluster accessor if applicable. Reset FIRST: a destroy batch walks several archetypes, and leaving the previous archetype's
+                    // state in place means a later non-cluster-eligible one folds a chunk id decoded from ITS record into the wrong archetype's summary —
+                    // sizing that archetype's visibility arrays to a garbage index. The old code never reset it either; the difference is that the fold
+                    // guard below now selects precisely the stale case.
+                    destroyClusterState = null;
                     destroyUseCluster = meta.IsClusterEligible && engineState.ClusterState != null;
                     if (destroyUseCluster)
                     {
@@ -2454,6 +2468,16 @@ public unsafe partial class Transaction
                             }
                         }
 
+                        // H1 ordering: the died watermark is folded BEFORE ReleaseSlot clears the occupancy bit, and the order is the whole point. A reader
+                        // that sees the cleared bit must also see the watermark, or it drops an entity whose death postdates its snapshot — the occupancy
+                        // word is current state while a reader is at a snapshot, and only the watermark separates them. Folding early is free because the
+                        // watermark is conservative UPWARD: a value recorded before the bit is cleared, or for a destroy that then fails, costs a per-entity
+                        // probe and can never make the gate say "visible" when it is not (#722 review).
+                        if (destroyClusterState != null)
+                        {
+                            destroyClusterState.NoteClusterDied(clusterChunkId, TSN);
+                        }
+
                         // Issue #230 Phase 3 Option B: the per-archetype R-Tree remove call is gone; ReleaseSlot below handles per-cell index cleanup
                         // via FinaliseEmptyClusterCellState when the source cluster becomes empty.
                         if (hasClusterAccessor)
@@ -2468,14 +2492,12 @@ public unsafe partial class Transaction
 
                     // Set DiedTSN (header layout is the same for both cluster and legacy records)
                     EntityRecordAccessor.GetHeader(readBuf).DiedTSN = TSN;
-                    // H1: a tombstone in this cluster means a reader older than TSN must still see the entity, and one newer must not — only the per-entity
-                    // probe can tell them apart, so drop the cluster off the fast path. Never cleared: proving no tombstone remains needs a full re-scan.
-                    // The chunk id comes from the record rather than the local above, which is scoped to the cluster-backed branch; the null check is what
-                    // establishes that this record IS a ClusterEntityRecord and so has that field at all.
-                    if (destroyClusterState != null)
-                    {
-                        destroyClusterState.NoteClusterDied(ClusterEntityRecordAccessor.GetClusterChunkId(readBuf));
-                    }
+                    // No watermark fold here. It moved ABOVE ReleaseSlot — see the H1 ordering note there — and the guarded copy that briefly remained,
+                    // for "the legacy non-cluster-backed shape", was unreachable: destroyClusterState is non-null only when destroyUseCluster is, and every
+                    // ArchetypeClusterState carries at least one segment (a non-pure-Transient archetype throws if its ClusterSegment cannot be allocated;
+                    // a pure-Transient one has transientSlotMask != 0 by construction), so one of the two accessor flags is always set. In the genuine
+                    // legacy shape destroyClusterState is null and the branch was excluded by its own first conjunct. Had it ever run it would have decoded
+                    // a cluster chunk id out of a LEGACY record's bytes and folded that garbage index into a cluster summary.
                     engineState.EntityMap.Upsert(entityId.EntityKey, readBuf, ref accessor, _changeSet);
 
                     // Enqueue for deferred GC (LinearHash removal + chunk freeing when MinTSN advances past DiedTSN)

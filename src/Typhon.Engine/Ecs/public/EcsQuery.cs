@@ -1626,7 +1626,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 }
 
                 var clusterBase = primaryAccessor.GetChunkAddress(clusterChunkId);
-                var occupancy = *(ulong*)clusterBase;
+                // Acquire, not a plain load: IsClusterFullyVisibleAt below opens with an acquire of its own, and an acquire does not stop an EARLIER plain
+                // load from sinking past it. Plain here would let arm64 pair a fresh occupancy word with a stale watermark — the phantom BIND-04 forbids.
+                var occupancy = Volatile.Read(ref *(ulong*)clusterBase);
                 if (occupancy == 0)
                 {
                     continue;
@@ -2047,7 +2049,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     }
 
                     var clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId);
-                    var occupancy = *(ulong*)clusterBase;
+                    var occupancy = Volatile.Read(ref *(ulong*)clusterBase);   // acquire — see ScanClusterSoa for why plain is wrong here
                     var remaining = candidateBits & occupancy; // intersection with live entities
 
                     if (remaining == 0)
@@ -2996,8 +2998,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// </para>
     /// <list type="bullet">
     /// <item><b>Born after the snapshot / died before it.</b> The occupancy word is CURRENT — it knows nothing about the reader's snapshot.
-    /// <see cref="ArchetypeClusterState.IsClusterFullyVisibleAt"/> is the same per-cluster summary the SoA scan uses (H1): it is true only when every entity in
-    /// the cluster was born at or before <paramref name="txTsn"/> and none has ever carried a <c>DiedTSN</c>. It is conservative by construction — an unsized
+    /// <see cref="ArchetypeClusterState.IsClusterFullyVisibleAt(int, long)"/> is the same per-cluster summary the SoA scan uses (H1): it is true only when
+    /// every entity in the cluster was born at or before <paramref name="txTsn"/> and every death recorded there is already visible to this reader. It is
+    /// conservative by construction — an unsized
     /// array or an unestablished maximum answers false — so a bail is always safe and only ever costs performance.</item>
     /// <item><b>Enabled/disabled (T2) predicates.</b> Occupancy is liveness, not enabled bits, so any T2 requirement disqualifies the archetype outright.</item>
     /// <item><b>Entities pending destroy in this transaction.</b> Their occupancy bit is still set, so a non-empty set disqualifies the archetype.</item>
@@ -3008,7 +3011,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// All-or-nothing per archetype, on purpose. A cluster that fails the summary would have to be counted through the EntityMap by entity id, and a point
     /// lookup there costs ~80 ns against the ~8 ns of the sequential scan the fallback already does — so a hybrid would be slower than the path it replaces on
     /// exactly the clusters it was meant to rescue. The cost of bailing is the cluster headers touched before the first failure, which the fallback scan reads
-    /// anyway. <c>ClusterAnyDied</c> is never cleared, so a long-lived archetype with churn settles onto the probe; that is a known ceiling, not a defect.
+    /// anyway. Since #722 the died side is a watermark rather than a sticky flag, so a churned archetype returns to this path as soon as the reader's snapshot
+    /// passes its last death — the ceiling that used to settle a long-lived archetype permanently onto the probe is gone.
     /// </para>
     /// </remarks>
     private bool TryCountViaOccupancy(ArchetypeEngineState engineState, bool hasT2, long txTsn, out int count)
@@ -3034,10 +3038,18 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var accessor = clusterState.ClusterSegment.CreateChunkAccessor();
         try
         {
-            var total = 0;
-            for (var c = 0; c < clusterState.ActiveClusterCount; c++)
+            // CLUSTERWALK-02: the (count, array) pair goes through the one reader, never read directly here. This used to be a plain load of both, which
+            // faults on a plain interleaving — old 16-length array, concurrent resize, count read as 17, index 16.
+            var activeIds = clusterState.ReadActiveClusterList(out var activeCount);
+            if (activeIds == null)
             {
-                var clusterChunkId = clusterState.ActiveClusterIds[c];
+                return false;
+            }
+
+            var total = 0;
+            for (var c = 0; c < activeCount; c++)
+            {
+                var clusterChunkId = activeIds[c];
 
                 // Occupancy BEFORE the summary, and with acquire ordering: NoteClusterBorn stores the maximum plainly, on the premise that the reader reaches
                 // it only after an acquire-ordered read of this word. Reading them the other way round could pair a fresh maximum with a stale occupancy word.

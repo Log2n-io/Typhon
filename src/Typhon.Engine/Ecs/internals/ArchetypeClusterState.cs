@@ -397,6 +397,7 @@ internal sealed unsafe class ArchetypeClusterState
 
             FinaliseEmptyClusterCellState(grid, chunkId);
             RemoveFromActiveList(chunkId);
+            ResetClusterVisibility(chunkId);   // the id is about to be recyclable — see ResetClusterVisibility
             ClusterSegment?.FreeChunk(chunkId);
             TransientSegment?.FreeChunk(chunkId);
         }
@@ -408,9 +409,9 @@ internal sealed unsafe class ArchetypeClusterState
     /// grid <c>cellKey</c> the cluster is attached to, or <c>-1</c> if unmapped (cluster not yet allocated, or archetype is not opted into the grid).
     /// </summary>
     /// <remarks>
-    /// Lazily allocated by <see cref="ClaimSlotInCell(int, ref ChunkAccessor{PersistentStore}, ChangeSet, SpatialGrid)"/> or
+    /// Lazily allocated by <see cref="ClaimSlotInCell(int, ref ChunkAccessor{PersistentStore}, ChangeSet, SpatialGrid, long)"/> or
     /// <see cref="RebuildCellState"/>. Non-spatial archetypes and spatial archetypes running without a configured <see cref="SpatialGrid"/> leave this
-    /// field <c>null</c> — the existing <see cref="ClaimSlot(ref ChunkAccessor{PersistentStore}, ChangeSet)"/> path is unchanged for them.
+    /// field <c>null</c> — the existing <see cref="ClaimSlot(ref ChunkAccessor{PersistentStore}, ChangeSet, long)"/> path is unchanged for them.
     /// </remarks>
     public int[] ClusterCellMap;
 
@@ -495,71 +496,273 @@ internal sealed unsafe class ArchetypeClusterState
     internal long[] ClusterMaxBornTsn;
 
     /// <summary>
-    /// One bit per cluster — set when any entity in it has ever had a non-zero <c>DiedTSN</c>. Indexed by clusterChunkId; word at <c>i / 64</c>, bit
-    /// <c>i % 64</c>. Never cleared while the cluster lives: a set bit only costs the per-entity probe, and clearing it would need a full re-scan to prove no
-    /// tombstone remains.
+    /// Per-cluster maximum <c>DiedTSN</c> over the entities it has ever held, or 0 when nothing has died there. Indexed by clusterChunkId. A reader at
+    /// snapshot <c>txTsn</c> may skip the per-entity died check for this cluster iff the value is <c>&lt;= txTsn</c>.
     /// </summary>
-    internal ulong[] ClusterAnyDied;
+    /// <remarks>
+    /// <para>
+    /// <b>This was a sticky bit until #722.</b> "Has anything ever died here?" is a question that can only be un-asked by a full re-scan, so the bit was never
+    /// cleared and a churning archetype latched permanently onto the per-entity probe — a documented ceiling for <c>Count()</c>, and fatal for anything that
+    /// runs every tick, which is what an unfiltered View's refresh does.
+    /// </para>
+    /// <para>
+    /// The question a reader actually needs answered is not <i>whether</i> something died but <i>whether every death here is already visible to it</i>, and
+    /// that is a maximum rather than a boolean. <c>ReleaseSlot</c> clears the occupancy bit at destroy commit while the tombstone lives on the EntityMap
+    /// record, so the only hazard a death creates is for a reader OLDER than it: occupancy has already dropped an entity that reader must still see. A reader
+    /// newer than every death in the cluster is exact. A maximum only ever rises, so it needs no re-scan to fall — it never falls — and the gate recovers on
+    /// its own as snapshots advance past the last death.
+    /// </para>
+    /// </remarks>
+    internal long[] ClusterMaxDiedTsn;
 
     /// <summary>Sentinel for "no site has established this cluster's maximum BornTSN" — forces the per-entity probe.</summary>
     internal const long VisibilityUnknown = long.MaxValue;
+
+    /// <summary>
+    /// Why a FRESHLY ALLOCATED cluster is left at <see cref="VisibilityUnknown"/> by the claim, while an existing one has its bound raised before the CAS.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The two directions need opposite treatment, and doing the same thing to both is a bug either way round.
+    /// </para>
+    /// <para>
+    /// <b>Existing cluster — fold BEFORE the publishing CAS.</b> The hazard is an OLDER reader: it sees the new bit paired with a bound that predates the
+    /// entity, so the gate vouches for a cluster holding an entity born after its snapshot. Raising first closes that, and raising early is free because the
+    /// bound is conservative upward.
+    /// </para>
+    /// <para>
+    /// <b>Fresh cluster — do NOT fold; leave it unknown.</b> The hazard is a NEWER reader. The claim publishes the occupancy bit before the caller writes the
+    /// slot's EntityId and its EntityMap record, so a reader at or past <c>bornTsn</c> that passed the gate would count a slot whose entity does not exist yet
+    /// — and <c>EcsQuery.TryCountViaOccupancy</c> has no per-entity probe to catch it. An unestablished bound denies the gate outright, which is exactly the
+    /// protection a fresh cluster had before the fold moved into the claim. The caller establishes the real value once the slot's contents exist.
+    /// </para>
+    /// <para>
+    /// <b>Why the caller may safely ESTABLISH rather than merely raise.</b> <see cref="NoteClusterBorn"/> overwrites an unknown bound with whatever it is
+    /// given, which would lose a higher value on a populated cluster. A fresh cluster holds exactly one entity, so the value the caller establishes is exact.
+    /// Do not extend that establish-from-unknown path to clusters that already hold entities.
+    /// </para>
+    /// <para>
+    /// <b>Known residual, NOT fixed here.</b> The same half-written-slot window still exists for an EXISTING cluster whose bound was already established: the
+    /// bit is published by the claim and the EntityMap record is written by the caller, so a newer reader can count a slot in flight. That predates this change
+    /// — the fold moving into the claim neither created nor widened it — and closing it needs a two-phase reserve/publish primitive rather than more fold
+    /// ordering, because the defect is what the SLOT contains, not what the summary says.
+    /// </para>
+    /// </remarks>
+    internal const string FreshClusterStaysUnknown = "see the remarks on this field";
 
     /// <summary>
     /// Record that an entity whose <c>BornTSN</c> is <paramref name="bornTsn"/> now occupies <paramref name="clusterChunkId"/>. Called by EVERY site that
     /// associates an entity with a cluster — spawn commit, WAL replay, chain rebuild, and spatial cluster migration — because the summary is only sound if it
     /// bounds every entity actually present.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This must run BEFORE the store that publishes the slot's occupancy bit, never after</b> (<c>BIND-04</c>). Every claim path therefore calls it itself
+    /// rather than leaving it to the caller: published the other way round, a reader that sees the bit can still see a maximum that predates the entity, and
+    /// <see cref="IsClusterFullyVisibleAt(int, long)"/> then vouches for a cluster holding an entity born after that reader's snapshot —
+    /// <c>EcsQuery.TryCountViaOccupancy</c>, which popcounts the word on the strength of that vouch and has no per-entity probe to fall back on, over-counts.
+    /// The reader's half is the mirror: acquire-read the occupancy word, then read the summary.
+    /// </para>
+    /// <para>
+    /// <b>The CAS covers the element, NOT the array.</b> <see cref="EnsureClusterVisibilityCapacity"/> is unsynchronised: two concurrent growers each allocate,
+    /// copy and publish, and the later publish drops the earlier's contents — so a fold that lands between another thread's copy and its publish is lost
+    /// regardless of how atomically it was made. That hazard predates this method's CAS and is not fixed by it. It is bounded by the same open question as
+    /// <c>ClaimSlot</c>'s unguarded <c>FreeClusterHead</c> / <c>AllocateNewCluster</c> sequence: whether the spawn-commit path is single-writer, which
+    /// <c>ClaimSlot</c>'s own remark asserts and <see cref="ClaimFreeBit"/>'s #708 remark denies. Both cannot be true; settle it before adding a lock here.
+    /// </para>
+    /// <para>
+    /// <b>The maximum is an upper bound, not the exact largest BornTSN present, and it is not monotone with the TSN clock.</b> Cluster migration folds the TSN
+    /// high-water mark because the migrated entity's own <c>BornTSN</c> is not readable until after the claim, so a migrated-into cluster can carry a bound
+    /// ABOVE anything committed — and a later spawn into it then moves nothing. Every consumer must treat "unmoved" as "no information", never as "unchanged";
+    /// see <c>EcsView.ScanArchetypeOccupancy</c>, which reads the occupancy word unconditionally for exactly this reason. Overshooting is otherwise free of
+    /// consequence: it only denies the whole-cluster shortcut to readers who would have been granted it, which costs a probe and never emits an entity.
+    /// </para>
+    /// </remarks>
     internal void NoteClusterBorn(int clusterChunkId, long bornTsn)
     {
         EnsureClusterVisibilityCapacity(clusterChunkId + 1);
-        var current = ClusterMaxBornTsn[clusterChunkId];
-        if (current == VisibilityUnknown || bornTsn > current)
+
+        // CAS rather than a plain store, because two claimants can be folding into the SAME cluster at once — #708 records that Transient spawns commit
+        // concurrently from independent transactions, and that is the very path this now runs on. A read-modify-write of a maximum loses updates under that:
+        // both read 5, one writes 12, the other writes 10 last, and the cluster ends up vouching for a snapshot at 10 while holding an entity born at 12.
+        // Silent, and produces a phantom rather than a slow query.
+        //
+        // The re-read of the array reference after the CAS is the other half, and serialising growers against each other does NOT cover it: a folder can pass
+        // the capacity check, take a reference to the CURRENT array, and CAS into it while a grower — holding the lock, entirely correctly — has already
+        // Array.Copy'd and is about to publish the replacement. The fold lands in an array nobody will read again. Confirming the reference is unchanged after
+        // the CAS, and retrying when it is not, is what makes the fold durable across a grow.
+        while (true)
         {
-            // Plain store: the reader consumes this only after an acquire-ordered read of the cluster's occupancy word, and the occupancy bit for this entity
-            // is published by the same commit that runs this call. A reader that cannot see the occupancy bit cannot emit the entity either way.
-            ClusterMaxBornTsn[clusterChunkId] = bornTsn;
+            var slots = Volatile.Read(ref ClusterMaxBornTsn);
+            var current = Volatile.Read(ref slots[clusterChunkId]);
+            if (current != VisibilityUnknown && bornTsn <= current)
+            {
+                // Even a no-op has to confirm it read the live array — a "already high enough" decision taken against a doomed copy is not a decision.
+                if (ReferenceEquals(Volatile.Read(ref ClusterMaxBornTsn), slots))
+                {
+                    return;
+                }
+
+                continue;
+            }
+
+            if (Interlocked.CompareExchange(ref slots[clusterChunkId], bornTsn, current) == current
+                && ReferenceEquals(Volatile.Read(ref ClusterMaxBornTsn), slots))
+            {
+                return;
+            }
         }
     }
 
-    /// <summary>Record that an entity in <paramref name="clusterChunkId"/> carries a non-zero <c>DiedTSN</c>, forcing the per-entity probe for that cluster.</summary>
-    internal void NoteClusterDied(int clusterChunkId)
+    /// <summary>
+    /// The one way to read the (count, array) pair of the active-cluster list. Count FIRST, then the array, both acquire, then clamp.
+    /// </summary>
+    /// <remarks>
+    /// CLUSTERWALK-02. <see cref="AddToActiveList"/> stores the grown array plainly and publishes the count with a release, so acquiring the count guarantees
+    /// seeing an array at least that long — and loading the array first needs no instruction reordering to fault, just a plain interleaving: read the
+    /// length-16 array, let a concurrent spawn resize and bump the count to 17, read 17, index 16. The rule requires every call site to come through one
+    /// reader rather than get the order right independently, because the sites that were right were right by accident.
+    /// <para>
+    /// It lives here rather than on <c>TyphonRuntime</c> (where it was <c>private static</c>) because it reads this type's fields and this type is not the
+    /// runtime's alone — <c>EcsQuery.TryCountViaOccupancy</c> needs it too, and reproducing the four lines at that call site is what the rule forbids.
+    /// </para>
+    /// <para>
+    /// This makes the pair CONSISTENT; it does not make the walk SAFE. A walker racing <see cref="RemoveFromActiveList"/> can still see one cluster twice and
+    /// skip another, whose chunk is freed two lines later — CLUSTERWALK-01, which needs a snapshot or epoch protocol and is unfixed.
+    /// </para>
+    /// </remarks>
+    internal int[] ReadActiveClusterList(out int count)
+    {
+        count = Volatile.Read(ref ActiveClusterCount);
+        var ids = Volatile.Read(ref ActiveClusterIds);
+        if (ids == null)
+        {
+            count = 0;
+            return null;
+        }
+
+        if (count > ids.Length)
+        {
+            count = ids.Length;
+        }
+
+        return ids;
+    }
+
+    /// <summary>
+    /// Return a cluster's visibility entries to the unestablished state. MUST be called by every site that frees a cluster chunk, before the chunk id can be
+    /// handed back out.
+    /// </summary>
+    /// <remarks>
+    /// Chunk ids are RECYCLED — <c>ChunkBasedSegment</c> keeps a free list — so without this a brand-new cluster inherits whatever the previous occupant of
+    /// that id left behind. That defeats <see cref="FreshClusterStaysUnknown"/> entirely: the fresh-cluster claim skips the fold precisely so the gate denies
+    /// until the slot has contents, and it can only deny if the entry actually holds the sentinel. Concretely — cluster 7 drains with born=100, died=120 and
+    /// is freed; a spawn at TSN 500 gets id 7 back and release-stores occupancy bit 0; a reader at txTsn=300 loads the word, reads born=100 and died=120, both
+    /// satisfied, and counts a slot whose EntityId tail and EntityMap record do not exist yet. It also stops a permanent-deny value (the migration tombstone
+    /// guard) being inherited by an unrelated cluster and nailing it to the slow path forever.
+    /// </remarks>
+    internal void ResetClusterVisibility(int clusterChunkId)
+    {
+        var born = Volatile.Read(ref ClusterMaxBornTsn);
+        if (born != null && (uint)clusterChunkId < (uint)born.Length)
+        {
+            Volatile.Write(ref born[clusterChunkId], VisibilityUnknown);
+        }
+
+        var died = Volatile.Read(ref ClusterMaxDiedTsn);
+        if (died != null && (uint)clusterChunkId < (uint)died.Length)
+        {
+            Volatile.Write(ref died[clusterChunkId], 0);
+        }
+    }
+
+    /// <summary>
+    /// Record that an entity in <paramref name="clusterChunkId"/> died at <paramref name="diedTsn"/>, forcing the per-entity probe for that cluster until a
+    /// reader's snapshot reaches that TSN. Called by EVERY site that tombstones an entity — destroy commit, WAL replay and spatial cluster migration —
+    /// because the summary is only sound if it bounds every death actually recorded.
+    /// </summary>
+    /// <remarks>
+    /// A site that tombstones WITHOUT clearing the occupancy bit must fold <see cref="VisibilityUnknown"/> rather than the death's TSN. The watermark's whole
+    /// argument is that a reader past the last death is exact because occupancy already reflects it; where the bit survives, that is false and a satisfiable
+    /// watermark grants the gate over a tombstone. Two sites are in that shape today — recovery replay and cluster migration — and both pass the sentinel.
+    /// </remarks>
+    internal void NoteClusterDied(int clusterChunkId, long diedTsn)
     {
         EnsureClusterVisibilityCapacity(clusterChunkId + 1);
-        ClusterAnyDied[clusterChunkId >> 6] |= 1UL << (clusterChunkId & 63);
+
+        // CAS, and the same post-CAS array re-read as NoteClusterBorn — see there. A lost update on this side under-records the watermark, which admits
+        // exactly the readers between the recorded value and the real death and makes them miss a tombstone they must still see. 0 is "no death", so it is
+        // never a legal value to fold.
+        while (true)
+        {
+            var slots = Volatile.Read(ref ClusterMaxDiedTsn);
+            var current = Volatile.Read(ref slots[clusterChunkId]);
+            if (diedTsn <= current)
+            {
+                if (ReferenceEquals(Volatile.Read(ref ClusterMaxDiedTsn), slots))
+                {
+                    return;
+                }
+
+                continue;
+            }
+
+            if (Interlocked.CompareExchange(ref slots[clusterChunkId], diedTsn, current) == current
+                && ReferenceEquals(Volatile.Read(ref ClusterMaxDiedTsn), slots))
+            {
+                return;
+            }
+        }
     }
 
     /// <summary>
     /// True when every entity in <paramref name="clusterChunkId"/> is visible to a reader at <paramref name="txTsn"/>, so the scan may skip the per-entity
     /// EntityMap probe for the whole cluster. False whenever the answer is not certain — an unsized array, an unestablished maximum, or any recorded death.
     /// </summary>
-    internal bool IsClusterFullyVisibleAt(int clusterChunkId, long txTsn)
+    internal bool IsClusterFullyVisibleAt(int clusterChunkId, long txTsn) => IsClusterFullyVisibleAt(clusterChunkId, txTsn, out _, out _);
+
+    /// <summary>
+    /// As <see cref="IsClusterFullyVisibleAt(int, long)"/>, additionally handing back the two watermark values the decision was made on.
+    /// </summary>
+    /// <remarks>
+    /// A caller that needs the values as well as the verdict — <c>EcsView</c> stores them as its change token — must not re-read the arrays afterwards. A
+    /// second read can observe a fold that landed AFTER the gate ran, which would be recorded as already-accounted-for while the occupancy word the caller
+    /// paired it with predates that fold; the cluster then reads quiet on the next refresh and the change is lost. One read, one decision, one pair of values.
+    /// </remarks>
+    internal bool IsClusterFullyVisibleAt(int clusterChunkId, long txTsn, out long bornWatermark, out long diedWatermark)
     {
+        bornWatermark = VisibilityUnknown;
+        diedWatermark = 0;
 
-
-        // Acquire loads, and in THIS order. The growth path publishes the resized ClusterAnyDied before release-storing ClusterMaxBornTsn, so a reader that
+        // Acquire loads, and in THIS order. The growth path publishes the resized ClusterMaxDiedTsn before release-storing ClusterMaxBornTsn, so a reader that
         // reads maxBorn first is guaranteed the died array it then reads is at least as new. Reading them the other way round could pair a new maxBorn with a
-        // stale short died array — and a missing died bit reads as "clean", which is a phantom.
+        // stale short died array — and a missing died entry reads as "no death", which is a phantom.
         var maxBorn = Volatile.Read(ref ClusterMaxBornTsn);
         if (maxBorn == null || (uint)clusterChunkId >= (uint)maxBorn.Length)
         {
             return false;
         }
 
-        var born = maxBorn[clusterChunkId];
+        var born = Volatile.Read(ref maxBorn[clusterChunkId]);
+        bornWatermark = born;
+
+        // A died array that is absent or too short is NOT evidence of "nobody died" — it is evidence that this reader cannot tell. Fall back to the probe.
+        var died = Volatile.Read(ref ClusterMaxDiedTsn);
+        if (died == null || (uint)clusterChunkId >= (uint)died.Length)
+        {
+            return false;
+        }
+
+        diedWatermark = Volatile.Read(ref died[clusterChunkId]);
+
         if (born == VisibilityUnknown || born > txTsn)
         {
             return false;
         }
 
-        // A died array that is absent or too short is NOT evidence of "nobody died" — it is evidence that this reader cannot tell. Fall back to the probe.
-        var died = Volatile.Read(ref ClusterAnyDied);
-        var word = clusterChunkId >> 6;
-        if (died == null || (uint)word >= (uint)died.Length)
-        {
-            return false;
-        }
-
-        return (died[word] & (1UL << (clusterChunkId & 63))) == 0;
+        // Unlike the born side there is no "unknown" sentinel: 0 means no death has been recorded, and 0 <= txTsn for every real snapshot, so a cluster
+        // nothing has died in never blocks. A reader whose snapshot has reached the last death sees an occupancy word that already reflects it.
+        return diedWatermark <= txTsn;
     }
 
     /// <summary>
@@ -568,12 +771,40 @@ internal sealed unsafe class ArchetypeClusterState
     /// </summary>
     internal void EnsureClusterVisibilityCapacity(int requiredLength)
     {
+        // Double-checked growth. The fast path is a plain length compare and stays lock-free; only an actual grow serialises. Unsynchronised, two growers each
+        // allocate, Array.Copy and publish, and the later publish silently drops every fold the earlier one copied — a lost BORN fold leaves the cluster
+        // vouching for an entity born after it, which is a phantom. Reachable since the fold moved into TryClaimSlotInCluster, which parallel Migrate-phase
+        // workers call. No caller holds _finalizeLock across this: ClaimSlotInCell's lock block covers AllocateNewCluster and the cell bookkeeping only, and
+        // every fold site sits outside it.
+        var current = Volatile.Read(ref ClusterMaxBornTsn);
+        if (current != null && current.Length >= requiredLength)
+        {
+            return;
+        }
+
+        ref WaitContext growCtx = ref Unsafe.NullRef<WaitContext>();
+        _finalizeLock.Lock.EnterExclusiveAccess(ref growCtx);
+        try
+        {
+            GrowClusterVisibilityCapacityLocked(requiredLength);
+        }
+        finally
+        {
+            _finalizeLock.Lock.ExitExclusiveAccess();
+        }
+    }
+
+    /// <summary>The growth body of <see cref="EnsureClusterVisibilityCapacity"/>. Caller must hold <c>_finalizeLock</c> exclusively.</summary>
+    private void GrowClusterVisibilityCapacityLocked(int requiredLength)
+    {
         if (ClusterMaxBornTsn == null)
         {
             var initial = Math.Max(16, requiredLength);
             var fresh = new long[initial];
             Array.Fill(fresh, VisibilityUnknown);
-            Volatile.Write(ref ClusterAnyDied, new ulong[(initial + 63) >> 6]);
+            // Zero-filled is correct and is NOT the pessimistic end for this array: 0 means "no death recorded", which is the truth for a cluster that has
+            // never held one. The born array needs its sentinel because an unestablished maximum must not read as 0 (= visible to everyone).
+            Volatile.Write(ref ClusterMaxDiedTsn, new long[initial]);
             // Publish the sized-and-filled array as one store: a reader that sees a non-null reference must see it fully initialized, or it would read a
             // default 0 as "clean" and skip the probe. See M3/M4/M5 in the pre-merge review for the same hazard in ZoneMapArray.
             Volatile.Write(ref ClusterMaxBornTsn, fresh);
@@ -594,9 +825,9 @@ internal sealed unsafe class ArchetypeClusterState
         var grown = new long[newLen];
         Array.Copy(ClusterMaxBornTsn, grown, oldLen);
         Array.Fill(grown, VisibilityUnknown, oldLen, newLen - oldLen);
-        var grownDied = new ulong[(newLen + 63) >> 6];
-        Array.Copy(ClusterAnyDied, grownDied, ClusterAnyDied.Length);
-        Volatile.Write(ref ClusterAnyDied, grownDied);
+        var grownDied = new long[newLen];
+        Array.Copy(ClusterMaxDiedTsn, grownDied, ClusterMaxDiedTsn.Length);
+        Volatile.Write(ref ClusterMaxDiedTsn, grownDied);
         Volatile.Write(ref ClusterMaxBornTsn, grown);
     }
 
@@ -1215,8 +1446,10 @@ internal sealed unsafe class ArchetypeClusterState
     /// FinalizeSpawns is single-writer (no concurrent commit), so CAS always succeeds on first try.</para>
     /// <para>The OccupancyBit is set immediately by this method. The caller MUST write component data and EntityKey before the next iteration boundary to
     /// maintain the invariant that occupied slots contain valid data.</para>
+    /// <para><paramref name="bornTsn"/> is folded into the cluster's H1 visibility summary BEFORE the bit is published — see
+    /// <see cref="NoteClusterBorn"/> and the class-level ordering note.</para>
     /// </remarks>
-    public (int clusterChunkId, int slotIndex) ClaimSlot(ref ChunkAccessor<PersistentStore> accessor, ChangeSet changeSet)
+    public (int clusterChunkId, int slotIndex) ClaimSlot(ref ChunkAccessor<PersistentStore> accessor, ChangeSet changeSet, long bornTsn)
     {
         // Try existing cluster with free slots (O(1) when FreeClusterHead is valid)
         if (FreeClusterHead >= 0)
@@ -1224,6 +1457,10 @@ internal sealed unsafe class ArchetypeClusterState
             int clusterId = FreeClusterHead;
             byte* clusterBase = accessor.GetChunkAddress(clusterId, true);
             ref ulong occupancy = ref *(ulong*)clusterBase;
+
+            // Fold BEFORE the claim: the CAS inside ClaimFreeBit is what publishes the bit, and its full fence keeps this store on the correct side of it.
+            // Folding for a claim that then fails (cluster full) only raises the maximum, which is conservative — never a relaxation.
+            NoteClusterBorn(clusterId, bornTsn);
 
             int slot = ClaimFreeBit(ref occupancy, Layout.FullMask);
             if (slot >= 0)
@@ -1245,8 +1482,8 @@ internal sealed unsafe class ArchetypeClusterState
         int newClusterId = AllocateNewCluster(changeSet);
         byte* newBase = accessor.GetChunkAddress(newClusterId, true);
 
-        // Claim slot 0 in the fresh cluster
-        *(ulong*)newBase = 1UL; // OccupancyBit 0 set
+        // Claim slot 0 in the fresh cluster. NO fold here — see FreshClusterStaysUnknown. Release store, paired with the reader's acquire read of the word.
+        Volatile.Write(ref *(ulong*)newBase, 1UL); // OccupancyBit 0 set
         FreeClusterHead = Layout.ClusterSize > 1 ? newClusterId : -1;
 
         return (newClusterId, 0);
@@ -1256,13 +1493,15 @@ internal sealed unsafe class ArchetypeClusterState
     /// Claim a free slot for pure-Transient archetypes (no PersistentStore segment).
     /// Same logic as the PersistentStore overload but using TransientStore accessor.
     /// </summary>
-    public (int clusterChunkId, int slotIndex) ClaimSlot(ref ChunkAccessor<TransientStore> accessor)
+    public (int clusterChunkId, int slotIndex) ClaimSlot(ref ChunkAccessor<TransientStore> accessor, long bornTsn)
     {
         if (FreeClusterHead >= 0)
         {
             int clusterId = FreeClusterHead;
             byte* clusterBase = accessor.GetChunkAddress(clusterId, true);
             ref ulong occupancy = ref *(ulong*)clusterBase;
+
+            NoteClusterBorn(clusterId, bornTsn);   // before the publishing CAS — see the PersistentStore overload
 
             int slot = ClaimFreeBit(ref occupancy, Layout.FullMask);
             if (slot >= 0)
@@ -1279,7 +1518,7 @@ internal sealed unsafe class ArchetypeClusterState
 
         int newClusterId = AllocateNewCluster(null);
         byte* newBase = accessor.GetChunkAddress(newClusterId, true);
-        *(ulong*)newBase = 1UL;
+        Volatile.Write(ref *(ulong*)newBase, 1UL);   // no fold — see FreshClusterStaysUnknown
         FreeClusterHead = Layout.ClusterSize > 1 ? newClusterId : -1;
 
         return (newClusterId, 0);
@@ -1302,7 +1541,7 @@ internal sealed unsafe class ArchetypeClusterState
     /// concurrent claimants on the same cluster safe (single-writer today; parallel-fence migration paths can hit the same dst cluster from cell-partitioned
     /// workers). The <c>dirty:true</c> re-fetch does not move the chunk, so the <c>occupancy</c> ref taken from the first fetch stays valid.
     /// </remarks>
-    private int TryClaimSlotInCluster<TStore>(ref ChunkAccessor<TStore> accessor, int clusterChunkId)
+    private int TryClaimSlotInCluster<TStore>(ref ChunkAccessor<TStore> accessor, int clusterChunkId, long bornTsn)
         where TStore : struct, IPageStore
     {
         byte* clusterBase = accessor.GetChunkAddress(clusterChunkId);
@@ -1317,6 +1556,10 @@ internal sealed unsafe class ArchetypeClusterState
 
         // Free slot found — dirty the page before mutating occupancy (ACW-before-write). MRU hit: clusterChunkId was just read above.
         accessor.GetChunkAddress(clusterChunkId, true);
+
+        // Fold the visibility summary BEFORE the CAS that publishes the bit. Placed after the full-cluster early-out so a scan that merely walks past a full
+        // cluster does not raise its maximum for nothing; a fold whose CAS loop then finds the cluster full is only conservative, never wrong.
+        NoteClusterBorn(clusterChunkId, bornTsn);
 
         while (true)
         {
@@ -1342,7 +1585,7 @@ internal sealed unsafe class ArchetypeClusterState
     /// its existing clusters has a free slot.
     /// </summary>
     /// <remarks>
-    /// <para>This is the spatial-aware counterpart of <see cref="ClaimSlot(ref ChunkAccessor{PersistentStore}, ChangeSet)"/>. Unlike <c>ClaimSlot</c> it
+    /// <para>This is the spatial-aware counterpart of <see cref="ClaimSlot(ref ChunkAccessor{PersistentStore}, ChangeSet, long)"/>. Unlike <c>ClaimSlot</c> it
     /// ignores <see cref="FreeClusterHead"/> — that hint is a global free-slot cache that cannot distinguish cells, so it's useless once spatial
     /// coherence is required. Instead, we scan this archetype's own cluster list for the target cell (typically ≤80 entries for AntHill-scale
     /// density, ≤15-30 ns scan cost).</para>
@@ -1352,7 +1595,12 @@ internal sealed unsafe class ArchetypeClusterState
     /// <see cref="CellState.ClusterCount"/>, appends the cluster to this archetype's per-cell claim list, and records the mapping in
     /// <see cref="ClusterCellMap"/>.</para>
     /// </remarks>
-    public (int clusterChunkId, int slotIndex) ClaimSlotInCell(int cellKey, ref ChunkAccessor<PersistentStore> accessor, ChangeSet changeSet, SpatialGrid grid)
+    public (int clusterChunkId, int slotIndex) ClaimSlotInCell(
+        int cellKey,
+        ref ChunkAccessor<PersistentStore> accessor,
+        ChangeSet changeSet,
+        SpatialGrid grid,
+        long bornTsn)
     {
         ref var cell = ref grid.GetCell(cellKey);
         var clusters = CellClusterPool.GetClusters(cellKey);
@@ -1376,7 +1624,7 @@ internal sealed unsafe class ArchetypeClusterState
         for (int i = scanStart; i < clusters.Length; i++)
         {
             int clusterId = clusters[i];
-            int slot = TryClaimSlotInCluster(ref accessor, clusterId);
+            int slot = TryClaimSlotInCluster(ref accessor, clusterId, bornTsn);
             if (slot < 0)
             {
                 if (i == firstNonFull)
@@ -1398,7 +1646,7 @@ internal sealed unsafe class ArchetypeClusterState
         for (int i = 0; i < scanStart; i++)
         {
             int clusterId = clusters[i];
-            int slot = TryClaimSlotInCluster(ref accessor, clusterId);
+            int slot = TryClaimSlotInCluster(ref accessor, clusterId, bornTsn);
             if (slot < 0)
             {
                 if (i == prefixFirstNonFull)
@@ -1442,7 +1690,7 @@ internal sealed unsafe class ArchetypeClusterState
         Interlocked.Increment(ref cell.EntityCount);
 
         byte* newBase = accessor.GetChunkAddress(newChunkId, true);
-        *(ulong*)newBase = 1UL; // occupancy bit 0
+        Volatile.Write(ref *(ulong*)newBase, 1UL); // occupancy bit 0, no fold — see FreshClusterStaysUnknown
 
         // Phase 3: Spatial:Grid:ClusterCellAssign instant — fired when a new cluster is bound to a cell.
         TyphonEvent.EmitSpatialGridClusterCellAssign(newChunkId, cellKey, (ushort)Math.Min(ArchetypeId, ushort.MaxValue));
@@ -1450,10 +1698,10 @@ internal sealed unsafe class ArchetypeClusterState
     }
 
     /// <summary>
-    /// Pure-Transient overload of <see cref="ClaimSlotInCell(int, ref ChunkAccessor{PersistentStore}, ChangeSet, SpatialGrid)"/>. Identical logic,
+    /// Pure-Transient overload of <see cref="ClaimSlotInCell(int, ref ChunkAccessor{PersistentStore}, ChangeSet, SpatialGrid, long)"/>. Identical logic,
     /// different accessor type.
     /// </summary>
-    public (int clusterChunkId, int slotIndex) ClaimSlotInCell(int cellKey, ref ChunkAccessor<TransientStore> accessor, SpatialGrid grid)
+    public (int clusterChunkId, int slotIndex) ClaimSlotInCell(int cellKey, ref ChunkAccessor<TransientStore> accessor, SpatialGrid grid, long bornTsn)
     {
         ref var cell = ref grid.GetCell(cellKey);
         var clusters = CellClusterPool.GetClusters(cellKey);
@@ -1470,7 +1718,7 @@ internal sealed unsafe class ArchetypeClusterState
         for (int i = scanStart; i < clusters.Length; i++)
         {
             int clusterId = clusters[i];
-            int slot = TryClaimSlotInCluster(ref accessor, clusterId);
+            int slot = TryClaimSlotInCluster(ref accessor, clusterId, bornTsn);
             if (slot < 0)
             {
                 if (i == firstNonFull)
@@ -1489,7 +1737,7 @@ internal sealed unsafe class ArchetypeClusterState
         for (int i = 0; i < scanStart; i++)
         {
             int clusterId = clusters[i];
-            int slot = TryClaimSlotInCluster(ref accessor, clusterId);
+            int slot = TryClaimSlotInCluster(ref accessor, clusterId, bornTsn);
             if (slot < 0)
             {
                 if (i == prefixFirstNonFull)
@@ -1526,7 +1774,7 @@ internal sealed unsafe class ArchetypeClusterState
         Interlocked.Increment(ref cell.EntityCount);
 
         byte* newBase = accessor.GetChunkAddress(newChunkId, true);
-        *(ulong*)newBase = 1UL;
+        Volatile.Write(ref *(ulong*)newBase, 1UL); // no fold — see FreshClusterStaysUnknown
 
         // Phase 3: Spatial:Grid:ClusterCellAssign instant — fired when a new cluster is bound to a cell.
         TyphonEvent.EmitSpatialGridClusterCellAssign(newChunkId, cellKey, (ushort)Math.Min(ArchetypeId, ushort.MaxValue));
@@ -2781,6 +3029,7 @@ internal sealed unsafe class ArchetypeClusterState
                 // Single-threaded caller (Transaction.Destroy, etc.) — safe to finalize immediately.
                 FinaliseEmptyClusterCellState(grid, clusterChunkId);
                 RemoveFromActiveList(clusterChunkId);
+                ResetClusterVisibility(clusterChunkId);   // the id is about to be recyclable — see ResetClusterVisibility
                 ClusterSegment.FreeChunk(clusterChunkId);
                 TransientSegment?.FreeChunk(clusterChunkId);
             }
@@ -2819,6 +3068,7 @@ internal sealed unsafe class ArchetypeClusterState
             {
                 FinaliseEmptyClusterCellState(grid, clusterChunkId);
                 RemoveFromActiveList(clusterChunkId);
+                ResetClusterVisibility(clusterChunkId);   // the id is about to be recyclable — see ResetClusterVisibility
                 TransientSegment.FreeChunk(clusterChunkId);
             }
         }
@@ -2881,7 +3131,7 @@ internal sealed unsafe class ArchetypeClusterState
     /// false) we reset to 0 so the freed slot is immediately reusable by the next claim. On the parallel-fence migration path (<c>deferFinalize</c> true)
     /// the reset is SKIPPED — releases there touch arbitrary, non-worker-exclusive source cells, so resetting would zero the cursors of destination cells
     /// other workers are actively claiming into (cursor thrash) and pound a shared array (false sharing). Phase-2 of
-    /// <see cref="ClaimSlotInCell(int, ref ChunkAccessor{PersistentStore}, ChangeSet, SpatialGrid)"/> recovers any slot freed behind the cursor, so
+    /// <see cref="ClaimSlotInCell(int, ref ChunkAccessor{PersistentStore}, ChangeSet, SpatialGrid, long)"/> recovers any slot freed behind the cursor, so
     /// skipping the reset costs at most a redundant scan, never a missed free slot.</para>
     /// </summary>
     private void DecrementCellEntityCountOnRelease(SpatialGrid grid, int clusterChunkId, bool resetCursor)

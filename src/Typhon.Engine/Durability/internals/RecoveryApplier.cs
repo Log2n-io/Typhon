@@ -206,7 +206,9 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         var clusterState = _engineState.ClusterState;
         var layout = clusterState.Layout;
 
-        var (clusterChunkId, slotIdx) = clusterState.ClaimSlot(ref _clusterAccessor, _changeSet);
+        // H1: the claim folds bornTsn into the cluster's visibility summary before publishing the occupancy bit — replay must bound the cluster too, or a
+        // recovered entity is invisible to the summary.
+        var (clusterChunkId, slotIdx) = clusterState.ClaimSlot(ref _clusterAccessor, _changeSet, bornTsn);
         byte* clusterBase = _clusterAccessor.GetChunkAddress(clusterChunkId, true);
 
         // Build the ClusterEntityRecord (19 bytes base + 4 bytes per Versioned slot).
@@ -214,7 +216,8 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         ref var header = ref ClusterEntityRecordAccessor.GetHeader(recordPtr);
         header.BornTSN = bornTsn;
         header.EnabledBits = enabledBits;
-        clusterState.NoteClusterBorn(clusterChunkId, bornTsn);   // H1: replay must bound the cluster too, or a recovered entity is invisible to the summary
+        // Establishes a freshly allocated cluster's bound; a no-op raise on an existing one the claim already covered (FreshClusterStaysUnknown).
+        clusterState.NoteClusterBorn(clusterChunkId, bornTsn);
         ClusterEntityRecordAccessor.SetClusterChunkId(recordPtr, clusterChunkId);
         ClusterEntityRecordAccessor.SetSlotIndex(recordPtr, (byte)slotIdx);
 
@@ -293,8 +296,12 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         }
 
         EntityRecordAccessor.GetHeader(readBuf).DiedTSN = tsn;
-        // H1: same reasoning as the commit-path tombstone — the replayed death has to take its cluster off the visibility fast path.
-        _engineState.ClusterState?.NoteClusterDied(ClusterEntityRecordAccessor.GetClusterChunkId(readBuf));
+        // H1, and NOT with `tsn`. Unlike the commit-path tombstone this replay does NOT call ReleaseSlot — cleanup is deferred to the orphan sweep — so the
+        // cluster keeps a SET occupancy bit for a dead entity. The whole died-watermark argument rests on the bit being cleared at destroy: a reader past the
+        // last death is exact only because occupancy already reflects it. Fold `tsn` here and every post-recovery reader satisfies `died <= txTsn`, the gate
+        // grants, and TryCountViaOccupancy popcounts a tombstone with no per-entity probe to catch it — a permanent over-count after any recovery that
+        // replays a below-frontier destroy. VisibilityUnknown denies this cluster until the sweep clears the bit, which is what the pre-#722 sticky flag did.
+        _engineState.ClusterState?.NoteClusterDied(ClusterEntityRecordAccessor.GetClusterChunkId(readBuf), ArchetypeClusterState.VisibilityUnknown);
         _engineState.EntityMap.Upsert(key, readBuf, ref _mapAccessor, _changeSet);
     }
 

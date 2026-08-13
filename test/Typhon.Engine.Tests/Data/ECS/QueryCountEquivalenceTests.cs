@@ -233,7 +233,7 @@ class QueryCountEquivalenceTests : TestBase<QueryCountEquivalenceTests>
     /// still alive for it. The archetype must fall back.
     /// </summary>
     [Test]
-    public void AfterADestroy_TheArchetypeFallsBackToTheProbe()
+    public void AfterADestroy_AReaderThatFollowsItStaysOnTheFastPath()
     {
         using var dbe = SetupEngine();
         var ids = SpawnBase(dbe, BaseCount);
@@ -246,7 +246,77 @@ class QueryCountEquivalenceTests : TestBase<QueryCountEquivalenceTests>
         }
 
         using var reader = dbe.CreateQuickTransaction();
-        AssertAgree(() => reader.QueryExact<QCountUnit>().Count(), BaseCount - 2, expectFastPath: false, "an archetype carrying a tombstone");
+        AssertAgree(() => reader.QueryExact<QCountUnit>().Count(), BaseCount - 2, expectFastPath: true,
+            "an archetype whose only deaths predate the reader");
+    }
+
+    /// <summary>
+    /// The recovery the sticky flag could not do (#722). Two destroys in different commits, and a reader created after each: the second reader must be back on
+    /// the fast path too, not permanently exiled by the fact that the cluster has ever seen a death.
+    /// </summary>
+    /// <remarks>
+    /// This is the case that decides whether an unfiltered View's per-tick refresh can use the occupancy delta at all. A simulation destroys entities
+    /// continuously, so under the old <c>ClusterAnyDied</c> flag every cluster carried it within a few ticks and the gate never opened again — the fast path
+    /// existed but was unreachable in the workload that needed it. Fails on the sticky flag; passes on the watermark.
+    /// </remarks>
+    [Test]
+    public void RepeatedDestroys_DoNotPermanentlyExileTheArchetype()
+    {
+        using var dbe = SetupEngine();
+        var ids = SpawnBase(dbe, BaseCount);
+
+        for (var round = 0; round < 3; round++)
+        {
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                tx.Destroy(ids[round]);
+                tx.Commit();
+            }
+
+            using var reader = dbe.CreateQuickTransaction();
+            AssertAgree(() => reader.QueryExact<QCountUnit>().Count(), BaseCount - (round + 1), expectFastPath: true,
+                $"round {round}: churn must not latch the archetype off the fast path");
+        }
+    }
+
+    /// <summary>
+    /// The destroy-side case that would be WRONG rather than slow, and the mirror of <see cref="ReaderPredatingACommit_DoesNotCountTheNewEntities"/>.
+    /// </summary>
+    /// <remarks>
+    /// <c>ReleaseSlot</c> clears the occupancy bit at destroy commit while the tombstone lives on the EntityMap record, so a reader whose snapshot predates the
+    /// death must still see the entity — but the occupancy word has already dropped it. Without the died watermark in the gate, the popcount UNDER-counts.
+    /// Ablation: delete the <c>died[clusterChunkId] &lt;= txTsn</c> term from <c>IsClusterFullyVisibleAt</c> and this returns the wrong number.
+    /// </remarks>
+    [Test]
+    public void ReaderPredatingADestroy_StillCountsTheDoomedEntities()
+    {
+        using var dbe = SetupEngine();
+        var ids = SpawnBase(dbe, BaseCount);
+
+        // Snapshot fixed here, before the destroy commits.
+        using var reader = dbe.CreateQuickTransaction();
+        var before = CountOn(ClusterCountPath.Planner, () => reader.QueryExact<QCountUnit>().Count(), out _, out _);
+
+        using (var writer = dbe.CreateQuickTransaction())
+        {
+            writer.Destroy(ids[0]);
+            writer.Destroy(ids[1]);
+            writer.Destroy(ids[2]);
+            writer.Commit();
+        }
+
+        var afterPlanned = CountOn(ClusterCountPath.Planner, () => reader.QueryExact<QCountUnit>().Count(), out var occupancy, out _);
+        var afterProbe = CountOn(ClusterCountPath.MapProbe, () => reader.QueryExact<QCountUnit>().Count(), out _, out _);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(before, Is.EqualTo(BaseCount), "sanity: the reader sees the seeded population before the writer runs");
+            Assert.That(afterPlanned, Is.EqualTo(BaseCount),
+                "the reader's snapshot predates the destroy, so those 3 entities must remain visible to it — the occupancy word has already dropped them, so "
+                + "a popcount without the died-TSN gate would under-count");
+            Assert.That(afterProbe, Is.EqualTo(afterPlanned), "and the two strategies must still agree");
+            Assert.That(occupancy, Is.Zero, "a reader older than the death cannot use occupancy at all — the gate must have sent it to the probe");
+        });
     }
 
     /// <summary>Occupancy is liveness, not enabled bits — any enabled/disabled requirement disqualifies the shortcut.</summary>
