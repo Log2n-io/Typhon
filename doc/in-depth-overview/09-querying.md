@@ -153,7 +153,7 @@ Singleton (`PlanBuilder.Instance`). Two stages:
 
 | Query shape | Entry point |
 |---|---|
-| Unordered, plan proposes a stream and the predicate looks selective | `ExecuteTargeted` → `ScanPerArchetypeBTreeSelective` — **Path A**: range-scan the archetype's B+Tree, then verify the remaining predicates on the matched slots only |
+| Unordered, plan proposes a stream and the primary index's fan-out is high enough (many rows per distinct key) | `ExecuteTargeted` → `ScanPerArchetypeBTreeSelective` — **Path A**: range-scan the archetype's B+Tree, then verify the remaining predicates on the matched slots only |
 | Unordered, otherwise | `ExecuteTargeted` → `ScanPerArchetypeBTree` — **Path B**: zone-map-prune each cluster and evaluate every predicate against the SoA column |
 | Ordered, every archetype clustered | `ExecuteOrderedClustered` — K-way merge over the OrderBy field's per-archetype B+Trees |
 | Ordered, mixed cluster + non-cluster | `ExecuteOrderedViaSortFallback` |
@@ -161,7 +161,7 @@ Singleton (`PlanBuilder.Instance`). Two stages:
 
 All of them scan real data and return correct results (`src/Typhon.Engine/Ecs/public/EcsQuery.cs`). In particular, a cluster query is never empty and `Count` is never 0 *merely because of plan shape*.
 
-**Path A vs Path B is a performance decision only.** Both return the same entities, including the same MVCC born/died visibility gate on a `Versioned` archetype, and the planner chooses between them on estimated selectivity (`< 5 %` matches → Path A). A Transient index home always takes Path B, whose body never touches a tree and is therefore correct for either home. The equality of the two paths is asserted rather than assumed — `QueryPathEquivalenceTests` runs a key-type × operator × sign matrix through both with the choice forced, because while they agreed only by convention no end-to-end test could have told the difference.
+**Path A vs Path B is a performance decision only.** Both return the same entities, including the same MVCC born/died visibility gate on a `Versioned` archetype, and the planner chooses between them on the primary index's **fan-out** (rows per distinct key): Path A is taken when fan-out is high enough that per-key tree cost beats the per-cluster zone-map pass; at low fan-out Path B wins on every layout measured. A Transient index home always takes Path B, whose body never touches a tree and is therefore correct for either home. The equality of the two paths is asserted rather than assumed — `QueryPathEquivalenceTests` runs a key-type × operator × sign matrix through both with the choice forced, because while they agreed only by convention no end-to-end test could have told the difference.
 
 ### `FieldEvaluator`
 
