@@ -1,0 +1,62 @@
+{
+  "Typhon": {
+    "Profiler": {
+      "Enabled": false,
+      "Trace": "simplespacebattle.typhon-trace",
+      "GcTracing":         { "Enabled": true },
+      "MemoryAllocations": { "Enabled": true },
+      "CpuSampling":       { "Enabled": true },
+      "Gauges":            { "Enabled": true },
+      "Scheduler":         { "Enabled": true },
+      "Runtime": {
+        "Enabled": true,
+        "ThreadScheduling": { "Enabled": true },
+        "WriteTickFence": {
+          "Enabled": true,
+          "Table":   { "Enabled": true },
+          "Shadow":  { "Enabled": true },
+          "Spatial": { "Enabled": true },
+          "Cluster": {
+            "Enabled": true,
+            "Shadow":  { "Enabled": true },
+            "Spatial": { "Enabled": true }
+          }
+        }
+      },
+      "ECS":        { "Enabled": true },
+      "Data":       { "Enabled": true },
+      "Memory":     { "Enabled": true },
+      "Storage":    { "Enabled": true },
+      "Durability": { "Enabled": true },
+      "Query":      { "Enabled": true },
+      "Spatial": {
+        "Enabled": true,
+        "ClusterMigration": { "Enabled": true },
+        "Cell":             { "Index": { "Enabled": true } },
+        "Concurrency":      { "Enabled": true }
+      },
+      "Concurrency": {
+        "Enabled": true,
+        "AccessControl": {
+          "Enabled": true,
+          "SharedAcquire":    { "Enabled": false },
+          "SharedRelease":    { "Enabled": false },
+          "ExclusiveAcquire": { "Enabled": false },
+          "ExclusiveRelease": { "Enabled": false }
+        },
+        "AccessControlSmall": {
+          "Enabled": true,
+          "SharedAcquire":    { "Enabled": false },
+          "SharedRelease":    { "Enabled": false },
+          "ExclusiveAcquire": { "Enabled": false },
+          "ExclusiveRelease": { "Enabled": false }
+        },
+        "Epoch": {
+          "Enabled": true,
+          "ScopeEnter": { "Enabled": false },
+          "ScopeExit":  { "Enabled": false }
+        }
+      }
+    }
+  }
+}

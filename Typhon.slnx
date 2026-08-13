@@ -41,6 +41,8 @@
         </Project>
         <Project Path="demo/AntHill/AntHill.Harness/AntHill.Harness.csproj" />
         <Project Path="demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj" />
+        <Project Path="demo/SimpleSpaceBattle/SimpleSpaceBattle.Main/SimpleSpaceBattle.Main.csproj" />
+        <Project Path="demo/SimpleSpaceBattle/SimpleSpaceBattle.Tests/SimpleSpaceBattle.Tests.csproj" />
         <Project Path="demo/SpaceBattle/SpaceBattle.Main/SpaceBattle.Main.csproj" />
         <Project Path="demo/SpaceBattle/SpaceBattle.Tests/SpaceBattle.Tests.csproj" />
     </Folder>
