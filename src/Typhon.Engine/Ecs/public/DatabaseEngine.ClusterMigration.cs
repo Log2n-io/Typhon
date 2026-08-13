@@ -432,7 +432,7 @@ public partial class DatabaseEngine
     /// <para>Per-migration pipeline:</para>
     /// <list type="number">
     ///   <item>Read entity id from source slot</item>
-    ///   <item><see cref="ArchetypeClusterState.ClaimSlotInCell(int, ref ChunkAccessor{PersistentStore}, ChangeSet, SpatialGrid)"/> on the
+    ///   <item><see cref="ArchetypeClusterState.ClaimSlotInCell(int, ref ChunkAccessor{PersistentStore}, ChangeSet, SpatialGrid, long)"/> on the
     ///         destination cell (allocates a new cluster if needed)</item>
     ///   <item>Copy every component slot's bytes source → destination (Persistent + Transient; Q8)</item>
     ///   <item>Copy EntityId and EnabledBits</item>
@@ -549,15 +549,22 @@ public partial class DatabaseEngine
 
                 // 2. Claim destination slot in the target cell. May allocate a new cluster (new chunk id).
                 //    ClaimSlotInCell maintains cell.EntityCount / cell.ClusterCount + ClusterCellMap.
+                //    H1 bound: the claim publishes the destination occupancy bit, so the destination's visibility summary has to bound this entity BEFORE that
+                //    store — but the entity's own BornTSN is not readable until step 9, under the EntityMap bucket lock. NextFreeId is the TSN high-water mark,
+                //    hence an upper bound on the BornTSN of anything that already exists, which is what a migrated entity is. Folding it is conservative: the
+                //    destination is gated until snapshots pass the current tick, and step 9's fold of the real (lower) value then only confirms it. Passing
+                //    the real value here instead would need a second EntityMap probe per migrated entity, and reading it before the claim reopens exactly the
+                //    torn-read window step 1b exists to close.
+                var migrationBornBound = TransactionChain.NextFreeId;
                 int dstChunkId;
                 int dstSlot;
                 if (hasClusterAccessor)
                 {
-                    (dstChunkId, dstSlot) = clusterState.ClaimSlotInCell(destCellKey, ref clusterAccessor, changeSet, grid);
+                    (dstChunkId, dstSlot) = clusterState.ClaimSlotInCell(destCellKey, ref clusterAccessor, changeSet, grid, migrationBornBound);
                 }
                 else
                 {
-                    (dstChunkId, dstSlot) = clusterState.ClaimSlotInCell(destCellKey, ref transientClusterAccessor, grid);
+                    (dstChunkId, dstSlot) = clusterState.ClaimSlotInCell(destCellKey, ref transientClusterAccessor, grid, migrationBornBound);
                 }
 
                 // 3. Re-fetch source / destination bases after potential segment growth inside ClaimSlotInCell.
@@ -756,12 +763,20 @@ public partial class DatabaseEngine
                 var updated = engineState.EntityMap.TryUpdateInPlace(entityKey, ref clusterLocationUpdater, ref emAccessor);
                 if (updated)
                 {
-                    // H1: the destination cluster now holds this entity, so its visibility summary must bound the entity's own TSNs. Folded AFTER the record
-                    // update so the summary can never be relaxed on the strength of a move that did not happen.
+                    // H1: the destination cluster now holds this entity, so its visibility summary must bound the entity's own TSNs. The born side is already
+                    // bounded by the NextFreeId fold inside the claim (step 2) and this fold only ever raises, so it is a no-op confirmation kept for the day
+                    // that bound is tightened. The DIED side has no such pre-fold: a migrated entity carrying a tombstone is only discovered here, and folding
+                    // it AFTER the record update is what keeps the summary from being relaxed on the strength of a move that did not happen.
                     clusterState.NoteClusterBorn(dstChunkId, clusterLocationUpdater.ObservedBornTsn);
                     if (clusterLocationUpdater.ObservedDiedTsn != 0)
                     {
-                        clusterState.NoteClusterDied(dstChunkId);
+                        // A tombstoned entity that keeps an occupancy bit breaks the premise the whole died watermark rests on — "ReleaseSlot clears the bit at
+                        // destroy commit", so a reader past the last death sees a word that already reflects it. Here it does not: the dst bit was set at claim
+                        // and only the SRC slot is released below, so this cluster holds a set bit for a dead entity. Under the pre-#722 sticky flag that
+                        // closed the gate forever and the per-entity probe caught it; a plain watermark would let every reader past ObservedDiedTsn through,
+                        // and TryCountViaOccupancy popcounts on that vouch with nothing to catch it. VisibilityUnknown restores the sticky behaviour for
+                        // exactly this case and nothing else: permanent deny for this cluster, no change to any cluster that drains normally.
+                        clusterState.NoteClusterDied(dstChunkId, ArchetypeClusterState.VisibilityUnknown);
                     }
                 }
                 if (!updated)

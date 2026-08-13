@@ -2239,25 +2239,7 @@ public sealed partial class TyphonRuntime : IDisposable
     /// </para>
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int[] ReadActiveClusterList(ArchetypeClusterState cs, out int count)
-    {
-        count = Volatile.Read(ref cs.ActiveClusterCount);
-        var ids = Volatile.Read(ref cs.ActiveClusterIds);
-        if (ids == null)
-        {
-            count = 0;
-            return null;
-        }
-
-        // Defensive clamp: a shrink between the two loads leaves count larger than the live prefix, which is benign (the entries are still in range), but a
-        // count past the array itself must never reach a caller.
-        if (count > ids.Length)
-        {
-            count = ids.Length;
-        }
-
-        return ids;
-    }
+    private static int[] ReadActiveClusterList(ArchetypeClusterState cs, out int count) => cs.ReadActiveClusterList(out count);
 
     private TickContext OnSystemStartInternal(int sysIdx)
     {

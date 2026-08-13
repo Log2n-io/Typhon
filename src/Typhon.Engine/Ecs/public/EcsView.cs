@@ -36,20 +36,6 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
     private readonly Dictionary<long, ushort> _branchBitmaps;
     private bool IsOrMode => _branchEvaluators != null;
 
-    /// <summary>Incremental mode: created with FieldEvaluators from Expression-based WHERE.</summary>
-    internal EcsView(EcsQuery<TArchetype> query, FieldEvaluator[] evaluators, ComponentTable componentTable,
-        EcsViewFieldReader fieldReader, int bufferCapacity = ViewDeltaRingBuffer.DefaultCapacity, long baseTSN = 0,
-        string sourceFile = null, int sourceLine = 0, string sourceMethod = null) :
-        base(evaluators, BuildFieldDependencies(evaluators), componentTable.DBE.MemoryAllocator, componentTable, bufferCapacity, baseTSN,
-            sourceFile, sourceLine, sourceMethod)
-    {
-        _query = query;
-        _componentTable = componentTable;
-        _registry = componentTable.ViewRegistry;
-        _evaluatorLookup = BuildEvaluatorLookup(evaluators);
-        _fieldReader = fieldReader;
-    }
-
     /// <summary>Incremental mode with cached execution plan.</summary>
     internal EcsView(EcsQuery<TArchetype> query, FieldEvaluator[] evaluators, ComponentTable componentTable,
         EcsViewFieldReader fieldReader, ExecutionPlan plan,
@@ -175,13 +161,8 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
         // catalog row. ArchetypeMetadata's ArchetypeId is the same identifier the Workbench Schema panel keys archetypes on.
         var meta = ArchetypeRegistry.GetMetadata<TArchetype>();
         var targetComponentType = meta?.ArchetypeId ?? 0;
-        PlanBuilder.EmitDefinitionDescribe(
-            Evaluators, _componentTable,
-            queryInstanceKind: 1, queryInstanceLocalId: (uint)_query.EcsQueryId,
-            _query.SourceFile, _query.SourceLine, _query.SourceMethod,
-            orderByFieldIndex: int.MinValue, descending: false,
-            primaryIndexFieldIdx: primaryIdx,
-            targetComponentTypeOverride: targetComponentType);
+        PlanBuilder.EmitDefinitionDescribe(Evaluators, _componentTable, 1, (uint)_query.EcsQueryId, _query.SourceFile, _query.SourceLine, _query.SourceMethod,
+            int.MinValue, false, primaryIdx, targetComponentType);
     }
 
     /// <summary>
@@ -444,36 +425,21 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
             DeltaBuffer.Reset(tx.TSN);
             _entityIds.Clear();
 
+            // #668: this used to have three branches and only this one was reachable. The other two required a view with a field reader but no cached plan
+            // (the constructor producing that shape had no callers) or a pull view (which returns from Refresh before the overflow check that leads here).
+            // Dead code that looks like a fallback hides how narrow the live path is — and one of the dead branches was the CORRECT one for cluster-backed
+            // archetypes, which is how #663 read as "correct or broken depending on whether a plan exists" when it was always broken.
+            Debug.Assert(HasCachedPlanInternal && _fieldReader != null,
+                "RefreshFull is overflow recovery for an INCREMENTAL view — it rebuilds membership from the cached plan and the field reader. A pull view "
+                + "reaching it means Refresh's pull-mode return was bypassed, and this would rebuild a predicate-filtered set without evaluating the "
+                + "predicate: wrong rows, not a slow refresh.");
+
             var requeryStart = Stopwatch.GetTimestamp();
-            if (HasCachedPlanInternal && _fieldReader != null)
-            {
-                // Cross-archetype scan with the cached plan. The `else` branch below already went through EcsQuery.Execute() and was therefore correct for
-                // cluster-backed archetypes; this branch bypassed it and re-populated to empty (#663) — correctness depended on whether a plan was cached.
-                _query.UpdateTransaction(tx);
-                _query.ExecuteFullScanAcrossArchetypes(CachedPlan, CachedPlan.OrderedEvaluators, _componentTable, _entityIds);
-            }
-            else if (_fieldReader != null)
-            {
-                // Fallback: broad scan via EcsQuery + per-entity field evaluation
-                _query.UpdateTransaction(tx);
-                foreach (var id in _query.Execute())
-                {
-                    var pk = (long)id.RawValue;
-                    if (_fieldReader.EvaluateAllFields(pk, Evaluators, tx))
-                    {
-                        _entityIds.TryAdd(pk);
-                    }
-                }
-            }
-            else
-            {
-                // Pull mode: just re-query
-                _query.UpdateTransaction(tx);
-                foreach (var id in _query.Execute())
-                {
-                    _entityIds.TryAdd((long)id.RawValue);
-                }
-            }
+
+            // Cross-archetype scan with the cached plan: a cluster-backed archetype keeps its indexes on the archetype, so a plan targeting the
+            // ComponentTable tree would repopulate to empty (#663).
+            _query.UpdateTransaction(tx);
+            _query.ExecuteFullScanAcrossArchetypes(CachedPlan, CachedPlan.OrderedEvaluators, _componentTable, _entityIds);
             fullScope.RequeryNs = (uint)Math.Min((Stopwatch.GetTimestamp() - requeryStart) * 1_000_000_000L / Stopwatch.Frequency, uint.MaxValue);
 
             DrainBufferAfterRefreshFull(tx.TSN);

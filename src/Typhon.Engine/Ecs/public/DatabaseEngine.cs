@@ -4219,7 +4219,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 var entityId = EntityId.FromRaw(entityPK);
                 var entityKey = entityId.EntityKey;
 
-                var (clusterChunkId, slotIndex) = clusterState.ClaimSlot(ref clusterAccessor, cs);
+                // bornTsn 0: committed before this open, so the claim establishes the summary as "all genesis" and a reopened DB starts on the fast path.
+                var (clusterChunkId, slotIndex) = clusterState.ClaimSlot(ref clusterAccessor, cs, 0);
                 var clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId, true);
 
                 // The entity-id tail is what every cluster scan resolves a slot back to an entity through; without it the rebuilt cluster is anonymous.
@@ -4229,7 +4230,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 ref var header = ref ClusterEntityRecordAccessor.GetHeader(recordBuf);
                 header.BornTSN = 0;   // committed before this open → visible at every snapshot
                 header.DiedTSN = 0;   // live: it has a chain head
-                clusterState.NoteClusterBorn(clusterChunkId, 0);   // H1: establishes the summary as "all genesis" so a reopened DB starts on the fast path
+                clusterState.NoteClusterBorn(clusterChunkId, 0);   // establishes a freshly allocated cluster as all-genesis (FreshClusterStaysUnknown)
 
                 // The pre-migration position, resolved BEFORE the enabled-bits loop so that loop can consult the old cluster's own bits.
                 (int ChunkId, int SlotIndex) oldPos = default;
