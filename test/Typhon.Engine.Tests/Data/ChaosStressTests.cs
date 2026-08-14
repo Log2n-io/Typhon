@@ -154,6 +154,12 @@ class ChaosStressTests : TestBase<ChaosStressTests>
 
     #region Main Chaos Test
 
+    // QUARANTINE (#696): a nondeterministic red band across the parameterised cases — 1 to 4 of the 6 fail per run, different victims each time
+    // (observed on unmodified main: run A = HeavyWrite_4T_200E_WithDelete; run B = Light_2T_50E_NoDelete + Medium_4T_100E_WithDelete +
+    // Scale_4T_500E + HeavyWrite_4T_200E_WithDelete). #696 recorded only Scale_4T_500E at 2/3 runs, so the band is wider than the issue states.
+    // Quarantined at the METHOD, which covers every case: the victim varies, so per-case suppression would chase a moving target.
+    // Same concurrent value/index correctness family as the fixture's other quarantined tests — NOT re-suppressed with [Ignore], which would
+    // hide it from local runs and from the filter too (#703).
     /// <summary>
     /// The ultimate chaos test: multiple threads performing random CRUD operations
     /// on multiple component types with varying transaction lifetimes.
@@ -161,6 +167,7 @@ class ChaosStressTests : TestBase<ChaosStressTests>
     [Test]
     [TestCaseSource(nameof(ChaosTestCases))]
     [Property("CacheSize", StressCacheSize)]
+    [Category("Quarantine")]
     public void ChaosTest_MultiThreadedCRUD(int threadCount, int entitiesPerThread, int operationsPerEntity, float readWriteRatio,
         bool includeDeletes, int seed)
     {
