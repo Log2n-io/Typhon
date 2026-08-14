@@ -42,6 +42,9 @@ internal static class ProfilerBootstrap
     private static bool Started;
     private static List<IProfilerExporter> Exporters;
 
+    /// <summary>One-shot latch for the inert-profiler warning (#792). Written only under <see cref="Gate"/>, so a plain field is correct.</summary>
+    private static bool WarnedInert;
+
     /// <summary>
     /// Runs at <c>Typhon.Engine</c> assembly load. Forces the <see cref="TelemetryConfig"/> static constructor so the JIT producer-gate is baked before any
     /// hot path is compiled, and eagerly allocates the spillover ring pool when profiling is active so events emitted before <see cref="TryStart"/> (a host's
@@ -98,9 +101,18 @@ internal static class ProfilerBootstrap
                     config = ovr.Configure(config) ?? config;
                 }
 
-                // Master switch on but no output channel requested — nothing to export. Stay quiet.
-                if (!config.IsActive)
+                // Master switch on but no output channel requested — nothing to export. Say so exactly once (#792): silence here is
+                // indistinguishable from "profiled fine, found nothing", and the realistic cause is a late environment variable, which the
+                // host cannot see because TelemetryConfig froze the merged configuration at assembly load. Console.Error rather than an
+                // ILogger, matching the startup-failure path below: a host with no logging configured is precisely the host that needs this.
+                var inertWarning = BuildInertProfilerWarning(config);
+                if (inertWarning != null)
                 {
+                    if (!WarnedInert)
+                    {
+                        WarnedInert = true;
+                        Console.Error.WriteLine(inertWarning);
+                    }
                     return;
                 }
 
@@ -134,6 +146,29 @@ internal static class ProfilerBootstrap
                 Started = false;
             }
         }
+    }
+
+    /// <summary>
+    /// The diagnostic for a profiler that is enabled but has no output channel, or <c>null</c> when <paramref name="config"/> resolves an output channel and
+    /// there is nothing to report. Pure — the caller owns emission and the one-shot latch.
+    /// </summary>
+    /// <remarks>
+    /// The wording carries the part that is not guessable from the symptom: the configuration is read once, at <c>Typhon.Engine</c> assembly load, so an
+    /// <c>Environment.SetEnvironmentVariable</c> issued from <c>Main</c> is already too late — <c>Main</c> references engine types, so the module initializer
+    /// has run before its first statement. That is #792, and the failure mode it produced was a clean run with no file and no message.
+    /// </remarks>
+    /// <param name="config">The effective launch config, after the file/env resolution and any host override.</param>
+    internal static string BuildInertProfilerWarning(ProfilerLaunchConfig config)
+    {
+        if (config == null || config.IsActive)
+        {
+            return null;
+        }
+
+        return "[Typhon] Profiler is ENABLED but no output channel is configured, so NO trace will be produced. Set 'Typhon:Profiler:Trace' (a "
+            + ".typhon-trace file path) or 'Typhon:Profiler:Live' (a TCP port) in typhon.telemetry.json beside the executable, or set "
+            + "TYPHON__PROFILER__TRACE / TYPHON__PROFILER__LIVE in the environment BEFORE the process starts. Setting those variables from inside Main has "
+            + "no effect: the telemetry configuration is read once when Typhon.Engine loads, which happens before Main's first statement runs.";
     }
 
     /// <summary>
