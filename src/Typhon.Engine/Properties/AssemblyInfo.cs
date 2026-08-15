@@ -25,6 +25,12 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("Typhon.Workbench.Tests")]
 [assembly: InternalsVisibleTo("Typhon.IOProfileRunner")]
 [assembly: InternalsVisibleTo("Typhon.MonitoringDemo")]
+// Added 2026-08-14: the SpaceBattle demo is a spatial-partitioning observatory — it renders the per-cell
+// CellState (EntityCount/ClusterCount/Tier), the authoritative cluster->cell map and the per-tick migration
+// counters. None of those has a public surface (SpatialGridAccessor.GetCell is internal because CellState is,
+// ArchetypeClusterState is internal wholesale), and the whole point of the tool is to show the internal state
+// the public API deliberately hides. Genuine internal-implementation reuse; not refactorable to public.
+[assembly: InternalsVisibleTo("SpaceBattle")]
 // Re-added 2026-05-25 (#376 Stage-3 4A): the `with-queries` trace fixture must emit QueryPlan + phase SPAN
 // records, whose typed `EncodeTo` encoders are internal source-generated `[TraceEvent]` ref structs
 // (QueryPlanEvent et al.) with NO public surface. Genuine internal-implementation reuse — the fixture drives

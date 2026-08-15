@@ -1,0 +1,11 @@
+{
+  // The OLD layout, kept as a contrast: factions in opposing columns with ore in the middle, so one battle
+  // line forms and then wanders. Useful for watching cell migration sweep across the grid in one direction
+  // instead of churning in several places at once.
+  "StationLayout": "edges",
+  "AsteroidLayout": "ring",
+  "AsteroidCount": 3,
+  "AsteroidCapacity": 160000,
+  "AsteroidFieldRadiusPct": 0.10,
+  "ProbeRadius": 2000
+}

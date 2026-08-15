@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- SpaceBattle — a spatial-partitioning observatory disguised as a space battle.
+       Purpose: make the two-level partitioning (cells + clusters) VISIBLE and measurable under
+       controllable density, cell size and churn. See claude/research/Spatial/. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>SpaceBattle</AssemblyName>
+    <OutputType>Exe</OutputType>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>default</LangVersion>
+    <Nullable>disable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TieredPGO>true</TieredPGO>
+    <!-- Startup speed: the demo must be on screen fast. -->
+    <TieredCompilationQuickJitForLoops>true</TieredCompilationQuickJitForLoops>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Typhon.Engine\Typhon.Engine.csproj" />
+    <ProjectReference Include="..\..\src\Typhon.Schema.Definition\Typhon.Schema.Definition.csproj" />
+    <ProjectReference Include="..\..\src\Typhon.Profiler\Typhon.Profiler.csproj" />
+    <PackageReference Include="JetBrains.Annotations" Version="2026.2.0" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.9" />
+    <PackageReference Include="SFML.Net" Version="3.0.0" />
+    <ProjectReference Include="..\..\src\Typhon.Analyzers\Typhon.Analyzers.csproj"
+                      ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
+    <ProjectReference Include="..\..\src\Typhon.Generators\Typhon.Generators.csproj"
+                      ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
+  </ItemGroup>
+</Project>

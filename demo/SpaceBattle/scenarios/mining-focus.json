@@ -1,0 +1,15 @@
+{
+  // Economy-forward: lots of ore, mostly miners, slow respawn. Watch material gate the war.
+  // Scattered ore rather than contested anchors, so the fighting follows the rocks instead of the bases.
+  "CellSize": 2000,
+  "InitialShipsPerFaction": 300,
+  "MaxShipsPerFaction": 900,
+  "MinerRatio": 0.6,
+  "AsteroidCount": 24,
+  "AsteroidCapacity": 3000,
+  "AsteroidLayout": "scatter",
+  "AsteroidFieldRadiusPct": 0.38,
+  "AsteroidRespawnTicks": 400,
+  "ShipCost": 400,
+  "ProbeRadius": 2000
+}

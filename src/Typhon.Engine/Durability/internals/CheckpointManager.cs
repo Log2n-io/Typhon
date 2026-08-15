@@ -2,7 +2,9 @@ using JetBrains.Annotations;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using Typhon.Profiler;
 
@@ -176,6 +178,81 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// Reset to 0 by any fully-covered cycle. A sustained nonzero value flags a pinned writer starving checkpoint progress (CK-03 telemetry).
     /// </summary>
     public long ConsecutiveGatedCycles => Interlocked.Read(ref _consecutiveGatedCycles);
+
+    // ─── #817 skip diagnostics ───────────────────────────────────────────────────────────────────────────────────
+    // Written on the checkpoint thread only; read by a diagnostic consumer. Volatile on publish so a reader on
+    // another thread cannot observe a count that outruns the array contents.
+
+    private int[] _prevSkipped = [];
+    private int[] _lastSkipped = [];
+    private int _lastSkippedCount;
+
+    /// <summary>Pages the coverage gate skipped on the most recent cycle (#817).</summary>
+    public ReadOnlySpan<int> LastSkippedPages => _lastSkipped.AsSpan(0, Volatile.Read(ref _lastSkippedCount));
+
+    /// <summary>How many of the last cycle's skipped pages were ALSO skipped on the cycle before it (#817).</summary>
+    public int RepeatSkippedPages { get; private set; }
+
+    /// <summary>Largest number of consecutive cycles any single page has been skipped (#817).</summary>
+    public int MaxConsecutiveSkipsForOnePage { get; private set; }
+
+    private readonly Dictionary<int, int> _skipStreak = [];
+
+    /// <summary>Skip causes, from the page cache (#817). A = live chunk writer, B = writer held &gt; 100 ms, C = stale odd counter.</summary>
+    public (long Acw, long WriterHeld, long StaleCounter) SkipCauses =>
+        (_mmf.CheckpointSkipAcw, _mmf.CheckpointSkipWriterHeld, _mmf.CheckpointSkipStaleCounter);
+
+    /// <summary>Live ActiveChunkWriters for a page (#817). Non-zero while quiescent proves a leaked registration.</summary>
+    public int ActiveChunkWritersOf(int memPageIndex) => _mmf.ActiveChunkWritersOf(memPageIndex);
+
+    /// <summary>Pages still dirty, and the cache size. Read quiescent after a checkpoint, a high count is a leak.</summary>
+    public (int Dirty, int Total, int FirstDirtyPage) CountDirtyPages() => _mmf.CountDirtyPages();
+
+    private void CaptureSkipDiagnostics(int[] pending, int stillSkipped)
+    {
+        if (stillSkipped <= 0)
+        {
+            Volatile.Write(ref _lastSkippedCount, 0);
+            RepeatSkippedPages = 0;
+            _skipStreak.Clear();
+            _prevSkipped = [];
+            return;
+        }
+
+        var skipped = new int[stillSkipped];
+        Array.Copy(pending, pending.Length - stillSkipped, skipped, 0, stillSkipped);
+        Array.Sort(skipped);
+
+        var repeat = 0;
+        foreach (var p in skipped)
+        {
+            if (Array.BinarySearch(_prevSkipped, p) >= 0)
+            {
+                repeat++;
+            }
+            var streak = _skipStreak.TryGetValue(p, out var s) ? s + 1 : 1;
+            _skipStreak[p] = streak;
+            if (streak > MaxConsecutiveSkipsForOnePage)
+            {
+                MaxConsecutiveSkipsForOnePage = streak;
+            }
+        }
+
+        // Drop pages that were NOT skipped this cycle, so a streak means CONSECUTIVE cycles rather than a lifetime
+        // tally — a page skipped once every other cycle is a completely different diagnosis from a pinned one.
+        if (_skipStreak.Count > skipped.Length)
+        {
+            foreach (var key in _skipStreak.Keys.Where(k => Array.BinarySearch(skipped, k) < 0).ToArray())
+            {
+                _skipStreak.Remove(key);
+            }
+        }
+
+        RepeatSkippedPages = repeat;
+        _prevSkipped = skipped;
+        _lastSkipped = skipped;
+        Volatile.Write(ref _lastSkippedCount, stillSkipped);
+    }
 
     // ═══════════════════════════════════════════════════════════════
     // Public API
@@ -443,6 +520,13 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                         Array.Copy(pending, writtenThisPass, retry, 0, stillSkipped);
                         pending = retry;
                     }
+
+                    // #817 diagnostic: capture WHICH pages the gate is stuck on, not just how many. The retry loop
+                    // partitions written to the front, so the survivors are the last `stillSkipped` entries. The
+                    // question that decides the fix is identity, not count: the same page every cycle means a
+                    // leaked ACW / stale seqlock counter (a bug — the gate is working as designed), whereas a
+                    // churning set means the coverage gate genuinely has no liveness guarantee under load.
+                    CaptureSkipDiagnostics(pending, stillSkipped);
 
                     writeScope.WrittenCount = writtenTotal;
                     writeBatchScope.StagingAllocated = writtenTotal;

@@ -15,6 +15,8 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics.X86;
+using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Typhon.Profiler;
@@ -1910,12 +1912,20 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     {
         var pi = _memPagesInfo[memPageIndex];
         Debug.Assert(pi.PageState is PageState.Exclusive or PageState.Idle, "We can't increment the dirty counter for a page that is not Exclusive or Idle.");
+        if (DirtyTracePage == memPageIndex)
+        {
+            RecordDcTrace(+1);
+        }
         Interlocked.Increment(ref pi.DirtyCounter);
     }
 
     internal void DecrementDirty(int memPageIndex)
     {
         var pi = _memPagesInfo[memPageIndex];
+        if (DirtyTracePage == memPageIndex)
+        {
+            RecordDcTrace(-1);
+        }
         var newVal = Interlocked.Decrement(ref pi.DirtyCounter);
         if (newVal == 0)
         {
@@ -1930,6 +1940,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void IncrementActiveChunkWriters(int memPageIndex)
     {
+        if (AcwTracePage == memPageIndex)
+        {
+            RecordAcwTrace(+1);
+        }
         ref var acw = ref _memPagesInfo[memPageIndex].ActiveChunkWriters;
         SpinWait sw = default;
         while (true)
@@ -1956,7 +1970,178 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// when a dirty slot is flushed to the <see cref="ChangeSet"/>.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal void DecrementActiveChunkWriters(int memPageIndex) => Interlocked.Decrement(ref _memPagesInfo[memPageIndex].ActiveChunkWriters);
+    internal void DecrementActiveChunkWriters(int memPageIndex)
+    {
+        if (AcwTracePage == memPageIndex)
+        {
+            RecordAcwTrace(-1);
+        }
+        Interlocked.Decrement(ref _memPagesInfo[memPageIndex].ActiveChunkWriters);
+    }
+
+    // ─── #817 ACW balance tracing ────────────────────────────────────────────────────────────────────────────────
+    // Reading the code found four balanced paths and no leak, yet the counter demonstrably never returns to zero.
+    // So: make the leak name its own call site. Every increment and decrement for ONE page is bucketed by call
+    // stack; any signature whose increments outnumber its decrements IS the unbalanced path. Off unless a page is
+    // selected, and deliberately not thread-safe beyond the lock — this is a diagnostic, not a shipping feature.
+
+    /// <summary>Page to trace ACW increments/decrements for, or -1 (off). Diagnostic only (#817).</summary>
+    internal static int AcwTracePage = -1;
+
+    private static readonly object AcwTraceLock = new();
+    private static readonly Dictionary<string, (int Inc, int Dec)> AcwTraceBuckets = [];
+
+    private static void RecordAcwTrace(int delta)
+    {
+        // Skip the two frames of this helper and its caller so the signature starts at the code that actually
+        // decided to register a writer.
+        var st = new StackTrace(2, false);
+        var sb = new StringBuilder();
+        var frames = Math.Min(6, st.FrameCount);
+        for (var i = 0; i < frames; i++)
+        {
+            var m = st.GetFrame(i)?.GetMethod();
+            if (m == null)
+            {
+                continue;
+            }
+            if (i > 0)
+            {
+                sb.Append(" <- ");
+            }
+            sb.Append(m.DeclaringType?.Name).Append('.').Append(m.Name);
+        }
+        var key = sb.ToString();
+        lock (AcwTraceLock)
+        {
+            AcwTraceBuckets.TryGetValue(key, out var e);
+            AcwTraceBuckets[key] = delta > 0 ? (e.Inc + 1, e.Dec) : (e.Inc, e.Dec + 1);
+
+            // Outstanding-increment ledger. The bucket table above cannot pair anything — increments and
+            // decrements have structurally different stacks — but this can: push on increment, pop on decrement,
+            // and whatever survives to a QUIESCED end of run is, by definition, an increment that was never
+            // released. That set names the leaking call site directly.
+            if (delta > 0)
+            {
+                AcwOutstanding.Add(key);
+            }
+            else if (AcwOutstanding.Count > 0)
+            {
+                AcwOutstanding.RemoveAt(AcwOutstanding.Count - 1);
+            }
+        }
+    }
+
+    private static readonly List<string> AcwOutstanding = [];
+
+    // ─── DirtyCounter balance tracing ────────────────────────────────────────────────────────────────────────────
+    // Same ledger, applied to DC. Note DC is NOT strictly conserved by design — DecrementDirtyToMin and
+    // DecrementDirtyByDelta both CLAMP, so an over-decrement is silently absorbed while a MISSING decrement leaks
+    // permanently. That asymmetry is why a leak here shows up as a dirty-page count that only ever climbs, and why
+    // the surviving increments at a quiesced end of run are the ones worth reading.
+
+    /// <summary>Page to trace DirtyCounter mutations for, or -1 (off). Diagnostic only.</summary>
+    internal static int DirtyTracePage = -1;
+
+    private static readonly List<string> DcOutstanding = [];
+
+    private static void RecordDcTrace(int delta)
+    {
+        if (delta == 0)
+        {
+            return;
+        }
+        var key = delta > 0 ? CaptureStack() : null;
+        lock (AcwTraceLock)
+        {
+            for (var i = 0; i < Math.Abs(delta); i++)
+            {
+                if (delta > 0)
+                {
+                    DcOutstanding.Add(key);
+                }
+                else if (DcOutstanding.Count > 0)
+                {
+                    DcOutstanding.RemoveAt(DcOutstanding.Count - 1);
+                }
+            }
+        }
+    }
+
+    /// <summary>DirtyCounter increment sites still outstanding at end of run — the leak, named.</summary>
+    internal static string DescribeDirtyOutstanding()
+    {
+        lock (AcwTraceLock)
+        {
+            if (DcOutstanding.Count == 0)
+            {
+                return "  (none outstanding — page balanced)";
+            }
+            var sb = new StringBuilder();
+            foreach (var g in DcOutstanding.GroupBy(s => s).OrderByDescending(g => g.Count()))
+            {
+                sb.Append('\n').Append($"  LEAKED x{g.Count(),-4} {g.Key}");
+            }
+            return sb.ToString();
+        }
+    }
+
+    private static string CaptureStack()
+    {
+        var st = new StackTrace(2, false);
+        var sb = new StringBuilder();
+        var frames = Math.Min(7, st.FrameCount);
+        for (var i = 0; i < frames; i++)
+        {
+            var m = st.GetFrame(i)?.GetMethod();
+            if (m == null)
+            {
+                continue;
+            }
+            if (i > 0)
+            {
+                sb.Append(" <- ");
+            }
+            sb.Append(m.DeclaringType?.Name).Append('.').Append(m.Name);
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>Increment call sites still outstanding at end of run — the leak, named (#817).</summary>
+    internal static string DescribeAcwOutstanding()
+    {
+        lock (AcwTraceLock)
+        {
+            if (AcwOutstanding.Count == 0)
+            {
+                return "  (none outstanding — page balanced)";
+            }
+            var sb = new StringBuilder();
+            foreach (var g in AcwOutstanding.GroupBy(s => s).OrderByDescending(g => g.Count()))
+            {
+                sb.Append('\n').Append($"  LEAKED x{g.Count(),-4} {g.Key}");
+            }
+            return sb.ToString();
+        }
+    }
+
+    /// <summary>Call-stack signatures whose ACW increments and decrements do not balance (#817).</summary>
+    internal static string DescribeAcwImbalance()
+    {
+        lock (AcwTraceLock)
+        {
+            if (AcwTraceBuckets.Count == 0)
+            {
+                return "no ACW traces captured (set AcwTracePage)";
+            }
+            var sb = new StringBuilder();
+            foreach (var kv in AcwTraceBuckets.OrderByDescending(k => k.Value.Inc - k.Value.Dec))
+            {
+                sb.Append('\n').Append($"  inc {kv.Value.Inc,6}  dec {kv.Value.Dec,6}  net {kv.Value.Inc - kv.Value.Dec,6}   {kv.Key}");
+            }
+            return sb.ToString();
+        }
+    }
 
     /// <summary>
     /// Raises <see cref="PageInfo.DirtyCounter"/> to <paramref name="minValue"/> if it is currently below that threshold.
@@ -1980,6 +2165,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
             if (Interlocked.CompareExchange(ref pi.DirtyCounter, minValue, current) == current)
             {
+                if (DirtyTracePage == memPageIndex)
+                {
+                    RecordDcTrace(minValue - current);   // raising DC counts as increments, one per unit raised
+                }
                 return;
             }
 
@@ -2001,6 +2190,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
             if (Interlocked.CompareExchange(ref pi.DirtyCounter, minValue, current) == current)
             {
+                if (DirtyTracePage == memPageIndex)
+                {
+                    RecordDcTrace(minValue - current);   // clamping decrement: record what was ACTUALLY applied
+                }
                 if (minValue == 0)
                 {
                     _backpressureStrategy.SignalPageAvailable();
@@ -2045,6 +2238,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             var newVal = current > delta ? current - delta : 0;
             if (Interlocked.CompareExchange(ref pi.DirtyCounter, newVal, current) == current)
             {
+                if (DirtyTracePage == memPageIndex)
+                {
+                    RecordDcTrace(newVal - current);   // clamping decrement: record what was ACTUALLY applied
+                }
                 if (newVal == 0)
                 {
                     _backpressureStrategy.SignalPageAvailable();
@@ -2098,8 +2295,21 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <returns>True if a consistent snapshot was obtained; false if the page was skipped — either because a real exclusive writer held the modification
     /// counter odd for longer than the checkpoint skip threshold (100ms), or because the counter was odd on a page no writer holds (a stale counter, skipped
     /// immediately). Skipping is safe: the page remains dirty and will be captured in the next checkpoint cycle.</returns>
+    /// <summary>
+    /// Why the last <see cref="CopyPageWithSeqlock"/> call declined: 0 = success, 2 = writer held &gt; 100 ms,
+    /// 3 = stale odd counter. Diagnostic only (#817) — written and read on the checkpoint thread alone, so no
+    /// synchronisation is required or implied.
+    /// </summary>
+    internal int LastSeqlockSkipReason;
+
+    /// <summary>Cumulative checkpoint page-skip counts by cause (#817). Diagnostic only.</summary>
+    internal long CheckpointSkipAcw;
+    internal long CheckpointSkipWriterHeld;
+    internal long CheckpointSkipStaleCounter;
+
     private unsafe bool CopyPageWithSeqlock(byte* pageAddr, byte* destAddr, int memPageIndex)
     {
+        LastSeqlockSkipReason = 0;
         var sw = new SpinWait();
         long oddSpinStart = 0;
         while (true)
@@ -2121,6 +2331,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 if (_memPagesInfo[memPageIndex].PageState != PageState.Exclusive)
                 {
                     LogStaleSeqlockCounterSkip(Logger, memPageIndex, counter);
+                    LastSeqlockSkipReason = 3;
+                    CheckpointSkipStaleCounter++;
                     return false;
                 }
 
@@ -2138,6 +2350,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                         // backpressure to free cache pages). Skip this page to avoid deadlock:
                         // the writer may be waiting for this checkpoint to complete DecrementDirty.
                         LogSeqlockWriterHeldSkip(Logger, (int)elapsedMs, counter);
+                        LastSeqlockSkipReason = 2;
+                        CheckpointSkipWriterHeld++;
                         return false;
                     }
                 }
@@ -2185,7 +2399,15 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// Pages with an actively-held writer (odd ModificationCounter for &gt;100ms) are skipped.</param>
     /// <param name="stagingPool">Pool from which to rent page-sized staging buffers.</param>
     /// <param name="writtenCount">Number of pages actually written (may be less than input length if pages were skipped).</param>
-    unsafe internal void WritePagesForCheckpoint(int[] memPageIndices, StagingBufferPool stagingPool, out int writtenCount)
+    /// <param name="capturedDirty">
+    /// Optional, aligned with the WRITTEN prefix of <paramref name="memPageIndices"/> on return: the page's
+    /// DirtyCounter as observed at the instant of capture, under the ACW sentinel. The checkpoint must ack by THIS
+    /// value rather than by 1 — a page touched by K units of work inside one cycle carries K outstanding marks and
+    /// the capture covers all of them, so a fixed -1 leaves K-1 behind permanently and the page can never be
+    /// evicted. Marks that arrive AFTER the capture are deliberately not covered: they are exactly CP-04's
+    /// re-dirty defence and must survive the ack so the next cycle rewrites the page.
+    /// </param>
+    unsafe internal void WritePagesForCheckpoint(int[] memPageIndices, StagingBufferPool stagingPool, out int writtenCount, int[] capturedDirty = null)
     {
         writtenCount = 0;
 
@@ -2243,12 +2465,17 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // detect because OLC writes don't update ModificationCounter.
             if (Interlocked.CompareExchange(ref pi.ActiveChunkWriters, -1, 0) != 0)
             {
+                CheckpointSkipAcw++;   // #817 diagnostic: cause A — a live chunk writer held the page
                 continue;
             }
 
             // Rent a staging buffer and snapshot the live page via seqlock.
             // No concurrent OLC writers can start while ACW = -1 (they spin-wait).
             // Page-level latches (TryLatchPageExclusive) are still detected by the seqlock.
+            // Read under the ACW sentinel (ACW == -1 blocks new writers), so this is the mark count the capture
+            // below actually covers — not a racing sample.
+            var dcAtCapture = Volatile.Read(ref pi.DirtyCounter);
+
             using var staging = stagingPool.Rent();
             if (!CopyPageWithSeqlock(livePageAddr, staging.Pointer, memPageIndex))
             {
@@ -2302,6 +2529,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // caller can retry exactly the skipped tail in a later pass (coverage gate, CK-03) instead of losing track of which pages still need writing.
             memPageIndices[i] = memPageIndices[writtenCount];
             memPageIndices[writtenCount] = memPageIndex;
+            if (capturedDirty != null && writtenCount < capturedDirty.Length)
+            {
+                capturedDirty[writtenCount] = dcAtCapture;
+            }
             writtenCount++;
 
             _metrics.PageWrittenToDiskCount++;
