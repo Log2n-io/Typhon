@@ -38,7 +38,8 @@ namespace Typhon.Schema.Definition
     public readonly struct ComponentSchemaSpec
     {
         public ComponentSchemaSpec(string name, int revision, ComponentFieldSpec[] fields,
-            StorageMode storageMode = StorageMode.Versioned, CommitDiscipline defaultDiscipline = CommitDiscipline.TickFence) { }
+            StorageMode storageMode = StorageMode.Versioned, CommitDiscipline defaultDiscipline = CommitDiscipline.TickFence,
+            bool managedOffsets = false) { }
     }
     public readonly struct ComponentFieldSpec
     {
@@ -138,8 +139,18 @@ namespace Game
             // Registration is by type, off the struct — components need not be partial.
             Assert.That(reg, Does.Contain("global::Typhon.Schema.Definition.GeneratedSchemaRegistry.RegisterComponent(typeof(global::Game.Rep)"));
             Assert.That(reg, Does.Contain("new global::Typhon.Schema.Definition.ComponentSchemaSpec("));
-            // Offsets are the one residual runtime call.
-            Assert.That(reg, Does.Contain("global::System.Runtime.InteropServices.Marshal.OffsetOf<global::Game.Rep>(\"X\")"));
+            // Offsets are measured against a stack probe, NOT Marshal.OffsetOf: the engine addresses fields through the managed layout, and Marshal reports
+            // the marshalled one — a different layout whenever a bool or char is involved (#816, #819).
+            Assert.That(reg, Does.Contain("var probe = default(global::Game.Rep);"));
+            Assert.That(reg, Does.Contain("ref byte origin = ref global::System.Runtime.CompilerServices.Unsafe.As<global::Game.Rep, byte>(ref probe);"));
+            Assert.That(reg, Does.Contain(
+                "(int)global::System.Runtime.CompilerServices.Unsafe.ByteOffset(ref origin, "
+              + "ref global::System.Runtime.CompilerServices.Unsafe.As<float, byte>("
+              + "ref global::System.Runtime.CompilerServices.Unsafe.AsRef(in probe.X)))"));
+            Assert.That(reg, Does.Not.Contain("Marshal.OffsetOf"), "the generator must not fall back to the marshalled layout");
+
+            // ...and the spec declares that provenance, which is what lets the engine refuse reflection-derived offsets it cannot verify (#819).
+            Assert.That(reg, Does.Contain("managedOffsets: true"));
             // Field metadata carried faithfully.
             Assert.That(reg, Does.Contain("previousName: \"Hitpoints\""));
             Assert.That(reg, Does.Contain("hasIndex: true, indexAllowMultiple: true"));

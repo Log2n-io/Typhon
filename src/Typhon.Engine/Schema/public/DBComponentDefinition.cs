@@ -28,6 +28,17 @@ public class DBComponentDefinition
     /// <summary>The unmanaged struct type this definition was built from, or the registered POCO type. May be null until set by the builder.</summary>
     public Type POCOType { get; internal set; }
 
+    /// <summary>
+    /// Whether this definition's field offsets were measured against the MANAGED layout — the one every accessor reads the component through.
+    /// </summary>
+    /// <remarks>
+    /// Set by the source-generated spec, which measures each field with <c>Unsafe.ByteOffset</c>. The runtime-reflection path cannot: it holds only a
+    /// <see cref="Type"/> and reads <c>Marshal.OffsetOf</c>, which reports the MARSHALLED layout. Those agree for ordinary blittable primitives and diverge
+    /// for <c>bool</c> and <c>char</c>, so <see cref="Build"/> refuses such a component when this is clear rather than storing offsets that address the wrong
+    /// bytes (#819, rule SCHEMA-07).
+    /// </remarks>
+    public bool OffsetsAreManaged { get; internal set; }
+
     /// <summary>Unique key combining <see cref="Name"/> and <see cref="Revision"/>, formatted as <c>{Name}:R{Revision}</c>.</summary>
     public string FullName => FormatFullName(Name, Revision);
 
@@ -343,6 +354,28 @@ public class DBComponentDefinition
               + "blittable structs; a reference type cannot back one.");
         }
 
+        // Offsets that were never measured against the managed layout can only be trusted for types whose two layouts provably coincide. `bool` and `char` are
+        // the only primitives where they do not: marshalling widens a bool to 4 bytes (1 managed) and narrows a char to 1 (2 managed). Where either appears,
+        // the recorded offsets MAY be a different layout from the one the engine reads, and nothing downstream can tell — for `char` the two layouts can even
+        // total the same size (`{ char; char; int }` is 8 bytes either way, with only the middle offset wrong), so no size comparison at any layer detects it.
+        //
+        // Deliberately broader than analyzer TYPHON011, which compares the two layouts in full and permits a shape where they happen to agree (a lone `bool`
+        // before an `int` sits at the same offset either way). Reproducing that comparison here would mean reimplementing managed struct layout at runtime;
+        // getting a real managed offset needs a typed `ref` to the field, which means IL emit, ruled out on AOT grounds (#409). So this path refuses what it
+        // cannot measure. It is reached only for a component with NO generated spec, i.e. an assembly not built with Typhon's tooling, where "rebuild it with
+        // the generator" is both the remedy and the thing that makes the offsets verifiable (#819, rule SCHEMA-07).
+        //
+        // The walk is over the CLR TYPE, not over this definition's fields: a nested struct that the schema does not model at all (FromType returns None for
+        // it, so it is dropped) still occupies bytes and still shifts every field after it. Scanning the schema's own field list would look straight past it.
+        // Shared with the CLI's assembly loader — a second, shallower copy of this policy is how the hole reopens.
+        if (!OffsetsAreManaged && LayoutDivergence.Detect(POCOType, out var divergentPath, out var kind))
+        {
+            throw new InvalidOperationException(
+                $"Component '{FullName}' ({POCOType.Name}) contains a {kind} at '{divergentPath}', and its layout was read by reflection, which reports the "
+              + "marshalled field offsets rather than the managed ones the engine addresses fields by — and those two disagree for exactly bool and char. "
+              + "Build this component with the Typhon source generator, which measures the managed layout, or use byte for a flag and ushort for a code unit.");
+        }
+
         var clrSize = RuntimeHelpers.SizeOf(POCOType.TypeHandle);
 
         // A field reaching past the end of the struct means the offsets describe a DIFFERENT layout from the one the accessors read — the managed/marshalled
@@ -359,5 +392,6 @@ public class DBComponentDefinition
 
         ComponentStorageSize = clrSize;
     }
+
 }
 

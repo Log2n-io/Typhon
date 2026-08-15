@@ -20,7 +20,25 @@
     <ItemGroup>
         <!-- The CLI (AssemblyName `typhon`) holds ProjectScaffolder (internal, via InternalsVisibleTo) + the embedded templates. -->
         <ProjectReference Include="..\..\src\Typhon.Shell\Typhon.Shell.csproj" />
+
+        <!-- #819: AssemblySchemaLoader reads schema out of a compiled assembly. To test that it prefers the generated spec over reflection, THIS assembly has
+             to carry one — so the generator runs over its own [Component] fixtures and the test loads its own DLL as the "external" schema assembly. -->
+        <ProjectReference Include="..\..\src\Typhon.Generators\Typhon.Generators.csproj"
+                          ReferenceOutputAssembly="false"
+                          OutputItemType="Analyzer" />
+
+        <!-- Built and copied beside the tests, but NOT referenced: the loader must open it as a foreign assembly whose module initializer has never run. -->
+        <ProjectReference Include="..\Typhon.Shell.Tests.SchemaFixture\Typhon.Shell.Tests.SchemaFixture.csproj"
+                          ReferenceOutputAssembly="false"
+                          Private="false" />
     </ItemGroup>
+
+    <Target Name="CopyForeignSchemaFixture" AfterTargets="Build">
+        <ItemGroup>
+            <ForeignSchemaFixture Include="$(MSBuildThisFileDirectory)..\Typhon.Shell.Tests.SchemaFixture\bin\$(Configuration)\$(TargetFramework)\Typhon.Shell.Tests.SchemaFixture.dll" />
+        </ItemGroup>
+        <Copy SourceFiles="@(ForeignSchemaFixture)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="Exists('%(ForeignSchemaFixture.FullPath)')" />
+    </Target>
 
     <!-- Typhon.Shell folds in the ASP.NET-hosted Workbench (`typhon ui`); the framework ref must be present to load its assembly graph. -->
     <ItemGroup>

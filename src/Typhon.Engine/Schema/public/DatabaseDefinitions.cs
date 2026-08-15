@@ -180,10 +180,24 @@ public class DatabaseDefinitions
     }
 
     /// <summary>
-    /// Non-generic overload for dry-run validation where the component type is known only at runtime. Reflects the type's <c>[Component]</c>/<c>[Field]</c>/
-    /// <c>[Index]</c>/<c>[SpatialIndex]</c>/<c>[ForeignKey]</c> metadata into a <see cref="ComponentSchemaSpec"/> and builds it through the shared core.
+    /// Non-generic overload for dry-run validation where the component type is known only at runtime. Prefers the type's source-generated spec exactly as the
+    /// generic overload does, and reflects its <c>[Component]</c>/<c>[Field]</c>/<c>[Index]</c>/<c>[SpatialIndex]</c>/<c>[ForeignKey]</c> metadata into a
+    /// <see cref="ComponentSchemaSpec"/> only when there is no generated one.
     /// </summary>
-    internal DBComponentDefinition CreateFromAccessor(Type t, FieldIdResolver resolver = null) => BuildFromSpec(ReflectComponentSpec(t), t, resolver);
+    /// <remarks>
+    /// The registry lookup is not an optimisation here, it is a correctness requirement: a reflected spec carries MARSHALLED offsets, and a definition built
+    /// from those is refused for a <c>bool</c>/<c>char</c> component (#819, rule SCHEMA-07). Skipping the registry would make the dry-run and
+    /// <c>typhon schema</c> paths reject components that register perfectly well through the generic overload.
+    /// </remarks>
+    internal DBComponentDefinition CreateFromAccessor(Type t, FieldIdResolver resolver = null)
+    {
+        if (GeneratedSchemaRegistry.TryGetComponentSpec(t, out var generated))
+        {
+            return BuildFromSpec(generated, t, resolver);
+        }
+
+        return BuildFromSpec(ReflectComponentSpec(t), t, resolver);
+    }
 
     /// <summary>
     /// Reflects a <c>[Component]</c>-annotated struct into a pure-data <see cref="ComponentSchemaSpec"/>. This is the ONLY place the schema-build path touches
@@ -249,7 +263,11 @@ public class DatabaseDefinitions
     /// <param name="resolver">Optional field-id resolver reconciling runtime fields against a persisted schema; null for a fresh component.</param>
     internal DBComponentDefinition BuildFromSpec(in ComponentSchemaSpec spec, Type pocoType, FieldIdResolver resolver)
     {
-        var compDef = new DBComponentDefinition(spec.Name, spec.Revision, spec.StorageMode, spec.DefaultDiscipline) { POCOType = pocoType };
+        var compDef = new DBComponentDefinition(spec.Name, spec.Revision, spec.StorageMode, spec.DefaultDiscipline)
+        {
+            POCOType = pocoType,
+            OffsetsAreManaged = spec.ManagedOffsets,
+        };
 
         lock (_componentLock)
         {

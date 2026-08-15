@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <!--
+      A stand-in for a third-party schema assembly: built with the Typhon source generator, but NOT referenced by the test host, so nothing has touched its
+      module initializer when AssemblySchemaLoader opens it. That is the only configuration in which the loader's RuntimeHelpers.RunModuleConstructor call is
+      load-bearing (#819) — an assembly the test project references has already had its initializer run by the runtime, which masks the whole question.
+    -->
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <LangVersion>default</LangVersion>
+        <IsPackable>false</IsPackable>
+        <IsTestProject>false</IsTestProject>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\..\src\Typhon.Schema.Definition\Typhon.Schema.Definition.csproj" />
+        <ProjectReference Include="..\..\src\Typhon.Generators\Typhon.Generators.csproj"
+                          ReferenceOutputAssembly="false"
+                          OutputItemType="Analyzer" />
+    </ItemGroup>
+
+</Project>
