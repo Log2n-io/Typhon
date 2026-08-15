@@ -264,7 +264,10 @@ internal sealed class FenceMigrateExecSystem : FencePhaseExecSystemBase
                 st.SortPendingMigrationsByDestCellKey();
             }
         }
-        return base.Prepare(ctx);
+
+        var chunkCount = base.Prepare(ctx);
+        EnsureChunkDirtyBuffers(chunkCount);
+        return chunkCount;
     }
 
     protected override long DispatchItem(int chunkIndex, in FenceWorkItem item, ChangeSet changeSet)
@@ -287,22 +290,39 @@ internal sealed class FenceMigrateExecSystem : FencePhaseExecSystemBase
     private System.Collections.Generic.List<DirtyBitDelta>[] _chunkDirtyBuffers
         = new System.Collections.Generic.List<DirtyBitDelta>[16];
 
-    private System.Collections.Generic.List<DirtyBitDelta> GetChunkDirtyBuffer(int chunkIndex)
+    /// <summary>
+    /// Size and populate the per-chunk buffer array for this tick's chunk count. Called ONLY from <see cref="Prepare"/>, which the scheduler runs
+    /// single-threaded.
+    /// </summary>
+    /// <remarks>
+    /// This used to be done on demand from <see cref="GetChunkDirtyBuffer"/>, i.e. from concurrent Migrate workers, with no synchronisation: two workers
+    /// could each read the same array, <c>Array.Copy</c> it, and publish — the second store dropping the first's bucket. The chunk count reaches ~45 in the
+    /// shapes this fence targets while the array starts at 16, so crossing the grow threshold is routine rather than pathological. The lost bucket is
+    /// currently benign, because the worker that created it still holds its own reference and flushes it in <see cref="OnAfterChunk"/> — but only that
+    /// detail makes it benign, and the plain reference store is also unordered against the <c>Array.Copy</c> on arm64. Sizing here removes the grow from
+    /// the worker path entirely rather than relying on the flush shape to stay as it is.
+    /// </remarks>
+    private void EnsureChunkDirtyBuffers(int chunkCount)
     {
-        if (chunkIndex >= _chunkDirtyBuffers.Length)
+        if (chunkCount > _chunkDirtyBuffers.Length)
         {
-            var grown = new System.Collections.Generic.List<DirtyBitDelta>[Math.Max(chunkIndex + 1, _chunkDirtyBuffers.Length * 2)];
+            var grown = new System.Collections.Generic.List<DirtyBitDelta>[Math.Max(chunkCount, _chunkDirtyBuffers.Length * 2)];
             Array.Copy(_chunkDirtyBuffers, grown, _chunkDirtyBuffers.Length);
             _chunkDirtyBuffers = grown;
         }
-        var bucket = _chunkDirtyBuffers[chunkIndex];
-        if (bucket == null)
+
+        for (int k = 0; k < chunkCount; k++)
         {
-            bucket = new System.Collections.Generic.List<DirtyBitDelta>(256);
-            _chunkDirtyBuffers[chunkIndex] = bucket;
+            _chunkDirtyBuffers[k] ??= new System.Collections.Generic.List<DirtyBitDelta>(256);
         }
-        return bucket;
     }
+
+    /// <summary>
+    /// This chunk's delta buffer. Never grows the backing array — <see cref="Prepare"/> has already sized and populated it for every chunk this tick
+    /// dispatches, so a worker only ever reads an element. An out-of-range index means the plan and the buffer array disagree, which is a defect rather
+    /// than something to paper over with a lazy grow, so it is left to throw.
+    /// </summary>
+    private System.Collections.Generic.List<DirtyBitDelta> GetChunkDirtyBuffer(int chunkIndex) => _chunkDirtyBuffers[chunkIndex];
 
     protected override void OnBeforeChunk(int chunkIndex)
     {

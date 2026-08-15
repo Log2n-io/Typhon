@@ -131,7 +131,11 @@ internal struct AccessControlSmall
                 return false;
             }
 
-            _spinWait.SpinOnce();
+            // SpinOnce(-1) disables the BCL's Thread.Sleep(1) escalation (#803). The default overload escalates at iteration 20, and on Windows Sleep(1) is
+            // re-armed on the next 15.625 ms timer tick — a wake time with no relationship to when the lock is released. Every critical section this type
+            // guards is sub-microsecond, so the CPU relief Sleep(1) buys never repays 15.6 ms. What remains (spin, then Yield/Sleep(0)) is a scheduler
+            // queueing delay instead of a timer delay. Same convention already used by BTree's OLC restart loops and the hash maps.
+            _spinWait.SpinOnce(-1);
             Fetch();
             return true;
         }

@@ -156,7 +156,9 @@ internal partial struct AccessControl
                     res = true;
                     break;
                 }
-                sw.SpinOnce();
+                // SpinOnce(-1) — never escalate to Thread.Sleep(1) (#803). The loop runs up to 100 iterations and the BCL escalates at 20, so the default
+                // overload could spend 80 iterations on a 15.625 ms Windows timer tick: ~1.2 s of wall time waiting on a sub-microsecond critical section.
+                sw.SpinOnce(-1);
 //                Console.WriteLine($"[Thread {Environment.CurrentManagedThreadId}] {LogData(cur)}");
             }
 
@@ -228,7 +230,11 @@ internal partial struct AccessControl
                     break;
                 }
 
-                sw.SpinOnce();
+                // SpinOnce(-1) — never escalate to Thread.Sleep(1) (#803). This loop bounds at 1000 iterations and the BCL escalates at 20, so the default
+                // overload put up to 980 Sleep(1) calls on one wait pass — ~15 s of wall time on Windows' 15.625 ms timer, for a lock whose holder releases
+                // in well under a microsecond. The waiter counters above give this type fairness; they do not give it a wake path, so the poll interval IS
+                // the wake latency and must stay off the timer.
+                sw.SpinOnce(-1);
             }
 
             // Update res to be either true (try again/reassess) or false (timeout or cancellation)
