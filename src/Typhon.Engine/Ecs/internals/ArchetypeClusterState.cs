@@ -388,8 +388,14 @@ internal sealed unsafe class ArchetypeClusterState
 
         var ids = _drainedClusterIds;
         bool hasCluster = ClusterSegment != null;
-        var clusterAccessor = hasCluster ? ClusterSegment.CreateChunkAccessor() : default;
-        var transientAccessor = TransientSegment != null ? TransientSegment.CreateChunkAccessor() : default;
+        // `using`, because GetChunkAddress(chunkId, dirty: true) below registers an ActiveChunkWriter on each
+        // chunk's page and only Dispose -> CommitChanges releases it (CP-13). Without it every drained cluster left
+        // one ACW on its page forever, so CP-11 skipped that page in EVERY checkpoint cycle: CK-03's coverage gate
+        // never opened, CheckpointLSN never advanced, no WAL segment was ever recycled, and the log grew at the
+        // full write rate until the writer stalled and the process died with WalBackPressureTimeout (#817).
+        // Disposing a `default` accessor is safe — Dispose returns immediately when _segment is null.
+        using var clusterAccessor = hasCluster ? ClusterSegment.CreateChunkAccessor() : default;
+        using var transientAccessor = TransientSegment != null ? TransientSegment.CreateChunkAccessor() : default;
 
         for (int i = 0; i < count; i++)
         {

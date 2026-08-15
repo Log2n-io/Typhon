@@ -1452,4 +1452,73 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         Assert.That((cs.ClusterProcessBitmap[chunkC >> 6] >> (chunkC & 63)) & 1L, Is.EqualTo(0L),
             "interior move with no extreme change avoids the fence-time process loop entirely");
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // CP-13 — ActiveChunkWriters conservation across cluster finalisation
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// CP-13: every ActiveChunkWriters registration is released. Emptying a cluster queues it for
+    /// <c>DrainPendingClusterFinalizations</c>, which opens ChunkAccessors and dirties each drained chunk's page.
+    /// Those accessors must reach Dispose/CommitChanges or the registration leaks permanently.
+    /// </summary>
+    /// <remarks>
+    /// The regression this pins is #817, and it is worth spelling out why 5 000 tests walked past it. A leaked ACW
+    /// corrupts nothing, throws nothing and costs no measurable time — its only consequence is that CP-11 skips
+    /// that page in EVERY subsequent checkpoint cycle, so CK-03's coverage gate never opens, no WAL segment is ever
+    /// recycled, and the log grows at the full write rate until the writer stalls. In the demo that surfaced ten
+    /// minutes later as a WalBackPressureTimeout thrown from the tick fence — pointing at the WAL writer, which was
+    /// innocent. Nothing observable connects the two ends, which is exactly why the invariant has to be asserted
+    /// directly rather than inferred from behaviour.
+    /// <para>
+    /// The assertion must run QUIESCENT — no open transaction, no accessor alive. While anything is in flight a
+    /// non-zero count is legitimate, and indistinguishable from a leak.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [VerifiesRule("CP-13")]
+    public void ClusterFinalization_ReleasesEveryActiveChunkWriter()
+    {
+        using var dbe = SetupEngineWithGrid();
+        var mmf = ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+
+        Assert.That(mmf.CountPagesWithActiveChunkWriters(), Is.Zero, "precondition: no writer registered before the test spawns anything");
+
+        // Fill one cell, then move every entity out of it. The source cluster empties, which is what queues a
+        // finalisation — the path that leaked. Several entities so more than one page is involved.
+        var ids = new EntityId[24];
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < ids.Length; i++)
+            {
+                ids[i] = tx.Spawn<ClMigUnit>(
+                    ClMigUnit.Pos.Set(PointAt(50f, 50f, i)),
+                    ClMigUnit.Scratch.Set(ScratchOf(i, i)));
+            }
+            tx.Commit();
+        }
+        dbe.WriteTickFence(1);
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < ids.Length; i++)
+            {
+                var eref = tx.OpenMut(ids[i]);
+                ref var pos = ref eref.Write(ClMigUnit.Pos);
+                pos.Bounds = new AABB2F { MinX = 650f, MinY = 650f, MaxX = 650f, MaxY = 650f };
+            }
+            tx.Commit();
+        }
+
+        // Migration executes on the next fence; the emptied cluster is drained on a later one, so run several.
+        for (var tick = 2; tick <= 6; tick++)
+        {
+            dbe.WriteTickFence(tick);
+        }
+
+        Assert.That(mmf.CountPagesWithActiveChunkWriters(), Is.Zero,
+            "every ActiveChunkWriters registration taken during migration and cluster finalisation must be released "
+            + "(CP-13). A non-zero count here means the checkpoint coverage gate will skip those pages forever and "
+            + "the WAL will never be reclaimed — see #817.");
+    }
 }

@@ -862,6 +862,21 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
     while caller still holds OLC write lock on evicted slot's node;
     same corruption as CP-11
 
+### CP-13: ActiveChunkWriters conservation `[fatal][silent]`
+  invariant every IncrementActiveChunkWriters is matched by exactly one DecrementActiveChunkWriters
+  invariant no writer in flight → ∀ page: page.ACW == 0
+  note CP-11 and CP-12 constrain when ACW may be observed non-zero and when the decrement may be
+       deferred; NEITHER requires that it ever happens. Every ChunkAccessor that dirties a slot must
+       therefore reach CommitChanges() or Dispose() — an accessor abandoned without either leaks the
+       registration permanently, because the release is driven only by those two paths.
+  scope: ChunkAccessor.MarkSlotDirty, ChunkAccessor.CommitChanges, ChunkAccessor.Dispose,
+         ChangeSet.FlushDeferredEvictions, ArchetypeClusterState.DrainPendingClusterFinalizations
+  on_violation: the leaked page is skipped by CP-11 in EVERY checkpoint cycle, so CK-03's coverage gate
+    never opens, CheckpointLSN never advances and CK-04 recycles no WAL segment. The log then grows at
+    the full write rate until the writer stalls and the engine raises WalBackPressureTimeout — observed
+    as 22 GB across 86 segments in four minutes against a 120 MB data file (#817). Silent: nothing is
+    corrupted and nothing is slow; a counter simply never returns to zero.
+
 ---
 
 ## Module: Seqlock

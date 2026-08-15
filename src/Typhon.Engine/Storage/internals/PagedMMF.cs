@@ -1862,6 +1862,50 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     protected virtual bool IsProtectedPage(int filePageIndex) => false;
 
+    // ─── Page-counter census (CP-13 / #817) ──────────────────────────────────────────────────────────────────────
+    // Read with the workload QUIESCENT. That is the whole point: while anything is in flight, a counter that is too
+    // high is indistinguishable from one that is legitimately busy, which is why an ACW leak survived 5 000+ tests
+    // and only surfaced as a WalBackPressureTimeout ten minutes into a demo run.
+
+    /// <summary>Live <see cref="PageInfo.ActiveChunkWriters"/> for a page. Non-zero at quiesce proves a leaked registration.</summary>
+    internal int ActiveChunkWritersOf(int memPageIndex) => Volatile.Read(ref _memPagesInfo[memPageIndex].ActiveChunkWriters);
+
+    /// <summary>Pages holding a writer registration. Must be zero at quiesce (CP-13).</summary>
+    internal int CountPagesWithActiveChunkWriters()
+    {
+        var n = 0;
+        for (var i = 0; i < _memPagesInfo.Length; i++)
+        {
+            if (Volatile.Read(ref _memPagesInfo[i].ActiveChunkWriters) != 0)
+            {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /// <summary>Live <see cref="PageInfo.DirtyCounter"/> for a page.</summary>
+    internal int DirtyCounterOf(int memPageIndex) => Volatile.Read(ref _memPagesInfo[memPageIndex].DirtyCounter);
+
+    /// <summary>Pages still dirty, the cache size, and the lowest dirty page index (-1 if none).</summary>
+    internal (int Dirty, int Total, int FirstDirtyPage) CountDirtyPages()
+    {
+        var n = 0;
+        var first = -1;
+        for (var i = 0; i < _memPagesInfo.Length; i++)
+        {
+            if (Volatile.Read(ref _memPagesInfo[i].DirtyCounter) > 0)
+            {
+                n++;
+                if (first < 0)
+                {
+                    first = i;
+                }
+            }
+        }
+        return (n, _memPagesInfo.Length, first);
+    }
+
     internal void IncrementDirty(int memPageIndex)
     {
         var pi = _memPagesInfo[memPageIndex];
