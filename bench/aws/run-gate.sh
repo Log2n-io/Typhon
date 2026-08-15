@@ -62,8 +62,15 @@ if [ "$RUN_WORKBENCH" = "true" ]; then
   # is one definition of "excluded from the gate" and not two that drift apart.
   WB_FILTER="$(python3 bench/aws/shard.py filter)"
   echo "[workbench] filter: ${WB_FILTER}"
+  # --blame-hang so a hang NAMES itself. This suite runs to ~90s; when one of its tests wedged, vstest printed nothing
+  # further and the job burned the step's whole 10-minute budget before the action killed it, leaving orphan dotnet
+  # processes and a log whose last line was "A total of 1 test files matched the specified pattern". A silent hang and a
+  # slow runner are indistinguishable from that, and neither the trx nor the retry pass exists to say otherwise —
+  # a timeout kills the run before either is written. 3m is ~2x the WHOLE suite, so it cannot fire on a merely loaded
+  # runner, and it lands inside the job step's own 10-minute cap — a detector that only trips after the step is killed
+  # would report nothing, which is the situation it exists to end.
   if dotnet test test/Typhon.Workbench.Tests/Typhon.Workbench.Tests.csproj -c Release --no-build \
-       --filter "$WB_FILTER" \
+       --filter "$WB_FILTER" --blame-hang --blame-hang-timeout 3m --blame-hang-dump-type none \
        --logger "trx;LogFileName=workbench.trx" --results-directory "$OUT" 2>&1 | tee "$OUT/workbench-dotnet.log"
   then echo "- ✅ workbench .NET tests passed" >> "$S"
   elif SHARD_REPO="$REPO" SHARD_CONFIG=Release python3 bench/aws/shard.py retry \
