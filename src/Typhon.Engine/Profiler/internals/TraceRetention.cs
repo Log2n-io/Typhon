@@ -201,8 +201,50 @@ internal static partial class TraceRetention
         return new RetentionReport(captureBytes, pinnedBytes, sidecarBytes, budget, evicted, skipped);
     }
 
+    /// <summary>
+    /// Deletes a capture, unless somebody has it open. Returns false when the file survives, which the caller counts as a skip.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The probe is what makes "never evict a capture open in a session" true off Windows.</b> Relying on
+    /// <see cref="File.Delete"/> to fail was a Windows-only guarantee wearing a portable-looking API: a sharing violation stops the delete there, while POSIX
+    /// <c>unlink</c> detaches the name from the inode no matter who holds the file open — it simply succeeds, the Workbench keeps reading a capture that is
+    /// no longer in the directory, and retention reports it as evicted. The guarantee did not degrade on Linux, it was absent, and nothing said so.
+    /// </para>
+    /// <para>
+    /// Opening with <see cref="FileShare.None"/> is the portable spelling of "is anybody else holding this?", because .NET backs <see cref="FileShare"/> with
+    /// <c>flock</c> on Unix — so an exclusive open fails exactly when another .NET process (the Workbench, which reads captures through
+    /// <see cref="FileStream"/>) has it. <see cref="FileAccess.Read"/> so a read-only mount cannot turn "in use" into "failed", and the handle is released
+    /// immediately: this asks a question, it does not hold the file.
+    /// </para>
+    /// <para>
+    /// A capture opened between the probe closing and the delete is a window this does not close, and deliberately: on Windows the delete still refuses, and
+    /// on Unix no check can close it, since nothing there can make unlink conditional. The alternative — an on-disk open-marker beside each capture, the shape
+    /// <c>db.lock</c> uses — buys atomicity at the cost of a second liveness protocol to keep honest. Worth revisiting only if this window is ever observed.
+    /// </para>
+    /// </remarks>
     private static bool TryDelete(string path, ILogger logger)
     {
+        try
+        {
+            using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+            }
+        }
+        catch (FileNotFoundException)
+        {
+            // Already gone — fall through, since File.Delete treats a missing file as success and so should this.
+        }
+        catch (DirectoryNotFoundException)
+        {
+            // The whole profilings/ directory went away under us. Same reasoning.
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            RetentionLog.DeleteSkipped(logger, Path.GetFileName(path), ex.GetType().Name, ex.Message);
+            return false;
+        }
+
         try
         {
             File.Delete(path);
