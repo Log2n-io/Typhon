@@ -3,15 +3,18 @@ import {
   BAR_AREA_BOTTOM_RESERVED,
   BAR_AREA_TOP,
   BAR_LEFT_PAD,
-  BAR_WIDTH,
   DRAG_THRESHOLD_PX,
   TIMELINE_HEIGHT,
   buildTickRows,
   computeSelectionIdxRange,
   drawTickOverview,
   hitTestScrollbar,
+  barsThatFit,
+  computeBarOffsets,
   hitTestTick,
   isInHelpHitZone,
+  missingTicksBefore,
+  recordedTicksOnly,
   type TickRow,
 } from '@/libs/profiler/canvas/tickOverview';
 import { formatDuration } from '@/libs/profiler/canvas/canvasUtils';
@@ -47,6 +50,11 @@ const OVERVIEW_HELP_LINES: string[] = [
   '  Orange overlay = ticks overlapping the current viewport.',
   '  ◀ / ▶ chevrons mean the selection extends past the visible',
   '    window.',
+  '  Grey hatched band = the tick axis JUMPS here. Only recorded',
+  '    ticks are drawn, so a cherry-picked capture puts e.g.',
+  '    tick 4 next to tick 8. Bars either side of the line are',
+  '    NOT adjacent in time — hover the right-hand one to see',
+  '    how many ticks were skipped.',
   '',
   'Bar colour:',
   '  Throttle multiplier (when > 1) wins over the P95 colouring,',
@@ -160,7 +168,15 @@ export default function TickOverview({ isLive = false }: Props) {
   // #289 — both trace and live modes derive from `metadata.tickSummaries`. In live mode the array grows over time
   // via SSE deltas (server-side IncrementalCacheBuilder finalizes ticks → store appends). The `buildTickRows`
   // helper handles the float-drift boundary clamp; see its doc for why.
-  const tickRows: TickRow[] = useMemo(() => buildTickRows(metadata?.tickSummaries), [metadata?.tickSummaries]);
+  //
+  // #805 — `recordedTicksOnly` first. A cherry-pick capture keeps a skeleton for every tick it did NOT record, purely
+  // to hold the tick numbering; drawing those would bury the armed windows in thousands of unclickable bars. Filtering
+  // at the ROW level rather than at the draw call is what keeps hit-testing, wheel navigation, the scrollbar and the
+  // selection range consistent — every one of them indexes into `tickRows` positionally.
+  const tickRows: TickRow[] = useMemo(
+    () => buildTickRows(recordedTicksOnly(metadata?.tickSummaries)),
+    [metadata?.tickSummaries],
+  );
 
   // GC marker source: every GC suspension wraps a stop-the-world window, so any tick that overlaps one
   // is a tick where GC happened. Merge-walk both sorted arrays in parallel — O(ticks + suspensions),
@@ -229,8 +245,10 @@ export default function TickOverview({ isLive = false }: Props) {
       return;
     }
     const w = canvasWidthRef.current;
-    const maxVisible = w > 0 ? Math.max(1, Math.floor((w - BAR_LEFT_PAD) / BAR_WIDTH)) : tickRows.length;
     const sr = scrollRangeRef.current;
+    // barsThatFit, not width/BAR_WIDTH: discontinuity bands consume horizontal space, so a pitch-based count
+    // overflows the canvas by the total band width and clips the right-hand bars.
+    const maxVisible = w > 0 ? Math.max(1, barsThatFit(tickRows, sr.startIdx, w - BAR_LEFT_PAD)) : tickRows.length;
     const visibleCount = sr.endIdx - sr.startIdx;
     const desiredVisible = Math.min(maxVisible, tickRows.length);
     if (visibleCount <= 0) {
@@ -259,10 +277,10 @@ export default function TickOverview({ isLive = false }: Props) {
     canvasWidthRef.current = rect.width;
 
     // Width-aware self-correction — init effect runs before first layout, so scrollWindow may be larger than the
-    // canvas can show. Clamp down to what fits at BAR_WIDTH.
+    // canvas can show. Clamp down to what actually fits, bands included.
     if (!isLive && tickRows.length > 0 && rect.width > 0) {
-      const maxVisible = Math.max(1, Math.min(tickRows.length, Math.floor((rect.width - BAR_LEFT_PAD) / BAR_WIDTH)));
       const sr0 = scrollRangeRef.current;
+      const maxVisible = Math.max(1, Math.min(tickRows.length, barsThatFit(tickRows, sr0.startIdx, rect.width - BAR_LEFT_PAD)));
       const currentVisible = sr0.endIdx - sr0.startIdx;
       if (currentVisible !== maxVisible || sr0.endIdx > tickRows.length) {
         const newStart = Math.max(0, Math.min(tickRows.length - maxVisible, sr0.startIdx));
@@ -343,8 +361,13 @@ export default function TickOverview({ isLive = false }: Props) {
     const canvas = canvasRef.current;
     if (!canvas) return -1;
     const rect = canvas.getBoundingClientRect();
-    return hitTestTick(clientX - rect.left, rect.width, scrollRangeRef.current);
-  }, []);
+    const sr = scrollRangeRef.current;
+    // The same offset table the draw pass builds. Bars are no longer on a uniform pitch — a discontinuity band takes
+    // real space — so hit-testing has to read the layout rather than divide by BAR_WIDTH, or every click past the
+    // first gap selects a neighbouring tick. Recomputed here rather than cached because pointer events and the rAF
+    // draw run at different times, and a stale table misaims clicks precisely while the user is scrolling.
+    return hitTestTick(clientX - rect.left, rect.width, sr, computeBarOffsets(tickRows, sr.startIdx, sr.endIdx));
+  }, [tickRows]);
 
   const panBy = useCallback((deltaTicks: number) => {
     const sr = scrollRangeRef.current;
@@ -627,6 +650,19 @@ export default function TickOverview({ isLive = false }: Props) {
         `Duration: ${formatDuration(tick.durationUs)} (${formatDuration(allocatedUs)} allocated)`,
         `Events: ${tick.eventCount.toLocaleString()}`,
       ];
+      // The dashed marker says a break is there; this says how big it is, which is the part that changes how you read
+      // the neighbouring bars. Named as "not recorded" rather than "missing": with cherry-picked capture the ticks did
+      // run, they were simply never armed, and "missing" would suggest data loss.
+      const skipped = missingTicksBefore(tickRows, idx);
+      if (skipped > 0) {
+        const from = tickRows[idx - 1].tickNumber + 1;
+        const to = tick.tickNumber - 1;
+        lines.push(
+          skipped === 1
+            ? `Gap before: tick ${from} not recorded`
+            : `Gap before: ticks ${from}–${to} not recorded (${skipped.toLocaleString()})`,
+        );
+      }
       // v9 (#289 follow-up): expose throttle + metronome diagnostics when present.
       const mult = tick.tickMultiplier ?? 0;
       if (mult > 1) {

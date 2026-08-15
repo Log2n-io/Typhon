@@ -60,7 +60,26 @@ public static class DatabaseLockFile
     /// <c>true</c> only when the holder explicitly advertised it. <b>Absent means false</b>, so a lock written by an
     /// older build — or by any normal engine — is never mistaken for one that will release on request.
     /// </param>
-    public readonly record struct LockInfo(int Pid, string MachineName, DateTimeOffset StartedAt, bool Yieldable);
+    /// <param name="ProfilerEndpoint">
+    /// Where the holder's live profiler can be reached (<c>host:port</c>), or <c>null</c> when it runs without one.
+    /// <b>Absent means null</b>, on the same reasoning as <paramref name="Yieldable"/>: a lock from an older build must
+    /// never be read as offering something it does not have.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// <b>Why the profiler endpoint rides here.</b> An observer that has the database — the Workbench opening a bundle
+    /// its holder is using — knows <i>who</i> holds it but not <i>where to watch</i> it. The holder knows its own live
+    /// port. This file is the one thing they already share, so the link is drawn database → engine, which is the
+    /// direction the user arrives from. Putting the database's identity on the profiler's wire instead would answer the
+    /// same question backwards, and would cost a wire-format change.
+    /// </para>
+    /// <para>
+    /// It is an advertisement of <i>intent</i>, not a liveness proof: the lock is written when the database opens, which
+    /// may precede the listener actually binding. A consumer must treat a refused connect as "not watchable right now"
+    /// rather than as a contradiction.
+    /// </para>
+    /// </remarks>
+    public readonly record struct LockInfo(int Pid, string MachineName, DateTimeOffset StartedAt, bool Yieldable, string ProfilerEndpoint);
 
     /// <summary>A claim in flight on a yieldable database.</summary>
     /// <param name="Pid">Process id of the claimant.</param>
@@ -89,14 +108,28 @@ public static class DatabaseLockFile
     /// <param name="startedAt">When the holder acquired the database.</param>
     /// <param name="machineName">Machine the holder runs on.</param>
     /// <param name="yieldable">Whether this holder will release the database on request.</param>
-    public static string SerializeLock(int pid, DateTimeOffset startedAt, string machineName, bool yieldable) =>
-        JsonSerializer.Serialize(new
-        {
-            pid,
-            startedAt = startedAt.ToString("o"),
-            machineName,
-            yieldable,
-        });
+    /// <param name="profilerEndpoint">
+    /// <c>host:port</c> of this holder's live profiler, or <c>null</c> when it runs without one. Omitted from the JSON
+    /// when null rather than written as <c>null</c>, so a lock from a holder with no profiler is byte-identical to one
+    /// written before this field existed.
+    /// </param>
+    public static string SerializeLock(int pid, DateTimeOffset startedAt, string machineName, bool yieldable, string profilerEndpoint = null) =>
+        profilerEndpoint == null
+            ? JsonSerializer.Serialize(new
+            {
+                pid,
+                startedAt = startedAt.ToString("o"),
+                machineName,
+                yieldable,
+            })
+            : JsonSerializer.Serialize(new
+            {
+                pid,
+                startedAt = startedAt.ToString("o"),
+                machineName,
+                yieldable,
+                profilerEndpoint,
+            });
 
     /// <summary>
     /// Reads the lock file. Returns <c>false</c> for absent, empty, unparseable or truncated files.
@@ -132,8 +165,17 @@ public static class DatabaseLockFile
             // Absent ⇒ false. This default is what keeps every pre-#621 lock file, and every ordinary engine's lock,
             // safe from being treated as willing to yield.
             var yieldable = root.TryGetProperty("yieldable", out var y) && y.ValueKind == JsonValueKind.True;
+            // Absent ⇒ null, for the same reason yieldable defaults false: a lock written before this field existed must
+            // never be read as advertising a profiler that is not there.
+            var profilerEndpoint = root.TryGetProperty("profilerEndpoint", out var pe) && pe.ValueKind == JsonValueKind.String
+                ? pe.GetString()
+                : null;
+            if (string.IsNullOrWhiteSpace(profilerEndpoint))
+            {
+                profilerEndpoint = null;
+            }
 
-            info = new LockInfo(root.GetProperty("pid").GetInt32(), machine, startedAt, yieldable);
+            info = new LockInfo(root.GetProperty("pid").GetInt32(), machine, startedAt, yieldable, profilerEndpoint);
             return true;
         }
         catch (Exception ex) when (IsExpectedIoOrFormatFailure(ex))

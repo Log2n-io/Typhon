@@ -93,6 +93,18 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     private IncrementalCacheBuilder _builder;
     private long _timestampFrequency;
     private byte[] _rawBlockBuffer = [];
+
+    /// <summary>
+    /// Destination for <see cref="FilterRecords"/> (#805). Grows to the largest block seen; never shrinks.
+    /// </summary>
+    /// <remarks>
+    /// Compacting in place inside <see cref="_rawBlockBuffer"/> would in fact be safe — the write cursor never overtakes
+    /// the read cursor, since a record is only copied after it has been walked. A separate buffer is used anyway so that
+    /// the raw block stays intact for the whole of <c>HandleBlock</c>: <see cref="ExtractThreadInfos"/> and any future
+    /// unfiltered inspection then read the engine's bytes, not a half-compacted version of them, with no ordering rule
+    /// to remember.
+    /// </remarks>
+    private byte[] _filteredBlockBuffer = [];
     private long _lastBlockReceivedTicks;
 
     /// <summary>
@@ -230,26 +242,37 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     /// <summary>Fires when the engine sends a Shutdown frame — terminal.</summary>
     public event Action<string> ShutdownReceived;
 
-    private AttachSessionRuntime(Guid sessionId, string endpointAddress, string host, int port, ILogger logger)
+    private AttachSessionRuntime(Guid sessionId, string endpointAddress, string host, int port, ILogger logger, CaptureMode captureMode)
     {
         _sessionId = sessionId;
         _endpointAddress = endpointAddress;
         _host = host;
         _port = port;
         _logger = logger;
+        _captureMode = captureMode;
+        // The capture counter IS the mode: unbounded for Everything (pre-#805 behaviour, bit-for-bit), zero for
+        // CherryPick so nothing but the per-tick skeleton is retained until the operator arms a window. Records that
+        // arrive before the first TickStart follow the same rule, which is why this is set here and not at first tick.
+        _remainingTicks = captureMode == CaptureMode.CherryPick ? 0 : AlwaysOnTicks;
+        _armedForCurrentTick = captureMode != CaptureMode.CherryPick;
     }
 
     /// <summary>
     /// Starts a new attach-session runtime. Performs 3 × 2 s upfront TCP connect retry before returning.
     /// </summary>
     public static async Task<AttachSessionRuntime> StartAsync(string endpointAddress, ILogger logger, CancellationToken ct)
-        => await StartAsync(Guid.NewGuid(), endpointAddress, logger, ct).ConfigureAwait(false);
+        => await StartAsync(Guid.NewGuid(), endpointAddress, logger, ct, CaptureMode.Everything).ConfigureAwait(false);
 
     /// <summary>
     /// Overload that accepts an explicit session id — used by <c>SessionsController</c> so the temp file path matches the
     /// public <c>sessionId</c> from <see cref="SessionManager"/>.
     /// </summary>
-    public static async Task<AttachSessionRuntime> StartAsync(Guid sessionId, string endpointAddress, ILogger logger, CancellationToken ct)
+    /// <param name="captureMode">
+    /// <see cref="CaptureMode.Everything"/> preserves the pre-#805 behaviour and is the default for every existing
+    /// caller. <see cref="CaptureMode.CherryPick"/> starts the session idle — see <c>12-on-demand-tick-capture.md</c>.
+    /// </param>
+    public static async Task<AttachSessionRuntime> StartAsync(Guid sessionId, string endpointAddress, ILogger logger, CancellationToken ct,
+        CaptureMode captureMode = CaptureMode.Everything)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(endpointAddress);
         var (host, port) = ParseEndpoint(endpointAddress);
@@ -293,7 +316,7 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
                 lastError);
         }
 
-        var runtime = new AttachSessionRuntime(sessionId, endpointAddress, host, port, logger);
+        var runtime = new AttachSessionRuntime(sessionId, endpointAddress, host, port, logger, captureMode);
         runtime.LogStarting(host, port);
         runtime.SetConnectionStatus("connected");
         runtime.LogConnected(host, port);
@@ -379,7 +402,16 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
                 throw new ArgumentOutOfRangeException(nameof(chunkIdx),
                     $"Chunk index {chunkIdx} out of range (manifest has {_builder.ChunkManifest.Count} entries).");
             }
-            return ValueTask.FromResult(_builder.ChunkManifest[chunkIdx]);
+            var entry = _builder.ChunkManifest[chunkIdx];
+            // #805: report the chunk's tick range in absolute simulation ticks, matching the manifest and tick summaries
+            // the client already holds. Byte offset and length are deliberately untouched — they address the temp file.
+            // Applying the translation here rather than in the controller keeps ProfilerController generic across
+            // Trace and Attach sessions.
+            return ValueTask.FromResult(entry with
+            {
+                FromTick = ToAbsoluteTick(entry.FromTick),
+                ToTick = ToAbsoluteTick(entry.ToTick),
+            });
         }
     }
 
@@ -691,6 +723,9 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
 
                     case LiveFrameType.Shutdown:
                         LogShutdownReceived();
+                        // #805: the engine quit cleanly and this session is terminal, so a recorded window would die
+                        // with the temp file. Save before anyone can dispose us.
+                        AutoSaveOnTeardown("engine_shutdown");
                         ShutdownReceived?.Invoke("engine_shutdown");
                         BroadcastDelta(new LiveStreamEventDto(Kind: "shutdown", Status: "engine_shutdown"));
                         return StreamEndReason.Shutdown;
@@ -803,7 +838,26 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
             BroadcastDelta(new LiveStreamEventDto(Kind: "shutdown", Status: "init_mismatch"));
             return false;
         }
-        // Same signature → continue feeding from where we left off. The builder's internal tick counter survives the
+        // #805: signature matching is not enough to tell "the socket blipped" from "the app was restarted". The Init
+        // signature deliberately excludes CreatedUtcTicks, so the SAME binary relaunched hashes identically — and
+        // continuing to feed the old builder would silently report run 2's tick 1 as tick N+1, because the builder's
+        // tick counter derives from counting TickStart markers and never resets.
+        //
+        // CreatedUtcTicks is the engine's session start time, so it separates the two cases exactly:
+        //   same value  → one engine process, transient TCP drop → resume, as before.
+        //   different   → a new process → the tick axis restarted → end this session.
+        // Ending it is a correctness fix, not a new limitation: true tick numbers and two runs on one timeline cannot
+        // both hold without a (run, tick) composite, which would mean changing TickSummary in Typhon.Profiler.
+        if (headerDto.CreatedUtcTicks != _initialHeader.CreatedUtcTicks)
+        {
+            LogEngineRestartDetected(_initialHeader.CreatedUtcTicks, headerDto.CreatedUtcTicks);
+            AutoSaveOnTeardown("engine_restarted");
+            ShutdownReceived?.Invoke("engine_restarted");
+            BroadcastDelta(new LiveStreamEventDto(Kind: "shutdown", Status: "engine_restarted"));
+            return false;
+        }
+
+        // Same process → continue feeding from where we left off. The builder's internal tick counter survives the
         // reconnect, so subsequent TickStart records resume the same tickNumber sequence.
         LogInitReceived(reader.Systems.Count, reader.Header.WorkerCount, reader.Header.BaseTickRate);
         return true;
@@ -916,13 +970,32 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         // Walk for ThreadInfo records BEFORE feeding the builder. The builder treats records as opaque bytes; we
         // need the slot→name mapping surfaced to the client via SSE delta + metadata snapshot regardless of which
         // chunk a record happens to land in (otherwise late-arriving worker ThreadInfo records get buried in
-        // unloaded chunks).
+        // unloaded chunks). Runs on the UNFILTERED buffer — ThreadInfo is exempt anyway, but reading it here keeps
+        // slot naming independent of capture state by construction rather than by coincidence.
         ExtractThreadInfos(_rawBlockBuffer.AsSpan(0, uncompressedBytes));
 
-        lock (_builderLock)
+        // #805 on-demand tick capture: drop detail records for ticks outside an armed window. Filtering is per record,
+        // never per block — a Block frame is a timestamp-ordered merge across all thread slots drained on a 1 ms
+        // cadence, so one block can straddle a tick boundary.
+        if (_filteredBlockBuffer.Length < uncompressedBytes)
         {
-            _builder.FeedRawRecords(_rawBlockBuffer.AsSpan(0, uncompressedBytes));
+            _filteredBlockBuffer = new byte[uncompressedBytes];
         }
+        var retainedBytes = FilterRecords(_rawBlockBuffer.AsSpan(0, uncompressedBytes), _filteredBlockBuffer);
+
+        if (retainedBytes > 0)
+        {
+            lock (_builderLock)
+            {
+                _builder.FeedRawRecords(_filteredBlockBuffer.AsSpan(0, retainedBytes));
+            }
+        }
+
+        // Published LAST, and as a pair. An observer that sees the received count advance has therefore also seen this
+        // block's arm-state transitions and its records reach the builder — so the two counters are never mutually
+        // inconsistent, and "bytes received" never advertises work that has not happened yet.
+        Interlocked.Add(ref _recordBytesRetained, retainedBytes);
+        Interlocked.Add(ref _recordBytesReceived, uncompressedBytes);
     }
 
     /// <summary>
@@ -1001,7 +1074,11 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         // Builder fires synchronously inside FeedRawRecords (which we already hold _builderLock for). Project to DTO and
         // append; SSE delta fanout happens outside the lock to avoid back-pressure on the read loop.
         var dto = new TickSummaryDto(
-            TickNumber: summary.TickNumber,
+            // #805: translated from the builder's attach-relative count to the engine's true simulation tick. Applied at
+            // every server→client boundary (here, the chunk manifest, and IChunkProvider) so the client only ever sees
+            // one coordinate system — the client correlates summaries against manifest tick ranges, so a boundary that
+            // translated only one of them would silently mis-map chunks to ticks.
+            TickNumber: ToAbsoluteTick(summary.TickNumber),
             StartUs: summary.StartUs,
             DurationUs: summary.DurationUs,
             EventCount: summary.EventCount,
@@ -1023,8 +1100,8 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     {
         var isContinuation = (entry.Flags & TraceFileCacheConstants.FlagIsContinuation) != 0;
         var dto = new ChunkManifestEntryDto(
-            FromTick: entry.FromTick,
-            ToTick: entry.ToTick,
+            FromTick: ToAbsoluteTick(entry.FromTick),
+            ToTick: ToAbsoluteTick(entry.ToTick),
             EventCount: entry.EventCount,
             IsContinuation: isContinuation);
         _chunkManifest.Add(dto);
@@ -1330,6 +1407,17 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     public void Dispose()
     {
         if (_disposed) return;
+
+        // Last chance to preserve a recorded window, and it must run BEFORE _disposed is set — AutoSaveOnTeardown
+        // refuses to run on a disposed runtime, and the temp file holding the capture is deleted a few lines below.
+        //
+        // The teardown frames (engine shutdown, engine restart) are not the only way a session ends: the operator can
+        // close it, or press Stop watching, and both routes arrive here having recorded exactly the ticks they meant
+        // to. While a live run also wrote a complete engine capture this merely duplicated it; now that a live-only
+        // run writes nothing else, skipping it here would silently discard the only artifact of the recording.
+        // Idempotent — a window already saved by a shutdown frame is not written twice.
+        try { AutoSaveOnTeardown("session_closed"); } catch { }
+
         _disposed = true;
         try { _flushChunkTimer?.Dispose(); } catch { }
         try { _trailingTickTimer?.Dispose(); } catch { }

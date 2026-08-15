@@ -6,11 +6,15 @@ namespace Typhon.Workbench.Sessions;
 /// Per-session handle for a live Typhon app attached over TCP. Owns an <see cref="AttachSessionRuntime"/> that manages
 /// the socket + frame-read loop + SSE subscriber fan-out.
 /// </summary>
-public sealed class AttachSession : ISession, IDisposable
+public sealed class AttachSession : ISession, ILiveProfilerHost, IDisposable
 {
     public Guid Id { get; }
     public string EndpointAddress { get; }
     public AttachSessionRuntime Runtime { get; }
+
+    /// <inheritdoc />
+    /// <remarks>An attach session exists to watch; its live runtime is never null for the session's lifetime.</remarks>
+    public AttachSessionRuntime LiveRuntime => Runtime;
 
     public SessionKind Kind => SessionKind.Attach;
     public SessionState State => SessionState.Attached;

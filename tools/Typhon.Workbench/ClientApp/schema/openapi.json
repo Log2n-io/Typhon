@@ -5067,6 +5067,9 @@
               "null",
               "string"
             ]
+          },
+          "cherryPick": {
+            "type": "boolean"
           }
         }
       },
@@ -9004,6 +9007,16 @@
               "string"
             ],
             "format": "uuid"
+          },
+          "profilerEndpoint": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "isWatchingLive": {
+            "type": "boolean",
+            "default": false
           }
         }
       },

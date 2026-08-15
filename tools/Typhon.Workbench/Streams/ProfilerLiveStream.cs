@@ -36,7 +36,10 @@ public static class ProfilerLiveStream
             session = s2;
         }
 
-        if (session is not AttachSession attach)
+        // Any session that is watching a live engine streams — an Attach session always, a database session while its
+        // application holds it. Kind is the wrong question here; #617 moved panel visibility onto capability for exactly
+        // this reason and the live stream is the same shape of decision.
+        if (session is not ILiveProfilerHost { LiveRuntime: { } liveRuntime })
         {
             ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
             return;
@@ -44,7 +47,7 @@ public static class ProfilerLiveStream
 
         await SseExtensions.WriteSseHeadersAsync(ctx, ct);
 
-        var runtime = attach.Runtime;
+        var runtime = liveRuntime;
         var (subscriberId, reader) = runtime.Subscribe();
 
         try
@@ -60,6 +63,9 @@ public static class ProfilerLiveStream
             {
                 await WriteEventAsync(ctx, new LiveStreamEventDto(Kind: "threadInfoAdded", ThreadInfo: info), ct);
             }
+            // #805: seed the capture state on connect. Without this a client that subscribes between two transitions
+            // would render "not recording" through an entire in-flight window, since deltas only fire on change.
+            await WriteEventAsync(ctx, new LiveStreamEventDto(Kind: "captureStateChanged", CaptureState: runtime.CaptureState), ct);
             await WriteEventAsync(ctx, new LiveStreamEventDto(Kind: "heartbeat", Status: runtime.ConnectionStatus), ct);
 
             await DrainLoopAsync(ctx, reader, runtime, ct);

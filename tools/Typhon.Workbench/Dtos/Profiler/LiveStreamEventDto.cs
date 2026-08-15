@@ -25,7 +25,8 @@ public record LiveStreamEventDto(
     ChunkManifestEntryDto ChunkEntry = null,
     GlobalMetricsDto GlobalMetrics = null,
     ThreadInfoDto ThreadInfo = null,
-    string Status = null);
+    string Status = null,
+    CaptureStateDto CaptureState = null);
 
 /// <summary>
 /// One (slot → thread name + kind) mapping. Emitted via <c>threadInfoAdded</c> SSE delta as the engine's worker

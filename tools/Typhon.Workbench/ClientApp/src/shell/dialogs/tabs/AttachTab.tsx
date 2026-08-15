@@ -3,7 +3,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 
 interface Props {
-  onAttach: (endpoint: string) => void;
+  onAttach: (endpoint: string, cherryPick: boolean) => void;
   isAttaching?: boolean;
 }
 
@@ -17,6 +17,10 @@ const ENDPOINT_REGEX = /^[^\s:]+(?::\d{1,5})?$/;
  */
 export default function AttachTab({ onAttach, isAttaching }: Props) {
   const [endpoint, setEndpoint] = useState<string>('localhost:9100');
+  // #805 — chosen per attach, deliberately not remembered: "show me everything this run does" and "let me grab the 100
+  // ticks around that spike" are both legitimate on the same engine minutes apart, so a sticky default would be wrong
+  // half the time. Defaults to capture-everything, which is the behaviour every attach had before #805.
+  const [cherryPick, setCherryPick] = useState<boolean>(false);
 
   const trimmed = endpoint.trim();
   const shapeValid = ENDPOINT_REGEX.test(trimmed);
@@ -54,11 +58,50 @@ export default function AttachTab({ onAttach, isAttaching }: Props) {
         </p>
       )}
 
+      <fieldset className="flex shrink-0 flex-col gap-2 rounded border border-border p-3">
+        <legend className="px-1 text-fs-sm text-muted-foreground">What to capture</legend>
+
+        <label className="flex cursor-pointer items-start gap-2">
+          <input
+            type="radio"
+            name="capture-mode"
+            className="mt-1"
+            checked={!cherryPick}
+            onChange={() => setCherryPick(false)}
+            data-testid="attach-mode-everything"
+          />
+          <span className="flex flex-col">
+            <span className="text-fs-base">Capture everything</span>
+            <span className="text-fs-xs text-muted-foreground">
+              Records every tick for as long as the session is attached.
+            </span>
+          </span>
+        </label>
+
+        <label className="flex cursor-pointer items-start gap-2">
+          <input
+            type="radio"
+            name="capture-mode"
+            className="mt-1"
+            checked={cherryPick}
+            onChange={() => setCherryPick(true)}
+            data-testid="attach-mode-cherry-pick"
+          />
+          <span className="flex flex-col">
+            <span className="text-fs-base">Cherry-pick ticks</span>
+            <span className="text-fs-xs text-muted-foreground">
+              Keeps the tick timeline and gauges, but records full detail only for the ticks you ask for with
+              <span className="font-medium"> Record</span>. Much smaller sessions.
+            </span>
+          </span>
+        </label>
+      </fieldset>
+
       <div className="flex-1" />
 
       <div className="flex shrink-0 justify-end gap-2">
         <Button
-          onClick={() => canAttach && onAttach(trimmed)}
+          onClick={() => canAttach && onAttach(trimmed, cherryPick)}
           disabled={!canAttach}
           className="text-fs-lg"
         >

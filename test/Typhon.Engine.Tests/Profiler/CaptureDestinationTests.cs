@@ -65,10 +65,28 @@ class CaptureDestinationTests : TestBase<CaptureDestinationTests>
             "existing configuration must not change meaning — anyone who set a path already told us where they want it");
     }
 
-    // ── AC3 · a live-only session gains no file exporter ─────────────────────────────────────────────────────
+    // ── AC3 · a live port asks to WATCH, and writes nothing on its own ───────────────────────────────────────
 
+    /// <summary>
+    /// A configured live port suppresses the default file destination.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>Live</c> and <c>Trace</c> are independent output channels, so asking for one must not silently produce the
+    /// other. This assertion was briefly inverted during #805 on the reasoning that "a TCP stream leaves nothing
+    /// behind, so the file is complementary". That reasoning ignored what the feature above it is for.
+    /// </para>
+    /// <para>
+    /// On-demand tick capture exists so an operator can record a chosen window and <b>store nothing else</b> — the
+    /// engine keeps emitting every tick over the wire and the Workbench discards what was not armed. A default file
+    /// destination here defeats that completely and invisibly. Measured on a 2,000-entity shard while recording two
+    /// 100-tick windows: <b>25.84 MB written beside the database against a 1.04 MB captured window.</b> The user's
+    /// requirement was explicit — "receive the data and ignore it, but DON'T STORE it" — and a tool does not get to
+    /// decide otherwise on their behalf.
+    /// </para>
+    /// </remarks>
     [Test]
-    public void LiveOnlySession_GetsNoFileDestination()
+    public void LivePort_SuppressesTheDefaultFileDestination()
     {
         using var dbe = SetupEngine();
         using var runtime = CreateIdleRuntime(dbe);
@@ -77,11 +95,27 @@ class CaptureDestinationTests : TestBase<CaptureDestinationTests>
 
         Assert.Multiple(() =>
         {
-            Assert.That(resolved.TraceFilePath, Is.Null, "a live session already has a destination; the default fills an absent one, it does not add a second");
-            Assert.That(resolved.LivePort, Is.EqualTo(9100));
+            Assert.That(resolved.LivePort, Is.EqualTo(9100), "the live port must survive untouched");
+            Assert.That(resolved.TraceFilePath, Is.Null,
+                "asking to watch must not write a complete capture of the whole run — that is exactly what cherry-picked capture exists to avoid");
         });
-        // Deliberately NOT asserting that profilings/ is absent: the runtime this test creates runs its own profiler bootstrap, which (the test project
-        // enables the profiler) may already have created the directory. That would test the fixture's environment, not this decision.
+    }
+
+    /// <summary>
+    /// Wanting both channels is one setting away: an explicit path is honoured alongside a live port, so a user who
+    /// wants the post-mortem file (and CPU sampling, which is file-mode only) says so and gets it.
+    /// </summary>
+    [Test]
+    public void LiveSessionWithAnExplicitPath_KeepsThatPath()
+    {
+        using var dbe = SetupEngine();
+        using var runtime = CreateIdleRuntime(dbe);
+        var explicitPath = Path.Combine(Path.GetTempPath(), "live-and-explicit.typhon-trace");
+
+        var resolved = ProfilerBootstrap.ApplyDefaultCaptureDestination(
+            runtime, new ProfilerLaunchConfig { LivePort = 9100, TraceFilePath = explicitPath });
+
+        Assert.That(resolved.TraceFilePath, Is.EqualTo(explicitPath));
     }
 
     // ── AC4 · no engine, no invention ────────────────────────────────────────────────────────────────────────

@@ -91,9 +91,12 @@ export default function EngineLiveHealthPanel(_props: IDockviewPanelProps) {
     setCaptureError(null);
     try {
       await captureAndAnalyse(sessionId);
-      // On success the session kind transitions; the panel unmounts and there's nothing to clean up here.
     } catch (e) {
       setCaptureError((e as Error)?.message ?? 'Capture & Analyse failed.');
+    } finally {
+      // This used to clear only on the failure arm, because success transitioned the session to a 'trace' session and
+      // unmounted the panel. #613 deleted that kind and #621 attaches the replay to THIS session instead, so the panel
+      // survives its own success — and the button stayed on 'Capturing…' for ever with the file already on disk.
       setIsCapturing(false);
     }
   }

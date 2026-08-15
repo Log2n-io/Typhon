@@ -50,4 +50,30 @@ public sealed partial class AttachSessionRuntime
     [LoggerMessage(Level = LogLevel.Error,
         Message = "Attach: reconnect rejected — Init signature changed; session marked unrecoverable")]
     private partial void LogInitMismatchUnrecoverable();
+
+    // ── On-demand tick capture (#805) ────────────────────────────────────────
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Capture: arm requested for {TickCount} tick(s) — takes effect at the next TickStart")]
+    private partial void LogCaptureArmRequested(int tickCount);
+
+    [LoggerMessage(Level = LogLevel.Information,
+        Message = "Capture: absolute tick numbering established — engine tick {EngineTick} maps to derived tick {DerivedTick} (offset {Offset})")]
+    private partial void LogTickOffsetLearned(uint engineTick, uint derivedTick, long offset);
+
+    [LoggerMessage(Level = LogLevel.Error,
+        Message = "Capture: tick numbering drifted — engine tick {EngineTick} vs derived {DerivedTick}; offset was {ExpectedOffset}, now {ActualOffset}. "
+                  + "A TickStart record was lost; reported tick numbers are no longer trustworthy.")]
+    private partial void LogTickNumberingDrift(uint engineTick, uint derivedTick, long expectedOffset, long actualOffset);
+
+    [LoggerMessage(Level = LogLevel.Information,
+        Message = "Capture: session saved to {Path} ({Bytes} bytes) before teardown — {RecordedTicks} tick(s) had been recorded")]
+    private partial void LogCaptureAutoSaved(string path, long bytes, long recordedTicks);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Capture: auto-save failed — {Reason}")]
+    private partial void LogCaptureAutoSaveFailed(string reason);
+
+    [LoggerMessage(Level = LogLevel.Information,
+        Message = "Attach: engine RESTART detected (session start {PreviousCreatedUtcTicks} → {NewCreatedUtcTicks}); ending this session rather than "
+                  + "continuing its tick axis into a new run")]
+    private partial void LogEngineRestartDetected(long previousCreatedUtcTicks, long newCreatedUtcTicks);
 }

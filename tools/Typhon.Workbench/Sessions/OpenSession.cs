@@ -3,10 +3,63 @@ using Typhon.Workbench.Schema;
 
 namespace Typhon.Workbench.Sessions;
 
-public sealed class OpenSession : ISession, IDisposable
+public sealed class OpenSession : ISession, ILiveProfilerHost, IDisposable
 {
     public Guid Id { get; }
     public string FilePath { get; }
+
+    // ── Watching the application that holds this database ────────────────────────────────────────────────────────
+    //
+    // The pairing this exists for: your application is running and holds the database, so this session opened PAUSED.
+    // From there it can watch the application's live profiler over TCP, and when the application exits the coordinator
+    // promotes the session to a real open — at which point the database AND the capture the engine wrote into its own
+    // profilings/ are both available, already correlated, with no import step.
+    //
+    // Blocker B1 (a live engine holds its database exclusively) is what makes this a sequence rather than a
+    // simultaneity: you cannot read the data while the application runs. You were never trying to. You were trying to
+    // be positioned while it ran, and to read afterwards.
+
+    private AttachSessionRuntime _liveRuntime;
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// <see cref="Volatile"/> for the same reason <see cref="Engine"/> is: written when watching starts or stops,
+    /// read from request threads.
+    /// </remarks>
+    public AttachSessionRuntime LiveRuntime => Volatile.Read(ref _liveRuntime);
+
+    /// <summary>True while this session is streaming from the application that holds its database.</summary>
+    public bool IsWatchingLive => Volatile.Read(ref _liveRuntime) != null;
+
+    /// <summary>
+    /// Begin watching a live engine. Replaces any previous runtime, so a re-watch after a dropped connection is a
+    /// plain call rather than a state machine the caller has to drive.
+    /// </summary>
+    public void StartWatching(AttachSessionRuntime runtime)
+    {
+        ArgumentNullException.ThrowIfNull(runtime);
+        // The recorded window is saved WITH the database, in its own profilings/ directory.
+        //
+        // This used to set SuppressAutoSave, on the reasoning that the engine writes a complete capture there anyway so
+        // a second file would only duplicate it. That reasoning was built on a defect: enabling a live port had been
+        // made to force a default file destination, so the "complete capture" being cited as already-durable was an
+        // artifact the feature was never supposed to produce. With the engine writing nothing for a live-only run, the
+        // window recorded here is the ONLY artifact — suppressing its save would silently discard the very ticks the
+        // operator armed. Co-locating it with the database is also what makes it reachable: the Profiles list reads
+        // that directory.
+        runtime.SuppressAutoSave = false;
+        runtime.AutoSaveDirectory = TraceLocation.ProfilingsDirectoryOf(FilePath);
+        var previous = Interlocked.Exchange(ref _liveRuntime, runtime);
+        previous?.Dispose();
+    }
+
+    /// <summary>Stop watching and dispose the runtime. Idempotent — returns false when nothing was being watched.</summary>
+    public bool StopWatching()
+    {
+        var previous = Interlocked.Exchange(ref _liveRuntime, null);
+        previous?.Dispose();
+        return previous != null;
+    }
 
     // ── Pause / resume (#621) ────────────────────────────────────────────────────────────────────────────────────
     //
@@ -85,7 +138,10 @@ public sealed class OpenSession : ISession, IDisposable
         get
         {
             var hasDatabase = Volatile.Read(ref _engine) != null;
-            var hasProfiler = !_profileHost.IsEmpty;
+            // Watching a live engine profiles just as much as holding an attached capture does — both serve
+            // /profiler/*. Panels ask for the capability, never the kind, which is what lets a paused Open session
+            // light up the profiler UI without pretending to be an Attach session.
+            var hasProfiler = !_profileHost.IsEmpty || Volatile.Read(ref _liveRuntime) != null;
             return hasDatabase
                 ? (hasProfiler ? DatabaseAndProfiler : DatabaseOnly)
                 : (hasProfiler ? ProfilerOnly : Nothing);
@@ -234,7 +290,10 @@ public sealed class OpenSession : ISession, IDisposable
 
     public void Dispose()
     {
-        // Profiles first: they hold file handles on captures inside the bundle the engine is about to release.
+        // The live runtime first: it owns a socket and a temp file, and its auto-save must run while the builder is
+        // still alive. Dispose deletes that temp file, so anything that wants the capture has to happen before it.
+        StopWatching();
+        // Profiles next: they hold file handles on captures inside the bundle the engine is about to release.
         _profileHost.DetachAll();
         // Null while paused — a paused session owns no engine, and disposing one is the whole of what pausing did.
         Volatile.Read(ref _engine)?.Dispose();

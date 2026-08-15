@@ -53,11 +53,14 @@ public sealed partial class ProfilerController : WorkbenchControllerBase
             return NotReady();
         }
 
-        if (session is AttachSession attach)
+        // Checked AFTER the profile above, so an attached capture keeps precedence over the live stream — that is the
+        // existing Attach behaviour and it is also what a watching database session wants: the profile is what the user
+        // put in the foreground.
+        if (session is ILiveProfilerHost { LiveRuntime: { } live })
         {
-            if (attach.Runtime.Metadata != null)
+            if (live.Metadata != null)
             {
-                return Ok(attach.Runtime.Metadata);
+                return Ok(live.Metadata);
             }
             // Init frame hasn't arrived yet — client retries.
             return NotReady();
@@ -96,9 +99,9 @@ public sealed partial class ProfilerController : WorkbenchControllerBase
     {
         var session = HttpContext.Items["Session"];
 
-        if (session is AttachSession attach)
+        if (session is ILiveProfilerHost { LiveRuntime: { } live })
         {
-            return Ok(attach.Runtime.SourceLocationManifest);
+            return Ok(live.SourceLocationManifest);
         }
 
         if (TryGetProfilerRuntime(session, out var profileRuntime))
@@ -132,9 +135,9 @@ public sealed partial class ProfilerController : WorkbenchControllerBase
             return Ok(runtime.CpuSampleData.Manifest);
         }
 
-        if (session is AttachSession)
+        if (session is ILiveProfilerHost { LiveRuntime: not null })
         {
-            // CPU sampling is file-mode only in v1 — a live attach carries no sample data (design §2, §9 risk 2).
+            // CPU sampling is file-mode only in v1 — a live stream carries no sample data (design §2, §9 risk 2).
             return Ok(CpuFrameManifestDto.Empty);
         }
 
@@ -182,7 +185,7 @@ public sealed partial class ProfilerController : WorkbenchControllerBase
             return Ok(tree);
         }
 
-        if (session is AttachSession)
+        if (session is ILiveProfilerHost { LiveRuntime: not null })
         {
             return Ok(CallTreeResponseDto.Empty);
         }
@@ -222,7 +225,7 @@ public sealed partial class ProfilerController : WorkbenchControllerBase
                 cpu.Samples, cpu.Stacks, windows, scope, runtime.TimestampFrequency, request?.BinCount ?? 0, cpu.ThreadRuns));
         }
 
-        if (session is AttachSession)
+        if (session is ILiveProfilerHost { LiveRuntime: not null })
         {
             return Ok(SampleDensityDto.Empty);
         }
@@ -248,6 +251,121 @@ public sealed partial class ProfilerController : WorkbenchControllerBase
         attach.Runtime.RequestDisconnect();
         return NoContent();
     }
+
+    /// <summary>
+    /// Arm an on-demand capture window (#805) — record the next <c>tickCount</c> ticks of a live attach session in full.
+    /// Pass <c>0</c> to stop a capture already in flight.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Takes effect at the next tick boundary, never mid-tick, so a window can never contain a partial tick. The unit is
+    /// deliberately ticks rather than milliseconds: the timeline draws one bar per tick, and the scheduler throttles its
+    /// tick rate under overload — exactly when someone is recording — so a duration would buy an unpredictable number of
+    /// bars.
+    /// </para>
+    /// <para>
+    /// Attach-only. A Trace session is already a finished capture, and an Open session has no live record stream.
+    /// </para>
+    /// </remarks>
+    [HttpPost("capture")]
+    public ActionResult<CaptureStateDto> Capture(Guid sessionId, [FromBody] CaptureRequest request)
+    {
+        var session = HttpContext.Items["Session"];
+        if (session is not ILiveProfilerHost { LiveRuntime: { } runtime })
+        {
+            return ConflictKindMismatch(NotWatchingDetail);
+        }
+
+        var tickCount = request?.TickCount ?? 0;
+        if (tickCount < 0)
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "invalid_tick_count",
+                Detail = "tickCount must be zero (stop) or positive.",
+                Status = StatusCodes.Status400BadRequest,
+            });
+        }
+
+        try
+        {
+            return Ok(runtime.Arm(tickCount));
+        }
+        catch (InvalidOperationException ex)
+        {
+            // Attached in capture-everything mode — arming a window would contradict the mode chosen at attach time.
+            return Conflict(new ProblemDetails
+            {
+                Title = "capture_mode_mismatch",
+                Detail = ex.Message,
+                Status = StatusCodes.Status409Conflict,
+            });
+        }
+    }
+
+    /// <summary>Current on-demand capture state for a session that is watching a live engine (#805).</summary>
+    [HttpGet("capture")]
+    public ActionResult<CaptureStateDto> GetCapture(Guid sessionId)
+    {
+        var session = HttpContext.Items["Session"];
+        if (session is not ILiveProfilerHost { LiveRuntime: { } runtime })
+        {
+            return ConflictKindMismatch(NotWatchingDetail);
+        }
+        return Ok(runtime.CaptureState);
+    }
+
+    /// <summary>
+    /// Begin watching the live engine that holds this database (#805 / unified mode). Valid on a <b>paused</b> Open
+    /// session whose holder advertises a profiler endpoint in <c>db.lock</c>.
+    /// </summary>
+    /// <remarks>
+    /// The endpoint is never taken from the client: it comes from the lock file the holder itself wrote. A session can
+    /// therefore only ever watch the application that actually holds its database, which is what keeps this from
+    /// becoming a general "connect anywhere" hole on a session-scoped route.
+    /// </remarks>
+    [HttpPost("watch")]
+    public async Task<ActionResult<CaptureStateDto>> StartWatching(Guid sessionId, [FromBody] WatchRequest request, CancellationToken ct)
+    {
+        var session = HttpContext.Items["Session"];
+        if (session is not OpenSession open)
+        {
+            return ConflictKindMismatch("Watching is started from a database session. An Attach session is already watching.");
+        }
+
+        var endpoint = open.PausedBy?.ProfilerEndpoint;
+        if (string.IsNullOrWhiteSpace(endpoint))
+        {
+            return Conflict(new ProblemDetails
+            {
+                Title = "no_profiler_advertised",
+                Detail = open.IsPaused
+                    ? "The process holding this database does not advertise a live profiler. Run it with a live port to watch it."
+                    : "This database is not held by another process, so there is nothing to watch. Its captures are in the Profiles list.",
+                Status = StatusCodes.Status409Conflict,
+            });
+        }
+
+        var mode = request?.CherryPick == false ? CaptureMode.Everything : CaptureMode.CherryPick;
+        var runtime = await AttachSessionRuntime.StartAsync(open.Id, endpoint, _logger, ct, mode);
+        open.StartWatching(runtime);
+        return Ok(runtime.CaptureState);
+    }
+
+    /// <summary>Stop watching. Idempotent — 204 whether or not anything was being watched.</summary>
+    [HttpDelete("watch")]
+    public IActionResult StopWatching(Guid sessionId)
+    {
+        var session = HttpContext.Items["Session"];
+        if (session is OpenSession open)
+        {
+            open.StopWatching();
+        }
+        return NoContent();
+    }
+
+    private const string NotWatchingDetail =
+        "This session is not watching a live engine. Open the database while your application holds it, then start watching.";
 
     /// <summary>
     /// Snapshot the current live attach session into a self-contained <c>.typhon-replay</c> file. The output is byte-format-identical to
@@ -278,7 +396,7 @@ public sealed partial class ProfilerController : WorkbenchControllerBase
         string resolved;
         if (string.IsNullOrWhiteSpace(request?.Path))
         {
-            resolved = ResolveDefaultCapturePath();
+            resolved = Sessions.CaptureStorage.ResolveDefaultCapturePath();
         }
         else
         {
@@ -368,10 +486,12 @@ public sealed partial class ProfilerController : WorkbenchControllerBase
     {
         // #289 — both Trace and Attach sessions implement IChunkProvider, so this method handles both modes uniformly.
         var session = HttpContext.Items["Session"];
-        // Attach keeps its own runtime type; everything else resolves through the capability helper (#617).
+        // Attach keeps its own runtime type; everything else resolves through the capability helper (#617), falling back
+        // to a live stream for a database session that is watching its application and has no capture in the foreground.
         IChunkProvider provider = session is AttachSession attach
             ? attach.Runtime
-            : TryGetProfilerRuntime(session, out var chunkRuntime) ? chunkRuntime : null;
+            : TryGetProfilerRuntime(session, out var chunkRuntime) ? chunkRuntime
+            : (session as ILiveProfilerHost)?.LiveRuntime;
         if (provider == null)
         {
             Response.StatusCode = StatusCodes.Status409Conflict;
@@ -452,10 +572,12 @@ public sealed partial class ProfilerController : WorkbenchControllerBase
         CancellationToken ct)
     {
         var session = HttpContext.Items["Session"];
-        // Attach keeps its own runtime type; everything else resolves through the capability helper (#617).
+        // Attach keeps its own runtime type; everything else resolves through the capability helper (#617), falling back
+        // to a live stream for a database session that is watching its application and has no capture in the foreground.
         IChunkProvider provider = session is AttachSession attach
             ? attach.Runtime
-            : TryGetProfilerRuntime(session, out var chunkRuntime) ? chunkRuntime : null;
+            : TryGetProfilerRuntime(session, out var chunkRuntime) ? chunkRuntime
+            : (session as ILiveProfilerHost)?.LiveRuntime;
         if (provider == null)
         {
             return Conflict();
@@ -559,27 +681,6 @@ public sealed partial class ProfilerController : WorkbenchControllerBase
     /// <c>$XDG_DATA_HOME/typhon/workbench/captures/</c> on POSIX), guarantees the directory exists, and stamps a
     /// monotone filename so repeated captures don't collide. Returns the resolved absolute path.
     /// </summary>
-    private static string ResolveDefaultCapturePath()
-    {
-        string root;
-        if (OperatingSystem.IsWindows())
-        {
-            root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        }
-        else
-        {
-            // XDG-equivalent on POSIX — defaults to ~/.local/share if XDG_DATA_HOME is unset.
-            var xdg = Environment.GetEnvironmentVariable("XDG_DATA_HOME");
-            root = !string.IsNullOrWhiteSpace(xdg)
-                ? xdg
-                : System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share");
-        }
-        var capturesDir = System.IO.Path.Combine(root, "Typhon", "Workbench", "captures");
-        System.IO.Directory.CreateDirectory(capturesDir);
-        var stamp = DateTime.UtcNow.ToString("yyyyMMddTHHmmssZ", System.Globalization.CultureInfo.InvariantCulture);
-        return System.IO.Path.Combine(capturesDir, $"typhon-capture-{stamp}.typhon-replay");
-    }
-
     private static List<TraceEventDto> ApplyFilters(List<TraceEventDto> source, HashSet<int> kinds, int? tick)
     {
         var result = new List<TraceEventDto>();
@@ -721,7 +822,11 @@ public sealed partial class ProfilerController : WorkbenchControllerBase
         {
             return attach.Runtime.QueryCatalog;
         }
-        return TryGetProfilerRuntime(session, out var runtime) && runtime.IsReady ? runtime.QueryCatalog : null;
+        if (TryGetProfilerRuntime(session, out var runtime) && runtime.IsReady)
+        {
+            return runtime.QueryCatalog;
+        }
+        return (session as ILiveProfilerHost)?.LiveRuntime?.QueryCatalog;
     }
 
     /// <summary>

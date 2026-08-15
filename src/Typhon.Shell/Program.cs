@@ -115,6 +115,7 @@ internal static class Program
                     tel.AddCommand<TelemetryEnableCommand>("enable").WithDescription("Set a flag (or subtree root) explicitly on.");
                     tel.AddCommand<TelemetryDisableCommand>("disable").WithDescription("Set a flag explicitly off.");
                     tel.AddCommand<TelemetryTraceCommand>("trace").WithDescription("Set/clear the profiler trace output file (Typhon:Profiler:Trace).");
+                    tel.AddCommand<TelemetryLiveCommand>("live").WithDescription("Set/clear the live attach TCP port (Typhon:Profiler:Live).");
                     tel.AddCommand<TelemetryResetCommand>("reset").WithDescription("Remove an explicit flag (back to inherit).");
                     tel.AddCommand<TelemetryEffectiveCommand>("effective").WithDescription("Show what would actually emit.");
                     tel.AddCommand<TelemetryPresetCommand>("preset").WithDescription("Apply a curated preset bundle.");

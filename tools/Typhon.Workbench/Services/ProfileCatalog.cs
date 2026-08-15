@@ -66,8 +66,50 @@ public static class ProfileCatalog
             rows.Add(ReadRow(path, info, attached.Id == Guid.Empty ? null : attached.Id, attached.IsActive, policy.IsPinned(info.Name), databaseId));
         }
 
+        // Cherry-picked windows saved by a watching session (#805) land here too, as self-contained .typhon-replay
+        // caches. They are captures of this database by every meaning that matters — recorded from its engine, written
+        // to its profilings/ — and listing only .typhon-trace would leave the operator's deliberately-recorded ticks
+        // invisible in the one place built for finding captures. `TraceSessionRuntime` already opens them.
+        foreach (var path in Directory.EnumerateFiles(profilings, "*" + CaptureStorage.ReplayExtension))
+        {
+            var info = new FileInfo(path);
+            attachedByName.TryGetValue(info.Name, out var attached);
+            rows.Add(ReadRow(path, info, attached.Id == Guid.Empty ? null : attached.Id, attached.IsActive, policy.IsPinned(info.Name), databaseId));
+        }
+
         rows.Sort(static (a, b) => b.CreatedUtcTicks.CompareTo(a.CreatedUtcTicks));
         return new ProfileListDto([.. rows], databaseTsn, profilings);
+    }
+
+    /// <summary>
+    /// Reads a capture's <see cref="TraceFileHeader"/>, whichever of the two on-disk shapes it has.
+    /// </summary>
+    /// <remarks>
+    /// A <c>.typhon-trace</c> starts with the header. A <c>.typhon-replay</c> is a self-contained <b>cache</b> whose
+    /// <c>SourceMetadata</c> section carries the same header verbatim, in the engine's wire format — so the same
+    /// projection works once the bytes are handed to a <see cref="TraceFileReader"/>, exactly as
+    /// <see cref="TraceFileCacheReader.SourceMetadataBytes"/> documents. A replay that is not self-contained has no
+    /// header to read and is thrown out to the unreadable row, which is the honest outcome: the row still shows the
+    /// file exists, and nothing invents columns it cannot know.
+    /// </remarks>
+    private static TraceFileHeader ReadCaptureHeader(string path)
+    {
+        using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        if (!string.Equals(Path.GetExtension(path), CaptureStorage.ReplayExtension, StringComparison.OrdinalIgnoreCase))
+        {
+            using var traceReader = new TraceFileReader(stream);
+            return traceReader.ReadHeader();
+        }
+
+        using var cacheReader = new TraceFileCacheReader(stream);
+        if (!cacheReader.IsSelfContained || cacheReader.SourceMetadataBytes.IsEmpty)
+        {
+            throw new InvalidDataException($"Replay '{Path.GetFileName(path)}' carries no embedded source metadata.");
+        }
+
+        using var metadata = new MemoryStream(cacheReader.SourceMetadataBytes.ToArray(), writable: false);
+        using var embeddedReader = new TraceFileReader(metadata);
+        return embeddedReader.ReadHeader();
     }
 
     /// <summary>Reads one capture's header into a row, degrading to an unreadable row rather than throwing.</summary>
@@ -79,9 +121,7 @@ public static class ProfileCatalog
     {
         try
         {
-            using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            using var reader = new TraceFileReader(stream);
-            var h = reader.ReadHeader();
+            var h = ReadCaptureHeader(path);
 
             return new ProfileDto(
                 FileName: info.Name,
@@ -139,9 +179,11 @@ public static class ProfileCatalog
         reason = null;
         try
         {
-            using var stream = File.Open(capturePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            using var reader = new TraceFileReader(stream);
-            var h = reader.ReadHeader();
+            // Same projection the list uses, so a capture that appears in the Profiles list can always be attached from
+            // it. Reading with TraceFileReader unconditionally would reject every .typhon-replay as unreadable — the
+            // list would show the operator their recorded window and then refuse to open it, which is worse than not
+            // listing it at all.
+            var h = ReadCaptureHeader(capturePath);
 
             if (h.DatabaseId == Guid.Empty || databaseId == Guid.Empty || h.DatabaseId == databaseId)
             {
@@ -152,7 +194,7 @@ public static class ProfileCatalog
             reason = $"This capture was recorded against database {h.DatabaseId:D}"
                 + (string.IsNullOrEmpty(recorded) ? "" : $" ('{recorded}')")
                 + $", not the one this session has open ({databaseId:D}). It is sitting in this bundle, but it does not belong to it — "
-                + "open it as a standalone trace session instead.";
+                + "open the database it was recorded against and attach it there.";
             return false;
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
