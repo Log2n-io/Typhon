@@ -288,7 +288,18 @@
     src per-component EnabledBits clear uses Interlocked.And per component slot
     src cell.EntityCount decrement uses Interlocked.Decrement(ref CellState.EntityCount)
     dst cell.EntityCount / ClusterCount increment uses Interlocked.Increment(ref CellState.*)
-    src/dst dirtyBits flips use Interlocked.And / Interlocked.Or on the per-cluster long word
+    src/dst dirtyBits flips are NOT written by the worker on the parallel path: it appends a
+      DirtyBitDelta to its own chunk-local buffer, and OnAfterChunk applies the whole buffer through
+      ArchetypeClusterState.ApplyDirtyBitDeltas under _finalizeLock, one acquisition per (chunk x
+      archetype). Plain bit ops are correct there BECAUSE the lock excludes sibling workers. Only the
+      serial WriteTickFence path (dirtyBuffer == null) writes the array directly, with Interlocked.And /
+      Interlocked.Or plus GrowFenceDirtyBitsForChunkId — safe because it is the only thread.
+      CORRECTED 2026-08-14: this rule previously specified Interlocked flips from the worker, which the
+      implementation has never done — the buffered-plus-lock design shipped in the same PR as the rule.
+      A rule that describes a design nobody built cannot catch a regression in the one that exists
+    the per-chunk delta buffers are sized in FenceMigrateExecSystem.Prepare, never grown from a worker:
+      growing the shared buffer array from concurrent DispatchItem calls loses a bucket when two growers
+      race, and the plain reference store is unordered against its Array.Copy on arm64
     cluster-fully-drains path (popcount(prev & ~mask) == 0) does NOT finalize in the worker:
       it records the chunkId via RecordClusterDrain (Interlocked.Increment slot reservation)
       and returns. CellClusterPool.RemoveCluster, RemoveClusterFromPerCellIndex,
@@ -300,25 +311,34 @@
     ReleaseSlot for this archetype, so the occupancy re-check and the free are single-threaded.
     A lock here would not substitute for the barrier — finalizing while a claimer holds a
     CAS-won slot frees a live chunk no matter who holds what
-  invariant FenceDirtyBits is pre-sized to PrimarySegmentCapacity + PendingMigrationCount
-    in PrepareArchetypeFence's tail BEFORE any Migrate-phase worker observes it — no Array.Resize
-    from worker threads
+  invariant FenceDirtyBits is pre-sized in PrepareArchetypeFence's tail BEFORE any Migrate-phase worker
+    observes it. The bound is a deliberate over-estimate (max(PrimarySegmentCapacity, existingLen) +
+    2*PendingMigrationCount + 64), NOT the strict PrimarySegmentCapacity + PendingMigrationCount this rule
+    used to state — that one was observed to under-estimate under AntHill loads. It is a performance
+    measure, not the safety argument: the parallel path never touches the array, and the on-demand grow in
+    ApplyDirtyBitDeltas / GrowFenceDirtyBitsForChunkId is what actually makes an under-estimate survivable
   invariant PendingMigrations is sorted by DestCellKey (SortPendingMigrationsByDestCellKey)
     by TickDriver between Prep and Migrate dispatches, so each worker slice owns disjoint dst cells
   invariant PendingMigrationCount = 0 reset happens once per fence in FinalizeArchetypeFence
     AFTER all Migrate-phase slices complete, never inside ExecuteMigrationsSlice
   scope: DatabaseEngine.ExecuteMigrations, DatabaseEngine.FinalizeArchetypeFence,
-    ArchetypeClusterState.ClearSlotMetadata,
+    ArchetypeClusterState.ClearSlotMetadata, ArchetypeClusterState.ApplyDirtyBitDeltas,
     ReleaseSlot (Persistent + Transient overloads), DecrementCellEntityCountOnRelease,
     FinaliseEmptyClusterCellState, ClaimSlotInCell (both overloads),
     RecordClusterDrain, DrainPendingClusterFinalizations
+  verified: FenceDirtyBitApplyTests
   on_violation:
     plain ++/-- on cell counters → torn updates across workers → drift in EntityCount/ClusterCount
     plain occupancy clear → lost concurrent slot release → ghost entity in cluster
     worker finalizes inline instead of recording the drain → frees a chunk a concurrent
       ClaimSlotInCell has already CAS-claimed → live entity written into a freed chunk
     finalize pass moved before the phase barriers → same race, now unconditional
-    Array.Resize from worker → lost Interlocked.Or writes from siblings holding old reference
+    Array.Resize from worker → lost writes from siblings holding the old array reference
+    ApplyDirtyBitDeltas called without _finalizeLock while siblings run → its plain bit ops lose
+      concurrent flips and its grow drops their writes
+    the chunk-buffer array grown from a worker → two growers race, one bucket is dropped from the array,
+      and its deltas are lost the moment anything reads buckets back out of the array rather than through
+      the reference the worker already holds
 
 ### MD-03: False-sharing avoidance for concurrent-mutation state `[perf][fatal]`
   invariant any data structure mutated concurrently from multiple workers isolates each
