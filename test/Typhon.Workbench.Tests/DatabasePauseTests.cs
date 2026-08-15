@@ -392,6 +392,15 @@ public sealed class DatabasePauseTests
             Assert.That(yieldedAgain, Is.True, "a resumed session must honour a second claim — the promise is re-made every time the lock is re-taken");
             Assert.That(DatabaseLockFile.Exists(fixture.TyphonFilePath), Is.False, "yielding means dropping the lock, not just the engine");
         });
+
+        // Leave the coordinator quiescent. Every other test here ends with its session either live or resumed, so its
+        // watch goes idle; this one deliberately ends mid-protocol — paused, with a claim still standing — which leaves
+        // the poll actively looking for its turn back while TearDown pulls the temp directory out from under it. That
+        // cost the NEXT test its resume in a full-suite Release run (and only there: the fixture passes alone, because
+        // nothing follows it). Retiring the claim and the session is the test cleaning up its own protocol state, not a
+        // workaround — SessionRemoved is the same edge production uses to stop watching a session that has gone away.
+        DatabaseLockFile.DeleteRequest(fixture.TyphonFilePath);
+        _sessions.Remove(session.Id);
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────────────────────────────────────────
