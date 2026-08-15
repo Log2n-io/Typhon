@@ -144,18 +144,30 @@ internal static class AssemblySchemaLoader
 
     private static ComponentSchema BuildSchema(Type type, ComponentAttribute componentAttr, string assemblyPath)
     {
-        var fields = new List<ComponentSchema.FieldInfo>();
-        var structSize = Unsafe.SizeOf<byte>(); // fallback
+        // An assembly compiled with Typhon's source generator already carries a spec whose offsets were measured against the MANAGED layout — the one the
+        // engine reads components through. Reflecting instead reads Marshal.OffsetOf, which describes the MARSHALLED layout, and those two disagree for
+        // `bool` and `char` (#819). Ask for the generated spec first; reflection is the fallback for assemblies that do not have one.
+        if (TryBuildSchemaFromGeneratedSpec(type, componentAttr, assemblyPath, out var generated))
+        {
+            return generated;
+        }
 
-        // Use Marshal.SizeOf for blittable structs, or compute from field offsets
-        try
+        // Reached only when the assembly has no generated spec, so the offsets below can only be read as the marshalled layout. That is a DIFFERENT layout
+        // from the managed one the engine addresses fields by wherever a bool or char is involved — and for char the totals can match, so nothing downstream
+        // would notice a field decoded a byte off. Refuse rather than hand back offsets that address the wrong bytes (#819).
+        //
+        // Uses the same detector as the engine's DBComponentDefinition.Build: it walks the CLR type at any depth, including fields the schema does not model
+        // and non-public ones, and excludes the declarations that reconcile the two layouts (CharSet.Unicode, [MarshalAs], explicit layout, fixed buffers).
+        if (LayoutDivergence.Detect(type, out var divergentPath, out var divergentKind))
         {
-            structSize = Marshal.SizeOf(type);
+            throw new InvalidOperationException(
+                $"Component '{componentAttr.Name ?? type.Name}' in '{assemblyPath}' contains a {divergentKind} at '{divergentPath}', and the assembly carries "
+              + "no Typhon-generated schema. Its field offsets can only be read as the marshalled layout, which disagrees with the managed layout the engine "
+              + "addresses fields by. Rebuild the assembly with the Typhon source generator.");
         }
-        catch
-        {
-            // If Marshal.SizeOf fails, use reflection-based calculation
-        }
+
+        var fields = new List<ComponentSchema.FieldInfo>();
+        var structSize = GetManagedStructSize(type);
 
         foreach (var fieldInfo in type.GetFields(BindingFlags.Public | BindingFlags.Instance))
         {
@@ -167,8 +179,9 @@ internal static class AssemblySchemaLoader
 
             var indexAttr = fieldInfo.GetCustomAttribute<IndexAttribute>();
             var fieldType = MapDotNetTypeToFieldType(fieldInfo.FieldType);
+
             var offset = (int)Marshal.OffsetOf(type, fieldInfo.Name);
-            var size = GetFieldSize(fieldInfo.FieldType);
+            var size = GetManagedFieldSize(fieldInfo.FieldType);
 
             fields.Add(new ComponentSchema.FieldInfo
             {
@@ -189,6 +202,71 @@ internal static class AssemblySchemaLoader
             structSize,
             assemblyPath,
             fields);
+    }
+
+    /// <summary>
+    /// Builds the schema from the assembly's source-generated <see cref="ComponentSchemaSpec"/> when it has one. Those offsets came from
+    /// <c>Unsafe.ByteOffset</c> against a stack probe, so they describe the managed layout the engine actually reads (#816, #819).
+    /// </summary>
+    private static bool TryBuildSchemaFromGeneratedSpec(Type type, ComponentAttribute componentAttr, string assemblyPath, out ComponentSchema schema)
+    {
+        schema = null;
+
+        // The registry is populated by the assembly's own [ModuleInitializer], and loading an assembly does not by itself run one — the CLI reaches these
+        // types through reflection, which need not touch the module. Force it, or a properly-generated assembly would silently take the reflection fallback.
+        //
+        // Deliberately NOT wrapped in a catch: the runtime caches a failed module initializer and rethrows the same TypeInitializationException for every
+        // subsequent access, so swallowing it would demote one broken assembly to the marshalled path for every component it declares — silently, which is
+        // the failure mode #819 exists to remove. A schema assembly whose initializer throws is broken, and saying so is the useful outcome.
+        RuntimeHelpers.RunModuleConstructor(type.Module.ModuleHandle);
+
+        if (!GeneratedSchemaRegistry.TryGetComponentSpec(type, out var spec) || spec.Fields == null)
+        {
+            return false;
+        }
+
+        // A spec is a claim, and the flag is the part of it that says the offsets were measured against the managed layout. A spec emitted by a pre-#819
+        // generator, or registered by hand through the public GeneratedSchemaRegistry API, carries marshalled or unknown offsets — preferring it over
+        // reflection would then hand the CLI the very bytes this change exists to stop it writing.
+        if (!spec.ManagedOffsets)
+        {
+            return false;
+        }
+
+        var fields = new List<ComponentSchema.FieldInfo>();
+        foreach (var f in spec.Fields)
+        {
+            if (f.IsStatic)
+            {
+                continue;
+            }
+
+            var fieldType = MapDotNetTypeToFieldType(f.DotNetType);
+            if (fieldType == FieldType.None)
+            {
+                continue;
+            }
+
+            fields.Add(new ComponentSchema.FieldInfo
+            {
+                Name = f.Name,
+                Type = fieldType,
+                Offset = f.Offset,
+                Size = GetManagedFieldSize(f.DotNetType),
+                HasIndex = f.HasIndex,
+                IndexAllowMultiple = f.IndexAllowMultiple
+            });
+        }
+
+        schema = new ComponentSchema(
+            spec.Name ?? componentAttr.Name,
+            spec.Revision,
+            // Component-level multi-instance ("AllowMultiple") was removed — always false now (field retained on ComponentSchema for shape stability).
+            false,
+            GetManagedStructSize(type),
+            assemblyPath,
+            fields);
+        return true;
     }
 
     private static FieldType MapDotNetTypeToFieldType(Type dotNetType)
@@ -224,16 +302,36 @@ internal static class AssemblySchemaLoader
         return FieldType.None;
     }
 
-    private static int GetFieldSize(Type dotNetType)
+    /// <summary>
+    /// Width of a field in the MANAGED layout — the one the engine reads components through, and the one both branches' offsets describe.
+    /// </summary>
+    /// <remarks>
+    /// Pairing a managed offset with a marshalled size would be #819 all over again on the other axis: <c>Marshal.SizeOf(typeof(char))</c> is 1 and
+    /// <c>bool</c> is 4, so a <c>char</c> field would be described as occupying half a code unit at a correct offset. <c>Marshal.SizeOf</c> also throws
+    /// outright on a generic struct, which would silently leave a size of zero.
+    /// </remarks>
+    private static int GetManagedFieldSize(Type dotNetType)
     {
-        // For known types, return the exact size; for unknowns, use Marshal.SizeOf
         try
         {
-            return Marshal.SizeOf(dotNetType);
+            return RuntimeHelpers.SizeOf(dotNetType.TypeHandle);
         }
         catch
         {
             return 0;
+        }
+    }
+
+    /// <summary>Managed size of the component struct itself, for the same reason <see cref="GetManagedFieldSize"/> exists.</summary>
+    private static int GetManagedStructSize(Type type)
+    {
+        try
+        {
+            return RuntimeHelpers.SizeOf(type.TypeHandle);
+        }
+        catch
+        {
+            return Unsafe.SizeOf<byte>();
         }
     }
 }

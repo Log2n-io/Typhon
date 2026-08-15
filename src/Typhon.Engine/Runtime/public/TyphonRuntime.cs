@@ -6,7 +6,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
-using System.Threading;
 using Typhon.Engine.internals;
 using Typhon.Profiler;
 using Typhon.Schema.Definition;

@@ -110,6 +110,34 @@ discipline (MVCC revision chains vs in-place SV vs heap-backed Transient), so re
              with data already on disk pins `Size` to its extent instead.
   verified: ClusterPaddedComponentTests [VerifiesRule] [RuleMutant]
 
+### SCHEMA-07: A field offset is only recorded when it was measured against the managed layout `[fatal][silent]`
+  invariant ∀ field F of a component backed by CLR struct T: `F.OffsetInComponentStorage` is F's offset in the MANAGED layout of T — the layout every
+            accessor reads through
+  never a definition whose offsets were not measured against the managed layout is built from a CLR type that `LayoutDivergence.Detect` reports on — a `bool`
+        or `char` at ANY depth, including inside a nested struct the schema does not model, which is dropped from the field list yet still displaces
+        everything after it. Detection excludes the declarations that reconcile the two layouts: `CharSet.Unicode`, an explicit `[MarshalAs]`,
+        `LayoutKind.Explicit`, and `fixed` buffers
+  never a consumer of a `ComponentSchemaSpec` trusts its offsets without checking `ManagedOffsets` — the flag is the claim, and a spec registered by a
+        pre-#819 generator or by hand through the public registry carries offsets nobody measured
+  scope: LayoutDivergence.Detect, ComponentSchemaSpec.ManagedOffsets, DBComponentDefinition.OffsetsAreManaged, DBComponentDefinition.Build,
+         DatabaseDefinitions.CreateFromAccessor, DatabaseDefinitions.ReflectComponentSpec, AssemblySchemaLoader.BuildSchema,
+         AssemblySchemaLoader.TryBuildSchemaFromGeneratedSpec
+  requires SCHEMA-06 — the stride and the offsets describe the same layout, or neither addresses the component correctly
+  on_violation: the marshalled layout differs from the managed one for exactly two field types: `bool` is 4 bytes marshalled and 1 managed, `char` is 1 and 2.
+                Recording marshalled offsets therefore shifts every field after the first such one, and every field-addressed consumer — index key
+                extraction, WAL field decode, crash recovery, schema evolution, the integrity scanner, the Workbench raw read — reads the wrong bytes.
+                Whole-struct copies are unaffected, which is what keeps it quiet. For `char` the two layouts can total the SAME size
+                (`{ char; char; int }` is 8 bytes either way, with only the middle offset wrong), so no size comparison at any layer can detect it.
+  rationale: the source generator measures each field with `Unsafe.ByteOffset` against a stack probe, so a generated spec describes the managed layout and
+             carries `ManagedOffsets`. Runtime reflection holds only a `Type`; getting a managed offset from one needs a typed `ref` to the field, which
+             means IL emit — ruled out on AOT grounds (#409). So the reflection path declares what it cannot measure and the engine refuses those components
+             rather than trusting them. The refusal is deliberately BROADER than analyzer TYPHON011, which compares the two layouts in full and permits a
+             shape where they coincide (a lone `bool` before an `int` sits at the same offset either way): reproducing that comparison at runtime would mean
+             reimplementing managed struct layout, so presence of the type is the proxy for divergence. Both paths that reach the check first consult
+             `GeneratedSchemaRegistry`, so a component built with the generator is unaffected and the refusal lands only on assemblies built without Typhon's
+             tooling, where "rebuild it with the generator" is the remedy (#819).
+  verified: ReflectedOffsetProvenanceTests [VerifiesRule]
+
 ---
 
 ## Module: CLUSTERWALK — Concurrent cluster enumeration vs structural mutation

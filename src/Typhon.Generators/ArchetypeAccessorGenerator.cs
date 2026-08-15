@@ -488,6 +488,14 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
                 continue;
             }
 
+            // A `fixed` buffer's field type is a pointer, and the offset expression measures `Unsafe.As<TField, byte>(…)` — a pointer cannot be a type
+            // argument, and the expression would need an unsafe context besides, so emitting one does not compile. The schema drops these fields anyway
+            // (`FromType` returns None for a pointer), so skipping them here loses nothing and keeps the registrar buildable (#819).
+            if (field.IsFixedSizeBuffer || field.Type.TypeKind == TypeKind.Pointer)
+            {
+                continue;
+            }
+
             string memberName = field.Name;
             string schemaName = memberName;
             string previousName = null;
@@ -881,6 +889,10 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
         {
             sb.AppendLine().Append(fi).Append(", defaultDiscipline: ").Append(model.DisciplineCast);
         }
+
+        // Every offset above came from Unsafe.ByteOffset against the stack probe, so this spec describes the MANAGED layout. Reflection cannot say the same
+        // and leaves the flag clear, which is what lets the engine refuse a bool/char component it has no way to measure (#819).
+        sb.AppendLine().Append(fi).Append(", managedOffsets: true");
         sb.AppendLine();
         sb.Append(indent).Append(")");
     }

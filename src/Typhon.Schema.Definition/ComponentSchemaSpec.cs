@@ -25,24 +25,39 @@ public readonly struct ComponentSchemaSpec
     /// <summary>The component's fields in declaration order (parent-first for inherited layouts). Never null.</summary>
     public ComponentFieldSpec[] Fields { get; }
 
+    /// <summary>
+    /// Whether <see cref="ComponentFieldSpec.Offset"/> was measured against the MANAGED layout — the one the engine reads components through.
+    /// </summary>
+    /// <remarks>
+    /// The source generator measures each field with <c>Unsafe.ByteOffset</c> against a stack probe and sets this. Runtime reflection has only a
+    /// <see cref="Type"/> to work from, so it reads <c>Marshal.OffsetOf</c> — the MARSHALLED layout — and leaves it clear. The two layouts agree for ordinary
+    /// blittable primitives and diverge for <c>bool</c> (1 byte managed, 4 marshalled) and <c>char</c> (2 vs 1), which is why the distinction is recorded
+    /// rather than assumed: a definition built from unmeasured offsets must not silently carry them into storage (#819).
+    /// </remarks>
+    public bool ManagedOffsets { get; }
+
     /// <summary>Creates a component schema spec.</summary>
     /// <param name="name">Component name (see <see cref="Name"/>).</param>
     /// <param name="revision">Schema revision (see <see cref="Revision"/>).</param>
     /// <param name="fields">Ordered field specs (see <see cref="Fields"/>).</param>
     /// <param name="storageMode">Storage mode (see <see cref="StorageMode"/>); default <see cref="StorageMode.Versioned"/>.</param>
     /// <param name="defaultDiscipline">Default commit discipline (see <see cref="DefaultDiscipline"/>); default <see cref="CommitDiscipline.TickFence"/>.</param>
+    /// <param name="managedOffsets">Whether the field offsets describe the managed layout (see <see cref="ManagedOffsets"/>). Defaults to <c>false</c>
+    /// deliberately: a caller that has not measured them must not be taken to have done so.</param>
     public ComponentSchemaSpec(
         string name,
         int revision,
         ComponentFieldSpec[] fields,
         StorageMode storageMode = StorageMode.Versioned,
-        CommitDiscipline defaultDiscipline = CommitDiscipline.TickFence)
+        CommitDiscipline defaultDiscipline = CommitDiscipline.TickFence,
+        bool managedOffsets = false)
     {
         Name = name;
         Revision = revision;
         Fields = fields;
         StorageMode = storageMode;
         DefaultDiscipline = defaultDiscipline;
+        ManagedOffsets = managedOffsets;
     }
 }
 
