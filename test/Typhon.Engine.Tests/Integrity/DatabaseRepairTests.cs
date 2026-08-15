@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
@@ -331,6 +331,176 @@ internal sealed class DatabaseRepairTests
 
         DamagePage(BundlePath, 2, page => page[IntegrityConstants.PageHeaderSize + 8] ^= 0xFF);
         Assert.That(DatabaseRepair.Fingerprint(Scan()), Is.Not.EqualTo(before), "but damaging the database must");
+    }
+
+    /// <summary>
+    /// The fingerprint must be a function of the database's content and nothing else — in particular not of the process
+    /// that computed it, nor of the order the scan happened to enumerate findings in.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="Fingerprint_ChangesWhenTheDatabaseChanges"/> looks like it already covers the stability half, and it
+    /// does not: both of its scans run in <b>this</b> process, and the defect it missed was
+    /// <c>string.GetHashCode</c>, which .NET randomises <b>per process</b>. So the fingerprint was stable within any
+    /// single run and different in every new one, which is invisible to a same-process assertion and fatal to the only
+    /// workflow that matters — <c>repair --plan</c> in one process, <c>repair --apply</c> in the next. It refused with
+    /// "the database has changed since this plan was produced", blaming the database for a defect in the comparison.
+    /// </para>
+    /// <para>
+    /// A golden value is the assertion that actually binds it. Comparing two computations cannot detect a per-process
+    /// seed, and spawning a second process to compare against is a slow way to test an arithmetic property. Pinning the
+    /// value means any reintroduction of a randomised or order-dependent hash fails here, in this run. If the algorithm
+    /// is ever changed deliberately, this constant is supposed to break — that is the point of it.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(30_000)]
+    public void Fingerprint_DependsOnContentAlone_NotOnProcessOrOrder()
+    {
+        BuildAndClose();
+        var report = Scan();
+
+        // Same findings, reversed. Sorting inside the fingerprint is what must absorb this.
+        var reversed = new IntegrityReport
+        {
+            Source = report.Source,
+            Mode = report.Mode,
+            Depth = report.Depth,
+            Identity = report.Identity,
+            Findings = report.Findings.Reverse().ToList(),
+            Limits = report.Limits,
+            Totals = report.Totals
+        };
+
+        Assert.That(DatabaseRepair.Fingerprint(reversed), Is.EqualTo(DatabaseRepair.Fingerprint(report)),
+            "the fingerprint must not depend on the order findings were enumerated in");
+
+        // The golden case: a fixed synthetic report must hash to a fixed value in every process, forever. It carries
+        // findings deliberately — with an empty list the fold never executes and the value is just the FNV offset
+        // basis, so an empty-report golden would pass against the very per-process hash it exists to forbid.
+        var pinned = new IntegrityReport
+        {
+            Source = "pinned",
+            Mode = report.Mode,
+            Depth = report.Depth,
+            Identity = new DatabaseIdentity { Name = "db", FormatRevision = 7, PageCount = 3, SizeBytes = 24576, CheckpointLsn = 11, MetaGeneration = 2 },
+            Findings =
+            [
+                new IntegrityFinding { Code = "CHK-XXX-01", Severity = IntegritySeverity.Leak, Summary = "s", Locus = new Locus(9), Occurrences = 3 },
+                new IntegrityFinding { Code = "CHK-AAA-02", Severity = IntegritySeverity.Advisory, Summary = "s", Locus = new Locus(1), Occurrences = 1 }
+            ],
+            Limits = report.Limits,
+            Totals = report.Totals
+        };
+
+        Assert.That(DatabaseRepair.Fingerprint(pinned), Is.EqualTo(PinnedFingerprint),
+            "a fixed report must fingerprint identically in every process — a per-process hash would break this");
+    }
+
+    /// <summary>
+    /// The fingerprint of the synthetic report in <see cref="Fingerprint_DependsOnContentAlone_NotOnProcessOrOrder"/>,
+    /// computed independently from the specification (FNV-1a over UTF-8 code units, findings sorted by code/page/count,
+    /// 0xFF separator) rather than captured from the implementation. A golden value copied out of the code under test
+    /// asserts only that the code does what it does; this one can actually be wrong.
+    /// </summary>
+    private const string PinnedFingerprint = "db|7|3|24576|11|2|7169f38ee60cfe0d";
+
+    /// <summary>
+    /// A bundle whose directory has been renamed cannot be opened by anything, so the scan must say so — and the plan
+    /// must not offer to repair it by reopening it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The database's name lives in page 0 and <c>ManagedPagedMMF.OnFileLoading</c> compares it to the bundle
+    /// directory's stem on every open. Copying <c>world.typhon</c> to <c>broken.typhon</c> — the obvious way to make a
+    /// scratch copy — therefore produces a database no tool can open. The scanner never opens the engine, so before
+    /// <c>CHK-BOO-02</c> learned to check this the report came back merely <i>Divergent</i>, the plan proposed
+    /// "open the database so the engine regenerates its derived structures", the dry run printed REPAIR COMPLETE, and
+    /// only the real apply failed — with a wrapper message that named neither cause nor fix.
+    /// </para>
+    /// <para>
+    /// Asserted through the <b>plan</b> rather than the report alone, because the finding on its own would not have
+    /// prevented any of that: what matters is that a step which cannot execute is never offered as one that can.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(30_000)]
+    public void ARenamedBundle_IsReportedUnopenable_AndNeverPlannedForRepair()
+    {
+        BuildAndClose();
+
+        var renamed = Path.Combine(DbDir, "renamed.typhon");
+        CopyDirectory(BundlePath, renamed);
+
+        using var source = new OfflineBundlePageSource(renamed);
+        var report = IntegrityScanner.Scan(source, new IntegrityOptions { Depth = ScanDepth.Deep });
+
+        var finding = report.Findings.FirstOrDefault(f => f.Code == "CHK-BOO-02");
+        Assert.That(finding, Is.Not.Null, "a bundle that cannot be opened must be reported\n" + IntegrityReportText.Render(report));
+        Assert.Multiple(() =>
+        {
+            Assert.That(finding.Severity, Is.EqualTo(IntegritySeverity.Fatal), "it is not merely a divergence — nothing can open this");
+            Assert.That(report.Verdict, Is.EqualTo(IntegrityVerdict.Unopenable));
+            Assert.That(finding.Summary + finding.Detail, Does.Contain(CurrentDatabaseName),
+                "the report is the deliverable here, so it must name the directory name that restores it");
+        });
+
+        var plan = DatabaseRepair.Plan(report);
+        Assert.That(plan.Steps.Any(s => s.Class == RepairClass.Regenerate), Is.False,
+            "reopening the database cannot be offered as a repair for a database that cannot be opened");
+    }
+
+    /// <summary>
+    /// A directory that is not named <c>{name}.typhon</c> at all is not a renamed bundle — it is an archived copy, and
+    /// the tool's own pre-repair backups are exactly that shape. It must not be reported as damage.
+    /// </summary>
+    /// <remarks>
+    /// The first cut of the name check used <c>Path.GetFileNameWithoutExtension</c>, which strips only the LAST
+    /// extension: <c>world.typhon.pre-repair-20260812</c> read as expecting <c>world.typhon</c>, so it emitted a Fatal
+    /// finding whose own message contradicted itself — <i>"records 'world' but its directory is named 'world.typhon'"</i>
+    /// — and turned every backup <c>repair --apply</c> takes into an Unopenable database on the next scan. A check that
+    /// condemns the artefacts its own feature produces is worse than the gap it closed.
+    /// </remarks>
+    [Test]
+    [CancelAfter(30_000)]
+    public void AnArchivedCopy_IsAdvisedAbout_NotCondemned()
+    {
+        BuildAndClose();
+
+        // The exact shape DatabaseRepair.CopyBundle produces.
+        var archived = BundlePath.TrimEnd(Path.DirectorySeparatorChar) + ".pre-repair-20260812-002703";
+        CopyDirectory(BundlePath, archived);
+
+        using var source = new OfflineBundlePageSource(archived);
+        var report = IntegrityScanner.Scan(source, new IntegrityOptions { Depth = ScanDepth.Deep });
+
+        var finding = report.Findings.FirstOrDefault(f => f.Code == "CHK-BOO-02");
+        Assert.That(finding, Is.Not.Null, "it is still worth saying the engine cannot open it in place");
+        Assert.Multiple(() =>
+        {
+            Assert.That(finding.Severity, Is.EqualTo(IntegritySeverity.Advisory),
+                "an archived copy is not damage — Fatal here would condemn every backup this feature takes");
+            Assert.That(report.Verdict, Is.Not.EqualTo(IntegrityVerdict.Unopenable),
+                "and it must not drag the verdict to Unopenable");
+            Assert.That(finding.Summary, Does.Contain($"{CurrentDatabaseName}.typhon"),
+                "the advice must name the directory name that would open it");
+            Assert.That(finding.Summary, Does.Not.Contain(".typhon.typhon"),
+                "and must not double up the extension, which is what the last-extension-only parse produced");
+        });
+    }
+
+    /// <summary>Recursive directory copy — the bundle is a directory, and the point of the test is that its NAME changes.</summary>
+    private static void CopyDirectory(string source, string target)
+    {
+        Directory.CreateDirectory(target);
+        foreach (var file in Directory.GetFiles(source))
+        {
+            File.Copy(file, Path.Combine(target, Path.GetFileName(file)), overwrite: true);
+        }
+        foreach (var dir in Directory.GetDirectories(source))
+        {
+            CopyDirectory(dir, Path.Combine(target, Path.GetFileName(dir)));
+        }
     }
 
     /// <summary>

@@ -1,5 +1,6 @@
-using JetBrains.Annotations;
+﻿using JetBrains.Annotations;
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -343,6 +344,23 @@ public static class DatabaseRepair
     /// A stable identity for "this database, in this state". Deliberately coarse: it must change when the database
     /// changes, and must not change merely because a scan ran twice.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Both halves of that contract were broken, and the failure was total rather than occasional: the findings fold
+    /// used <c>string.GetHashCode</c>, which .NET <b>randomises per process</b> as hash-flood mitigation. Two scans of
+    /// byte-identical data therefore produced different fingerprints in different processes, so the documented
+    /// two-step workflow — <c>repair --plan</c>, review it, <c>repair --apply</c> — could never succeed. It refused
+    /// with <i>"the database has changed since this plan was produced"</i>, which is the most misleading answer
+    /// available: it accuses the database of drifting to explain a defect in the comparison.
+    /// </para>
+    /// <para>
+    /// The fold was also order-dependent, chaining findings in list order, so a re-scan that merely enumerated the same
+    /// findings in a different sequence changed the value too. Now: sort, then FNV-1a over UTF-8 bytes with a
+    /// separator — the same construction <c>ProfilerSessionMetadataBuilder</c> uses for schema fingerprints, and for
+    /// the same reason. Sorting is what makes it order-independent; the byte-level hash is what makes it
+    /// process-independent; the separator stops <c>("Ab", 1)</c> and <c>("A", …)</c> colliding by concatenation.
+    /// </para>
+    /// </remarks>
     /// <param name="report">The report to fingerprint.</param>
     public static string Fingerprint(IntegrityReport report)
     {
@@ -353,13 +371,46 @@ public static class DatabaseRepair
         sb.Append(id.SizeBytes).Append('|').Append(id.CheckpointLsn).Append('|').Append(id.MetaGeneration).Append('|');
 
         // Fold the findings in, so a plan built for one set of problems cannot be applied to a database with another set.
-        var hash = 17UL;
+        var entries = new List<(string Code, int Page, long Occurrences)>(report.Findings.Count);
         for (var i = 0; i < report.Findings.Count; i++)
         {
             var f = report.Findings[i];
-            hash = (hash * 1099511628211UL) ^ (ulong)f.Code.GetHashCode(StringComparison.Ordinal);
-            hash = (hash * 1099511628211UL) ^ (ulong)f.Locus.FilePageIndex;
-            hash = (hash * 1099511628211UL) ^ (ulong)f.Occurrences;
+            entries.Add((f.Code ?? string.Empty, f.Locus.FilePageIndex, f.Occurrences));
+        }
+
+        entries.Sort(static (x, y) =>
+        {
+            var byCode = string.CompareOrdinal(x.Code, y.Code);
+            if (byCode != 0)
+            {
+                return byCode;
+            }
+            var byPage = x.Page.CompareTo(y.Page);
+            return byPage != 0 ? byPage : x.Occurrences.CompareTo(y.Occurrences);
+        });
+
+        const ulong offsetBasis = 14695981039346656037;
+        const ulong prime = 1099511628211;
+        var hash = offsetBasis;
+        Span<byte> intBytes = stackalloc byte[sizeof(int)];
+        Span<byte> longBytes = stackalloc byte[sizeof(long)];
+        foreach (var (code, page, occurrences) in entries)
+        {
+            foreach (var b in Encoding.UTF8.GetBytes(code))
+            {
+                hash = (hash ^ b) * prime;
+            }
+            BinaryPrimitives.WriteInt32LittleEndian(intBytes, page);
+            foreach (var b in intBytes)
+            {
+                hash = (hash ^ b) * prime;
+            }
+            BinaryPrimitives.WriteInt64LittleEndian(longBytes, occurrences);
+            foreach (var b in longBytes)
+            {
+                hash = (hash ^ b) * prime;
+            }
+            hash = (hash ^ 0xFF) * prime;
         }
 
         sb.Append(hash.ToString("x16", CultureInfo.InvariantCulture));
@@ -385,6 +436,15 @@ public static class DatabaseRepair
 
     private static string EscalationFor(IntegrityFinding finding)
     {
+        // "Nothing is lost" is about DATA, and says nothing about whether the database still functions — so it must not
+        // be the consolation offered for a Fatal finding. A renamed bundle loses no bytes at all and cannot be opened by
+        // any means; telling its owner "the database continues to work" is false at the exact moment they are reading a
+        // report to find out whether it does.
+        if (finding.Severity == IntegritySeverity.Fatal)
+        {
+            return "The database cannot be opened in this state; the finding above says what to do about it.";
+        }
+
         if (finding.Loss == null || finding.Loss.IsNone)
         {
             return "Nothing is lost by leaving it; the database continues to work.";
