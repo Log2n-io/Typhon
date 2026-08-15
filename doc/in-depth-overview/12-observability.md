@@ -338,6 +338,8 @@ Output: off-CPU gaps visible in the Workbench timeline overlaid on the affected 
 4. Calls `TyphonProfiler.Start(parent, metadata, processExitTeardown: FinishStop)`.
 5. Subscribes `runtime.Engine.MMF.DisposingEvent` to `FinishStop` so the trace finalizes deterministically when the engine's storage tears down (after the engine's own shutdown teardown, so engine-shutdown events make it into the trace).
 
+When `ProfilerActive` is on but no output channel is configured, `TryStart` emits a one-shot warning to `Console.Error` (once per process) and returns without starting the profiler. This replaces the silent no-op of earlier versions — see `BuildInertProfilerWarning` (#792).
+
 ### Drain
 
 `ProfilerConsumerThread` drains all 256 slot rings round-robin, batches records via `TraceRecordBatchPool`, compresses with LZ4, and hands the compressed blocks to each attached `IProfilerExporter`. The consumer is one dedicated thread (`Typhon.Profiler-Consumer`).

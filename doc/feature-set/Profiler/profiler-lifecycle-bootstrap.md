@@ -26,7 +26,8 @@ the safety net, and an explicit host call never conflict.
 
 ## 💻 Usage
 ```csharp
-// 1. Drop next to the executable (or set TYPHON__PROFILER__* env vars) — no code required:
+// 1. Drop next to the executable, or set TYPHON__PROFILER__* env vars in the process environment
+//    BEFORE the process starts (setting them inside Main() is too late — config is frozen at assembly load):
 // typhon.telemetry.json
 // {
 //   "Typhon": { "Profiler": { "Enabled": true, "Trace": "session.typhon-trace" } }
@@ -51,6 +52,7 @@ TyphonProfiler.Stop();
 | Signal | Effect |
 |---|---|
 | `Typhon.Telemetry.Enabled` / `Profiler.Enabled` = `false` | Bootstrap is a no-op; zero runtime cost |
+| `Profiler.Enabled` = `true`, but neither `Trace` nor `Live` channel configured | One-shot warning to `Console.Error`; profiling not started |
 | Engine storage disposed (normal shutdown) | Primary teardown — trace finalized deterministically |
 | `AppDomain.ProcessExit` / terminating unhandled exception | Backup teardown for hosts that never dispose |
 | `TyphonProfiler.Stop()` called explicitly | Early, host-initiated teardown (idempotent) |
@@ -60,8 +62,10 @@ TyphonProfiler.Stop();
   the entire integration surface.
 - `TyphonProfiler.Start`/`Stop` are idempotent: a double-start is a no-op, a double-stop is a no-op — safe
   under restart-after-crash or a redundant safety-net firing.
-- Bootstrap failures (port already in use, unwritable trace path) are caught and logged to stderr; the host
-  keeps running without profiling rather than crashing.
+- Bootstrap failures (port already in use, unwritable trace path, or profiling enabled with no output channel
+  configured) are caught and logged to `Console.Error`; the host keeps running without profiling rather than crashing.
+- The telemetry configuration is frozen at assembly load — before `Main`'s first statement runs. `Environment.SetEnvironmentVariable`
+  calls inside `Main` have no effect; set `TYPHON__PROFILER__*` in the OS environment or a launch profile instead.
 - The process-exit safety net does **not** catch `TerminateProcess`/`taskkill /F`/`SIGKILL`,
   `StackOverflowException`, or access violations — the OS reaps the process before managed code runs. Only a
   clean shutdown or a caught, terminating unhandled exception finalizes the trace.
