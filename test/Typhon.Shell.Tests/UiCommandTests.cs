@@ -246,4 +246,68 @@ public sealed class UiCommandTests
         File.SetLastWriteTimeUtc(path, writtenUtc);
         return path;
     }
+
+    // ── An explicitly-typed path gets the same scrutiny as a derived one ──────────────────────────────────────────
+    //
+    // `typhon ui <database>` used to trust the argument outright: it started Kestrel and handed the SPA a `db=`
+    // pointing at nothing, so a plain typo surfaced in the browser rather than in the shell that produced it. The
+    // --open-db branch beside it had validated its own result all along; only the path the user typed was exempt.
+
+    [Test]
+    public void ResolveDbPath_MissingDatabase_IsRejected_NamingThePath()
+    {
+        var missing = Path.Combine(_tempDir, "does-not-exist.typhon");
+
+        var result = UiCommand.ResolveDbPath(new UiCommand.Settings { Database = missing }, out var error);
+
+        Assert.That(result, Is.Null);
+        Assert.That(error, Does.Contain(missing), "the message must name the path that was not found");
+    }
+
+    [Test]
+    public void ResolveDbPath_FileInsteadOfBundle_SaysADatabaseIsADirectory()
+    {
+        var file = Path.Combine(_tempDir, "world.typhon");
+        File.WriteAllText(file, "not a bundle");
+
+        var result = UiCommand.ResolveDbPath(new UiCommand.Settings { Database = file }, out var error);
+
+        Assert.That(result, Is.Null);
+        Assert.That(error, Does.Contain("DIRECTORY"), "pointing at a file is the common mistake — say why it is wrong");
+    }
+
+    [Test]
+    public void ResolveDbPath_ExistingBundle_IsAcceptedAndAbsolute()
+    {
+        var db = Path.Combine(_tempDir, "world.typhon");
+        Directory.CreateDirectory(db);
+
+        var result = UiCommand.ResolveDbPath(new UiCommand.Settings { Database = db }, out var error);
+
+        Assert.That(error, Is.Null);
+        Assert.That(result, Is.EqualTo(Path.GetFullPath(db)));
+    }
+
+    [Test]
+    public void ResolveTracePath_MissingCapture_IsRejected_AndPointsAtProfilings()
+    {
+        var missing = Path.Combine(_tempDir, "nope.typhon-trace");
+
+        var result = UiCommand.ResolveTracePath(new UiCommand.Settings { Trace = missing }, out var error);
+
+        Assert.That(result, Is.Null);
+        Assert.That(error, Does.Contain(missing));
+        Assert.That(error, Does.Contain("profilings"), "captures live in the bundle — say where to look");
+    }
+
+    [Test]
+    public void ResolveTracePath_ExistingCapture_IsAccepted()
+    {
+        var capture = MakeCapture("world.typhon", "20260814-220312-943.typhon-trace", DateTime.UtcNow);
+
+        var result = UiCommand.ResolveTracePath(new UiCommand.Settings { Trace = capture }, out var error);
+
+        Assert.That(error, Is.Null);
+        Assert.That(result, Is.EqualTo(Path.GetFullPath(capture)));
+    }
 }

@@ -45,6 +45,29 @@ internal static class Program
                 config.SetApplicationName("typhon");
                 config.SetApplicationVersion(Version);
 
+                // Spectre's default handler prints `Error: {ex.Message}` and nothing else, so a wrapped exception loses
+                // the only sentence that says what actually happened — a repair failing on an unopenable database
+                // reported "Virtual Disk Manager initialization error, check inner exception" and then discarded the
+                // very exception it told the reader to check. Render the whole chain: the outermost message is the
+                // context, the innermost is almost always the cause and the fix.
+                config.SetExceptionHandler((ex, _) =>
+                {
+                    AnsiConsole.MarkupLine($"[red]Error:[/] {Markup.Escape(ex.Message)}");
+
+                    for (var inner = ex.InnerException; inner != null; inner = inner.InnerException)
+                    {
+                        AnsiConsole.MarkupLine($"[red]  caused by:[/] {Markup.Escape(inner.Message)}");
+                    }
+
+                    // The stack is noise for a user-facing failure and essential for an unexpected one; DEBUG is the
+                    // line the rest of this file already draws between the two.
+#if DEBUG
+                    AnsiConsole.MarkupLine($"[grey]{Markup.Escape(ex.GetType().FullName)}[/]");
+                    Console.WriteLine(ex.StackTrace);
+#endif
+                    return 10;
+                });
+
                 // `typhon ui [database]` launches the Workbench UI (#429). The REPL remains the default command,
                 // so `typhon`, `typhon <db>`, `typhon -c …` are unchanged; only the literal `ui` verb branches here.
                 config.AddCommand<UiCommand>("ui")

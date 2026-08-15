@@ -162,7 +162,7 @@ internal sealed class UiCommand : Command<UiCommand.Settings>
     /// positional <c>[database]</c> nor <c>--open-db</c> is given. Sets <paramref name="error"/> (and returns null)
     /// when both are given, or when <c>--open-db</c> finds no — or more than one — <c>*.typhon</c> database in the CWD.
     /// </summary>
-    private static string ResolveDbPath(Settings settings, out string error)
+    internal static string ResolveDbPath(Settings settings, out string error)
     {
         error = null;
         var hasArg = !string.IsNullOrWhiteSpace(settings.Database);
@@ -175,7 +175,20 @@ internal sealed class UiCommand : Command<UiCommand.Settings>
 
         if (hasArg)
         {
-            return Path.GetFullPath(settings.Database);
+            // Validate the path the user typed, exactly as the --open-db branch below validates the one it derives.
+            // Without this the Workbench starts happily and hands the SPA a `db=` pointing at nothing: the failure then
+            // surfaces in the browser, several layers and one process away from the typo that caused it.
+            var full = Path.GetFullPath(settings.Database);
+            if (Directory.Exists(full))
+            {
+                return full;
+            }
+
+            error = File.Exists(full)
+                ? $"'{full}' is a file. A Typhon database is a DIRECTORY named {{name}}{IntegrityConstants.BundleExtension} — "
+                  + "pass the bundle itself, not a file inside it."
+                : $"No database at '{full}'. Check the path, or run your app once to create one.";
+            return null;
         }
 
         if (!settings.OpenDb)
@@ -310,7 +323,7 @@ internal sealed class UiCommand : Command<UiCommand.Settings>
     /// returns null and sets <paramref name="error"/> to a human-readable message so <c>Execute</c> can print it
     /// and exit 1.
     /// </summary>
-    private static string ResolveTracePath(Settings settings, out string error)
+    internal static string ResolveTracePath(Settings settings, out string error)
     {
         error = null;
         var hasTrace = !string.IsNullOrWhiteSpace(settings.Trace);
@@ -323,7 +336,18 @@ internal sealed class UiCommand : Command<UiCommand.Settings>
 
         if (hasTrace)
         {
-            return Path.GetFullPath(settings.Trace);
+            // Same reasoning as ResolveDbPath: an explicitly-typed path gets the same scrutiny as a derived one.
+            var full = Path.GetFullPath(settings.Trace);
+            if (File.Exists(full))
+            {
+                return full;
+            }
+
+            error = Directory.Exists(full)
+                ? $"'{full}' is a directory. --trace takes a single {TraceLocation.TraceExtension} capture file."
+                : $"No capture at '{full}'. Captures live in {{database}}{IntegrityConstants.BundleExtension}/"
+                  + $"{TraceLocation.ProfilingsDirectoryName}/ — or use --open-latest to pick the newest automatically.";
+            return null;
         }
 
         if (!settings.OpenLatest)
