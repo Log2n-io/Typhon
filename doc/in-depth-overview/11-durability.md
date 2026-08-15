@@ -182,17 +182,22 @@ The batch is built by [`CommitBatchBuilder`](https://github.com/Log2n-io/Typhon/
 
 [`WalSegmentManager`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/WalSegmentManager.cs)
 
-WAL records are written into fixed-size segment files named `{segmentId:D16}.wal` in the configured WAL directory (default `wal/`). Each segment starts with a 4096-byte `WalSegmentHeader` ([file](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/WalSegmentHeader.cs)) carrying magic (`TYFW`), version, segment ID, first/prev LSN, and a CRC32C — sized for one aligned disk page so the first record sits at a 4096-byte boundary (required for `O_DIRECT` / `FILE_FLAG_NO_BUFFERING`).
+WAL records are written into segment files named `{segmentId:D16}.wal` in the configured WAL directory (default `wal/`). Each segment starts with a 4096-byte `WalSegmentHeader` ([file](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/WalSegmentHeader.cs)) carrying magic (`TYFW`), version, segment ID, first/prev LSN, its own size, and a CRC32C — sized for one aligned disk page so the first record sits at a 4096-byte boundary (required for `O_DIRECT` / `FILE_FLAG_NO_BUFFERING`).
 
 ### Defaults
 
 | Knob | Default | Source |
 |---|---|---|
-| Segment size | 64 MB | `WalWriterOptions.SegmentSize` |
-| Pre-allocated segments | 4 | `WalWriterOptions.PreAllocateSegments` |
+| Segment size (after the first rotation) | 64 MB | `WalWriterOptions.SegmentSize` |
+| First segment size | 16 MB | `WalWriterOptions.InitialSegmentSize` |
+| Pre-allocated segments | 4, built on the first rotation | `WalWriterOptions.PreAllocateSegments` |
 | Rotation threshold | 75 % utilization | `WalWriter.RotationThreshold` constant |
 
-When the active segment passes 75 % utilization, the writer seals it, opens the next pre-allocated segment, writes its header, and replenishes the pre-allocation pool. Pre-allocation creates new empty files of full segment size via `RandomAccess.SetLength` so rotation doesn't pay metadata-write latency on the hot path.
+**Segments are not uniformly sized, and the pool is not built at open** (#784). A database that never fills a segment never rotates, so its first segment is its entire WAL forever — sizing that file for steady-state throughput charged a 1.8 MB database a 320 MiB `wal/` directory. The first segment is therefore `InitialSegmentSize`, and the pre-allocation pool is created on the **first rotation**, when the database has demonstrated it will actually need one. Everything from that rotation on is `SegmentSize`, so a busy database's steady state is unchanged. Each header declares its **own** size rather than the configured one, which is what lets readers bound their scan correctly across a mixed-size set.
+
+When the active segment passes 75 % utilization, the writer seals it, opens the next pre-allocated segment, writes its header, and replenishes the pool. Pre-allocation creates empty files via `RandomAccess.SetLength` so rotation doesn't pay metadata-write latency on the hot path.
+
+A drain larger than the space left in the active segment forces an **early** rotation, ahead of the 75 % threshold, and the replacement is sized `max(SegmentSize, header + batch)` so an over-sized batch still lands inside a declared region. Skipping that check would extend the file past what its header declares — a positioned write past EOF succeeds silently — and every byte beyond the declared size is unreachable to recovery (rule `WR-03`, #785).
 
 ### Segments are deleted, not "recycled"
 

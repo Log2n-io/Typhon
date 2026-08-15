@@ -249,6 +249,65 @@ public class WalSegmentSizingTests : AllocatorTestBase
         }
     }
 
+    /// <summary>
+    /// The mutant for <see cref="ADrainLargerThanTheActiveSegment_NeverWritesPastItsDeclaredSize"/>. That verifier's
+    /// whole claim rests on one predicate — a segment's file length equals the size its own header declares — and a
+    /// predicate that cannot fail proves nothing. This grows a segment past its declared size and shows the predicate
+    /// separates the two states.
+    /// </summary>
+    /// <remarks>
+    /// It also demonstrates *why* the overrun is silent, which is what earns WR-03 its <c>[silent]</c> marker: the write
+    /// does not fail, is not rejected, and leaves no error behind. A positioned write past EOF simply extends the file,
+    /// so the only evidence is the disagreement asserted here — between what the file measures and what its header says
+    /// recovery may read.
+    /// </remarks>
+    [Test]
+    [CancelAfter(15000)]
+    [RuleMutant("WR-03")]
+    public void Mutant_ASegmentGrownPastItsDeclaredSize_FailsTheVerifiersPredicate()
+    {
+        const uint SegSize = 64 * 1024;
+        const int Overrun = 49_152;   // the exact overshoot #785 produced before the guard existed
+
+        var fileIO = new WalFileIO();
+        try
+        {
+            string path;
+            long declared;
+
+            var segMgr = new WalSegmentManager(fileIO, _walDir, SegSize, 1, false, 0);
+            try
+            {
+                segMgr.Initialize(lastSegmentId: 0, firstLSN: 1);
+                path = segMgr.ActiveSegment.Path;
+                declared = segMgr.ActiveSegment.SegmentSize;
+                Assert.That(new FileInfo(path).Length, Is.EqualTo(declared), "precondition: a fresh segment is exactly the size its header declares");
+            }
+            finally
+            {
+                segMgr.Dispose();   // release the NO_BUFFERING handle before reopening the file to damage it
+            }
+
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Write))
+            {
+                fs.Seek(0, SeekOrigin.End);
+                fs.Write(new byte[Overrun]);
+            }
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(new FileInfo(path).Length, Is.Not.EqualTo(declared),
+                    "an overrun segment must NOT satisfy the verifier's predicate — if it did, the verifier would pass on damaged and healthy alike");
+                Assert.That(new FileInfo(path).Length - declared, Is.EqualTo(Overrun),
+                    "and the excess is exactly the region recovery can never reach, because OpenSegment bounds its scan by the declared size");
+            });
+        }
+        finally
+        {
+            fileIO.Dispose();
+        }
+    }
+
     private static void PublishBytes(WalCommitBuffer buffer, int totalBytes)
     {
         const int FrameSize = 8192;
