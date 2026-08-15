@@ -19,7 +19,7 @@ struct BagData
 }
 
 [Component("Typhon.Test.ECS.ItemData", 1)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct ItemData
 {
     [Index(AllowMultiple = true, OnParentDelete = CascadeAction.Delete)]

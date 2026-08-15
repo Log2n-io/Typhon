@@ -13,6 +13,9 @@ Custom Roslyn analyzers for the Typhon database engine project.
 | TYPHON006 | Error | Dispose() must dispose all critical fields |
 | TYPHON007 | Error | Early return in Dispose() must not skip critical field disposal |
 | TYPHON008 | Error | Public-namespace type exposes internal-namespace type on its public surface |
+| TYPHON009 | Warning | Spatial component mutated via `GetSpan`/`Get` instead of the `WriteSpatial` barrier |
+| TYPHON010 | Warning | Component struct stores padding beyond a 4-byte multiple — every entity pays for bytes that carry no field |
+| TYPHON011 | Error | Component struct's managed and marshalled layouts differ (`bool` / `char`) — the schema cannot describe it correctly |
 
 ---
 
@@ -379,6 +382,122 @@ When the analyzer fires, choose one of:
 1. **Promote the internal type** to `Typhon.Engine` — appropriate when it really is part of the consumer contract (and was misclassified as internal).
 2. **Hide the leak behind a public-only abstraction** — return an interface, a snapshot struct, or a public wrapper over the internal type.
 3. **Make the public type internal** — appropriate when the public type was misclassified and is itself an implementation detail.
+
+---
+
+## ComponentLayoutAnalyzer (TYPHON010 + TYPHON011)
+
+### TYPHON010 — Avoidable padding
+
+**Severity:** Warning
+
+Reports a `[Component]` struct that stores more padding than a 4-byte-aligned layout of its fields would need.
+
+### Why This Rule Exists
+
+A component column is strided by `sizeof(T)` — that is the stride `Span<T>` and `ref T` step by, and the engine takes it as the component's storage size
+(`DBComponentDefinition.Build`, rule SCHEMA-06). Padding is therefore stored per entity, written to the WAL and checkpointed, while carrying no field:
+
+```csharp
+[Component("Ship.Vitals", 1)]
+public struct Vitals { public long Owner; public int Hp; }   // 16 bytes stored for 12 bytes of data
+```
+
+Before #816 the engine strided such a column by the *field extent* instead, which silently mis-addressed every slot after the first. Taking `sizeof(T)` fixed
+that; this analyzer is what keeps the resulting cost visible.
+
+### The baseline is `Pack = 4`, rounded up to 4 — not the end of the last field
+
+Rounding a component up to 4 costs at most 3 bytes and keeps every layout word-aligned. Rounding up to **8** — which a single `long` or `double` imposes on the
+whole struct — costs up to 7, and is the waste worth acting on.
+
+The comparison is against **what the struct would measure at `Pack = 4`**, not against where its last field ends. Measuring the tail would make the diagnostic a
+function of field *order* rather than of wasted storage:
+
+| Struct | Type size | Packs to | Reported? |
+|---|---|---|---|
+| `{ long; int }` | 16 | 12 | **yes** — 4 bytes recoverable |
+| `{ int; long }` | 16 | 12 | **yes** — same waste, padding just sits in the middle |
+| `{ AABB2F; byte }` | 20 | 17 → 20 | no — already a 4-byte multiple |
+| `{ int }` with `Size = 8` | 8 | 4 | **yes** — declared oversize |
+
+### Resolution
+
+Add `Pack = 4`, which caps every field's alignment at 4:
+
+```csharp
+[Component("Ship.Vitals", 1)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+public struct Vitals { public long Owner; public int Hp; }   // 12 bytes stored
+```
+
+**Reordering the fields does not help** — it relocates the padding rather than removing it (`{ int; long }` is 16 bytes as well).
+
+### `Pack` or `Size`?
+
+Prefer **`Pack`**: it follows the fields, so adding one adjusts the layout, where a pinned `Size` freezes a number that rots — too small becomes a runtime
+`TypeLoadException`, too large silently re-introduces the padding.
+
+Use **`Size`** when the component already has data on disk. `Pack` caps alignment for *every* field, so it can move **interior** offsets — `{ int A; long B;
+float C }` at `Pack = 4` slides `B` from 8 to 4 — and field offsets are persisted (`FieldR1.Offset`) and compared by `SchemaValidator`. `Size` pinned to the
+field extent never moves anything. For system components this is the difference between a transparent change and a `BK_SystemSchemaRevision` bump that refuses
+every existing database (rule SCHEMA-05); `ArchetypeR1` and `SchemaHistoryR1` were verified offset-by-offset before taking `Pack = 4`.
+
+The shared trade is alignment: at a 12-byte stride the `long` is 4-byte-aligned on odd slots. Fine for ordinary loads on x64 and arm64, but such a field must
+not be the target of `Interlocked`. When the padding is worth paying for, suppress the diagnostic at the declaration and say why.
+
+### Limits
+
+The analyzer reimplements sequential struct layout: primitives, enums, nested structs, fixed-size buffers, `[InlineArray]`, `Pack`, `Size` and `CharSet`.
+Anything it cannot model exactly makes it stay silent rather than report a byte count it cannot stand behind — `LayoutKind.Explicit` or `Auto`, a pointer or
+`nint` field, a generic component, a type it does not recognise, and nesting deeper than 8 levels. A self-referential struct (only expressible in invalid
+source, but analyzers run on that too) is detected and abandoned rather than recursed into.
+
+---
+
+### TYPHON011 — Managed vs marshalled layout
+
+**Severity:** Error
+
+Reports a `[Component]` struct whose **managed** layout differs from its **marshalled** one.
+
+#### Why This Rule Exists
+
+The reflection schema path records field offsets with `Marshal.OffsetOf` (`DatabaseDefinitions.ReflectComponentSpec`), which describes the *marshalled*
+layout, while every accessor reads the component through the *managed* one. They agree for ordinary blittable primitives and diverge for exactly two types —
+`bool` marshals to a 4-byte Win32 `BOOL` (1 byte managed), `char` to a 1-byte ANSI character (2 bytes managed):
+
+```
+struct { bool A; bool B; int C; }    managed  A@0 B@1 C@4  (8 bytes)
+                                     marshal  A@0 B@4 C@8  (12 bytes)
+
+struct { char A; char B; int C; }    managed  A@0 B@2 C@4  (8 bytes)
+                                     marshal  A@0 B@1 C@4  (8 bytes)   ← same size, wrong offsets
+```
+
+When they diverge, every field-addressed path reads the wrong bytes with no error anywhere: index key extraction, WAL field decode, crash recovery, schema
+evolution, the integrity scanner, the Workbench raw read. Whole-struct copies keep working, which is what makes it so quiet.
+
+The `char` row is why this is a compile-time check and not a registration assert: both layouts are 8 bytes, so no runtime size comparison can see it.
+
+#### Resolution
+
+Use `byte` for a flag and `ushort` for a code unit. This is an **error**, not a warning, because there is no correct way to use such a component.
+
+It is a *comparison*, not a ban on `bool`/`char`, and stays silent whenever the two layouts happen to agree:
+
+- a single `bool` before a wider field — the managed layout pads it out to the same place the marshalled one puts it, so the common one-flag shape is fine;
+- `CharSet.Unicode` on the struct — `char` then marshals as 2 bytes, the same as managed;
+- an explicit `[MarshalAs]` on a field — the marshalled width is the author's to define, so the check abandons rather than accusing an annotated field.
+
+Divergence hidden inside a nested struct is caught too, including when it sits last and displaces nothing: the check compares each field's *width* as well as
+its offset.
+
+#### Note on the generated path
+
+The source generator does **not** use `Marshal.OffsetOf` — since #816 it measures offsets against a stack probe with `Unsafe.ByteOffset`, so a generated spec
+already carries managed offsets. This diagnostic protects the reflection fallback (`CreateFromAccessor(Type)`, `AssemblySchemaLoader`), which has only a
+`Type` to work from and cannot do the same.
 
 ---
 

@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using Typhon.Schema.Definition;
@@ -64,7 +65,11 @@ public class DBComponentDefinition
     /// </summary>
     public CommitDiscipline DefaultDiscipline { get; internal set; }
 
-    /// <summary>Byte size of the component's field data (the largest field offset plus its size), excluding per-chunk overhead.</summary>
+    /// <summary>
+    /// Byte stride of one component instance in storage, excluding per-chunk overhead. This is the CLR size of <see cref="POCOType"/> — the same stride
+    /// <c>Span&lt;T&gt;</c> and <c>ref T</c> step by — so it includes any trailing padding the compiler adds for alignment. Falls back to the largest field
+    /// offset plus its size when no value type backs the definition.
+    /// </summary>
     public int ComponentStorageSize { get; private set; }
 
     /// <summary>
@@ -313,7 +318,46 @@ public class DBComponentDefinition
             throw new Exception("We didn't detect at least one field... Fields must be public field (not property), not static and of a compatible data type.");
         }
 
-        ComponentStorageSize = lastField.OffsetInComponentStorage + lastField.SizeInComponentStorage;
+        // The stride of a component column is the stride every accessor assumes: `Span<T>` and `ref T` step by sizeof(T), which includes the trailing padding
+        // the compiler adds to keep the struct's alignment in an array. The field extent cannot see that padding — `struct { long A; int B; }` has an extent
+        // of 12 and a CLR size of 16 — and a column strided by the extent mis-addresses every slot after the first, reading into the next slot and writing
+        // over it (#816). So the stride IS sizeof(T), padding included; those bytes are stored but never carry a field. A component that does not want to pay
+        // them declares `[StructLayout(LayoutKind.Sequential, Pack = 4)]`, which caps field alignment so the padding never appears — the analyzer (TYPHON010)
+        // points this out at compile time.
+        //
+        var fieldExtent = lastField.OffsetInComponentStorage + lastField.SizeInComponentStorage;
+
+        // A definition with no backing type is METADATA ONLY — a synthetic shape fed to SchemaValidator.ComputeDiff, or a persisted schema reconstructed for
+        // comparison. It never backs a column, so there is no stride to get wrong and the field extent is the only size that means anything. A definition that
+        // DOES name a struct is the real thing, and SCHEMA-06 is an equality for it.
+        if (POCOType == null)
+        {
+            ComponentStorageSize = fieldExtent;
+            return;
+        }
+
+        if (!POCOType.IsValueType)
+        {
+            throw new InvalidOperationException(
+                $"Component '{FullName}' names {POCOType.FullName} as its backing type, which is not a value type. A component's storage is a column of "
+              + "blittable structs; a reference type cannot back one.");
+        }
+
+        var clrSize = RuntimeHelpers.SizeOf(POCOType.TypeHandle);
+
+        // A field reaching past the end of the struct means the offsets describe a DIFFERENT layout from the one the accessors read — the managed/marshalled
+        // divergence `bool` and `char` cause, since offsets come from Marshal.OffsetOf while every read is a managed `*(T*)`. Taking the larger of the two here
+        // would adopt that foreign layout and re-create #816 inverted, with the stride now overshooting sizeof(T). Analyzer TYPHON011 rejects such a component
+        // at compile time; this is the same refusal for anything that reaches registration without having been compiled against it.
+        if (fieldExtent > clrSize)
+        {
+            throw new InvalidOperationException(
+                $"Component '{FullName}' ({POCOType.Name}) declares fields reaching byte {fieldExtent} but the type is only {clrSize} bytes. Its field offsets "
+              + "describe the marshalled layout while the engine reads the managed one — a bool (4 bytes marshalled, 1 managed) or char (1 vs 2) field is the "
+              + "usual cause. Use byte for a flag and ushort for a code unit.");
+        }
+
+        ComponentStorageSize = clrSize;
     }
 }
 

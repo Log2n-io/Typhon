@@ -118,8 +118,12 @@ public struct ComponentR1
 /// id, and an added field is <c>CompatibilityLevel.Compatible</c> — <c>SchemaEvolutionEngine</c> zero-fills it with no migration function, and zero is already
 /// the "not persisted, rebuild" sentinel the other SPIs use.
 /// </remarks>
+// Pack = 4: the natural layout rounds the fields' 108 bytes up to 112 for NextEntityKey's 8-byte alignment, and a component column is strided by sizeof(T), so
+// those 4 bytes would be stored, logged and checkpointed per archetype without carrying a field (#816, TYPHON010). Capping alignment at 4 removes the rounding
+// and — verified field by field — moves no offset, so the stride stays the 108 this component has always had and no BK_SystemSchemaRevision bump is due
+// (SCHEMA-05). Pack rather than Size because it follows the fields: add one and the layout adjusts, where a pinned Size would silently rot.
 [Component(SchemaName, 2)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 [PublicAPI]
 public struct ArchetypeR1
 {
@@ -262,8 +266,9 @@ public enum SchemaObjectKind
 /// <summary>
 /// Audit trail entry for schema changes. One entity is created for each component schema change (add/remove/widen fields, migration function execution, etc.).
 /// </summary>
+// Pack = 4 — see ArchetypeR1 above for why (#816, SCHEMA-05). 176 → 172, no offset moves.
 [Component(SchemaName, 1)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 [PublicAPI]
 public struct SchemaHistoryR1
 {
@@ -2753,6 +2758,22 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
                     migrationResult = SchemaEvolutionEngine.MigrateWithFunction(
                         MMF, EpochManager, diff, persistedFields, persisted.Comp, definition, chain.Value, Logger, RaiseMigrationProgress);
+                }
+
+                // A stride change that no field-level diff can see. `SchemaDiff` compares names, types, offsets and sizes; the per-instance STRIDE is none of
+                // those, so a component whose padding changed — the whole of #816, where storage went from the field extent to sizeof(T) — reports Identical
+                // and skips every branch below, including the stride-migration check inside them. The cluster segment is then reopened at the new geometry and
+                // every row after the first is read at the wrong offset, silently. Refuse instead: pre-alpha, recreating the database is the accepted remedy,
+                // and it is the same trade SCHEMA-05 already makes for the engine's own system components.
+                // CompSize, not the total stride: the overhead term moves whenever the storage mode does (a SingleVersion component carries an inline entityPK
+                // that a Versioned one does not), and that is a different change with its own, more specific error further down.
+                if (diff.IsIdentical && persisted.Comp.CompSize != definition.ComponentStorageSize)
+                {
+                    throw new InvalidOperationException(
+                        $"Component '{schemaName}' is stored at {persisted.Comp.CompSize} bytes per instance but this build lays it out at "
+                      + $"{definition.ComponentStorageSize}, with no field-level change to migrate through. This is a padding-only layout change "
+                      + $"(see #816 / rule SCHEMA-06): declare [StructLayout(LayoutKind.Sequential, Pack = 4)] on the struct to restore the stored stride, "
+                      + $"or recreate the database.");
                 }
 
                 if (!diff.IsIdentical)

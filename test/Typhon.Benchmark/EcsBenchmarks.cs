@@ -20,7 +20,7 @@ struct BenchParentData
 }
 
 [Component("Typhon.Benchmark.ECS.ChildData", 1)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct BenchChildData
 {
     [Index(AllowMultiple = true, OnParentDelete = CascadeAction.Delete)]

@@ -65,8 +65,9 @@ public class DatabaseSchemaTests
 
         dc.CreateFromAccessor<ComponentR1>();
 
+        // No WithPOCO: the fields below are declared by hand and do not correspond to DBObject's own layout, so naming it as the backing struct would assert a
+        // stride they do not fit (#816, rule SCHEMA-06). A definition with no backing type is metadata-only, which is exactly what this builder produces here.
         dc.CreateComponentBuilder("DBObject", 1)
-            .WithPOCO<DBObject>()
             .WithField<String64>(-1, "DBObjectTypeName", 0).IsStatic()
             .WithField<long>(0, "ID", 0)
             .Build();

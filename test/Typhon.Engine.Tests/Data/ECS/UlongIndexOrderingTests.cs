@@ -9,7 +9,7 @@ namespace Typhon.Engine.Tests;
 // ── #676: the suite had no ulong-typed indexed field at all, which is the whole reason a signed-ordered ULong tree survived. ──
 
 [Component("Typhon.Test.UlongIdx.Account", 1, StorageMode = StorageMode.SingleVersion)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct UlongIdxAccount
 {
     [Index]

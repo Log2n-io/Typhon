@@ -89,6 +89,27 @@ discipline (MVCC revision chains vs in-place SV vs heap-backed Transient), so re
              requires no migration code, only that every existing database be recreated — the accepted pre-alpha trade (#615).
   verified: SystemSchemaRevisionGateTests [VerifiesRule]
 
+### SCHEMA-06: A component's storage stride is the CLR size of its struct `[fatal][silent]`
+  invariant ∀ component C backed by CLR struct T: `C.ComponentStorageSize == sizeof(T)`
+  never a column is strided by the extent of C's fields (`lastField.Offset + lastField.Size`) when `sizeof(T)` is larger
+  scope: DBComponentDefinition.Build, DBComponentDefinition.ComponentStorageSize, ArchetypeClusterInfo.ComponentSize, ClusterRef.CheckStride
+  never the two accessor families disagree on the stride: `EntityRef` multiplies `ComponentSize(slot)` explicitly, while `ClusterRef` takes
+        `ComponentOffset(slot)` as a base and lets `Span<T>` / `Unsafe.Add<T>` supply `sizeof(T)` implicitly. That asymmetry is exactly why the invariant is
+        stated on the LAYOUT rather than on either call site — it is the only place the two can be made to agree
+  on_violation: every accessor that hands out a `Span<T>` or a `ref T` steps by `sizeof(T)`, because that is what those types mean. A column strided by
+                anything else mis-addresses slot i, so reads alias the wrong slot and run off the end of the column into the next component's, and a
+                whole-struct write stamps the neighbouring slot's leading bytes. Nothing detects it: the bytes are structurally valid, the CRC covers what
+                was written, and the flat per-entity view keeps reading correctly for interior slots — so the two views of the same memory disagree with no
+                error anywhere (#816, found via #815).
+  rationale: the two quantities differ exactly by the trailing padding the compiler adds to keep T's alignment inside an array, which the schema cannot see —
+             `struct { long A; int B; }` has a field extent of 12 and a CLR size of 16. 14 components in this repository were in that state, including the
+             engine's own `ArchetypeR1` and `SchemaHistoryR1`. Taking the CLR size costs those padding bytes per entity; a component that does not want to
+             pay declares `[StructLayout(LayoutKind.Sequential, Pack = 4)]`, which caps field alignment and satisfies the invariant from the other side.
+             TYPHON010 reports the choice at compile time, and reports only padding beyond a 4-byte multiple — rounding to 4 costs at most 3 bytes and is
+             accepted; the 8-byte rounding one `long` imposes on a whole struct is not. `Pack` moves interior offsets, which are persisted, so a component
+             with data already on disk pins `Size` to its extent instead.
+  verified: ClusterPaddedComponentTests [VerifiesRule] [RuleMutant]
+
 ---
 
 ## Module: CLUSTERWALK — Concurrent cluster enumeration vs structural mutation

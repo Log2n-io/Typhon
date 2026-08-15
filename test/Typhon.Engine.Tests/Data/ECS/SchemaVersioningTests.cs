@@ -21,11 +21,16 @@ unsafe class SchemaVersioningTests : TestBase<SchemaVersioningTests>
     {
         // 64B Name + 2B ArchetypeId + 2B RoutingId + 2B ParentArchetypeId + 1B ComponentCount + 1B _pad0 + 4B Revision + 4B ComponentNames + 4B EntityMapSPI
         // + 4B ClusterSegmentSPI + 8B NextEntityKey = 96B, + 2B AssemblyId, then 2B of alignment padding before 4B ClusterIndexSPI + 4B ClusterString64IndexSPI
-        // (#661), and the struct rounds up to its 8B alignment (it contains a long) → 112B.
+        // (#661) → the fields end at 108B.
         //
         // The prior comment attributed 3B to padding where the struct actually carries RoutingId (2B) + _pad0 (1B) — RoutingId is persisted, and is the
         // durable anchor every EntityId's routing resolves through.
-        Assert.That(sizeof(ArchetypeR1), Is.EqualTo(112));
+        //
+        // 108, not the 112 the 8B alignment would round up to: since #816 a component's storage stride IS sizeof(T) (SCHEMA-06), so those 4 trailing bytes
+        // would be stored and logged per archetype without carrying a field. `[StructLayout(Pack = 4)]` on the declaration caps field alignment at 4, which
+        // removes the rounding without moving a single field offset — so the stride stays the 108 this component has always had, and no
+        // BK_SystemSchemaRevision bump is due (SCHEMA-05).
+        Assert.That(sizeof(ArchetypeR1), Is.EqualTo(108));
     }
 
     [Test]

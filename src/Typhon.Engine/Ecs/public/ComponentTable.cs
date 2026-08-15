@@ -286,7 +286,10 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
 
     internal void ClearDestroyedChunkIds() => _destroyedChunkIds.Clear();
 
-    /// <summary>Size in bytes of a single component's field payload (excludes MVCC and index overhead).</summary>
+    /// <summary>
+    /// Byte stride of one component instance — <c>sizeof(T)</c> of the backing struct, so the field payload plus any padding the compiler adds for alignment
+    /// (#816, rule SCHEMA-06). Excludes MVCC and index overhead; see <see cref="ComponentTotalSize"/> for the figure that includes them.
+    /// </summary>
     public int ComponentStorageSize => Definition.ComponentStorageSize;
 
     /// <summary>Schema definition (fields, indexes, layout) of the component type stored in this table.</summary>
