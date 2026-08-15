@@ -284,7 +284,8 @@ Typhon's 8 KB pages span two 4 KB device blocks; consumer NVMe makes 8 KB writes
 
 | Page class | On CRC failure during recovery | Rule |
 |---|---|---|
-| **Derived** (Index, Spatial, Occupancy) | Always healed — the structure is discarded and **rebuilt** from primary data (`RebuildSecondaryIndexes`, `RederiveOccupancyOnCrash`). | RB-01 / CK-09 |
+| **Derived** (Index, Spatial) | Always healed — the structure is discarded and rebuilt from primary data (`RebuildSecondaryIndexes`). | RB-01 |
+| **Derived** (Occupancy) | Usually healed — `RederiveOccupancyOnCrash` rebuilds the bitmap from actual segment ownership. Exception: if a persisted archetype or component segment pointer cannot be read during reconstruction, it throws rather than adopting a partial bitmap (partial ⇒ live pages marked free). That throw manifests as a loud open failure, not a silent bad rebuild. | CK-09 |
 | **Primary** (component/revision content, EntityMap, cluster, collections, string table, system) | **Heal-or-loud-fail**: recorded *suspect* during recovery; resolved after rebuild — if the page no longer backs a live chunk (entity re-created in-window, scrub freed the old) → healed; if it still backs a live primary chunk → **the open FAILS LOUDLY** naming the page (`ResolveSuspectPrimaryPages`). | RB-04 |
 
 This is the defining safety property of the redesign: a torn primary page is never silently served as if intact. Because every primary segment is a `ChunkBasedSegment`, `ResolveSuspectPrimaryPages` (`IsDerivedSegmentKind` = `Index | Spatial | Occupancy`) loud-fails uniformly — there is no silent-corruption path. The A/B slot-pairing (§5) covers the structural meta/directory pages that rebuild can't re-derive.

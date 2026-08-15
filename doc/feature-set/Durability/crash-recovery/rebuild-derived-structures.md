@@ -54,9 +54,13 @@ catch (CorruptionException ex)
 
 ## ⚠️ Guarantees & limits
 
-- **Always rebuilt, never repaired** — secondary B+Tree indexes, the page-occupancy bitmap, and the EntityMap of
+- **Always rebuilt, never repaired** — secondary B+Tree indexes and the EntityMap of
   any "rebuildable" archetype (cluster-eligible, or every non-`Transient` slot `Versioned`) are unconditionally
   cleared and rebuilt after every crash recovery; a CRC-clean derived page on disk is not even consulted.
+  The **page-occupancy bitmap** follows the same rebuild path with one additional guard: if a persisted archetype
+  or component segment pointer cannot be read during reconstruction, `RederiveOccupancyOnCrash` throws rather than
+  adopting a partial bitmap (a partial bitmap would mark live pages free). That throw surfaces as a loud
+  database-open failure, not a silent bad rebuild — see `typhon check` to diagnose which pointer is unreadable.
 - **Ordering is load-bearing** — rebuild runs after the WAL window is applied and Versioned chains are scrubbed
   to their single committed HEAD, so indexes are built from final values, never from pre-crash MVCC history.
   The occupancy bitmap rebuild specifically runs after recovery's own seal checkpoint, since that checkpoint can
