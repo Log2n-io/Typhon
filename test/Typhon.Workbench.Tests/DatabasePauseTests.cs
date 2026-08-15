@@ -372,21 +372,28 @@ public sealed class DatabasePauseTests
         var session = await OpenSessionAsync(fixture.TyphonFilePath);
         _coordinator.TrackLiveSession(session, []);
 
+        // Deadlines are deliberately generous. This test is the only one here that drives the protocol through THREE
+        // state changes, each gated on a 1-second poll and one of them on a real engine open — so its wall-clock cost
+        // scales with how loaded the machine is, and under a full-suite run on a contended CI box the original 10s/15s
+        // budgets were not always enough. Raising them weakens no assertion: every one of these is a claim about what
+        // the protocol EVENTUALLY does, and the poll interval is an implementation detail the test must not encode.
+        var deadline = TimeSpan.FromSeconds(45);
+
         // Round 1 — the application starts and asks for the database.
         DatabaseLockFile.WriteRequest(fixture.TyphonFilePath);
-        Assert.That(await WaitUntilAsync(() => session.IsPaused, TimeSpan.FromSeconds(10)), Is.True,
+        Assert.That(await WaitUntilAsync(() => session.IsPaused, deadline), Is.True,
             "precondition: the first handoff must work, or this test is proving nothing about the second");
 
         // The application exits: its claim is retired and the database is free again, so the session comes back.
         DatabaseLockFile.DeleteRequest(fixture.TyphonFilePath);
-        Assert.That(await WaitUntilAsync(() => !session.IsPaused, TimeSpan.FromSeconds(15)), Is.True, "the session must resume once its database is free");
+        Assert.That(await WaitUntilAsync(() => !session.IsPaused, deadline), Is.True, "the session must resume once its database is free");
         Assert.That(DatabaseLockFile.TryReadLock(fixture.TyphonFilePath, out var info), Is.True, "a resumed session holds the lock again");
         Assert.That(info.Yieldable, Is.True, "the resumed lock re-advertises the promise — which is why it must still be kept");
 
         // Round 2 — the application starts again. This is the case that regressed.
         DatabaseLockFile.WriteRequest(fixture.TyphonFilePath);
 
-        var yieldedAgain = await WaitUntilAsync(() => session.IsPaused, TimeSpan.FromSeconds(10));
+        var yieldedAgain = await WaitUntilAsync(() => session.IsPaused, deadline);
         Assert.Multiple(() =>
         {
             Assert.That(yieldedAgain, Is.True, "a resumed session must honour a second claim — the promise is re-made every time the lock is re-taken");
