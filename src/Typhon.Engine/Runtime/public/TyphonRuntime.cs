@@ -177,6 +177,11 @@ public sealed partial class TyphonRuntime : IDisposable
     /// Fires once when a tick is aborted under <see cref="SystemExceptionPolicy.AbortTickAndStop"/>, on the tick thread, after the tick has fully drained.
     /// Never fires for a successful tick, and never fires twice — the runtime is terminal after an abort. The handler should stop the runtime
     /// (<see cref="FatalStop"/>) and let the host decide whether to exit or rebuild the engine.
+    /// <para>
+    /// "Drained" means every system has run or been skipped — it does NOT mean the tick is over. The handler runs INSIDE the tick, on the tick thread, and
+    /// the tick's own end-of-tick accounting still runs after the handler returns. So <see cref="FatalStop"/> called from here takes effect after the current
+    /// tick completes, and <see cref="CurrentTickNumber"/> advances once more once it does. Do not block in this handler: you are holding up the tick thread.
+    /// </para>
     /// </summary>
     public event Action<TyphonRuntime, TickOutcome> OnTickAborted;
 
@@ -357,6 +362,11 @@ public sealed partial class TyphonRuntime : IDisposable
     /// orderly stop and the wrong thing after a fatal tick: the abort means the simulation is logically incomplete, so committing a final round of shutdown
     /// writes on top of it would persist state derived from a tick that never finished. Everything else — subscription server, profiler, scheduler — is
     /// torn down exactly as in <see cref="Shutdown"/>.
+    /// <para>
+    /// <b>Neither this nor <see cref="Shutdown"/> is a quiescence point.</b> Both stop new ticks; neither waits for the tick in flight. The expected caller
+    /// is an <see cref="OnTickAborted"/> handler, which runs on the tick thread — so this typically returns into the very tick it is stopping, which then
+    /// finishes and posts its accounting. Dispose the runtime when you need "nothing is running": <see cref="Dispose"/> joins the tick thread.
+    /// </para>
     /// </remarks>
     public void FatalStop() => StopInternal(false);
 
