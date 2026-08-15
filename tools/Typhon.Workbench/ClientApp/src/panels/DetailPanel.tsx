@@ -28,6 +28,8 @@ import {
   revealSystemInDag,
 } from '@/shell/commands/openDbMap';
 import { revealQueryInAnalyzer } from '@/shell/commands/profilerCommands';
+import { CaptureDetailCard } from '@/panels/Profiles/CaptureDetailCard';
+import type { Profile } from '@/hooks/profiles/useProfileList';
 import { isViewActive } from '@/shell/viewRegistry';
 import type { ComponentSchema, Field } from '@/hooks/schema/types';
 import ProfilerDetail from '@/panels/profiler/ProfilerDetail';
@@ -102,7 +104,9 @@ export default function DetailPanel() {
           it. Leaf + ancestors share ONE scroll list. With a chain, the leaf is wrapped in an auto-height div so
           its `h-full` collapses to content height — no whitespace gap before the first ancestor, one scrollbar.
           With no chain, the lone leaf fills the rail as before (profiler / entity cards expect that). */}
-      <div className="min-h-0 flex-1 overflow-auto">
+      {/* min-w-0 alongside min-h-0: a flex child's default min-width:auto stops it shrinking below its content, so
+          wide cards grew the rail instead of overflowing inside it and no horizontal scrollbar ever appeared. */}
+      <div className="min-h-0 min-w-0 flex-1 overflow-auto">
         {ancestors.length === 0 ? (
           <div className="h-full">
             <LeafCard leaf={activeLeaf} />
@@ -153,6 +157,8 @@ function LeafCard({ leaf }: { leaf: SelectionLeaf }): React.JSX.Element {
       return <SystemLeafCard name={String(leaf.ref)} />;
     case 'query':
       return <QueryLeafCard ref0={leaf.ref} />;
+    case 'capture':
+      return <CaptureDetailCard profile={leaf.ref as Profile} />;
     default:
       return <ObjectSummaryCard icon={<Binary className="h-4 w-4 text-muted-foreground" />} kind={leaf.type} title={String(leaf.ref)} />;
   }
@@ -265,7 +271,7 @@ function ComponentLeafCard({ typeName }: { typeName: string }): React.JSX.Elemen
       actions={actions}
     >
       {c ? (
-        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-fs-sm">
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-fs-sm">
           <dt className="text-muted-foreground">Size</dt>
           <dd className="tabular-nums">{c.storageSize}B</dd>
           <dt className="text-muted-foreground">Fields</dt>
@@ -300,7 +306,7 @@ function ArchetypeLeafCard({ archetypeId }: { archetypeId: string }): React.JSX.
       actions={actions}
     >
       {a ? (
-        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-fs-sm">
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-fs-sm">
           <dt className="text-muted-foreground">Components</dt>
           <dd className="tabular-nums">{a.componentTypes.length}</dd>
           <dt className="text-muted-foreground">Entities</dt>
@@ -625,7 +631,7 @@ function Row({ label, value }: { label: string; value: string }) {
   return (
     <>
       <dt className="text-muted-foreground">{label}</dt>
-      <dd className="font-mono tabular-nums text-foreground">{value}</dd>
+      <dd className="min-w-0 break-words font-mono tabular-nums text-foreground">{value}</dd>
     </>
   );
 }
@@ -650,7 +656,7 @@ function DbMapPageDetail({
         <p className="text-fs-sm text-muted-foreground">Decoding page…</p>
       ) : (
         <>
-          <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
+          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-fs-sm">
             <Row label="Byte offset" value={`0x${page.byteOffset.toString(16).toUpperCase()}`} />
             <Row label="Change revision" value={page.changeRevision.toLocaleString()} />
             <Row label="Format revision" value={String(page.formatRevision)} />
@@ -706,7 +712,7 @@ function DbMapSegmentDetail({
         <p className="text-fs-sm text-muted-foreground">Harvesting segment summary…</p>
       ) : (
         <>
-          <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
+          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-fs-sm">
             <Row label="Root page" value={`#${summary.rootPageIndex}`} />
             <Row label="Pages" value={summary.pageCount.toLocaleString()} />
             {summary.stride > 0 && <Row label="Stride" value={`${summary.stride} B`} />}
@@ -724,7 +730,7 @@ function DbMapSegmentDetail({
           {isCluster && (
             <div className="mt-3 border-t border-border pt-2">
               <p className="mb-1 text-fs-xs uppercase tracking-wide text-muted-foreground">Cluster fill</p>
-              <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
+              <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-fs-sm">
                 <Row label="Entities" value={Number(summary.entityCount).toLocaleString()} />
                 <Row label="Active clusters" value={summary.activeClusterCount.toLocaleString()} />
                 <Row label="Slots / cluster" value={String(summary.clusterSize)} />
@@ -750,7 +756,7 @@ function DbMapSegmentDetail({
           {map && (
             <div className="mt-3 border-t border-border pt-2">
               <p className="mb-1 text-fs-xs uppercase tracking-wide text-muted-foreground">Entity-map (linear hash)</p>
-              <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
+              <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-fs-sm">
                 <Row label="Entries" value={Number(map.entryCount).toLocaleString()} />
                 <Row label="Buckets" value={map.bucketCount.toLocaleString()} />
                 <Row label="Load factor" value={map.loadFactor.toFixed(2)} />
@@ -890,7 +896,7 @@ function DbMapChunkDetail({
         <p className="text-fs-sm text-muted-foreground">Decoding chunk…</p>
       ) : (
         <>
-          <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
+          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-fs-sm">
             <Row label="Page" value={String(pageIndex)} />
             <Row label="Segment" value={`#${chunk.segmentId}`} />
             {chunk.componentType && <Row label="Component" value={chunk.componentType} />}
@@ -922,7 +928,7 @@ function ClusterCellBlock({ cell }: { cell: StorageClusterCellDto }) {
   return (
     <div className="mt-3 border-t border-border pt-2">
       <p className="mb-1 text-fs-xs uppercase tracking-wide text-muted-foreground">Spatial cell</p>
-      <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
+      <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-fs-sm">
         <Row label="Cell" value={`(${cell.cellX}, ${cell.cellY}) · key ${cell.cellKey}`} />
         <Row label="Entities here" value={cell.entitiesInCell.toLocaleString()} />
         <Row label="Clusters here" value={cell.clustersInCell.toLocaleString()} />
@@ -1015,7 +1021,7 @@ function DbMapEntityDetail({
         <p className="text-fs-sm text-muted-foreground">This slot is free — no entity here.</p>
       ) : (
         <>
-          <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
+          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-fs-sm">
             <Row label="Slot" value={`${slotIndex} (in cluster #${chunkId})`} />
             <Row label="Segment" value={`#${segmentId}`} />
           </dl>
@@ -1056,7 +1062,7 @@ function DbMapCellDetail({
         <p className="text-fs-sm text-muted-foreground">Decoding…</p>
       ) : (
         <>
-          <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
+          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-fs-sm">
             <dt className="text-muted-foreground">Value</dt>
             <dd className="break-all font-mono text-foreground">{cell.value}</dd>
             {/* A cluster entity slot carries an allocation bit (colorKey: 1 = a live entity occupies the slot, 0 =
@@ -1082,7 +1088,7 @@ function CellList({ title, cells }: { title: string; cells: DbContentCell[] }) {
     <div className="mt-3 border-t border-border pt-2">
       <p className="mb-1 text-fs-xs uppercase tracking-wide text-muted-foreground">{title}</p>
       <div className="max-h-64 overflow-auto">
-        <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-0.5 text-fs-sm">
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-fs-sm">
           {cells.slice(0, 256).map((c, i) => (
             <div key={`${c.kind}-${c.offset}-${i}`} className="contents">
               <dt className="truncate text-muted-foreground" title={c.label}>
@@ -1130,7 +1136,7 @@ function FieldDetail({ field, schema, componentLabel }: { field: Field; schema: 
           </div>
         </div>
 
-        <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-fs-sm">
           <dt className="text-muted-foreground">Type</dt>
           <dd className="font-mono text-foreground">{field.typeName}</dd>
 
@@ -1186,7 +1192,7 @@ function ResourceDetail({ resource }: { resource: SelectedResource }) {
           <span className="ml-auto text-fs-sm text-muted-foreground">{selected.kind}</span>
         </div>
 
-        <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-fs-sm">
           <dt className="text-muted-foreground">Id</dt>
           <dd className="truncate text-foreground">{raw.id ?? selected.resourceId}</dd>
 
