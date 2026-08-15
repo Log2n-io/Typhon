@@ -305,12 +305,18 @@ public sealed class DatabasePauseTests
 
         DatabaseLockFile.WriteRequest(fixture.TyphonFilePath);
 
-        var yielded = await WaitUntilAsync(() => session.IsPaused, TimeSpan.FromSeconds(10));
+        var yielded = await WaitUntilAsync(() => session.IsPaused, TimeSpan.FromSeconds(30));
+
+        // The lock is waited for, not sampled: IsPaused is set by Pause() while db.lock survives until the engine being
+        // disposed releases the file. The two are effects of one yield, not one event, and reading the file off the flag's
+        // timing is the race that wedged this test on the CI runner.
+        var lockReleased = await WaitUntilAsync(() => !DatabaseLockFile.Exists(fixture.TyphonFilePath), TimeSpan.FromSeconds(30));
+
         Assert.Multiple(() =>
         {
             Assert.That(yielded, Is.True, "a claim on a yieldable database must be honoured");
             Assert.That(session.PausedBy?.Pid, Is.EqualTo(Environment.ProcessId), "the banner must name the process that asked");
-            Assert.That(DatabaseLockFile.Exists(fixture.TyphonFilePath), Is.False, "yielding means dropping the lock, not just the engine");
+            Assert.That(lockReleased, Is.True, "yielding means dropping the lock, not just the engine");
         });
     }
 
@@ -394,10 +400,17 @@ public sealed class DatabasePauseTests
         DatabaseLockFile.WriteRequest(fixture.TyphonFilePath);
 
         var yieldedAgain = await WaitUntilAsync(() => session.IsPaused, deadline);
+
+        // Wait for the lock too, rather than reading it the instant IsPaused flips. They are two effects of one yield and
+        // they are NOT simultaneous: Pause() sets the flag, and db.lock goes when the engine it disposes finishes letting
+        // go of the file. Asserting the file state off the flag's timing is a race the test invents — it passed on Windows
+        // because dispose happened to win, and failed one Linux run in three because there it sometimes does not.
+        var lockReleased = await WaitUntilAsync(() => !DatabaseLockFile.Exists(fixture.TyphonFilePath), deadline);
+
         Assert.Multiple(() =>
         {
             Assert.That(yieldedAgain, Is.True, "a resumed session must honour a second claim — the promise is re-made every time the lock is re-taken");
-            Assert.That(DatabaseLockFile.Exists(fixture.TyphonFilePath), Is.False, "yielding means dropping the lock, not just the engine");
+            Assert.That(lockReleased, Is.True, "yielding means dropping the lock, not just the engine");
         });
 
         // Leave the coordinator quiescent. Every other test here ends with its session either live or resumed, so its
