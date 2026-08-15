@@ -29,6 +29,15 @@ class StrictTickAbortRuntimeTests : TestBase<StrictTickAbortRuntimeTests>
         SystemExceptionPolicy = SystemExceptionPolicy.AbortTickAndStop,
     };
 
+    // WorkerCount 1 puts the whole tick inline on the timer thread (ExecuteTickSingleThreaded), which is the shape the re-entrancy test below needs — and
+    // the shape the #404 report was filed against.
+    private static RuntimeOptions StrictSingleWorker() => new()
+    {
+        WorkerCount = 1,
+        BaseTickRate = 1000,
+        SystemExceptionPolicy = SystemExceptionPolicy.AbortTickAndStop,
+    };
+
     [Test]
     public void AbortedTick_StillRunsFenceAndFlush()
     {
@@ -82,6 +91,52 @@ class StrictTickAbortRuntimeTests : TestBase<StrictTickAbortRuntimeTests>
         Assert.That(captured.FailedSystemName, Is.EqualTo("Thrower"), "the first failing system must be named");
         Assert.That(captured.FailedSystemException, Is.TypeOf<InvalidOperationException>());
         Assert.That(runtime.LastTickOutcome.FailedSystemIndex, Is.GreaterThanOrEqualTo(0));
+    }
+
+    // The documented response to OnTickAborted is FatalStop(), and the handler runs on the TICK thread, inside the tick — so that call re-enters the
+    // scheduler's shutdown from the very thread it is stopping. Two properties fall out, and both are contract rather than accident (#404):
+    //
+    //   1. FatalStop() must RETURN, promptly. Nothing may join the tick thread from this path — that would be a self-join. StopTimerThread()'s join is
+    //      bounded at 2 s, so implementing #404's original action ("Shutdown() should stop+join the timer thread") without a re-entrancy branch turns every
+    //      fatal stop into a 2 s stall that returns false and changes nothing. The 1 s bound below is what reddens if someone does that.
+    //   2. CurrentTickNumber advances EXACTLY once after FatalStop() returns: the aborted tick resumes where the handler left it and runs its telemetry
+    //      finalizer, whose last statement is the increment. Here the advance is guaranteed, not merely possible — which is what the Shutdown() doc denied
+    //      when it promised the counter was "stable once this returns".
+    [Test]
+    public void FatalStopFromAbortHandler_ReturnsWithoutSelfJoin_AndCostsExactlyOneMoreTick()
+    {
+        long tickInsideHandler = -1;
+        var fatalStopElapsed = TimeSpan.MaxValue;
+        using var handlerDone = new ManualResetEventSlim(false);
+
+        using var dbe = SetupEngine();
+        using var runtime = TyphonRuntime.Create(dbe, schedule =>
+        {
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Thrower", _ => throw new InvalidOperationException("boom"));
+        }, StrictSingleWorker());
+
+        runtime.OnTickAborted += (r, _) =>
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            r.FatalStop();
+            sw.Stop();
+
+            fatalStopElapsed = sw.Elapsed;
+            // Read INSIDE the handler: we are still within the aborted tick, so its increment has not run yet.
+            Volatile.Write(ref tickInsideHandler, r.CurrentTickNumber);
+            handlerDone.Set();
+        };
+
+        runtime.Start();
+        Assert.That(handlerDone.Wait(TimeSpan.FromSeconds(5)), Is.True, "the abort handler must run");
+
+        // Deliberate observation window: let the aborted tick post its accounting, and prove nothing follows it.
+        Thread.Sleep(50);
+
+        Assert.That(fatalStopElapsed, Is.LessThan(TimeSpan.FromSeconds(1)),
+            "FatalStop() from the tick thread must not join the tick thread — a self-join would stall for StopTimerThread's 2 s bound");
+        Assert.That(runtime.CurrentTickNumber, Is.EqualTo(Volatile.Read(ref tickInsideHandler) + 1),
+            "the aborted tick posts its own accounting after FatalStop() returns — exactly one advance, and no further tick");
     }
 
     [Test]

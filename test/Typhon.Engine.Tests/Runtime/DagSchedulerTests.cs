@@ -331,25 +331,42 @@ public class DagSchedulerTests
     [Test]
     public void Shutdown_Clean()
     {
-        using var scheduler = NewDag(workerCount: 4)
+        var scheduler = NewDag(workerCount: 4)
             .CallbackSystem("A", _ => { })
             .Build(_registry.Runtime);
-        scheduler.Start();
-        SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= 3, TimeSpan.FromSeconds(5));
-        scheduler.Shutdown();
 
-        // Shutdown() signals and JOINS the workers, but _currentTickNumber++ lives in the tick's telemetry finalizer, which runs on the TIMER thread — so the
-        // tick already in flight when Shutdown() was called can land its increment just after Shutdown() returns. Pinning the baseline immediately raced that
-        // last increment and failed with "Expected: 346 But was: 347" (1 run in 10 pinned to 3 cores). Let the in-flight tick's accounting settle, THEN pin
-        // the baseline. The property under test — that no FURTHER ticks execute — is unaffected and genuinely holds: a probe measured delta 0 across 9 trials
-        // even with a 1 s observation window, so the timer thread stops producing ticks even though only Dispose() actually stops the thread.
-        Thread.Sleep(50);
+        try
+        {
+            scheduler.Start();
+            SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= 3, TimeSpan.FromSeconds(5));
+            scheduler.Shutdown();
 
-        // Verify the scheduler stopped (no more ticks)
-        var tickAfterShutdown = scheduler.CurrentTickNumber;
-        Thread.Sleep(50);
-        Assert.That(scheduler.CurrentTickNumber, Is.EqualTo(tickAfterShutdown),
-            "No more ticks should execute after shutdown");
+            // Shutdown() is NOT a quiescence point, and this pins exactly how far it falls short rather than sleeping past the gap. It signals and joins the
+            // WORKERS, but the tick already past ExecuteCallbacks' entry gate keeps running on the TIMER thread, and _currentTickNumber++ is the last
+            // statement of that tick's telemetry finalizer. So the counter can advance by ONE after Shutdown() returns — and by no more, because
+            // _workerShutdown is published before the join, so every later tick early-returns at the gate. Asserting equality here is what made this test
+            // flaky: "Expected: 346 But was: 347", 1 run in 10 pinned to 3 cores (#689). The earlier fix slept 50 ms first and pinned the baseline after;
+            // that hid the one-tick advance instead of stating it, which is how the Shutdown() doc came to claim the counter was stable on return (#404).
+            var afterShutdown = scheduler.CurrentTickNumber;
+
+            // Deliberate observation window, not a synchronisation shortcut: the property is the ABSENCE of further ticks, so there is no event to wait on.
+            Thread.Sleep(50);
+
+            Assert.That(scheduler.CurrentTickNumber - afterShutdown, Is.InRange(0L, 1L),
+                "Shutdown() must let at most the in-flight tick post its accounting, and no further tick may execute");
+
+            // Dispose() IS the quiescence point — base.Dispose() -> StopTimerThread() joins the timer thread, so nothing can post after it returns.
+            scheduler.Dispose();
+            var afterDispose = scheduler.CurrentTickNumber;
+            Thread.Sleep(50);
+
+            Assert.That(scheduler.CurrentTickNumber, Is.EqualTo(afterDispose),
+                "No tick accounting may land after Dispose() has joined the timer thread");
+        }
+        finally
+        {
+            scheduler.Dispose();
+        }
     }
 
     // Regression: a scheduler lifecycle must not leave a thread running. Shutdown() bumps _tickGeneration — the same field workers use to detect a new tick —
