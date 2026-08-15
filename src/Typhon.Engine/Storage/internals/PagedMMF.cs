@@ -496,7 +496,15 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         {
             Logger.LogError(e, "Virtual Disk Manager service initialization failed");
             Dispose();
-            throw new Exception("Virtual Disk Manager initialization error, check inner exception.", e);
+
+            // Say what went wrong, not merely that something did. "Virtual Disk Manager initialization error, check
+            // inner exception" named neither cause nor fix, and it referred the reader to an inner exception that every
+            // caller then dropped: Spectre.Console prints `Error: {ex.Message}` and stops, the Workbench renders the
+            // message into a toast, and the top-level shell handler only unwraps under #if DEBUG. So the one actionable
+            // sentence — "Database name mismatch: expected 'broken', found 'world'" — reached nobody. It has misdirected
+            // twice now (the other was a Win32Exception out of the liveness probe, #621), which is once more than a
+            // wrapper that adds no information deserves. The inner exception is still attached for the stack trace.
+            throw new Exception($"Cannot open the database at '{Options.BundleDirectory}': {e.Message}", e);
         }
     }
 
