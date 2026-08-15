@@ -293,7 +293,13 @@ public sealed partial class DatabasePauseCoordinator : IDisposable
             _dataBrowser.InvalidateSession(session);
             session.Resume(engine);
 
-            Forget(session.Id);
+            // KEEP WATCHING. Resume is the one transition that moves a session from the paused half of this poll to the
+            // live half, not out of the watched set: the engine we just opened wrote a fresh `yieldable: true` lock, so
+            // this session is once again advertising a promise only this coordinator can keep. Forgetting it here made
+            // the SECOND handoff fail every time — an application that closes and reopens its own database (the dev loop
+            // this feature exists to serve) would find the Workbench had silently re-acquired, publish its claim, and
+            // wait out the full LockHandoffTimeout against a watcher that no longer existed. Stale watches need no
+            // cleanup here: the sweep above retires any whose session has been removed or replaced.
             LogResumed(session.Id, session.FilePath);
         }
         catch (DatabaseLockedException)

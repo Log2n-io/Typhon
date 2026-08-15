@@ -357,6 +357,43 @@ public sealed class DatabasePauseTests
         Assert.That(File.Exists(requestPath), Is.False, "the orphan must be removed — nobody else will ever clean it up");
     }
 
+    [Test]
+    public async Task AResumedSession_YieldsAgain_WhenASecondClaimAppears()
+    {
+        // The dev loop is a LOOP. An application closes its database and reopens it — ShardLab's "durability: close &
+        // reopen" chapter does precisely that — so the handoff has to work more than once. It did not: resuming used to
+        // Forget() the watch, which left a LIVE session holding a fresh lock that still advertised `yieldable: true`
+        // with nobody watching for claims. The reopen then published its request and waited out the entire
+        // LockHandoffTimeout against a watcher that no longer existed, before failing exactly as it would have anyway.
+        //
+        // The first handoff passing is what made this invisible: every existing yield test drives a session that was
+        // tracked at creation and never resumed, so all three of them pass with the bug in place.
+        var fixture = FixtureDatabase.CreateOrReuse(_tempDir, force: true);
+        var session = await OpenSessionAsync(fixture.TyphonFilePath);
+        _coordinator.TrackLiveSession(session, []);
+
+        // Round 1 — the application starts and asks for the database.
+        DatabaseLockFile.WriteRequest(fixture.TyphonFilePath);
+        Assert.That(await WaitUntilAsync(() => session.IsPaused, TimeSpan.FromSeconds(10)), Is.True,
+            "precondition: the first handoff must work, or this test is proving nothing about the second");
+
+        // The application exits: its claim is retired and the database is free again, so the session comes back.
+        DatabaseLockFile.DeleteRequest(fixture.TyphonFilePath);
+        Assert.That(await WaitUntilAsync(() => !session.IsPaused, TimeSpan.FromSeconds(15)), Is.True, "the session must resume once its database is free");
+        Assert.That(DatabaseLockFile.TryReadLock(fixture.TyphonFilePath, out var info), Is.True, "a resumed session holds the lock again");
+        Assert.That(info.Yieldable, Is.True, "the resumed lock re-advertises the promise — which is why it must still be kept");
+
+        // Round 2 — the application starts again. This is the case that regressed.
+        DatabaseLockFile.WriteRequest(fixture.TyphonFilePath);
+
+        var yieldedAgain = await WaitUntilAsync(() => session.IsPaused, TimeSpan.FromSeconds(10));
+        Assert.Multiple(() =>
+        {
+            Assert.That(yieldedAgain, Is.True, "a resumed session must honour a second claim — the promise is re-made every time the lock is re-taken");
+            Assert.That(DatabaseLockFile.Exists(fixture.TyphonFilePath), Is.False, "yielding means dropping the lock, not just the engine");
+        });
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>Polls a predicate to a deadline. Preferred over a fixed sleep: the poll interval is an implementation detail this test must not encode.</summary>
