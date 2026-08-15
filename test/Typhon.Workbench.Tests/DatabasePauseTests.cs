@@ -289,7 +289,13 @@ public sealed class DatabasePauseTests
 
     // ── AC17 · the holder keeps the promise its lock file makes ──────────────────────────────────────────────────
 
+    // #811 — wedges the test host on the c6id gate runner and nowhere else: it passes alone, passes its fixture, and
+    // passes 4/4 full-suite runs on Linux under WSL2 with the same Release build and the same gate filter. Quarantined
+    // rather than deleted because nothing about the test has been shown to be wrong; the difference is the runner, and
+    // the two untested suspects are named in the issue. AC17 keeps its coverage through
+    // AResumedSession_YieldsAgain_WhenASecondClaimAppears, which drives this same yield and asserts the same release.
     [Test]
+    [Category("Quarantine")]
     public async Task ALiveSession_YieldsTheDatabase_WhenAClaimAppears()
     {
         // The Workbench writes `yieldable: true` into every lock it takes, which tells an application starting later
