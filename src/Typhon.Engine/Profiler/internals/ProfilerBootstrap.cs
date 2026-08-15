@@ -185,9 +185,24 @@ internal static class ProfilerBootstrap
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>Deliberately narrow.</b> An explicit <c>Typhon:Profiler:Trace</c> path still means exactly what it meant before, and a live-only session already
-    /// <i>has</i> a destination — the <c>LivePort &lt; 0</c> term is what keeps this from bolting a file exporter onto one. The default fills an absent
-    /// destination; it never adds a second.
+    /// <b>Deliberately narrow.</b> An explicit <c>Typhon:Profiler:Trace</c> path still means exactly what it meant before: the default fills an absent
+    /// destination, it never overrides a chosen one.
+    /// </para>
+    /// <para>
+    /// <b>A configured live port suppresses it.</b> <c>Live</c> and <c>Trace</c> are independent output channels — that is the whole shape of
+    /// <c>typhon telemetry</c> — so asking for one must never silently produce the other. A live port is a request to <i>watch</i>; turning it into a
+    /// multi-gigabyte file the caller never asked for is a decision the tool does not get to make on their behalf.
+    /// </para>
+    /// <para>
+    /// This is load-bearing for on-demand tick capture (#805), not merely tidy. That feature exists so an operator can record a chosen window and store
+    /// nothing else; the engine keeps emitting every tick over the wire and the Workbench discards what was not armed. A default file destination here
+    /// defeats it completely and invisibly: the operator records 100 ticks, and the engine writes a complete capture of the entire run beside the database
+    /// anyway. Measured on a 2,000-entity shard: <b>25.84 MB written against a 1.04 MB captured window</b>.
+    /// </para>
+    /// <para>
+    /// An explicit <see cref="ProfilerLaunchConfig.TraceFilePath"/> still wins, so wanting both is one setting away
+    /// (<c>typhon telemetry trace &lt;path&gt;</c>). The cost of live-only is that CPU sampling does not run — it is file-mode only — which is a visible,
+    /// logged consequence of a choice the user made, not a silent one made for them.
     /// </para>
     /// <para>
     /// Pruning happens <b>here</b>, in whatever process is about to write a capture, precisely because the Workbench is not always present — a game server, a
@@ -198,6 +213,11 @@ internal static class ProfilerBootstrap
     /// </remarks>
     internal static ProfilerLaunchConfig ApplyDefaultCaptureDestination(TyphonRuntime runtime, ProfilerLaunchConfig config)
     {
+        // A configured live port suppresses the default file. Live and Trace are independent channels: a request to
+        // WATCH must not silently produce a file the caller never asked for. This is what makes on-demand tick capture
+        // (#805) mean anything — an operator who records 100 ticks must not find a complete capture of the whole run
+        // written beside the database regardless. An explicit TraceFilePath still wins, so wanting both is one setting
+        // away; SuppressCapture still wins over everything.
         if (config == null || config.SuppressCapture || config.TraceFilePath != null || config.LivePort >= 0)
         {
             return config;

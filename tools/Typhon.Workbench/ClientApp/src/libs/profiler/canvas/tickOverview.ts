@@ -42,6 +42,10 @@ export interface TickSummaryLike {
   tickNumber: number | string;
   startUs: number | string;
   durationUs: number | string;
+  /** u64-as-string bitmask of the systems that ran this tick. Absent on minimal callers; `0`/null on a tick with none. */
+  activeSystemsBitmask?: string | number | null;
+  /** Longest single system execution this tick. `0` when no system-scoped record was retained. */
+  maxSystemDurationUs?: number | string;
   eventCount: number | string;
   // v9+ integer fields. Orval's .NET-OpenAPI codegen emits these as `number | string` (precision-preserving
   // dual representation, same as `tickNumber` / `eventCount` above), so the Like shape accepts both — consumers
@@ -68,6 +72,135 @@ export interface TickSummaryLike {
  * Real engine-idle gaps (next.startUs greater than start + duration) are preserved — the clamp uses
  * `Math.min`, so it only trims overshoot, never extends.
  */
+/**
+ * Does this tick carry anything to look at?
+ *
+ * On-demand tick capture (#805) keeps a per-tick SKELETON for every tick — `TickStart`/`TickEnd`, the metronome wait,
+ * the overload counters, the gauge snapshot — so tick numbering stays absolute across windows the operator never armed.
+ * Those ticks still finalize into summaries, so without this predicate the overview draws a bar per engine tick and a
+ * hundred recorded ticks are lost in thousands of empty ones. Clicking such a bar selects a tick with no systems, no
+ * spans and nothing in the detail panel.
+ *
+ * <p><b>Only the timeline filters.</b> Engine Live Health reads the same summaries for tick rate, gauges and anomalies
+ * and must keep seeing every tick — that panel is what you watch while deciding when to press Record.</p>
+ *
+ * <b>Summaries carrying neither field</b> deliberately survive: a caller that supplies only the core four cannot be
+ * judged, and guessing "not recorded" would blank the strip entirely. Absence of evidence is not evidence of absence.
+ *
+ * The synthetic pre-tick summary (tick 0) is <i>not</i> special-cased here — it has no systems by construction, so it
+ * fails this test. {@link recordedTicksOnly} decides its fate, because whether it is worth showing depends on its
+ * neighbour rather than on itself.
+ */
+export function isRecordedTick(s: TickSummaryLike): boolean {
+  const bitmask = s.activeSystemsBitmask;
+  const hasBitmask = bitmask !== undefined && bitmask !== null;
+  const hasMaxDuration = s.maxSystemDurationUs !== undefined;
+  if (!hasBitmask && !hasMaxDuration) return true;
+
+  // Number() on a u64 beyond 2^53 loses precision, but never turns a non-zero value into zero — and zero is the only
+  // thing being tested. Both fields are consulted because the bitmask only tracks system indices below 64, so a DAG
+  // wider than that would report 0 for a tick whose systems genuinely ran.
+  if (hasBitmask && Number(bitmask) !== 0) return true;
+  return hasMaxDuration && Number(s.maxSystemDurationUs) > 0;
+}
+
+/**
+ * How many tick numbers are missing immediately before `index`, or 0 when the axis is continuous there.
+ *
+ * Cherry-picked capture makes the tick axis **discontinuous**: recording ticks 1–4 and then 8–10 leaves the overview
+ * drawing seven bars whose numbers jump 4 → 8. Without a marker those bars read as one uninterrupted run, so a spike
+ * at tick 8 looks like it happened right after tick 4 — the strip would be quietly lying about time.
+ *
+ * Returns a count rather than a boolean because the size of the gap is what the reader wants: "3 ticks skipped" and
+ * "4,000 ticks skipped" are the same picture but very different runs.
+ */
+export function missingTicksBefore(ticks: readonly TickRow[], index: number): number {
+  if (index <= 0 || index >= ticks.length) return 0;
+  const gap = ticks[index].tickNumber - ticks[index - 1].tickNumber - 1;
+  // Negative would mean the list is not ascending — never true for summaries, and reporting a "gap" for it would be
+  // an invention. Zero is the honest answer for anything that is not a forward jump.
+  return gap > 0 ? gap : 0;
+}
+
+/** Width of the hatched band inserted where the tick axis jumps. */
+export const GAP_BAND_WIDTH = 6;
+
+/**
+ * X offset of each visible bar, relative to {@link BAR_LEFT_PAD}, with a {@link GAP_BAND_WIDTH} slot **inserted**
+ * wherever the tick axis jumps.
+ *
+ * The band occupies real space rather than overpainting the bars either side of it. Overpainting was the first
+ * attempt and it is wrong twice over: it mutilates two bars that carry data, and it still presents them as adjacent
+ * — the reader sees one continuous run with a mark drawn on it, instead of a run that visibly stops and restarts.
+ *
+ * Returned as a table because every consumer needs the same arithmetic — bars, GC markers, the selection overlay,
+ * tick labels, the hover outline and hit-testing. Nine sites computing `(i - startIdx) * BAR_WIDTH` independently is
+ * exactly how a strip ends up where the bar you click is not the bar you hit.
+ */
+export function computeBarOffsets(
+  ticks: readonly TickRow[],
+  startIdx: number,
+  endIdx: number,
+): number[] {
+  const count = Math.max(0, endIdx - startIdx);
+  const offsets = new Array<number>(count);
+  let x = 0;
+  for (let k = 0; k < count; k++) {
+    // No band before the first visible bar: there is no visible left-hand neighbour for it to separate. The break is
+    // still real, but it is off-screen, and a leading band would only push the strip right for no reader benefit.
+    if (k > 0 && missingTicksBefore(ticks, startIdx + k) > 0) {
+      x += GAP_BAND_WIDTH;
+    }
+    offsets[k] = x;
+    x += BAR_WIDTH;
+  }
+  return offsets;
+}
+
+/**
+ * How many bars fit in `availablePx`, counting the gap bands that have to be inserted among them.
+ *
+ * Sizing the window as `availablePx / BAR_WIDTH` ignores that space and overflows the canvas by exactly the total
+ * band width — the right-hand bars would be drawn past the edge and silently clipped.
+ */
+export function barsThatFit(ticks: readonly TickRow[], startIdx: number, availablePx: number): number {
+  if (availablePx <= 0) return 0;
+  let used = 0;
+  let fitted = 0;
+  for (let k = 0; startIdx + k < ticks.length; k++) {
+    const band = k > 0 && missingTicksBefore(ticks, startIdx + k) > 0 ? GAP_BAND_WIDTH : 0;
+    if (used + band + BAR_WIDTH > availablePx) break;
+    used += band + BAR_WIDTH;
+    fitted++;
+  }
+  return fitted;
+}
+
+/**
+ * The overview's input: the recorded ticks, in order. Returns the original array untouched when nothing is filtered,
+ * so the common case (a trace, or an attach recording everything) keeps referential identity for `useMemo`.
+ */
+export function recordedTicksOnly<T extends TickSummaryLike>(
+  summaries: readonly T[] | null | undefined,
+): readonly T[] | null | undefined {
+  if (!summaries || summaries.length === 0) return summaries;
+  const kept = summaries.filter(isRecordedTick);
+
+  // The synthetic tick 0 — the pre-tick engine-setup window — is worth a bar only when it ABUTS the run being shown,
+  // i.e. the recording starts at tick 1. Then it is the "before the loop started" slot the user clicks to reach setup
+  // events, and it sits flush against tick 1 with no discontinuity.
+  //
+  // In a cherry-picked capture it usually does not abut anything: record a window at tick 133 and you get a stub
+  // holding whatever arrived before the first TickStart, followed by a 132-tick gap. That bar is not the setup window
+  // for anything on screen — it is a fragment with a separator after it, and both are noise.
+  const first = summaries[0];
+  if (first && Number(first.tickNumber) === 0 && !isRecordedTick(first) && kept.length > 0 && Number(kept[0].tickNumber) === 1) {
+    kept.unshift(first);
+  }
+
+  return kept.length === summaries.length ? summaries : kept;
+}
+
 export function buildTickRows(summaries: readonly TickSummaryLike[] | null | undefined): TickRow[] {
   if (!summaries || summaries.length === 0) return [];
   const result: TickRow[] = new Array(summaries.length);
@@ -233,6 +366,10 @@ export function drawTickOverview(
   ctx.setLineDash([]);
 
   const barWidth = BAR_WIDTH;
+  // Every x in this function comes from here, so bars, markers, overlay, labels and hit-testing cannot drift apart
+  // once discontinuity bands start consuming horizontal space.
+  const barOffsets = computeBarOffsets(ticks, sr.startIdx, sr.endIdx);
+  const barX = (index: number) => BAR_LEFT_PAD + barOffsets[index - sr.startIdx];
 
   // Bars. Minimum 1 px height floor so very-short ticks (e.g. a fast ForceCheckpoint) stay visible.
   // A second pass below draws the GC marker triangles so they overlay the bars without being clipped by
@@ -241,7 +378,7 @@ export function drawTickOverview(
     const tick = ticks[i];
     const ratio = Math.min(tick.durationUs / p95, 1.0);
     const barH = Math.max(1, ratio * barAreaHeight);
-    const x = BAR_LEFT_PAD + (i - sr.startIdx) * barWidth;
+    const x = barX(i);
     const y = barAreaTop + barAreaHeight - barH;
 
     // Throttle tint takes priority over P95 colouring — a tick where the engine has slowed itself is
@@ -269,7 +406,7 @@ export function drawTickOverview(
     for (let i = sr.startIdx; i < sr.endIdx; i++) {
       const tick = ticks[i];
       if (!gcTicks.has(tick.tickNumber)) continue;
-      const x = BAR_LEFT_PAD + (i - sr.startIdx) * barWidth;
+      const x = barX(i);
       const cx = x + Math.floor((barWidth - 1) / 2);
       ctx.beginPath();
       ctx.moveTo(cx, baseY - height);
@@ -281,13 +418,62 @@ export function drawTickOverview(
     }
   }
 
+  // Discontinuity markers — where the tick axis jumps.
+  //
+  // Drawn in the 1-px lane the bar pass already leaves between bars, so the layout, hit-testing and every index
+  // calculation downstream are untouched: this is annotation, not spacing. A cherry-picked capture holds ticks 1–4 and
+  // 8–10 side by side, and without this the strip presents them as one continuous run — the reader would measure a
+  // spike at tick 8 as following immediately from tick 4.
+  //
+  // A hatched band rather than a line: diagonal stripes are the conventional "axis break" mark, and they cannot be
+  // mistaken for data the way a vertical rule sitting among vertical bars can. The band is cleared to the strip
+  // background first, so it reads as a CUT through the strip instead of an overlay on top of it.
+  {
+    const gapTop = barAreaTop;
+    const gapBottom = barAreaTop + barAreaHeight;
+    // The band sits in space `computeBarOffsets` already reserved for it — the bar to its right was pushed along by
+    // exactly this width — so it covers no data at all. Starting at startIdx + 1 matches that layout: no space is
+    // reserved before the first visible bar, and a band drawn there would sit on top of it.
+    // One pixel narrower than the slot, matching the `barWidth - 1` convention the bar pass uses: the bar to the LEFT
+    // already ends one pixel short, so painting the full slot would leave the band flush against the right-hand bar and
+    // separated from the left one. Inset keeps a lane on both sides and the band visually centred in its own space.
+    const bandWidth = GAP_BAND_WIDTH - 1;
+    for (let i = sr.startIdx + 1; i < sr.endIdx; i++) {
+      if (missingTicksBefore(ticks, i) <= 0) continue;
+      const x0 = barX(i) - GAP_BAND_WIDTH;
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(x0, gapTop, bandWidth, gapBottom - gapTop);
+      ctx.clip();
+
+      ctx.fillStyle = theme.card;
+      ctx.fillRect(x0, gapTop, bandWidth, gapBottom - gapTop);
+
+      // Mid-grey: it reads on both themes without claiming severity. A break in the axis is a fact about the recording,
+      // not a problem with the run — amber sat in the same register as the throttle tints and the GC marker, which are
+      // warnings.
+      ctx.strokeStyle = '#8A8A8A';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      // 45° stripes. The loop starts a band-width above the top and ends one below the bottom so the diagonals reach
+      // the corners — stopping at the exact bounds leaves untouched triangles at each end.
+      for (let y = gapTop - bandWidth; y <= gapBottom + bandWidth; y += 3) {
+        ctx.moveTo(x0, y + bandWidth);
+        ctx.lineTo(x0 + bandWidth, y);
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
   // Green selection overlay — ticks overlapping viewRange.
   if (selection.first >= 0) {
     const drawFirst = Math.max(selection.first, sr.startIdx);
     const drawLast = Math.min(selection.last, sr.endIdx - 1);
     if (drawFirst <= drawLast) {
-      const overlayStartX = BAR_LEFT_PAD + (drawFirst - sr.startIdx) * barWidth;
-      const overlayEndX = BAR_LEFT_PAD + (drawLast - sr.startIdx + 1) * barWidth;
+      const overlayStartX = barX(drawFirst);
+      const overlayEndX = barX(drawLast) + barWidth;
       ctx.fillStyle = OVERLAY_COLOR;
       ctx.fillRect(overlayStartX, barAreaTop, overlayEndX - overlayStartX, barAreaHeight);
       ctx.strokeStyle = OVERLAY_BORDER;
@@ -336,7 +522,7 @@ export function drawTickOverview(
   ctx.textAlign = 'center';
   const labelEvery = Math.max(1, Math.floor(60 / barWidth));
   for (let i = sr.startIdx; i < sr.endIdx; i += labelEvery) {
-    const x = BAR_LEFT_PAD + (i - sr.startIdx) * barWidth + barWidth / 2;
+    const x = barX(i) + barWidth / 2;
     ctx.fillText(`${ticks[i].tickNumber}`, x, height - 5);
   }
 
@@ -347,8 +533,8 @@ export function drawTickOverview(
     const clampedA = Math.max(sr.startIdx, a);
     const clampedB = Math.min(sr.endIdx - 1, b);
     if (clampedA <= clampedB) {
-      const x1 = BAR_LEFT_PAD + (clampedA - sr.startIdx) * barWidth;
-      const x2 = BAR_LEFT_PAD + (clampedB - sr.startIdx + 1) * barWidth;
+      const x1 = barX(clampedA);
+      const x2 = barX(clampedB) + barWidth;
       ctx.fillStyle = OVERVIEW_PALETTE.selection + '30';
       ctx.fillRect(x1, barAreaTop, x2 - x1, barAreaHeight);
       ctx.strokeStyle = OVERLAY_BORDER;
@@ -402,7 +588,7 @@ export function drawTickOverview(
   // wrapper (see TickOverview.tsx) so it doesn't obstruct adjacent bars in the strip. The canvas
   // draw pass only highlights the hovered bar; content goes through HelpOverlay.
   if (!helpHovered && hover && hover.tickIdx >= sr.startIdx && hover.tickIdx < sr.endIdx) {
-    const x = BAR_LEFT_PAD + (hover.tickIdx - sr.startIdx) * barWidth;
+    const x = barX(hover.tickIdx);
     // Primary accent — chromatic outline that reads as "this is hovered" in both themes without feeling as
     // heavy as a jet-black foreground stroke does against a pale card in light mode.
     ctx.strokeStyle = theme.primary;
@@ -484,19 +670,33 @@ export function hitTestScrollbar(
 
 /**
  * Translate an in-canvas mouse X to the tick index under it (within the current visible window), or `-1`.
- * Bar width is the fixed <see cref="BAR_WIDTH"/>. <c>canvasWidth</c> kept in the signature for symmetry with
- * <see cref="hitTestScrollbar"/> even though it isn't read — callers always pass it.
+ *
+ * Reads the same offset table the draw pass uses, because bars are no longer on a uniform pitch: a discontinuity band
+ * consumes {@link GAP_BAND_WIDTH} of horizontal space, so `floor(x / BAR_WIDTH)` drifts by one bar per band and every
+ * click past the first gap would select the wrong tick — silently, since the wrong tick is a perfectly plausible one.
+ *
+ * A click that lands **inside** a band returns `-1`: there is no tick there. That is the honest answer, and it stops a
+ * click in the gap from snapping the viewport to a neighbour the user did not aim at.
  */
 export function hitTestTick(
   mouseX: number,
   _canvasWidth: number,
   scrollWindow: { startIdx: number; endIdx: number },
+  barOffsets: readonly number[],
 ): number {
-  const visibleCount = scrollWindow.endIdx - scrollWindow.startIdx;
+  const visibleCount = Math.min(scrollWindow.endIdx - scrollWindow.startIdx, barOffsets.length);
   if (visibleCount <= 0) return -1;
   const offsetMouseX = mouseX - BAR_LEFT_PAD;
-  if (offsetMouseX < 0 || offsetMouseX >= visibleCount * BAR_WIDTH) return -1;
-  return scrollWindow.startIdx + Math.floor(offsetMouseX / BAR_WIDTH);
+  if (offsetMouseX < 0) return -1;
+
+  // Offsets ascend, so the last bar starting at or before the cursor is the only candidate; anything beyond its width
+  // is either a band (bands precede the bar that follows them) or past the end of the strip.
+  for (let k = visibleCount - 1; k >= 0; k--) {
+    const start = barOffsets[k];
+    if (offsetMouseX < start) continue;
+    return offsetMouseX < start + BAR_WIDTH ? scrollWindow.startIdx + k : -1;
+  }
+  return -1;
 }
 
 /**

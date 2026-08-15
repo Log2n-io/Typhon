@@ -19,6 +19,12 @@ public record SessionDto(
     // #617 — what the session can DO, so the client stops inferring it from Kind. An Open session gains and loses
     // "profiler" as profiles are attached and detached, which no kind enum can express.
     string[] Capabilities = null,
-    Guid? ActiveProfileId = null);
+    Guid? ActiveProfileId = null,
+    // P5 — live attach as a capability of a paused Open session. The endpoint comes from the holder's `db.lock`, so a
+    // non-null value means "the process holding this database is advertising a profiler port": exactly the condition
+    // under which offering to watch it makes sense. Without this the client cannot tell a watchable pause from an
+    // ordinary one, and `DatabaseHolder.IsWatchable` was server-only.
+    string ProfilerEndpoint = null,
+    bool IsWatchingLive = false);
 
 public record SessionDiagnosticDto(string ComponentName, string Kind, string Detail);

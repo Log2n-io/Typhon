@@ -562,7 +562,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         try
         {
             File.WriteAllText(_lockFilePath, DatabaseLockFile.SerializeLock(
-                Environment.ProcessId, DateTimeOffset.UtcNow, Environment.MachineName, Options.YieldableLock));
+                Environment.ProcessId, DateTimeOffset.UtcNow, Environment.MachineName, Options.YieldableLock, ResolveAdvertisedProfilerEndpoint()));
 
             // Only now may this instance ever delete that file — see ReleaseLockFile. A failed write below leaves this false,
             // so an instance that never owned a lock can never remove one.
@@ -651,6 +651,29 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// the very collision the lock exists to report destroyed the evidence of itself: subsequent openers saw an unlocked
     /// database and fell through to the OS sharing violation with no idea who held it.</para>
     /// </summary>
+    /// <summary>
+    /// The <c>host:port</c> this process's live profiler can be reached at, for the lock file to advertise, or
+    /// <c>null</c> when no live port is configured.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Lets an observer that has the database — the Workbench opening a bundle its holder is using — discover where to
+    /// watch it, without the user retyping an endpoint they never chose. Read from the resolved launch config, which
+    /// <see cref="TelemetryConfig"/> settles at class load from <c>typhon.telemetry.json</c> plus environment.
+    /// </para>
+    /// <para>
+    /// <b>Intent, not liveness.</b> The lock is written when the database opens, which can precede the TCP listener
+    /// binding; a host that overrides the port in code after this point is also not reflected. Consumers treat a refused
+    /// connect as "not watchable right now", so the failure mode of being early or wrong is a retry, not a lie that
+    /// matters.
+    /// </para>
+    /// </remarks>
+    private static string ResolveAdvertisedProfilerEndpoint()
+    {
+        var port = TelemetryConfig.ProfilerLaunch?.LivePort ?? -1;
+        return port >= 0 ? $"localhost:{port}" : null;
+    }
+
     private void ReleaseLockFile()
     {
         if (!_lockFileOwned)

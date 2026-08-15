@@ -30,6 +30,11 @@ internal sealed class TelemetryEditor
     // `typhon telemetry trace <path>`; the editor toggles the channel on/off with this sensible default.
     private const string DefaultTracePath = "captures/app.typhon-trace";
 
+    // Default port when arming live attach from the editor (F4), mirroring how F3 arms a trace with a default path.
+    // Matches ProfilerLaunchConfig.DefaultLivePort, which is also what the Workbench's Attach dialog prefills — three
+    // places agreeing on 9100 is the difference between "it just connects" and "why is it not connecting".
+    private const int DefaultLivePort = 9100;
+
     // Transparent normal background (terminal shows through); dark selection bar keeps coloured text readable.
     private Color _bgNormal;
     private Color _bgFocus;
@@ -91,10 +96,22 @@ internal sealed class TelemetryEditor
             };
             traceLabel.SetScheme(Fg(string.IsNullOrEmpty(_model.TracePath) ? _fgDefault : On));
 
+            // The second output channel, on the same footing. Since #805 the live port is published in the database's
+            // db.lock, so turning it on here is what lets the Workbench discover this app and offer to watch it.
+            var liveLabel = new Label
+            {
+                X = 1,
+                Y = Pos.Bottom(traceLabel),
+                Width = Dim.Fill(1),
+                Height = 1,
+                Text = LiveStatusText(),
+            };
+            liveLabel.SetScheme(Fg(_model.LivePort.HasValue ? On : _fgDefault));
+
             var tree = new FlagTree
             {
                 X = 0,
-                Y = Pos.Bottom(traceLabel),
+                Y = Pos.Bottom(liveLabel),
                 Width = Dim.Fill(),
                 Height = Dim.Fill(4), // leave 4 rows for the selection info + 2 legend lines
             };
@@ -139,7 +156,9 @@ internal sealed class TelemetryEditor
                 ("Space/Enter", Footgun),
                 (" cycle     ", _fgDefault),
                 ("F3", On),
-                (" trace on/off     ", _fgDefault),
+                (" trace     ", _fgDefault),
+                ("F4", On),
+                (" live     ", _fgDefault),
                 ("F2", On),
                 (" save & quit     ", _fgDefault),
                 ("Esc", Off),
@@ -163,6 +182,7 @@ internal sealed class TelemetryEditor
             };
             tree.Cancel = () => app.RequestStop();
             tree.ToggleTrace = () => ToggleTrace(traceLabel);
+            tree.ToggleLive = () => ToggleLive(liveLabel);
             tree.SelectionChanged += (_, e) =>
             {
                 if (e.NewValue is FlagRef r)
@@ -178,7 +198,7 @@ internal sealed class TelemetryEditor
                 Height = Dim.Fill(),
             };
             win.SetScheme(transparent);
-            win.Add(traceLabel, tree, selInfo);
+            win.Add(traceLabel, liveLabel, tree, selInfo);
             foreach (var v in legendState)
             {
                 win.Add(v);
@@ -357,6 +377,33 @@ internal sealed class TelemetryEditor
             ? $"Trace output: (off — no trace file is written)   ·   F3 to enable → {DefaultTracePath}"
             : $"Trace output: {_model.TracePath}   (a trace is written each run)   ·   F3 to disable";
 
+    private string LiveStatusText()
+        => _model.LivePort is { } port
+            ? $"Live attach:  port {port}   (the Workbench can watch this app)   ·   F4 to disable"
+            : $"Live attach:  (off — nothing to attach to)   ·   F4 to enable → port {DefaultLivePort}";
+
+    /// <summary>
+    /// Toggle the live TCP channel, the second output axis the flag tree cannot reach.
+    /// </summary>
+    /// <remarks>
+    /// Arms <see cref="DefaultLivePort"/> when off and clears when on, exactly as F3 does for the trace file. A custom
+    /// port is still <c>typhon telemetry live &lt;port&gt;</c> — the editor toggles channels, it does not author values.
+    /// </remarks>
+    private void ToggleLive(Label label)
+    {
+        if (_model.LivePort.HasValue)
+        {
+            _model.ClearLive();
+        }
+        else
+        {
+            _model.SetLive(DefaultLivePort);
+        }
+        label.Text = LiveStatusText();
+        label.SetScheme(Fg(_model.LivePort.HasValue ? On : _fgDefault));
+        label.SetNeedsDraw();
+    }
+
     /// <summary>Toggle the profiler trace output channel: arm it with <see cref="DefaultTracePath"/> when off, clear it
     /// when on. This is the axis the flag tree can't reach — clearing it is what actually stops a session from tracing.</summary>
     private void ToggleTrace(Label label)
@@ -390,6 +437,7 @@ internal sealed class TelemetryEditor
         public Action SaveQuit;
         public Action Cancel;
         public Action ToggleTrace;
+        public Action ToggleLive;
 
         protected override bool OnKeyDown(Key key)
         {
@@ -404,6 +452,11 @@ internal sealed class TelemetryEditor
             if (key == Key.F3)
             {
                 ToggleTrace?.Invoke();
+                return true;
+            }
+            if (key == Key.F4)
+            {
+                ToggleLive?.Invoke();
                 return true;
             }
             if (key == Key.F2)

@@ -58,10 +58,10 @@ export default function ConnectDialog({ open, initialTab, onOpenChange }: Props)
  }
  };
 
- const handleOpenAttach = async (endpoint: string) => {
- logInfo(`Attaching to engine: ${endpoint}`, { endpoint });
+ const handleOpenAttach = async (endpoint: string, cherryPick: boolean) => {
+ logInfo(`Attaching to engine: ${endpoint}`, { endpoint, cherryPick });
  try {
- const response = await postAttach.mutateAsync({ data: { endpointAddress: endpoint } });
+ const response = await postAttach.mutateAsync({ data: { endpointAddress: endpoint, cherryPick } });
  const dto = response.data;
  setSession(dto);
  logInfo(`Attach session opened`, { sessionId: dto.sessionId, endpoint });

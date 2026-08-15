@@ -64,7 +64,27 @@ export type LiveStreamPayload =
   | { kind: 'threadInfoAdded'; threadInfo: LiveThreadInfo }
   | { kind: 'globalMetricsUpdated'; globalMetrics: GlobalMetricsDto }
   | { kind: 'heartbeat'; status: 'connecting' | 'connected' | 'reconnecting' | 'disconnected' }
-  | { kind: 'shutdown'; status: string };
+  | { kind: 'shutdown'; status: string }
+  | { kind: 'captureStateChanged'; captureState: CaptureState };
+
+/**
+ * On-demand tick capture state (#805). Mirrors the server's `CaptureStateDto`.
+ *
+ * `state` is `Idle` (cherry-pick with no window open), `Recording` (a bounded window is running) or `Everything`
+ * (unbounded — the behaviour every attach session had before #805).
+ */
+export interface CaptureState {
+  state: 'Idle' | 'Recording' | 'Everything';
+  remaining: number;
+  recordedTicks: number;
+  mode: 'Everything' | 'CherryPick';
+  /** False when the engine runs without gauges: the timeline is then numbered from the attach point, not simulation start. */
+  tickNumbersAbsolute: boolean;
+  /** True if a `TickStart` was lost, so reported tick numbers can no longer be trusted. */
+  tickNumberingSuspect: boolean;
+  bytesReceived: number;
+  bytesRetained: number;
+}
 
 /** Live connection status — mirrors the server's `AttachSessionRuntime.ConnectionStatus`. */
 export type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
@@ -82,6 +102,8 @@ interface ProfilerSessionStoreState {
   isLive: boolean;
   /** Live connection status; null when no live session is active. */
   connectionStatus: ConnectionStatus | null;
+  /** On-demand tick capture state (#805); null until the first `captureStateChanged` frame, which the stream sends on connect. */
+  captureState: CaptureState | null;
   /**
    * Reason string carried by the server's `shutdown` SSE event (e.g. `"init_mismatch"` when a reconnect's Init
    * signature differs from the original session). Null for transient drops where the server emits no reason.
@@ -178,6 +200,7 @@ export const useProfilerSessionStore = create<ProfilerSessionStoreState>()((set)
 
   isLive: false,
   connectionStatus: null,
+  captureState: null,
   disconnectReason: null,
   latestTickNumber: 0,
   liveThreadInfos: new Map(),
@@ -244,6 +267,7 @@ export const useProfilerSessionStore = create<ProfilerSessionStoreState>()((set)
       let connectionStatus = s.connectionStatus;
       let disconnectReason = s.disconnectReason;
       let latestTickNumber = s.latestTickNumber;
+      let captureState = s.captureState;
 
       let pendingTicks: TickSummaryDto[] | null = null;
       let pendingChunks: ChunkManifestEntryDto[] | null = null;
@@ -276,6 +300,10 @@ export const useProfilerSessionStore = create<ProfilerSessionStoreState>()((set)
           case 'globalMetricsUpdated':
             // Last-wins — only the final metrics in the batch matter.
             pendingMetrics = ev.globalMetrics;
+            break;
+          case 'captureStateChanged':
+            // Last-wins: the state is a snapshot, not a delta, so intermediate frames in one batch are already stale.
+            captureState = ev.captureState;
             break;
           case 'threadInfoAdded': {
             const existing = (pendingThreadInfos ?? liveThreadInfos).get(ev.threadInfo.threadSlot);
@@ -318,7 +346,7 @@ export const useProfilerSessionStore = create<ProfilerSessionStoreState>()((set)
         liveThreadInfos = pendingThreadInfos;
       }
 
-      return { metadata, liveThreadInfos, connectionStatus, disconnectReason, latestTickNumber };
+      return { metadata, liveThreadInfos, connectionStatus, disconnectReason, latestTickNumber, captureState };
     }),
 
   setSlotVisibility: (slot, visible) =>
@@ -405,6 +433,7 @@ export const useProfilerSessionStore = create<ProfilerSessionStoreState>()((set)
       buildError: null,
       isLive: false,
       connectionStatus: null,
+      captureState: null,
       disconnectReason: null,
       latestTickNumber: 0,
       liveThreadInfos: new Map(),

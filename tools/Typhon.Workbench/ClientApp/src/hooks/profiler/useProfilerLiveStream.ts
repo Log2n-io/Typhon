@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useEventSource } from '@/hooks/streams/useEventSource';
 import {
   useProfilerSessionStore,
+  type CaptureState,
   type ConnectionStatus,
   type LiveStreamPayload,
   type LiveThreadInfo,
@@ -68,6 +69,8 @@ export function useProfilerLiveStream(sessionId: string | null) {
         enqueue({ kind: 'threadInfoAdded', threadInfo: data.threadInfo }),
       globalMetricsUpdated: (data: { globalMetrics: GlobalMetricsDto }) =>
         enqueue({ kind: 'globalMetricsUpdated', globalMetrics: data.globalMetrics }),
+      captureStateChanged: (data: { captureState: CaptureState }) =>
+        enqueue({ kind: 'captureStateChanged', captureState: data.captureState }),
       heartbeat: (data: { status: ConnectionStatus }) => enqueue({ kind: 'heartbeat', status: data.status }),
       shutdown: (data: { status: string }) => enqueue({ kind: 'shutdown', status: data.status ?? 'disconnected' }),
     }),

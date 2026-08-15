@@ -76,9 +76,17 @@ export default function ReconnectBanner() {
     setActionError(null);
     try {
       await captureAndAnalyse(sessionId);
-      // Session transitions to 'trace'; banner self-hides via the visibility gate above.
+      // The banner used to disappear on its own because the session became a 'trace' session and the visibility gate
+      // above stopped matching. #613 deleted that session kind and #621 made the replay attach back to THIS session, so
+      // the kind stays 'attach' and the gate keeps matching — nothing unmounts us. Dismiss explicitly: the disconnect
+      // has been dealt with, and re-offering "capture what we have" for a buffer already saved invites a duplicate.
+      setDismissed(dismissKey);
     } catch (e) {
       setActionError((e as Error)?.message ?? 'Capture & Analyse failed.');
+    } finally {
+      // MUST be finally, not the catch arm. Clearing it only on failure was safe only while success unmounted us; it
+      // now leaves the button reading 'Capturing…' for ever on the SUCCESS path — the capture is on disk and the UI
+      // says it is still running.
       setIsCapturing(false);
     }
   }

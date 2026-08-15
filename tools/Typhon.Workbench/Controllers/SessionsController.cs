@@ -74,10 +74,14 @@ public sealed partial class SessionsController : ControllerBase
             // Only the first can name the holder from the exception; for the second we read db.lock if it happens to be
             // there, and otherwise say plainly that we do not know who. Failing hard on the second while pausing on the
             // first would make the same situation behave differently depending on which race the caller lost.
+            // The endpoint is read from the lock rather than taken from the refusal — see DatabaseHolder.ProfilerEndpoint
+            // for why that is safe for an address and not for an identity. It is what turns "someone else has your
+            // database" into "…and you can watch them", which is the whole point of opening paused.
+            var endpoint = DatabaseHolder.ReadProfilerEndpoint(resolvedFile);
             var holder = ex is DatabaseLockedException locked
-                ? new DatabaseHolder(locked.OwnerPid, locked.OwnerMachine, locked.StartedAt)
+                ? new DatabaseHolder(locked.OwnerPid, locked.OwnerMachine, locked.StartedAt, endpoint)
                 : DatabaseLockFile.TryReadHolder(resolvedFile, out var pid, out var machine, out var startedAt)
-                    ? new DatabaseHolder(pid, machine, startedAt)
+                    ? new DatabaseHolder(pid, machine, startedAt, endpoint)
                     : null;
             var pausedSession = new OpenSession(Guid.NewGuid(), resolvedFile, holder, requestedSchemaDllPaths);
             _sessions.Create(pausedSession);
@@ -128,7 +132,8 @@ public sealed partial class SessionsController : ControllerBase
         // AttachSessionRuntime.StartAsync does 3 × 2 s upfront TCP retry; throws WorkbenchException(503) on total failure.
         // Session id is generated up front so the live cache temp file path matches the public sessionId.
         var sessionId = Guid.NewGuid();
-        var runtime = await AttachSessionRuntime.StartAsync(sessionId, request.EndpointAddress, _logger, ct);
+        var captureMode = request.CherryPick ? CaptureMode.CherryPick : CaptureMode.Everything;
+        var runtime = await AttachSessionRuntime.StartAsync(sessionId, request.EndpointAddress, _logger, ct, captureMode);
 
         var session = new AttachSession(sessionId, request.EndpointAddress, runtime);
         _sessions.Create(session);
@@ -222,10 +227,17 @@ public sealed partial class SessionsController : ControllerBase
     private static SessionDto ToDto(WbSession s)
     {
         var dto = ToDtoCore(s);
+        // Both watch fields are applied HERE rather than in ToDtoCore's branches, for the same reason Capabilities is:
+        // ToDtoCore returns from four places and a field set in three of them is a bug that presents as a button that
+        // silently never appears.
+        var open = s as OpenSession;
         return dto with
         {
             Capabilities = [.. s.Capabilities],
             ActiveProfileId = s.ActiveProfileId,
+            // Null unless a holder is advertising a profiler port — the client's whole test for "can this be watched".
+            ProfilerEndpoint = open?.PausedBy?.ProfilerEndpoint,
+            IsWatchingLive = open?.IsWatchingLive ?? false,
         };
     }
 

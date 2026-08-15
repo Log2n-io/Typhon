@@ -39,6 +39,16 @@ interface SessionStoreState {
   isPaused: boolean;
   /** Human-readable explanation for the paused banner — names the holding process. Null when not paused. */
   pausedReason: string | null;
+  /**
+   * The profiler endpoint the holding process advertises in the database's `db.lock`, or null when it advertises none.
+   *
+   * Non-null is the whole condition for offering *Watch live*: the process that took the database is a Typhon app with
+   * a live port open. A pause caused by an editor, a backup or an older build reports null, and offering to watch that
+   * would only produce a connection refused.
+   */
+  profilerEndpoint: string | null;
+  /** True while this session is watching that endpoint. Server-owned, so it survives a reload and a second tab. */
+  isWatchingLive: boolean;
   setSession: (dto: SessionDto) => void;
   clearSession: () => void;
 }
@@ -57,9 +67,13 @@ export const useSessionStore = create<SessionStoreState>()((set) => ({
   activeProfileId: null,
   isPaused: false,
   pausedReason: null,
+  profilerEndpoint: null,
+  isWatchingLive: false,
   setSession: (dto) =>
     set({
       kind: (dto.kind?.toLowerCase() ?? 'open') as SessionKind,
+      profilerEndpoint: (dto.profilerEndpoint as string | null | undefined) ?? null,
+      isWatchingLive: dto.isWatchingLive === true,
       capabilities: ((dto.capabilities as string[] | null | undefined) ?? []) as SessionCapability[],
       activeProfileId: (dto.activeProfileId as string | null | undefined) ?? null,
       isPaused: dto.isPaused === true,
@@ -89,6 +103,8 @@ export const useSessionStore = create<SessionStoreState>()((set) => ({
       activeProfileId: null,
       isPaused: false,
       pausedReason: null,
+      profilerEndpoint: null,
+      isWatchingLive: false,
     }),
 }));
 
@@ -120,9 +136,33 @@ export const useSessionCapability = (capability: SessionCapability): boolean =>
  * The attach clause is not simply `kind !== 'attach'` any more (#621): an attach session that saved a replay and
  * attached it back IS reading a file, and the surfaces gated here work for it. `activeProfileId` is exactly the
  * "a capture is attached" signal, so the test states the real condition instead of approximating it by kind.
+ *
+ * P5 removed the kind clause entirely. It read "an Open session is always file-backed", which was true only while
+ * `open` implied a database and nothing live. A paused Open session watching its holder has the profiler capability
+ * and **no file at all** — it would have been reported as trace-backed, offering Call Tree scoping (CPU sampling is
+ * file-mode only) against a live socket with nothing on disk to scope. Since #613 deleted the standalone trace
+ * session, every file-backed session reaches its capture as an attached profile, so `activeProfileId` alone is the
+ * condition for all kinds.
  */
 export const useTraceBackedSession = (): boolean =>
-  useSessionStore((s) => s.capabilities.includes('profiler') && (s.kind !== 'attach' || s.activeProfileId !== null));
+  useSessionStore((s) => s.capabilities.includes('profiler') && s.activeProfileId !== null);
+
+/**
+ * True when the session has a live profiler stream to subscribe to — the counterpart of
+ * {@link useTraceBackedSession}, and deliberately NOT `kind === 'attach'`.
+ *
+ * A paused Open session watching its holder's engine is live too (P5). The stream endpoint and the SSE hook are both
+ * kind-agnostic — the server gates on `ILiveProfilerHost`, which an `OpenSession` implements once it is watching — so
+ * the only thing that ever made live a property of Attach was call sites asking about `kind`. That is what left the
+ * Record control missing on a watching database session while the whole server side was ready for it.
+ *
+ * Written as a plain predicate over the two fields so it can be unit-tested without rendering a panel.
+ */
+export const isLiveStreamSession = (state: Pick<SessionStoreState, 'kind' | 'isWatchingLive'>): boolean =>
+  state.kind === 'attach' || state.isWatchingLive;
+
+/** Hook form of {@link isLiveStreamSession}, for components. */
+export const useLiveStreamSession = (): boolean => useSessionStore(isLiveStreamSession);
 
 /**
  * True when a database-backed panel should show a *paused* state rather than an error (#621).

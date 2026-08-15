@@ -2,12 +2,13 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { IDockviewPanelProps } from 'dockview-react';
 import { Activity, AlertCircle, Loader2, Radio, RefreshCw, Unplug } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import CaptureControl from '@/panels/profiler/components/CaptureControl';
 import { usePanelHotkeys } from '@/hooks/usePanelHotkeys';
 import { getApiSessionsId } from '@/api/generated/sessions/sessions';
 import { captureFileName } from '@/libs/profiles/captureLocation';
 import { useDeleteApiSessionsSessionIdProfileProfileId, usePostApiSessionsSessionIdProfile } from '@/api/generated/profiles/profiles';
 import { logError, logInfo } from '@/stores/useLogStore';
-import { useSessionStore, useTraceBackedSession } from '@/stores/useSessionStore';
+import { useLiveStreamSession, useSessionStore, useTraceBackedSession } from '@/stores/useSessionStore';
 import { useNavHistoryStore } from '@/stores/useNavHistoryStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useProfilerSessionStore, type ConnectionStatus } from '@/stores/useProfilerSessionStore';
@@ -24,7 +25,7 @@ import { useProfilerStatsStore } from '@/stores/useProfilerStatsStore';
 import { useRecentFilesStore } from '@/stores/useRecentFilesStore';
 import { resolveInitialViewport } from '@/libs/profiler/initialViewport';
 import { formatBytes } from '@/libs/formatBytes';
-import { buildTickRows, computeSelectionIdxRange } from '@/libs/profiler/canvas/tickOverview';
+import { buildTickRows, computeSelectionIdxRange, recordedTicksOnly } from '@/libs/profiler/canvas/tickOverview';
 import TickOverview from './sections/TickOverview';
 import TimeArea from './sections/TimeArea';
 import OverloadStrip from './sections/OverloadStrip';
@@ -94,6 +95,9 @@ function ProfilerPanelInner(props: IDockviewPanelProps) {
 
   const isAttach = kind === 'attach';
   const isTrace = useTraceBackedSession();
+  // P5 — a paused Open session watching its holder's engine is live too, so the subscription follows the live runtime
+  // rather than the session kind. See `isLiveStreamSession` for why that distinction is the whole bug.
+  const hasLiveStream = useLiveStreamSession();
 
   const commitViewRange = useProfilerViewStore((s) => s.commitViewRange);
 
@@ -134,7 +138,7 @@ function ProfilerPanelInner(props: IDockviewPanelProps) {
   // any `{0, 0}` sentinel write here would suppress all tick loading. The viewport-restore init
   // below therefore drives off `metadata.tickSummaries` (available in one shot from the API
   // response) rather than `timeAreaTicks` (which only populates after viewRange is non-degenerate).
-  const { ticks: timeAreaTicks, gaugeData, threadInfos, pendingRangesUs } = useProfilerCache(sessionId, isAttach);
+  const { ticks: timeAreaTicks, gaugeData, threadInfos, pendingRangesUs } = useProfilerCache(sessionId, hasLiveStream);
 
   // Single producer for the viewport range-stats. RangeStatsDetail and TopSpansPanel both read the
   // result from `useProfilerStatsStore` so the O(events-in-range) aggregation runs once per click
@@ -176,12 +180,13 @@ function ProfilerPanelInner(props: IDockviewPanelProps) {
     });
   }, [viewRangeForStats, isTrace, filePath]);
 
-  // Metadata polling runs in both Trace and Attach modes — server branches on session kind.
-  // Gate on kind so the query doesn't fire for Open (DB) sessions, which would 409.
-  useProfilerMetadata(isTrace || isAttach ? sessionId : null);
-  // Build-progress SSE only meaningful for Trace mode; live-stream SSE only for Attach mode.
+  // Metadata polling runs wherever there is something to serve: an attached capture (trace-backed) or a live runtime.
+  // The gate still matters — an Open session with neither has no profile to serve and the endpoint answers 409.
+  useProfilerMetadata(isTrace || hasLiveStream ? sessionId : null);
+  // Build-progress SSE only meaningful for Trace mode; the live stream follows the live runtime, whichever kind of
+  // session is hosting it.
   useProfilerBuildProgress(isTrace ? sessionId : null);
-  useProfilerLiveStream(isAttach ? sessionId : null);
+  useProfilerLiveStream(hasLiveStream ? sessionId : null);
   // #302 Phase 6: hydrate `useSourceLocationStore` so the Source row in `ProfilerDetail` can
   // resolve span siteIds. Gated on `metadata` being ready: for trace sessions the server only
   // populates the manifest after build completion (same moment metadata is set), so querying
@@ -189,7 +194,7 @@ function ProfilerPanelInner(props: IDockviewPanelProps) {
   // For attach sessions metadata arrives after the init handshake which also carries the
   // FileTable + SourceLocationManifest frames, so by the time metadata lands the server's
   // manifest is ready too.
-  useProfilerSourceLocations(isTrace || isAttach ? (metadata ? sessionId : null) : null);
+  useProfilerSourceLocations(isTrace || hasLiveStream ? (metadata ? sessionId : null) : null);
 
   // Tell the store which mode we're in; panels and future renderers can branch off `isLive`.
   // The cleanup wipes every profiler-scoped store so switching sessions (or closing the panel)
@@ -204,7 +209,7 @@ function ProfilerPanelInner(props: IDockviewPanelProps) {
   // The cleanup only fires on session *change* (not first mount), so a cold-load URL deep-link
   // on the first session survives.
   useEffect(() => {
-    setIsLive(isAttach);
+    setIsLive(hasLiveStream);
     return () => {
       useProfilerSessionStore.getState().reset();
       useSelectionStore.getState().clearLeaf(); // 3E: clear the profiler selection on the unified bus (silo retired)
@@ -215,7 +220,7 @@ function ProfilerPanelInner(props: IDockviewPanelProps) {
       // next one, so each new session starts linked (panels follow the timeline again).
       useProfilerViewStore.getState().setScopeLinked(true);
     };
-  }, [sessionId, isAttach, setIsLive]);
+  }, [sessionId, hasLiveStream, setIsLive]);
 
   const fileName = useMemo(() => {
     if (!filePath) return null;
@@ -228,7 +233,14 @@ function ProfilerPanelInner(props: IDockviewPanelProps) {
   // same `computeSelectionIdxRange` the TickOverview uses to draw the selection overlay, so the
   // header label and the overlay always agree. `count` is index-based (tick numbers may have gaps).
   // `tickRows` only rebuilds when tickSummaries change.
-  const tickRows = useMemo(() => buildTickRows(metadata?.tickSummaries), [metadata?.tickSummaries]);
+  // `recordedTicksOnly` for the same reason the strip filters: this label reports the SELECTION, and the selection is
+  // made on the strip. Counting the skeleton ticks the strip does not draw makes the header disagree with what the
+  // user selected — "368 frames" over a window where 200 bars exist, every count in the header inflated by the ticks
+  // that were never recorded.
+  const tickRows = useMemo(
+    () => buildTickRows(recordedTicksOnly(metadata?.tickSummaries)),
+    [metadata?.tickSummaries],
+  );
   const selectedTickRange = useMemo(() => {
     if (tickRows.length === 0) return null;
     if (viewRangeForStats.endUs <= viewRangeForStats.startUs) return null;
@@ -237,7 +249,10 @@ function ProfilerPanelInner(props: IDockviewPanelProps) {
     return { first: tickRows[first].tickNumber, last: tickRows[last].tickNumber, count: last - first + 1 };
   }, [tickRows, viewRangeForStats]);
 
-  if (!isTrace && !isAttach) {
+  // "Is there anything to show?", not "which kind of session is this?". A paused Open session that started watching its
+  // holder acquires live data WHILE THIS PANEL IS ALREADY OPEN — asking about `kind` here left it showing the cold
+  // state after Watch live, with the stream connected and ticks arriving behind it.
+  if (!isTrace && !hasLiveStream) {
     return (
       <div className="flex h-full w-full items-center justify-center bg-background">
         <div className="text-center text-sm text-muted-foreground">
@@ -252,17 +267,20 @@ function ProfilerPanelInner(props: IDockviewPanelProps) {
     <div className="flex h-full w-full flex-col overflow-hidden bg-background">
       {/* Header */}
       <div className="wb-pane-header flex flex-shrink-0 items-center gap-3 border-b border-border bg-card px-3 py-2 text-fs-base">
-        {isAttach
+        {hasLiveStream
           ? <Radio className="h-4 w-4 text-muted-foreground" aria-label="Live profiler session" />
           : <Activity className="h-4 w-4 text-muted-foreground" aria-label="Trace profiler session" />}
         <span className="font-semibold text-foreground">
-          {isAttach ? (fileName ?? 'Live engine') : (fileName ?? 'Profiler')}
+          {hasLiveStream ? (fileName ?? 'Live engine') : (fileName ?? 'Profiler')}
         </span>
 
-        {isAttach && (
+        {hasLiveStream && (
           <>
             <StatusPill status={connectionStatus} />
-            {connectionStatus !== 'disconnected' && (
+            {/* Disconnect stays keyed on the session KIND, and is the one thing here that genuinely is. It drops an
+                Attach session's own TCP link; a watching database session ends the same thing through "Stop watching"
+                on the paused banner, which also releases the runtime the session is hosting. */}
+            {isAttach && connectionStatus !== 'disconnected' && (
               <Button
                 variant="outline"
                 size="sm"
@@ -280,6 +298,8 @@ function ProfilerPanelInner(props: IDockviewPanelProps) {
             <span className="font-mono tabular-nums text-foreground">
               Tick {latestTickNumber.toLocaleString()}
             </span>
+            {/* #805 — on-demand tick capture. Renders itself away unless the session was attached in cherry-pick mode. */}
+            <CaptureControl sessionId={sessionId} />
             {/* Auto-scroll toggle removed in #345 — live mode pins viewRange to the first tick on
                arrival and never moves it automatically thereafter. Pan/zoom interactions are
                always available; the user navigates to new ticks via TickOverview / drag-select. */}
@@ -341,15 +361,15 @@ function ProfilerPanelInner(props: IDockviewPanelProps) {
           <ErrorState message={buildError} />
         ) : isTrace && !metadata ? (
           <BuildProgressOverlay progress={buildProgress} />
-        ) : isAttach && !metadata ? (
+        ) : hasLiveStream && !metadata ? (
           <LiveWaitingOverlay status={connectionStatus} />
         ) : (
           <div className="flex h-full w-full flex-col overflow-hidden">
-            <TickOverview isLive={isAttach} />
+            <TickOverview isLive={hasLiveStream} />
             {/* Overload diagnostics strip — auto-hidden on healthy traces; surfaces multiplier/overrunRatio when the engine throttles. Issue #289. */}
             <OverloadStrip />
             <div className="flex-1 min-h-0">
-              <TimeArea ticks={timeAreaTicks} gaugeData={gaugeData} threadNames={gaugeData.threadNames} threadInfos={threadInfos} pendingRangesUs={pendingRangesUs} isLive={isAttach} />
+              <TimeArea ticks={timeAreaTicks} gaugeData={gaugeData} threadNames={gaugeData.threadNames} threadInfos={threadInfos} pendingRangesUs={pendingRangesUs} isLive={hasLiveStream} />
             </div>
           </div>
         )}

@@ -32,21 +32,71 @@ namespace Typhon.Workbench.Fixtures;
 /// Usage (Playwright via DEBUG-only <c>POST /api/fixtures/mock-profiler</c>): the Workbench holds a
 /// dictionary keyed by port and disposes each server on application shutdown.
 /// </summary>
+/// <remarks>
+/// <para>
+/// <b>Two modes.</b> The default <i>timer</i> mode preserves the original behaviour — after Init it emits
+/// <see cref="MaxBlocks"/> minimal tick blocks at <see cref="BlockInterval"/>. Setting <see cref="Scripted"/> before
+/// <see cref="Start"/> suppresses that loop entirely and hands control to the test, which pushes exactly the records it
+/// wants via <see cref="SendBlockAsync"/> and observes the effect deterministically. Filter tests need scripted mode:
+/// asserting "tick N carries detail and tick N+1 does not" is untestable against a timer.
+/// </para>
+/// <para>
+/// <b>Engine lifecycle simulation.</b> <see cref="SendShutdownAsync"/> models a clean quit (the engine's Shutdown
+/// envelope), <see cref="DropClientAsync"/> models a crash (socket closed with no warning). Both leave the listener up,
+/// so the Workbench's reconnect loop can land a fresh connection and receive a second Init — which is how restart
+/// behaviour is exercised without launching a process.
+/// </para>
+/// </remarks>
 public sealed class MockTcpProfilerServer : IAsyncDisposable
 {
     private readonly TcpListener _listener;
     private readonly CancellationTokenSource _cts = new();
+    private readonly SemaphoreSlim _sendLock = new(1, 1);
+    private readonly object _clientLock = new();
+    private TaskCompletionSource _clientConnected = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private Task _acceptTask;
     private TcpClient _client;
     private bool _started;
+    private int _connectionCount;
 
     public int Port { get; private set; }
 
-    /// <summary>How often to emit Block frames after Init. Default 100 ms.</summary>
+    /// <summary>How often to emit Block frames after Init. Default 100 ms. Ignored when <see cref="Scripted"/> is set.</summary>
     public TimeSpan BlockInterval { get; set; } = TimeSpan.FromMilliseconds(100);
 
-    /// <summary>Maximum blocks to emit before idling. Defaults to 10 so tests don't run indefinitely.</summary>
+    /// <summary>Maximum blocks to emit before idling. Defaults to 10 so tests don't run indefinitely. Ignored when <see cref="Scripted"/> is set.</summary>
     public int MaxBlocks { get; set; } = 10;
+
+    /// <summary>
+    /// When true, no automatic Block emission happens — the test drives the stream via <see cref="SendBlockAsync"/>.
+    /// Must be set before <see cref="Start"/>.
+    /// </summary>
+    public bool Scripted { get; set; }
+
+    /// <summary>
+    /// Value written into the Init header's <c>CreatedUtcTicks</c>. Changing it between connections models a genuine
+    /// engine <b>restart</b>; leaving it constant models a transient socket drop within one engine process. The
+    /// Workbench distinguishes the two on exactly this field, so a fixture that cannot vary it cannot test either.
+    /// </summary>
+    public long CreatedUtcTicks { get; set; }
+
+    /// <summary>
+    /// Number of client connections accepted so far. A restart scenario expects this to reach 2: the original attach,
+    /// then the reconnect after <see cref="DropClientAsync"/> or <see cref="SendShutdownAsync"/>.
+    /// </summary>
+    public int ConnectionCount => Volatile.Read(ref _connectionCount);
+
+    /// <summary>True while a client socket is held open.</summary>
+    public bool HasClient
+    {
+        get
+        {
+            lock (_clientLock)
+            {
+                return _client != null;
+            }
+        }
+    }
 
     public MockTcpProfilerServer()
     {
@@ -62,38 +112,171 @@ public sealed class MockTcpProfilerServer : IAsyncDisposable
         _acceptTask = Task.Run(AcceptLoopAsync);
     }
 
+    /// <summary>
+    /// Completes once a client has connected and its Init frame has been written. Scripted tests await this before
+    /// pushing records, so a block can never race ahead of the handshake.
+    /// </summary>
+    public Task WaitForClientAsync(CancellationToken ct = default)
+    {
+        Task connected;
+        lock (_clientLock)
+        {
+            connected = _clientConnected.Task;
+        }
+        return connected.WaitAsync(ct);
+    }
+
     private async Task AcceptLoopAsync()
     {
-        try
+        while (!_cts.IsCancellationRequested)
         {
-            _client = await _listener.AcceptTcpClientAsync(_cts.Token).ConfigureAwait(false);
-            _client.NoDelay = true;
-            var stream = _client.GetStream();
-
-            // Send Init frame immediately on connect.
-            var initPayload = BuildInitPayload();
-            await WriteFrameAsync(stream, LiveFrameType.Init, initPayload, _cts.Token).ConfigureAwait(false);
-
-            // Emit periodic Block frames. Each block carries one minimal TickStart + TickEnd record
-            // pair so the client's tick counter increments observably.
-            for (var i = 0; i < MaxBlocks && !_cts.IsCancellationRequested; i++)
+            TcpClient accepted;
+            try
             {
-                try
+                accepted = await _listener.AcceptTcpClientAsync(_cts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) { break; }
+            catch (ObjectDisposedException) { break; }
+            catch (SocketException) { break; }
+
+            accepted.NoDelay = true;
+            lock (_clientLock)
+            {
+                _client = accepted;
+            }
+            Interlocked.Increment(ref _connectionCount);
+
+            try
+            {
+                var stream = accepted.GetStream();
+
+                // Send Init frame immediately on connect.
+                var initPayload = BuildInitPayload(CreatedUtcTicks);
+                await WriteFrameAsync(stream, LiveFrameType.Init, initPayload, _cts.Token).ConfigureAwait(false);
+
+                lock (_clientLock)
                 {
-                    await Task.Delay(BlockInterval, _cts.Token).ConfigureAwait(false);
+                    _clientConnected.TrySetResult();
                 }
-                catch (OperationCanceledException)
+
+                if (Scripted)
                 {
-                    break;
+                    // The test owns the stream from here. Park until the connection is torn down or the server stops.
+                    await WaitForDisconnectAsync(accepted).ConfigureAwait(false);
+                    continue;
                 }
-                var blockPayload = BuildBlockPayload(tickIndex: i + 1);
-                await WriteFrameAsync(stream, LiveFrameType.Block, blockPayload, _cts.Token).ConfigureAwait(false);
+
+                // Emit periodic Block frames. Each block carries one minimal TickStart + TickEnd record
+                // pair so the client's tick counter increments observably.
+                for (var i = 0; i < MaxBlocks && !_cts.IsCancellationRequested; i++)
+                {
+                    try
+                    {
+                        await Task.Delay(BlockInterval, _cts.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        break;
+                    }
+                    var blockPayload = BuildBlockPayload(tickIndex: i + 1);
+                    await WriteFrameAsync(stream, LiveFrameType.Block, blockPayload, _cts.Token).ConfigureAwait(false);
+                }
+
+                await WaitForDisconnectAsync(accepted).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) { /* normal shutdown */ }
+            catch (ObjectDisposedException) { /* listener or client disposed */ }
+            catch (SocketException) { /* client disconnected */ }
+            catch (IOException) { /* client disconnected mid-send */ }
+        }
+    }
+
+    /// <summary>Parks until the connection drops or the server is cancelled, so the accept loop can take the next client.</summary>
+    private async Task WaitForDisconnectAsync(TcpClient client)
+    {
+        while (!_cts.IsCancellationRequested)
+        {
+            bool stillCurrent;
+            lock (_clientLock)
+            {
+                stillCurrent = ReferenceEquals(_client, client);
+            }
+            if (!stillCurrent || !client.Connected)
+            {
+                return;
+            }
+            try
+            {
+                await Task.Delay(20, _cts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
             }
         }
-        catch (OperationCanceledException) { /* normal shutdown */ }
-        catch (ObjectDisposedException) { /* listener disposed */ }
-        catch (SocketException) { /* client disconnected */ }
-        catch (IOException) { /* client disconnected mid-send */ }
+    }
+
+    /// <summary>
+    /// Push one Block frame carrying <paramref name="records"/> — a packed, size-prefixed record buffer, typically built
+    /// with <see cref="MockRecordFactory"/>. The caller decides where block boundaries fall, which is what makes a
+    /// straddling-block test possible.
+    /// </summary>
+    public async Task SendBlockAsync(byte[] records, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(records);
+        var recordCount = MockRecordFactory.CountRecords(records);
+        var compressed = new byte[K4os.Compression.LZ4.LZ4Codec.MaximumOutputSize(Math.Max(records.Length, 1))];
+        var blockHeader = new byte[TraceBlockEncoder.BlockHeaderSize];
+        var compressedSize = TraceBlockEncoder.EncodeBlock(records, recordCount, compressed, blockHeader);
+
+        var payload = new byte[blockHeader.Length + compressedSize];
+        blockHeader.CopyTo(payload, 0);
+        Array.Copy(compressed, 0, payload, blockHeader.Length, compressedSize);
+
+        await SendFrameAsync(LiveFrameType.Block, payload, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Send the clean-quit <see cref="LiveFrameType.Shutdown"/> envelope, as a real engine does on orderly teardown.</summary>
+    public Task SendShutdownAsync(CancellationToken ct = default) => SendFrameAsync(LiveFrameType.Shutdown, [], ct);
+
+    /// <summary>
+    /// Close the client socket with no Shutdown envelope — the crash / kill path. The listener stays up, so the
+    /// Workbench's reconnect loop can land a new connection and receive a second Init.
+    /// </summary>
+    public Task DropClientAsync()
+    {
+        TcpClient toClose;
+        lock (_clientLock)
+        {
+            toClose = _client;
+            _client = null;
+            _clientConnected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+        try { toClose?.Close(); } catch { /* already gone */ }
+        return Task.CompletedTask;
+    }
+
+    private async Task SendFrameAsync(LiveFrameType type, byte[] payload, CancellationToken ct)
+    {
+        TcpClient client;
+        lock (_clientLock)
+        {
+            client = _client;
+        }
+        if (client == null)
+        {
+            throw new InvalidOperationException("No client connected — await WaitForClientAsync() before sending.");
+        }
+
+        await _sendLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await WriteFrameAsync(client.GetStream(), type, payload, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
     }
 
     private static async Task WriteFrameAsync(NetworkStream stream, LiveFrameType type, byte[] payload, CancellationToken ct)
@@ -101,12 +284,15 @@ public sealed class MockTcpProfilerServer : IAsyncDisposable
         var header = new byte[LiveStreamProtocol.FrameHeaderSize];
         LiveStreamProtocol.WriteFrameHeader(header, type, payload.Length);
         await stream.WriteAsync(header, ct).ConfigureAwait(false);
-        await stream.WriteAsync(payload, ct).ConfigureAwait(false);
+        if (payload.Length > 0)
+        {
+            await stream.WriteAsync(payload, ct).ConfigureAwait(false);
+        }
         await stream.FlushAsync(ct).ConfigureAwait(false);
     }
 
     /// <summary>Minimal Init payload: header + empty system / archetype / component-type tables.</summary>
-    private static byte[] BuildInitPayload()
+    private static byte[] BuildInitPayload(long createdUtcTicks)
     {
         using var ms = new MemoryStream();
         var header = new TraceFileHeader
@@ -120,7 +306,7 @@ public sealed class MockTcpProfilerServer : IAsyncDisposable
             SystemCount = 0,
             ArchetypeCount = 0,
             ComponentTypeCount = 0,
-            CreatedUtcTicks = 0,
+            CreatedUtcTicks = createdUtcTicks,
             SamplingSessionStartQpc = 0,
         };
         ms.Write(MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(in header, 1)));
@@ -192,13 +378,18 @@ public sealed class MockTcpProfilerServer : IAsyncDisposable
         {
             _cts.Cancel();
         }
-        try { _client?.Close(); } catch { /* ignore */ }
+        lock (_clientLock)
+        {
+            try { _client?.Close(); } catch { /* ignore */ }
+            _client = null;
+        }
         try { _listener.Stop(); } catch { /* ignore */ }
         if (_acceptTask != null)
         {
             try { await _acceptTask.ConfigureAwait(false); }
             catch { /* already observed */ }
         }
+        _sendLock.Dispose();
         _cts.Dispose();
     }
 }

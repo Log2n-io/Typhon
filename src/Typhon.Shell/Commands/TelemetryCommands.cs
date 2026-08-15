@@ -175,6 +175,92 @@ internal sealed class TelemetryTraceCommand : Command<TelemetryTraceSettings>
     private static bool IsClearWord(string s) => Array.Exists(ClearWords, w => string.Equals(w, s, StringComparison.OrdinalIgnoreCase));
 }
 
+internal sealed class TelemetryLiveSettings : TelemetryFileSettings
+{
+    [CommandArgument(0, "[port]")]
+    [Description("TCP port for live attach (e.g. 9100), or 'off' to remove it.")]
+    public string Port { get; set; }
+
+    [CommandOption("--wait <MS>")]
+    [Description("Block startup up to this many ms waiting for the first viewer to connect.")]
+    public int? WaitMs { get; set; }
+
+    [CommandOption("--clear")]
+    [Description("Remove the live channel.")]
+    public bool Clear { get; set; }
+}
+
+/// <summary>
+/// <c>typhon telemetry live &lt;port&gt;</c> — the live TCP channel (<c>Typhon:Profiler:Live</c>), sibling of
+/// <see cref="TelemetryTraceCommand"/>.
+/// </summary>
+/// <remarks>
+/// <para>
+/// A separate verb rather than a node in <c>telemetry edit</c> on purpose: that editor is a tri-state tree over the
+/// generated flag catalog, where every node is inherit / on / off. A port is none of those, and special-casing a typed
+/// field into it would trade a uniform control over 200-odd flags for a form.
+/// </para>
+/// <para>
+/// This exists because the port stopped being a private launch detail: the engine publishes it in the database's
+/// <c>db.lock</c>, so a Workbench opening a bundle its application holds can discover where to watch. A value that two
+/// processes agree on belongs in the tool that writes the file, not in hand-edited JSON.
+/// </para>
+/// </remarks>
+internal sealed class TelemetryLiveCommand : Command<TelemetryLiveSettings>
+{
+    protected override int Execute(CommandContext context, TelemetryLiveSettings settings, CancellationToken cancellationToken)
+    {
+        var model = TelemetryFile.Load(TelemetryCommandSupport.FilePath(settings.File));
+        var port = settings.Port?.Trim();
+
+        // Same footgun as `trace`: a bare `live off` must remove the channel, not fail to parse and leave the previous
+        // port armed. Handled here rather than left to int.TryParse so the two verbs behave identically.
+        if (settings.Clear || (port != null && IsClearWord(port)))
+        {
+            model.ClearLive();
+            TelemetryCommandSupport.PrintSaved(model, null, "cleared live attach");
+            return 0;
+        }
+
+        if (string.IsNullOrEmpty(port))
+        {
+            // No argument reads as "show me", not as an error: it is the question someone types first.
+            if (model.LivePort is { } current)
+            {
+                var wait = model.LiveWaitMs is { } w ? $", waits up to {w} ms for a viewer" : "";
+                AnsiConsole.MarkupLine($"[green]live attach on port {current}[/][grey]{Markup.Escape(wait)}[/]");
+            }
+            else
+            {
+                AnsiConsole.MarkupLine("[grey]live attach not configured[/]");
+                AnsiConsole.MarkupLine("  [grey]typhon telemetry live 9100[/]");
+            }
+            return 0;
+        }
+
+        if (!int.TryParse(port, out var parsed) || parsed < 1 || parsed > 65535)
+        {
+            AnsiConsole.MarkupLine($"[red]Not a TCP port:[/] {Markup.Escape(port)} [grey](expected 1-65535, or 'off')[/]");
+            return 1;
+        }
+
+        if (settings.WaitMs is { } ms && ms < 0)
+        {
+            AnsiConsole.MarkupLine("[red]--wait must be zero or positive.[/]");
+            return 1;
+        }
+
+        model.SetLive(parsed, settings.WaitMs);
+        var suffix = settings.WaitMs is { } set ? $" (wait {set} ms)" : "";
+        TelemetryCommandSupport.PrintSaved(model, null, $"live → port {parsed}{suffix}");
+        return 0;
+    }
+
+    private static readonly string[] ClearWords = ["clear", "off", "none", "disable", "disabled", "remove", "false"];
+
+    private static bool IsClearWord(string s) => Array.Exists(ClearWords, w => string.Equals(w, s, StringComparison.OrdinalIgnoreCase));
+}
+
 internal sealed class TelemetryDisableCommand : Command<TelemetryPathSettings>
 {
     protected override int Execute(CommandContext context, TelemetryPathSettings settings, CancellationToken cancellationToken)
@@ -238,6 +324,11 @@ internal sealed class TelemetryEffectiveCommand : Command<TelemetryEffectiveSett
             .Select(i => all[i].Path.Length == 0 ? "Profiler" : all[i].Path)
             .ToList();
 
+        // "What would actually emit" has two halves, and the flags are only one of them: events that fire with nowhere
+        // to go emit nothing at all. Reporting the output channels here is what makes the answer complete — and a
+        // profiler with flags on but no Trace and no Live is a specific, easy mistake worth naming out loud.
+        ReportOutputChannels(model);
+
         if (on.Count == 0)
         {
             AnsiConsole.MarkupLine("[grey]No telemetry effectively enabled.[/]");
@@ -249,6 +340,28 @@ internal sealed class TelemetryEffectiveCommand : Command<TelemetryEffectiveSett
             AnsiConsole.MarkupLine("  [green]" + Markup.Escape(p) + "[/]");
         }
         return 0;
+    }
+
+    private static void ReportOutputChannels(TelemetryFile model)
+    {
+        var hasTrace = !string.IsNullOrEmpty(model.TracePath);
+        var hasLive = model.LivePort.HasValue;
+
+        if (hasTrace)
+        {
+            AnsiConsole.MarkupLine($"[green]trace file[/] → {Markup.Escape(model.TracePath)}");
+        }
+        if (hasLive)
+        {
+            var wait = model.LiveWaitMs is { } w ? $" (waits up to {w} ms for a viewer)" : "";
+            AnsiConsole.MarkupLine($"[green]live attach[/] → port {model.LivePort.Value}{Markup.Escape(wait)}");
+        }
+        if (!hasTrace && !hasLive)
+        {
+            AnsiConsole.MarkupLine("[yellow]No output channel[/] [grey]— no trace file and no live port, so nothing is recorded anywhere.[/]");
+            AnsiConsole.MarkupLine("  [grey]typhon telemetry trace captures/app.typhon-trace   ·   typhon telemetry live 9100[/]");
+        }
+        AnsiConsole.WriteLine();
     }
 }
 

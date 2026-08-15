@@ -11,8 +11,24 @@ namespace Typhon.Workbench.Sessions;
 /// <param name="Pid">Process id of the holder, as recorded in its lock file.</param>
 /// <param name="MachineName">Machine the holder runs on. A different machine cannot be probed for liveness, so such a lock is always treated as live.</param>
 /// <param name="StartedAt">When the holder acquired the database.</param>
-public sealed record DatabaseHolder(int Pid, string MachineName, DateTimeOffset StartedAt)
+/// <param name="ProfilerEndpoint">
+/// <c>host:port</c> of the holder's live profiler, or <c>null</c> when it advertises none. This is the one field read
+/// from <c>db.lock</c> rather than taken from the refusal, and deliberately so: it is not <i>identity</i>. The reason
+/// identity must come from the exception — that a re-read could name a process which never blocked us — does not apply
+/// to an address, where the cost of being stale is a refused connect that the caller already has to handle.
+/// </param>
+public sealed record DatabaseHolder(int Pid, string MachineName, DateTimeOffset StartedAt, string ProfilerEndpoint = null)
 {
+    /// <summary>True when the holder advertises a live profiler this session could watch.</summary>
+    public bool IsWatchable => !string.IsNullOrWhiteSpace(ProfilerEndpoint);
+
+    /// <summary>
+    /// Reads the holder's advertised profiler endpoint from <c>db.lock</c>, or <c>null</c> if it advertises none or the
+    /// lock cannot be read. Best-effort: an unreadable lock means "cannot watch", never an error.
+    /// </summary>
+    public static string ReadProfilerEndpoint(string bundleOrDatabasePath) =>
+        Typhon.Engine.DatabaseLockFile.TryReadLock(bundleOrDatabasePath, out var info) ? info.ProfilerEndpoint : null;
+
     /// <summary>
     /// A one-line description for the paused banner — "PID 12345 on DESKTOP-ABC (since 2026-08-03 14:02:11Z)". Naming the holder is the difference between a
     /// user closing the right process and guessing.

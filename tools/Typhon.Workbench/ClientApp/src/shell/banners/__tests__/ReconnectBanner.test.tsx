@@ -118,3 +118,38 @@ describe('UC-OBS-07 — reconnect banner action wiring (AC4.8, GAP-22)', () => {
     expect(screen.queryByTestId('engine-reconnect-banner')).toBeTruthy();
   });
 });
+
+/**
+ * The button used to be left reading `Capturing…` for ever on the SUCCESS path. It cleared the flag only in its catch
+ * arm, which was correct only while a successful capture turned the session into a 'trace' session and the visibility
+ * gate unmounted the banner. #613 deleted that session kind and #621 attaches the replay back to the SAME session, so
+ * the banner survives its own success — and the user watches a spinner for a capture that is already on disk.
+ */
+describe('Capture & Analyse — the banner must not get stuck on Capturing…', () => {
+  it('leaves the capturing state after a successful capture', async () => {
+    setAttachDisconnected(null);
+    const { container } = render(<ReconnectBanner />);
+
+    fireEvent.click(screen.getByTestId('engine-reconnect-banner-capture'));
+    await waitFor(() => expect(spies.captureAndAnalyse).toHaveBeenCalledWith('sess-A'));
+
+    // The disconnect has been dealt with, so the banner retires itself rather than re-offering a duplicate capture.
+    await waitFor(() => expect(container.firstChild).toBeNull());
+  });
+
+  it('restores the button after a failed capture so it can be retried', async () => {
+    spies.captureAndAnalyse.mockRejectedValueOnce(new Error('disk full'));
+    setAttachDisconnected(null);
+    render(<ReconnectBanner />);
+
+    fireEvent.click(screen.getByTestId('engine-reconnect-banner-capture'));
+
+    await waitFor(() => {
+      const button = screen.getByTestId('engine-reconnect-banner-capture') as HTMLButtonElement;
+      expect(button.disabled).toBe(false);
+      expect(button.textContent).toMatch(/Capture what we have/i);
+    });
+    // The banner stays up on failure — there is still something to capture.
+    expect(screen.queryByTestId('engine-reconnect-banner')).toBeTruthy();
+  });
+});
