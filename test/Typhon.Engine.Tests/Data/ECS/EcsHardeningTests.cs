@@ -72,7 +72,7 @@ struct HRegionData
 }
 
 [Component("Typhon.Test.ECS.H.CityData", 1)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct HCityData
 {
     [Index(AllowMultiple = true, OnParentDelete = CascadeAction.Delete)]
@@ -81,7 +81,7 @@ struct HCityData
 }
 
 [Component("Typhon.Test.ECS.H.DistrictData", 1)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct HDistrictData
 {
     [Index(AllowMultiple = true, OnParentDelete = CascadeAction.Delete)]

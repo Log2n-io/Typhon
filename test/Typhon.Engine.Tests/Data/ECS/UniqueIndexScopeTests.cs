@@ -12,7 +12,7 @@ namespace Typhon.Engine.Tests;
 /// <see cref="UsBase"/>'s subtree — is unambiguous.
 /// </summary>
 [Component("Typhon.Test.UniqScope.Data", 1, StorageMode = StorageMode.SingleVersion)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct UsData
 {
     [Index] public int Key;

@@ -143,7 +143,7 @@ struct EvoCombinedV1
 }
 
 [Component("Typhon.Schema.UnitTest.EvoCombined", 1)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct EvoCombinedV2
 {
     public long A;

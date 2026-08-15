@@ -20,7 +20,7 @@ namespace Typhon.Engine.Tests;
 /// index physically cannot represent that — the engine now rejects it at write time rather than silently dropping the incumbent.
 /// </remarks>
 [Component("Typhon.Test.QPath.Data", 1, StorageMode = StorageMode.SingleVersion)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct QPathData
 {
     [Index(AllowMultiple = true)] public int I;

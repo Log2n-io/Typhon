@@ -62,7 +62,7 @@ struct EvoSmWidenV1
 }
 
 [Component("Typhon.Schema.UnitTest.EvoSmWiden", 1, StorageMode = StorageMode.SingleVersion)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct EvoSmWidenV2
 {
     public long A;
@@ -87,7 +87,7 @@ class EvoSmWidenV2Arch : Archetype<EvoSmWidenV2Arch>
 #region Remove a field
 
 [Component("Typhon.Schema.UnitTest.EvoSmDrop", 1, StorageMode = StorageMode.SingleVersion)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct EvoSmDropV1
 {
     public int A;
@@ -262,8 +262,9 @@ class SchemaEvolutionStorageModeTests : TestBase<SchemaEvolutionStorageModeTests
             Assert.Multiple(() =>
             {
                 Assert.That(got.A, Is.EqualTo(11), "field before the removed one keeps its offset");
-                // C moves from offset 12 to offset 4. Reading it at the OLD offset would pick up the removed long's high half, so this is the assertion that
-                // actually proves the field map drove the copy rather than a blind memcpy.
+                // C moves from offset 12 to offset 4. The 12 comes from V1's Pack = 4, which places Doomed at 4 rather than 8 (#816, TYPHON010) — under the
+                // natural layout C sat at 16. Reading C at its OLD offset would pick up bytes 12-15 of a V1 record, which is where Doomed's tail sits, so
+                // this is the assertion that actually proves the field map drove the copy rather than a blind memcpy.
                 Assert.That(got.C, Is.EqualTo(6.25f).Within(0.0001f), "field AFTER the removed one must be re-addressed to its new offset");
             });
         }

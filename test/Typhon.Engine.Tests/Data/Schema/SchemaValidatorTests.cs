@@ -36,7 +36,9 @@ class SchemaValidatorTests
     /// </summary>
     private static DBComponentDefinition MakeDefinition(params (int FieldId, string Name, FieldType Type, int Offset, int Size, bool HasIndex, bool IndexAllowMultiple, int ArrayLength)[] fields)
     {
-        var def = new DBComponentDefinition("Test", 1) { POCOType = typeof(int) };
+        // No POCOType: these are synthetic shapes with hand-picked offsets, built only to feed SchemaValidator.ComputeDiff. They never back a column, so they
+        // carry no backing struct — claiming one (this used to say typeof(int)) would assert a stride the offsets do not fit (#816, rule SCHEMA-06).
+        var def = new DBComponentDefinition("Test", 1);
         foreach (var (fieldId, name, type, offset, size, hasIndex, indexAllowMultiple, arrayLength) in fields)
         {
             var f = def.CreateField(fieldId, name, type, FieldType.None, offset, typeof(int));

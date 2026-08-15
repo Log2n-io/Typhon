@@ -500,12 +500,16 @@ internal sealed class SchemaCatalogReader
     /// Decodes one persisted row, tolerating a chunk <b>smaller</b> than the CLR struct.
     /// </summary>
     /// <remarks>
-    /// The engine persists a component's own size; the CLR rounds its type up to the alignment of its widest field.
-    /// <c>ArchetypeR1</c> is 108 bytes on disk and 112 in memory, because <c>long NextEntityKey</c> forces the type to a
-    /// multiple of 8 — so a direct <see cref="MemoryMarshal.Read{T}(ReadOnlySpan{byte})"/> reads four bytes it does not
-    /// own: the next row's, or past the page's raw-data area on the last chunk of a page, where it throws instead.
-    /// <c>ComponentR1</c> hides this entirely, its 160 bytes already landing on an 8-boundary, so a reader written and
-    /// tested against the component catalog alone works right up until it meets the archetype one.
+    /// A persisted chunk can be narrower than the CLR struct that decodes it, and a direct <see cref="MemoryMarshal.Read{T}(ReadOnlySpan{byte})"/> would then
+    /// read bytes it does not own: the next row's, or past the page's raw-data area on the last chunk of a page, where it throws instead.
+    /// <para>
+    /// Until #816 the commonest source of that gap was alignment: the engine persisted a component's field extent while the CLR rounded the type up to the
+    /// alignment of its widest field, which made <c>ArchetypeR1</c> 108 bytes on disk and 112 in memory. That divergence is gone — a component's storage size
+    /// IS <c>sizeof(T)</c> now (SCHEMA-06), and <c>ArchetypeR1</c> carries <c>StructLayout.Pack = 4</c>, which brings the type itself to 108. What remains is
+    /// schema evolution: rows
+    /// written by an older, narrower revision of a component outlive it on disk, and this reader is what lets the integrity scanner decode them without a
+    /// migration pass.
+    /// </para>
     /// </remarks>
     private static T ReadRow<T>(ReadOnlySpan<byte> chunk) where T : unmanaged
     {

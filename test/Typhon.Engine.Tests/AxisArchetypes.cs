@@ -22,7 +22,7 @@ namespace Typhon.Engine.Tests;
 #region SingleVersion
 
 [Component("Typhon.Test.Axis.SvCore", 1, StorageMode = StorageMode.SingleVersion)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct AxSvCore
 {
     public int Key;
@@ -32,7 +32,7 @@ struct AxSvCore
 }
 
 [Component("Typhon.Test.Axis.SvUniq", 1, StorageMode = StorageMode.SingleVersion)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct AxSvUniq
 {
     [Index]
@@ -44,7 +44,7 @@ struct AxSvUniq
 }
 
 [Component("Typhon.Test.Axis.SvMulti", 1, StorageMode = StorageMode.SingleVersion)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct AxSvMulti
 {
     public int Key;
@@ -61,7 +61,7 @@ struct AxSvMulti
 #region Versioned
 
 [Component("Typhon.Test.Axis.VerCore", 1)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct AxVerCore
 {
     public int Key;
@@ -71,7 +71,7 @@ struct AxVerCore
 }
 
 [Component("Typhon.Test.Axis.VerUniq", 1)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct AxVerUniq
 {
     [Index]
@@ -83,7 +83,7 @@ struct AxVerUniq
 }
 
 [Component("Typhon.Test.Axis.VerMulti", 1)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct AxVerMulti
 {
     public int Key;
@@ -100,7 +100,7 @@ struct AxVerMulti
 #region Transient
 
 [Component("Typhon.Test.Axis.TrCore", 1, StorageMode = StorageMode.Transient)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct AxTrCore
 {
     public int Key;
@@ -110,7 +110,7 @@ struct AxTrCore
 }
 
 [Component("Typhon.Test.Axis.TrUniq", 1, StorageMode = StorageMode.Transient)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct AxTrUniq
 {
     [Index]
@@ -122,7 +122,7 @@ struct AxTrUniq
 }
 
 [Component("Typhon.Test.Axis.TrMulti", 1, StorageMode = StorageMode.Transient)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct AxTrMulti
 {
     public int Key;

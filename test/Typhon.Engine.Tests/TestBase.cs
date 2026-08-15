@@ -126,7 +126,7 @@ public struct CompGuild
 }
 
 [Component("Typhon.Schema.UnitTest.TestPlayer", 1)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 public struct CompPlayer
 {
     [Index(AllowMultiple = true), ForeignKey(typeof(CompGuild))]

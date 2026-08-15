@@ -68,7 +68,7 @@ struct MsrVerV1
 }
 
 [Component("Typhon.Schema.UnitTest.MsrVer", 1)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct MsrVerV2
 {
     public int A;

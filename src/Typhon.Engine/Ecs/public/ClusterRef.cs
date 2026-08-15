@@ -94,6 +94,26 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     private byte* ResolveBase(byte slot) => (_transientBase != null && (_meta.TransientSlotMask & (1 << slot)) != 0) ? _transientBase : _base;
 
     /// <summary>
+    /// Assert that <typeparamref name="T"/> strides the column exactly. Every accessor below hands out a <c>Span&lt;T&gt;</c> or a <c>ref T</c>, both of which
+    /// step by <c>sizeof(T)</c>; if the column was laid out at a different stride, slot <c>i</c> is addressed at the wrong offset and a write spills into the
+    /// neighbouring slot — silently, in Release (#816). The layout has matched <c>sizeof(T)</c> since <c>DBComponentDefinition.Build</c> started taking the CLR
+    /// size, so in practice this fires only when the <see cref="Comp{T}"/> handle names a component that is not <typeparamref name="T"/>.
+    /// <para>Inline-guard form: <see cref="CheckConfig.Enabled"/> is a <c>static readonly bool</c> that defaults to <see langword="false"/> and is set from
+    /// configuration, not from the build flavour — so the JIT folds the whole check away in any build that leaves strict mode off, and the interpolated
+    /// message is built only on the throw path.</para>
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void CheckStride<T>(byte slot) where T : unmanaged
+    {
+        if (CheckConfig.Enabled && sizeof(T) != _layout.ComponentSize(slot))
+        {
+            ThrowHelper.ThrowInvalidOp(
+                $"Component at slot {slot} has a column stride of {_layout.ComponentSize(slot)} bytes but {typeof(T).Name} is {sizeof(T)} bytes. "
+              + $"The Comp<T> handle most likely names a different component.");
+        }
+    }
+
+    /// <summary>
     /// Get a mutable span of the component's data across all N slots (its SoA array). For Versioned components use <see cref="GetReadOnlySpan{T}"/> instead —
     /// writing directly to the cluster slot bypasses the revision chain and breaks MVCC snapshot isolation.
     /// </summary>
@@ -112,6 +132,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
             ThrowHelper.ThrowInvalidOp(
                 $"GetSpan on Versioned component bypasses revision chain. Use GetReadOnlySpan for reads, OpenMut+Write for writes.");
         }
+        CheckStride<T>(slot);
         return new Span<T>(ResolveBase(slot) + _layout.ComponentOffset(slot), _layout.ClusterSize);
     }
 
@@ -145,6 +166,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     public ReadOnlySpan<T> GetReadOnlySpan<T>(Comp<T> comp) where T : unmanaged
     {
         var slot = _meta.GetSlot(comp._componentTypeId);
+        CheckStride<T>(slot);
         return new ReadOnlySpan<T>(ResolveBase(slot) + _layout.ComponentOffset(slot), _layout.ClusterSize);
     }
 
@@ -157,6 +179,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         {
             ThrowHelper.ThrowInvalidOp($"Get on Versioned component bypasses revision chain. Use OpenMut+Write for writes.");
         }
+        CheckStride<T>(slot);
         return ref Unsafe.Add(ref Unsafe.AsRef<T>(ResolveBase(slot) + _layout.ComponentOffset(slot)), slotIndex);
     }
 
@@ -165,6 +188,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     public ref readonly T GetReadOnly<T>(Comp<T> comp, int slotIndex) where T : unmanaged
     {
         var slot = _meta.GetSlot(comp._componentTypeId);
+        CheckStride<T>(slot);
         return ref Unsafe.Add(ref Unsafe.AsRef<T>(ResolveBase(slot) + _layout.ComponentOffset(slot)), slotIndex);
     }
 
@@ -241,6 +265,8 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
             ThrowHelper.ThrowInvalidOp(
                 $"WriteSpatial requires the archetype's spatial-indexed component (marked [SpatialIndex]). For non-spatial fields, use GetSpan or Get.");
         }
+
+        CheckStride<T>(slot);
 
         var spatialSlot = _state.SpatialSlot;
         var slotBytes = ResolveBase(slot) + _layout.ComponentOffset(slot) + slotIndex * sizeof(T);

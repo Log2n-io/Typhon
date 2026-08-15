@@ -25,7 +25,7 @@ public struct SvNavGuild
 }
 
 [Component("Typhon.Test.Nav.SvPlayer", 1, StorageMode = StorageMode.SingleVersion)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 public struct SvNavPlayer
 {
     [Index(AllowMultiple = true), ForeignKey(typeof(SvNavGuild))]

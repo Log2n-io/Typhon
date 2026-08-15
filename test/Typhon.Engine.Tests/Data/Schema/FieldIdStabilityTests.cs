@@ -41,7 +41,7 @@ struct CompRemoveV1
 }
 
 [Component("Typhon.Schema.UnitTest.SchemaRemove", 1)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct CompRemoveV2
 {
     public int A;

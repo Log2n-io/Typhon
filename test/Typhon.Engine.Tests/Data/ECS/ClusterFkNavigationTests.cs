@@ -25,7 +25,7 @@ public struct MixNavGuild
 // cluster-eligible and moves this index onto the ARCHETYPE. That is the case the old NotSupportedException guard did not catch: it tested the component's
 // storage mode, and this component is Versioned, so navigation proceeded and silently returned nothing.
 [Component("Typhon.Test.Nav.MixPlayer", 1, StorageMode = StorageMode.Versioned)]
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 public struct MixNavPlayer
 {
     [Index(AllowMultiple = true), ForeignKey(typeof(MixNavGuild))]

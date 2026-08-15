@@ -725,7 +725,7 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
     }
 
     // Per-assembly reflection-free component registrar (feature #514, phase 5). One [ModuleInitializer] registers every [Component] in the assembly: its
-    // ComponentSchemaSpec (built as pure data, offsets via a one-time Marshal.OffsetOf) into the schema-contract-level GeneratedSchemaRegistry, plus — when this
+    // ComponentSchemaSpec (pure data, offsets measured once off a stack probe) into the schema-contract-level GeneratedSchemaRegistry, plus — when this
     // compilation references the engine — each ComponentCollection<T> AOT-safe factory. Runs once at assembly load, before any DatabaseEngine reads the registry
     // — which dissolves the flaky lazy-init race and lets [Component] structs drop the `partial` requirement (the schema no longer lives on the struct).
     //
@@ -768,9 +768,19 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
                 }
             }
 
-            sb.Append("            global::Typhon.Schema.Definition.GeneratedSchemaRegistry.RegisterComponent(typeof(").Append(model.StructFqn).AppendLine("),");
-            AppendComponentSpec(sb, model, "                ");
-            sb.AppendLine("            );");
+            // Scoped block per component: `probe` is the stack instance every field offset is measured against. A LOCAL, deliberately — the offsets must
+            // describe the MANAGED layout, which is the one every accessor reads through (`*(T*)`, `Span<T>`, `ref T`). Marshal.OffsetOf would describe the
+            // marshalled layout instead, and the two disagree for bool (4 bytes marshalled, 1 managed) and char (1 vs 2) — silently, and for char without
+            // even a size difference to notice. See TYPHON011.
+            sb.AppendLine("            {");
+            sb.Append("                var probe = default(").Append(model.StructFqn).AppendLine(");");
+            sb.Append("                ref byte origin = ref global::System.Runtime.CompilerServices.Unsafe.As<").Append(model.StructFqn)
+              .AppendLine(", byte>(ref probe);");
+            sb.Append("                global::Typhon.Schema.Definition.GeneratedSchemaRegistry.RegisterComponent(typeof(").Append(model.StructFqn)
+              .AppendLine("),");
+            AppendComponentSpec(sb, model, "                    ");
+            sb.AppendLine("                );");
+            sb.AppendLine("            }");
         }
 
         // Archetype finalization barrier (replaces Archetype<T>.Touch()). Archetypes always reference the engine (they derive from Archetype<TSelf>), so
@@ -808,8 +818,11 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
         {
             sb.Append(ei).Append("new global::").Append(SchemaNs).Append(".ComponentFieldSpec(")
               .Append(Quote(f.SchemaName)).Append(", typeof(").Append(f.FieldTypeFqn).Append("), ")
-              .Append("global::System.Runtime.InteropServices.Marshal.OffsetOf<").Append(model.StructFqn).Append(">(")
-              .Append(Quote(f.MemberName)).Append(").ToInt32()");
+              // AsRef(in …) rather than a bare `ref probe.Member`: a component may declare a `public readonly` field, and taking a mutable ref to one is
+              // CS0192. The reflection path accepts such fields, so emitting the bare form would compile here and fail in the consumer's assembly.
+              .Append("(int)global::System.Runtime.CompilerServices.Unsafe.ByteOffset(ref origin, ")
+              .Append("ref global::System.Runtime.CompilerServices.Unsafe.As<").Append(f.FieldTypeFqn)
+              .Append(", byte>(ref global::System.Runtime.CompilerServices.Unsafe.AsRef(in probe.").Append(f.MemberName).Append(")))");
 
             if (f.PreviousName != null)
             {

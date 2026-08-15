@@ -110,6 +110,8 @@ public struct FoodSource
 
 // ── Obstacle components ────────────────────────────────────────────────────
 
+// Fields end at 17 and the type is 20 bytes. Left alone deliberately: 20 is already a 4-byte multiple, and TYPHON010 only reports padding beyond that — the
+// 3 bytes here buy a word-aligned layout, whereas the 8-byte rounding a `long` would impose is what costs real storage.
 [Component("AntHill.Obstacle", 1, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct Obstacle
@@ -135,6 +137,7 @@ public struct Obstacle
 
 // ── Nest components ────────────────────────────────────────────────────────
 
+// Fields end at 25, type is 28 — a 4-byte multiple, so nothing to fix. See Obstacle above.
 [Component("AntHill.NestInfo", 1, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct NestInfo
