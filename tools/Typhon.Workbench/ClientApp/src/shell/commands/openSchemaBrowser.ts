@@ -184,6 +184,21 @@ export function toggleViewResourceTree(): void {
   }
 }
 
+/**
+ * Expands the right edge group so a newly-published selection is actually visible. Mirrors what opening the Data
+ * Browser does before focusing its entity list: a selection whose only effect lands in a collapsed rail is
+ * indistinguishable from a click that did nothing — which is exactly how single-click in Profile sessions read.
+ * No-op when the rail is already open or absent, so it never steals focus from what the user is looking at.
+ */
+export function ensureDetailVisible(): void {
+  const api = registeredApi;
+  if (!api) return;
+  const eg = api.getEdgeGroup('right');
+  if (eg?.isCollapsed()) {
+    eg.expand();
+  }
+}
+
 /** Toggle the right edge group (Detail panel). */
 export function toggleViewDetail(): void {
   const api = registeredApi;
