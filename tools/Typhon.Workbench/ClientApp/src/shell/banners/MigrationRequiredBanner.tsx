@@ -44,10 +44,10 @@ export default function MigrationRequiredBanner() {
  variant="outline"
  size="sm"
  className="h-6 text-fs-sm"
- onClick={() => openConnect('open')}
- title="Reopen with binaries matching this database's schema"
+ onClick={() => openConnect('known')}
+ title="Leave this database and open a different one"
  >
- Open another file…
+ Open a different database…
  </Button>
  </div>
  </div>
