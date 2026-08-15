@@ -4,7 +4,9 @@ import { AlertTriangle, FileQuestion, Pin, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useProfileList, type Profile } from '@/hooks/profiles/useProfileList';
 import { toggleViewProfiler } from '@/shell/commands/profilerCommands';
+import { ensureDetailVisible } from '@/shell/commands/openSchemaBrowser';
 import { useSessionCapability } from '@/stores/useSessionStore';
+import { useSelectionStore } from '@/stores/useSelectionStore';
 
 /** Ticks → a short human duration. Trace durations are Stopwatch ticks, so the frequency comes from the header. */
 function formatDuration(ticks: number, frequency: number): string {
@@ -83,6 +85,7 @@ export default function ProfilesPanel(_props: IDockviewPanelProps) {
   const { profiles, profilingsDirectory, isLoading, isError, isFetching, refetch, attach, detach } = useProfileList();
   const hasDatabase = useSessionCapability('database');
   const [selected, setSelected] = useState<string | null>(null);
+  const selectLeaf = useSelectionStore((s) => s.select);
 
   const busy = attach.isPending || detach.isPending;
 
@@ -98,12 +101,35 @@ export default function ProfilesPanel(_props: IDockviewPanelProps) {
     if (profile.profileId) {
       detach.mutate(profile.profileId);
     } else if (profile.isReadable) {
+      // Whatever is open now, so it can be released once the new one is in. ProfileHost is deliberately plural — it
+      // exists so two captures of the same database can be compared later — so Attach ADDS rather than replaces, and
+      // the "one at a time" policy is this panel's to enforce. Without it, opening a second capture left the first
+      // attached: its TraceSessionRuntime alive with a decoded capture in memory (tens of MB) and file handles open
+      // INSIDE the bundle, which is exactly what has to be released before the database can be closed or yielded.
+      const previousProfileId = profiles.find((p) => p.profileId)?.profileId ?? null;
+
       // Opening a capture and then having to go find the timeline yourself is a step nobody wants: the reason to open
       // it is to look at it. Only on success — a rejected attach (the wrong-database guard) must leave you here reading
       // why, not staring at an empty profiler.
-      attach.mutate(profile.fileName, { onSuccess: () => toggleViewProfiler() });
+      attach.mutate(profile.fileName, {
+        onSuccess: () => {
+          // Attach FIRST, release second. The reverse order would leave a rejected attach — the wrong-database guard
+          // fires on exactly the captures a user is most likely to try — with nothing attached at all, turning a
+          // recoverable "that one does not belong here" into a session that lost the capture it already had.
+          if (previousProfileId) {
+            detach.mutate(previousProfileId);
+          }
+          toggleViewProfiler();
+        },
+      });
     }
   };
+
+  // `w-full` pinned the table to the pane width, so it could never be wider than what you can see: the columns
+  // squeezed to their minimums and were then clipped, with nothing to scroll. `w-max min-w-full` says "fill the pane,
+  // but grow to fit the content", which is what gives the scroll container something to scroll. This panel docks into
+  // a ~260 px left edge group, so it is routinely narrower than the columns it has to show.
+  const TABLE_CLASS = 'w-max min-w-full border-collapse';
 
   // Enter activates the focused row, so the panel is reachable without a pointer — a double-click-only surface would
   // otherwise have no keyboard equivalent at all.
@@ -135,7 +161,10 @@ export default function ProfilesPanel(_props: IDockviewPanelProps) {
         </div>
       )}
 
-      <div className="flex-1 overflow-auto">
+      {/* min-w-0 is what lets this scroll at all: a flex child defaults to min-width:auto, so it refuses to shrink
+          below its content and grows past the pane instead of overflowing inside it — the scrollbar then never
+          appears and the right-hand columns are simply clipped away. */}
+      <div className="min-w-0 flex-1 overflow-auto">
         {!hasDatabase ? (
           <Empty>Profile sessions live with a database. Open a <code>.typhon</code> database to see its captures.</Empty>
         ) : isLoading ? (
@@ -150,7 +179,7 @@ export default function ProfilesPanel(_props: IDockviewPanelProps) {
             written to <code className="break-all">{profilingsDirectory}</code>.
           </Empty>
         ) : (
-          <table className="w-full border-collapse">
+          <table className={TABLE_CLASS}>
             <thead className="sticky top-0 bg-background">
               <tr className="text-muted-foreground text-left">
                 {/* Which session is open is the one fact you scan this list for, so it leads — a marker in the last
@@ -168,7 +197,15 @@ export default function ProfilesPanel(_props: IDockviewPanelProps) {
               {profiles.map((p) => (
                 <tr
                   key={p.fileName}
-                  onClick={() => setSelected(p.fileName)}
+                  onClick={() => {
+                    setSelected(p.fileName);
+                    // Publish to the Inspector. Selecting used to set a background colour and nothing else — and even
+                    // that was suppressed on the open row — so the panel's single-click-selects contract had no
+                    // observable result. The capture's provenance (which database recorded it) rides in the row model
+                    // and had no surface at all until here.
+                    selectLeaf('capture', p);
+                    ensureDetailVisible();
+                  }}
                   onDoubleClick={() => onRowActivate(p)}
                   onKeyDown={(e) => onRowKeyDown(e, p)}
                   tabIndex={0}

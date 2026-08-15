@@ -113,6 +113,17 @@ export function useProfileList() {
 
   const invalidate = async () => {
     await queryClient.invalidateQueries({ queryKey });
+
+    // Everything under ['profiler'] describes the capture that WAS attached, and none of it is keyed in a way that
+    // notices the swap: every profiler query keys on the session id alone (metadata, call tree, CPU frames, source
+    // locations, trace status, sample density). Profiles are session SUB-resources — that id deliberately does not
+    // change when you switch capture — so TanStack kept serving the previous recording. The top banner updated,
+    // because it reads activeProfileId off the session store, while every view below it did not.
+    //
+    // removeQueries, not invalidateQueries: an invalidated query still hands back its cached data on the next render
+    // and refetches behind it, so the new capture would open showing one frame of the old one.
+    queryClient.removeQueries({ queryKey: ['profiler'] });
+
     await refreshSession();
   };
 

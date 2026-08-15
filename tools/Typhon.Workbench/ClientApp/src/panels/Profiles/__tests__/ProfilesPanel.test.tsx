@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import type { IDockviewPanelProps } from 'dockview-react';
 import type { Profile } from '@/hooks/profiles/useProfileList';
 import { useSessionStore } from '@/stores/useSessionStore';
+import { useSelectionStore } from '@/stores/useSelectionStore';
 
 // Mutable holder so each test can swap what the (mocked) data hook returns. `vi.hoisted` lifts it above the
 // hoisted `vi.mock` factory below.
@@ -151,6 +152,73 @@ describe('ProfilesPanel (#617)', () => {
     rerender(<ProfilesPanel {...({} as IDockviewPanelProps)} />);
     fireEvent.doubleClick(screen.getAllByRole('row')[1]);
     expect(hoisted.detached).toEqual(['pid-1']);
+  });
+
+  // ProfileHost.Attach ADDS — it is plural by design, so two captures of one database can be compared later. The
+  // "one at a time" policy therefore belongs here. Without it, opening a second capture left the first attached: a
+  // TraceSessionRuntime alive with a decoded capture in memory and file handles open INSIDE the bundle, which is
+  // exactly what has to be released before the database can be closed or yielded to an application.
+  it('opening a second capture releases the one it replaces', () => {
+    hoisted.profiles = [
+      makeProfile({ fileName: 'open.typhon-trace', profileId: 'pid-open', isActive: true }),
+      makeProfile({ fileName: 'next.typhon-trace' }),
+    ];
+    renderPanel();
+
+    fireEvent.doubleClick(screen.getAllByRole('row')[2]); // [0] header, [1] the already-open capture
+
+    expect(hoisted.attached).toEqual(['next.typhon-trace']);
+    expect(hoisted.detached).toEqual(['pid-open']);
+  });
+
+  it('a rejected attach releases nothing — you keep the capture you had', () => {
+    // The wrong-database guard fires on exactly the captures a user is most likely to try. Detaching first would turn
+    // "that one does not belong here" into a session that also lost the capture it already had.
+    hoisted.profiles = [
+      makeProfile({ fileName: 'open.typhon-trace', profileId: 'pid-open', isActive: true }),
+      makeProfile({ fileName: 'foreign.typhon-trace' }),
+    ];
+    hoisted.attachError = new Error('recorded against another database');
+    renderPanel();
+
+    fireEvent.doubleClick(screen.getAllByRole('row')[2]);
+
+    expect(hoisted.detached).toEqual([]);
+  });
+
+  // Single click had a contract ("selects, does not act") and no observable result: it set a background colour, and
+  // even that was suppressed on the open row. The capture's provenance — which database recorded it — was read,
+  // typed and mapped into the row model and then displayed nowhere at all.
+  it('single click publishes the capture to the Inspector', () => {
+    hoisted.profiles = [makeProfile({ fileName: 'a.typhon-trace', databaseName: 'world-shard' })];
+    renderPanel();
+
+    fireEvent.click(screen.getAllByRole('row')[1]);
+
+    const leaf = useSelectionStore.getState().leaf;
+    expect(leaf?.type).toBe('capture');
+    expect((leaf?.ref as Profile).fileName).toBe('a.typhon-trace');
+    expect((leaf?.ref as Profile).databaseName).toBe('world-shard');
+  });
+
+  it('single click still does not attach or detach', () => {
+    hoisted.profiles = [makeProfile({ fileName: 'a.typhon-trace' })];
+    renderPanel();
+
+    fireEvent.click(screen.getAllByRole('row')[1]);
+
+    expect(hoisted.attached).toEqual([]);
+    expect(hoisted.detached).toEqual([]);
+  });
+
+  it('opening the first capture detaches nothing', () => {
+    hoisted.profiles = [makeProfile({ fileName: 'a.typhon-trace' })];
+    renderPanel();
+
+    fireEvent.doubleClick(screen.getAllByRole('row')[1]);
+
+    expect(hoisted.attached).toEqual(['a.typhon-trace']);
+    expect(hoisted.detached).toEqual([]);
   });
 
   it('opening a profile switches to the Profiler view', () => {

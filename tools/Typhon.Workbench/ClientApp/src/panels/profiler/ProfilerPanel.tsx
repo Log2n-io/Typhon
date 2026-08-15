@@ -38,7 +38,23 @@ import { applyWorkbenchAuthHeaders } from '@/api/bootstrapToken';
  * Phase 1b proves the live-data pipeline end-to-end (TCP connect → Init frame → metadata DTO → tick SSE);
  * Phase 2 lifts the Canvas 2D renderers on top.
  */
+/**
+ * Remounts the profiler whenever the session's active capture changes.
+ *
+ * {@link ProfilerPanelInner} already resets every profiler store in an unmount cleanup, and the reload path's comment
+ * assumed "the new activeProfileId re-keys this panel" — but nothing ever did. The panel is registered as a plain
+ * dockview component (`Profiler: ProfilerPanel`), so switching capture left it mounted with the previous recording's
+ * local state: view range, selected thread, open tab, scroll. Keying on the profile id makes that assumption true.
+ *
+ * The TanStack side is handled at the switch itself (useProfileList.invalidate drops the ['profiler'] cache); this
+ * covers the React-local half. Both are needed — a remount alone would re-read the same stale query entries.
+ */
 export default function ProfilerPanel(props: IDockviewPanelProps) {
+  const activeProfileId = useSessionStore((s) => s.activeProfileId);
+  return <ProfilerPanelInner key={activeProfileId ?? 'no-profile'} {...props} />;
+}
+
+function ProfilerPanelInner(props: IDockviewPanelProps) {
   const sessionId = useSessionStore((s) => s.sessionId);
   const token = useSessionStore((s) => s.token);
   const filePath = useSessionStore((s) => s.filePath);
