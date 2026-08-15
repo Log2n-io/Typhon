@@ -38,6 +38,11 @@ public sealed class SessionsControllerTraceMagicTests
     {
         _factory = new WorkbenchFactory();
         _client = _factory.CreateAuthenticatedClient();
+
+        // The bundle must exist before it is opened: POST /api/sessions/file no longer auto-creates a database from a
+        // path that is not there (a typo used to fabricate an empty one instead of failing). These tests are about
+        // capture validation, so the database is setup — create it rather than lean on the old create-if-missing.
+        Directory.CreateDirectory(BundlePath);
     }
 
     [TearDown]

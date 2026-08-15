@@ -186,9 +186,30 @@ public sealed partial class SessionsController : ControllerBase
         if (string.Equals(stem, "demo", StringComparison.OrdinalIgnoreCase)
             && !Path.IsPathRooted(requestPath))
         {
+            // The demo is the ONE path allowed not to exist yet: DemoDataProvider materialises it on first use, so it
+            // is a create-on-demand fixture rather than a database the user is claiming to already have.
             return _demoData.Resolve(requestPath);
         }
-        return Path.GetFullPath(requestPath);
+
+        var fullPath = Path.GetFullPath(requestPath);
+
+        // A viewer never creates data. EngineLifecycle.OpenAsync is create-if-missing — deliberately, since that is what
+        // makes an application's first run produce its database — so without this check a mistyped or stale path does not
+        // fail: it FABRICATES a new empty database and returns a perfectly healthy session onto it. The user then browses
+        // an empty bundle wondering where their entities went, which reads as data loss rather than as the typo it is.
+        // Observed via `typhon ui .\does-not-exist.typhon`, which left a real 565 KB `data` file behind.
+        //
+        // CreateFileSession already promises this a few lines below — "Corrupt, missing and schema-incompatible databases
+        // still fail" — where it explains why only a LOCKED database opens paused. This is what makes the "missing" half
+        // of that sentence true, and it must stay ahead of the lock handling: a path that is not there was never locked.
+        if (!Directory.Exists(fullPath))
+        {
+            throw new WorkbenchException(404, "database_not_found",
+                $"No database at '{fullPath}'. A Typhon database is a directory named {{name}}{IntegrityConstants.BundleExtension}; "
+                + "check the path, or run your application once to create one.");
+        }
+
+        return fullPath;
     }
 
     /// <summary>
