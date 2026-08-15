@@ -20,6 +20,14 @@ namespace Typhon.Workbench.Tests;
 /// </summary>
 [TestFixture]
 [NonParallelizable] // opens real engines — the schema-compat check reads the process-global ArchetypeRegistry (see #554)
+// #811 — quarantined AS A FIXTURE, not test by test. Quarantining the single test that wedged the c6id gate runner
+// simply moved the hang to the next test in the class, which is the evidence that settles what this is: not one bad
+// test but something these fifteen share on that one machine. They open and dispose real engines in a loop, each with
+// a FileSystemWatcher over the bundle, and they pass alone, pass as a fixture, and pass 4/4 full-suite runs on Linux
+// under WSL2 with the same Release build and gate filter. The cost is stated rather than hidden: this removes ALL
+// server-side F8 coverage from the merge gate until #811 is understood. The nightly still runs it, which is where a
+// quarantined test is supposed to be observed.
+[Category("Quarantine")]
 public sealed class DatabasePauseTests
 {
     private string _tempDir;
@@ -289,13 +297,7 @@ public sealed class DatabasePauseTests
 
     // ── AC17 · the holder keeps the promise its lock file makes ──────────────────────────────────────────────────
 
-    // #811 — wedges the test host on the c6id gate runner and nowhere else: it passes alone, passes its fixture, and
-    // passes 4/4 full-suite runs on Linux under WSL2 with the same Release build and the same gate filter. Quarantined
-    // rather than deleted because nothing about the test has been shown to be wrong; the difference is the runner, and
-    // the two untested suspects are named in the issue. AC17 keeps its coverage through
-    // AResumedSession_YieldsAgain_WhenASecondClaimAppears, which drives this same yield and asserts the same release.
     [Test]
-    [Category("Quarantine")]
     public async Task ALiveSession_YieldsTheDatabase_WhenAClaimAppears()
     {
         // The Workbench writes `yieldable: true` into every lock it takes, which tells an application starting later
