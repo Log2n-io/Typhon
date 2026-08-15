@@ -33,10 +33,19 @@ interface DatabasePausedNoticeProps {
  *
  * <p>Deliberately quiet — muted, no icon colour, no action button. Nothing is wrong and there is nothing to do; the
  * session repairs itself when the other process exits. An alarming empty state would misrepresent a normal handoff.</p>
+ *
+ * <p><b>It carries its own background</b> because it cannot assume it has one. Most panels render it into empty flow,
+ * but the Db Map overlays it on a painted canvas (`DbMapPanel.tsx`, `absolute left-2 top-2`) — where bare muted text
+ * over segment fills was simply unreadable. `bg-muted/85` plus a backdrop blur keeps it legible on any substrate while
+ * staying quiet; opaque would read as an alert, and a colour would claim something is wrong.</p>
  */
 export default function DatabasePausedNotice({ subject, testId = 'database-paused' }: DatabasePausedNoticeProps) {
   return (
-    <div role="status" data-testid={testId} className="flex items-start gap-2 p-3 text-fs-base text-muted-foreground">
+    <div
+      role="status"
+      data-testid={testId}
+      className="flex items-start gap-2 rounded-md border border-border/50 bg-muted/85 p-3 text-fs-base text-muted-foreground shadow-sm backdrop-blur-sm"
+    >
       <PauseCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
       <p>{subject} will be available again when the other process using this database exits.</p>
     </div>

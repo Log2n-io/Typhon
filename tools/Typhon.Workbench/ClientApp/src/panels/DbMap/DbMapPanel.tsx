@@ -1769,8 +1769,10 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
             />
           )}
           {isLoading && <p className="absolute left-3 top-2 text-fs-sm text-muted-foreground">Loading map…</p>}
+          {/* Inset, not flush: the notice carries a rounded background of its own now, and a rounded card jammed into
+              the panel's corner reads as a rendering glitch rather than a deliberate overlay. */}
           {databasePaused && (
-            <div className="absolute left-0 top-0">
+            <div className="absolute left-2 top-2">
               <DatabasePausedNotice subject="The file map" testId="dbmap-paused" />
             </div>
           )}
