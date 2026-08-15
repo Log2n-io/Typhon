@@ -32,12 +32,15 @@ const int ShardSize = 20_000;
 const int TickTarget = 200;
 const int StartingCredits = 100;
 
-var tracePath = Path.GetFullPath(Path.Combine("captures", "guide.typhon-trace"));
-Directory.CreateDirectory(Path.GetDirectoryName(tracePath));
-// Snapshot the trace's last-write time BEFORE the run so the completion check can tell a freshly-written trace from a
-// leftover one — WITHOUT deleting anything. Past captures are kept on purpose (that's what `typhon ui --open-latest`
+// Captures live WITH the database, in its own profilings/ directory — this file never names a path. typhon.telemetry.json
+// leaves Typhon:Profiler:Trace absent, and an absent destination means "a file in {bundle}/profilings/" (#616), so the
+// capture is always reachable through the database it describes instead of landing wherever the process happened to run.
+// That co-location is what lets the Workbench correlate a capture with the data it was recorded against.
+var profilingsDir = TraceLocation.ProfilingsDirectoryOf(Path.GetFullPath("world-shard.typhon"));
+// Snapshot the newest capture's timestamp BEFORE the run so the completion check can tell a freshly-written one from a
+// leftover — WITHOUT deleting anything. Past captures are kept on purpose (that's what `typhon ui --open-latest`
 // browses); a stale file is told apart by its timestamp, not by wiping history.
-var traceBefore = File.Exists(tracePath) ? File.GetLastWriteTimeUtc(tracePath) : DateTime.MinValue;
+var traceBefore = NewestCapture(profilingsDir)?.LastWriteTimeUtc ?? DateTime.MinValue;
 
 // The database PERSISTS across runs — it's a database, not a scratch buffer. Pass `--reset` to wipe it and deploy a
 // fresh shard; otherwise a re-run RESUMES the shard that survived the previous run (ch.1 detects which case it's in).
@@ -277,16 +280,40 @@ EntityId probe = default, mover = default;
 }
 
 Console.WriteLine();
-if (File.Exists(tracePath) && new FileInfo(tracePath).Length > 0 && File.GetLastWriteTimeUtc(tracePath) > traceBefore)
+var capture = NewestCapture(profilingsDir);
+if (capture != null && capture.Length > 0 && capture.LastWriteTimeUtc > traceBefore)
 {
-    Console.WriteLine($"OK — ran end to end; profiler trace written: {tracePath} ({new FileInfo(tracePath).Length:N0} bytes)");
+    Console.WriteLine($"OK — ran end to end; profiler trace written: {capture.FullName} ({capture.Length:N0} bytes)");
 }
 else
 {
-    Console.WriteLine($"WARN — no fresh trace written this run at {tracePath}. Enable profiling in typhon.telemetry.json (a Profiler with a Trace path).");
+    Console.WriteLine($"WARN — no fresh trace written this run in {profilingsDir}. Enable profiling in typhon.telemetry.json.");
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────
+
+// The newest capture in a database's profilings/ directory, or null if there is none. Captures are named by the engine
+// (a UTC timestamp, see TraceLocation.NewCapturePath), so they are found by scanning rather than by a path this file
+// knows in advance — which is the point: the destination belongs to the database, not to the app.
+static FileInfo NewestCapture(string profilingsDirectory)
+{
+    if (!Directory.Exists(profilingsDirectory))
+    {
+        return null;
+    }
+
+    FileInfo newest = null;
+    foreach (var file in new DirectoryInfo(profilingsDirectory).GetFiles("*" + TraceLocation.TraceExtension))
+    {
+        if (newest == null || file.LastWriteTimeUtc > newest.LastWriteTimeUtc)
+        {
+            newest = file;
+        }
+    }
+
+    return newest;
+}
+
 static DatabaseEngine OpenEngine()
 {
     var dbe = DatabaseEngine.Open("world-shard.typhon", o => o

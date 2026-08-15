@@ -1,7 +1,8 @@
-# Run artifacts from `dotnet run` — the database bundle, WAL, lock, and the profiler trace.
+# Run artifacts from `dotnet run` — the database bundle, WAL, lock, and the profiler captures. Captures live inside
+# the bundle (world-shard.typhon/profilings/), so ignoring the bundle already covers them; the loose patterns stay for
+# anything written outside it by an explicit Typhon:Profiler:Trace path.
 *.bin
 *.wal
 *.lock
 *.typhon/
 *.typhon-trace
-captures/

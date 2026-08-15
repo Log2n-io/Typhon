@@ -105,7 +105,8 @@ internal static class ProjectScaffolder
           </ItemGroup>
 
           <ItemGroup>
-            <!-- Config-driven profiling: copied next to the exe so the engine self-wires and writes ./captures/*.typhon-trace. -->
+            <!-- Config-driven profiling: copied next to the exe so the engine self-wires. It names no output path, so the
+                 capture lands in the database's own world-shard.typhon/profilings/ directory. -->
             <None Update="typhon.telemetry.json" CopyToOutputDirectory="PreserveNewest" />
           </ItemGroup>
 
@@ -128,8 +129,9 @@ internal static class ProjectScaffolder
         dotnet run
         ```
 
-        The first run restores the `Typhon` package from NuGet, deploys the shard, ticks the runtime, and writes a
-        non-empty `./captures/guide.typhon-trace` — with zero edits.
+        The first run restores the `Typhon` package from NuGet, deploys the shard, ticks the runtime, and records a
+        non-empty capture into `world-shard.typhon/profilings/` — with zero edits. Captures live with the database
+        they describe, so the Workbench can correlate a capture with the data it was recorded against.
 
         ## Explore the trace
 

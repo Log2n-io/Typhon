@@ -2,7 +2,6 @@
   "Typhon": {
     "Profiler": {
       "Enabled": true,
-      "Trace": "captures/guide.typhon-trace",
       "CpuSampling": { "Enabled": true },
       "GcTracing":   { "Enabled": true },
       "Scheduler":   { "Enabled": true },

@@ -60,8 +60,8 @@ internal sealed class NewCommand : Command<NewCommand.Settings>
         AnsiConsole.WriteLine();
         AnsiConsole.MarkupLine("Next steps:");
         AnsiConsole.MarkupLine($"  [grey]cd[/] {name.EscapeMarkup()}");
-        AnsiConsole.MarkupLine("  [grey]dotnet run[/]                 # deploys the shard, ticks the runtime, writes ./captures/*.typhon-trace");
-        AnsiConsole.MarkupLine("  [grey]typhon ui --open-latest[/]    # open the trace in the Workbench");
+        AnsiConsole.MarkupLine("  [grey]dotnet run[/]                 # deploys the shard, ticks the runtime, records a capture into world-shard.typhon/profilings/");
+        AnsiConsole.MarkupLine("  [grey]typhon ui --open-latest[/]    # open the database and its newest capture together");
         return 0;
     }
 }
