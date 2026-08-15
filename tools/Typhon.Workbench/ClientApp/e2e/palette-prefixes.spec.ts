@@ -25,7 +25,7 @@ test.describe('AC1.3 — command palette prefix routing', () => {
     await openPalette(page, 'open');
     await expect.poll(() => itemCount(page)).toBe(7);
     expect(await itemTexts(page)).toEqual(
-      expect.arrayContaining(['Open File…', 'Open Recent', 'Open Data Browser', 'Open Storage Health']),
+      expect.arrayContaining(['Open Typhon Database…', 'Open Recent', 'Open Data Browser', 'Open Storage Health']),
     );
   });
 
@@ -33,7 +33,7 @@ test.describe('AC1.3 — command palette prefix routing', () => {
     await openPalette(page, '>open');
     // The bug this guards: ">open" used to show "No results". It must match exactly like "open".
     await expect.poll(() => itemCount(page)).toBe(7);
-    expect(await itemTexts(page)).toEqual(expect.arrayContaining(['Open File…', 'Open Storage Health']));
+    expect(await itemTexts(page)).toEqual(expect.arrayContaining(['Open Typhon Database…', 'Open Storage Health']));
   });
 
   test('"@" resolves in-session objects (resource hits)', async ({ page }) => {

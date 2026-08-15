@@ -19,7 +19,7 @@ async function openDemo(page: import('@playwright/test').Page, request: import('
   await request.delete(`http://localhost:5200/api/sessions/${j.sessionId}`, { headers: { 'X-Session-Token': j.sessionId } });
   await page.addInitScript(() => { try { localStorage.clear(); } catch { /* ignore */ } });
   await page.goto('/');
-  await page.getByRole('button', { name: /^open \.typhon file$/i }).click();
+  await page.getByRole('button', { name: /^open typhon database$/i }).click();
   await page.getByPlaceholder(/path/i).first().fill(DEMO_DIR);
   const row = page.getByText(/^demo\.typhon$/).first();
   await expect(row).toBeVisible({ timeout: 10_000 });

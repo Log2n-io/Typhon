@@ -12,7 +12,7 @@ test.describe('Phase 4 — Connect Dialog', () => {
   // against, so offering it as a peer entry point would advertise a third mode that no longer exists.
   test('Welcome shows the two entry modes (+ recents shortcut)', async ({ page }) => {
     await page.goto('/');
-    await expect(page.getByRole('button', { name: /^open \.typhon file$/i })).toBeVisible();
+    await expect(page.getByRole('button', { name: /^open typhon database$/i })).toBeVisible();
     await expect(page.getByRole('button', { name: /^attach to engine$/i })).toBeVisible();
     await expect(page.getByRole('button', { name: /^recent files$/i })).toBeVisible();
     await expect(page.getByRole('button', { name: /^open \.typhon-trace$/i })).toHaveCount(0);
@@ -39,7 +39,7 @@ test.describe('Phase 4 — Connect Dialog', () => {
     await expect(page.getByRole('button', { name: /^attach$/i })).toBeVisible();
   });
 
-  test('Open File → browse to DemoData → pick demo.typhon → open → tree renders', async ({ page, request }) => {
+  test('Open Typhon Database → browse to DemoData → pick demo.typhon → open → tree renders', async ({ page, request }) => {
     // A Typhon database is a bundle DIRECTORY. This used to hand-write a 0-byte `demo.typhon` marker file, which the
     // engine rejects outright ("a file exists at the bundle path") — a leftover from the pre-bundle layout where the
     // engine wrote `demo.bin` and the UI picked a separate marker. `seedDemoFile` creates and initialises the real
@@ -47,7 +47,7 @@ test.describe('Phase 4 — Connect Dialog', () => {
     await seedDemoFile(request);
 
     await page.goto('/');
-    await page.getByRole('button', { name: /^open \.typhon file$/i }).click();
+    await page.getByRole('button', { name: /^open typhon database$/i }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
 
     // Navigate the FileBrowser to the demo directory by typing into the breadcrumb input.

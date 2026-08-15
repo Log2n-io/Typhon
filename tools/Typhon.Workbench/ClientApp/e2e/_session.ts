@@ -65,17 +65,17 @@ export async function gotoWelcome(page: Page): Promise<void> {
 
 /**
  * Open an (empty) demo `.typhon` through the real Open-File dialog. Works whether the Welcome screen is
- * showing (uses the Welcome button) or a session is already open (uses File ▸ Open .typhon File…), so it
+ * showing (uses the Welcome button) or a session is already open (uses File ▸ Open Typhon Database…), so it
  * doubles as the "switch session without closing" path.
  */
 export async function openDemoFile(page: Page, request: APIRequestContext, name = 'demo.typhon'): Promise<void> {
   await seedDemoFile(request, name);
-  const welcomeBtn = page.getByRole('button', { name: /^open \.typhon file$/i });
+  const welcomeBtn = page.getByRole('button', { name: /^open typhon database$/i });
   if (await welcomeBtn.isVisible().catch(() => false)) {
     await welcomeBtn.click();
   } else {
     await page.getByRole('menuitem', { name: 'File' }).click();
-    await page.getByRole('menuitem', { name: /^open \.typhon file/i }).click();
+    await page.getByRole('menuitem', { name: /^open typhon database/i }).click();
   }
   await expect(page.getByRole('dialog')).toBeVisible();
   await page.getByPlaceholder(/path/i).first().fill(DEMO_DIR);

@@ -66,7 +66,7 @@ export function buildBaseCommands(): CommandItem[] {
   };
 
   const commands: CommandItem[] = [
-    { id: 'open-file',     label: 'Open File…',               keywords: 'open typhon',      action: () => openConnect('open') },
+    { id: 'open-file',     label: 'Open Typhon Database…',    keywords: 'open typhon file database', action: () => openConnect('known') },
     { id: 'open-recent',   label: 'Open Recent',              keywords: 'recent file',       action: () => openConnect('recent') },
     { id: 'attach',        label: 'Attach…',                  keywords: 'attach engine',     action: () => openConnect('attach') },
     { id: 'close-session', label: 'Close Session',            keywords: 'close disconnect',  action: closeSession },

@@ -8,7 +8,7 @@ import { openIntegrity } from './commands/openIntegrity';
 
 export default function WelcomeScreen() {
  const [dialogOpen, setDialogOpen] = useState(false);
- const [initialTab, setInitialTab] = useState<ConnectTab>('open');
+ const [initialTab, setInitialTab] = useState<ConnectTab>('known');
  // Dev fixture button visibility — same capability probe ConnectDialog uses. /api/fixtures/capability
  // only exists in DEBUG builds; a 404 here means Release → hide the button.
  const [devFixtureAvailable, setDevFixtureAvailable] = useState(false);
@@ -36,7 +36,7 @@ export default function WelcomeScreen() {
  <div className="text-center">
  <h1 className="mb-1 text-xl font-semibold text-foreground">Typhon Workbench</h1>
  <p className="text-fs-lg text-muted-foreground">
- Open a database, trace file, or attach to a running engine
+ Open a database or attach to a running engine
  </p>
  </div>
 
@@ -44,10 +44,10 @@ export default function WelcomeScreen() {
  <Button
  variant="outline"
  className="flex h-auto flex-col items-center gap-2 px-6 py-4 text-fs-lg"
- onClick={() => openDialog('open')}
+ onClick={() => openDialog('known')}
  >
  <Database className="h-5 w-5" />
- <span>Open .typhon File</span>
+ <span>Open Typhon Database</span>
  </Button>
 
  <Button

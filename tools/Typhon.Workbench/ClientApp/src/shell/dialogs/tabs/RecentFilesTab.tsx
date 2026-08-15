@@ -28,7 +28,7 @@ export default function RecentFilesTab({ onOpen, openingPath }: Props) {
   if (entries.length === 0) {
     return (
       <div className="flex h-full items-center justify-center text-fs-lg text-muted-foreground">
-        No recent files. Open a database from the <b className="px-1">Open File</b> tab,
+        No recent files. Open a database from the <b className="px-1">Database</b> tab,
         or a trace from the <b className="px-1">Open Trace</b> tab.
       </div>
     );

@@ -54,7 +54,7 @@ function releaseDatabase(): void {
  */
 async function openBundle(page: import('@playwright/test').Page): Promise<void> {
   await page.goto('/');
-  await page.getByRole('button', { name: /^open \.typhon file$/i }).click();
+  await page.getByRole('button', { name: /^open typhon database$/i }).click();
   await expect(page.getByRole('dialog')).toBeVisible();
   await page.getByPlaceholder(/path/i).first().fill(DEMO_DIR);
   const row = page.getByText(/^paused-e2e\.typhon$/).first();
@@ -95,7 +95,7 @@ test.describe('#621 — paused session', () => {
     await expect(banner).toContainText(String(process.pid));
 
     // A paused session is NOT an error state — the shell stays up rather than bouncing back to Welcome.
-    await expect(page.getByRole('button', { name: /^open \.typhon file$/i })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /^open typhon database$/i })).toHaveCount(0);
   });
 
   test('the banner clears on its own once the holder releases the database', async ({ page }) => {
@@ -171,7 +171,7 @@ test.describe('#621 — cooperative handoff', () => {
 test.describe('#621 — two entry modes', () => {
   test('the Connect dialog offers no standalone trace or cached-data mode', async ({ page }) => {
     await page.goto('/');
-    await page.getByRole('button', { name: /^open \.typhon file$/i }).click();
+    await page.getByRole('button', { name: /^open typhon database$/i }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
 
     // Open database + Attach are the modes; Recent / Known are shortcuts into the first.

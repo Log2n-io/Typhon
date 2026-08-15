@@ -82,7 +82,7 @@ export default function ConnectDialog({ open, initialTab, onOpenChange }: Props)
  <DialogHeader>
  <DialogTitle className="">Connect</DialogTitle>
  <DialogDescription className="text-fs-lg">
- Open a database, attach to a live engine, or replay a trace.
+ Open a database or attach to a live engine.
  </DialogDescription>
  </DialogHeader>
 
@@ -94,7 +94,7 @@ export default function ConnectDialog({ open, initialTab, onOpenChange }: Props)
  <TabsList className="shrink-0">
  <TabsTrigger value="recent">Recent</TabsTrigger>
  <TabsTrigger value="known">Known</TabsTrigger>
- <TabsTrigger value="open">Open File</TabsTrigger>
+ <TabsTrigger value="open">Database</TabsTrigger>
  <TabsTrigger value="attach">Attach</TabsTrigger>
  {/* Dev Fixture moved to its own standalone panel (View → Dev Fixture / palette: "Open Dev Fixture").
      The capability probe + `devFixtureAvailable` state stay here only as a hint for the View-menu wiring

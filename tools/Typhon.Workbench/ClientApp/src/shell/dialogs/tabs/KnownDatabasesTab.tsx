@@ -98,7 +98,7 @@ export default function KnownDatabasesTab({ onOpen, openingPath, active = true }
           ) : (
             <span>
               No databases recorded yet. Any Typhon application that opens a database registers it here — including this
-              one, so opening a database from the <b className="px-1">Open File</b> tab will populate the list.
+              one, so opening a database from the <b className="px-1">Database</b> tab will populate the list.
             </span>
           )}
         </div>

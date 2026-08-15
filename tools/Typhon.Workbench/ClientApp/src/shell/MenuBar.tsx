@@ -68,7 +68,7 @@ export default function MenuBar() {
  const setDensity = useDensityStore((s) => s.setMode);
 
  const [dialogOpen, setDialogOpen] = useState(false);
- const [initialTab, setInitialTab] = useState<ConnectTab>('open');
+ const [initialTab, setInitialTab] = useState<ConnectTab>('known');
  const [saveReplayOpen, setSaveReplayOpen] = useState(false);
  const [kbdHelpOpen, setKbdHelpOpen] = useState(false);
 
@@ -107,7 +107,7 @@ export default function MenuBar() {
  <MenubarMenu>
  <MenubarTrigger className="h-7 px-2 text-fs-lg">File</MenubarTrigger>
  <MenubarContent>
- <MenubarItem onClick={() => openConnect('open')}>Open .typhon File…</MenubarItem>
+ <MenubarItem onClick={() => openConnect('known')}>Open Typhon Database…</MenubarItem>
  <MenubarItem onClick={() => openConnect('attach')}>Attach to Engine…</MenubarItem>
  <MenubarSeparator />
  <MenubarItem
