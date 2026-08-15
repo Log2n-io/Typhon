@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using Microsoft.AspNetCore.Mvc;
 using Typhon.Workbench.DataBrowser;
 using Typhon.Workbench.Dtos.Data;
+using Typhon.Workbench.Dtos.Profiler;
 using Typhon.Workbench.Middleware;
 using Typhon.Workbench.Schema;
 
@@ -43,6 +44,29 @@ public sealed class DataBrowserController : ControllerBase
     [HttpGet("archetypes/{archetypeId}/entities/{entityId}")]
     public ActionResult<EntityDetailDto> GetEntity(Guid sessionId, string archetypeId, string entityId)
         => Invoke(() => _data.GetEntityDetail(sessionId, archetypeId, entityId));
+
+    /// <summary>
+    /// Splits a cohort of entity ids into those the database still holds and those it does not (#620, design §4.4) — the
+    /// "1,240 spawned here, 830 still alive" answer.
+    /// </summary>
+    /// <remarks>POST rather than GET because a cohort's id list does not fit in a query string.</remarks>
+    [HttpPost("archetypes/{archetypeId}/entities/resolve")]
+    public ActionResult<CohortResolutionDto> ResolveCohort(Guid sessionId, string archetypeId, [FromBody] CohortRequestDto body)
+        => Invoke(() => _data.ResolveCohort(sessionId, archetypeId, body?.EntityIds ?? []));
+
+    /// <summary>
+    /// A page of rows for an explicit list of entity ids, in the order given — what makes "open these 830 in the Data Browser" a navigation rather than a
+    /// filter the user has to rebuild by hand.
+    /// </summary>
+    [HttpPost("archetypes/{archetypeId}/entities/page")]
+    public ActionResult<EntityPageDto> GetEntityPageForIds(
+        Guid sessionId,
+        string archetypeId,
+        [FromBody] CohortRequestDto body,
+        [FromQuery] int offset = 0,
+        [FromQuery] int limit = 200,
+        [FromQuery] string preview = null)
+        => Invoke(() => _data.GetEntityPageForIds(sessionId, archetypeId, body?.EntityIds ?? [], offset, limit, preview));
 
     private ActionResult<T> Invoke<T>(Func<T> action)
     {

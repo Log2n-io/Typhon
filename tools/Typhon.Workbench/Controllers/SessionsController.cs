@@ -17,13 +17,20 @@ public sealed partial class SessionsController : ControllerBase
     private readonly SessionManager _sessions;
     private readonly DemoDataProvider _demoData;
     private readonly OptionsStore _options;
+    private readonly DatabasePauseCoordinator _pause;
     private readonly ILogger<SessionsController> _logger;
 
-    public SessionsController(SessionManager sessions, DemoDataProvider demoData, OptionsStore options, ILogger<SessionsController> logger)
+    public SessionsController(
+        SessionManager sessions,
+        DemoDataProvider demoData,
+        OptionsStore options,
+        DatabasePauseCoordinator pause,
+        ILogger<SessionsController> logger)
     {
         _sessions = sessions;
         _demoData = demoData;
         _options = options;
+        _pause = pause;
         _logger = logger;
     }
 
@@ -45,7 +52,39 @@ public sealed partial class SessionsController : ControllerBase
         // ADR-055 Phase 2: the persisted registered schema directories feed manifest resolution at priority 2 (above
         // the Workbench's own bundled binaries). Ignored when an explicit user-specified list is supplied above.
         var registeredSchemaDirs = _options.Get().Schema?.Directories ?? [];
-        var engine = await EngineLifecycle.OpenAsync(resolvedFile, requestedSchemaDllPaths, registeredSchemaDirs, ct);
+
+        EngineLifecycle engine;
+        try
+        {
+            engine = await EngineLifecycle.OpenAsync(resolvedFile, requestedSchemaDllPaths, registeredSchemaDirs, ct);
+        }
+        catch (Exception ex) when (ex is DatabaseLockedException || (ex is WorkbenchException { ErrorCode: "file_locked" }))
+        {
+            // Another process holds the database (#621). Open PAUSED rather than refuse: the session still knows its bundle, so its captures list and attach
+            // with no engine involved, and the coordinator promotes it to a real open the moment the holder exits. That is the cold-start case — reaching for
+            // the profiler *while* the application is running — which a hard failure leaves with no session at all, and therefore nothing to show.
+            //
+            // Only a LOCKED database earns this. Corrupt, missing and schema-incompatible databases still fail below, because waiting for a lock that was
+            // never the problem would convert a clear error into a session that silently never resumes.
+            // Two ways a database says "someone else has me", and they must not behave differently:
+            //   • DatabaseLockedException — the advisory lock was found and names its holder.
+            //   • file_locked — the OS refused the handle (ERROR_SHARING_VIOLATION). This happens when the lock file is
+            //     absent or stale but a process still holds the mapping: a holder that died before writing its lock, or
+            //     simply the instant before another opener finishes writing one. It is ALWAYS another process.
+            // Only the first can name the holder from the exception; for the second we read db.lock if it happens to be
+            // there, and otherwise say plainly that we do not know who. Failing hard on the second while pausing on the
+            // first would make the same situation behave differently depending on which race the caller lost.
+            var holder = ex is DatabaseLockedException locked
+                ? new DatabaseHolder(locked.OwnerPid, locked.OwnerMachine, locked.StartedAt)
+                : DatabaseLockFile.TryReadHolder(resolvedFile, out var pid, out var machine, out var startedAt)
+                    ? new DatabaseHolder(pid, machine, startedAt)
+                    : null;
+            var pausedSession = new OpenSession(Guid.NewGuid(), resolvedFile, holder, requestedSchemaDllPaths);
+            _sessions.Create(pausedSession);
+            _pause.TrackPausedSession(pausedSession, requestedSchemaDllPaths);
+            LogSessionCreatedPaused(pausedSession.Id, holder?.Describe() ?? "an unidentified process");
+            return CreatedAtAction(nameof(GetSession), new { id = pausedSession.Id }, ToDto(pausedSession));
+        }
 
         var sessionState = engine.State switch
         {
@@ -66,6 +105,9 @@ public sealed partial class SessionsController : ControllerBase
             engine.Diagnostics);
 
         _sessions.Create(session);
+        // #621 — a live session is watched too, so the yieldable advertisement its lock file makes is actually honoured
+        // when an application asks for the database.
+        _pause.TrackLiveSession(session, requestedSchemaDllPaths);
         LogSessionCreated(session.Id, "file");
         return CreatedAtAction(nameof(GetSession), new { id = session.Id }, ToDto(session));
     }
@@ -91,35 +133,6 @@ public sealed partial class SessionsController : ControllerBase
         var session = new AttachSession(sessionId, request.EndpointAddress, runtime);
         _sessions.Create(session);
         LogSessionCreated(session.Id, "attach");
-        return CreatedAtAction(nameof(GetSession), new { id = session.Id }, ToDto(session));
-    }
-
-    [HttpPost("trace")]
-    public ActionResult<SessionDto> CreateTraceSession([FromBody] CreateTraceSessionRequest request)
-    {
-        if (string.IsNullOrWhiteSpace(request.FilePath))
-        {
-            throw new WorkbenchException(400, "invalid_path", "filePath is required.");
-        }
-        var resolvedFile = Path.GetFullPath(request.FilePath);
-        if (!System.IO.File.Exists(resolvedFile))
-        {
-            throw new WorkbenchException(404, "trace_file_not_found", $"Trace file not found: {resolvedFile}");
-        }
-
-        // Validate file magic up-front — rejects unrelated files immediately with 400 rather than creating a session that'll fault its
-        // background build and flood /metadata with 500s. Both .typhon-trace ("TYTR") and .typhon-replay ("TPCH" + IsSelfContained) are
-        // accepted; TraceSessionRuntime detects which by extension and takes the right load path.
-        ValidateTraceOrReplayMagic(resolvedFile);
-
-        // Single-session-per-file invariant matches the Open-mode pattern (above). Reopens are cheap because
-        // the sidecar cache is fingerprint-cached on disk (or, for replay files, the file IS the cache).
-        _sessions.RemoveWhere(s => s is TraceSession ts && string.Equals(ts.FilePath, resolvedFile, StringComparison.OrdinalIgnoreCase));
-
-        var runtime = TraceSessionRuntime.Start(resolvedFile, _logger);
-        var session = new TraceSession(Guid.NewGuid(), resolvedFile, runtime);
-        _sessions.Create(session);
-        LogSessionCreated(session.Id, "trace");
         return CreatedAtAction(nameof(GetSession), new { id = session.Id }, ToDto(session));
     }
 
@@ -173,12 +186,50 @@ public sealed partial class SessionsController : ControllerBase
         if (string.Equals(stem, "demo", StringComparison.OrdinalIgnoreCase)
             && !Path.IsPathRooted(requestPath))
         {
+            // The demo is the ONE path allowed not to exist yet: DemoDataProvider materialises it on first use, so it
+            // is a create-on-demand fixture rather than a database the user is claiming to already have.
             return _demoData.Resolve(requestPath);
         }
-        return Path.GetFullPath(requestPath);
+
+        var fullPath = Path.GetFullPath(requestPath);
+
+        // A viewer never creates data. EngineLifecycle.OpenAsync is create-if-missing — deliberately, since that is what
+        // makes an application's first run produce its database — so without this check a mistyped or stale path does not
+        // fail: it FABRICATES a new empty database and returns a perfectly healthy session onto it. The user then browses
+        // an empty bundle wondering where their entities went, which reads as data loss rather than as the typo it is.
+        // Observed via `typhon ui .\does-not-exist.typhon`, which left a real 565 KB `data` file behind.
+        //
+        // CreateFileSession already promises this a few lines below — "Corrupt, missing and schema-incompatible databases
+        // still fail" — where it explains why only a LOCKED database opens paused. This is what makes the "missing" half
+        // of that sentence true, and it must stay ahead of the lock handling: a path that is not there was never locked.
+        if (!Directory.Exists(fullPath))
+        {
+            throw new WorkbenchException(404, "database_not_found",
+                $"No database at '{fullPath}'. A Typhon database is a directory named {{name}}{IntegrityConstants.BundleExtension}; "
+                + "check the path, or run your application once to create one.");
+        }
+
+        return fullPath;
     }
 
+    /// <summary>
+    /// Projects a session to its wire shape, then stamps the capability set on whatever the per-kind branches produced (#617).
+    /// </summary>
+    /// <remarks>
+    /// Applied once here rather than repeated in each branch: capabilities are read off <see cref="ISession"/> identically for every kind, and a branch that
+    /// forgot them would surface as a session whose panels silently never appear — a bug with no error attached to it.
+    /// </remarks>
     private static SessionDto ToDto(WbSession s)
+    {
+        var dto = ToDtoCore(s);
+        return dto with
+        {
+            Capabilities = [.. s.Capabilities],
+            ActiveProfileId = s.ActiveProfileId,
+        };
+    }
+
+    private static SessionDto ToDtoCore(WbSession s)
     {
         if (s is OpenSession os)
         {
@@ -192,6 +243,28 @@ public sealed partial class SessionsController : ControllerBase
                 SessionState.Incompatible => "Incompatible",
                 _ => "Compatible",
             };
+            // #621 — a paused session is Lifecycle "Paused" with IsPaused set and Reason naming the holder. The client must be able to tell "released, will
+            // come back" apart from both "still loading" and "failed": the first is a normal state with working profiler panels, and rendering it as an error
+            // would teach the user to close and reopen, which is precisely what pausing exists to avoid.
+            if (os.IsPaused)
+            {
+                return new SessionDto(
+                    os.Id,
+                    os.Kind.ToString(),
+                    os.State.ToString(),
+                    os.FilePath,
+                    os.SchemaDllPaths,
+                    os.SchemaStatus,
+                    os.LoadedComponentTypes,
+                    diags,
+                    Lifecycle: "Paused",
+                    IsPaused: true,
+                    SchemaCompatibility: schemaCompatibility,
+                    Reason: os.PausedBy is { } holder
+                        ? $"Database released to {holder.Describe()}. Captures remain available; the Workbench reopens it automatically when that process exits."
+                        : "Database released. The Workbench reopens it automatically when it becomes available.");
+            }
+
             return new SessionDto(
                 os.Id,
                 os.Kind.ToString(),
@@ -215,19 +288,6 @@ public sealed partial class SessionsController : ControllerBase
                 Lifecycle: isReady ? "Ready" : "Loading",
                 IsStreaming: isReady);
         }
-        if (s is TraceSession trace)
-        {
-            var lifecycle = !trace.Runtime.IsBuildComplete ? "Loading"
-                : trace.Runtime.Metadata != null ? "Ready"
-                : "Closed";
-            return new SessionDto(
-                trace.Id,
-                trace.Kind.ToString(),
-                trace.State.ToString(),
-                trace.FilePath,
-                Lifecycle: lifecycle,
-                Reason: lifecycle == "Closed" ? "build-failed" : null);
-        }
         return new SessionDto(s.Id, s.Kind.ToString(), s.State.ToString(), s.FilePath, Lifecycle: "Ready");
     }
 
@@ -242,14 +302,16 @@ public sealed partial class SessionsController : ControllerBase
                 SessionState.Incompatible => "Incompatible",
                 _ => "Compatible",
             };
+            // #621 — kept in step with ToDtoCore. Two projections of the same session state is one too many, but the DTOs differ and the client reads both;
+            // what must never differ is whether they agree the session is paused.
             return new SessionStateDto(
                 os.Kind.ToString(),
-                Lifecycle: "Ready",
+                Lifecycle: os.IsPaused ? "Paused" : "Ready",
                 IsStreaming: false,
-                IsPaused: false,
+                IsPaused: os.IsPaused,
                 IsReattaching: false,
                 SchemaCompatibility: schemaCompatibility,
-                Reason: null);
+                Reason: os.IsPaused && os.PausedBy is { } holder ? $"Database released to {holder.Describe()}." : null);
         }
         if (s is AttachSession attach)
         {
@@ -263,20 +325,6 @@ public sealed partial class SessionsController : ControllerBase
                 SchemaCompatibility: null,
                 Reason: null);
         }
-        if (s is TraceSession trace)
-        {
-            var lifecycle = !trace.Runtime.IsBuildComplete ? "Loading"
-                : trace.Runtime.Metadata != null ? "Ready"
-                : "Closed";
-            return new SessionStateDto(
-                trace.Kind.ToString(),
-                Lifecycle: lifecycle,
-                IsStreaming: false,
-                IsPaused: false,
-                IsReattaching: false,
-                SchemaCompatibility: null,
-                Reason: lifecycle == "Closed" ? "build-failed" : null);
-        }
         return new SessionStateDto(s.Kind.ToString(), Lifecycle: "Ready", IsStreaming: false, IsPaused: false,
             IsReattaching: false, SchemaCompatibility: null, Reason: null);
     }
@@ -284,68 +332,7 @@ public sealed partial class SessionsController : ControllerBase
     [LoggerMessage(Level = LogLevel.Information, Message = "Session {SessionId} created via {Mode}")]
     private partial void LogSessionCreated(Guid sessionId, string mode);
 
-    /// <summary>
-    /// Validates the file at <paramref name="path"/> as either a <c>.typhon-trace</c> source (magic "TYTR") OR a
-    /// <c>.typhon-replay</c> self-contained cache (magic "TPCH"). Throws 400 with a human-readable reason on any other content. The
-    /// extension determines the expected magic — opening a <c>.typhon-trace-cache</c> file (TPCH magic but conventional sidecar role)
-    /// from the trace open dialog is rejected with a hint to open the parent <c>.typhon-trace</c> instead.
-    /// </summary>
-    private static void ValidateTraceOrReplayMagic(string path)
-    {
-        // Read magic (4 bytes) + on-disk format version (next 2 bytes) in one peek — the version gate below catches an
-        // old/newer .typhon-trace up-front, so an unsupported file fails here with a clear 400 instead of creating a
-        // session whose background build faults at TraceFileReader.ReadHeader and surfaces a 500 on /metadata.
-        Span<byte> head = stackalloc byte[6];
-        int read;
-        try
-        {
-            using var fs = System.IO.File.OpenRead(path);
-            read = fs.ReadAtLeast(head, head.Length, throwOnEndOfStream: false);
-        }
-        catch (IOException ex)
-        {
-            throw new WorkbenchException(400, "invalid_trace_file", $"Cannot read trace file: {ex.Message}");
-        }
-        if (read < 4)
-        {
-            throw new WorkbenchException(400, "invalid_trace_file", $"File is too small to be a valid trace: {path}");
-        }
+    [LoggerMessage(Level = LogLevel.Information, Message = "Session {SessionId} created PAUSED — database held by {Holder}; watching for release")]
+    private partial void LogSessionCreatedPaused(Guid sessionId, string holder);
 
-        var magic = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(head);
-        var extension = Path.GetExtension(path);
-        var isReplay = string.Equals(extension, ".typhon-replay", StringComparison.OrdinalIgnoreCase);
-
-        if (isReplay)
-        {
-            if (magic == Typhon.Profiler.CacheHeader.MagicValue)
-            {
-                return;
-            }
-            var asAscii = System.Text.Encoding.ASCII.GetString(head[..4]);
-            throw new WorkbenchException(400, "invalid_replay_file",
-                $"File magic is '{asAscii}' (0x{magic:X8}); expected 'TPCH' for a .typhon-replay file.");
-        }
-
-        // Default: source .typhon-trace file with TYTR magic.
-        if (magic == Typhon.Profiler.TraceFileHeader.MagicValue)
-        {
-            // Magic is valid — also gate the on-disk format version so an old/newer trace fails with an immediate,
-            // actionable 400 (mirrors TraceFileReader.ReadHeader's range check, which would otherwise fault the build).
-            var version = read >= 6 ? System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(head[4..6]) : (ushort)0;
-            if (version < Typhon.Profiler.TraceFileReader.MinSupportedVersion || version > Typhon.Profiler.TraceFileHeader.CurrentVersion)
-            {
-                throw new WorkbenchException(400, "unsupported_trace_version",
-                    $"Unsupported trace file version: {version}. This build reads versions "
-                    + $"{Typhon.Profiler.TraceFileReader.MinSupportedVersion}..{Typhon.Profiler.TraceFileHeader.CurrentVersion}. Re-record against a current build.");
-            }
-            return;
-        }
-
-        // Common-mistake hint: a TPCH file with .typhon-trace-cache extension is the auto-built sidecar; the user should open the parent.
-        var ascii = System.Text.Encoding.ASCII.GetString(head[..4]);
-        var hint = magic == Typhon.Profiler.CacheHeader.MagicValue
-            ? "This looks like a .typhon-trace-cache sidecar. Open the matching source .typhon-trace file instead, or use .typhon-replay extension if this is a saved replay file."
-            : $"File magic is '{ascii}' (0x{magic:X8}); expected 'TYTR' for a .typhon-trace file.";
-        throw new WorkbenchException(400, "invalid_trace_file", hint);
-    }
 }

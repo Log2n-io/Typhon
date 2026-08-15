@@ -184,6 +184,21 @@ export function toggleViewResourceTree(): void {
   }
 }
 
+/**
+ * Expands the right edge group so a newly-published selection is actually visible. Mirrors what opening the Data
+ * Browser does before focusing its entity list: a selection whose only effect lands in a collapsed rail is
+ * indistinguishable from a click that did nothing — which is exactly how single-click in Profile sessions read.
+ * No-op when the rail is already open or absent, so it never steals focus from what the user is looking at.
+ */
+export function ensureDetailVisible(): void {
+  const api = registeredApi;
+  if (!api) return;
+  const eg = api.getEdgeGroup('right');
+  if (eg?.isCollapsed()) {
+    eg.expand();
+  }
+}
+
 /** Toggle the right edge group (Detail panel). */
 export function toggleViewDetail(): void {
   const api = registeredApi;
@@ -320,6 +335,15 @@ export function toggleViewSystemDag(): void {
 
 export function toggleViewDataFlow(): void {
   toggleDockPanel('data-flow', 'DataFlow', 'Data Flow');
+}
+
+/**
+ * Entity Lifecycle — spawn/destroy cohorts (#620). Its own view rather than a Data Flow tab: the two read from
+ * different sections of the capture, and Data Flow's bars depend on a rollup that a populated cluster archetype does
+ * not currently produce (#631), which would have made this feature unusable for reasons unrelated to it.
+ */
+export function toggleViewEntityLifecycle(): void {
+  toggleDockPanel('entity-lifecycle', 'EntityLifecycle', 'Entity Lifecycle');
 }
 
 export function toggleViewOptions(): void {
@@ -571,6 +595,45 @@ export function registerResetLayout(fn: (() => void) | null): void {
  */
 export function resetLayout(): void {
   registeredResetLayout?.();
+}
+
+/**
+ * Open (or focus) the **Profile sessions** list — the captures recorded against the database this session has open
+ * (#617).
+ *
+ * An open-session view rather than a profiler one: it is how you *find* a capture, so it has to be reachable before
+ * any profile is attached. That is also why it docks **left, beside Resources** rather than in the centre: it is a
+ * navigator — you pick a capture from it and the result appears elsewhere — not a workspace you read.
+ *
+ * The anchor is the Resource Tree panel rather than the left edge group's id, so it still lands correctly in a
+ * restored layout where the group was rebuilt under a different id. With no Resource Tree at all we let dockview
+ * place it; "Reset Layout to Default" restores the canonical spot. (Same fallback as the Systems & Queries navigator.)
+ */
+export function openProfiles(): void {
+  const api = registeredApi;
+  if (!api) return;
+  const from = readActivePanelId();
+  const existing = api.getPanel('profiles');
+  if (existing) {
+    const group = existing.api.group;
+    if (group.api.isCollapsed()) {
+      group.api.expand();
+    }
+    existing.focus();
+  } else {
+    const leftEdge = api.getEdgeGroup('left');
+    if (leftEdge?.isCollapsed()) {
+      leftEdge.expand();
+    }
+    const anchor = api.getPanel('resource-tree');
+    api.addPanel({
+      id: 'profiles',
+      component: 'Profiles',
+      title: 'Profile sessions',
+      position: anchor ? { referencePanel: anchor.id, direction: 'within' } : undefined,
+    });
+  }
+  recordPanelTransition('profiles', from);
 }
 
 /**

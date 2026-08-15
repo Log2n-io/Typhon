@@ -65,7 +65,8 @@ public sealed class FileCacheSink : ICacheChunkSink
         IReadOnlyList<QueueTickSummary> queueTickSummaries,
         IReadOnlyList<PostTickSummary> postTickSummaries,
         IReadOnlyDictionary<ushort, string> queueIdToName,
-        IReadOnlyList<SystemArchetypeTouchSummary> systemArchetypeTouches)
+        IReadOnlyList<SystemArchetypeTouchSummary> systemArchetypeTouches,
+        IReadOnlyList<EntityLifecycleRun> entityLifecycleRuns)
     {
         if (_trailerWritten)
         {
@@ -117,6 +118,11 @@ public sealed class FileCacheSink : ICacheChunkSink
         // v15 (#327) — always emit, even if empty, so v15 readers can rely on its presence.
         _writer.BeginSection(CacheSectionId.SystemArchetypeTouches);
         _writer.WriteArray(ToArray(systemArchetypeTouches));
+
+        // v17 (#620) — always emit, even if empty. An absent section and an empty one would otherwise be indistinguishable, and the entity lens needs
+        // to tell "this capture recorded no spawns" from "this cache is too old to know".
+        _writer.BeginSection(CacheSectionId.EntityLifecycle);
+        _writer.WriteArray(ToArray(entityLifecycleRuns));
 
         _writer.Finalize(headerTemplate);
         _trailerWritten = true;

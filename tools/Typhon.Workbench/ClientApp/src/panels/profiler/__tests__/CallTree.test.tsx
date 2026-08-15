@@ -30,7 +30,11 @@ vi.mock('@/shell/commands/openSchemaBrowser', () => ({
   updateSourcePreviewIfOpen: vi.fn(),
 }));
 vi.mock('@/stores/useSessionStore', () => ({
-  useSessionStore: (sel: (s: unknown) => unknown) => sel({ sessionId: 'session-1', kind: 'trace', token: 'tok' }),
+  useSessionStore: (sel: (s: unknown) => unknown) =>
+    sel({ sessionId: 'session-1', kind: 'trace', token: 'tok', capabilities: ['profiler'] }),
+  // The panel asks whether its data comes from a capture file rather than a live stream (#617) — true for the trace
+  // session this suite models.
+  useTraceBackedSession: () => true,
 }));
 vi.mock('@/stores/useCpuFrameStore', () => ({
   useCpuFrameStore: (sel: (s: unknown) => unknown) => sel({ byId: new Map(), categoryName: new Map() }),

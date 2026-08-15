@@ -36,14 +36,21 @@ interface DbMapStoreState {
   /** The selected side-rail tab. */
   activeTab: DbMapTab;
   /**
-   * A component type name a cross-link (Resource Explorer / Schema Inspector) asked the map to focus on open
-   * (§13 A4 AC1) — cross-links identify components by type name. The panel consumes it once and clears it.
+   * What a cross-link asked the map to focus on open (§13 A4 AC1). Cross-links identify their target by **name**,
+   * never by id — an archetype's id is a per-process catalog id on one side of the epic's bridges and a persisted
+   * routing id on the other (design §5.2/§5.3), and the segment-table id spaces of `/dbmap/regions` and
+   * `/dbmap/health` are independently assigned. A name is the one handle every panel agrees on.
+   *
+   * The `kind` distinguishes the two resolutions: a component owns one segment, whereas an archetype owns three
+   * (cluster rows, entity map, cluster index) and must be framed as a set (#619 §4.2). The panel consumes the
+   * request once and clears it.
    */
-  pendingFocusType: string | null;
+  pendingFocus: { kind: 'component' | 'archetype'; name: string } | null;
   /**
-   * A physical page index an integrity finding asked the map to reveal. Distinct from
-   * {@link pendingFocusType} because a finding identifies damage by page, not by component — a corrupt page
-   * may belong to a segment whose component type is exactly what the damage made unreadable.
+   * A physical page index an integrity finding asked the map to reveal. Deliberately a second field rather than
+   * another arm of {@link pendingFocus}: a finding identifies damage by page, not by schema entity — a corrupt
+   * page may belong to a segment whose component type is exactly what the damage made unreadable. Folding it in
+   * would force every schema-entity consumer to discriminate against a kind it can never handle.
    */
   pendingFocusPage: number | null;
   /** The active filter-to-dim predicate, or null when no filter is applied (§4.6). */
@@ -62,9 +69,11 @@ interface DbMapStoreState {
   setActiveTab: (tab: DbMapTab) => void;
   /** Requests the panel focus a component type's segment on its next render — the cross-link entry point. */
   requestFocusComponent: (typeName: string) => void;
+  /** Requests the panel frame every segment an archetype owns (#619 §4.2). */
+  requestFocusArchetype: (archetypeName: string) => void;
   /** Requests the panel centre on a physical page — the integrity-finding entry point. */
   requestFocusPage: (pageIndex: number) => void;
-  /** Clears a consumed cross-link focus request (both the type and page forms). */
+  /** Clears a consumed cross-link focus request (both the schema-entity and page forms). */
   clearPendingFocus: () => void;
   /** Sets the filter-to-dim predicate; null clears it. */
   setFilter: (filter: DbMapFilter | null) => void;
@@ -96,7 +105,7 @@ export const useDbMapStore = create<DbMapStoreState>()(
       lensSegmentId: null,
       railCollapsed: false,
       activeTab: 'legend',
-      pendingFocusType: null,
+      pendingFocus: null,
       pendingFocusPage: null,
       filter: null,
       bookmarks: {},
@@ -110,9 +119,10 @@ export const useDbMapStore = create<DbMapStoreState>()(
       focusSegment: (segmentId) => set({ lens: 'fragmentation', lensSegmentId: segmentId, activeTab: 'legend' }),
       toggleRail: () => set((s) => ({ railCollapsed: !s.railCollapsed })),
       setActiveTab: (tab) => set({ activeTab: tab }),
-      requestFocusComponent: (typeName) => set({ pendingFocusType: typeName }),
+      requestFocusComponent: (typeName) => set({ pendingFocus: { kind: 'component', name: typeName } }),
+      requestFocusArchetype: (archetypeName) => set({ pendingFocus: { kind: 'archetype', name: archetypeName } }),
       requestFocusPage: (pageIndex) => set({ pendingFocusPage: pageIndex }),
-      clearPendingFocus: () => set({ pendingFocusType: null, pendingFocusPage: null }),
+      clearPendingFocus: () => set({ pendingFocus: null, pendingFocusPage: null }),
       setFilter: (filter) => set({ filter }),
       addBookmark: (databaseName, bookmark) =>
         set((s) => ({
@@ -138,7 +148,7 @@ export const useDbMapStore = create<DbMapStoreState>()(
       storage: safeStorage(),
       // Persist the view configuration so the panel reopens the way the user left it — encoding, lens, overlay
       // toggles, filter, and rail layout — alongside the per-database bookmarks. `lensSegmentId`,
-      // `pendingFocusType` and `pendingFocusPage` are deliberately NOT persisted: they reference a specific
+      // `pendingFocus` and `pendingFocusPage` are deliberately NOT persisted: they reference a specific
       // segment / cross-link / damaged page that may not exist next session, so they reset (the panel guards
       // a restored fragmentation lens with no segment so it doesn't dim the whole map on open, and guards a
       // restored integrity lens with no report the same way).

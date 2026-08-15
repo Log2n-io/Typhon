@@ -176,7 +176,7 @@ describe('Inspector — bus-driven dispatch', () => {
     useSelectionStore.getState().select('segment', { kind: 'segment', segmentId: 9, typeName: 'Position' });
     renderInspector();
     fireEvent.click(screen.getByTestId('segment-reveal-file-map'));
-    expect(useDbMapStore.getState().pendingFocusType).toBe('Position');
+    expect(useDbMapStore.getState().pendingFocus).toEqual({ kind: 'component', name: 'Position' });
   });
 
   it('a non-component segment leaf shows no handoff verbs — no dead affordance (PC-6)', () => {

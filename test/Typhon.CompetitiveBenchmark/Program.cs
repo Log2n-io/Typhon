@@ -12,6 +12,11 @@ internal static class Program
 
     public static int Main(string[] args)
     {
+        // Competitive-harness databases are throwaway measurement scaffolding — keep them out of the machine-local
+        // registry (#622, design D-7). Most already land under %TEMP% and are suppressed automatically; a few runners
+        // default to the working directory, which this covers.
+        DatabaseRegistry.SuppressForProcess = true;
+
         var cmd = args.Length > 0 ? args[0] : "smoke";
         switch (cmd)
         {

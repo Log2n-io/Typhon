@@ -6,6 +6,7 @@ import { refreshResourceGraph } from '@/hooks/useResourceIndex';
 import {
   toggleViewDataBrowser,
   toggleViewDataFlow,
+  toggleViewEntityLifecycle,
   toggleViewDbMap,
   toggleViewDevFixture,
   toggleViewStorageHealth,
@@ -18,6 +19,7 @@ import {
   toggleViewSourcePreview,
   toggleViewSystemDag,
   toggleViewSystemsQueriesNav,
+  openProfiles,
   openSourcePreviewForCurrentSpan,
   saveLayoutAsDefault,
   resetLayout,
@@ -54,7 +56,8 @@ export function openConnect(tab: ConnectTab): void {
 }
 
 export function buildBaseCommands(): CommandItem[] {
-  const { sessionId, clearSession, kind } = useSessionStore.getState();
+  const { sessionId, clearSession, kind, capabilities } = useSessionStore.getState();
+  const sessionScope = { kind, capabilities };
   const { toggle: toggleTheme } = useThemeStore.getState();
 
   const closeSession = () => {
@@ -63,20 +66,21 @@ export function buildBaseCommands(): CommandItem[] {
   };
 
   const commands: CommandItem[] = [
-    { id: 'open-file',     label: 'Open File…',               keywords: 'open typhon',      action: () => openConnect('open') },
+    { id: 'open-file',     label: 'Open Typhon Database…',    keywords: 'open typhon file database', action: () => openConnect('known') },
     { id: 'open-recent',   label: 'Open Recent',              keywords: 'recent file',       action: () => openConnect('recent') },
     { id: 'attach',        label: 'Attach…',                  keywords: 'attach engine',     action: () => openConnect('attach') },
-    { id: 'open-trace',    label: 'Open Trace…',              keywords: 'trace typhon',      action: () => openConnect('trace') },
     { id: 'close-session', label: 'Close Session',            keywords: 'close disconnect',  action: closeSession },
     { id: 'refresh-graph', label: 'Refresh Resource Graph',   keywords: 'refresh reload tree', action: refreshResourceGraph },
     // (Stage 2 / GAP-02: the schema-archetypes/indexes/relationships toggle commands were removed with the
     //  four Schema* panels — those facts now live in the Component Inspector tabs.)
     { id: 'toggle-view-system-dag',           label: 'Toggle View System DAG',              keywords: 'system dag scheduler topology phases rfc07', action: toggleViewSystemDag, viewId: 'SystemDag' },
     { id: 'toggle-view-data-flow',            label: 'Toggle View Data Flow',               keywords: 'data flow timeline matrix marey tracks granularity bars access heatmap systems components', action: toggleViewDataFlow, viewId: 'DataFlow' },
+    { id: 'toggle-view-entity-lifecycle',      label: 'Toggle View Entity Lifecycle',        keywords: 'entity lifecycle spawn destroy cohort born created deleted alive survivors storm', action: toggleViewEntityLifecycle, viewId: 'EntityLifecycle' },
     { id: 'toggle-view-dbmap',                label: 'Toggle View Database File Map',       keywords: 'database file map storage layout pages hilbert fragmentation disk', action: toggleViewDbMap, viewId: 'DbMap' },
     { id: 'toggle-view-storage-health',       label: 'Open Storage Health',                 keywords: 'storage health dashboard segments occupancy dirty reclaimable fragmentation wal disk aggregate', action: toggleViewStorageHealth, viewId: 'StorageHealth' },
     { id: 'toggle-view-dev-fixture',          label: 'Create sample database',              keywords: 'sample playground dev fixture database generate preset advanced destination folder', action: toggleViewDevFixture, viewId: 'DevFixture' },
     { id: 'check-integrity',                  label: 'Check database integrity…',           keywords: 'integrity check scan repair corrupt damage checksum crc verify recover fix broken unopenable loss', action: () => openIntegrity(), viewId: 'Integrity' },
+    { id: 'profiles',                         label: 'Open Profile Sessions',               keywords: 'profile sessions profiles profiling captures traces recordings database', action: openProfiles, viewId: 'Profiles' },
     { id: 'data-browser',                     label: 'Open Data Browser',                   keywords: 'data browser entities components values inspect crud rows', action: () => toggleViewDataBrowser(), viewId: 'DataBrowserEntities' },
     { id: 'open-query-console',               label: 'Open Query Console',                  keywords: 'query console author run dsl chip filter where archetype indexed', action: () => openQueryConsole(), viewId: 'QueryConsole' },
     { id: 'toggle-view-query-console',        label: 'Toggle View Query Console',           keywords: 'query console author run dsl chip filter where archetype indexed', action: toggleViewQueryConsole, viewId: 'QueryConsole' },
@@ -104,5 +108,5 @@ export function buildBaseCommands(): CommandItem[] {
   // (IA §5.1) — so a view-toggle the session can't actually open is absent from the palette, mirroring the View
   // menu. Non-view (shell) commands have no viewId → scope `any` → always kept. Single source of truth for the
   // session scope is `viewRegistry.VIEW_SESSION_SCOPE`, shared with the menu.
-  return commands.filter((c) => isViewVisible(c.viewId, kind));
+  return commands.filter((c) => isViewVisible(c.viewId, sessionScope));
 }

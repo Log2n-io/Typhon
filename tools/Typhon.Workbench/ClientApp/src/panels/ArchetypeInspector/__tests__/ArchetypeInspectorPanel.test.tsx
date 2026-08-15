@@ -7,6 +7,7 @@ import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useDataBrowserStore } from '@/stores/useDataBrowserStore';
 import { useInspectorTargetStore } from '@/stores/useInspectorTargetStore';
+import { useDbMapStore } from '@/stores/useDbMapStore';
 
 // Stage 2 · Archetype Inspector panel (GAP-02). Component coverage: PC-9 self-addressing (auto-target on cold
 // open, header switcher, PC-1 restore), the bus-driven header + Components tab, row→bus, the launchpad/
@@ -15,9 +16,14 @@ import { useInspectorTargetStore } from '@/stores/useInspectorTargetStore';
 const mocks = vi.hoisted(() => ({
   arch: { list: [] as ArchetypeInfo[], isLoading: false, isError: false, isFetching: false, refetch: () => {} },
   comp: { list: [] as ComponentSummary[], isLoading: false, isError: false, isFetching: false, refetch: () => {} },
+  health: null as unknown,
 }));
 vi.mock('@/hooks/schema/useArchetypeList', () => ({ useArchetypeList: () => mocks.arch }));
 vi.mock('@/hooks/schema/useComponentList', () => ({ useComponentList: () => mocks.comp }));
+// The Storage tab's #619 breakdown reads the segment table. Stub the query so this panel test stays provider-free.
+vi.mock('@/hooks/dbmap/useDbMapHealth', () => ({
+  useDbMapHealth: (sessionId: string | null) => ({ data: sessionId ? mocks.health : null }),
+}));
 // The header/switcher labels run through useArchetypeNames (live react-query). Stub it to a passthrough so this
 // panel test stays provider-free; labels then fall back to "#<id>" (the mocked DTOs carry no archetype name).
 vi.mock('@/hooks/queryConsole/useArchetypeNames', () => ({
@@ -73,7 +79,16 @@ beforeEach(() => {
   useSelectionStore.getState().clear();
   useDataBrowserStore.getState().reset();
   useInspectorTargetStore.setState({ byKey: {} });
-  useSessionStore.setState({ filePath: FILE, sessionId: 'sess', kind: 'open' });
+  useSessionStore.setState({ filePath: FILE, sessionId: 'sess', kind: 'open', capabilities: ['database'] });
+  mocks.health = {
+    dataFileBytes: 4_096 * 10_000,
+    dataFilePageCount: 10_000,
+    segments: [
+      { id: 0, kind: 'Cluster', typeName: 'Game.Unit', pageCount: 1_200, allocatedChunkCount: 62, chunkCapacity: 100, chunkFillPct: 62, reclaimableBytes: 1_800_000, entityCount: 340_182, occupancyPct: 71 },
+      { id: 1, kind: 'EntityMap', typeName: 'Game.Unit', pageCount: 4, allocatedChunkCount: 2, chunkCapacity: 10, chunkFillPct: 20, reclaimableBytes: 0, entityCount: 0, occupancyPct: 20 },
+      { id: 2, kind: 'Component', typeName: 'CompA', pageCount: 900, allocatedChunkCount: 5, chunkCapacity: 10, chunkFillPct: 50, reclaimableBytes: 0, entityCount: 0, occupancyPct: 50 },
+    ],
+  };
   (globalThis as unknown as { ResizeObserver: typeof ResizeObserverStub }).ResizeObserver = ResizeObserverStub;
   Element.prototype.scrollIntoView = () => {};
   Element.prototype.hasPointerCapture = () => false;
@@ -196,5 +211,61 @@ describe('ArchetypeInspectorPanel', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Indexes' }));
     const rows = screen.getAllByTestId('archetype-index-row');
     expect(rows.map((r) => r.getAttribute('data-type-name'))).toEqual(['CompA']);
+  });
+
+  // ── #619 §4.2 — the Storage tab's physical breakdown ──────────────────────────────────────────────────────
+  //
+  // Before #619 this tab's "Reveal in File Map" passed `rows[0].typeName` — the archetype's FIRST COMPONENT. For a
+  // cluster archetype the components have no component-table segment, so the reveal matched nothing and the button
+  // silently did nothing. No test covered it, which is how it survived.
+
+  function renderStorageTab(over: Partial<ArchetypeInfo> = {}) {
+    mocks.arch = { list: [arch('800', 1000, { name: 'Game.Unit', ...over })], isLoading: false, isError: false, isFetching: false, refetch: () => {} };
+    useSelectionStore.getState().select('archetype', '800');
+    render(<ArchetypeInspectorPanel {...PROPS} />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Storage' }));
+  }
+
+  it('Storage tab lists the segments the archetype owns, and their page total', () => {
+    renderStorageTab();
+    const owned = screen.getByTestId('archetype-owned-segments').textContent ?? '';
+    expect(owned).toContain('Cluster · EntityMap');
+    expect(owned).toContain('1,204'); // 1,200 cluster + 4 entity map — NOT the 900-page shared component table
+  });
+
+  it('names shared component tables without counting them in the total', () => {
+    // CompA's table is type-global: every archetype carrying CompA stores rows there. Adding its 900 pages here
+    // would report the same bytes again for the next archetype that lists CompA.
+    renderStorageTab();
+    expect(screen.getByTestId('archetype-shared-tables').textContent).toContain('not counted above');
+    expect(screen.getByTestId('archetype-owned-segments').textContent).not.toContain('2,104');
+  });
+
+  it('reveals the ARCHETYPE, not its first component (the pre-#619 defect)', () => {
+    useDbMapStore.getState().clearPendingFocus();
+    renderStorageTab();
+
+    fireEvent.click(screen.getByTestId('archetype-reveal-file-map'));
+
+    expect(useDbMapStore.getState().pendingFocus).toEqual({ kind: 'archetype', name: 'Game.Unit' });
+  });
+
+  it('offers no reveal at all for an archetype this database has no segment for (§5.7)', () => {
+    // Absent, not a button that opens the map onto nothing.
+    renderStorageTab({ name: 'Game.Vanished' });
+    expect(screen.queryByTestId('archetype-reveal-file-map')).toBeNull();
+    expect(screen.queryByTestId('archetype-owned-segments')).toBeNull();
+  });
+
+  it('carries the staleness caveat only when a capture is attached', () => {
+    // With no capture there are no recorded figures nearby to confuse these present-tense ones with, so the
+    // caveat would be an apology for data that is simply current.
+    renderStorageTab();
+    expect(screen.queryByTestId('archetype-storage-caveat')).toBeNull();
+
+    cleanup();
+    useSessionStore.setState({ capabilities: ['database', 'profiler'] });
+    renderStorageTab();
+    expect(screen.getByTestId('archetype-storage-caveat').textContent).toContain('move pages');
   });
 });

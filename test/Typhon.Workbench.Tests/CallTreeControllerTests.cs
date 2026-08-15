@@ -37,9 +37,7 @@ public sealed class CallTreeControllerTests
 
     private async Task<SessionDto> CreateTraceSessionAsync(string tracePath)
     {
-        var resp = await _client.PostAsJsonAsync("/api/sessions/trace", new CreateTraceSessionRequest(tracePath));
-        resp.EnsureSuccessStatusCode();
-        return JsonSerializer.Deserialize<SessionDto>(await resp.Content.ReadAsStringAsync(), Json)!;
+        return await CaptureSessionFactory.OpenWithCaptureAsync(_client, _factory.DemoDirectory, tracePath);
     }
 
     private async Task WaitForBuildAsync(Guid sessionId, TimeSpan timeout)

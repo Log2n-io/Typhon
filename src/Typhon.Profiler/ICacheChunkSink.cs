@@ -87,6 +87,10 @@ public interface ICacheChunkSink : IDisposable
     /// <see cref="CacheSectionId.SystemArchetypeTouches"/> section. Empty list is valid (older traces or sessions with
     /// <c>TelemetryConfig.SchedulerArchetypeTouchesActive = false</c>).
     /// </param>
+    /// <param name="entityLifecycleRuns">
+    /// v17 (#620). Entity spawn/destroy runs backing the Workbench entity lens's cohorts and the <c>lifecycle/*</c> tracks. Written to the
+    /// <see cref="CacheSectionId.EntityLifecycle"/> section. Empty list is valid — a capture with no ECS activity, or one predating v17.
+    /// </param>
     /// <exception cref="NotSupportedException">
     /// Thrown by live sinks (e.g. <c>AppendOnlyChunkSink</c>) — see <see cref="SupportsTrailer"/>. Callers should gate on that
     /// flag rather than catching the exception.
@@ -105,5 +109,6 @@ public interface ICacheChunkSink : IDisposable
         IReadOnlyList<PostTickSummary> postTickSummaries,
         IReadOnlyDictionary<ushort, string> queueIdToName,
         // v15 (#327) — Workbench Data Flow per-(system, archetype) entity-touch rollups. May be empty.
-        IReadOnlyList<SystemArchetypeTouchSummary> systemArchetypeTouches);
+        IReadOnlyList<SystemArchetypeTouchSummary> systemArchetypeTouches,
+        IReadOnlyList<EntityLifecycleRun> entityLifecycleRuns);
 }

@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Mvc;
 using Typhon.Workbench.Dtos.Data;
 using Typhon.Workbench.Dtos.Profiler;
 using Typhon.Workbench.Middleware;
+using Typhon.Workbench.Profiler;
 using Typhon.Workbench.Services;
 using Typhon.Workbench.Sessions;
 
@@ -110,6 +111,16 @@ public sealed class DataController : WorkbenchControllerBase
             new TrackFieldDescriptorDto("tickNumber",        "u32"),
             new TrackFieldDescriptorDto("entitiesProcessed", "u32"),
             new TrackFieldDescriptorDto("chunkCount",        "u32"),
+        ]),
+        // ── v4 tracks (#620) — Workbench entity lens ─────────────────────────
+        // Entities born / destroyed per tick. These exist so a spawn storm is VISIBLE before it can be selected: without a
+        // per-tick series there is no way to find tick 4,102 in the first place. Addressed as `lifecycle/spawn`,
+        // `lifecycle/destroy`, or `lifecycle/spawn/<archetypeLabel>` to scope either to one archetype.
+        new TrackSchemaDto("lifecycle/<kind>[/<archetype>]", "perTickLifecycle",
+        [
+            new TrackFieldDescriptorDto("tickNumber",   "u32"),
+            new TrackFieldDescriptorDto("entityCount",  "u32"),
+            new TrackFieldDescriptorDto("runCount",     "u32"),
         ]),
     ]);
 
@@ -304,12 +315,14 @@ public sealed class DataController : WorkbenchControllerBase
             && !trackId.StartsWith("queue/", StringComparison.Ordinal)
             && !trackId.StartsWith("posttick/", StringComparison.Ordinal)
             && !trackId.StartsWith("archetype/", StringComparison.Ordinal)
-            && !trackId.StartsWith("component-family/", StringComparison.Ordinal))
+            && !trackId.StartsWith("component-family/", StringComparison.Ordinal)
+            && !trackId.StartsWith("lifecycle/", StringComparison.Ordinal))
         {
             return BadRequest(new ProblemDetails
             {
                 Title = "unknown-track",
-                Detail = $"Unknown track: '{trackId}'. Available tracks: tick/summary, metronome/wait, system/<name>, queue/<name>, posttick/*, archetype/<label>, system-archetype/<sys>/<arch>, component-family/<name>.",
+                Detail = $"Unknown track: '{trackId}'. Available tracks: tick/summary, metronome/wait, system/<name>, queue/<name>, posttick/*, "
+                    + "archetype/<label>, system-archetype/<sys>/<arch>, component-family/<name>, lifecycle/<spawn|destroy>[/<archetype>].",
                 Status = StatusCodes.Status400BadRequest,
             });
         }
@@ -360,6 +373,10 @@ public sealed class DataController : WorkbenchControllerBase
         if (trackId.StartsWith("component-family/", StringComparison.Ordinal))
         {
             return GetComponentFamilyTrackData(metadata, trackId, from, to);
+        }
+        if (trackId.StartsWith("lifecycle/", StringComparison.Ordinal))
+        {
+            return GetLifecycleTrackData(metadata, trackId, from, to);
         }
 
         var ticks = metadata.TickSummaries;
@@ -730,16 +747,22 @@ public sealed class DataController : WorkbenchControllerBase
     /// <summary>
     /// Resolves session metadata from <c>HttpContext.Items["Session"]</c>.
     /// Returns <c>null</c> metadata when the session is valid but not yet ready (caller should 202).
-    /// Sets <paramref name="mismatchResult"/> when the session kind is unsupported (caller should return it).
+    /// Sets <paramref name="mismatchResult"/> when the session has no capture to serve (caller should return it).
     /// </summary>
+    /// <remarks>
+    /// Resolved through <see cref="WorkbenchControllerBase.TryGetProfilerRuntime"/> rather than by testing the session kind (#618, design §4.1). The topology
+    /// and <c>who-writes</c>/<c>who-reads</c> routes are what give a database its <b>system dimension</b> — a database on disk has none of its own — so they
+    /// have to answer for an open database with a capture attached, which is not a <c>TraceSession</c> and never will be. #617 rewired the profiler routes the
+    /// same way; these were left behind because they live on a different controller.
+    /// </remarks>
     private ProfilerMetadataDto ResolveMetadata(out ActionResult mismatchResult)
     {
         mismatchResult = null;
         var session = HttpContext.Items["Session"];
 
-        if (session is TraceSession trace)
+        if (TryGetProfilerRuntime(session, out var runtime))
         {
-            return trace.Runtime.Metadata;
+            return runtime.Metadata;
         }
 
         if (session is AttachSession attach)
@@ -747,7 +770,193 @@ public sealed class DataController : WorkbenchControllerBase
             return attach.Runtime.Metadata;
         }
 
-        mismatchResult = ConflictKindMismatch("Topology is only available for Trace and Attach sessions.");
+        // Name the missing thing, not the session's kind: for an open database the answer is "attach a capture", which the kind-based message hid behind
+        // "only available for Trace and Attach sessions" — advice that was actively wrong once a capture could be attached to a database.
+        mismatchResult = session is OpenSession
+            ? ConflictKindMismatch("System topology comes from a profiling capture. Attach one to this database to see which systems touch its components.")
+            : ConflictKindMismatch("Topology is only available for a session with a profiling capture.");
+        return null;
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // 4d. Entity lifecycle (#620) — spawn/destroy series + cohorts
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Per-tick spawn or destroy volume: <c>lifecycle/spawn</c>, <c>lifecycle/destroy</c>, or either scoped to one archetype
+    /// (<c>lifecycle/spawn/&lt;archetypeLabel&gt;</c>). This is the series that makes a spawn storm findable — without it there is no way to know that
+    /// tick 4,102 is the interesting one.
+    /// </summary>
+    private ActionResult<TrackDataResponseDto> GetLifecycleTrackData(ProfilerMetadataDto metadata, string trackId, uint from, uint to)
+    {
+        var rest = trackId["lifecycle/".Length..];
+        var slash = rest.IndexOf('/');
+        var kindText = slash < 0 ? rest : rest[..slash];
+        var archetypeLabel = slash < 0 ? null : rest[(slash + 1)..];
+
+        if (!TryParseLifecycleKind(kindText, out var kind))
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "unknown-track",
+                Detail = $"Unknown lifecycle kind '{kindText}'. Expected 'spawn' or 'destroy'.",
+                Status = StatusCodes.Status400BadRequest,
+            });
+        }
+
+        if (!TryResolveLifecycleRouting(metadata, archetypeLabel, out var routingFilter, out var problem))
+        {
+            return problem;
+        }
+
+        var points = EntityLifecycleService.GetSeries(metadata.EntityLifecycleRuns, kind, from, to, routingFilter);
+        var records = new object[points.Count];
+        for (var i = 0; i < points.Count; i++)
+        {
+            records[i] = new LifecycleTickRecordDto(points[i].TickNumber, points[i].EntityCount, points[i].RunCount);
+        }
+        return Ok(new TrackDataResponseDto(trackId, records));
+    }
+
+    /// <summary>
+    /// Returns a page of the entities spawned (or destroyed) within a tick range, plus the identity evidence a caller needs before joining the cohort to
+    /// a database.
+    /// </summary>
+    /// <remarks>
+    /// The response deliberately carries <b>both</b> archetype identifiers. <c>routingId</c> is the durable per-database id embedded in every entity id
+    /// and is safe to join on; <c>catalogArchetypeId</c> is the trace's per-process id, which is a <i>different number for the same archetype</i> whenever
+    /// registration order differs from persisted routing order (design §5.3). Returning only one would leave the caller to guess which it had.
+    /// </remarks>
+    [HttpGet("lifecycle/cohort")]
+    public ActionResult<EntityCohortDto> GetLifecycleCohort(
+        Guid sessionId,
+        [FromQuery] string kind = "spawn",
+        [FromQuery] uint from = 0,
+        [FromQuery] uint to = uint.MaxValue,
+        [FromQuery] string archetype = null,
+        [FromQuery] int offset = 0,
+        [FromQuery] int limit = 0)
+    {
+        if (!TryParseLifecycleKind(kind, out var lifecycleKind))
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "bad-kind",
+                Detail = $"Unknown lifecycle kind '{kind}'. Expected 'spawn' or 'destroy'.",
+                Status = StatusCodes.Status400BadRequest,
+            });
+        }
+
+        if (from > to)
+        {
+            return BadRequest(new ProblemDetails { Title = "bad-range", Detail = "from must be <= to.", Status = StatusCodes.Status400BadRequest });
+        }
+
+        var metadata = ResolveMetadata(out var mismatch);
+        if (mismatch != null)
+        {
+            return mismatch;
+        }
+        if (metadata == null)
+        {
+            return NotReady();
+        }
+
+        if (!TryResolveLifecycleRouting(metadata, archetype, out var routingFilter, out var problem))
+        {
+            return problem;
+        }
+
+        var cohort = EntityLifecycleService.GetCohort(metadata.EntityLifecycleRuns, lifecycleKind, from, to, routingFilter, offset, limit);
+
+        // The name is resolved from the ROUTING id, not the catalog id, because the routing id is what the cohort's entity ids actually carry. Null when
+        // the cohort spans archetypes or the capture predates D-3 — absent, rather than a name that might belong to another type.
+        var archetypeName = ResolveArchetypeNameByRouting(metadata, cohort.RoutingId);
+
+        return Ok(new EntityCohortDto(
+            Kind: lifecycleKind.ToString().ToLowerInvariant(),
+            FromTick: cohort.FromTick,
+            ToTick: cohort.ToTick,
+            TotalEntities: cohort.TotalEntities,
+            Offset: cohort.Offset,
+            EntityIds: [.. cohort.EntityIds],
+            HasMore: cohort.HasMore,
+            RoutingId: cohort.RoutingId == EntityLifecycleService.MixedRoutingId ? null : cohort.RoutingId,
+            CatalogArchetypeId: cohort.CatalogArchetypeId < 0 ? null : cohort.CatalogArchetypeId,
+            ArchetypeName: archetypeName));
+    }
+
+    private static bool TryParseLifecycleKind(string text, out Typhon.Profiler.EntityLifecycleKind kind)
+    {
+        switch (text)
+        {
+            case "spawn": kind = Typhon.Profiler.EntityLifecycleKind.Spawn; return true;
+            case "destroy": kind = Typhon.Profiler.EntityLifecycleKind.Destroy; return true;
+            default: kind = default; return false;
+        }
+    }
+
+    /// <summary>Turns an optional archetype label into the routing-id filter the lifecycle section is keyed by.</summary>
+    /// <remarks>
+    /// A capture whose archetype table predates D-3 carries no routing ids, so scoping to an archetype is <i>impossible</i> rather than merely empty.
+    /// Saying so with a 409 beats returning zero rows, which would read as "this archetype spawned nothing".
+    /// </remarks>
+    private bool TryResolveLifecycleRouting(ProfilerMetadataDto metadata, string archetypeLabel, out ushort? routingFilter, out ActionResult problem)
+    {
+        routingFilter = null;
+        problem = null;
+        if (string.IsNullOrEmpty(archetypeLabel))
+        {
+            return true;
+        }
+
+        foreach (var a in metadata.Archetypes)
+        {
+            if (a.Label != archetypeLabel && a.Name != archetypeLabel)
+            {
+                continue;
+            }
+
+            if (a.RoutingId == Typhon.Profiler.ArchetypeRecord.UnknownRoutingId)
+            {
+                problem = Conflict(new ProblemDetails
+                {
+                    Title = "routing-id-unavailable",
+                    Detail = $"Archetype '{archetypeLabel}' has no routing id in this capture, so its entities cannot be identified. "
+                        + "The capture predates the routing-id field, or it was withheld because multiple engines were observed.",
+                    Status = StatusCodes.Status409Conflict,
+                });
+                return false;
+            }
+
+            routingFilter = a.RoutingId;
+            return true;
+        }
+
+        problem = NotFound(new ProblemDetails
+        {
+            Title = "unknown-archetype",
+            Detail = $"No archetype named '{archetypeLabel}' in this capture.",
+            Status = StatusCodes.Status404NotFound,
+        });
+        return false;
+    }
+
+    /// <summary>Archetype display name for a routing id, or null when the capture cannot tell (mixed cohort, or a pre-D-3 archetype table).</summary>
+    private static string ResolveArchetypeNameByRouting(ProfilerMetadataDto metadata, ushort routingId)
+    {
+        if (routingId == EntityLifecycleService.MixedRoutingId)
+        {
+            return null;
+        }
+
+        foreach (var a in metadata.Archetypes)
+        {
+            if (a.RoutingId == routingId)
+            {
+                return string.IsNullOrEmpty(a.Label) ? a.Name : a.Label;
+            }
+        }
         return null;
     }
 }

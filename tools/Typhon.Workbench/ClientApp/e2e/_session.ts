@@ -10,16 +10,32 @@ export const DEMO_DIR = path.resolve('../bin/Debug/net10.0/DemoData');
 export async function closeAllSessions(request: APIRequestContext): Promise<void> {
   const list = await request.get('http://localhost:5173/api/sessions');
   if (!list.ok()) return;
-  const { sessions = [] } = await list.json();
-  for (const s of sessions as Array<{ sessionId: string }>) {
+  // GET /api/sessions returns a BARE ARRAY of SessionDto. This used to destructure `{ sessions = [] }`, which yields
+  // undefined for an array and silently fell back to the empty default — so this helper closed nothing, ever, and every
+  // spec's sessions accumulated across the run, each holding its database open. Tolerate both shapes so a future
+  // envelope does not silently reintroduce the same no-op.
+  const body = await list.json();
+  const sessions: Array<{ sessionId: string }> = Array.isArray(body) ? body : (body?.sessions ?? []);
+  for (const s of sessions) {
     await request.delete(`http://localhost:5173/api/sessions/${s.sessionId}`, { headers: { 'X-Session-Token': s.sessionId } });
   }
 }
 
-/** Create an empty `.typhon` file in the DemoData dir (idempotent). Returns its bare name. */
+/**
+ * Ensures the DemoData directory exists and that nothing blocks the bundle path. Returns the bare database name.
+ *
+ * This used to write a 0-byte FILE at `demo.typhon`. A Typhon database is a bundle **directory**, and the engine
+ * explicitly rejects a file sitting at that path ("this looks like a legacy or foreign artifact"), so every spec that
+ * seeded this way failed its open — and, because the seed's failure is swallowed, failed later at "the dialog did not
+ * close" with no hint as to why. Removing a stale file rather than creating one is the fix; the server creates the
+ * bundle itself on the seeding POST below.
+ */
 export function ensureDemoFile(name = 'demo.typhon'): string {
   fs.mkdirSync(DEMO_DIR, { recursive: true });
-  fs.writeFileSync(path.join(DEMO_DIR, name), '');
+  const target = path.join(DEMO_DIR, name);
+  if (fs.existsSync(target) && !fs.statSync(target).isDirectory()) {
+    fs.rmSync(target, { force: true });
+  }
   return name;
 }
 
@@ -49,17 +65,17 @@ export async function gotoWelcome(page: Page): Promise<void> {
 
 /**
  * Open an (empty) demo `.typhon` through the real Open-File dialog. Works whether the Welcome screen is
- * showing (uses the Welcome button) or a session is already open (uses File ▸ Open .typhon File…), so it
+ * showing (uses the Welcome button) or a session is already open (uses File ▸ Open Typhon Database…), so it
  * doubles as the "switch session without closing" path.
  */
 export async function openDemoFile(page: Page, request: APIRequestContext, name = 'demo.typhon'): Promise<void> {
   await seedDemoFile(request, name);
-  const welcomeBtn = page.getByRole('button', { name: /^open \.typhon file$/i });
+  const welcomeBtn = page.getByRole('button', { name: /^open typhon database$/i });
   if (await welcomeBtn.isVisible().catch(() => false)) {
     await welcomeBtn.click();
   } else {
     await page.getByRole('menuitem', { name: 'File' }).click();
-    await page.getByRole('menuitem', { name: /^open \.typhon file/i }).click();
+    await page.getByRole('menuitem', { name: /^open typhon database/i }).click();
   }
   await expect(page.getByRole('dialog')).toBeVisible();
   await page.getByPlaceholder(/path/i).first().fill(DEMO_DIR);

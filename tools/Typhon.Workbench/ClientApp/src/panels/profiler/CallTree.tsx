@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Activity, ChevronDown, ChevronRight, Crosshair, FileCode, Loader2, Search, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { useSessionStore } from '@/stores/useSessionStore';
+import { useSessionStore, useTraceBackedSession } from '@/stores/useSessionStore';
 import { useOptionsStore } from '@/stores/useOptionsStore';
 import { useCpuFrameStore } from '@/stores/useCpuFrameStore';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
@@ -50,7 +50,6 @@ const ROOT_ENTRY: NavEntry = { scope: WHOLE_SESSION_SCOPE, frameRoot: null };
  */
 export default function CallTree() {
   const sessionId = useSessionStore((s) => s.sessionId);
-  const kind = useSessionStore((s) => s.kind);
 
   // viewMode / direction / groupByCategory are persisted UX prefs (PC-1, AC3.16) — they survive Workbench reloads
   // and session changes. The Call Tree's *scope* stays session-scoped via `useCallTreeScopeStore`; only the lenses
@@ -121,7 +120,7 @@ export default function CallTree() {
     return () => window.clearTimeout(handle);
   }, [filterText]);
 
-  const isTrace = kind === 'trace';
+  const isTrace = useTraceBackedSession();
   useCpuFrameManifest(isTrace ? sessionId : null);
 
   // The store is the cross-panel command inbox: TimeArea / Detail "View in Call Tree" write a scope here; this

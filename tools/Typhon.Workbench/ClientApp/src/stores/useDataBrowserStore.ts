@@ -22,6 +22,12 @@ interface DataBrowserState {
   pageIndex: number;
   /** Chosen preview columns, or null to use the schema-derived default for the current archetype. */
   previewFields: PreviewField[] | null;
+  /**
+   * An explicit set of entity ids the list is narrowed to (#620 — the entity lens's handoff), or null for the whole
+   * archetype. Held here rather than derived, because the set comes from a *capture* and cannot be recomputed from
+   * the database alone.
+   */
+  cohort: CohortScope | null;
 
   setArchetype: (id: string | null) => void;
   selectEntity: (entityId: string | null) => void;
@@ -29,7 +35,23 @@ interface DataBrowserState {
   setAutoPageSize: (on: boolean) => void;
   setPageIndex: (index: number) => void;
   setPreviewFields: (fields: PreviewField[] | null) => void;
+  setCohort: (cohort: CohortScope | null) => void;
+  clearCohort: () => void;
   reset: () => void;
+}
+
+/**
+ * A caller-supplied entity set the Data Browser is narrowed to.
+ *
+ * {@link label} exists so the UI can never show a silently filtered list: a user who arrives at a scoped Data Browser
+ * without having asked for it would otherwise read a 830-row list as the archetype's whole population. The scope is
+ * always rendered as a visible, clearable chip carrying this text.
+ */
+export interface CohortScope {
+  /** Entity ids, in the order the cohort recorded them. */
+  entityIds: string[];
+  /** Human-readable provenance, e.g. "1,240 spawned at tick 4,102 — 830 alive". */
+  label: string;
 }
 
 export const useDataBrowserStore = create<DataBrowserState>()((set, get) => ({
@@ -38,10 +60,13 @@ export const useDataBrowserStore = create<DataBrowserState>()((set, get) => ({
   autoPageSize: false,
   pageIndex: 0,
   previewFields: null,
+  cohort: null,
   // Switching archetype returns to page 1 and drops custom columns (they belong to the old schema). The
   // strangler mirror sets the bus leaf to the new archetype, which also supersedes any prior entity leaf.
   setArchetype: (id) => {
-    set({ archetypeId: id, pageIndex: 0, previewFields: null });
+    // Switching archetype drops any cohort scope: a cohort's ids belong to the archetype it came from, and carrying
+    // them across would produce an empty list that looks like an empty archetype.
+    set({ archetypeId: id, pageIndex: 0, previewFields: null, cohort: null });
     if (id != null) {
       useSelectionStore.getState().select('archetype', id);
     }
@@ -58,6 +83,10 @@ export const useDataBrowserStore = create<DataBrowserState>()((set, get) => ({
   setAutoPageSize: (on) => set({ autoPageSize: on, pageIndex: 0 }),
   setPageIndex: (index) => set({ pageIndex: Math.max(0, index) }),
   setPreviewFields: (fields) => set({ previewFields: fields }),
+  // Entering or leaving a cohort scope returns to page 1: the offsets index the scoped set, so keeping the page would
+  // land past the end of a smaller list or silently show a different slice of a larger one.
+  setCohort: (cohort) => set({ cohort, pageIndex: 0 }),
+  clearCohort: () => set({ cohort: null, pageIndex: 0 }),
   reset: () =>
     set({
       archetypeId: null,
@@ -65,5 +94,6 @@ export const useDataBrowserStore = create<DataBrowserState>()((set, get) => ({
       autoPageSize: false,
       pageIndex: 0,
       previewFields: null,
+      cohort: null,
     }),
 }));

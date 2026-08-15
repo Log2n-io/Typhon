@@ -49,8 +49,9 @@ tx.Commit();   // batch appended now; durable on the next GroupCommit flush
 | Option | Default | Effect |
 |---|---|---|
 | `WalDirectory` | `null` → `{bundle}/wal` | Directory holding WAL segment files. Left `null`, the engine resolves it to a `wal/` folder **inside the database bundle** (`{DatabaseDirectory}/{DatabaseName}.typhon/wal`), keeping each database's WAL private. Set it explicitly only to place the WAL elsewhere. |
-| `SegmentSize` | 64 MB | Size of each pre-allocated segment file |
-| `PreAllocateSegments` | 4 | Segments kept pre-allocated ahead of the write position |
+| `SegmentSize` | 64 MB | Size of every segment created by rotation |
+| `InitialSegmentSize` | 16 MB | Size of the **first** segment. A database that never rotates keeps this file as its entire WAL, so sizing it for steady-state throughput charged small databases the full `SegmentSize` forever (#784). Clamped to `SegmentSize`; `0` restores the old uniform behaviour |
+| `PreAllocateSegments` | 4 | Segments kept pre-allocated ahead of the write position — the pool is built on the **first rotation**, not at open, so a database that never fills a segment never pays for it |
 | `GroupCommitIntervalMs` | 5 | Auto-flush interval consumed by `DurabilityMode.GroupCommit` |
 | `UseFUA` | `true` | Per-write Force-Unit-Access durability vs. relying on explicit flush |
 | `StagingBufferSize` | 256 KB | Aligned staging buffer size used for direct I/O writes |

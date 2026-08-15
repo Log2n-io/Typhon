@@ -2,7 +2,7 @@ import type { DockviewApi } from 'dockview-react';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useUiPrefsStore } from '@/stores/useUiPrefsStore';
-import { useSessionStore } from '@/stores/useSessionStore';
+import { useSessionStore, sessionHasCapability } from '@/stores/useSessionStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useQueryAnalyzerStore } from '@/panels/QueryAnalyzer/useQueryAnalyzerStore';
 import type { TimeRange } from '@/libs/profiler/model/uiTypes';
@@ -20,11 +20,24 @@ export function registerProfilerDockApi(api: DockviewApi | null): void {
   registeredApi = api;
 }
 
-/** Focuses the Profiler panel. Structural in trace/attach sessions — always present in center. */
+/**
+ * Reveals the Profiler panel, creating it if the layout does not have one yet.
+ *
+ * The create branch is not defensive padding — it is the normal path for a **database** session. The dock layout is
+ * built once, from the capabilities the session had at the time; an Open session starts with `database` alone and only
+ * gains `profiler` later, when a capture is attached (#617, D-10). By then the layout exists without a profiler panel,
+ * so focusing an absent panel silently did nothing: the View menu grew a Profiler entry that led nowhere.
+ *
+ * Added with no position, matching how `buildDefaultLayout` seeds it for trace sessions — the timeline is the centre
+ * workspace, not an edge panel.
+ */
 export function toggleViewProfiler(): void {
   const api = registeredApi;
   if (!api) return;
-  api.getPanel('profiler')?.focus();
+  const panel =
+    api.getPanel('profiler') ??
+    api.addPanel({ id: 'profiler', component: 'Profiler', title: 'Profiler', tabComponent: 'locked' });
+  panel?.focus();
 }
 
 /**
@@ -110,8 +123,7 @@ function addQueryAnalyzerPanel(api: DockviewApi): void {
 
 /** The Query Analyzer can open only when its view is active AND we're in a profiler (trace/attach) session. */
 function canOpenQueryAnalyzer(): boolean {
-  const kind = useSessionStore.getState().kind;
-  return isViewActive('QueryAnalyzer') && (kind === 'trace' || kind === 'attach');
+  return isViewActive('QueryAnalyzer') && sessionHasCapability(useSessionStore.getState(), 'profiler');
 }
 
 /**
@@ -163,8 +175,7 @@ function addEngineLiveHealthPanel(api: DockviewApi): void {
  * palette gating mirrors the rest of the profiler surfaces: enabled when the session is trace or attach.
  */
 function canOpenEngineLiveHealth(): boolean {
-  const kind = useSessionStore.getState().kind;
-  return isViewActive('EngineLiveHealth') && (kind === 'trace' || kind === 'attach');
+  return isViewActive('EngineLiveHealth') && sessionHasCapability(useSessionStore.getState(), 'profiler');
 }
 
 /** Open (or focus) the Engine Live Health panel — focus-when-present so a reveal never flips it closed. */

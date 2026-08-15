@@ -339,6 +339,25 @@ html .dockview-react {
   width: 100% !important;
 }
 
+/* A panel must never be laid out wider than the pane it is docked in.
+ *
+ * `.dv-groupview` is a flex container and `.dv-content-container` is a `flex: 1 1 auto` child of it — so the CSS
+ * default `min-width: auto` applies and the container REFUSES to shrink below its content. A panel with a wide table
+ * or a long path therefore grew its container past the group (measured: a 424 px content container inside a 260 px
+ * group), and the group's own `overflow: hidden` silently clipped the difference.
+ *
+ * Two symptoms, one cause, and both look like panel bugs from the inside:
+ *   • content appears shoved right and cut off — it was laid out for 424 px, so the values sat beyond the visible edge;
+ *   • no horizontal scrollbar ever appears — a panel's own `overflow-auto` was HANDED 424 px, so from its point of
+ *     view nothing overflowed. The overflow was happening one level up, where it is hidden rather than scrolled.
+ *
+ * `min-width: 0` restores "you may shrink", so the panel is sized to the pane and its own scroll containers can do
+ * their job. Deliberately applied to every group, not just edge groups: the constraint is true of all of them, and
+ * scoping it narrowly would leave the same trap armed for whichever layout hits it next. */
+.dv-groupview > .dv-content-container {
+  min-width: 0;
+}
+
 /* Active-panel cue (DS-4): a discreet tint on the *active* pane's own header toolbar — the row each panel
  * renders at its top (Resources' filter, Logs' badges + filter, the Inspector title). Panels opt in with
  * the shared `wb-pane-header` class. Kept unlayered so it reliably wins over Tailwind utility-layer

@@ -35,9 +35,7 @@ public sealed class DataControllerTests
     private async Task<SessionDto> CreateTraceSessionAsync(int tickCount = 3, int instantsPerTick = 2)
     {
         var path = TraceFixtureBuilder.BuildMinimalTrace(_factory.DemoDirectory, tickCount, instantsPerTick);
-        var resp = await _client.PostAsJsonAsync("/api/sessions/trace", new CreateTraceSessionRequest(path));
-        resp.EnsureSuccessStatusCode();
-        return JsonSerializer.Deserialize<SessionDto>(await resp.Content.ReadAsStringAsync(), Json)!;
+        return await CaptureSessionFactory.OpenWithCaptureAsync(_client, _factory.DemoDirectory, path);
     }
 
     private async Task WaitForBuildAsync(Guid sessionId, TimeSpan timeout)
@@ -135,7 +133,8 @@ public sealed class DataControllerTests
         var tracks = doc.RootElement.GetProperty("tracks");
         // v1 had 2 tracks; v2 (#311) added 3 track families: system/<name>, queue/<name>, posttick/<phase>.
         // v3 (#327) added 3 more for the Workbench Data Flow module: archetype/<label>, system-archetype/<sys>/<arch>, component-family/<name>.
-        Assert.That(tracks.GetArrayLength(), Is.EqualTo(8), "v3 exposes 8 tracks (2 v1 + 3 v2 + 3 v3 family descriptors)");
+        // v4 (#620) added 1 for the entity lens: lifecycle/<kind>[/<archetype>].
+        Assert.That(tracks.GetArrayLength(), Is.EqualTo(9), "v4 exposes 9 tracks (2 v1 + 3 v2 + 3 v3 + 1 v4 family descriptors)");
 
         var ids = Enumerable.Range(0, tracks.GetArrayLength())
             .Select(i => tracks[i].GetProperty("id").GetString())
@@ -145,6 +144,7 @@ public sealed class DataControllerTests
             "tick/summary", "metronome/wait",
             "system/<name>", "queue/<name>", "posttick/<phase>",
             "archetype/<label>", "system-archetype/<system>/<archetype>", "component-family/<family>",
+            "lifecycle/<kind>[/<archetype>]",
         }));
 
         var tickSummary = tracks[0];

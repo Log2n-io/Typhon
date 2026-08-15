@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
  Menubar,
  MenubarContent,
@@ -28,11 +28,13 @@ import {
   toggleViewDataBrowser,
   toggleViewDbMap,
   toggleViewDataFlow,
+  toggleViewEntityLifecycle,
   toggleViewDetail,
   toggleViewDevFixture,
   toggleViewLogs,
   toggleViewOptions,
   toggleViewResourceTree,
+  openProfiles,
   toggleViewSchemaExplorer,
   toggleViewSourcePreview,
   toggleViewStorageHealth,
@@ -55,6 +57,9 @@ export default function MenuBar() {
  const triggerRef = useRef<HTMLButtonElement>(null);
 
  const kind = useSessionStore((s) => s.kind);
+ const capabilities = useSessionStore((s) => s.capabilities);
+ // Built once per render rather than at each of the 17 isViewVisible() checks below.
+ const sessionScope = useMemo(() => ({ kind, capabilities }), [kind, capabilities]);
  const sessionId = useSessionStore((s) => s.sessionId);
  const clearSession = useSessionStore((s) => s.clearSession);
  const toggleTheme = useThemeStore((s) => s.toggle);
@@ -63,7 +68,7 @@ export default function MenuBar() {
  const setDensity = useDensityStore((s) => s.setMode);
 
  const [dialogOpen, setDialogOpen] = useState(false);
- const [initialTab, setInitialTab] = useState<ConnectTab>('open');
+ const [initialTab, setInitialTab] = useState<ConnectTab>('known');
  const [saveReplayOpen, setSaveReplayOpen] = useState(false);
  const [kbdHelpOpen, setKbdHelpOpen] = useState(false);
 
@@ -102,8 +107,7 @@ export default function MenuBar() {
  <MenubarMenu>
  <MenubarTrigger className="h-7 px-2 text-fs-lg">File</MenubarTrigger>
  <MenubarContent>
- <MenubarItem onClick={() => openConnect('open')}>Open .typhon File…</MenubarItem>
- <MenubarItem onClick={() => openConnect('trace')}>Open .typhon-trace…</MenubarItem>
+ <MenubarItem onClick={() => openConnect('known')}>Open Typhon Database…</MenubarItem>
  <MenubarItem onClick={() => openConnect('attach')}>Attach to Engine…</MenubarItem>
  <MenubarSeparator />
  <MenubarItem
@@ -134,67 +138,73 @@ export default function MenuBar() {
  {/* Schema Explorer is the open-session default navigator; its menu entry is the only recovery path to reopen
      it after closing the tab (besides "Reset Layout", which nukes other customisations) — so it stays visible
      in open mode. Shell-structural at the registry level (viewRegistry.ts), session-kind gated for usefulness. */}
- {isViewVisible('SchemaExplorer', kind) && (
+ {isViewVisible('SchemaExplorer', sessionScope) && (
  <MenubarItem onClick={toggleViewSchemaExplorer}>Schema</MenubarItem>
  )}
- {isViewVisible('DataBrowserEntities', kind) && (
+ {isViewVisible('DataBrowserEntities', sessionScope) && (
  <MenubarItem onClick={() => toggleViewDataBrowser()}>Data Browser</MenubarItem>
  )}
- {isViewVisible('DbMap', kind) && (
+ {isViewVisible('DbMap', sessionScope) && (
  <MenubarItem onClick={toggleViewDbMap}>Database File Map</MenubarItem>
  )}
  {/* Storage Health — aggregate dashboard sibling of DbMap (both surface storage facts of the loaded file). */}
- {isViewVisible('StorageHealth', kind) && (
+ {isViewVisible('StorageHealth', sessionScope) && (
  <MenubarItem onClick={toggleViewStorageHealth}>Storage Health</MenubarItem>
+ )}
+ {isViewVisible('Profiles', sessionScope) && (
+ <MenubarItem onClick={openProfiles}>Profile sessions</MenubarItem>
  )}
  {/* (Stage 2 / GAP-02: the Component Layout/Archetypes/Indexes/Relationships items were removed —
      those facts are now tabs of the Component Inspector, reached by selecting a component.) */}
- {isViewVisible('Profiler', kind) && (
+ {isViewVisible('Profiler', sessionScope) && (
  <MenubarItem onClick={toggleViewProfiler}>Profiler</MenubarItem>
  )}
- {isViewVisible('TopSpans', kind) && (
+ {isViewVisible('TopSpans', sessionScope) && (
  <MenubarItem onClick={toggleViewTopSpans}>Top Spans</MenubarItem>
  )}
- {isViewVisible('SystemDag', kind) && (
+ {isViewVisible('SystemDag', sessionScope) && (
  <MenubarItem onClick={toggleViewSystemDag}>System DAG</MenubarItem>
  )}
- {isViewVisible('CriticalPath', kind) && (
+ {isViewVisible('CriticalPath', sessionScope) && (
  <MenubarItem onClick={toggleViewCriticalPath}>Critical Path</MenubarItem>
  )}
- {isViewVisible('CallTree', kind) && (
+ {isViewVisible('CallTree', sessionScope) && (
  <MenubarItem onClick={toggleViewCallTree}>Call Tree</MenubarItem>
  )}
- {isViewVisible('SourcePreview', kind) && (
+ {isViewVisible('SourcePreview', sessionScope) && (
  <MenubarItem onClick={toggleViewSourcePreview}>Source Preview</MenubarItem>
  )}
- {isViewVisible('DataFlow', kind) && (
+ {isViewVisible('DataFlow', sessionScope) && (
  <MenubarItem onClick={toggleViewDataFlow}>Data Flow</MenubarItem>
  )}
- {isViewVisible('QueryAnalyzer', kind) && (
+ {isViewVisible('EntityLifecycle', sessionScope) && (
+ <MenubarItem onClick={toggleViewEntityLifecycle}>Entity Lifecycle</MenubarItem>
+ )}
+ {isViewVisible('QueryAnalyzer', sessionScope) && (
  <MenubarItem onClick={toggleViewQueryAnalyzer}>Query Analyzer</MenubarItem>
  )}
  {/* #386 Phase 1: Query Console — open-session only. Hidden outside an open .typhon file (IA §5.1). */}
- {isViewVisible('QueryConsole', kind) && (
+ {isViewVisible('QueryConsole', sessionScope) && (
  <MenubarItem onClick={toggleViewQueryConsole}>Query Console</MenubarItem>
  )}
- {isViewVisible('EngineLiveHealth', kind) && (
+ {isViewVisible('EngineLiveHealth', sessionScope) && (
  <MenubarItem onClick={toggleViewEngineLiveHealth}>Engine Health</MenubarItem>
  )}
  {/* Systems & Queries Navigator — the trace/attach-mode default left-edge navigator (the profiler-mode
      counterpart of Resource Tree). Shown only in a profiler session — the in-mode recovery path to reopen
      the navigator after closing its panel. */}
- {isViewVisible('SystemsQueriesNav', kind) && (
+ {isViewVisible('SystemsQueriesNav', sessionScope) && (
  <MenubarItem onClick={toggleViewSystemsQueriesNav}>Systems &amp; Queries</MenubarItem>
  )}
  {/* Create sample database. Session-independent (scope 'any') — the user generates a sample DB regardless of
      any open session; opening the result establishes a new session. Shipped in Release (#433); the panel still
      shows a "not available" cold state if `/api/fixtures/capability` ever fails to report availability. */}
- {isViewVisible('DevFixture', kind) && (
+ {isViewVisible('DevFixture', sessionScope) && (
  <MenubarItem onClick={toggleViewDevFixture}>Create sample database…</MenubarItem>
  )}
  {ANY_ZONE_D_VIEW_ACTIVE && <MenubarSeparator />}
  {/* Resource Tree — the open-session navigator; hidden outside an open .typhon file (no resources to show). */}
- {isViewVisible('ResourceTree', kind) && (
+ {isViewVisible('ResourceTree', sessionScope) && (
  <MenubarItem onClick={toggleViewResourceTree}>Resource Tree</MenubarItem>
  )}
  <MenubarItem onClick={toggleViewDetail}>Detail</MenubarItem>

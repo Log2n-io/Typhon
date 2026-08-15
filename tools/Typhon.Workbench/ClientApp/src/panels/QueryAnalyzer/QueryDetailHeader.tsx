@@ -6,6 +6,7 @@ import { openComponentInSchema, revealArchetypeInInspector, revealSystemInDag } 
 import { formatNs, formatSelectivity, formatThousands, predicateSummary, queryKindLabel } from './format';
 import { categoricalColor } from '@/libs/color/categorical';
 import { rgbCss } from '@/libs/color/contrast';
+import type { QueryTargetReality } from '@/hooks/profiles/useQueryTargetReality';
 
 /**
  * Detail header for the focused query (design §4.2): identity (`Kind#LocalId on target`), the
@@ -24,9 +25,15 @@ interface Props {
   targetId: number;
   /** True when the target is a ComponentType (→ Component Inspector); false = Archetype (→ Archetype Inspector). */
   targetIsComponent: boolean;
+  /**
+   * What the database says about this target right now (#618 §4.3), resolved by the parent. Passed in rather than
+   * fetched here so this component keeps the property its tests rely on and its contract states — everything
+   * pre-resolved, no round-trip of its own. Omitted (or unresolved) renders no index-reality strip at all.
+   */
+  reality?: QueryTargetReality;
 }
 
-export function QueryDetailHeader({ definition, archetypeName, ownerNames, targetId, targetIsComponent }: Props) {
+export function QueryDetailHeader({ definition, archetypeName, ownerNames, targetId, targetIsComponent, reality }: Props) {
   const openInEditor = useOptionsStore((s) => s.openInEditor);
   const agg = definition.aggregate;
   const src = definition.userSource;
@@ -111,6 +118,56 @@ export function QueryDetailHeader({ definition, archetypeName, ownerNames, targe
         <Stat label="selectivity" value={formatSelectivity(toNumber(agg.avgSelectivity))} />
         <Stat label="rows scan→ret" value={`${formatThousands(toNumber(agg.totalRowsScanned))} → ${formatThousands(toNumber(agg.totalRowsReturned))}`} />
       </div>
+
+      <IndexReality definition={definition} targetName={archetypeName} targetIsComponent={targetIsComponent} reality={reality} />
+    </div>
+  );
+}
+
+/**
+ * The database's half of the diagnosis (#618 §4.3): the cost above is what the capture recorded; this is why. Renders
+ * nothing at all when the session has no database, or when the target does not resolve in it — the bridge is absent
+ * rather than showing zeroes, per §5.7.
+ */
+function IndexReality({
+  definition,
+  targetName,
+  targetIsComponent,
+  reality,
+}: {
+  definition: QueryDefinitionDto;
+  targetName: string;
+  targetIsComponent: boolean;
+  reality?: QueryTargetReality;
+}) {
+  if (!reality?.resolved) return null;
+
+  // The fields the query actually filters on, named by the capture itself — no id mapping needed.
+  const filtered = Array.from(new Set((definition.evaluators ?? []).map((e) => e.fieldName).filter((n): n is string => !!n)));
+  const unindexed = filtered.filter((f) => !reality.indexedFields.has(f));
+
+  return (
+    <div className="mt-1.5 flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-fs-sm" data-testid="query-index-reality">
+      <span className="text-muted-foreground">in this database now</span>
+
+      {reality.entityCount !== null && (
+        <span className="text-foreground">
+          <span className="font-mono">{targetName}</span> holds{' '}
+          <span className="tabular-nums font-medium">{formatThousands(reality.entityCount)}</span> entities
+        </span>
+      )}
+
+      {targetIsComponent && filtered.length > 0 && (
+        unindexed.length === 0 ? (
+          <span className="text-emerald-600 dark:text-emerald-400" data-testid="query-index-verdict">
+            every filtered field is indexed
+          </span>
+        ) : (
+          <span className="text-amber-600 dark:text-amber-400" data-testid="query-index-verdict">
+            no index on <span className="font-mono">{unindexed.join(', ')}</span>
+          </span>
+        )
+      )}
     </div>
   );
 }

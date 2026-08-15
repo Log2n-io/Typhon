@@ -19,8 +19,12 @@ namespace Typhon.Workbench.Controllers;
 [Tags("Profiler")]
 [RequireBootstrapToken]
 [RequireSession]
-public sealed class ProfilerController : WorkbenchControllerBase
+public sealed partial class ProfilerController : WorkbenchControllerBase
 {
+    private readonly ILogger<ProfilerController> _logger;
+
+    public ProfilerController(ILogger<ProfilerController> logger) => _logger = logger;
+
     /// <summary>
     /// Returns the full metadata DTO once the session is ready. For Trace sessions this means the sidecar cache build
     /// completed; for Attach sessions it means the first Init frame arrived. Returns 202 Accepted with an empty body
@@ -33,9 +37,9 @@ public sealed class ProfilerController : WorkbenchControllerBase
     {
         var session = HttpContext.Items["Session"];
 
-        if (session is TraceSession trace)
+        if (TryGetProfilerRuntime(session, out var profileRuntime))
         {
-            var runtime = trace.Runtime;
+            var runtime = profileRuntime;
             if (runtime.IsBuildComplete)
             {
                 if (runtime.Metadata != null)
@@ -59,7 +63,7 @@ public sealed class ProfilerController : WorkbenchControllerBase
             return NotReady();
         }
 
-        return ConflictKindMismatch("Profiler metadata is only available for Trace and Attach sessions.");
+        return ConflictKindMismatch("This session has no profile to serve. Open a capture as a profile on this database, or open the capture directly as a trace session.");
     }
 
     /// <summary>
@@ -73,12 +77,12 @@ public sealed class ProfilerController : WorkbenchControllerBase
     public ActionResult<TraceStatusDto> GetTraceStatus(Guid sessionId)
     {
         var session = HttpContext.Items["Session"];
-        if (session is TraceSession trace)
+        if (TryGetProfilerRuntime(session, out var profileRuntime))
         {
-            return Ok(new TraceStatusDto(trace.Runtime.NewVersionAvailable));
+            return Ok(new TraceStatusDto(profileRuntime.NewVersionAvailable));
         }
 
-        return ConflictKindMismatch("Trace status is only available for Trace sessions.");
+        return ConflictKindMismatch("This session has no profile to serve. Open a capture as a profile on this database, or open the capture directly as a trace session.");
     }
 
     /// <summary>
@@ -97,14 +101,14 @@ public sealed class ProfilerController : WorkbenchControllerBase
             return Ok(attach.Runtime.SourceLocationManifest);
         }
 
-        if (session is TraceSession trace)
+        if (TryGetProfilerRuntime(session, out var profileRuntime))
         {
             // Manifest was loaded once at build completion in TraceSessionRuntime; we just hand it
             // back. Pre-feature traces (or traces without attribution) get SourceLocationManifestDto.Empty.
-            return Ok(trace.Runtime.SourceLocationManifest);
+            return Ok(profileRuntime.SourceLocationManifest);
         }
 
-        return ConflictKindMismatch("Source-location manifest is only available for Trace and Attach sessions.");
+        return ConflictKindMismatch("This session has no profile to serve. Open a capture as a profile on this database, or open the capture directly as a trace session.");
     }
 
     /// <summary>
@@ -118,9 +122,9 @@ public sealed class ProfilerController : WorkbenchControllerBase
     {
         var session = HttpContext.Items["Session"];
 
-        if (session is TraceSession trace)
+        if (TryGetProfilerRuntime(session, out var profileRuntime))
         {
-            var runtime = trace.Runtime;
+            var runtime = profileRuntime;
             if (!runtime.IsBuildComplete)
             {
                 return NotReady();
@@ -134,7 +138,7 @@ public sealed class ProfilerController : WorkbenchControllerBase
             return Ok(CpuFrameManifestDto.Empty);
         }
 
-        return ConflictKindMismatch("CPU-sample frames are only available for Trace and Attach sessions.");
+        return ConflictKindMismatch("This session has no profile to serve. Open a capture as a profile on this database, or open the capture directly as a trace session.");
     }
 
     /// <summary>
@@ -149,9 +153,9 @@ public sealed class ProfilerController : WorkbenchControllerBase
         var session = HttpContext.Items["Session"];
         request ??= new CallTreeRequestDto(null, null, null, "wall-clock");
 
-        if (session is TraceSession trace)
+        if (TryGetProfilerRuntime(session, out var profileRuntime))
         {
-            var runtime = trace.Runtime;
+            var runtime = profileRuntime;
             if (!runtime.IsBuildComplete)
             {
                 return NotReady();
@@ -183,7 +187,7 @@ public sealed class ProfilerController : WorkbenchControllerBase
             return Ok(CallTreeResponseDto.Empty);
         }
 
-        return ConflictKindMismatch("The CPU call tree is only available for Trace and Attach sessions.");
+        return ConflictKindMismatch("This session has no profile to serve. Open a capture as a profile on this database, or open the capture directly as a trace session.");
     }
 
     /// <summary>
@@ -199,9 +203,9 @@ public sealed class ProfilerController : WorkbenchControllerBase
         var session = HttpContext.Items["Session"];
         var scope = request?.Scope ?? new CallTreeRequestDto(null, null, null, "wall-clock");
 
-        if (session is TraceSession trace)
+        if (TryGetProfilerRuntime(session, out var profileRuntime))
         {
-            var runtime = trace.Runtime;
+            var runtime = profileRuntime;
             if (!runtime.IsBuildComplete)
             {
                 return NotReady();
@@ -223,7 +227,7 @@ public sealed class ProfilerController : WorkbenchControllerBase
             return Ok(SampleDensityDto.Empty);
         }
 
-        return ConflictKindMismatch("Sample density is only available for Trace and Attach sessions.");
+        return ConflictKindMismatch("This session has no profile to serve. Open a capture as a profile on this database, or open the capture directly as a trace session.");
     }
 
     /// <summary>
@@ -294,7 +298,24 @@ public sealed class ProfilerController : WorkbenchControllerBase
         try
         {
             var bytesWritten = await attach.Runtime.SaveSessionAsync(resolved, ct);
-            return Ok(new SaveReplayResponse(resolved, bytesWritten));
+
+            // #621 — attach the replay we just wrote as this session's active profile, and say so in the response.
+            //
+            // With the standalone trace session removed, a capture is always attached TO a session; a replay taken over TCP has no database the Workbench can
+            // reach (blocker B1), so it attaches back to the live session it came from. Doing it HERE rather than via a follow-up client call is what keeps the
+            // "attach a capture by path" hole closed: the only path ever attached is the one the server itself just produced, so nothing has to trust a
+            // client-supplied path. If attaching fails the save still succeeded and is reported — the file on disk is the durable artefact.
+            Guid? profileId = null;
+            try
+            {
+                profileId = attach.AttachProfile(TraceSessionRuntime.Start(resolved, _logger));
+            }
+            catch (Exception ex)
+            {
+                LogReplayAttachFailed(sessionId, resolved, ex.Message);
+            }
+
+            return Ok(new SaveReplayResponse(resolved, bytesWritten, profileId));
         }
         catch (InvalidOperationException ex)
         {
@@ -347,12 +368,10 @@ public sealed class ProfilerController : WorkbenchControllerBase
     {
         // #289 — both Trace and Attach sessions implement IChunkProvider, so this method handles both modes uniformly.
         var session = HttpContext.Items["Session"];
-        IChunkProvider provider = session switch
-        {
-            TraceSession trace => trace.Runtime,
-            AttachSession attach => attach.Runtime,
-            _ => null,
-        };
+        // Attach keeps its own runtime type; everything else resolves through the capability helper (#617).
+        IChunkProvider provider = session is AttachSession attach
+            ? attach.Runtime
+            : TryGetProfilerRuntime(session, out var chunkRuntime) ? chunkRuntime : null;
         if (provider == null)
         {
             Response.StatusCode = StatusCodes.Status409Conflict;
@@ -433,12 +452,10 @@ public sealed class ProfilerController : WorkbenchControllerBase
         CancellationToken ct)
     {
         var session = HttpContext.Items["Session"];
-        IChunkProvider provider = session switch
-        {
-            TraceSession trace => trace.Runtime,
-            AttachSession attach => attach.Runtime,
-            _ => null,
-        };
+        // Attach keeps its own runtime type; everything else resolves through the capability helper (#617).
+        IChunkProvider provider = session is AttachSession attach
+            ? attach.Runtime
+            : TryGetProfilerRuntime(session, out var chunkRuntime) ? chunkRuntime : null;
         if (provider == null)
         {
             return Conflict();
@@ -700,12 +717,11 @@ public sealed class ProfilerController : WorkbenchControllerBase
     private Services.QueryCatalogService ResolveCatalog()
     {
         var session = HttpContext.Items["Session"];
-        return session switch
+        if (session is AttachSession attach)
         {
-            TraceSession trace => trace.Runtime.IsReady ? trace.Runtime.QueryCatalog : null,
-            AttachSession attach => attach.Runtime.QueryCatalog,
-            _ => null,
-        };
+            return attach.Runtime.QueryCatalog;
+        }
+        return TryGetProfilerRuntime(session, out var runtime) && runtime.IsReady ? runtime.QueryCatalog : null;
     }
 
     /// <summary>
@@ -729,4 +745,7 @@ public sealed class ProfilerController : WorkbenchControllerBase
             Status = StatusCodes.Status409Conflict,
         });
     }
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Session {SessionId}: replay saved to '{Path}' but could not be attached as a profile: {Error}")]
+    private partial void LogReplayAttachFailed(Guid sessionId, string path, string error);
 }

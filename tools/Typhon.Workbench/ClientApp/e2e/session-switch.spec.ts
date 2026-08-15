@@ -17,7 +17,7 @@ test.describe('AC1.10 — switch session without close', () => {
     await expect.poll(() => new URL(page.url()).searchParams.get('resource')).toContain('ManagedPagedMMF');
     await expect(page.getByText(/select anything/i)).toHaveCount(0); // Inspector populated
 
-    // Session B: switch to a different file WITHOUT closing A (File ▸ Open .typhon File…).
+    // Session B: switch to a different file WITHOUT closing A (File ▸ Open Typhon Database…).
     await openDemoFile(page, request, 'demo.typhon');
 
     // Reset: the previous session's leaf must be gone — empty URL and empty Inspector on the new session.

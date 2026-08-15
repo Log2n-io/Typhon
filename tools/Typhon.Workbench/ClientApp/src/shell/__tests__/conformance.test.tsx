@@ -15,6 +15,7 @@ import TopSpansPanel from '@/panels/profiler/TopSpansPanel';
 import CallTree from '@/panels/profiler/CallTree';
 import SourcePreviewPanel from '@/panels/profiler/SourcePreviewPanel';
 import CriticalPathPanel from '@/panels/CriticalPath/CriticalPathPanel';
+import CohortsPanel from '@/panels/EntityLifecycle/CohortsPanel';
 import QueryAnalyzerPanel from '@/panels/QueryAnalyzer/QueryAnalyzerPanel';
 import QueryConsolePanel from '@/panels/QueryConsole/QueryConsolePanel';
 import EngineLiveHealthPanel from '@/panels/EngineLiveHealth/EngineLiveHealthPanel';
@@ -59,6 +60,10 @@ const VIEWS: { id: string; label: string; render: () => React.JSX.Element }[] = 
   { id: 'CallTree', label: 'Call Tree', render: () => <CallTree /> },
   { id: 'SourcePreview', label: 'Source Preview', render: () => <SourcePreviewPanel {...NO_PROPS} /> },
   { id: 'CriticalPath', label: 'Critical Path', render: () => <CriticalPathPanel {...NO_PROPS} /> },
+  // Entity Lifecycle (#620): pure DOM (strip of buttons + field list). The no-tick-selected branch covers D + E for the
+  // enrolment guard; PC-6 holds because the only handoff it offers — Open in Data Browser — is gated on a resolved
+  // cohort and is absent otherwise.
+  { id: 'EntityLifecycle', label: 'Entity Lifecycle', render: () => <CohortsPanel {...NO_PROPS} /> },
   // Query Analyzer (3 Phase 4): jsdom-mountable because the React-Flow Plan tab is lazy-loaded — the
   // panel's static import graph carries no `@xyflow/react`, so it is enrolled here, not CANVAS_EXCLUDED.
   { id: 'QueryAnalyzer', label: 'Query Analyzer', render: () => <QueryAnalyzerPanel {...NO_PROPS} /> },

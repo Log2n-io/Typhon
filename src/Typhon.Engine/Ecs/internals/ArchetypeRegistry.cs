@@ -501,6 +501,95 @@ internal static class ArchetypeRegistry
     // Lifecycle
     // ═══════════════════════════════════════════════════════════════════════
 
+    // ── Live-engine accounting (#614 D-9) ────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // TyphonProfiler is a process-global static: two DatabaseEngine instances alive at once do NOT produce two traces, they produce ONE trace with interleaved
+    // events from two colliding archetype routing-id spaces. The profiler needs to know when that happened so it can withhold the routing ids rather than
+    // write ambiguous ones.
+    //
+    // This count is kept SEPARATE from the per-Type refcounts below, rather than riding along inside Register/UnregisterEngineUse, because the two have
+    // different pairing requirements. The Type refcounts are deliberately forgiving — UnregisterEngineUse skips Types it doesn't know, so an engine that
+    // registered components and then died before InitializeArchetypes does no harm. An engine COUNT cannot be forgiving in the same way: one unpaired
+    // decrement makes the process under-report, and under-reporting is the dangerous direction — it writes ambiguous routing ids while believing they are
+    // sound. Explicit one-shot calls from the engine's own init/dispose make the pairing exact by construction.
+
+    /// <summary>Engines currently registered with the process-global registry. Written only under <c>RegistrationLock</c>.</summary>
+    private static int LiveEngineCount;
+
+    /// <summary>High-water mark of <see cref="LiveEngineCount"/> since the last <see cref="ResetLiveEngineHighWater"/>.</summary>
+    private static int MaxLiveEngineCountSinceReset;
+
+    /// <summary>Number of engines live right now. Read at capture start to warn when a capture is mixed from its very first event.</summary>
+    internal static int CurrentLiveEngineCount
+    {
+        get
+        {
+            lock (RegistrationLock)
+            {
+                return LiveEngineCount;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Highest number of simultaneously-live engines observed since the last reset. Read at capture close: a value &gt; 1 means this trace is mixed and its
+    /// routing ids are ambiguous.
+    /// </summary>
+    /// <remarks>
+    /// A high-water mark rather than a snapshot, because the case that matters is a second engine that both appears <i>and disappears</i> inside the capture
+    /// window — sampling the live count at close would report 1 and hand out ids from two id spaces as if they were one.
+    /// </remarks>
+    internal static int MaxLiveEngineCount
+    {
+        get
+        {
+            lock (RegistrationLock)
+            {
+                return MaxLiveEngineCountSinceReset;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rebases the high-water mark to the current live count. Called by the profiler when a capture starts, so the mark measures that capture's window and not
+    /// the whole process lifetime. Exact for this purpose because profiler sessions are process-global and serialized.
+    /// </summary>
+    internal static void ResetLiveEngineHighWater()
+    {
+        lock (RegistrationLock)
+        {
+            MaxLiveEngineCountSinceReset = LiveEngineCount;
+        }
+    }
+
+    /// <summary>Records that an engine has come online. Called once per engine from <see cref="DatabaseEngine.InitializeArchetypes"/>, guarded there.</summary>
+    internal static void RegisterLiveEngine()
+    {
+        lock (RegistrationLock)
+        {
+            LiveEngineCount++;
+            if (LiveEngineCount > MaxLiveEngineCountSinceReset)
+            {
+                MaxLiveEngineCountSinceReset = LiveEngineCount;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Records that an engine has gone away. Paired one-for-one with <see cref="RegisterLiveEngine"/> by the engine's dispose guard; the floor at zero is
+    /// belt-and-braces so a hypothetical unpaired call degrades to under-counting by one rather than to a permanently negative counter.
+    /// </summary>
+    internal static void UnregisterLiveEngine()
+    {
+        lock (RegistrationLock)
+        {
+            if (LiveEngineCount > 0)
+            {
+                LiveEngineCount--;
+            }
+        }
+    }
+
     /// <summary>
     /// Increment the engine-use refcount for each provided archetype + component Type. Called by <see cref="DatabaseEngine.InitializeArchetypes"/> with the
     /// snapshot of Types that engine consumed. Paired with <see cref="UnregisterEngineUse"/> on engine dispose; balanced calls release the registry's

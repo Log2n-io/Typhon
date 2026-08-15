@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Button } from '@/components/ui/button';
 import { useOptionsStore } from '@/stores/useOptionsStore';
 import { useOptionsUiStore, type OptionsCategory } from '@/stores/useOptionsUiStore';
 import { DagForm } from './DagForm';
@@ -29,7 +30,12 @@ const CATEGORIES: CategoryDef[] = [
 export default function OptionsPanel(): React.JSX.Element {
   const fetchOptions = useOptionsStore((s) => s.fetch);
   const loaded = useOptionsStore((s) => s.loaded);
-  const [active, setActive] = useState<CategoryKey>('editor');
+  const loadError = useOptionsStore((s) => s.loadError);
+  // Seed from the pending deep-link request so a banner's "Locate…" lands on Schema on the FIRST render. Reading it
+  // only in the effect below left one frame on 'editor', which is what made the deep-link look like it had been ignored.
+  const [active, setActive] = useState<CategoryKey>(
+    () => useOptionsUiStore.getState().requestedCategory ?? 'editor',
+  );
 
   // A deep-link (e.g. the schema banners' "Manage schema directories…") can request a category before/while
   // the panel mounts; snap to it and clear the request so a later manual switch isn't overridden.
@@ -80,6 +86,16 @@ export default function OptionsPanel(): React.JSX.Element {
       <main className="flex-1 overflow-auto p-4">
         {active === 'dag' ? (
           <DagForm />
+        ) : loadError ? (
+          // A failed load must never look like a slow one. This panel is where the schema banner sends you when a
+          // database's schema assembly cannot be found, so a spinner that never resolves strands the one recovery path.
+          <div role="alert" className="max-w-prose space-y-2">
+            <p className="text-fs-base font-semibold text-destructive">Options could not be loaded</p>
+            <p className="text-fs-base text-muted-foreground">{loadError}</p>
+            <Button variant="outline" size="sm" onClick={() => void fetchOptions()}>
+              Retry
+            </Button>
+          </div>
         ) : !loaded ? (
           <p className="text-fs-base text-muted-foreground">Loading…</p>
         ) : (

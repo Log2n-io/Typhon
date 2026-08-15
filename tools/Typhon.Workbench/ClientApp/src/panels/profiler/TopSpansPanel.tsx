@@ -4,7 +4,7 @@ import { cn } from '@/lib/utils';
 import type { SpanGroupStats } from '@/libs/profiler/stats/selectionStats';
 import { useProfilerStatsStore } from '@/stores/useProfilerStatsStore';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
-import { useSessionStore } from '@/stores/useSessionStore';
+import { useSessionCapability } from '@/stores/useSessionStore';
 
 /**
  * Top-N expensive spans — its own dock panel because the table is wide (7 columns) and would force
@@ -22,8 +22,8 @@ type SpanSortKey = 'name' | 'count' | 'minUs' | 'avgUs' | 'maxUs' | 'p95Us' | 't
 const TOP_SPANS_LIMIT = 20;
 
 export default function TopSpansPanel(): React.JSX.Element {
-  const sessionKind = useSessionStore((s) => s.kind);
-  const isProfilerSession = sessionKind === 'attach' || sessionKind === 'trace';
+  // Capability, not kind (#617/#621): an open database with a capture attached can profile, and this test said otherwise.
+  const isProfilerSession = useSessionCapability('profiler');
   const stats = useProfilerStatsStore((s) => s.stats);
 
   if (!isProfilerSession) {

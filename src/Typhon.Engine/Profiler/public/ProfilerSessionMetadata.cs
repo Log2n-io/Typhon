@@ -79,6 +79,25 @@ public sealed class ProfilerSessionMetadata
     /// <summary>Resource-graph pre-order tree snapshot. v7+ trace section. Empty when no resource graph is available.</summary>
     public ResourceGraphNodeRecord[] ResourceGraphNodes { get; }
 
+    // ── Capture identity (trace format v12+, #614) ───────────────────────────
+    // What makes a capture self-describing: which database it ran against, where in that database's transaction history it starts, and what schema it saw.
+    // All default to zero/empty for hosts with no engine attached — those captures are still valid, they just cannot be paired to a database.
+
+    /// <summary>Durable identity of the database being profiled (<c>DatabaseEngine.DatabaseId</c>), or <see cref="Guid.Empty"/> when no engine is attached.</summary>
+    public Guid DatabaseId { get; }
+
+    /// <summary>The database's bundle name, for display. Empty when no engine is attached.</summary>
+    public string DatabaseName { get; }
+
+    /// <summary>The engine's next-free TSN at session start — the left edge of the capture's transaction window. 0 when no engine is attached.</summary>
+    public long TsnAtStart { get; }
+
+    /// <summary>The runtime's tick number at session start — the left edge of the capture's tick window. 0 when no scheduler is running.</summary>
+    public long TickAtStart { get; }
+
+    /// <summary>Order-independent digest of the schema this capture ran against. 0 when no engine is attached. See <c>TraceFileHeader.SchemaFingerprint</c>.</summary>
+    public ulong SchemaFingerprint { get; }
+
     /// <summary>
     /// Construct session metadata from captured engine/runtime tables. Every optional array defaults to empty (never <c>null</c>);
     /// <see cref="RuntimeConfig"/> defaults to <c>null</c> when no engine config is available.
@@ -100,11 +119,17 @@ public sealed class ProfilerSessionMetadata
     /// <param name="runtimeConfig">Engine runtime-config snapshot, or <c>null</c> when unavailable.</param>
     /// <param name="eventQueues">Per-queue static schema; empty when no queues are registered.</param>
     /// <param name="resourceGraphNodes">Resource-graph pre-order tree snapshot; empty when unavailable.</param>
+    /// <param name="databaseId">Durable identity of the database being profiled; <see cref="Guid.Empty"/> when no engine is attached.</param>
+    /// <param name="databaseName">The database's bundle name, for display; empty when no engine is attached.</param>
+    /// <param name="tsnAtStart">Engine's next-free TSN at session start; <c>0</c> when no engine is attached.</param>
+    /// <param name="schemaFingerprint">Digest of the schema this capture ran against; <c>0</c> when no engine is attached.</param>
+    /// <param name="tickAtStart">Runtime's tick number at session start; <c>0</c> when no scheduler is running.</param>
     public ProfilerSessionMetadata(SystemDefinitionRecord[] systems, ArchetypeRecord[] archetypes, ComponentTypeRecord[] componentTypes, int workerCount,
         float baseTickRate, long startTimestamp, long stopwatchFrequency, DateTime startedUtc, long samplingSessionStartQpc = 0, TrackRecord[] tracks = null,
         DagRecord[] dags = null, ComponentDefinitionRecord[] componentDefinitions = null, ArchetypeDefinitionRecord[] archetypeDefinitions = null,
         IndexCatalogEntry[] indexCatalog = null, RuntimeConfigRecord runtimeConfig = null, EventQueueRecord[] eventQueues = null,
-        ResourceGraphNodeRecord[] resourceGraphNodes = null)
+        ResourceGraphNodeRecord[] resourceGraphNodes = null, Guid databaseId = default, string databaseName = null, long tsnAtStart = 0,
+        ulong schemaFingerprint = 0, long tickAtStart = 0)
     {
         Systems = systems ?? [];
         Archetypes = archetypes ?? [];
@@ -123,5 +148,10 @@ public sealed class ProfilerSessionMetadata
         RuntimeConfig = runtimeConfig;
         EventQueues = eventQueues ?? [];
         ResourceGraphNodes = resourceGraphNodes ?? [];
+        DatabaseId = databaseId;
+        DatabaseName = databaseName ?? string.Empty;
+        TsnAtStart = tsnAtStart;
+        SchemaFingerprint = schemaFingerprint;
+        TickAtStart = tickAtStart;
     }
 }

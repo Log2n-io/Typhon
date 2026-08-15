@@ -37,9 +37,7 @@ public sealed class DecodedChunkEndpointTests
     private async Task<SessionDto> CreateTraceSessionAsync(int tickCount = 5, int instantsPerTick = 3)
     {
         var path = TraceFixtureBuilder.BuildMinimalTrace(_factory.DemoDirectory, tickCount, instantsPerTick);
-        var resp = await _client.PostAsJsonAsync("/api/sessions/trace", new CreateTraceSessionRequest(path));
-        resp.EnsureSuccessStatusCode();
-        return JsonSerializer.Deserialize<SessionDto>(await resp.Content.ReadAsStringAsync(), Json)!;
+        return await CaptureSessionFactory.OpenWithCaptureAsync(_client, _factory.DemoDirectory, path);
     }
 
     private async Task WaitForBuildAsync(Guid sessionId, TimeSpan timeout)

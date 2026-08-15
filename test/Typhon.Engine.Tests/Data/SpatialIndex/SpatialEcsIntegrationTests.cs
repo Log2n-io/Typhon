@@ -372,17 +372,17 @@ class SpatialEcsIntegrationTests : TestBase<SpatialEcsIntegrationTests>
         using var qtx = dbe.CreateQuickTransaction();
 
         // Two spatial predicates — the second would silently overwrite the first.
-        Assert.Throws<System.InvalidOperationException>(() =>
+        Assert.Throws<InvalidOperationException>(() =>
             qtx.Query<SpatialShipArchetype>().WhereInAABB<SpatialShip>(0, 0, 0, 100, 100, 100).WhereNearby<SpatialShip>(0, 0, 0, 50));
 
         // foreach does not apply spatial predicates.
-        Assert.Throws<System.InvalidOperationException>(() =>
+        Assert.Throws<InvalidOperationException>(() =>
         {
             foreach (var _ in qtx.Query<SpatialShipArchetype>().WhereInAABB<SpatialShip>(0, 0, 0, 100, 100, 100)) { }
         });
 
         // A view cannot combine WhereField with a spatial predicate.
-        Assert.Throws<System.InvalidOperationException>(() =>
+        Assert.Throws<InvalidOperationException>(() =>
             qtx.Query<SpatialShipArchetype>().WhereInAABB<SpatialShip>(0, 0, 0, 100, 100, 100).WhereField<SpatialShip>(s => s.Speed > 0f).ToView());
     }
 

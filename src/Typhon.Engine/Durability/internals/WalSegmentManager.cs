@@ -63,6 +63,7 @@ internal sealed class WalSegmentManager : IDisposable
     private readonly IWalFileIO _fileIO;
     private readonly string _walDirectory;
     private readonly uint _segmentSize;
+    private readonly uint _initialSegmentSize;
     private readonly int _preAllocateCount;
     private readonly bool _useFUA;
 
@@ -72,9 +73,11 @@ internal sealed class WalSegmentManager : IDisposable
 
     /// <summary>
     /// Sealed segments awaiting reclamation. Each entry records the segment's file path and last LSN so that <see cref="MarkReclaimable"/> can determine
-    /// if all records have been checkpointed.
+    /// if all records have been checkpointed, plus its declared byte size — segments are NOT all <see cref="_segmentSize"/> (the first segment of a
+    /// lifecycle uses <see cref="_initialSegmentSize"/>, and an oversized batch gets a segment sized to hold it), so <see cref="TotalWalBytes"/> must
+    /// sum real sizes rather than multiply a count.
     /// </summary>
-    private readonly List<(string Path, long LastLSN)> _sealedSegments = new();
+    private readonly List<(string Path, long LastLSN, long SizeBytes)> _sealedSegments = new();
 
     /// <summary>
     /// Serializes all <see cref="_sealedSegments"/> access (CK-07 / TXW-7): the WAL writer thread adds on rotation,
@@ -91,10 +94,15 @@ internal sealed class WalSegmentManager : IDisposable
     /// </summary>
     /// <param name="fileIO">Platform I/O abstraction.</param>
     /// <param name="walDirectory">Directory for WAL segment files.</param>
-    /// <param name="segmentSize">Size of each segment file in bytes (default 64 MB).</param>
+    /// <param name="segmentSize">Size of each rotated segment file in bytes (default 64 MB).</param>
     /// <param name="preAllocateCount">Number of segments to pre-allocate ahead (default 4).</param>
     /// <param name="useFUA">Whether to open segments with FUA (for Immediate durability mode).</param>
-    public WalSegmentManager(IWalFileIO fileIO, string walDirectory, uint segmentSize, int preAllocateCount, bool useFUA)
+    /// <param name="initialSegmentSize">
+    /// Size of the segment <see cref="Initialize"/> creates, in bytes. 0 means "same as <paramref name="segmentSize"/>". A database that never rotates
+    /// keeps exactly this one file, so sizing it for steady-state throughput costs every small database the full <paramref name="segmentSize"/> on disk
+    /// forever (#784). Rotated segments are unaffected — from the first rotation on, everything is <paramref name="segmentSize"/> as before.
+    /// </param>
+    public WalSegmentManager(IWalFileIO fileIO, string walDirectory, uint segmentSize, int preAllocateCount, bool useFUA, uint initialSegmentSize = 0)
     {
         ArgumentNullException.ThrowIfNull(fileIO);
         ArgumentNullException.ThrowIfNull(walDirectory);
@@ -102,6 +110,7 @@ internal sealed class WalSegmentManager : IDisposable
         _fileIO = fileIO;
         _walDirectory = walDirectory;
         _segmentSize = segmentSize;
+        _initialSegmentSize = initialSegmentSize == 0 ? segmentSize : Math.Min(initialSegmentSize, segmentSize);
         _preAllocateCount = preAllocateCount;
         _useFUA = useFUA;
     }
@@ -132,16 +141,20 @@ internal sealed class WalSegmentManager : IDisposable
 
         _nextSegmentId = Math.Max(lastSegmentId, maxExistingId) + 1;
 
-        // Create and open the first active segment
-        ActiveSegment = CreateSegment(_nextSegmentId, firstLSN, 0);
+        // Create and open the first active segment, at the (possibly smaller) initial size — see _initialSegmentSize.
+        ActiveSegment = CreateSegment(_nextSegmentId, firstLSN, 0, _initialSegmentSize);
 
         // Pre-allocation must continue strictly AFTER the active segment id — otherwise EnsurePreAllocated would walk up
         // from id 1 and recreate the very placeholders we just reclaimed (and any retained real segments' ids).
         _lastPreAllocatedSegmentId = _nextSegmentId;
         _nextSegmentId++;
 
-        // Pre-allocate additional segments
-        EnsurePreAllocated();
+        // NO pre-allocation here (#784). The pool exists so a rotation never blocks on file creation, but at Initialize it is
+        // not yet known whether this database will EVER rotate — and most never do. Building it eagerly cost every database
+        // _preAllocateCount * _segmentSize of empty files (320 MiB at the defaults) that MarkReclaimable cannot see, because
+        // placeholders are never in _sealedSegments. The first RotateSegment finds no spare, falls through to its existing
+        // CreateSegment branch, and its trailing EnsurePreAllocated() builds the full pool — so a database that does rotate
+        // is back to the previous steady state from rotation #1, with no new state to track.
 
         // Reclaim adopted segments whose records are all below the checkpoint frontier (data already in the data file).
         // Segments with records ≥ checkpointLsn stay in _sealedSegments and are reclaimed by the next checkpoint cycle —
@@ -171,7 +184,7 @@ internal sealed class WalSegmentManager : IDisposable
             return 0;
         }
 
-        var valid = new List<(long Id, long FirstLsn, string Path)>(files.Length);
+        var valid = new List<(long Id, long FirstLsn, string Path, uint SizeBytes)>(files.Length);
         long maxId = 0;
         foreach (var path in files)
         {
@@ -181,9 +194,9 @@ internal sealed class WalSegmentManager : IDisposable
                 maxId = id;
             }
 
-            if (TryReadSegmentFirstLsn(path, out var firstLsn))
+            if (TryReadSegmentFirstLsn(path, out var firstLsn, out var sizeBytes))
             {
-                valid.Add((id, firstLsn, path));
+                valid.Add((id, firstLsn, path, sizeBytes));
             }
             else
             {
@@ -210,7 +223,7 @@ internal sealed class WalSegmentManager : IDisposable
             // Single-threaded open path, but locked for consistency with the concurrent writers (CK-07).
             lock (_sealedLock)
             {
-                _sealedSegments.Add((valid[i].Path, lastLsn));
+                _sealedSegments.Add((valid[i].Path, lastLsn, valid[i].SizeBytes));
             }
         }
 
@@ -221,11 +234,12 @@ internal sealed class WalSegmentManager : IDisposable
     private static long ParseSegmentIdFromPath(string path)
         => long.TryParse(Path.GetFileNameWithoutExtension(path), out var id) ? id : 0;
 
-    /// <summary>Reads + validates a segment header, returning its <see cref="WalSegmentHeader.FirstLSN"/>. False if the
-    /// file has no valid header (empty placeholder or torn).</summary>
-    private bool TryReadSegmentFirstLsn(string path, out long firstLsn)
+    /// <summary>Reads + validates a segment header, returning its <see cref="WalSegmentHeader.FirstLSN"/> and its declared
+    /// <see cref="WalSegmentHeader.SegmentSize"/>. False if the file has no valid header (empty placeholder or torn).</summary>
+    private bool TryReadSegmentFirstLsn(string path, out long firstLsn, out uint sizeBytes)
     {
         firstLsn = 0;
+        sizeBytes = 0;
         try
         {
             using var handle = _fileIO.OpenSegmentForRead(path);
@@ -237,6 +251,7 @@ internal sealed class WalSegmentManager : IDisposable
                 return false;
             }
             firstLsn = header.FirstLSN;
+            sizeBytes = header.SegmentSize;
             return true;
         }
         catch (IOException)
@@ -250,8 +265,13 @@ internal sealed class WalSegmentManager : IDisposable
     /// </summary>
     /// <param name="firstLSN">First LSN for the new segment.</param>
     /// <param name="prevLastLSN">Last LSN of the segment being sealed.</param>
+    /// <param name="minDataBytes">
+    /// Bytes the caller is about to write into the new segment. The segment is sized to hold them whatever
+    /// <see cref="_segmentSize"/> says, so a batch larger than a whole configured segment still lands inside a declared
+    /// region instead of past the end of the file (WR-03 / #785). 0 for a rotation with nothing pending.
+    /// </param>
     /// <returns>The new active segment context.</returns>
-    public WalSegmentContext RotateSegment(long firstLSN, long prevLastLSN)
+    public WalSegmentContext RotateSegment(long firstLSN, long prevLastLSN, long minDataBytes = 0)
     {
         var oldSegment = ActiveSegment;
         oldSegment.LastLSN = prevLastLSN;
@@ -261,10 +281,14 @@ internal sealed class WalSegmentManager : IDisposable
         var path = GetSegmentPath(nextId);
         _nextSegmentId++;
 
+        // A pre-allocated spare is _segmentSize; if this batch needs more, the spare cannot be used as-is and
+        // CreateSegment re-sizes the file to fit (SetLength grows it — the file is a never-written placeholder).
+        var requiredSize = RequiredSegmentSize(minDataBytes);
+
         WalSegmentContext newSegment;
 
-        // If pre-allocated, just open and write header
-        if (_fileIO.Exists(path))
+        // If pre-allocated AND large enough, just open and write header
+        if (_fileIO.Exists(path) && requiredSize <= _segmentSize)
         {
             var handle = _fileIO.OpenSegment(path, _useFUA);
             newSegment = new WalSegmentContext
@@ -283,7 +307,7 @@ internal sealed class WalSegmentManager : IDisposable
         }
         else
         {
-            newSegment = CreateSegment(nextId, firstLSN, prevLastLSN);
+            newSegment = CreateSegment(nextId, firstLSN, prevLastLSN, requiredSize);
         }
 
         ActiveSegment = newSegment;
@@ -291,7 +315,7 @@ internal sealed class WalSegmentManager : IDisposable
         // Track the sealed segment for checkpoint-based reclamation (CK-07: under the list lock), then close its handle
         lock (_sealedLock)
         {
-            _sealedSegments.Add((oldSegment.Path, oldSegment.LastLSN));
+            _sealedSegments.Add((oldSegment.Path, oldSegment.LastLSN, oldSegment.SegmentSize));
         }
         oldSegment.Dispose();
 
@@ -317,7 +341,7 @@ internal sealed class WalSegmentManager : IDisposable
         {
             for (int i = _sealedSegments.Count - 1; i >= 0; i--)
             {
-                var (path, lastLSN) = _sealedSegments[i];
+                var (path, lastLSN, _) = _sealedSegments[i];
                 if (lastLSN < checkpointLSN)
                 {
                     _fileIO.Delete(path);
@@ -345,10 +369,62 @@ internal sealed class WalSegmentManager : IDisposable
     }
 
     /// <summary>
-    /// Total byte size of the WAL across all segment files — sealed segments counted at full segment size plus
+    /// Total byte size of the WAL across all segment files — each sealed segment at its own declared size plus
     /// the active segment's current write offset. Read-only; for storage introspection (Database File Map).
     /// </summary>
-    public long TotalWalBytes => (SealedSegmentCount * _segmentSize) + (ActiveSegment?.WriteOffset ?? 0L);
+    /// <remarks>
+    /// Sums per-segment sizes rather than multiplying a count: segments are no longer uniformly <see cref="_segmentSize"/>
+    /// (the first segment of a lifecycle is <see cref="_initialSegmentSize"/>, and an oversized batch gets a segment sized
+    /// to hold it), so a count * size product would over-report.
+    /// </remarks>
+    public long TotalWalBytes
+    {
+        get
+        {
+            long sealedBytes = 0;
+            lock (_sealedLock)
+            {
+                for (var i = 0; i < _sealedSegments.Count; i++)
+                {
+                    sealedBytes += _sealedSegments[i].SizeBytes;
+                }
+            }
+
+            return sealedBytes + (ActiveSegment?.WriteOffset ?? 0L);
+        }
+    }
+
+    /// <summary>
+    /// The size a segment must have to hold <paramref name="dataBytes"/> of records: at least the configured
+    /// <see cref="_segmentSize"/>, and always enough for the header plus the data, rounded up to the 4 KiB alignment
+    /// direct I/O requires. See WR-03.
+    /// </summary>
+    private uint RequiredSegmentSize(long dataBytes)
+    {
+        var needed = WalSegmentHeader.SizeInBytes + Math.Max(0, dataBytes);
+        if (needed <= _segmentSize)
+        {
+            return _segmentSize;
+        }
+
+        // Round up to the direct-I/O page size; the cast is safe because a batch is bounded by the commit buffer half.
+        return (uint)((needed + (WalPageSize - 1)) & ~((long)WalPageSize - 1));
+    }
+
+    /// <summary>Direct-I/O alignment for segment sizing (matches the WAL writer's page alignment).</summary>
+    private const int WalPageSize = 4096;
+
+    /// <summary>
+    /// Whether <paramref name="dataBytes"/> more bytes fit inside the active segment's declared size. The WAL writer
+    /// calls this BEFORE writing and rotates when it returns false — without that, the write runs past the declared end
+    /// of the file and <see cref="WalSegmentReader"/>, which bounds its scan by the header's declared size, cannot see
+    /// those records at recovery (WR-03 / #785).
+    /// </summary>
+    public bool ActiveSegmentCanHold(long dataBytes)
+    {
+        var segment = ActiveSegment;
+        return segment != null && segment.WriteOffset + dataBytes <= segment.SegmentSize;
+    }
 
     /// <summary>
     /// Ensures the pre-allocation pool is full (creates new empty segment files as needed).
@@ -372,6 +448,12 @@ internal sealed class WalSegmentManager : IDisposable
     /// <summary>
     /// Returns the ratio of used space in the active segment (0.0 to 1.0).
     /// </summary>
+    /// <remarks>
+    /// Measured against the ACTIVE segment's own declared size, not the configured <see cref="_segmentSize"/>. Segments
+    /// are not uniformly sized (see <see cref="_initialSegmentSize"/>), and dividing by the configured size would let a
+    /// smaller segment report a fraction of its true fill — a 16 MiB segment measured against 64 MiB reaches the
+    /// rotation threshold only at 48 MiB of writes, which it cannot hold.
+    /// </remarks>
     public double ActiveSegmentUtilization
     {
         get
@@ -381,7 +463,7 @@ internal sealed class WalSegmentManager : IDisposable
                 return 0;
             }
 
-            return (double)ActiveSegment.WriteOffset / _segmentSize;
+            return (double)ActiveSegment.WriteOffset / ActiveSegment.SegmentSize;
         }
     }
 
@@ -391,20 +473,20 @@ internal sealed class WalSegmentManager : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public string GetSegmentPath(long segmentId) => Path.Combine(_walDirectory, $"{segmentId:D16}.wal");
 
-    private WalSegmentContext CreateSegment(long segmentId, long firstLsn, long prevSegmentLsn)
+    private WalSegmentContext CreateSegment(long segmentId, long firstLsn, long prevSegmentLsn, uint segmentSize)
     {
         var path = GetSegmentPath(segmentId);
         var handle = _fileIO.OpenSegment(path, _useFUA);
 
         // Pre-allocate the file
-        _fileIO.PreAllocate(handle, _segmentSize);
+        _fileIO.PreAllocate(handle, segmentSize);
 
         var context = new WalSegmentContext
         {
             Handle = handle,
             WriteOffset = WalSegmentHeader.SizeInBytes,
             SegmentId = segmentId,
-            SegmentSize = _segmentSize,
+            SegmentSize = segmentSize,
             Path = path,
             FirstLSN = firstLsn,
             LastLSN = firstLsn,
@@ -418,7 +500,9 @@ internal sealed class WalSegmentManager : IDisposable
     private unsafe void WriteSegmentHeader(WalSegmentContext context, long firstLsn, long prevSegmentLsn)
     {
         var header = new WalSegmentHeader();
-        header.Initialize(context.SegmentId, firstLsn, prevSegmentLsn, _segmentSize);
+        // The context's OWN size, not the configured one — the header is what recovery bounds its scan by, so a segment
+        // that was created larger (or smaller) than _segmentSize must declare what it actually is.
+        header.Initialize(context.SegmentId, firstLsn, prevSegmentLsn, context.SegmentSize);
         header.ComputeAndSetCrc();
 
         var headerBytes = new byte[WalSegmentHeader.SizeInBytes];
@@ -448,7 +532,7 @@ internal sealed class WalSegmentManager : IDisposable
         lock (_sealedLock)
         {
             paths = new List<string>(_sealedSegments.Count + 1);
-            foreach (var (path, _) in _sealedSegments)
+            foreach (var (path, _, _) in _sealedSegments)
             {
                 paths.Add(path);
             }

@@ -12,7 +12,8 @@ import { createClickDisambiguator } from '@/hooks/clickDisambiguator';
 import { useArchetypeList } from '@/hooks/schema/useArchetypeList';
 import { useComponentList } from '@/hooks/schema/useComponentList';
 import { useSelectionStore } from '@/stores/useSelectionStore';
-import { useSessionStore } from '@/stores/useSessionStore';
+import { useSessionStore, useDatabasePaused } from '@/stores/useSessionStore';
+import DatabasePausedNotice from '@/shell/banners/DatabasePausedNotice';
 import { useSchemaExplorerPrefsStore } from '@/stores/useSchemaExplorerPrefsStore';
 import { openArchetypeInspector, openComponentInspector } from '@/shell/commands/openSchemaBrowser';
 import type { StorageMode } from '@/hooks/schema/types';
@@ -174,7 +175,12 @@ export default function SchemaExplorerPanel(_props: IDockviewPanelProps) {
   const isLoading = aLoading || cLoading;
   const isError = aError || cError;
   const isFetching = aFetching || cFetching;
-  const isEmpty = !isLoading && archetypes.length === 0 && components.length === 0;
+  const databasePaused = useDatabasePaused();
+  // "Nothing is registered" is only sayable when the lists are empty AND we actually got an answer. A failed or paused
+  // fetch leaves them empty too, and the panel used to state both — "Failed to load schema." directly above "No schema
+  // registered in this session.", which contradict each other. Emptiness now means an answered, genuinely empty
+  // database (#621 surfaced this via the paused case; the isError arm was already wrong before it).
+  const isEmpty = !isLoading && !isError && !databasePaused && archetypes.length === 0 && components.length === 0;
   const refresh = () => {
     aRefetch();
     cRefetch();
@@ -269,7 +275,8 @@ export default function SchemaExplorerPanel(_props: IDockviewPanelProps) {
       </div>
 
       <div ref={containerRef} className="min-h-0 flex-1 overflow-hidden" tabIndex={-1}>
-        {isError && <p className="p-3 text-fs-base text-destructive">Failed to load schema.</p>}
+        {databasePaused && <DatabasePausedNotice subject="The schema" testId="schema-explorer-paused" />}
+        {!databasePaused && isError && <p className="p-3 text-fs-base text-destructive">Failed to load schema.</p>}
         {isLoading && archetypes.length === 0 && components.length === 0 && (
           <p className="p-3 text-fs-base text-muted-foreground">Loading schema…</p>
         )}

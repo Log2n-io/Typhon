@@ -62,9 +62,12 @@ const SOURCE_LOCATION_ID_SIZE = 2;
  * If you add a new instant-style kind on the C# side, add it here too. The list of carve-out ranges below is structured the same way as the
  * C# IsSpan body so the two stay in lockstep visually.
  */
-function isInstantKind(v: number): boolean {
+export function isInstantKind(v: number): boolean {
   if (v < 10) return true;                                                 // pre-#243 instants (TickStart..MemoryAllocEvent)
   if (v === TraceEventKind.PerTickSnapshot || v === TraceEventKind.ThreadInfo) return true; // 76, 77
+  // EcsSpawnBatch (36, #620) — instant rollup for a whole batch spawn. Its neighbours EcsSpawn (30) / EcsDestroy (31) are
+  // spans, hence a point carve-out rather than a range. Missing it rendered the record as a phantom span named `Kind[36]`.
+  if (v === TraceEventKind.EcsSpawnBatch) return true;
   if (v >= 90 && v <= 116) return true;                                    // Concurrency tracing (Phase 2, #280)
   // Spatial tracing (Phase 3, #281) — mixed; instants are 127-135, 137, 140-142, 144, 145.
   if ((v >= 127 && v <= 135) || v === 137 || (v >= 140 && v <= 142) || v === 144 || v === 145) return true;
@@ -87,6 +90,10 @@ function isInstantKind(v: number): boolean {
   //   243 (RuntimePhaseSpan)        — SPAN, falls through.
   //   244 (QueueTickEnd)            — instant rollup, hand-coded codec, no span-header extension.
   if (v === 242 || v === 244) return true;
+  // Query Definition Export (#342, sub-issues #334/#335/#336):
+  //   247 (QueryDefinitionDescribe), 248 (QueryArgs) — instant-style with variable payloads. Present in the C# ladder since
+  //   #342; this mirror had drifted and was decoding both as spans.
+  if (v === 247 || v === 248) return true;
   // OS thread scheduling (#ETW) — 254 (ThreadContextSwitch) is instant-shaped: 12-byte header + 13-byte payload, no span extension.
   if (v === 254) return true;
   return false;

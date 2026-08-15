@@ -162,7 +162,7 @@ internal sealed class UiCommand : Command<UiCommand.Settings>
     /// positional <c>[database]</c> nor <c>--open-db</c> is given. Sets <paramref name="error"/> (and returns null)
     /// when both are given, or when <c>--open-db</c> finds no — or more than one — <c>*.typhon</c> database in the CWD.
     /// </summary>
-    private static string ResolveDbPath(Settings settings, out string error)
+    internal static string ResolveDbPath(Settings settings, out string error)
     {
         error = null;
         var hasArg = !string.IsNullOrWhiteSpace(settings.Database);
@@ -175,7 +175,20 @@ internal sealed class UiCommand : Command<UiCommand.Settings>
 
         if (hasArg)
         {
-            return Path.GetFullPath(settings.Database);
+            // Validate the path the user typed, exactly as the --open-db branch below validates the one it derives.
+            // Without this the Workbench starts happily and hands the SPA a `db=` pointing at nothing: the failure then
+            // surfaces in the browser, several layers and one process away from the typo that caused it.
+            var full = Path.GetFullPath(settings.Database);
+            if (Directory.Exists(full))
+            {
+                return full;
+            }
+
+            error = File.Exists(full)
+                ? $"'{full}' is a file. A Typhon database is a DIRECTORY named {{name}}{IntegrityConstants.BundleExtension} — "
+                  + "pass the bundle itself, not a file inside it."
+                : $"No database at '{full}'. Check the path, or run your app once to create one.";
+            return null;
         }
 
         if (!settings.OpenDb)
@@ -310,7 +323,7 @@ internal sealed class UiCommand : Command<UiCommand.Settings>
     /// returns null and sets <paramref name="error"/> to a human-readable message so <c>Execute</c> can print it
     /// and exit 1.
     /// </summary>
-    private static string ResolveTracePath(Settings settings, out string error)
+    internal static string ResolveTracePath(Settings settings, out string error)
     {
         error = null;
         var hasTrace = !string.IsNullOrWhiteSpace(settings.Trace);
@@ -323,7 +336,18 @@ internal sealed class UiCommand : Command<UiCommand.Settings>
 
         if (hasTrace)
         {
-            return Path.GetFullPath(settings.Trace);
+            // Same reasoning as ResolveDbPath: an explicitly-typed path gets the same scrutiny as a derived one.
+            var full = Path.GetFullPath(settings.Trace);
+            if (File.Exists(full))
+            {
+                return full;
+            }
+
+            error = Directory.Exists(full)
+                ? $"'{full}' is a directory. --trace takes a single {TraceLocation.TraceExtension} capture file."
+                : $"No capture at '{full}'. Captures live in {{database}}{IntegrityConstants.BundleExtension}/"
+                  + $"{TraceLocation.ProfilingsDirectoryName}/ — or use --open-latest to pick the newest automatically.";
+            return null;
         }
 
         if (!settings.OpenLatest)
@@ -331,41 +355,60 @@ internal sealed class UiCommand : Command<UiCommand.Settings>
             return null;
         }
 
-        // --open-latest: newest *.typhon-trace under <cwd>/captures.
-        var capturesDir = Path.Combine(Directory.GetCurrentDirectory(), "captures");
-        var latest = FindLatestTrace(capturesDir);
+        // --open-latest: the newest capture across every database bundle in the working directory.
+        //
+        // This used to look in <cwd>/captures — the location captures were written to before #616 moved them inside the bundle they belong to. That change
+        // landed on the WRITER; this is the READER, in another assembly, with no test spanning both, so the flag silently found nothing from the day captures
+        // moved. Deriving the search from TraceLocation means the two cannot drift again.
+        var cwd = Directory.GetCurrentDirectory();
+        var latest = FindLatestCaptureUnder(cwd);
         if (latest is null)
         {
-            error = $"No *.typhon-trace captures found under {capturesDir}. Record a trace first, or pass --trace <PATH>.";
+            error = $"No captures found in any *.typhon database under {cwd}. Record a trace first, or pass --trace <PATH>.";
             return null;
         }
 
         return latest;
     }
 
-    /// <summary>Returns the absolute path of the most-recently-written <c>*.typhon-trace</c> in <paramref name="capturesDir"/>, or null when none exist.</summary>
-    private static string FindLatestTrace(string capturesDir)
+    /// <summary>
+    /// The most-recently-written capture across every <c>*.typhon</c> database bundle directly under <paramref name="searchRoot"/>, or null when there are none.
+    /// </summary>
+    /// <remarks>
+    /// Scans one level deep only: bundles are where a project puts its databases, and a recursive walk of an arbitrary working directory would be both slow and
+    /// surprising — "latest capture" should not reach into an unrelated subproject's data. Every path question is delegated to <see cref="TraceLocation"/> so
+    /// the layout is known in one place rather than re-joined here.
+    /// </remarks>
+    internal static string FindLatestCaptureUnder(string searchRoot)
     {
-        if (!Directory.Exists(capturesDir))
+        if (string.IsNullOrEmpty(searchRoot) || !Directory.Exists(searchRoot))
         {
             return null;
         }
 
-        var files = new DirectoryInfo(capturesDir).GetFiles("*.typhon-trace");
-        if (files.Length == 0)
+        FileInfo newest = null;
+        foreach (var bundle in Directory.EnumerateDirectories(searchRoot, "*.typhon", SearchOption.TopDirectoryOnly))
         {
-            return null;
-        }
-
-        var newest = files[0];
-        for (var i = 1; i < files.Length; i++)
-        {
-            if (files[i].LastWriteTimeUtc > newest.LastWriteTimeUtc)
+            var profilings = TraceLocation.ProfilingsDirectoryOf(bundle);
+            if (!Directory.Exists(profilings))
             {
-                newest = files[i];
+                continue;
+            }
+
+            foreach (var file in new DirectoryInfo(profilings).GetFiles("*" + TraceLocation.TraceExtension))
+            {
+                // Sidecar caches live beside captures and share the stem; IsCapture is what tells them apart.
+                if (!TraceLocation.IsCapture(file.FullName))
+                {
+                    continue;
+                }
+                if (newest is null || file.LastWriteTimeUtc > newest.LastWriteTimeUtc)
+                {
+                    newest = file;
+                }
             }
         }
 
-        return newest.FullName;
+        return newest?.FullName;
     }
 }

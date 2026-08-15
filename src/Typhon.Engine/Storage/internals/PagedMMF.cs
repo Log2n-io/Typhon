@@ -1,4 +1,4 @@
-// CS1591: this file declares public-accessibility types that live in the internal namespace (Phase 2b entanglement, see
+﻿// CS1591: this file declares public-accessibility types that live in the internal namespace (Phase 2b entanglement, see
 // claude/research/PublicVsInternalApiClassification.md). They are excluded from the published API reference, so consumer-facing
 // doc coverage is not enforced here.
 #pragma warning disable 1591
@@ -15,7 +15,6 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics.X86;
-using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Typhon.Profiler;
@@ -288,6 +287,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     /// <summary>The database bundle directory (<c>{name}.typhon</c>). The <c>data</c> file, <c>db.lock</c>, and <c>wal/</c> live inside it.</summary>
     internal string BundleDirectory => Options.BundleDirectory;
+
+    /// <summary>The database's name — the bundle directory's stem, without the <c>.typhon</c> suffix. Recorded in profiling captures so a trace can say which
+    /// database it ran against in terms a human recognises (#614, D-2).</summary>
+    internal string DatabaseName => Options.DatabaseName;
     
     private protected readonly PinnedMemoryBlock MemPages;
     private unsafe byte* _memPagesAddr;
@@ -493,7 +496,15 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         {
             Logger.LogError(e, "Virtual Disk Manager service initialization failed");
             Dispose();
-            throw new Exception("Virtual Disk Manager initialization error, check inner exception.", e);
+
+            // Say what went wrong, not merely that something did. "Virtual Disk Manager initialization error, check
+            // inner exception" named neither cause nor fix, and it referred the reader to an inner exception that every
+            // caller then dropped: Spectre.Console prints `Error: {ex.Message}` and stops, the Workbench renders the
+            // message into a toast, and the top-level shell handler only unwraps under #if DEBUG. So the one actionable
+            // sentence — "Database name mismatch: expected 'broken', found 'world'" — reached nobody. It has misdirected
+            // twice now (the other was a Win32Exception out of the liveness probe, #621), which is once more than a
+            // wrapper that adds no information deserves. The inner exception is still attached for the stack trace.
+            throw new Exception($"Cannot open the database at '{Options.BundleDirectory}': {e.Message}", e);
         }
     }
 
@@ -508,84 +519,153 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     #region Lock File
 
-    private string BuildLockFilePath() => Path.Combine(Options.BundleDirectory, "db.lock");
+    private string BuildLockFilePath() => DatabaseLockFile.PathFor(Options.BundleDirectory);
+
+    /// <summary>True once THIS instance successfully wrote the advisory lock file. Gates <see cref="ReleaseLockFile"/> so a rejected open never deletes the
+    /// lock belonging to the live holder that rejected it.</summary>
+    private bool _lockFileOwned;
+
+    /// <summary>How often to re-check while waiting for a yieldable holder to let go.</summary>
+    private static readonly TimeSpan HandoffPollInterval = TimeSpan.FromMilliseconds(50);
 
     /// <summary>
-    /// Checks for an existing advisory lock file and creates a new one.
-    /// If a stale lock file is found (dead PID), it is deleted with a warning.
-    /// If a live lock file is found, throws <see cref="DatabaseLockedException"/>.
+    /// Takes the advisory lock, waiting briefly for a <i>yieldable</i> incumbent to release it (#621).
     /// </summary>
+    /// <remarks>
+    /// <para>Three outcomes for an existing lock, unchanged in the first two:</para>
+    /// <list type="bullet">
+    /// <item><b>Dead PID</b> (or unreadable, or a different machine's file we can prove nothing about) — stale, removed, we proceed.</item>
+    /// <item><b>Live and not yieldable</b> — <see cref="DatabaseLockedException"/>, immediately. This is every ordinary
+    /// application-versus-application collision, and it behaves exactly as it did before this protocol existed.</item>
+    /// <item><b>Live and yieldable</b> — publish a claim and wait up to <see cref="PagedMMFOptions.LockHandoffTimeout"/>.</item>
+    /// </list>
+    /// <para>The claim is written once and deleted by <b>this</b> process after acquiring, never by the holder. That is
+    /// what lets the request file mean "a claim is in flight": a holder that has released must not race back in during
+    /// the window between its own release and the claimant's acquisition, and the request's presence is how it knows.</para>
+    /// </remarks>
     private void AcquireLockFile()
     {
-        if (File.Exists(_lockFilePath))
+        var handoffDeadline = (DateTimeOffset?)null;
+        var claimPublished = false;
+
+        while (true)
         {
-            try
+            if (!TryClearOrRejectExistingLock(ref handoffDeadline, ref claimPublished))
             {
-                var json = File.ReadAllText(_lockFilePath);
-                using var doc = JsonDocument.Parse(json);
-                var root = doc.RootElement;
-                var pid = root.GetProperty("pid").GetInt32();
-                var machineName = root.GetProperty("machineName").GetString() ?? "unknown";
-                var startedAt = root.TryGetProperty("startedAt", out var ts) ? 
-                    DateTimeOffset.Parse(ts.GetString() ?? string.Empty) : DateTimeOffset.MinValue;
-
-                if (!string.Equals(machineName, Environment.MachineName, StringComparison.OrdinalIgnoreCase))
-                {
-                    // Different machine — cannot verify PID remotely, treat as live
-                    ThrowHelper.ThrowDatabaseLocked(Options.BuildDatabasePathFileName(), pid, machineName, startedAt);
-                }
-
-                if (IsProcessAlive(pid))
-                {
-                    ThrowHelper.ThrowDatabaseLocked(Options.BuildDatabasePathFileName(), pid, machineName, startedAt);
-                }
-
-                // Stale lock — process is dead, delete and proceed
-                Logger.LogWarning("Stale lock file detected for PID {Pid} (started {StartedAt:u}). Previous process may have crashed. Removing lock file",
-                    pid, startedAt);
-                DeleteFileAndWait(_lockFilePath);
+                Thread.Sleep(HandoffPollInterval);
+                continue;
             }
-            catch (DatabaseLockedException)
-            {
-                throw; // Re-throw lock exceptions
-            }
-            catch (Exception ex)
-            {
-                // Corrupt or unreadable lock file — delete and proceed with a warning
-                Logger.LogWarning(ex, "Lock file '{LockFilePath}' is corrupt or unreadable. Removing it", _lockFilePath);
-                try { DeleteFileAndWait(_lockFilePath); } catch { /* best effort */ }
-            }
+            break;
         }
 
         // Write new lock file
         try
         {
-            var lockContent = JsonSerializer.Serialize(new
-            {
-                pid = Environment.ProcessId,
-                startedAt = DateTimeOffset.UtcNow.ToString("o"),
-                machineName = Environment.MachineName
-            });
-            File.WriteAllText(_lockFilePath, lockContent);
+            File.WriteAllText(_lockFilePath, DatabaseLockFile.SerializeLock(
+                Environment.ProcessId, DateTimeOffset.UtcNow, Environment.MachineName, Options.YieldableLock));
+
+            // Only now may this instance ever delete that file — see ReleaseLockFile. A failed write below leaves this false,
+            // so an instance that never owned a lock can never remove one.
+            _lockFileOwned = true;
         }
         catch (Exception ex)
         {
             // Lock file creation failed — log warning but proceed (OS file share is the real protection)
             Logger.LogWarning(ex, "Failed to create lock file '{LockFilePath}'. OS-level file sharing will still prevent concurrent access", _lockFilePath);
         }
+
+        if (claimPublished)
+        {
+            // Ours to retire, and only now: while it existed the holder knew not to re-acquire into the gap.
+            DatabaseLockFile.DeleteRequest(Options.BundleDirectory);
+        }
     }
 
     /// <summary>
-    /// Deletes the advisory lock file if it exists.
+    /// One pass of the acquisition loop. Returns <c>true</c> when the path is clear to write our own lock, <c>false</c> when the caller should wait and try
+    /// again. Throws <see cref="DatabaseLockedException"/> when it never will be.
+    /// </summary>
+    private bool TryClearOrRejectExistingLock(ref DateTimeOffset? handoffDeadline, ref bool claimPublished)
+    {
+        if (!File.Exists(_lockFilePath))
+        {
+            return true;
+        }
+
+        if (!DatabaseLockFile.TryReadLock(Options.BundleDirectory, out var info))
+        {
+            // Corrupt, truncated or mid-write. Treated as removable, exactly as before this protocol — the OS file share is the real protection, so a bad
+            // advisory file must never be able to wedge an open permanently.
+            Logger.LogWarning("Lock file '{LockFilePath}' is corrupt or unreadable. Removing it", _lockFilePath);
+            try { DeleteFileAndWait(_lockFilePath); } catch { /* best effort */ }
+            return true;
+        }
+
+        var owner = Options.BuildDatabasePathFileName();
+        var isRemote = !string.Equals(info.MachineName, Environment.MachineName, StringComparison.OrdinalIgnoreCase);
+
+        if (!isRemote && !IsProcessAlive(info.Pid))
+        {
+            // Stale lock — process is dead, delete and proceed.
+            Logger.LogWarning("Stale lock file detected for PID {Pid} (started {StartedAt:u}). Previous process may have crashed. Removing lock file",
+                info.Pid, info.StartedAt);
+            DeleteFileAndWait(_lockFilePath);
+            return true;
+        }
+
+        // Live. A remote holder's PID is unverifiable, so it is treated as live and — since we cannot ask it to yield
+        // either — never eligible for handoff.
+        if (isRemote || !info.Yieldable || Options.LockHandoffTimeout <= TimeSpan.Zero)
+        {
+            ThrowHelper.ThrowDatabaseLocked(owner, info.Pid, info.MachineName, info.StartedAt);
+        }
+
+        if (handoffDeadline is null)
+        {
+            handoffDeadline = DateTimeOffset.UtcNow + Options.LockHandoffTimeout;
+            DatabaseLockFile.WriteRequest(Options.BundleDirectory);
+            claimPublished = true;
+            Logger.LogInformation("Database is held by PID {Pid}, which advertises it will yield. Requesting release (waiting up to {TimeoutMs} ms)",
+                info.Pid, (int)Options.LockHandoffTimeout.TotalMilliseconds);
+        }
+        else if (DateTimeOffset.UtcNow > handoffDeadline)
+        {
+            // The holder advertised yieldable and did not deliver — hung, or an older build that writes the flag without
+            // honouring it. Say so: "locked" alone would send the user hunting for a process that believes it cooperated.
+            DatabaseLockFile.DeleteRequest(Options.BundleDirectory);
+            throw new DatabaseLockedException(owner, info.Pid, info.MachineName, info.StartedAt,
+                new TimeoutException(
+                    $"PID {info.Pid} advertised that it would yield the database but did not release it within "
+                    + $"{(int)Options.LockHandoffTimeout.TotalMilliseconds} ms."));
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Deletes the advisory lock file — but ONLY the one this instance created.
+    ///
+    /// <para>The ownership check is load-bearing, not defensive tidiness. A rejected open (the database is held by a live
+    /// process) reaches this through the <see cref="DatabaseLockedException"/> handler in the constructor, having never
+    /// written a lock of its own — it found somebody else's. Deleting it there stripped the LIVE holder's advisory lock, so
+    /// the very collision the lock exists to report destroyed the evidence of itself: subsequent openers saw an unlocked
+    /// database and fell through to the OS sharing violation with no idea who held it.</para>
     /// </summary>
     private void ReleaseLockFile()
     {
+        if (!_lockFileOwned)
+        {
+            return;
+        }
+
         try
         {
             if (_lockFilePath != null)
             {
                 DeleteFileAndWait(_lockFilePath);
             }
+
+            _lockFileOwned = false;
         }
         catch (Exception ex)
         {
@@ -595,6 +675,14 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     private static bool IsProcessAlive(int pid)
     {
+        // A lock can only ever have been written by a real, running process, so a non-positive id is a corrupt or synthetic record — pid 0 is the System Idle
+        // Process on Windows and not a process at all on POSIX. Probing it would hit the "cannot inspect" branch below and read as LIVE, which would let one
+        // bogus lock file wedge a database permanently. Rejected up front instead.
+        if (pid <= 0)
+        {
+            return false;
+        }
+
         try
         {
             using var process = Process.GetProcessById(pid);
@@ -604,6 +692,14 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         {
             // Process does not exist
             return false;
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            // The process exists but cannot be inspected — another user's session, a protected process, or PID 0 (the System Idle Process, whose HasExited
+            // throws ERROR_ACCESS_DENIED). "Cannot tell" must read as LIVE: the alternative is stealing a lock from a process that is very much running. Before
+            // this was handled the exception escaped the constructor and surfaced as "Virtual Disk Manager initialization error", which describes neither the
+            // cause nor the fix.
+            return true;
         }
     }
 

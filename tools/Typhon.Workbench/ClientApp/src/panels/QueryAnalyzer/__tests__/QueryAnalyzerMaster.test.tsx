@@ -38,7 +38,7 @@ function renderMaster() {
 }
 
 beforeEach(() => {
-  useSessionStore.setState({ sessionId: 'sess-1', kind: 'trace' });
+  useSessionStore.setState({ sessionId: 'sess-1', kind: 'open' });
   useQueryCatalogStore.getState().reset();
   useQueryAnalyzerStore.getState().reset();
   useSelectionStore.getState().clear();

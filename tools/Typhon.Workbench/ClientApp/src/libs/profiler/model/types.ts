@@ -29,6 +29,8 @@ export const enum TraceEventKind {
   EcsQueryCount = 33,
   EcsQueryAny = 34,
   EcsViewRefresh = 35,
+  /** Instant (not a span) — one record for an entire batch spawn (#620). See `isInstantKind` in `decode/chunkDecoder.ts`. */
+  EcsSpawnBatch = 36,
 
   BTreeInsert = 40,
   BTreeDelete = 41,
@@ -358,6 +360,7 @@ export const SpanKindNames: Record<number, string> = {
   [TraceEventKind.TransactionRollback]: 'Transaction.Rollback',
   [TraceEventKind.TransactionCommitComponent]: 'Transaction.CommitComponent',
   [TraceEventKind.EcsSpawn]: 'ECS.Spawn',
+  [TraceEventKind.EcsSpawnBatch]: 'ECS.SpawnBatch',
   [TraceEventKind.EcsDestroy]: 'ECS.Destroy',
   [TraceEventKind.EcsQueryExecute]: 'ECS.Query.Execute',
   [TraceEventKind.EcsQueryCount]: 'ECS.Query.Count',

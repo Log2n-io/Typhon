@@ -75,7 +75,9 @@ public static class UnifiedDataStream
         // The unified stream is a profiler-data surface (per design §10). Database-open sessions
         // expose their state via /api/sessions/{id}/state polling; carrying their lifecycle
         // through this channel adds complexity for no consumer in v1.
-        if (session is not (AttachSession or TraceSession))
+        // #621: an Open session with a capture attached is a profiler-data surface too — that is the whole of D-10. Gating on
+        // the capability rather than the session type is what keeps this from having to learn each new way to hold a capture.
+        if (!session.Capabilities.Contains(SessionCapability.Profiler))
         {
             ctx.Response.StatusCode = StatusCodes.Status409Conflict;
             return;
@@ -293,8 +295,10 @@ public static class UnifiedDataStream
 
     private static ProfilerMetadataDto ResolveMetadata(WbSession session) => session switch
     {
+        // An attached capture wins over a live stream: attaching one is an explicit "show me the recording" gesture.
+        OpenSession { ActiveProfile: { } openProfile } => openProfile.Metadata,
+        AttachSession { ActiveProfile: { } replay } => replay.Metadata,
         AttachSession a => a.Runtime.Metadata,
-        TraceSession t => t.Runtime.Metadata,
         _ => null,
     };
 
@@ -316,10 +320,10 @@ public static class UnifiedDataStream
                 isReattaching = false,
             };
         }
-        if (session is TraceSession trace)
+        if (session is OpenSession { ActiveProfile: { } trace })
         {
-            var lifecycle = !trace.Runtime.IsBuildComplete ? "Loading"
-                : trace.Runtime.Metadata != null ? "Ready"
+            var lifecycle = !trace.IsBuildComplete ? "Loading"
+                : trace.Metadata != null ? "Ready"
                 : "Closed";
             return new
             {

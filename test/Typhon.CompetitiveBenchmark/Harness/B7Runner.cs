@@ -213,7 +213,7 @@ public static class B7Runner
             using var c = conn.CreateCommand();
             c.CommandText = "SELECT SUM(v) FROM t";
             var o = c.ExecuteScalar();
-            return o is System.Numerics.BigInteger bi ? (long)bi : Convert.ToInt64(o);
+            return o is BigInteger bi ? (long)bi : Convert.ToInt64(o);
         }
 
         var sw = Stopwatch.StartNew();

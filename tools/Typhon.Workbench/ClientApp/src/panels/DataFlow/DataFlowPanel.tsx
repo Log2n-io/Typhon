@@ -21,6 +21,7 @@ import { type XAxisMode, useDataFlowViewStore } from './useDataFlowViewStore';
 import DataFlowTimeline from './DataFlowTimeline';
 import DataFlowToolbar from './DataFlowToolbar';
 import DataFlowSidePanel from './DataFlowSidePanel';
+import { useArchetypeStorage } from '@/hooks/profiles/useArchetypeStorage';
 import DataFlowMatrix from './DataFlowMatrix';
 import { type BarTickStats } from './DataFlowTooltip';
 
@@ -358,6 +359,26 @@ export default function DataFlowPanel(_props: IDockviewPanelProps) {
   // F-key fit-to-selection (spec §11.4): increment a token, the timeline reacts by clearing its wheel-zoom.
   const [fitToken, setFitToken] = useState(0);
 
+  // ── The physical lens (#619, design §4.2) ────────────────────────────────────────────────────────────────
+  //
+  // Hover wins over the sticky click selection. Resolved here rather than in the side panel so the precedence
+  // rule exists once, and so the two hooks below key off the same bar the panel is about to render.
+  const focusedBar = hoveredBar ?? selectedBar;
+
+  // Archetype ids resolved from the capture's ARCHETYPE table only — deliberately not `useProfilerNameMaps`,
+  // whose map merges component-type ids in and lets archetypes win the overlap. A touch summary's archetypeId is
+  // unambiguously an archetype catalog id, so a merged map could only ever mislabel it. Design §5.2/§5.3.
+  const archetypeNames = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const a of metadata?.archetypes ?? []) {
+      if (a.name) m.set(Number(a.archetypeId), a.name);
+    }
+    return m;
+  }, [metadata?.archetypes]);
+
+  const focusedArchetypeName = focusedBar ? archetypeNames.get(focusedBar.archetypeId) ?? null : null;
+  const focusedArchetypeStorage = useArchetypeStorage(focusedArchetypeName);
+
   // Resolve the "isolate" key from the cross-panel hover store. Falls back to the local hovered bar so isolate
   // works even when the hover originates inside this panel (the most common case).
   const hoverIsolate = useMemo(() => {
@@ -498,10 +519,11 @@ export default function DataFlowPanel(_props: IDockviewPanelProps) {
           </div>
           <div className="hidden w-64 shrink-0 border-l border-border bg-card @[720px]:block">
             <DataFlowSidePanel
-              hoveredBar={hoveredBar}
-              selectedBar={selectedBar}
+              focusedBar={focusedBar}
               tracks={tracks}
               systems={topology.systems ?? []}
+              archetypeName={focusedArchetypeName}
+              storage={focusedArchetypeStorage}
             />
           </div>
         </div>

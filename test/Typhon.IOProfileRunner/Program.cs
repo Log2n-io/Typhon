@@ -140,6 +140,10 @@ public static class Program
         // main thread. Must be set BEFORE any engine code runs that would claim a slot.
         System.Threading.Thread.CurrentThread.Name = "IOProfileRunner.Main";
 
+        // This runner builds a disposable database in the working directory purely to generate I/O — keep it out of the
+        // machine-local registry (#622, design D-7), which the temp guard cannot do for a cwd-rooted path.
+        DatabaseRegistry.SuppressForProcess = true;
+
         var configPath = args.Length > 0 ? args[0] : "ioprofile.json";
         if (!File.Exists(configPath))
         {

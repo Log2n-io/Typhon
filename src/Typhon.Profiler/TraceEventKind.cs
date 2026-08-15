@@ -100,6 +100,25 @@ public enum TraceEventKind : byte
     /// <summary>View refresh. Required: <c>archetypeTypeId: u16</c>. Optional: <c>mode: u8</c>, <c>resultCount: i32</c>, <c>deltaCount: i32</c>.</summary>
     EcsViewRefresh = 35,
 
+    /// <summary>
+    /// Batch entity spawn — one record for the whole batch. Required: <c>archetypeId: u16</c>, <c>routingId: u16</c>, <c>baseKey: i64</c>,
+    /// <c>count: i32</c>, <c>tsn: i64</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A batch is a closed-form range, not a list: <c>Transaction.SpawnBatch</c> reserves all N keys with one <c>Interlocked.Add</c> and stamps one routing
+    /// id, so every id in the batch is <c>new EntityId(baseKey + n, routingId)</c>. Recording N <see cref="EcsSpawn"/> records would store ~56 B each of a
+    /// value the reader can compute — 11 MiB for a 200K bulk load, against 24 B here.
+    /// </para>
+    /// <para>
+    /// <b>Why <c>routingId</c> is carried explicitly.</b> It is already the low 16 bits of every id in the range, but a consumer rebuilding ids from
+    /// <c>baseKey</c> alone would have to source it from somewhere — and the nearest candidate, <c>archetypeId</c>, is the *catalog* id, a different number
+    /// for the same archetype. That substitution is the id-space landmine documented in
+    /// <c>claude/design/Apps/Workbench/10-database-and-profiles.md</c> §5.3; carrying both closes it at the wire level.
+    /// </para>
+    /// </remarks>
+    EcsSpawnBatch = 36,
+
     // ── B+Tree (span) ──
 
     /// <summary>B+Tree insert. No payload — kind is the only data.</summary>
@@ -1082,6 +1101,15 @@ public static class TraceEventKindExtensions
             return false;
         }
         if (kind == TraceEventKind.PerTickSnapshot || kind == TraceEventKind.ThreadInfo)
+        {
+            return false;
+        }
+        // EcsSpawnBatch (36, #620) — instant rollup for a whole batch spawn, declared `Shape = Instant` on its producer so the
+        // generator emits a 12-byte header with NO 25-byte span-header extension. Its numeric neighbours (EcsSpawn 30,
+        // EcsDestroy 31) ARE spans, so it needs an explicit carve-out rather than a range. Without it every span-aware reader
+        // consumed 25 payload bytes as a span header — fabricated duration and parent links — and the Workbench rendered it on a
+        // thread lane as a phantom span named `Kind[36]`.
+        if (kind == TraceEventKind.EcsSpawnBatch)
         {
             return false;
         }

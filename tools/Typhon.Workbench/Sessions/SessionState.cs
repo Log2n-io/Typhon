@@ -6,5 +6,4 @@ public enum SessionState
     MigrationRequired,
     Incompatible,
     Attached,
-    Trace,
 }

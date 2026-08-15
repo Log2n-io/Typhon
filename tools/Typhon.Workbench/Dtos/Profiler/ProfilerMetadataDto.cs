@@ -24,6 +24,9 @@ public record ProfilerMetadataDto(
     System.Collections.Generic.Dictionary<ushort, string> QueueIdToName,
     // v15 (#327) — Workbench Data Flow per-(tick, system, archetype) entity-touch rollups. Empty for v14-or-older caches.
     Typhon.Profiler.SystemArchetypeTouchSummary[] SystemArchetypeTouches,
+    // v17 (#620) — entity spawn/destroy runs backing the entity lens's cohorts. Empty for v16-or-older caches, which is
+    // distinguishable from "this capture recorded no spawns" only by the cache's chunker version.
+    Typhon.Profiler.EntityLifecycleRun[] EntityLifecycleRuns,
     // #354 W4 — runtime partitioning hierarchy (Engine → Track → DAG → Phase → System), projected from the trace's
     // Tracks + DAGs tables. Empty for traces with no track data. The flat <see cref="Phases"/> list is retained as a
     // derived first-seen rollup for consumers not yet migrated to the hierarchy.
@@ -50,6 +53,21 @@ public record DagDto(
     string[] Phases);
 
 /// <summary>Header fields projected from <c>TraceFileHeader</c>. All primitive types — JSON-friendly.</summary>
+/// <remarks>
+/// The trailing block (<paramref name="DatabaseId"/> onwards) is the v12 capture-identity segment (#614). It exists so the profiles list can render a rich row
+/// — which database, how long, how many ticks, how far behind — from the header alone, without building a sidecar cache per capture. Zero / empty values mean
+/// the capture ran with no engine attached, which is a valid trace that simply cannot be paired to a database.
+/// </remarks>
+/// <param name="DatabaseId">Durable id of the database the capture ran against, as a GUID string; empty when none was recorded.</param>
+/// <param name="DatabaseName">The database's bundle name, for display; empty when none was recorded.</param>
+/// <param name="TsnMin">Engine next-free TSN when the capture started.</param>
+/// <param name="TsnMax">Engine next-free TSN when the capture closed. Compare against the database's current TSN for the drift readout.</param>
+/// <param name="DurationTicks">Capture length in <c>Stopwatch</c> ticks — divide by <paramref name="TimestampFrequency"/> for seconds.</param>
+/// <param name="TickCount">Runtime ticks the capture spans; 0 when it ran without a scheduler.</param>
+/// <param name="SchemaFingerprint">Order-independent digest of the schema, as a decimal string (a <c>ulong</c> exceeds JSON's safe integer range).</param>
+/// <param name="MultipleEnginesObserved">
+/// True when more than one engine was live during the capture. Routing ids are absent from such a trace, and archetype correlation must fall back to names.
+/// </param>
 public record ProfilerHeaderDto(
     int Version,
     long TimestampFrequency,
@@ -59,7 +77,16 @@ public record ProfilerHeaderDto(
     ushort ArchetypeCount,
     ushort ComponentTypeCount,
     long CreatedUtcTicks,
-    long SamplingSessionStartQpc);
+    long SamplingSessionStartQpc,
+    // v12 (#614) — capture identity + listing fields.
+    string DatabaseId = "",
+    string DatabaseName = "",
+    long TsnMin = 0,
+    long TsnMax = 0,
+    long DurationTicks = 0,
+    uint TickCount = 0,
+    string SchemaFingerprint = "0",
+    bool MultipleEnginesObserved = false);
 
 /// <summary>One system in the DAG.</summary>
 /// <remarks>
@@ -100,15 +127,26 @@ public record SystemDefinitionDto(
 /// <c>SchemaRevision</c> mirrors <c>ArchetypeAttribute.Revision</c>; <c>ComponentTypeNames</c> lists the slot-ordered
 /// component types declared on the archetype.
 /// </summary>
+/// <param name="RoutingId">
+/// The archetype's durable per-database routing id (#614, D-3) — the identity every <c>EntityId</c> embeds, and the only id safe to join against database-side
+/// data. <c>0xFFFF</c> when the trace does not know it. ⚠️ <c>ArchetypeId</c> is the per-<i>process</i> catalog id and is <b>not</b> interchangeable with this:
+/// comparing the two produces a plausible wrong answer for any database whose registration order differs from its routing order, while looking correct in a
+/// fresh test database. Resolve through <c>TraceArchetypeIdentity</c> rather than by hand.
+/// </param>
 public record ArchetypeDto(
     ushort ArchetypeId,
     string Name,
     string Label,
     int SchemaRevision,
-    string[] ComponentTypeNames);
+    string[] ComponentTypeNames,
+    ushort RoutingId = 0xFFFF);
 
 /// <summary>Component-type-id → name mapping.</summary>
-public record ComponentTypeDto(int ComponentTypeId, string Name);
+/// <param name="Revision">
+/// The component's schema revision (<c>[Component(Revision)]</c>). Surfaced per component — rather than only at archetype granularity — because "which
+/// component moved between this capture and the database?" is the question the drift readout has to answer (#614, D-2).
+/// </param>
+public record ComponentTypeDto(int ComponentTypeId, string Name, int Revision = 0);
 
 /// <summary>Per-tick overview row. Used to render the tick-overview strip at the top of the Profiler panel.</summary>
 /// <param name="ActiveSystemsBitmask">64-bit bitmask of active system indices. Serialized as decimal string to preserve precision.</param>

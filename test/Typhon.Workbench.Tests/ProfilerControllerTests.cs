@@ -37,9 +37,7 @@ public sealed class ProfilerControllerTests
     private async Task<SessionDto> CreateTraceSessionAsync(int tickCount = 3, int instantsPerTick = 2)
     {
         var path = TraceFixtureBuilder.BuildMinimalTrace(_factory.DemoDirectory, tickCount, instantsPerTick);
-        var resp = await _client.PostAsJsonAsync("/api/sessions/trace", new CreateTraceSessionRequest(path));
-        resp.EnsureSuccessStatusCode();
-        return JsonSerializer.Deserialize<SessionDto>(await resp.Content.ReadAsStringAsync(), Json)!;
+        return await CaptureSessionFactory.OpenWithCaptureAsync(_client, _factory.DemoDirectory, path);
     }
 
     private async Task WaitForBuildAsync(Guid sessionId, TimeSpan timeout)
@@ -139,8 +137,10 @@ public sealed class ProfilerControllerTests
             "an untouched source file must report newVersionAvailable=false");
 
         // Simulate a profiling re-run overwriting the same .typhon-trace in place.
+        // #621 — FilePath is the database bundle now, so the capture is resolved from inside it. Overwriting the bundle
+        // directory (what the old FilePath would mean today) is what this used to do by accident.
         var replacement = TraceFixtureBuilder.BuildMinimalTrace(_factory.DemoDirectory, tickCount: 6, instantsPerTick: 4);
-        File.Copy(replacement, session.FilePath!, overwrite: true);
+        File.Copy(replacement, CaptureSessionFactory.CapturePathOf(session), overwrite: true);
 
         // Poll the endpoint through the 1 s server-side debounce + fingerprint re-compute.
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);

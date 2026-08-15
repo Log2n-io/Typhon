@@ -12,10 +12,14 @@ using Typhon.Workbench.Fixtures;
 namespace Typhon.Workbench.Tests;
 
 /// <summary>
-/// Regression guard for <c>SessionsController.ValidateTraceFileMagic</c>. Without this upfront
-/// check a bad file path would create a session that immediately fails its background cache
+/// Regression guard for <c>ProfilesController.ValidateCaptureMagic</c>. Without this upfront
+/// check a bad file would create a runtime that immediately fails its background cache
 /// build, flooding <c>/metadata</c> with 500s. The validator returns a clean 400 for three
 /// distinct bad-magic cases so the UI can surface a readable error pill.
+///
+/// <para>#621 moved the guard from the deleted standalone-trace route to the attach path — with two entry modes,
+/// attaching is the only way a user hands the Workbench a capture file, so it is where a wrong file now arrives.
+/// The cases are unchanged; only the door they knock on is.</para>
 ///
 /// The most common user mistake (pasting the <c>.typhon-trace-cache</c> sidecar instead of the
 /// source) gets a specific hint in the error message — we pin that too so the diagnostic doesn't
@@ -34,22 +38,42 @@ public sealed class SessionsControllerTraceMagicTests
     {
         _factory = new WorkbenchFactory();
         _client = _factory.CreateAuthenticatedClient();
+
+        // The bundle must exist before it is opened: POST /api/sessions/file no longer auto-creates a database from a
+        // path that is not there (a typo used to fabricate an empty one instead of failing). These tests are about
+        // capture validation, so the database is setup — create it rather than lean on the old create-if-missing.
+        Directory.CreateDirectory(BundlePath);
     }
 
     [TearDown]
     public void TearDown() => _factory.Dispose();
 
+    /// <summary>Writes a candidate file straight into a fresh database's <c>profilings/</c>, which is where attach resolves names.</summary>
     private string WriteFile(string name, byte[] bytes)
     {
-        Directory.CreateDirectory(_factory.DemoDirectory);
-        var path = Path.Combine(_factory.DemoDirectory, name);
+        var profilings = TraceLocation.ProfilingsDirectoryOf(BundlePath);
+        Directory.CreateDirectory(profilings);
+        var path = Path.Combine(profilings, name);
         File.WriteAllBytes(path, bytes);
         return path;
     }
 
+    private string BundlePath => Path.Combine(_factory.DemoDirectory, "magic.typhon");
+
     private async Task<(HttpStatusCode Code, string Detail)> PostTraceAsync(string path)
     {
-        var resp = await _client.PostAsJsonAsync("/api/sessions/trace", new CreateTraceSessionRequest(path));
+        // Open the database, then try to attach the candidate file by name — the path a user takes since #621.
+        var opened = await _client.PostAsJsonAsync("/api/sessions/file", new { filePath = BundlePath });
+        opened.EnsureSuccessStatusCode();
+        var session = JsonSerializer.Deserialize<SessionDto>(await opened.Content.ReadAsStringAsync(),
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
+
+        var req = new HttpRequestMessage(HttpMethod.Post, $"/api/sessions/{session.SessionId}/profile")
+        {
+            Content = System.Net.Http.Json.JsonContent.Create(new { fileName = Path.GetFileName(path) }),
+        };
+        req.Headers.Add("X-Session-Token", session.SessionId.ToString());
+        var resp = await _client.SendAsync(req);
         var body = await resp.Content.ReadAsStringAsync();
         var detail = "";
         try
@@ -110,21 +134,20 @@ public sealed class SessionsControllerTraceMagicTests
     [Test]
     public async Task Post_ValidTraceFixture_Returns201()
     {
-        // Positive control — a real fixture passes the magic check and produces a session.
-        var path = TraceFixtureBuilder.BuildMinimalTrace(_factory.DemoDirectory, tickCount: 2, instantsPerTick: 1);
-        var resp = await _client.PostAsJsonAsync("/api/sessions/trace", new CreateTraceSessionRequest(path));
-        Assert.That(resp.StatusCode, Is.EqualTo(HttpStatusCode.Created));
+        // Positive control — a real fixture passes the magic check and attaches. Without this the bad-magic cases above
+        // would pass just as happily if the validator rejected everything.
+        var built = TraceFixtureBuilder.BuildMinimalTrace(_factory.DemoDirectory, tickCount: 2, instantsPerTick: 1);
+        var session = await CaptureSessionFactory.OpenWithCaptureAsync(_client, _factory.DemoDirectory, built);
+        Assert.That(session.Capabilities, Does.Contain("profiler"), "a valid capture must attach and grant the profiler capability");
     }
 
     [Test]
     public async Task Post_NonexistentFile_Returns404()
     {
-        // The 404 path is upstream of the magic validator — it fires on File.Exists failure. Pin
-        // it here to distinguish it from the 400 bad-magic cases above (users will see different
-        // error phrasing).
-        var path = Path.Combine(_factory.DemoDirectory, "does-not-exist.typhon-trace");
-        var resp = await _client.PostAsJsonAsync("/api/sessions/trace", new CreateTraceSessionRequest(path));
-        Assert.That(resp.StatusCode, Is.EqualTo(HttpStatusCode.NotFound));
+        // The 404 path is upstream of the magic validator — it fires on File.Exists failure. Pin it here to distinguish
+        // it from the 400 bad-magic cases above (users see different error phrasing).
+        var (code, _) = await PostTraceAsync(Path.Combine(TraceLocation.ProfilingsDirectoryOf(BundlePath), "does-not-exist.typhon-trace"));
+        Assert.That(code, Is.EqualTo(HttpStatusCode.NotFound));
     }
 
     [Test]

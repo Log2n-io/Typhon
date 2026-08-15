@@ -6,7 +6,7 @@
   },
   "servers": [
     {
-      "url": "http://localhost:5200/"
+      "url": "http://127.0.0.1:5200/"
     }
   ],
   "paths": {
@@ -167,6 +167,85 @@
         ]
       }
     },
+    "/api/databases": {
+      "get": {
+        "tags": [
+          "Databases"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnownDatabaseListDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Databases"
+        ],
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnownDatabaseListDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/databases/prune": {
+      "post": {
+        "tags": [
+          "Databases"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnownDatabaseListDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
     "/api/sessions/{sessionId}/data/archetypes/{archetypeId}/entities": {
       "get": {
         "tags": [
@@ -283,6 +362,167 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/EntityDetailDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/data/archetypes/{archetypeId}/entities/resolve": {
+      "post": {
+        "tags": [
+          "DataBrowser"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "archetypeId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CohortRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CohortRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/CohortRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CohortResolutionDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/data/archetypes/{archetypeId}/entities/page": {
+      "post": {
+        "tags": [
+          "DataBrowser"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "archetypeId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "int32",
+              "default": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "int32",
+              "default": 200
+            }
+          },
+          {
+            "name": "preview",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CohortRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CohortRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/CohortRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntityPageDto"
                 }
               }
             }
@@ -680,6 +920,109 @@
         ]
       }
     },
+    "/api/sessions/{sessionId}/lifecycle/cohort": {
+      "get": {
+        "tags": [
+          "Data"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "spawn"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "uint32",
+              "default": 0
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "uint32",
+              "default": 4294967295
+            }
+          },
+          {
+            "name": "archetype",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "int32",
+              "default": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "int32",
+              "default": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntityCohortDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
     "/api/fs/home": {
       "get": {
         "tags": [
@@ -1005,6 +1348,50 @@
         "responses": {
           "200": {
             "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/fixtures/damaged": {
+      "post": {
+        "tags": [
+          "Fixtures"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DamagedFixtureRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DamagedFixtureRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/DamagedFixtureRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DamagedFixtureResponseDto"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -2299,6 +2686,136 @@
         ]
       }
     },
+    "/api/sessions/{sessionId}/profiles": {
+      "get": {
+        "tags": [
+          "Profiles"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileListDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/profile": {
+      "post": {
+        "tags": [
+          "Profiles"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachProfileRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachProfileRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachProfileRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/profile/{profileId}": {
+      "delete": {
+        "tags": [
+          "Profiles"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "profileId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
     "/api/sessions/{sessionId}/query/plan": {
       "post": {
         "tags": [
@@ -2881,50 +3398,6 @@
             "application/*+json": {
               "schema": {
                 "$ref": "#/components/schemas/CreateAttachSessionRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SessionDto"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "Bearer": [ ]
-          }
-        ]
-      }
-    },
-    "/api/sessions/trace": {
-      "post": {
-        "tags": [
-          "Sessions"
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateTraceSessionRequest"
-              }
-            },
-            "text/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateTraceSessionRequest"
-              }
-            },
-            "application/*+json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateTraceSessionRequest"
               }
             }
           },
@@ -3771,6 +4244,15 @@
             "items": {
               "type": "string"
             }
+          },
+          "routingId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16",
+            "default": 65535
           }
         }
       },
@@ -3854,6 +4336,18 @@
               "string"
             ],
             "format": "double"
+          }
+        }
+      },
+      "AttachProfileRequest": {
+        "type": "object",
+        "properties": {
+          "fileName": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "default": ""
           }
         }
       },
@@ -4127,6 +4621,84 @@
           }
         }
       },
+      "CohortRequestDto": {
+        "required": [
+          "entityIds"
+        ],
+        "type": "object",
+        "properties": {
+          "entityIds": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "CohortResolutionDto": {
+        "required": [
+          "archetypeId",
+          "routingId",
+          "revision",
+          "aliveIds",
+          "missingIds",
+          "foreignRoutingCount"
+        ],
+        "type": "object",
+        "properties": {
+          "archetypeId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "routingId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          },
+          "revision": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "aliveIds": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "missingIds": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "foreignRoutingCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          }
+        }
+      },
       "ComponentFamilyMapDto": {
         "required": [
           "componentToFamily",
@@ -4349,6 +4921,15 @@
               "null",
               "string"
             ]
+          },
+          "revision": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32",
+            "default": 0
           }
         }
       },
@@ -4599,20 +5180,6 @@
           }
         }
       },
-      "CreateTraceSessionRequest": {
-        "required": [
-          "filePath"
-        ],
-        "type": "object",
-        "properties": {
-          "filePath": {
-            "type": [
-              "null",
-              "string"
-            ]
-          }
-        }
-      },
       "DagDto": {
         "required": [
           "id",
@@ -4643,6 +5210,64 @@
             "items": {
               "type": "string"
             }
+          }
+        }
+      },
+      "DamagedFixtureRequestDto": {
+        "required": [
+          "path"
+        ],
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "variant": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "default": "meta-slot"
+          }
+        }
+      },
+      "DamagedFixtureResponseDto": {
+        "required": [
+          "path",
+          "variant",
+          "verdict",
+          "findingCount"
+        ],
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "variant": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "verdict": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "findingCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           }
         }
       },
@@ -4779,6 +5404,97 @@
           }
         }
       },
+      "EntityCohortDto": {
+        "required": [
+          "kind",
+          "fromTick",
+          "toTick",
+          "totalEntities",
+          "offset",
+          "entityIds",
+          "hasMore",
+          "routingId",
+          "catalogArchetypeId",
+          "archetypeName"
+        ],
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "fromTick": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "toTick": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "totalEntities": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "offset": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "entityIds": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "hasMore": {
+            "type": "boolean"
+          },
+          "routingId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          },
+          "catalogArchetypeId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "archetypeName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
       "EntityDetailDto": {
         "required": [
           "entityId",
@@ -4818,6 +5534,10 @@
             }
           }
         }
+      },
+      "EntityLifecycleRun": {
+        "type": "object",
+        "description": "One spawn or destroy **run** in CacheSectionId.EntityLifecycle — the trace-side index behind the Workbench entity lens (#620,\r\ndesign §4.4). Sorted by `(TickNumber, FirstEntityKey)` so a tick range resolves by binary search."
       },
       "EntityMapStatsDto": {
         "required": [
@@ -6090,6 +6810,88 @@
           }
         }
       },
+      "KnownDatabaseDto": {
+        "required": [
+          "name",
+          "bundlePath",
+          "databaseId",
+          "firstSeenUtc",
+          "lastOpenedUtc",
+          "lastOpenedBy",
+          "exists"
+        ],
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "bundlePath": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "databaseId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "firstSeenUtc": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lastOpenedUtc": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lastOpenedBy": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "exists": {
+            "type": "boolean"
+          }
+        }
+      },
+      "KnownDatabaseListDto": {
+        "required": [
+          "enabled",
+          "disabledReason",
+          "registryDirectory",
+          "entries"
+        ],
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "disabledReason": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "registryDirectory": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "entries": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/KnownDatabaseDto"
+            }
+          }
+        }
+      },
       "MemoryAllocDirection": {
         "type": "integer",
         "description": "Direction of a TraceEventKind.MemoryAllocEvent: allocation or free."
@@ -6302,6 +7104,165 @@
           "value": { }
         }
       },
+      "ProfileDto": {
+        "required": [
+          "fileName",
+          "profileId",
+          "isActive",
+          "createdUtcTicks",
+          "durationTicks",
+          "timestampFrequency",
+          "tickCount",
+          "tsnMin",
+          "tsnMax",
+          "schemaFingerprint",
+          "databaseId",
+          "databaseName",
+          "multipleEnginesObserved",
+          "sizeBytes",
+          "isPinned",
+          "isReadable",
+          "belongsToDatabase"
+        ],
+        "type": "object",
+        "properties": {
+          "fileName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "profileId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          },
+          "isActive": {
+            "type": "boolean"
+          },
+          "createdUtcTicks": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "durationTicks": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "timestampFrequency": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "tickCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "tsnMin": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "tsnMax": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "schemaFingerprint": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "databaseId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "databaseName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "multipleEnginesObserved": {
+            "type": "boolean"
+          },
+          "sizeBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "isPinned": {
+            "type": "boolean"
+          },
+          "isReadable": {
+            "type": "boolean"
+          },
+          "belongsToDatabase": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ProfileListDto": {
+        "required": [
+          "profiles",
+          "databaseTsn",
+          "profilingsDirectory"
+        ],
+        "type": "object",
+        "properties": {
+          "profiles": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ProfileDto"
+            }
+          },
+          "databaseTsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "profilingsDirectory": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
       "ProfilerHeaderDto": {
         "required": [
           "version",
@@ -6387,6 +7348,67 @@
               "string"
             ],
             "format": "int64"
+          },
+          "databaseId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "default": ""
+          },
+          "databaseName": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "default": ""
+          },
+          "tsnMin": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64",
+            "default": 0
+          },
+          "tsnMax": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64",
+            "default": 0
+          },
+          "durationTicks": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64",
+            "default": 0
+          },
+          "tickCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32",
+            "default": 0
+          },
+          "schemaFingerprint": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "default": "0"
+          },
+          "multipleEnginesObserved": {
+            "type": "boolean",
+            "default": false
           }
         }
       },
@@ -6408,6 +7430,7 @@
           "postTickSummaries",
           "queueIdToName",
           "systemArchetypeTouches",
+          "entityLifecycleRuns",
           "tracks"
         ],
         "type": "object",
@@ -6539,6 +7562,15 @@
             ],
             "items": {
               "$ref": "#/components/schemas/SystemArchetypeTouchSummary"
+            }
+          },
+          "entityLifecycleRuns": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/EntityLifecycleRun"
             }
           },
           "tracks": {
@@ -7811,6 +8843,13 @@
               "string"
             ],
             "format": "int64"
+          },
+          "profileId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
           }
         }
       },
@@ -7949,6 +8988,22 @@
               "null",
               "string"
             ]
+          },
+          "capabilities": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "activeProfileId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
           }
         }
       },
@@ -10367,6 +11422,9 @@
             "$ref": "#/components/schemas/TraceEventDtoEcsSpawnEventDto"
           },
           {
+            "$ref": "#/components/schemas/TraceEventDtoEcsSpawnBatchEventDto"
+          },
+          {
             "$ref": "#/components/schemas/TraceEventDtoEcsViewDeltaBufferOverflowEventDto"
           },
           {
@@ -10822,6 +11880,7 @@
             "ecsQuerySpatialAttach": "#/components/schemas/TraceEventDtoEcsQuerySpatialAttachEventDto",
             "ecsQuerySubtreeExpand": "#/components/schemas/TraceEventDtoEcsQuerySubtreeExpandEventDto",
             "ecsSpawn": "#/components/schemas/TraceEventDtoEcsSpawnEventDto",
+            "ecsSpawnBatch": "#/components/schemas/TraceEventDtoEcsSpawnBatchEventDto",
             "ecsViewDeltaBufferOverflow": "#/components/schemas/TraceEventDtoEcsViewDeltaBufferOverflowEventDto",
             "ecsViewDeltaCacheMiss": "#/components/schemas/TraceEventDtoEcsViewDeltaCacheMissEventDto",
             "ecsViewIncrementalDrain": "#/components/schemas/TraceEventDtoEcsViewIncrementalDrainEventDto",
@@ -18186,6 +19245,106 @@
           }
         },
         "description": "Generated DTO for `EcsQuerySubtreeExpand` trace events. Wire format mirrors the encoder partial."
+      },
+      "TraceEventDtoEcsSpawnBatchEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "ecsSpawnBatch"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "archetypeId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`EcsSpawnBatch` event payload — archetype id.",
+            "format": "uint16"
+          },
+          "routingId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`EcsSpawnBatch` event payload — routing id.",
+            "format": "uint16"
+          },
+          "baseKey": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`EcsSpawnBatch` event payload — base key.",
+            "format": "int64"
+          },
+          "count": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`EcsSpawnBatch` event payload — count.",
+            "format": "int32"
+          },
+          "tsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`EcsSpawnBatch` event payload — tsn.",
+            "format": "int64"
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
+            "format": "uint16"
+          }
+        },
+        "description": "Generated instant-event DTO for `EcsSpawnBatch`. 12-byte header + payload; no span fields."
       },
       "TraceEventDtoEcsSpawnEventDto": {
         "properties": {
@@ -31494,6 +32653,9 @@
       "name": "Options"
     },
     {
+      "name": "Databases"
+    },
+    {
       "name": "DataBrowser"
     },
     {
@@ -31507,6 +32669,9 @@
     },
     {
       "name": "Integrity"
+    },
+    {
+      "name": "Profiles"
     },
     {
       "name": "QueryConsole"

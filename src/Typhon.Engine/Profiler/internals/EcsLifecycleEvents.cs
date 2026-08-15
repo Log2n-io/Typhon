@@ -26,6 +26,48 @@ internal ref partial struct EcsSpawnEvent
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// ECS Spawn Batch
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+/// <summary>
+/// Producer-side ref struct for <see cref="TraceEventKind.EcsSpawnBatch"/> — one record for an entire batch spawn.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>A batch is a range, so it is stored as one.</b> <c>Transaction.SpawnBatch</c> / <c>SpawnBatchAllocate</c> reserve all N entity keys with a single
+/// <c>Interlocked.Add</c> and stamp one routing id, so the batch's ids are exactly <c>new EntityId(BaseKey + n, RoutingId)</c> for <c>n</c> in
+/// <c>[0, Count)</c>. That makes the range reconstruction exact rather than an approximation, and collapses what would be N × ~56 B of
+/// <see cref="TraceEventKind.EcsSpawn"/> records into 24 B.
+/// </para>
+/// <para>
+/// <b>Instant shape, not a span.</b> The consumer wants the cohort, not the batch's duration — which the enclosing transaction span already brackets. Instant
+/// emits a direct <c>EmitEcsSpawnBatch(...)</c> with the gate check inlined: no ref-struct materialization, no try/finally, and nothing to place at the far
+/// end of a long loop body where an early return could drop it.
+/// </para>
+/// </remarks>
+[TraceEvent(TraceEventKind.EcsSpawnBatch, Shape = TraceEventShape.Instant)]
+internal ref partial struct EcsSpawnBatchEvent
+{
+    [BeginParam] public ushort ArchetypeId;
+
+    /// <summary>
+    /// The archetype's durable per-database routing id, which every id in the range embeds in its low 16 bits. Carried even though it is derivable from any
+    /// one id, because a reader rebuilding the range from <see cref="BaseKey"/> has only <see cref="ArchetypeId"/> otherwise — and that is the *catalog* id,
+    /// a different number for the same archetype (design §5.3).
+    /// </summary>
+    [BeginParam] public ushort RoutingId;
+
+    /// <summary>First entity key in the reserved range. Keys, not raw ids — the raw id is <c>(key &lt;&lt; 16) | RoutingId</c>.</summary>
+    [BeginParam] public long BaseKey;
+
+    /// <summary>Number of consecutive keys reserved. Always &gt; 0; zero-length batches emit nothing.</summary>
+    [BeginParam] public int Count;
+
+    /// <summary>Transaction sequence number the batch was spawned under.</summary>
+    [BeginParam] public long Tsn;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 // ECS Destroy
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 

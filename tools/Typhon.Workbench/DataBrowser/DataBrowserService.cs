@@ -5,6 +5,7 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using Typhon.Engine;
 using Typhon.Workbench.Dtos.Data;
+using Typhon.Workbench.Dtos.Profiler;
 using Typhon.Workbench.Schema;
 using Typhon.Workbench.Sessions;
 
@@ -35,6 +36,39 @@ public sealed class DataBrowserService
     {
         ArgumentNullException.ThrowIfNull(sessions);
         _sessions = sessions;
+    }
+
+    /// <summary>
+    /// Drops every cached snapshot for a session. <b>Must be called whenever the session's engine is replaced</b> — i.e. on pause and on resume (#621).
+    /// </summary>
+    /// <remarks>
+    /// <para>This is a correctness requirement, not housekeeping. <see cref="_snapshots"/> is keyed on the <see cref="OpenSession"/>, and the whole point of
+    /// pausing is that the session object <i>outlives</i> the engine. Without this call the entries stay reachable, so after the application has written to
+    /// the database and the Workbench has resumed, the Data Browser keeps serving the pre-pause entity list stamped with the pre-pause
+    /// <c>Revision</c> — silently wrong data that looks entirely plausible, which is the single worst outcome this feature could produce.</para>
+    /// <para><c>StorageMapService</c> needs no equivalent: its cache is keyed on the <c>DatabaseEngine</c> itself, so replacing the engine invalidates it by
+    /// construction.</para>
+    /// </remarks>
+    public void InvalidateSession(OpenSession session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        _snapshots.Remove(session);
+    }
+
+    /// <summary>
+    /// Whether this session currently has cached snapshots. Test-only introspection for the pause path (#621).
+    /// </summary>
+    /// <remarks>
+    /// The behaviour that matters — "a resumed session re-reads the database instead of replaying a pre-pause list" — cannot be observed from outside the
+    /// service: a surviving cache would answer without ever touching the new engine, which looks identical to a correct answer unless the data changed
+    /// underneath. Writing entities from a test would require the schema's static archetype types, which live in a collectible ALC precisely so they do not
+    /// leak into the default one. So the mechanism is pinned here directly, and the end-to-end version — browse, let the application write, resume, see the
+    /// new rows — is part of the live walk rather than pretended at in a unit test.
+    /// </remarks>
+    internal bool HasCachedSnapshots(OpenSession session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        return _snapshots.TryGetValue(session, out var perSession) && !perSession.IsEmpty;
     }
 
     private sealed record ArchetypeSnapshot(EntityId[] Ids, long Revision);
@@ -203,6 +237,112 @@ public sealed class DataBrowserService
         return new EntityDetailDto(entityId, archetypeId, tx.TSN, components);
     }
 
+    // ── Cohort resolution (#620, design §4.4) ──────────────────────────────
+
+    /// <summary>
+    /// Partitions a spawn cohort into the entities the database still holds and those it does not.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why this is safe at all.</b> <c>EntityId</c> is monotonic and never recycled, so an id taken from an old capture either finds the same entity or
+    /// finds nothing — it can never resolve to a <i>different</i> one. That single property is what makes the entity bridge shippable where the archetype
+    /// and component bridges needed name joins and rename chains.
+    /// </para>
+    /// <para>
+    /// <b>The routing-id cross-check.</b> Every entity id embeds its archetype's durable routing id in the low 16 bits. Before answering, the archetype's
+    /// routing id is compared against the ids actually submitted; a mismatch means the caller is asking about a different archetype's entities — the exact
+    /// shape of design §5.3's landmine — and is rejected rather than answered with a confident "none of these are alive".
+    /// </para>
+    /// <para>
+    /// Membership is tested against the cached archetype snapshot, so a 200,000-id cohort costs one enumeration (already paid by the entity list) plus one
+    /// hash lookup per id — not one <c>TryOpen</c> per id, and certainly not one request per id.
+    /// </para>
+    /// </remarks>
+    /// <param name="sessionId">An Open (file) session.</param>
+    /// <param name="archetypeId">Catalog archetype id, as the schema DTO reports it.</param>
+    /// <param name="entityIds">Raw entity ids as decimal strings.</param>
+    public CohortResolutionDto ResolveCohort(Guid sessionId, string archetypeId, IReadOnlyList<string> entityIds)
+    {
+        var (open, archId) = ResolveArchetype(sessionId, archetypeId);
+        var expectedRouting = open.Engine.Engine.RoutingIdForCatalog(archId);
+        var snapshot = GetSnapshot(open, archId);
+
+        var live = new HashSet<long>(snapshot.Ids.Length);
+        foreach (var id in snapshot.Ids)
+        {
+            live.Add((long)id.RawValue);
+        }
+
+        var alive = new List<string>();
+        var missing = new List<string>();
+        var foreignRouting = 0;
+
+        foreach (var raw in entityIds ?? [])
+        {
+            if (!ulong.TryParse(raw, out var parsed))
+            {
+                missing.Add(raw);
+                continue;
+            }
+
+            var value = unchecked((long)parsed);
+            if (EntityId.FromRaw(value).ArchetypeId != expectedRouting)
+            {
+                // Not "destroyed" — not this archetype's entity at all. Counting it as missing would let a mis-joined cohort read as a mass extinction.
+                foreignRouting++;
+                continue;
+            }
+
+            (live.Contains(value) ? alive : missing).Add(raw);
+        }
+
+        return new CohortResolutionDto(
+            ArchetypeId: archetypeId,
+            RoutingId: expectedRouting,
+            Revision: snapshot.Revision,
+            AliveIds: [.. alive],
+            MissingIds: [.. missing],
+            ForeignRoutingCount: foreignRouting);
+    }
+
+    /// <summary>
+    /// Returns a page of rows for an explicit list of entity ids, in the order given, using the same preview decoding as
+    /// <see cref="GetEntityPage"/>.
+    /// </summary>
+    /// <remarks>
+    /// The Data Browser's normal page is a window onto the archetype's whole snapshot; this one is a window onto a caller-supplied set, which is what makes
+    /// "open these 830 in the Data Browser" a real navigation rather than a filter the user has to reconstruct by hand.
+    /// </remarks>
+    public EntityPageDto GetEntityPageForIds(Guid sessionId, string archetypeId, IReadOnlyList<string> entityIds, int offset, int limit, string preview = null)
+    {
+        var (open, archId) = ResolveArchetype(sessionId, archetypeId);
+        var snapshot = GetSnapshot(open, archId);
+
+        var parsed = new List<EntityId>(entityIds?.Count ?? 0);
+        foreach (var raw in entityIds ?? [])
+        {
+            if (ulong.TryParse(raw, out var value))
+            {
+                parsed.Add(EntityId.FromRaw(unchecked((long)value)));
+            }
+        }
+
+        var total = parsed.Count;
+        var start = Math.Clamp(offset, 0, total);
+        var take = Math.Clamp(limit <= 0 ? DefaultLimit : limit, 1, MaxLimit);
+        var count = Math.Min(take, total - start);
+
+        var window = parsed.GetRange(start, count).ToArray();
+        var specs = ParsePreview(preview);
+        var rows = specs.Length == 0
+            ? BuildIdOnlyRows(window, 0, count)
+            : BuildPreviewRows(open.Engine.Engine, window, 0, count, specs);
+
+        // The snapshot revision travels with the page so the caller can say which HEAD the rows were read against — a cohort is drawn from a past capture,
+        // and the values in it are emphatically current.
+        return new EntityPageDto(archetypeId, snapshot.Revision, total, start, rows, start + count < total);
+    }
+
     // ── Resolution + snapshot ──────────────────────────────────────────────
 
     private (OpenSession Open, ushort ArchetypeId) ResolveArchetype(Guid sessionId, string archetypeId)
@@ -225,6 +365,14 @@ public sealed class DataBrowserService
         {
             // Trace / live-Attach sessions have no in-process engine to read entities from.
             throw new DataUnavailableException(sessionId, session.Kind.ToString());
+        }
+        if (open.IsPaused)
+        {
+            // Paused (#621): the engine is gone, so there are no entities to read. 409 rather than 400 — this resolves itself when the holder exits, and the
+            // client should retry rather than treat it as a permanent wrong-session-kind error.
+            throw new WorkbenchException(409, "database_paused",
+                "The Data Browser needs the database, which this session has released"
+                + (open.PausedBy is { } h ? $" to {h.Describe()}" : "") + ".");
         }
         if (open.Engine.State != SchemaCompatibility.State.Ready)
         {

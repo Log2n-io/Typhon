@@ -46,6 +46,11 @@ const DEFAULT_OPTIONS: WorkbenchOptions = {
 interface OptionsState {
   options: WorkbenchOptions;
   loaded: boolean;
+  /**
+   * Why the last {@link fetch} failed, or null. Rendered instead of the loading placeholder so a failed load is
+   * distinguishable from a slow one — without it the panel is a spinner that never resolves and reads as a hang.
+   */
+  loadError: string | null;
   /** Operating system from `/api/system/os` — drives UI affordances (e.g., disabling VS on macOS). */
   os: 'windows' | 'macos' | 'linux' | 'other';
 
@@ -102,21 +107,39 @@ function ensureOptionsStreamSubscription(set: (partial: Partial<OptionsState>) =
 export const useOptionsStore = create<OptionsState>()((set, get) => ({
   options: DEFAULT_OPTIONS,
   loaded: false,
+  loadError: null,
   os: 'other',
 
   fetch: async () => {
-    const [optsResp, osResp] = await Promise.all([
-      fetch('/api/options'),
-      fetch('/api/system/os'),
-    ]);
-    if (optsResp.ok) {
-      const opts = (await optsResp.json()) as WorkbenchOptions;
-      set({ options: opts, loaded: true });
+    set({ loadError: null });
+    try {
+      // Auth headers are NOT optional here. Under `typhon ui` the bootstrap token lives in sessionStorage and must be
+      // attached per request — only the Vite dev proxy injects it server-side. These two GETs were the last raw fetches
+      // in this store (the PATCHes below always applied them), so under `typhon ui` they 401'd, `loaded` never became
+      // true, and the Options panel showed "Loading…" forever. That is the panel the schema banner sends you to, so a
+      // database whose schema DLL could not be found had its one recovery path end in a dead spinner.
+      const [optsResp, osResp] = await Promise.all([
+        fetch('/api/options', { headers: applyWorkbenchAuthHeaders(new Headers()) }),
+        fetch('/api/system/os', { headers: applyWorkbenchAuthHeaders(new Headers()) }),
+      ]);
+
+      if (optsResp.ok) {
+        const opts = (await optsResp.json()) as WorkbenchOptions;
+        set({ options: opts, loaded: true });
+      } else {
+        // Terminal, and SAID. A silent non-ok used to leave `loaded` false with nothing rendered but a spinner —
+        // indistinguishable from "still loading", which is why this looked like a freeze rather than a failure.
+        set({ loadError: `Could not load options (HTTP ${optsResp.status}).` });
+      }
+
+      if (osResp.ok) {
+        const osInfo = (await osResp.json()) as { os: 'windows' | 'macos' | 'linux' | 'other' };
+        set({ os: osInfo.os });
+      }
+    } catch (err) {
+      set({ loadError: err instanceof Error ? err.message : 'Could not load options.' });
     }
-    if (osResp.ok) {
-      const osInfo = (await osResp.json()) as { os: 'windows' | 'macos' | 'linux' | 'other' };
-      set({ os: osInfo.os });
-    }
+
     // Subscribe to out-of-band changes (file edited by hand, another Workbench window PATCHing).
     // EventSource lifetime tied to the page; the SSE handler closes server-side on disconnect.
     ensureOptionsStreamSubscription(set);

@@ -592,14 +592,14 @@ public sealed class AggregationServiceTests
 
     private static SystemDefinitionDto MakeSystem(string name, ushort idx) => new(
         idx, name, 0, 0, false, 0,
-        System.Array.Empty<ushort>(), System.Array.Empty<ushort>(),
+        Array.Empty<ushort>(), Array.Empty<ushort>(),
         "", false,
-        System.Array.Empty<string>(), System.Array.Empty<string>(),
-        System.Array.Empty<string>(), System.Array.Empty<string>(),
-        System.Array.Empty<string>(), System.Array.Empty<string>(),
-        System.Array.Empty<string>(), System.Array.Empty<string>(),
-        System.Array.Empty<string>(), System.Array.Empty<string>(),
-        System.Array.Empty<string>(), System.Array.Empty<string>(),
+        Array.Empty<string>(), Array.Empty<string>(),
+        Array.Empty<string>(), Array.Empty<string>(),
+        Array.Empty<string>(), Array.Empty<string>(),
+        Array.Empty<string>(), Array.Empty<string>(),
+        Array.Empty<string>(), Array.Empty<string>(),
+        Array.Empty<string>(), Array.Empty<string>(),
         DagId: 0);
 
     private static SystemTickSummary MakeSystemRow(uint tick, ushort sysIdx, float duration) => new()
@@ -693,26 +693,28 @@ public sealed class AggregationServiceTests
             PostTickSummary[] postRows = null,
             Dictionary<ushort, string> queueIdToName = null,
             SystemArchetypeTouchSummary[] archetypeTouches = null,
-            ArchetypeDto[] archetypes = null)
+            ArchetypeDto[] archetypes = null,
+            EntityLifecycleRun[] lifecycleRuns = null)
         {
             return new ProfilerMetadataDto(
                 Fingerprint: "TEST",
                 Header: new ProfilerHeaderDto(0, 1, 0f, 0, 0, 0, 0, 0, 0),
-                Systems: systems ?? System.Array.Empty<SystemDefinitionDto>(),
-                Archetypes: archetypes ?? System.Array.Empty<ArchetypeDto>(),
-                ComponentTypes: System.Array.Empty<ComponentTypeDto>(),
+                Systems: systems ?? Array.Empty<SystemDefinitionDto>(),
+                Archetypes: archetypes ?? Array.Empty<ArchetypeDto>(),
+                ComponentTypes: Array.Empty<ComponentTypeDto>(),
                 SpanNames: new Dictionary<int, string>(),
-                GlobalMetrics: new GlobalMetricsDto(0, 0, 0, 0, 0, 0, 0, System.Array.Empty<SystemAggregateDto>()),
-                TickSummaries: System.Array.Empty<TickSummaryDto>(),
-                ChunkManifest: System.Array.Empty<ChunkManifestEntryDto>(),
-                GcSuspensions: System.Array.Empty<GcSuspensionDto>(),
-                Phases: System.Array.Empty<string>(),
-                Tracks: System.Array.Empty<TrackDto>(),
-                SystemTickSummaries: systemRows ?? System.Array.Empty<SystemTickSummary>(),
-                QueueTickSummaries: queueRows ?? System.Array.Empty<QueueTickSummary>(),
-                PostTickSummaries: postRows ?? System.Array.Empty<PostTickSummary>(),
+                GlobalMetrics: new GlobalMetricsDto(0, 0, 0, 0, 0, 0, 0, Array.Empty<SystemAggregateDto>()),
+                TickSummaries: Array.Empty<TickSummaryDto>(),
+                ChunkManifest: Array.Empty<ChunkManifestEntryDto>(),
+                GcSuspensions: Array.Empty<GcSuspensionDto>(),
+                Phases: Array.Empty<string>(),
+                Tracks: Array.Empty<TrackDto>(),
+                SystemTickSummaries: systemRows ?? Array.Empty<SystemTickSummary>(),
+                QueueTickSummaries: queueRows ?? Array.Empty<QueueTickSummary>(),
+                PostTickSummaries: postRows ?? Array.Empty<PostTickSummary>(),
                 QueueIdToName: queueIdToName ?? new Dictionary<ushort, string>(),
-                SystemArchetypeTouches: archetypeTouches ?? System.Array.Empty<SystemArchetypeTouchSummary>());
+                SystemArchetypeTouches: archetypeTouches ?? Array.Empty<SystemArchetypeTouchSummary>(),
+                EntityLifecycleRuns: lifecycleRuns ?? Array.Empty<EntityLifecycleRun>());
         }
     }
 }

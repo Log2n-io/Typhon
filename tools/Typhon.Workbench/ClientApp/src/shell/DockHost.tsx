@@ -3,7 +3,7 @@ import { useThemeStore } from '@/stores/useThemeStore';
 import { useLogStore, selectUnseenLevel, selectUnseenCount, type LogLevel } from '@/stores/useLogStore';
 import { DockviewDefaultTab, DockviewReact, themeDark, themeLight, type DockviewApi, type DockviewReadyEvent, type IDockviewDefaultTabProps, type IDockviewPanelHeaderProps, type IDockviewPanelProps } from 'dockview-react';
 import { useDockLayoutStore } from '@/stores/useDockLayoutStore';
-import { useSessionStore } from '@/stores/useSessionStore';
+import { useSessionStore, useSessionCapability, useTraceBackedSession } from '@/stores/useSessionStore';
 // Eagerly imported: the shell + default-layout panels that are always mounted at session open (so lazy-loading
 // them would only add a Suspense flash, not save the cold bundle anything). Everything else is lazy (below).
 import DetailPanel from '@/panels/DetailPanel';
@@ -18,6 +18,7 @@ import { registerDockApi, registerResetLayout, focusPanelBody } from './commands
 import { registerProfilerDockApi } from './commands/profilerCommands';
 import { isViewActive } from './viewRegistry';
 import MigrationRequiredBanner from './banners/MigrationRequiredBanner';
+import PausedBanner from './banners/PausedBanner';
 import IncompatibleBanner from './banners/IncompatibleBanner';
 import ReconnectBanner from './banners/ReconnectBanner';
 
@@ -137,6 +138,7 @@ const components: Record<string, React.FC<IDockviewPanelProps>> = {
   ComponentInspector: lazyPanel(() => import('@/panels/ComponentInspector/ComponentInspectorPanel')),
   SystemDag: lazyPanel(() => import('@/panels/SystemDag/SystemDagPanel')),
   DataFlow: lazyPanel(() => import('@/panels/DataFlow/DataFlowPanel')),
+  EntityLifecycle: lazyPanel(() => import('@/panels/EntityLifecycle/CohortsPanel')),
   CriticalPath: lazyPanel(() => import('@/panels/CriticalPath/CriticalPathPanel')),
   CallTree: lazyPanel(() => import('@/panels/profiler/CallTree')),
   Options: lazyPanel(() => import('@/panels/options/OptionsPanel')),
@@ -151,6 +153,7 @@ const components: Record<string, React.FC<IDockviewPanelProps>> = {
   DataBrowserEntities: lazyPanel(() => import('@/panels/DataBrowser/EntityListPanel')),
   // #386 Phase 1: Query Console (chip-mode authoring + DSL editor + result grid + saved queries / history).
   QueryConsole: lazyPanel(() => import('@/panels/QueryConsole/QueryConsolePanel')),
+  Profiles: lazyPanel(() => import('@/panels/Profiles/ProfilesPanel')),
   // Dev Fixture: lazy because it's only opened on demand (View → Dev Fixture or palette). Replaces the former
   // tab inside ConnectDialog so the feature has a persistent home — generate, inspect, generate again without
   // re-opening the Connect dialog.
@@ -165,8 +168,12 @@ const activeComponents: Record<string, React.FC<IDockviewPanelProps>> = Object.f
 // Stage 0 default layouts are the shell frame only: edge groups (navigator / inspector / drawer) around a
 // neutral, empty center. Every center/zone-D panel is added only when its view is active (`isViewActive`),
 // so the deep panels stay out today and re-appear automatically as Stages 2-4 flip them back on.
-function buildDefaultLayout(api: DockviewReadyEvent['api'], kind: 'none' | 'open' | 'attach' | 'trace') {
-  if (kind === 'trace' || kind === 'attach') {
+function buildDefaultLayout(
+  api: DockviewReadyEvent['api'],
+  kind: 'none' | 'open' | 'attach' | 'trace',
+  hasProfiler: boolean,
+) {
+  if (hasProfiler) {
     // The Profiler timeline is the center workspace — add it FIRST (no position) so it establishes the main
     // grid; the edge groups then wrap around it. A no-position addPanel joins the *active* group, so adding it
     // AFTER an edge panel docks it into that edge instead — the bug that put the timeline in the left edge once
@@ -277,6 +284,10 @@ export default function DockHost() {
   const filePath = useSessionStore((s) => s.filePath);
   const sessionState = useSessionStore((s) => s.sessionState);
   const kind = useSessionStore((s) => s.kind);
+  // Layout follows what the session can DO (#617): an open database with a capture attached needs the profiler
+  // panels just as much as a trace session does, and it is still kind === 'open'.
+  const hasProfiler = useSessionCapability('profiler');
+  const traceBacked = useTraceBackedSession();
   const layoutKey = filePath ? `${kind}:${filePath}` : `${kind}:default`;
   const getLayout = useDockLayoutStore((s) => s.get);
   const saveLayout = useDockLayoutStore((s) => s.save);
@@ -320,7 +331,7 @@ export default function DockHost() {
           event.api.removeEdgeGroup(pos);
         }
       }
-      buildDefaultLayout(event.api, kind);
+      buildDefaultLayout(event.api, kind, hasProfiler);
     };
 
     registerResetLayout(rebuildDefault);
@@ -341,13 +352,13 @@ export default function DockHost() {
           rebuildDefault();
         }
       } else {
-        buildDefaultLayout(event.api, kind);
+        buildDefaultLayout(event.api, kind, hasProfiler);
       }
     }
 
     // Trace-session safety net: profiler lives in the center area and must always be present — but only while
     // the Profiler view is active (gated off in Stage 0, restored in Stage 3).
-    if (kind === 'trace' && isViewActive('Profiler') && !event.api.getPanel('profiler')) {
+    if (traceBacked && isViewActive('Profiler') && !event.api.getPanel('profiler')) {
       event.api.addPanel({ id: 'profiler', component: 'Profiler', title: 'Profiler', tabComponent: 'locked' });
     }
 
@@ -357,7 +368,7 @@ export default function DockHost() {
     // actually needs it, so a layout that kept the panels elsewhere isn't given a spurious empty group.
     const needLogs = !event.api.getPanel('logs');
     const needTopSpans =
-      (kind === 'trace' || kind === 'attach') && isViewActive('TopSpans') && !event.api.getPanel('top-spans');
+      hasProfiler && isViewActive('TopSpans') && !event.api.getPanel('top-spans');
     if ((needLogs || needTopSpans) && !event.api.getEdgeGroup('bottom')) {
       event.api.addEdgeGroup('bottom', { id: EDGE_BOTTOM_ID, initialSize: 200, minimumSize: 100 });
     }
@@ -394,6 +405,8 @@ export default function DockHost() {
 
   return (
     <div className="flex h-full flex-col">
+      {/* #621 — self-gating on session.isPaused, and owns the poll that notices the database coming back. */}
+      <PausedBanner />
       {showMigration && <MigrationRequiredBanner />}
       {showIncompatible && <IncompatibleBanner />}
       {/* Stage 4 P4 (#377) — reconnect / shutdown banner; self-gates on sessionKind === 'attach' &&

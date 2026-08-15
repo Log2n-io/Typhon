@@ -24,7 +24,8 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import type { ResourceNodeDto } from '@/api/generated/model';
 import { useResourceGraphStore } from '@/stores/useResourceGraphStore';
-import { useSessionStore } from '@/stores/useSessionStore';
+import { useSessionStore, useDatabasePaused } from '@/stores/useSessionStore';
+import DatabasePausedNotice from '@/shell/banners/DatabasePausedNotice';
 import { useSelectedResourceStore } from '@/stores/useSelectedResourceStore';
 import { useRecentFilesStore } from '@/stores/useRecentFilesStore';
 import { useResourceIndex } from '@/hooks/useResourceIndex';
@@ -251,6 +252,7 @@ export default function ResourceTreePanel() {
  const queryClient = useQueryClient();
 
  const { root, isLoading, isError, refresh, isFetching } = useResourceIndex();
+ const databasePaused = useDatabasePaused();
  // Subscribe to the engine's graph-mutation SSE stream; on event the hook invalidates the
  // resource-root query and the tree + index re-fetch. Server coalesces to ≤10/sec per session.
  useResourceGraphStream();
@@ -378,7 +380,8 @@ export default function ResourceTreePanel() {
  {isLoading && (
  <p className="px-3 py-2 text-fs-sm text-muted-foreground">Loading…</p>
  )}
- {isError && (
+ {databasePaused && <DatabasePausedNotice subject="The resource tree" testId="resource-tree-paused" />}
+ {!databasePaused && isError && (
  <p className="px-3 py-2 text-fs-sm text-destructive">Failed to load resources</p>
  )}
  {rootNode && (

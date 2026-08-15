@@ -78,7 +78,10 @@ export type SelectionObjectType =
   | 'span'
   | 'tick'
   | 'timeRange'
-  | 'sourceLocation';
+  | 'sourceLocation'
+  // A profiling capture in the Profile sessions list. Selecting one is how its provenance becomes visible —
+  // which database recorded it, and whether that is the database currently open (#617 D-2).
+  | 'capture';
 
 /**
  * The most-recently selected *primary* object — what the right-rail Inspector renders in full and

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 
@@ -175,6 +175,76 @@ internal static class BootstrapChecks
         {
             ReportRevisionMismatch(ctx, b.FormatRevision, b.SelectedSlot);
         }
+
+        CheckNameMatchesBundle(ctx, b);
+    }
+
+    /// <summary>
+    /// The recorded database name must equal the bundle directory's stem, because <c>ManagedPagedMMF.OnFileLoading</c>
+    /// compares exactly these two on every open and throws when they differ.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the third thing the engine validates about page 0 — after the signature and the format revision, both of
+    /// which this check already covered. Omitting it left a bundle that <b>cannot be opened by any means</b> scanning as
+    /// healthy, which is the one verdict a checker must never get wrong: the report said Divergent-but-repairable, the
+    /// plan proposed reopening the database, and the reopen was impossible. The scan is offline and never opens the
+    /// engine, so nothing downstream could have noticed on its behalf.
+    /// </para>
+    /// <para>
+    /// The cause is almost always a renamed or copied bundle — <c>Copy-Item world.typhon broken.typhon</c> — since the
+    /// name lives inside the file and the directory is what carries it. Reported <see cref="IntegritySeverity.Fatal"/>
+    /// because the database is unopenable, and <see cref="Repairability.NotRepairable"/> because the remedy is a filesystem
+    /// rename rather than anything a repair plan may do: this feature does not move the operator's files.
+    /// </para>
+    /// </remarks>
+    private static void CheckNameMatchesBundle(ScanContext ctx, BootstrapView b)
+    {
+        var bundle = ctx.Bundle;
+        if (bundle == null || string.IsNullOrEmpty(b.DatabaseName))
+        {
+            return;   // a non-bundle source (a backup, a test stream) carries no directory to disagree with
+        }
+
+        var directory = Path.GetFileName(bundle.BundlePath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        if (string.IsNullOrEmpty(directory))
+        {
+            return;
+        }
+
+        // A bundle directory is `{name}.typhon` and nothing else, so the expected name is that suffix removed — NOT
+        // Path.GetFileNameWithoutExtension, which strips only the LAST extension and therefore reads
+        // `world.typhon.pre-repair-20260812` as expecting `world.typhon`. That produced a finding whose own message
+        // contradicted itself ("records 'world' but its directory is named 'world.typhon'"), on the pre-repair copies
+        // this feature creates itself.
+        if (!directory.EndsWith(IntegrityConstants.BundleExtension, StringComparison.OrdinalIgnoreCase))
+        {
+            // Not a canonical bundle directory at all. That is normal and deliberate for a pre-repair copy or an
+            // archived one: the name is what stops it being mistaken for a live database. It is still worth saying how
+            // to use it, because the engine cannot open it in place — but it is an Advisory, not damage. Reporting
+            // Fatal here would make every backup this tool takes scan as a broken database.
+            ctx.Report(Identity, IntegritySeverity.Advisory, "", new Locus(b.SelectedSlot),
+                $"This directory is not named '{b.DatabaseName}{IntegrityConstants.BundleExtension}', so the engine cannot open it in place.",
+                $"The contents are a database named '{b.DatabaseName}'; the engine derives a bundle's location from its name and "
+                + $"opens '{b.DatabaseName}{IntegrityConstants.BundleExtension}' only. Copy or rename this directory to that name "
+                + "— in a parent directory of your choosing — to open it. Scanning it here needs no rename and is unaffected.");
+            return;
+        }
+
+        var expected = directory[..^IntegrityConstants.BundleExtension.Length];
+        if (string.IsNullOrEmpty(expected) || string.Equals(expected, b.DatabaseName, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        ctx.Report(Identity, IntegritySeverity.Fatal, "", new Locus(b.SelectedSlot),
+            $"This database cannot be opened: it records the name '{b.DatabaseName}' but its bundle directory is named '{expected}{IntegrityConstants.BundleExtension}'.",
+            $"The engine compares the name persisted in page 0 against the bundle directory's stem on every open and refuses "
+            + $"a mismatch, so no tool can open this bundle in its current location — including the repair step that reopens "
+            + $"a database to regenerate its derived structures. Nothing is damaged: renaming the directory back to "
+            + $"'{b.DatabaseName}{IntegrityConstants.BundleExtension}' restores it exactly. A copied bundle must keep its name "
+            + "and change its parent directory instead.",
+            Repairability.NotRepairable);
     }
 
     /// <summary>

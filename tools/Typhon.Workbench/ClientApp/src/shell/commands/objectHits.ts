@@ -24,8 +24,10 @@ const GROUP_ORDER: ObjectGroup[] = ['Resources', 'Components', 'Archetypes', 'Sy
 /** Which object groups are reachable in each session kind (session-kind filtering, suite C law 4). */
 const GROUPS_BY_KIND: Record<SessionKind, ObjectGroup[]> = {
   none: [],
-  open: ['Resources', 'Components', 'Archetypes'],
-  trace: ['Components', 'Archetypes', 'Systems', 'Queries'],
+  // #621: an Open session reaches everything — it is now also how you reach a capture, so Systems and Queries are
+  // available to it whenever one is attached. Listing them here is the honest upper bound for a kind; the panels
+  // themselves gate on the profiler capability, which is the condition that actually varies during a session's life.
+  open: ['Resources', 'Components', 'Archetypes', 'Systems', 'Queries'],
   attach: ['Systems', 'Queries'],
 };
 

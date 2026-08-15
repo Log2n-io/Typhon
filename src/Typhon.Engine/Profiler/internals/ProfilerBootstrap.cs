@@ -1,6 +1,9 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Threading;
 
@@ -101,6 +104,11 @@ internal static class ProfilerBootstrap
                     config = ovr.Configure(config) ?? config;
                 }
 
+                // Captures live with their database (#616, design D-1). This MUST stay ahead of the inert check below: it fills an absent
+                // destination, so asking "is there an output channel?" before it would warn about a profiler that is one line away from
+                // being given one — which is every database-backed capture, i.e. the default case.
+                config = ApplyDefaultCaptureDestination(runtime, config);
+
                 // Master switch on but no output channel requested — nothing to export. Say so exactly once (#792): silence here is
                 // indistinguishable from "profiled fine, found nothing", and the realistic cause is a late environment variable, which the
                 // host cannot see because TelemetryConfig froze the merged configuration at assembly load. Console.Error rather than an
@@ -169,6 +177,62 @@ internal static class ProfilerBootstrap
             + ".typhon-trace file path) or 'Typhon:Profiler:Live' (a TCP port) in typhon.telemetry.json beside the executable, or set "
             + "TYPHON__PROFILER__TRACE / TYPHON__PROFILER__LIVE in the environment BEFORE the process starts. Setting those variables from inside Main has "
             + "no effect: the telemetry configuration is read once when Typhon.Engine loads, which happens before Main's first statement runs.";
+    }
+
+    /// <summary>
+    /// Points an otherwise-destinationless capture at <c>{bundle}/profilings/</c> and enforces the database's retention policy before the new file is created
+    /// (#616, D-1 + D-6). Returns <paramref name="config"/> unchanged whenever a destination was already chosen or there is no bundle to write into.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Deliberately narrow.</b> An explicit <c>Typhon:Profiler:Trace</c> path still means exactly what it meant before, and a live-only session already
+    /// <i>has</i> a destination — the <c>LivePort &lt; 0</c> term is what keeps this from bolting a file exporter onto one. The default fills an absent
+    /// destination; it never adds a second.
+    /// </para>
+    /// <para>
+    /// Pruning happens <b>here</b>, in whatever process is about to write a capture, precisely because the Workbench is not always present — a game server, a
+    /// CI box, a customer deployment records captures with no tooling installed. A budget enforced only by the Workbench would leave those disks filling
+    /// exactly as before. Running it before the new file is created also means the capture about to be written is never a candidate for its own eviction.
+    /// </para>
+    /// <para>Best-effort throughout: a host must never fail to start profiling because a directory could not be pruned.</para>
+    /// </remarks>
+    internal static ProfilerLaunchConfig ApplyDefaultCaptureDestination(TyphonRuntime runtime, ProfilerLaunchConfig config)
+    {
+        if (config == null || config.SuppressCapture || config.TraceFilePath != null || config.LivePort >= 0)
+        {
+            return config;
+        }
+
+        var bundle = runtime?.Engine?.MMF?.BundleDirectory;
+        if (string.IsNullOrEmpty(bundle))
+        {
+            // Standalone profiling with no engine attached (Typhon.IOProfileRunner, exporter tests). There is no database to co-locate with, so leave the
+            // config destinationless rather than inventing a directory somewhere.
+            return config;
+        }
+
+        // Same reasoning as TraceRetention.Prune: the engine's Logger is legitimately null in some hosts, and [LoggerMessage] methods do not tolerate that.
+        ILogger logger = runtime.Engine.Logger ?? (ILogger)NullLogger.Instance;
+        try
+        {
+            var profilings = TraceLocation.ProfilingsDirectoryOf(bundle);
+            var policy = RetentionPolicy.Read(profilings, out var malformedReason);
+            if (malformedReason != null)
+            {
+                RetentionLog.PolicyUnreadable(logger, profilings, malformedReason);
+            }
+
+            // Prune BEFORE creating the new file, so the capture about to be written is never a candidate for its own eviction.
+            TraceRetention.Prune(profilings, policy, logger);
+
+            return config with { TraceFilePath = TraceLocation.NewCapturePath(bundle) };
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // An unwritable bundle (read-only mount, foreign ownership) must degrade to "no capture", not to a failed host start.
+            ProfilerBootstrapLog.CaptureDirectoryUnavailable(logger, bundle, ex.GetType().Name, ex.Message);
+            return config;
+        }
     }
 
     /// <summary>

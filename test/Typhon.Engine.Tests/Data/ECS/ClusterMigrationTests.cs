@@ -103,7 +103,7 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
                     ulong occupancy = *(ulong*)clusterBase;
                     while (occupancy != 0)
                     {
-                        int slot = System.Numerics.BitOperations.TrailingZeroCount(occupancy);
+                        int slot = BitOperations.TrailingZeroCount(occupancy);
                         occupancy &= occupancy - 1;
                         long entityAtSlot = *(long*)(clusterBase + cs.Layout.EntityIdsOffset + slot * 8);
                         if (entityAtSlot == (long)id.RawValue)

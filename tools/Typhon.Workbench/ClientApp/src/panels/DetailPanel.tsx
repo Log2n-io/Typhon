@@ -3,7 +3,7 @@ import { Binary, Boxes, ChevronDown, ChevronRight, FolderOpen, HardDrive, Layers
 import { StatusBadge } from '@/components/ui/status-badge';
 import { simplifyTypeName } from '@/libs/simplifyTypeName';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
-import { useSessionStore } from '@/stores/useSessionStore';
+import { useSessionCapability, useSessionStore } from '@/stores/useSessionStore';
 import type { DbMapSelection } from '@/libs/dbmap/dbMapSelection';
 import { useDbMapOverlayStore } from '@/stores/useDbMapOverlayStore';
 import { useDbMap } from '@/hooks/dbmap/useDbMap';
@@ -20,8 +20,16 @@ import { openComponentInspector, openArchetypeInspector, openDataBrowser } from 
 import { useArchetypesForComponent } from '@/hooks/schema/useArchetypesForComponent';
 import { pickPrimaryArchetype } from '@/hooks/dataBrowser/pickArchetype';
 import { componentNameFromResource } from '@/hooks/dataBrowser/resourceComponent';
-import { openComponentInSchema, openDbMapForComponent, revealComponentInResourceTree, revealSystemInDag } from '@/shell/commands/openDbMap';
+import {
+  openComponentInSchema,
+  openDbMapForComponent,
+  revealArchetypeInFileMap,
+  revealComponentInResourceTree,
+  revealSystemInDag,
+} from '@/shell/commands/openDbMap';
 import { revealQueryInAnalyzer } from '@/shell/commands/profilerCommands';
+import { CaptureDetailCard } from '@/panels/Profiles/CaptureDetailCard';
+import type { Profile } from '@/hooks/profiles/useProfileList';
 import { isViewActive } from '@/shell/viewRegistry';
 import type { ComponentSchema, Field } from '@/hooks/schema/types';
 import ProfilerDetail from '@/panels/profiler/ProfilerDetail';
@@ -51,8 +59,10 @@ import type { ProfilerSelection } from '@/libs/profiler/model/traceModel';
 export default function DetailPanel() {
   const leaf = useSelectionStore((s) => s.leaf);
   const profilerMetadata = useProfilerSessionStore((s) => s.metadata);
-  const sessionKind = useSessionStore((s) => s.kind);
-  const isProfilerSession = sessionKind === 'attach' || sessionKind === 'trace';
+  // #617 introduced capabilities to replace exactly this test; #621 finishes the job. `kind === 'trace' || 'attach'` is
+  // false for an open database with a capture attached — a session that can profile — so this panel was hiding profiler
+  // detail from the database-hosted path that F4 made the primary one.
+  const isProfilerSession = useSessionCapability('profiler');
 
   // Pin freezes the rail on the current object so clicking elsewhere doesn't re-target it (ephemeral).
   const [pinned, setPinned] = useState<SelectionLeaf | null>(null);
@@ -94,7 +104,9 @@ export default function DetailPanel() {
           it. Leaf + ancestors share ONE scroll list. With a chain, the leaf is wrapped in an auto-height div so
           its `h-full` collapses to content height — no whitespace gap before the first ancestor, one scrollbar.
           With no chain, the lone leaf fills the rail as before (profiler / entity cards expect that). */}
-      <div className="min-h-0 flex-1 overflow-auto">
+      {/* min-w-0 alongside min-h-0: a flex child's default min-width:auto stops it shrinking below its content, so
+          wide cards grew the rail instead of overflowing inside it and no horizontal scrollbar ever appeared. */}
+      <div className="min-h-0 min-w-0 flex-1 overflow-auto">
         {ancestors.length === 0 ? (
           <div className="h-full">
             <LeafCard leaf={activeLeaf} />
@@ -145,6 +157,8 @@ function LeafCard({ leaf }: { leaf: SelectionLeaf }): React.JSX.Element {
       return <SystemLeafCard name={String(leaf.ref)} />;
     case 'query':
       return <QueryLeafCard ref0={leaf.ref} />;
+    case 'capture':
+      return <CaptureDetailCard profile={leaf.ref as Profile} />;
     default:
       return <ObjectSummaryCard icon={<Binary className="h-4 w-4 text-muted-foreground" />} kind={leaf.type} title={String(leaf.ref)} />;
   }
@@ -257,7 +271,7 @@ function ComponentLeafCard({ typeName }: { typeName: string }): React.JSX.Elemen
       actions={actions}
     >
       {c ? (
-        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-fs-sm">
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-fs-sm">
           <dt className="text-muted-foreground">Size</dt>
           <dd className="tabular-nums">{c.storageSize}B</dd>
           <dt className="text-muted-foreground">Fields</dt>
@@ -292,7 +306,7 @@ function ArchetypeLeafCard({ archetypeId }: { archetypeId: string }): React.JSX.
       actions={actions}
     >
       {a ? (
-        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-fs-sm">
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-fs-sm">
           <dt className="text-muted-foreground">Components</dt>
           <dd className="tabular-nums">{a.componentTypes.length}</dd>
           <dt className="text-muted-foreground">Entities</dt>
@@ -617,7 +631,7 @@ function Row({ label, value }: { label: string; value: string }) {
   return (
     <>
       <dt className="text-muted-foreground">{label}</dt>
-      <dd className="font-mono tabular-nums text-foreground">{value}</dd>
+      <dd className="min-w-0 break-words font-mono tabular-nums text-foreground">{value}</dd>
     </>
   );
 }
@@ -642,7 +656,7 @@ function DbMapPageDetail({
         <p className="text-fs-sm text-muted-foreground">Decoding page…</p>
       ) : (
         <>
-          <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
+          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-fs-sm">
             <Row label="Byte offset" value={`0x${page.byteOffset.toString(16).toUpperCase()}`} />
             <Row label="Change revision" value={page.changeRevision.toLocaleString()} />
             <Row label="Format revision" value={String(page.formatRevision)} />
@@ -698,7 +712,7 @@ function DbMapSegmentDetail({
         <p className="text-fs-sm text-muted-foreground">Harvesting segment summary…</p>
       ) : (
         <>
-          <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
+          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-fs-sm">
             <Row label="Root page" value={`#${summary.rootPageIndex}`} />
             <Row label="Pages" value={summary.pageCount.toLocaleString()} />
             {summary.stride > 0 && <Row label="Stride" value={`${summary.stride} B`} />}
@@ -716,7 +730,7 @@ function DbMapSegmentDetail({
           {isCluster && (
             <div className="mt-3 border-t border-border pt-2">
               <p className="mb-1 text-fs-xs uppercase tracking-wide text-muted-foreground">Cluster fill</p>
-              <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
+              <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-fs-sm">
                 <Row label="Entities" value={Number(summary.entityCount).toLocaleString()} />
                 <Row label="Active clusters" value={summary.activeClusterCount.toLocaleString()} />
                 <Row label="Slots / cluster" value={String(summary.clusterSize)} />
@@ -742,7 +756,7 @@ function DbMapSegmentDetail({
           {map && (
             <div className="mt-3 border-t border-border pt-2">
               <p className="mb-1 text-fs-xs uppercase tracking-wide text-muted-foreground">Entity-map (linear hash)</p>
-              <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
+              <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-fs-sm">
                 <Row label="Entries" value={Number(map.entryCount).toLocaleString()} />
                 <Row label="Buckets" value={map.bucketCount.toLocaleString()} />
                 <Row label="Load factor" value={map.loadFactor.toFixed(2)} />
@@ -760,30 +774,71 @@ function DbMapSegmentDetail({
 }
 
 /**
- * Segment → handoff verbs (AC2.14). A component-table segment pivots to the same destinations a component does
- * — Open in Component Inspector (Schema), Open in Data Browser (type-first archetype pick), Reveal in File Map,
- * Reveal in Resource Tree. Mirrors {@link ResourceActions}; renders only for a component segment (a `typeName`),
- * so a non-component segment never shows a dead verb (PC-6). This is what makes a Storage Health row (which
- * carries the type name on the bus segment leaf) reach all four views.
+ * Segment → handoff verbs (AC2.14). Mirrors {@link ResourceActions}; renders only for a segment that names an
+ * owner, so a segment with none never shows a dead verb (PC-6).
+ *
+ * **A segment's owner is not always a component.** `ResolveSegmentOwnerName` labels `Cluster`, `EntityMap` and
+ * per-archetype `Index` segments with an **archetype** name (`DatabaseEngine.StorageIntrospection.cs:498`), and
+ * everything else with a component's. Sending an archetype name down the component verbs is not a cosmetic
+ * mismatch — it 404s `components/{t}/archetypes`, opens a Component Inspector on a type that does not exist, and
+ * reveals `ComponentTable_{archetype}` in a tree that has no such node: four dead verbs behind live-looking
+ * buttons, which is precisely what PC-6 exists to prevent. Found in #619 by following the new archetype reveal
+ * (design §4.2) into the Detail pane, where every one of them fired.
+ *
+ * The fork is decided by the same name join the physical lens is built on: an owner that names an archetype in
+ * this database *is* an archetype (§5.2 — names are the stable identifier; ids are not comparable across the
+ * epic's bridges).
  */
 function SegmentActions({ typeName }: { typeName: string }): React.JSX.Element {
-  const { archetypes } = useArchetypesForComponent(typeName);
-  const primary = pickPrimaryArchetype(archetypes);
-  const cls = 'w-full rounded border border-border px-2 py-1 text-fs-sm text-foreground hover:bg-accent';
+  const { list: archetypes } = useArchetypeList();
+  const ownerArchetype = archetypes.find((a) => a.name === typeName) ?? null;
+  return ownerArchetype
+    ? <ArchetypeSegmentActions archetypeId={ownerArchetype.archetypeId} name={typeName} />
+    : <ComponentSegmentActions typeName={typeName} />;
+}
+
+const SEGMENT_VERB_CLS = 'w-full rounded border border-border px-2 py-1 text-fs-sm text-foreground hover:bg-accent';
+
+/** Verbs for a segment an archetype owns — its cluster rows, entity map, or cluster index. */
+function ArchetypeSegmentActions({ archetypeId, name }: { archetypeId: string; name: string }): React.JSX.Element {
   return (
     <div className="mt-3 flex flex-col gap-1 border-t border-border pt-2">
-      <button type="button" onClick={() => openComponentInSchema(typeName)} data-testid="segment-open-schema" className={cls}>
+      <button
+        type="button"
+        onClick={() => { useSelectionStore.getState().select('archetype', archetypeId); openArchetypeInspector(); }}
+        data-testid="segment-open-archetype"
+        className={SEGMENT_VERB_CLS}
+      >
+        Open in Archetype Inspector
+      </button>
+      <button type="button" onClick={() => openDataBrowser(archetypeId)} data-testid="segment-open-data-browser" className={SEGMENT_VERB_CLS}>
+        Open in Data Browser
+      </button>
+      <button type="button" onClick={() => revealArchetypeInFileMap(name)} data-testid="segment-reveal-file-map" className={SEGMENT_VERB_CLS}>
+        Reveal in File Map
+      </button>
+    </div>
+  );
+}
+
+/** Verbs for a component-table / revision / component-index segment — the original four. */
+function ComponentSegmentActions({ typeName }: { typeName: string }): React.JSX.Element {
+  const { archetypes } = useArchetypesForComponent(typeName);
+  const primary = pickPrimaryArchetype(archetypes);
+  return (
+    <div className="mt-3 flex flex-col gap-1 border-t border-border pt-2">
+      <button type="button" onClick={() => openComponentInSchema(typeName)} data-testid="segment-open-schema" className={SEGMENT_VERB_CLS}>
         Open in Component Inspector
       </button>
       {primary && (
-        <button type="button" onClick={() => openDataBrowser(primary.archetypeId)} data-testid="segment-open-data-browser" className={cls}>
+        <button type="button" onClick={() => openDataBrowser(primary.archetypeId)} data-testid="segment-open-data-browser" className={SEGMENT_VERB_CLS}>
           Open in Data Browser
         </button>
       )}
-      <button type="button" onClick={() => openDbMapForComponent(typeName)} data-testid="segment-reveal-file-map" className={cls}>
+      <button type="button" onClick={() => openDbMapForComponent(typeName)} data-testid="segment-reveal-file-map" className={SEGMENT_VERB_CLS}>
         Reveal in File Map
       </button>
-      <button type="button" onClick={() => revealComponentInResourceTree(typeName)} data-testid="segment-reveal-resource" className={cls}>
+      <button type="button" onClick={() => revealComponentInResourceTree(typeName)} data-testid="segment-reveal-resource" className={SEGMENT_VERB_CLS}>
         Reveal in Resource Tree
       </button>
     </div>
@@ -841,7 +896,7 @@ function DbMapChunkDetail({
         <p className="text-fs-sm text-muted-foreground">Decoding chunk…</p>
       ) : (
         <>
-          <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
+          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-fs-sm">
             <Row label="Page" value={String(pageIndex)} />
             <Row label="Segment" value={`#${chunk.segmentId}`} />
             {chunk.componentType && <Row label="Component" value={chunk.componentType} />}
@@ -873,7 +928,7 @@ function ClusterCellBlock({ cell }: { cell: StorageClusterCellDto }) {
   return (
     <div className="mt-3 border-t border-border pt-2">
       <p className="mb-1 text-fs-xs uppercase tracking-wide text-muted-foreground">Spatial cell</p>
-      <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
+      <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-fs-sm">
         <Row label="Cell" value={`(${cell.cellX}, ${cell.cellY}) · key ${cell.cellKey}`} />
         <Row label="Entities here" value={cell.entitiesInCell.toLocaleString()} />
         <Row label="Clusters here" value={cell.clustersInCell.toLocaleString()} />
@@ -966,7 +1021,7 @@ function DbMapEntityDetail({
         <p className="text-fs-sm text-muted-foreground">This slot is free — no entity here.</p>
       ) : (
         <>
-          <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
+          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-fs-sm">
             <Row label="Slot" value={`${slotIndex} (in cluster #${chunkId})`} />
             <Row label="Segment" value={`#${segmentId}`} />
           </dl>
@@ -1007,7 +1062,7 @@ function DbMapCellDetail({
         <p className="text-fs-sm text-muted-foreground">Decoding…</p>
       ) : (
         <>
-          <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
+          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-fs-sm">
             <dt className="text-muted-foreground">Value</dt>
             <dd className="break-all font-mono text-foreground">{cell.value}</dd>
             {/* A cluster entity slot carries an allocation bit (colorKey: 1 = a live entity occupies the slot, 0 =
@@ -1033,7 +1088,7 @@ function CellList({ title, cells }: { title: string; cells: DbContentCell[] }) {
     <div className="mt-3 border-t border-border pt-2">
       <p className="mb-1 text-fs-xs uppercase tracking-wide text-muted-foreground">{title}</p>
       <div className="max-h-64 overflow-auto">
-        <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-0.5 text-fs-sm">
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-fs-sm">
           {cells.slice(0, 256).map((c, i) => (
             <div key={`${c.kind}-${c.offset}-${i}`} className="contents">
               <dt className="truncate text-muted-foreground" title={c.label}>
@@ -1081,7 +1136,7 @@ function FieldDetail({ field, schema, componentLabel }: { field: Field; schema: 
           </div>
         </div>
 
-        <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-fs-sm">
           <dt className="text-muted-foreground">Type</dt>
           <dd className="font-mono text-foreground">{field.typeName}</dd>
 
@@ -1137,7 +1192,7 @@ function ResourceDetail({ resource }: { resource: SelectedResource }) {
           <span className="ml-auto text-fs-sm text-muted-foreground">{selected.kind}</span>
         </div>
 
-        <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-fs-sm">
           <dt className="text-muted-foreground">Id</dt>
           <dd className="truncate text-foreground">{raw.id ?? selected.resourceId}</dd>
 

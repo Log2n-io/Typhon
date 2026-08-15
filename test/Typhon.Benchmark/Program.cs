@@ -56,6 +56,12 @@ class Program
 
     static void Main(string[] args)
     {
+        // Keep benchmark databases out of the machine-local registry (#622, design D-7). The environment variable is
+        // what actually does the work here: BenchmarkDotNet runs each benchmark in a SPAWNED child process, and a
+        // static set in this one would not reach it — the variable is inherited, so both are covered.
+        DatabaseRegistry.SuppressForProcess = true;
+        Environment.SetEnvironmentVariable(DatabaseRegistry.DisableEnvironmentVariable, "off");
+
         // If command-line arguments are provided, use BenchmarkDotNet's built-in handling
         // This preserves backward compatibility with --filter, --list, etc.
         if (args.Length > 0)

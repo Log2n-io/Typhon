@@ -3,9 +3,11 @@ import type { IDockviewPanelProps } from 'dockview-react';
 import { Activity, AlertCircle, Loader2, Radio, RefreshCw, Unplug } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { usePanelHotkeys } from '@/hooks/usePanelHotkeys';
-import { usePostApiSessionsTrace } from '@/api/generated/sessions/sessions';
+import { getApiSessionsId } from '@/api/generated/sessions/sessions';
+import { captureFileName } from '@/libs/profiles/captureLocation';
+import { useDeleteApiSessionsSessionIdProfileProfileId, usePostApiSessionsSessionIdProfile } from '@/api/generated/profiles/profiles';
 import { logError, logInfo } from '@/stores/useLogStore';
-import { useSessionStore } from '@/stores/useSessionStore';
+import { useSessionStore, useTraceBackedSession } from '@/stores/useSessionStore';
 import { useNavHistoryStore } from '@/stores/useNavHistoryStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useProfilerSessionStore, type ConnectionStatus } from '@/stores/useProfilerSessionStore';
@@ -36,7 +38,23 @@ import { applyWorkbenchAuthHeaders } from '@/api/bootstrapToken';
  * Phase 1b proves the live-data pipeline end-to-end (TCP connect → Init frame → metadata DTO → tick SSE);
  * Phase 2 lifts the Canvas 2D renderers on top.
  */
+/**
+ * Remounts the profiler whenever the session's active capture changes.
+ *
+ * {@link ProfilerPanelInner} already resets every profiler store in an unmount cleanup, and the reload path's comment
+ * assumed "the new activeProfileId re-keys this panel" — but nothing ever did. The panel is registered as a plain
+ * dockview component (`Profiler: ProfilerPanel`), so switching capture left it mounted with the previous recording's
+ * local state: view range, selected thread, open tab, scroll. Keying on the profile id makes that assumption true.
+ *
+ * The TanStack side is handled at the switch itself (useProfileList.invalidate drops the ['profiler'] cache); this
+ * covers the React-local half. Both are needed — a remount alone would re-read the same stale query entries.
+ */
 export default function ProfilerPanel(props: IDockviewPanelProps) {
+  const activeProfileId = useSessionStore((s) => s.activeProfileId);
+  return <ProfilerPanelInner key={activeProfileId ?? 'no-profile'} {...props} />;
+}
+
+function ProfilerPanelInner(props: IDockviewPanelProps) {
   const sessionId = useSessionStore((s) => s.sessionId);
   const token = useSessionStore((s) => s.token);
   const filePath = useSessionStore((s) => s.filePath);
@@ -75,7 +93,7 @@ export default function ProfilerPanel(props: IDockviewPanelProps) {
   }, [sessionId, token, disconnecting]);
 
   const isAttach = kind === 'attach';
-  const isTrace = kind === 'trace';
+  const isTrace = useTraceBackedSession();
 
   const commitViewRange = useProfilerViewStore((s) => s.commitViewRange);
 
@@ -83,26 +101,30 @@ export default function ProfilerPanel(props: IDockviewPanelProps) {
   // flag this hook polls (~3 s). When set, the header shows a Reload button. Gated on `metadata` so it
   // doesn't poll during the build (the server only arms the watcher after the build completes anyway).
   const setSession = useSessionStore((s) => s.setSession);
-  const postTrace = usePostApiSessionsTrace();
+  const activeProfileId = useSessionStore((s) => s.activeProfileId);
+  const attachProfile = usePostApiSessionsSessionIdProfile();
+  const detachProfile = useDeleteApiSessionsSessionIdProfileProfileId();
+  const reloadPending = attachProfile.isPending || detachProfile.isPending;
   const newVersionAvailable = useProfilerTraceStatus(isTrace && metadata ? sessionId : null);
 
   const handleReloadTrace = useCallback(async () => {
-    if (!filePath || postTrace.isPending) return;
+    if (!filePath || !sessionId || !activeProfileId || reloadPending) return;
     try {
-      // Re-POSTing the same path makes the server drop the stale TraceSession and spin a fresh one — it
-      // re-fingerprints the file, sees the mismatch, and rebuilds the sidecar cache. Swapping sessionId
-      // re-keys this panel: the cleanup effect below wipes every profiler store (viewRange included), so
-      // the first-tick effect re-runs and the view resets cleanly onto the new run.
-      const response = await postTrace.mutateAsync({ data: { filePath } });
-      setSession(response.data);
-      logInfo('Reloaded trace with newer on-disk version', {
-        sessionId: response.data.sessionId,
-        filePath: response.data.filePath ?? filePath,
-      });
+      // #621 — detach then re-attach the SAME capture rather than re-creating a session. Attaching starts a fresh
+      // TraceSessionRuntime, which re-fingerprints the file, sees the mismatch and rebuilds the sidecar cache — the same
+      // work the old re-POST triggered. What changes is that the session survives: its id, token and database stay put,
+      // so only the profile is swapped underneath. The new activeProfileId re-keys this panel, so the cleanup effect
+      // still wipes the profiler stores and the view resets cleanly onto the new run.
+      const fileName = captureFileName(filePath);
+      await detachProfile.mutateAsync({ sessionId, profileId: activeProfileId });
+      await attachProfile.mutateAsync({ sessionId, data: { fileName } });
+      const refreshed = await getApiSessionsId(sessionId);
+      setSession(refreshed.data);
+      logInfo('Reloaded capture with newer on-disk version', { sessionId, filePath });
     } catch (err) {
-      logError('Failed to reload trace', { filePath, error: String(err) });
+      logError('Failed to reload capture', { filePath, error: String(err) });
     }
-  }, [filePath, postTrace, setSession]);
+  }, [filePath, sessionId, activeProfileId, reloadPending, attachProfile, detachProfile, setSession]);
 
   // #289 — unified chunk cache for both modes. The replay path builds the cache once on session open;
   // the live path's IncrementalCacheBuilder grows the manifest server-side and ships growth deltas, so
@@ -300,7 +322,7 @@ export default function ProfilerPanel(props: IDockviewPanelProps) {
                 variant="outline"
                 size="sm"
                 onClick={handleReloadTrace}
-                disabled={postTrace.isPending}
+                disabled={reloadPending}
                 className="ml-auto h-6 border-amber-500/50 px-2 text-fs-sm text-amber-600 hover:bg-amber-500/10 dark:text-amber-400"
                 aria-label="Reload trace with the newer on-disk version"
                 title="The source .typhon-trace file was overwritten on disk (a profiling re-run regenerated it). Reload to rebuild the cache from the new version — the current view resets."

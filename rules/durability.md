@@ -1230,6 +1230,35 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   note: surfaced by the multi-drain crash test (each Immediate commit flushes its own padded block); the watermark
     (DurableLsn) was honest throughout — the bytes were on disk, only unreachable by the contiguous frame walk
 
+### WR-03: Every written record lies inside its segment's declared size `[fatal][silent]`
+  context a drain is written at `segment.WriteOffset` and the offset advances by the padded length. A positioned write
+    past EOF simply EXTENDS the file (the segment is opened FILE_FLAG_NO_BUFFERING|WriteThrough with sector-aligned
+    offsets and lengths), so nothing fails — the file just grows past what its header declares. But
+    `WalSegmentReader.OpenSegment` computes its data region as `header.SegmentSize - WalSegmentHeader.SizeInBytes`,
+    so any byte past the declared size is UNREACHABLE to recovery.
+  invariant before writing a drain of `n` padded bytes, `WalWriter.WriterLoop` requires
+            `activeSegment.WriteOffset + n <= activeSegment.SegmentSize`; when it does not hold it rotates FIRST
+            (`WalSegmentManager.ActiveSegmentCanHold` → `RotateSegment(..., minDataBytes: n)`) and only then writes
+  invariant the rotation target is sized to hold the batch: `RotateSegment` allocates
+            `max(SegmentSize, AlignUp(header + minDataBytes))`, so a batch larger than a WHOLE configured segment
+            still lands inside a declared region rather than overflowing a fresh one
+  invariant the header declares the segment's OWN size, not the configured `SegmentSize` — segments are not uniformly
+            sized (the first segment of a lifecycle uses `InitialSegmentSize`; an oversized batch gets a bespoke size),
+            and recovery bounds its scan by what the header says
+  invariant `ActiveSegmentUtilization` divides by the ACTIVE segment's declared size, never the configured one — a
+            16 MiB segment measured against 64 MiB reaches the 75% rotation threshold only at 48 MiB, which it cannot hold
+  scope: WalWriter.WriterLoop, WalSegmentManager.ActiveSegmentCanHold, WalSegmentManager.RotateSegment,
+         WalSegmentManager.ActiveSegmentUtilization, WalSegmentManager.WriteSegmentHeader, WalSegmentReader.OpenSegment
+  on_violation: a drain larger than the room left is appended past the declared end → the records are durable, acked,
+    and silently dropped at replay (measured: a segment declaring 65,536 bytes grown to 114,688 — 49,152 bytes lost)
+  note the pre-#785 code checked rotation only AFTER writing (utilization >= 75%), which cannot prevent an overrun by
+    construction. Safety rested on `(1 - threshold) * SegmentSize` happening to exceed the commit-buffer half — an
+    accident of two defaults in DIFFERENT option classes (`WalWriterOptions.SegmentSize`,
+    `ResourceOptions.WalRingBufferSizeBytes`) that know nothing about each other, and one that the shipped defaults
+    ALREADY failed (16 MiB of worst-case headroom against a 32 MiB maximum drain). Fit-driven rotation removes the
+    coupling instead of documenting it, which is what makes a variable `InitialSegmentSize` (#784) safe.
+  verified: WalSegmentSizingTests [VerifiesRule]
+
 ---
 
 ## Module: Versioned HEAD Reopen

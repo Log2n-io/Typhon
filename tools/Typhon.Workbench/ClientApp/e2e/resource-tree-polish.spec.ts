@@ -31,7 +31,7 @@ async function openDemo(page: import('@playwright/test').Page, request: import('
   });
   await page.goto('/');
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
-  await page.getByRole('button', { name: /^open \.typhon file$/i }).click();
+  await page.getByRole('button', { name: /^open typhon database$/i }).click();
   await expect(page.getByRole('dialog')).toBeVisible();
   await page.getByPlaceholder(/path/i).first().fill(DEMO_DIR);
   const demoRow = page.getByText(/^demo\.typhon$/).first();

@@ -33,7 +33,8 @@ cd MyApp
 ```
 
 Run it. The first run restores the `Typhon` package from NuGet, deploys the shard, ticks the runtime, and — because
-`typhon.telemetry.json` turns the profiler on — writes a profiler trace to `./captures/`:
+`typhon.telemetry.json` turns the profiler on — records a profiler capture into the database's own
+`world-shard.typhon/profilings/` directory:
 
 ```bash
 dotnet run
@@ -53,13 +54,17 @@ probe came back:
    Ham       (SingleVersion) durable → 100/100/100 (H/A/M)
    Intent    (Transient)     RESET   → (0, 0)   (heap-only; dropped on reopen by design)
 
-OK — ran end to end; profiler trace written: ./captures/guide.typhon-trace (6,497,101 bytes)
+OK — ran end to end; profiler trace written: ./world-shard.typhon/profilings/20260814-220312-943.typhon-trace (22,937,035 bytes)
 ```
 
 That last block is the point of the whole sample: the database came back, and **each storage mode came back
 differently** — which is the modeling decision [ch.2](02-modeling.md) is about.
 
-Open that trace in the Workbench:
+Notice where the capture landed: **inside the database**, not beside the app. `typhon.telemetry.json` names no output
+path, and an absent path means "a file in this database's `profilings/`". A capture therefore travels with the data it
+describes — which is what lets the Workbench line up what a system *did* against where that data actually *lives*.
+
+Open the database and its newest capture together:
 
 ```bash
 typhon ui --open-latest
@@ -82,11 +87,15 @@ Profiling is **config-driven** — a `typhon.telemetry.json` beside your app, wh
 code from you. The CLI authors that file so you never hand-edit nested JSON:
 
 ```bash
-typhon telemetry trace captures/app.typhon-trace   # set the profiler trace output file
+typhon telemetry trace captures/app.typhon-trace   # pin captures to an explicit path instead
 typhon telemetry enable CpuSampling                # add a capture channel
 typhon telemetry edit                              # full-screen interactive flag editor
-typhon telemetry trace --clear                     # stop writing a trace
+typhon telemetry trace --clear                     # back to the default: inside the database bundle
 ```
+
+`trace <path>` is the **override**, not the norm. With no path set — the scaffold's default — captures go to the
+database's own `profilings/`, which is what keeps a capture findable from the database it describes. Set an explicit
+path only when you want captures somewhere else, and remember that `--clear` is how you get the default back.
 
 ---
 

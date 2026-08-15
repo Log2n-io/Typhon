@@ -35,7 +35,7 @@ afterEach(() => {
 
 describe('UC-OBS-07a — ReconnectBanner gates on attach + disconnected (PC-2 / suite D / AC4.8)', () => {
   it('renders nothing when sessionKind is not attach', () => {
-    useSessionStore.setState({ kind: 'trace', sessionId: 'x', filePath: 'y' });
+    useSessionStore.setState({ kind: 'open', sessionId: 'x', filePath: 'y' });
     useProfilerSessionStore.setState({ connectionStatus: 'disconnected', disconnectReason: 'init_mismatch' });
     const { container } = render(<ReconnectBanner />);
     expect(container.firstChild).toBeNull();

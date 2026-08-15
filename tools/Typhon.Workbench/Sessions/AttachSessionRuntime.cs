@@ -555,7 +555,8 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
                     queueTickSummaries: _builder?.QueueTickSummaries ?? Array.Empty<Typhon.Profiler.QueueTickSummary>(),
                     postTickSummaries: _builder?.PostTickSummaries ?? Array.Empty<Typhon.Profiler.PostTickSummary>(),
                     queueIdToName: _builder?.QueueIdToName ?? new System.Collections.Generic.Dictionary<ushort, string>(),
-                    systemArchetypeTouches: _builder?.SystemArchetypeTouches ?? Array.Empty<Typhon.Profiler.SystemArchetypeTouchSummary>());
+                    systemArchetypeTouches: _builder?.SystemArchetypeTouches ?? Array.Empty<Typhon.Profiler.SystemArchetypeTouchSummary>(),
+                    entityLifecycleRuns: _builder?.EntityLifecycleRuns ?? Array.Empty<Typhon.Profiler.EntityLifecycleRun>());
             }
             finally
             {
@@ -1106,6 +1107,9 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         var satTouches = _builder?.SystemArchetypeTouches is { Count: > 0 } sat
             ? ((List<Typhon.Profiler.SystemArchetypeTouchSummary>)sat).ToArray()
             : [];
+        var lifecycleRuns = _builder?.EntityLifecycleRuns is { Count: > 0 } elr
+            ? ((List<Typhon.Profiler.EntityLifecycleRun>)elr).ToArray()
+            : [];
 
         var snap = new ProfilerMetadataDto(
             Fingerprint: string.Empty,
@@ -1124,7 +1128,8 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
             QueueTickSummaries: qTicks,
             PostTickSummaries: postTicks,
             QueueIdToName: qNames,
-            SystemArchetypeTouches: satTouches);
+            SystemArchetypeTouches: satTouches,
+            EntityLifecycleRuns: lifecycleRuns);
         _metadataSnapshot = snap;
         return snap;
     }
@@ -1225,16 +1230,7 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     private static ProfilerHeaderDto ProjectHeader(TraceFileReader reader)
     {
         var h = reader.Header;
-        return new ProfilerHeaderDto(
-            Version: h.Version,
-            TimestampFrequency: h.TimestampFrequency,
-            BaseTickRate: h.BaseTickRate,
-            WorkerCount: h.WorkerCount,
-            SystemCount: h.SystemCount,
-            ArchetypeCount: h.ArchetypeCount,
-            ComponentTypeCount: h.ComponentTypeCount,
-            CreatedUtcTicks: h.CreatedUtcTicks,
-            SamplingSessionStartQpc: h.SamplingSessionStartQpc);
+        return TraceSessionRuntime.ProjectHeaderDto(in h);
     }
 
     private static SystemDefinitionDto[] ProjectSystems(TraceFileReader reader)
@@ -1275,14 +1271,7 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         => TraceSessionRuntime.ProjectArchetypes(reader.Archetypes, reader.ArchetypeDefinitions, reader.ComponentTypes);
 
     private static ComponentTypeDto[] ProjectComponentTypes(TraceFileReader reader)
-    {
-        var arr = new ComponentTypeDto[reader.ComponentTypes.Count];
-        for (var i = 0; i < reader.ComponentTypes.Count; i++)
-        {
-            arr[i] = new ComponentTypeDto(reader.ComponentTypes[i].ComponentTypeId, reader.ComponentTypes[i].Name);
-        }
-        return arr;
-    }
+        => TraceSessionRuntime.ProjectComponentTypes(reader.ComponentTypes, reader.ComponentDefinitions);
 
     private static async Task<IPAddress> ResolveIPv4Async(string host, CancellationToken ct)
     {

@@ -121,13 +121,10 @@ public sealed class ProfilerLiveStreamTests
     [Test]
     public async Task Stream_NonAttachSession_Returns401()
     {
-        // Trace sessions aren't valid subjects of the live stream — the handler casts to
-        // AttachSession and bails with 401 if the session isn't one. Pins the upstream auth
-        // boundary.
+        // A database session — even one holding a capture — is not a valid subject of the LIVE stream: the handler casts
+        // to AttachSession and bails with 401. Pins the upstream auth boundary.
         var tracePath = TraceFixtureBuilder.BuildMinimalTrace(_factory.DemoDirectory, tickCount: 2, instantsPerTick: 1);
-        var resp = await _client.PostAsJsonAsync("/api/sessions/trace", new CreateTraceSessionRequest(tracePath));
-        resp.EnsureSuccessStatusCode();
-        var session = JsonSerializer.Deserialize<SessionDto>(await resp.Content.ReadAsStringAsync(), Json)!;
+        var session = await CaptureSessionFactory.OpenWithCaptureAsync(_client, _factory.DemoDirectory, tracePath);
 
         var req = new HttpRequestMessage(HttpMethod.Get, $"/api/sessions/{session.SessionId}/profiler/stream");
         req.Headers.Add("X-Session-Token", session.SessionId.ToString());

@@ -41,8 +41,16 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('start', 'stop', 'reset', 'status', 'restart', 'watch-kestrel', 'watch-vite', 'help', '--help', '-h')]
+    [ValidateSet('start', 'stop', 'clean', 'reset', 'status', 'restart', 'watch-kestrel', 'watch-vite', 'help', '--help', '-h')]
     [string]$Action = 'start',
+
+    # Purge the SPA build artifacts before starting. `reset` clears wedged PROCESSES; this clears stale
+    # ARTIFACTS — the other way a dev loop gets stuck. Applies to: start / restart. See Invoke-Clean.
+    [switch]$Clean,
+
+    # With `clean` (or -Clean): also delete wwwroot, forcing a full Vite rebuild (~15 s) instead of only
+    # invalidating the StaticWebAssets manifest. Use when the asset directory itself is suspect.
+    [switch]$Hard,
 
     # Overrides the Kestrel / ASP.NET Core log category (Microsoft.AspNetCore) via a command-line
     # config key passed to the Kestrel host (`dotnet watch`/`run`). Applies to start / restart / watch-kestrel. Without it,
@@ -78,6 +86,8 @@ $ViteLog        = Join-Path $StateDir 'wb-dev.vite.log'
 $ViteErrLog     = Join-Path $StateDir 'wb-dev.vite.err.log'
 $WorkbenchProj  = Join-Path $RepoRoot 'tools/Typhon.Workbench'
 $ClientApp      = Join-Path $WorkbenchProj 'ClientApp'
+$WorkbenchObj   = Join-Path $WorkbenchProj 'obj'
+$WorkbenchWww   = Join-Path $WorkbenchProj 'wwwroot'
 
 # App args appended after `--` so `dotnet watch` forwards them to the Workbench host. The
 # Microsoft.AspNetCore config key (a command-line config provider override) outranks
@@ -89,8 +99,19 @@ $KestrelAppArgs = if ($LogLevel) { @('--', "--Logging:LogLevel:Microsoft.AspNetC
 # Kestrel launch verb, chosen by -Configuration. Debug → `dotnet watch` (hot reload). Release → `dotnet run -c Release`
 # (optimized build, no file watcher) for API perf measurement. Returned as an arg array so both the detached `start`
 # path (a cmd.exe string) and the foreground `watch-kestrel` path (a Start-Process arg list) build from one decision.
+#
+# -Detached adds `--non-interactive`, and ONLY the detached path passes it. A rude edit (changed signature, new type,
+# generics) is one hot reload cannot apply, and `dotnet watch` then BLOCKS on a stdin prompt:
+#   "Do you want to restart your app - Yes (y) / No (n) / Always (a) / Never (v)?"
+# `start` launches through cmd.exe with stdout/stderr redirected to log files and no console to type into, so nobody
+# can ever answer it — the edit silently never lands and the question sits unread in wb-dev.kestrel.log. Non-interactive
+# makes that case restart the app instead. `watch-kestrel` runs on the calling console (-NoNewWindow) where stdin IS
+# available, so it keeps the prompt: there, being asked is a feature.
 function Get-KestrelDotnetVerbArgs {
+    param([switch]$Detached)
+
     if ($Configuration -eq 'Release') { return @('run', '-c', 'Release') }
+    if ($Detached) { return @('watch', '--non-interactive') }
     return @('watch')
 }
 
@@ -171,6 +192,49 @@ function Stop-ProcTree($processId) {
     taskkill /F /T /PID $processId 2>&1 | Out-Null
 }
 
+# Close any OPEN DATABASE SESSION before the host is force-killed.
+#
+# The thing that must happen cleanly is the DATABASE close, not the process exit. Disposing a session runs
+# DatabaseEngine.Dispose, which writes the clean-shutdown marker and releases the advisory lock; skipping it leaves the
+# file marked unclean and a stale db.lock behind, so the next open distrusts the persisted MVCC heads
+# (DatabaseEngine._headsTrusted) and redoes work it did not need to.
+#
+# The host itself CANNOT be asked to exit politely: it is a console process with no window, so `taskkill` without /F is
+# refused outright ("This process can only be terminated forcefully"), and its console is not ours to send Ctrl+Break to.
+# Measured, not assumed. But the running server exposes DELETE /api/sessions/{id} already — so we ask it to let go of the
+# databases, and only then kill it. Once nothing holds a database, how the process dies stops mattering.
+#
+# Auth mirrors the Vite dev proxy: read the bootstrap token from disk and send it as X-Workbench-Token (plus the session's
+# own token). Best-effort throughout — a server that is already gone, wedged, or holding nothing just falls through to the
+# force-kill, which is exactly the old behaviour.
+function Close-WorkbenchSessions($timeoutSec = 15) {
+    if (-not (Test-PortBound 5200)) { return 0 }
+
+    $tokenFile = Join-Path $env:LOCALAPPDATA 'Typhon\Workbench\bootstrap.token'
+    if (-not (Test-Path $tokenFile)) { return 0 }
+
+    try {
+        $token = (Get-Content $tokenFile -Raw).Trim()
+        $headers = @{ 'X-Workbench-Token' = $token }
+        $sessions = Invoke-RestMethod -Uri 'http://localhost:5200/api/sessions' -Headers $headers -TimeoutSec $timeoutSec
+    } catch {
+        return 0
+    }
+
+    $closed = 0
+    foreach ($s in @($sessions)) {
+        if (-not $s.sessionId) { continue }
+        try {
+            $h = @{ 'X-Workbench-Token' = $token; 'X-Session-Token' = $s.sessionId }
+            Invoke-RestMethod -Uri "http://localhost:5200/api/sessions/$($s.sessionId)" -Method Delete -Headers $h -TimeoutSec $timeoutSec | Out-Null
+            $closed++
+        } catch {
+            Write-Host "  WARN: could not close session $($s.sessionId) — its database will be left unclean"
+        }
+    }
+    return $closed
+}
+
 # This script's own process plus its ancestor chain (pwsh -> cmd/bash -> ...). The `reset` sweep
 # excludes these so a `/T` tree-kill can never take down the shell running it — the documented
 # "pwsh self-kill" gotcha. Bounded + cycle-guarded against a pathological parent loop.
@@ -216,7 +280,7 @@ function Find-WbDevProcesses {
 
 function Invoke-Help {
     @'
-wb-dev.ps1 [start | stop | status | restart | watch-kestrel | watch-vite | help]
+wb-dev.ps1 [start | stop | clean | reset | status | restart | watch-kestrel | watch-vite | help]
 
   Manage the Typhon Workbench dev servers (Kestrel :5200 + Vite :5173).
   Single-shot — replaces the 7-9 round-trip /wb-dev skill flow.
@@ -224,9 +288,16 @@ wb-dev.ps1 [start | stop | status | restart | watch-kestrel | watch-vite | help]
 Actions:
   start          Launch Kestrel + Vite detached, wait for binding, write state JSON
   stop           Read state, kill process trees, delete state, verify
+  clean          Purge stale SPA build ARTIFACTS (the StaticWebAssets caches in
+                 tools/Typhon.Workbench/obj). Stops the servers first if running.
+                 Use when a Kestrel build dies with "No file exists for the asset":
+                 a client-source edit re-hashed every chunk and the cached manifest
+                 still names the old ones. Nothing self-heals it. -Hard also drops
+                 wwwroot. NOTE: this is the ARTIFACT cure; `reset` is the PROCESS one.
   reset          Kill EVERY lingering Workbench Kestrel/Vite by signature + port
                  owner (ignores the state file), then clear state. Use when start
                  reports an untracked port, or status shows stale/orphan processes.
+                 Does NOT touch build output — for that you want `clean`.
   status         Read state, check liveness + port binding
   restart        Stop then start (1 s pause between)
   watch-kestrel  Run Kestrel in THIS shell (foreground, interactive Hot Reload);
@@ -238,6 +309,9 @@ Actions:
   third shell see them. Ctrl+C in the watch window clears that server's PID.
 
 Options:
+  -Clean             Run `clean` before starting. Applies to: start / restart.
+  -Hard              With clean / -Clean: also delete wwwroot, forcing a full Vite
+                     rebuild (~15 s) instead of only invalidating the manifest.
   -LogLevel <level>  Override the Kestrel / ASP.NET Core log category
                      (Microsoft.AspNetCore). Levels: Trace, Debug, Information,
                      Warning, Error, Critical, None. Applies to start / restart /
@@ -256,6 +330,8 @@ Options:
                      start / restart / watch-kestrel.
 
 Examples:
+  wb-dev.ps1 start -Clean                           # after editing ClientApp sources
+  wb-dev.ps1 clean -Hard                            # nuke wwwroot + manifest, rebuild from scratch
   wb-dev.ps1 watch-kestrel -log:warning
   wb-dev.ps1 start -LogLevel Warning
   wb-dev.ps1 start -Prod                            # production SPA build, perf-test mode
@@ -312,6 +388,8 @@ function Invoke-Status {
 }
 
 function Invoke-Start {
+    if ($Clean) { Invoke-Clean }
+
     $state = Read-DevState
     if ($state) {
         if ((Test-ProcAlive $state.kestrelPid) -and (Test-ProcAlive $state.vitePid)) {
@@ -359,7 +437,7 @@ function Invoke-Start {
     # Ctrl+C sends CTRL_C_EVENT to the entire group, killing npm/node without console-mode cleanup
     # and leaving the terminal with VT mode stuck on (the "goes crazy" symptom).
     $kestrelAppArgStr = if ($KestrelAppArgs.Count) { ' ' + ($KestrelAppArgs -join ' ') } else { '' }
-    $kestrelVerb = (Get-KestrelDotnetVerbArgs) -join ' '
+    $kestrelVerb = (Get-KestrelDotnetVerbArgs -Detached) -join ' '
     $kestrelCmd = "dotnet $kestrelVerb --project `"$WorkbenchProj`"$kestrelAppArgStr 1>`"$KestrelLog`" 2>`"$KestrelErrLog`""
     $kestrel = Start-Process 'cmd.exe' `
         -ArgumentList "/c $kestrelCmd" `
@@ -407,6 +485,24 @@ function Invoke-Start {
             if (Test-Path $ViteLog)    { Get-Content $ViteLog    -Tail 30 }
             Write-Host '--- last 30 lines: Vite stderr ---'
             if (Test-Path $ViteErrLog) { Get-Content $ViteErrLog -Tail 30 }
+
+            # Name the one build failure the logs above bury under an MSBuild stack trace. A stale StaticWebAssets
+            # manifest looks like a generic "Failed to build project" for every project in the graph, so the actual
+            # cause — one dead asset path — is easy to read straight past.
+            $kestrelOutput = @(
+                if (Test-Path $KestrelErrLog) { Get-Content $KestrelErrLog -Raw -ErrorAction SilentlyContinue }
+                if (Test-Path $KestrelLog)    { Get-Content $KestrelLog    -Raw -ErrorAction SilentlyContinue }
+            ) -join "`n"
+            if ($kestrelOutput -match [regex]::Escape($script:StaleAssetSignature)) {
+                Write-Host ''
+                Write-Host 'DIAGNOSIS: stale SPA asset cache.' -ForegroundColor Yellow
+                Write-Host '  The StaticWebAssets manifest in obj/ names a hashed asset that no longer exists —'
+                Write-Host '  a client-source edit made Vite re-emit every chunk under new content hashes.'
+                Write-Host '  Nothing self-heals it: only a build rewrites the manifest, and the build is what fails.'
+                Write-Host ''
+                Write-Host '  FIX:  .\wb-dev.ps1 start -Clean          (or: .\wb-dev.ps1 clean, then start)' -ForegroundColor Green
+                Write-Host '        add -Hard to also drop wwwroot and force a full Vite rebuild'
+            }
             exit 1
         }
 
@@ -450,6 +546,11 @@ function Invoke-Stop {
         return
     }
 
+    # Let go of any open database BEFORE the host is force-killed, so it closes cleanly (clean-shutdown marker + lock
+    # release) instead of looking like a crash to the next process that opens it.
+    $closed = Close-WorkbenchSessions
+    if ($closed -gt 0) { Write-Host "  closed $closed open database session(s) cleanly before stopping" }
+
     Stop-ProcTree $state.kestrelPid
     Stop-ProcTree $state.vitePid
 
@@ -464,6 +565,63 @@ function Invoke-Stop {
         Write-Host 'manual taskkill /F /PID <pid> may be required'
     } else {
         Write-Host "stopped Kestrel (pid $($state.kestrelPid)) + Vite (pid $($state.vitePid))"
+    }
+}
+
+# Signature MSBuild emits when the StaticWebAssets manifest in obj/ names an asset that is no longer on disk.
+# Used both to explain a failed start and to suggest the cure. Kept next to Invoke-Clean so the detector and the
+# fix stay in sync.
+$script:StaleAssetSignature = 'No file exists for the asset at either location'
+
+# Purge the SPA build artifacts. THIS IS NOT `reset`: reset clears wedged PROCESSES, this clears stale ARTIFACTS.
+#
+# The failure it cures: `BuildClientApp` declares Outputs="wwwroot\index.html" — ONE file — while `npm run build`
+# actually emits ~450 whose FILENAMES carry a content hash. Edit any client source and Vite re-emits every chunk
+# under new names, but MSBuild's up-to-date check only ever looked at index.html, so the StaticWebAssets manifest
+# cached in obj/ still names yesterday's hashes. DefineStaticWebAssets then resolves an asset that no longer
+# exists and the whole Kestrel build dies with "No file exists for the asset...". Nothing self-heals it: the
+# manifest is only rewritten by a build, and the build is what is failing. `dotnet watch` sits on
+# "Waiting for a file to change" forever, because no file is going to change.
+#
+# Deleting the caches is safe — they are MSBuild intermediates, regenerated from the real wwwroot on the next build.
+function Invoke-Clean {
+    # Artifacts cannot be replaced while a host has them loaded, so stop first — but only if something is tracked.
+    $state = Read-DevState
+    if ($state -and ((Test-ProcAlive $state.kestrelPid) -or (Test-ProcAlive $state.vitePid))) {
+        Write-Host 'clean — stopping running servers first (build artifacts are locked while loaded)'
+        Invoke-Stop
+    }
+
+    $removed = 0
+
+    # The StaticWebAssets caches: staticwebassets*.json (build/develop manifests + endpoints) and *.dswa.cache.json
+    # (the incremental compressed-asset caches). Scoped to the Workbench obj/ tree — never a broader clean.
+    if (Test-Path $WorkbenchObj) {
+        $caches = @(Get-ChildItem -Path $WorkbenchObj -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like 'staticwebassets*.json' -or $_.Name -like '*.dswa.cache.json' })
+        foreach ($f in $caches) {
+            Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue
+            $removed++
+        }
+        Write-Host "  removed $removed StaticWebAssets cache file(s) from $WorkbenchObj"
+    }
+    else {
+        Write-Host "  no obj/ tree at $WorkbenchObj — nothing to purge"
+    }
+
+    if ($Hard) {
+        if (Test-Path $WorkbenchWww) {
+            Remove-Item $WorkbenchWww -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host "  removed $WorkbenchWww (full Vite rebuild on next start, ~15 s)"
+        }
+        else {
+            Write-Host '  wwwroot already absent'
+        }
+    }
+
+    Write-Host 'clean complete — the next build regenerates the manifest from the real wwwroot'
+    if (-not $Hard) {
+        Write-Host 'if it recurs, re-run with -Hard to drop wwwroot as well'
     }
 }
 
@@ -577,6 +735,7 @@ switch ($Action) {
     '-h'            { Invoke-Help }
     'start'         { Invoke-Start }
     'stop'          { Invoke-Stop }
+    'clean'         { Invoke-Clean }
     'reset'         { Invoke-Reset }
     'status'        { Invoke-Status }
     'restart'       { Invoke-Restart }

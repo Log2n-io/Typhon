@@ -99,7 +99,12 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
         }
     }
 
-    public int Length => _pages.Length;
+    /// <summary>Number of file pages this segment owns; <c>0</c> when it was never materialised or has been disposed.</summary>
+    /// <remarks>
+    /// Null-safe deliberately. Callers guard with <c>Length == 0</c> to mean "nothing here, skip it" (see <c>DatabaseEngine.AddSegment</c>) — which threw a
+    /// <see cref="NullReferenceException"/> out of the very check written to prevent it whenever the segment had never been created.
+    /// </remarks>
+    public int Length => _pages?.Length ?? 0;
     public ReadOnlySpan<int> Pages => _pages;
 
     /// <summary>The underlying page store.</summary>
@@ -907,10 +912,19 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     /// </remarks>
     internal void CollectDirectoryMapExtensionPages(long epoch, List<int> dest)
     {
-        var rootIndex = RootPageIndex;
-        _store.RequestPageEpoch(rootIndex, epoch, out var memPageIndex);
+        // A segment that is registered but never materialised — a component the application declared and has not yet written a single row to — owns no root
+        // page, and therefore owns no directory-map extension pages either. "None" is the correct answer to give, so give it instead of throwing out of a walk
+        // over every segment. Reading RootPageIndex here used to throw, which took down the crash-path occupancy re-derive
+        // (BuildOwnedPageBitmap ← RederiveOccupancyOnCrash) for ANY database holding an empty component — which is nearly every real schema.
+        var pages = _pages;
+        if (pages == null || pages.Length == 0)
+        {
+            return;
+        }
+
+        _store.RequestPageEpoch(pages[0], epoch, out var memPageIndex);
         var page = _store.GetPage(memPageIndex);
-        var maxWalk = (_pages?.Length ?? 0) / NextHeadersIndexSectionCount + 4; // cycle guard
+        var maxWalk = pages.Length / NextHeadersIndexSectionCount + 4; // cycle guard
         var step = 0;
         while (step < maxWalk)
         {

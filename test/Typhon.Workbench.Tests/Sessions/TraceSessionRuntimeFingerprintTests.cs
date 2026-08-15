@@ -120,10 +120,10 @@ public sealed class TraceSessionRuntimeFingerprintTests
         // safe — if a refactor ever breaks the write path, the reuse branch would silently start
         // trusting stale caches.
         var freshFingerprint = new byte[32];
-        Typhon.Profiler.TraceFileCacheReader.ComputeSourceFingerprint(tracePath, freshFingerprint);
+        TraceFileCacheReader.ComputeSourceFingerprint(tracePath, freshFingerprint);
 
         using var fs = File.OpenRead(runtime.CacheFilePath);
-        using var reader = new Typhon.Profiler.TraceFileCacheReader(fs);
+        using var reader = new TraceFileCacheReader(fs);
         Assert.That(reader.VerifyFingerprint(freshFingerprint), Is.True,
             "cache header's SourceFingerprint must equal ComputeSourceFingerprint(source)");
     }

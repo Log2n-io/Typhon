@@ -135,6 +135,15 @@ public sealed class EngineLifecycle : IDisposable
                 {
                     opts.DatabaseName = databaseName;
                     opts.DatabaseDirectory = directory;
+                    // #621 — advertise that this holder will step aside. The Workbench is a long-lived, read-only
+                    // observer; an application that wants the database it is sitting on should not have to wait for a
+                    // human to close a window. Only a holder's own advertisement enables handoff, so setting it here
+                    // changes nothing about how two applications contend with each other.
+                    //
+                    // This is a promise, and DatabasePauseCoordinator is what keeps it: it watches for the claim file
+                    // and disposes this engine when one appears. Advertising without honouring requests would merely
+                    // turn an instant failure into a short wait followed by the same failure.
+                    opts.YieldableLock = true;
                     // 131072 pages × 8KB = 1 GiB page cache. Sized for multi-million-entity databases: at that
                     // scale the EntityMap (paged hash) + component clusters + BTree index pages alone need
                     // thousands of pages resident or eviction back-pressure dominates on Commit. 1 GiB gives
@@ -278,6 +287,15 @@ public sealed class EngineLifecycle : IDisposable
             sp?.Dispose();
             throw;
         }
+        catch (DatabaseLockedException)
+        {
+            // Propagated intact rather than flattened into engine_open_failed (#621). This exception is the only place that carries WHO holds the database —
+            // OwnerPid / OwnerMachine / StartedAt, observed at the moment of refusal. The caller turns that into a paused session whose banner names the
+            // holder; re-reading db.lock to recover it would race, because the holder may have exited and been replaced in between.
+            alc?.Dispose();
+            sp?.Dispose();
+            throw;
+        }
         catch (Exception ex)
         {
             alc?.Dispose();
@@ -299,6 +317,50 @@ public sealed class EngineLifecycle : IDisposable
     /// hit wins. Names that resolve to no file are appended to <paramref name="missing"/>. The core engine assembly is
     /// never in the manifest, so it is never sought here.
     /// </summary>
+    /// <summary>
+    /// The <c>bin/{Configuration}/{tfm}/</c> directories directly under <paramref name="databaseParent"/>, newest first.
+    /// Empty when there is no <c>bin</c> — which is every non-development database, so this costs one failed
+    /// <see cref="Directory.Exists"/> in production.
+    /// </summary>
+    /// <remarks>
+    /// Bounded on purpose: exactly <c>bin/*/*</c>, never a recursive walk. A deep sweep of an arbitrary directory a
+    /// database happens to live in is both slow and a way to load an assembly the user never meant to expose. Ordered
+    /// by write time so a fresh <c>Debug</c> build outranks a stale <c>Release</c> one from last month.
+    /// </remarks>
+    internal static IEnumerable<string> EnumerateAdjacentBuildOutputs(string databaseParent)
+    {
+        if (string.IsNullOrEmpty(databaseParent))
+        {
+            yield break;
+        }
+
+        var bin = Path.Combine(databaseParent, "bin");
+        if (!Directory.Exists(bin))
+        {
+            yield break;
+        }
+
+        List<string> tfmDirs = [];
+        try
+        {
+            foreach (var configDir in Directory.EnumerateDirectories(bin))
+            {
+                tfmDirs.AddRange(Directory.EnumerateDirectories(configDir));
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // An unreadable bin/ is not an error — it just means this probe contributes nothing.
+            yield break;
+        }
+
+        tfmDirs.Sort(static (a, b) => Directory.GetLastWriteTimeUtc(b).CompareTo(Directory.GetLastWriteTimeUtc(a)));
+        foreach (var d in tfmDirs)
+        {
+            yield return d;
+        }
+    }
+
     private static string[] ResolveManifestAssemblies(DatabaseEngine engine, string directory, string[] registeredDirs, List<string> missing, out string status)
     {
         var required = engine.GetRequiredAssemblies();
@@ -324,6 +386,19 @@ public sealed class EngineLifecycle : IDisposable
         }
         searchDirs.Add((AppContext.BaseDirectory, "bundled"));
         searchDirs.Add((directory, "legacy-adjacent"));
+
+        // A database created by a .NET app sits in that app's working directory, and the app's own assembly — the one
+        // the database names as its schema — is one level down in bin/{Config}/{tfm}/. That is the ENTIRE golden path:
+        // `typhon new` → `dotnet run` → open in the Workbench. Without this probe the first thing a new user sees is a
+        // red "schema" banner about binaries they built five minutes ago, sitting fifteen metres away in the same tree.
+        //
+        // Deliberately narrow rather than a recursive sweep: fixed depth, only under the bundle's own parent, and the
+        // match is still by exact assembly name below — so a hit means "the assembly this database asked for, by name".
+        // Ranked last, so a registered directory or a bundled build always wins over whatever happens to be in bin/.
+        foreach (var probe in EnumerateAdjacentBuildOutputs(directory))
+        {
+            searchDirs.Add((probe, "app-build-output"));
+        }
 
         var nameIndex = new Dictionary<string, string>[searchDirs.Count]; // metadata-name index, built lazily per dir
 
