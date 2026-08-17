@@ -3,8 +3,8 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-07-20 |
-| Domain | Component schema identity, archetype registry, component-type identity |
+| Last Updated | 2026-08-17 |
+| Domain | Component schema identity, archetype registry, component-type identity, tick-fence dirty bitmaps |
 
 > Type-location: `Ecs/internals/ArchetypeRegistry.cs`, `Ecs/internals/ArchetypeMetadata.cs` (+ `ArchetypeEngineState`), `Ecs/public/DatabaseEngine.cs`
 > (`RegisterComponentFromAccessor`, the reopen schema-load path), `Schema.Definition/Attributes.cs` (`[Component]`).
@@ -247,3 +247,50 @@ popcounts the occupancy word on the strength of the grant alone and has nothing 
              churning archetype used to latch onto the per-entity probe forever. The cost is that "the bit is cleared at
              destroy" became load-bearing for every caller, and two callers never held it.
   requires CLUSTERVIS-01 (same summary, the publication half)
+
+---
+
+## Module: DIRTY — Dirty bitmaps track published-entity mutations
+
+Two bitmaps drive the tick fence: `ComponentTable.DirtyBitmap`, keyed by content chunk id, and
+`ArchetypeClusterState.ClusterDirtyBitmap`, keyed `clusterChunkId * 64 + slotIndex`. Both answer one question — *which
+already-published entities did this tick mutate?* — and both feed the same two consumers: WAL emission at the fence, and
+change-filtered system dispatch.
+
+A **spawn is not a mutation** for this purpose, and `FinalizeSpawns` says so where it publishes: *"We do NOT set
+ClusterDirtyBitmap here — that bitmap tracks write mutations for change-filtered dispatch, same as per-ComponentTable
+DirtyBitmap (which is also not set during FinalizeSpawns for non-cluster SV entities)."* A spawn's bytes reach disk by a
+different route — page-level dirty marks and the checkpoint under TickFence discipline, its own CM-06 Slot record under
+Commit discipline.
+
+### DIRTY-01: A spawn sets no dirty bit, in either bitmap `[fatal]` `[silent]`
+  invariant ∀ entity e spawned in transaction T: at commit(T), e contributes no bit to `ComponentTable.DirtyBitmap` nor
+            to `ClusterDirtyBitmap` — including when T also WRITES e before committing
+  never marking a spawn-staging chunk id dirty. Until `FinalizeSpawns` publishes it, a spawned entity has no cluster slot
+        — which is why the write lands on the pre-publish branch in the first place — so there is no correct bit to set,
+        not merely an inconvenient one.
+  scope: EntityAccessor.WriteEcsComponentData, Transaction.FinalizeSpawns, DatabaseEngine.ProcessTableFence
+  on_violation: a SingleVersion staging chunk reaches the fence, which reads the entity PK from its overhead and gets 0 —
+                the PK is stamped into a staging chunk only for TRANSIENT slots, while `EntityPKOverheadSize` is 8 for
+                every non-Versioned component. Routing id 0 is reserved and never assigned, so `GetMetaByRouting` returns
+                null and the fence throws. In Release the scheduler swallows it: measured over 55 s with every tick
+                poisoned — 6,602 fence exceptions, 6,602 leaked `UnitOfWork` objects (1:1 with poisoned ticks), 321 MB of
+                WAL across 5 unrecycled segments, and `CurrentTickNumber` frozen at 0, because the throw escapes before
+                the counter's only mutation. Systems keep running and the timer keeps firing; the whole Fence DAG is
+                skipped. The engine neither crashes nor blocks — its clock stops while it burns CPU and disk (#837). A
+                TRANSIENT staging chunk fails differently and just as hard: its PK IS stamped, so it survives the fence
+                and reaches the change-filtered dispatch scan, which calls `ComponentSegment.CreateChunkAccessor()` —
+                null on a Transient table, which builds only its transient segments.
+  note: this rule constrains PRODUCERS. `ProcessTableFence` now skips a zero-PK chunk rather than dereferencing routing
+        id 0 — matching what the cluster walker already did for an unoccupied slot — so a future producer degrades to a
+        dropped fence record instead of a frozen clock. That guard is defence in depth, not a substitute: a zero PK in
+        that bitmap still means someone violated this rule.
+  rationale: nothing is lost by withholding the bit. Under TickFence discipline a spawn's SingleVersion values are
+             checkpoint-durable BY DESIGN and were never WAL-logged at the fence anyway; under Commit discipline the
+             spawn's own CM-06 Slot record carries them, built from the staging chunk AFTER the in-place write, because
+             own-spawns deliberately skip write staging (#713). Index entries are inserted by `FinalizeSpawns` itself
+             from the same final bytes.
+  verified: SpawnThenWriteFenceTests.OwnSpawnWrite_LeavesTheTableDirtyBitmapClean [VerifiesRule] — asserts the bitmap
+            directly rather than inferring it from the absence of a crash, with
+            SpawnThenWrite_EveryTick_LeavesTheRuntimeClockAdvancing covering the symptom that made this expensive: the
+            clock, not the exception.

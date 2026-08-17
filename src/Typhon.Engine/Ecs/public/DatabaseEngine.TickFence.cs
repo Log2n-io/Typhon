@@ -259,6 +259,16 @@ public partial class DatabaseEngine
                             var src = accessor.GetChunkAsReadOnlySpan(chunkId);
                             var entityPk = MemoryMarshal.Read<long>(src);
 
+                            // A chunk with no PK in its overhead is not a published entity. Routing ids start at 1, so
+                            // EntityId.FromRaw(0).ArchetypeId indexes a null slot and the GetSlot below NREs — which, escaping the fence, freezes the
+                            // runtime's tick counter and leaks that tick's UnitOfWork, silently in Release (#837). DIRTY-01 removed the one producer that
+                            // could put such a chunk here (a spawn-staging id), but the deref itself was never guarded, so a future producer would
+                            // reproduce #837 verbatim. Skip it, exactly as the cluster walker skips an unoccupied slot in AppendClusterCollectionContent.
+                            if (entityPk == 0)
+                            {
+                                continue;
+                            }
+
                             // Flush before the frame would exceed the per-Append cap. Fence records are individually committed, so
                             // splitting across Appends is safe; the codec splits each batch into RecordBatch chunks internally.
                             if (batchBytes > 0 && batchBytes + recOverhead + stride > MaxFenceBatchBytes)

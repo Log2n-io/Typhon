@@ -122,7 +122,7 @@ Each file covers one domain. Rules are grouped by module within the domain.
 | [durability.md](durability.md) | WAL, Checkpoint, Recovery | WAL Pipeline, Checkpoint, Rebuild/Suspect-Mode, Seqlock, UoW Registry, Page Safety |
 | [runtime-scheduling.md](runtime-scheduling.md) | DagScheduler, RuntimeSchedule, Auto-DAG (RFC 07) | Phase Resolution, Access Conflict Detection, Edge Derivation, Debug-Runtime Write Validation, API Contract Stability |
 | [spatial.md](spatial.md) | Spatial R-Tree, Queries, Triggers, Interest, Spatial Tiers | R-Tree Structure, Queries, Fat AABB Updates, Trigger Volumes, Interest Management, Cluster Spatial AABBs, ClusterCellMap, TierClusterIndex, Migration Dirty Bits, Dormancy, Checkerboard Partition, SetCellTier Validation |
-| [ecs.md](ecs.md) | Component schema identity, component-type identity | SCHEMA (StorageMode fixed per (name, revision); ComponentTypeId is a process-global in-memory handle) |
+| [ecs.md](ecs.md) | Component schema identity, component-type identity, tick-fence dirty bitmaps | SCHEMA (StorageMode fixed per (name, revision); ComponentTypeId is a process-global in-memory handle), CLUSTERWALK, CLUSTERVIS, DIRTY (a spawn sets no dirty bit — `DIRTY-01`) |
 | [indexing.md](indexing.md) | Secondary-index ownership and scope, ordered index reads | Index Ownership & Scope (`IX-01..05`), Ordered Index Reads (`IXS-01..03`) |
 | [concurrency.md](concurrency.md) | UoW cancellation, structural holdoff, thread identity, MVCC snapshot retention, epoch pinning | Cooperative Cancellation ⊗ Structural Holdoff (`CX-01..04` — a coupled pair, see the module note), Thread Identity (`CX-05`), Snapshot Retention (`SNAP-01..02`), Epoch Pinning ⊗ Page Eviction (`EP-01`) |
 

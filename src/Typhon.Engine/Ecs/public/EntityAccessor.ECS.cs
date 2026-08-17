@@ -468,7 +468,19 @@ public unsafe partial class EntityAccessor
             ptr = info.CompContentAccessor.GetChunkAddress(chunkId, true);
             _didInPlaceSvWrite = true;   // CM-02: a TickFence in-place SingleVersion write happened — blocks late escalation to Commit
         }
-        table.DirtyBitmap?.Set(chunkId);
+
+        // DIRTY-01 (rules/ecs.md): a spawn sets no dirty bit. These bitmaps track write mutations to entities that are already PUBLISHED, and FinalizeSpawns
+        // deliberately marks neither this one nor ClusterDirtyBitmap for a spawn. For an own-spawn `chunkId` names the spawn-staging chunk, which has no
+        // published identity to report: the entity PK is stamped into that chunk's overhead only for TRANSIENT slots, so the fence reads PK 0 and dies on
+        // GetMetaByRouting(0) — silently, in Release (#837). A Transient own-spawn does carry its PK and so reached the change-filtered dispatch scan instead,
+        // which calls table.ComponentSegment.CreateChunkAccessor() — null on a Transient table, which builds only its transient segments. Both are the same
+        // mistake: a staging chunk id where a published one is expected. Nothing is lost by withholding the bit; see DIRTY-01's rationale for the
+        // per-discipline durability argument.
+        if (!isOwnSpawn)
+        {
+            table.DirtyBitmap?.Set(chunkId);
+        }
+
         return ref Unsafe.AsRef<T>(ptr + info.ComponentOverhead);
     }
 
