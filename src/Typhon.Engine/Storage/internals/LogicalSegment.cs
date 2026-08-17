@@ -671,15 +671,36 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
 
         _pages = filePageIndices.ToArray();
 
-        // Post-condition #1: walk the chain in memory. Mismatch here ⇒ bug in CreateOrGrow pointer writes (not persistence).
-        var memChainCount = WalkForwardChainPageCount(epoch);
-        if (memChainCount != _pages.Length)
+        // Post-condition #1: verify the data-page forward chain over the pages this call actually wrote — the root, the old tail at growFrom-1, and every new
+        // page. Mismatch here ⇒ bug in CreateOrGrow's pointer writes (not persistence).
+        //
+        // The range is bounded on purpose (#838). This check is the ONLY thing a grow leaves epoch-pinned: RequestPageEpoch raises AccessEpoch by CAS-max and
+        // the sole thing that lowers it is UnlatchPageExclusive, which resets it to 0 (PS-03) — so the write loops above, which latch and unlatch every page
+        // they touch, end pinning nothing, while a page merely READ through RequestPageEpoch stays unevictable under PS-01 until the enclosing epoch scope
+        // exits. That scope is the CALLER's, not ours: Transaction.Init opens it and only the transaction's dispose closes it, and a nested EpochGuard.Enter
+        // does not re-pin (PinCurrentThread stamps at depth 0 only). Walking the whole chain therefore pinned O(segment) pages for a whole transaction, and
+        // once the segment outgrew the page cache a commit ended up waiting for eviction of pages its own pin protected — a self-deadlock surfaced as a 5 s
+        // PageCacheBackpressureTimeoutException. Bounding the walk does not make the check free; it makes its cost proportional to the grow (measured: 12
+        // pages for a 10-page grow, against 1210 — the whole segment — before), which is the property that matters, because a caller that grows by N has
+        // already committed to touching N pages.
+        var pageList = _pages;
+        var badLink = VerifyGrownChainLinks(epoch, pageList, growFrom, out var actualNext);
+        if (badLink >= 0)
         {
             throw new InvalidOperationException(
-                $"CreateOrGrow IN-MEMORY chain mismatch: root={_pages[0]} kind={_kind} growFrom={growFrom} " +
-                $"expected={_pages.Length} chain={memChainCount} (diff={memChainCount - _pages.Length:+0;-#}) " +
+                $"CreateOrGrow IN-MEMORY chain mismatch: root={pageList[0]} kind={_kind} growFrom={growFrom} " +
+                $"page[{badLink}]={pageList[badLink]} points at {actualNext}, expected {((badLink + 1) < pageList.Length ? pageList[badLink + 1] : 0)} " +
                 $"— bug is in CreateOrGrow's pointer writes, not persistence.");
         }
+
+        // There is deliberately NO strict-mode escape hatch that re-runs the exhaustive walk here. CheckConfig.Enabled is the switch a user flips to diagnose
+        // a stall, and this walk is what produces the stall — arming it from the diagnostic gate would deadlock the very investigation it is meant to serve
+        // (this suite runs strict mode on for every fixture, so that is not hypothetical). What the narrowing does give up is stated in EP-01: prefix damage
+        // this method did NOT cause — a lost write leaving a stale pointer below growFrom-1, or a cycle in the prefix — is no longer noticed at the next grow.
+        // It is still caught, by the exhaustive chain↔directory cross-check on every reopen (Load) and on demand over every segment (RunStorageIntegrityCheck
+        // / `typhon check`), just later. That is the right trade: a post-condition's job is to prove ITS OWN writes correct, the old check mis-attributed
+        // prefix damage to CreateOrGrow anyway ("not persistence"), and the bounded check is strictly more thorough than the count comparison over the range
+        // this method can actually corrupt.
 
         // Post-condition #2: walk the directory section in memory by reading the root + extension map pages RIGHT NOW and
         // verify each entry matches the in-memory _pages array position-by-position. Mismatch here ⇒ bug in CreateOrGrow's
@@ -695,6 +716,88 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Verifies the data-page forward chain (<see cref="LogicalSegmentHeader.LogicalSegmentNextRawDataPBID"/>) over <b>only the pages
+    /// <see cref="CreateOrGrow"/> just wrote</b> — the root, the old tail at <paramref name="growFrom"/><c>-1</c>, and every newly added page. Compares
+    /// positionally: page <c>i</c>'s forward pointer must be <c>_pages[i+1]</c>, and <c>0</c> at the last page. Returns <c>-1</c> when every link matches,
+    /// else the index into <paramref name="pages"/> whose pointer is wrong, with <paramref name="actualNext"/> set to what that page actually held.
+    /// </summary>
+    /// <param name="epoch">The caller's epoch, used to tag every page this reads.</param>
+    /// <param name="pages">
+    /// The segment's page directory. Passed in rather than re-read from <c>_pages</c> so the index this returns and the array the caller reports it against
+    /// are provably the same object — two independent reads of a volatile field are two chances to disagree.
+    /// </param>
+    /// <param name="growFrom">The first index this call wrote; <c>0</c> for <c>Create</c>.</param>
+    /// <param name="actualNext">On a mismatch, the forward pointer the offending page actually held.</param>
+    /// <remarks>
+    /// <para>
+    /// The bound is the point (#838). <see cref="WalkForwardChainPageCount"/> walks from the root and fetches every data page; each fetch raises that page's
+    /// <c>AccessEpoch</c> by CAS-max, and the only thing that lowers it is <c>UnlatchPageExclusive</c>, which resets it to 0 (PS-03). A page that is merely
+    /// READ therefore stays unevictable under PS-01 until the enclosing epoch scope exits — and that scope belongs to the caller (a transaction), not to the
+    /// walk, which turned a post-condition on a small grow into an O(segment) pin held for a whole transaction.
+    /// </para>
+    /// <para>
+    /// This check is consequently the ONLY thing a grow leaves pinned: the write loops in <see cref="CreateOrGrow"/> latch and unlatch every page they
+    /// touch, so they end pinning nothing. Bounding the walk does not make the check free — it costs one pin per page in range, held for the caller's scope —
+    /// it makes the cost proportional to the grow rather than to the segment, which is the property EP-01 (<c>rules/concurrency.md</c>) requires.
+    /// </para>
+    /// <para>
+    /// Coverage over the range is strictly stronger than the count comparison it replaces: positional comparison also catches "right count, wrong target",
+    /// for the same reason <see cref="VerifyDirectoryAgainst"/> is positional. What it gives up is prefix damage <see cref="CreateOrGrow"/> did not cause,
+    /// which the exhaustive walk still catches on every reopen (<see cref="Load"/>) and on demand (<c>RunStorageIntegrityCheck</c>).
+    /// </para>
+    /// <para>
+    /// <b>Index 0 is always verified</b>, even when it falls outside <c>[growFrom-1, end]</c>. A grow that pushes the page directory past
+    /// <see cref="RootHeaderIndexSectionCount"/> allocates a map-extension page and rewrites the ROOT page's <see cref="LogicalSegmentHeader"/> to chain to
+    /// it — and <see cref="LogicalSegmentHeader.LogicalSegmentNextMapPBID"/> sits directly beside
+    /// <see cref="LogicalSegmentHeader.LogicalSegmentNextRawDataPBID"/> in that struct, so a wrong-field write there is precisely the bug class this
+    /// post-condition exists to catch. It costs no extra fetch in practice: <see cref="VerifyDirectoryAgainst"/> faults the root immediately afterwards.
+    /// </para>
+    /// </remarks>
+    private int VerifyGrownChainLinks(long epoch, int[] pages, int growFrom, out int actualNext)
+    {
+        actualNext = 0;
+
+        if (pages == null || pages.Length == 0)
+        {
+            return -1;
+        }
+
+        // A start beyond the array would make the loop body vanish and the check report "clean" without having verified anything — the one failure mode a
+        // detector must not have. Unreachable today (Grow rejects newLength <= current, GrowOccupancySegment passes length-1 for a length-page array).
+        Debug.Assert(growFrom <= pages.Length,
+            $"CreateOrGrow growFrom={growFrom} exceeds the {pages.Length}-page directory; the chain check would be vacuous.");
+
+        var start = Math.Max(0, growFrom - 1);
+        if ((start > 0) && !ChainLinkMatches(epoch, pages, 0, out actualNext))
+        {
+            return 0;
+        }
+
+        for (var i = start; i < pages.Length; i++)
+        {
+            if (!ChainLinkMatches(epoch, pages, i, out actualNext))
+            {
+                return i;
+            }
+        }
+
+        actualNext = 0;
+        return -1;
+    }
+
+    /// <summary>
+    /// Reads page <paramref name="index"/>'s forward-chain pointer and reports whether it names the next page in <paramref name="pages"/> (or <c>0</c> at the
+    /// tail). <paramref name="actualNext"/> always receives what the page actually held, so the caller can put both values in its message.
+    /// </summary>
+    private bool ChainLinkMatches(long epoch, int[] pages, int index, out int actualNext)
+    {
+        _store.RequestPageEpoch(pages[index], epoch, out var memPageIndex);
+        var page = _store.GetPage(memPageIndex);
+        actualNext = page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).LogicalSegmentNextRawDataPBID;
+        return actualNext == (((index + 1) < pages.Length) ? pages[index + 1] : 0);
     }
 
     /// <summary>

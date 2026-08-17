@@ -124,13 +124,13 @@ Each file covers one domain. Rules are grouped by module within the domain.
 | [spatial.md](spatial.md) | Spatial R-Tree, Queries, Triggers, Interest, Spatial Tiers | R-Tree Structure, Queries, Fat AABB Updates, Trigger Volumes, Interest Management, Cluster Spatial AABBs, ClusterCellMap, TierClusterIndex, Migration Dirty Bits, Dormancy, Checkerboard Partition, SetCellTier Validation |
 | [ecs.md](ecs.md) | Component schema identity, component-type identity | SCHEMA (StorageMode fixed per (name, revision); ComponentTypeId is a process-global in-memory handle) |
 | [indexing.md](indexing.md) | Secondary-index ownership and scope, ordered index reads | Index Ownership & Scope (`IX-01..05`), Ordered Index Reads (`IXS-01..03`) |
-| [concurrency.md](concurrency.md) | UoW cancellation, structural holdoff, thread identity | Cooperative Cancellation ⊗ Structural Holdoff (`CX-01..04` — a coupled pair, see the module note), Thread Identity (`CX-05`) |
+| [concurrency.md](concurrency.md) | UoW cancellation, structural holdoff, thread identity, MVCC snapshot retention, epoch pinning | Cooperative Cancellation ⊗ Structural Holdoff (`CX-01..04` — a coupled pair, see the module note), Thread Identity (`CX-05`), Snapshot Retention (`SNAP-01..02`), Epoch Pinning ⊗ Page Eviction (`EP-01`) |
 
 ## Roadmap
 
 Domains to add, in priority order (highest-risk invariants first):
 
-- [ ] **`concurrency.md`** — AccessControl state machine, epoch protocol, lock ordering, deadlock prevention. High priority: the epoch/eviction interaction spans multiple subsystems and violations cause use-after-free.
+- [ ] **`concurrency.md`** *(partial)* — AccessControl state machine, lock ordering, deadlock prevention. The epoch/eviction interaction has its first invariant (`EP-01`, from #838, which cost a P0 self-deadlock to establish); the rest of the epoch protocol is still unwritten. Remains high priority: it spans multiple subsystems and violations cause use-after-free.
 - [ ] **`data-engine.md`** — MVCC visibility rules, revision chain integrity, B+Tree structural invariants, schema versioning field-ID stability. High priority: visibility bugs cause silent incorrect query results.
 - [ ] **`storage.md`** — Page state machine (partially covered in durability via seqlock/eviction), segment allocation, bitmap consistency. Medium priority: most rules are local to PagedMMF.
 - [ ] **`execution.md`** — Commit path ordering, transaction pool, DurabilityMode contracts, holdoff/yield-point placement. Medium priority: partly covered in durability already.
