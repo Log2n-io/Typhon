@@ -177,6 +177,47 @@ internal sealed class App : IDisposable
 
     // ─── Simulation clock ─────────────────────────────────────────────────────────────────────────────────────────
 
+    // ─── Score trend ──────────────────────────────────────────────────────────────────────────────────────────────
+    // Sampled on a wall clock rather than per frame: a delta against the previous FRAME is noise at 60 Hz — every value
+    // moves by a handful and the arrow flickers. A few seconds is long enough that the sign means something.
+
+    private readonly long[] _scoreAtLastSample = new long[4];
+    private readonly long[] _scoreDelta = new long[4];
+    private long _nextScoreSampleAt;
+
+    private void SampleScoreTrend()
+    {
+        var now = Stopwatch.GetTimestamp();
+        if (now < _nextScoreSampleAt)
+        {
+            return;
+        }
+
+        var first = _nextScoreSampleAt == 0;
+        _nextScoreSampleAt = now + (long)(_cfg.ScoreTrendIntervalSeconds * Stopwatch.Frequency);
+
+        for (var f = 0; f < _cfg.Factions && f < 4; f++)
+        {
+            var score = _sim.Score(f);
+            // The first sample has nothing to compare against, and reporting the whole score as a delta would paint a
+            // huge spurious arrow on the opening frames.
+            _scoreDelta[f] = first ? 0 : score - _scoreAtLastSample[f];
+            _scoreAtLastSample[f] = score;
+        }
+    }
+
+    /// <summary>Arrow + signed delta over the last sampling window, or a flat mark when it has not moved.</summary>
+    private string TrendMark(int faction)
+    {
+        var d = _scoreDelta[faction & 3];
+        return d switch
+        {
+            > 0 => $"▲+{d:N0}",
+            < 0 => $"▼{d:N0}",
+            _ => "= 0",
+        };
+    }
+
     private void StepSimulation(double frameDt)
     {
         var dt = 1f / _cfg.TickRate;
@@ -223,12 +264,57 @@ internal sealed class App : IDisposable
         }
 
         _ticksPerFrameEma = _ticksPerFrameEma * 0.9 + ticksThisFrame * 0.1;
+        SampleScoreTrend();
+        WriteCensus();
 
         if (ticksThisFrame > 0 && _mapWin is { IsOpen: true } &&
             _host.Tick % Math.Max(1, _cfg.FileMapEveryNTicks) == 0)
         {
             _fileMap.Refresh();
         }
+    }
+
+    private System.IO.StreamWriter _census;
+    private long _nextCensusTick;
+
+    /// <summary>
+    /// One CSV line every <see cref="Config.CensusEveryTicks"/> ticks, flushed immediately.
+    /// </summary>
+    /// <remarks>
+    /// Flushed per line on purpose: the failure under study (#824) terminates the process, so anything buffered is
+    /// anything lost. A run that dies at minute thirty must still yield the whole curve up to minute thirty —
+    /// otherwise an hour of machine time produces one bit ("it crashed"), which is what the first long run produced.
+    /// </remarks>
+    private void WriteCensus()
+    {
+        if (_cfg.CensusEveryTicks <= 0 || _host.Tick < _nextCensusTick)
+        {
+            return;
+        }
+        _nextCensusTick = _host.Tick + _cfg.CensusEveryTicks;
+
+        if (_census == null)
+        {
+            var path = System.IO.Path.IsPathRooted(_cfg.CensusFile)
+                ? _cfg.CensusFile
+                : System.IO.Path.Combine(AppContext.BaseDirectory, _cfg.CensusFile);
+            _census = new System.IO.StreamWriter(path, append: false) { AutoFlush = true };
+            _census.WriteLine("tick,ships,dirtyPages,acwPages,slotRefPages,epochHeldPages,unevictablePages,totalPages," +
+                              "scoreB,scoreO,stationsB,stationsO,shipsB,shipsO,peakBpDebt,peakBpEpochHeld," +
+                              "checkpoints,gatedCycles,segmentsRecycled,walBytes,walFiles,simMs,frameMs,worstFenceMs");
+            Console.WriteLine($"census -> {path}");
+        }
+
+        var cp = _host.CheckpointStats();
+        var pin = _host.CountPinnedPages();
+        var peak = _host.PeakBackpressure();
+        var (walBytes, walFiles) = _host.WalFootprint();
+        _census.WriteLine($"{_host.Tick},{_sim.ShipsAlive[0] + _sim.ShipsAlive[1]}," +
+                          $"{pin.Dirty},{pin.Acw},{pin.SlotRef},{pin.EpochHeld},{pin.Unevictable},{pin.Total}," +
+                          $"{_sim.Score(0)},{_sim.Score(1)},{_sim.StationsAlive[0]},{_sim.StationsAlive[1]},{_sim.ShipsAlive[0]},{_sim.ShipsAlive[1]}," +
+                          $"{peak.Debt},{peak.EpochHeld}," +
+                          $"{cp.Checkpoints},{cp.GatedCycles},{cp.SegmentsRecycled}," +
+                          $"{walBytes},{walFiles},{_simMsEma:F2},{_frameMsEma:F2},{_host.MaxFenceMs:F1}");
     }
 
     private void RunOneTick(float dt)
@@ -518,6 +604,124 @@ internal sealed class App : IDisposable
         return false;
     }
 
+    /// <summary>Reads the selected ship's combat + miner state and world position.</summary>
+    private bool TryReadSelectedShip(out Combat com, out Miner min, out float x, out float y)
+    {
+        com = default;
+        min = default;
+        x = 0;
+        y = 0;
+        using var tx = _host.DBE.CreateQuickTransaction();
+        using var acc = tx.For<Ship>();
+        using var e = acc.GetClusterEnumerator();
+        foreach (var cluster in e)
+        {
+            if (cluster.ChunkId != _sel.ChunkId)
+            {
+                continue;
+            }
+            var bits = cluster.OccupancyBits;
+            if ((bits & (1UL << _sel.Slot)) == 0)
+            {
+                return false;
+            }
+            var pos = cluster.GetReadOnlySpan(Ship.Position);
+            var cb = cluster.GetReadOnlySpan(Ship.Combat);
+            var mn = cluster.GetReadOnlySpan(Ship.Miner);
+            com = cb[_sel.Slot];
+            min = mn[_sel.Slot];
+            x = pos[_sel.Slot].Bounds.MinX;
+            y = pos[_sel.Slot].Bounds.MinY;
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>Everything the simulation knows about one ship, in gameplay terms.</summary>
+    private IEnumerable<string> DescribeSelectedShip(Combat c, Miner m, float sx, float sy)
+    {
+        var kindName = c.Kind switch
+        {
+            Simulation.KindHeavy => "HEAVY",
+            Simulation.KindMiner => "MINER",
+            Simulation.KindFast => "INTERCEPTOR",
+            Simulation.KindDestroyer => "DESTROYER",
+            _ => "LIGHT fighter",
+        };
+        var hpMax = c.Kind switch
+        {
+            Simulation.KindHeavy => _cfg.ShipHp * 3,
+            Simulation.KindMiner => _cfg.ShipHp * 2,
+            Simulation.KindFast => _cfg.FastHp,
+            Simulation.KindDestroyer => _cfg.DestroyerHp,
+            _ => _cfg.ShipHp,
+        };
+        var shMax = c.Kind switch
+        {
+            Simulation.KindHeavy => _cfg.ShipShieldMax * 3,
+            Simulation.KindMiner => _cfg.ShipShieldMax * 2,
+            Simulation.KindFast => _cfg.FastShield,
+            Simulation.KindDestroyer => _cfg.DestroyerShield,
+            _ => _cfg.ShipShieldMax,
+        };
+        var speed = c.Kind switch
+        {
+            Simulation.KindHeavy => _cfg.ShipMaxSpeed * 0.6f,
+            Simulation.KindMiner => _cfg.ShipMaxSpeed * 0.7f,
+            Simulation.KindFast => _cfg.FastMaxSpeed,
+            Simulation.KindDestroyer => _cfg.DestroyerMaxSpeed,
+            _ => _cfg.ShipMaxSpeed,
+        };
+        var cost = c.Kind switch
+        {
+            Simulation.KindHeavy => _cfg.HeavyCost,
+            Simulation.KindMiner => _cfg.MinerCost,
+            Simulation.KindFast => _cfg.FastCost,
+            Simulation.KindDestroyer => _cfg.DestroyerCost,
+            _ => _cfg.LightCost,
+        };
+
+        yield return $"  {kindName}   faction {Simulation.FactionTag(c.Faction)}   position ({sx:F0}, {sy:F0}) m   cost {cost} material";
+
+        // The line this panel exists for. Everything else is a stat you could infer from the hull; the TASK is the
+        // one thing that is pure state and invisible on screen — two ships flying the same direction may be racing
+        // an objective and fleeing to defend a base, and nothing in the picture distinguishes them.
+        yield return $"  TASK   {Simulation.TaskName(Simulation.TaskOf(c.SteerFlags))}";
+
+        yield return $"  hull   {c.Hp}/{hpMax}   shield {c.Shield}/{shMax}   effective HP {c.Hp + c.Shield}/{hpMax + shMax}";
+        yield return $"  damage {c.Damage}/shot   range {_sim.WeaponRangeOf(c.Kind):F0} m   cooldown {c.Cooldown}/{_cfg.WeaponCooldownTicks} ticks"
+                   + (c.Cooldown == 0 ? "  (ready to fire)" : "");
+        yield return $"  top speed {speed:F0} m/s   rooted {c.RootTicks} ticks   orbit {((c.SteerFlags & 1) == 0 ? "CW" : "CCW")}";
+
+        if (c.HasTarget != 0)
+        {
+            var d = MathF.Sqrt((c.TargetX - sx) * (c.TargetX - sx) + (c.TargetY - sy) * (c.TargetY - sy));
+            var inRange = d <= _sim.WeaponRangeOf(c.Kind);
+            yield return $"  target ({c.TargetX:F0}, {c.TargetY:F0}) m   distance {d:F0} m   {(inRange ? "IN RANGE" : "closing")}";
+        }
+        else
+        {
+            yield return "  no target — steering, not shooting";
+        }
+
+        yield return c.ThreatTicks > 0
+            ? $"  UNDER ATTACK — {c.ThreatTicks} ticks of threat left (defends instead of hunting)"
+            : $"  not under attack   calm {c.CalmTicks} ticks (shield regen after {_cfg.ShipShieldRegenTicks})";
+
+        if (c.Kind == Simulation.KindMiner)
+        {
+            var pct = m.CargoMax > 0 ? 100f * m.Cargo / m.CargoMax : 0f;
+            yield return $"  cargo  {m.Cargo}/{m.CargoMax} ({pct:F0}%)   mine rate {_cfg.MineRate}/tick   home station ({m.HomeX:F0}, {m.HomeY:F0}) m";
+            yield return m.HasOre != 0
+                ? $"  working asteroid key {m.OreKey} at ({m.OreX:F0}, {m.OreY:F0}) m"
+                : $"  no asteroid held   next search in {m.SearchCooldown} ticks";
+        }
+
+        var eff = Effect(c.Faction & 3);
+        yield return $"  faction effects: {eff}";
+        yield return "";
+    }
+
     // ─── Rendering ────────────────────────────────────────────────────────────────────────────────────────────────
 
     private void RenderMain() => RenderMain(true);
@@ -614,11 +818,15 @@ internal sealed class App : IDisposable
                    $"{_ticksPerFrameEma:F2} ticks/frame   budget {_cfg.SimBudgetMs:F0} ms   " +
                    $"backlog {_tickAccumulator:F1} ticks",
                    keepingUp ? new Color(150, 220, 170) : bad));
-        lines.Add(($"ships {_sim.ShipsAlive[0]} vs {_sim.ShipsAlive[1]}   shots {_sim.ShotsAlive}   spawned {_sim.TotalSpawned}  killed {_sim.TotalKilled}", white));
-        lines.Add(($"miners {_sim.MinersAlive[0]} vs {_sim.MinersAlive[1]}   material {_sim.Material[0]} vs {_sim.Material[1]}   " +
+        lines.Add(($"ships {Simulation.FactionTag(0)} {_sim.ShipsAlive[0]} vs {Simulation.FactionTag(1)} {_sim.ShipsAlive[1]}   shots {_sim.ShotsAlive}   spawned {_sim.TotalSpawned}  killed {_sim.TotalKilled}", white));
+        lines.Add(($"miners {Simulation.FactionTag(0)} {_sim.MinersAlive[0]} vs {Simulation.FactionTag(1)} {_sim.MinersAlive[1]}   " +
+                   $"material {Simulation.FactionTag(0)} {_sim.Material[0]} vs {Simulation.FactionTag(1)} {_sim.Material[1]}   " +
                    $"asteroids {_sim.AsteroidsAlive}   mined {_sim.TotalMined}", new Color(190, 220, 170)));
+        lines.Add(($"stations {Simulation.FactionTag(0)} {_sim.StationsAlive[0]} vs {Simulation.FactionTag(1)} {_sim.StationsAlive[1]}   " +
+                   $"score {Simulation.FactionTag(0)} {_sim.Score(0):N0} {TrendMark(0)}  vs  {Simulation.FactionTag(1)} {_sim.Score(1):N0} {TrendMark(1)}",
+                   _sim.Score(0) >= _sim.Score(1) ? Renderer.FactionA : Renderer.FactionB));
         lines.Add(($"pickups won {_sim.PickupsCollected}  hits landed {_sim.PickupHits}  shots absorbed {_sim.ShotsAbsorbed}   " +
-                   $"A[{Effect(0)}]  B[{Effect(1)}]", new Color(255, 220, 140)));
+                   $"{Simulation.FactionTag(0)}[{Effect(0)}]  {Simulation.FactionTag(1)}[{Effect(1)}]", new Color(255, 220, 140)));
         lines.Add((PickupLine(), _sim.LivePickupKind >= 0 ? new Color(255, 235, 150) : dim));
         lines.Add(("", dim));
         lines.Add((RenderLine(), _renderer.Lod.Tier == LodTier.Density ? new Color(255, 220, 140) : white));
@@ -752,6 +960,7 @@ internal sealed class App : IDisposable
         Add(_sim.ShieldTicks[faction], "SHIELD");
         Add(_sim.SpeedTicks[faction], "SPEED");
         Add(_sim.MiningTicks[faction], "MINING");
+        Add(_sim.ProductionTicks[faction], "PRODUCTION");
         return parts.Count == 0 ? "-" : string.Join(" + ", parts);
 
         void Add(int ticks, string name)
@@ -781,7 +990,7 @@ internal sealed class App : IDisposable
         var b = _sim.PickupProgress[1];
         var p = _sim.LivePickupPos;
         return $"CONTEST  {Simulation.PickupName((byte)_sim.LivePickupKind)} at ({p.X / 1000f:F0},{p.Y / 1000f:F0}) km   " +
-               $"A {a}/{need} {Bar(a / (float)need)}   B {b}/{need} {Bar(b / (float)need)}";
+               $"{Simulation.FactionTag(0)} {a}/{need} {Bar(a / (float)need)}   {Simulation.FactionTag(1)} {b}/{need} {Bar(b / (float)need)}";
 
         static string Bar(float t)
         {
@@ -823,7 +1032,7 @@ internal sealed class App : IDisposable
         {
             var hpPct = _cfg.StationHpMax > 0 ? 100f * si.Hp / _cfg.StationHpMax : 0f;
             var shPct = _cfg.StationShieldMax > 0 ? 100f * si.Shield / _cfg.StationShieldMax : 0f;
-            yield return $"  faction {(char)('A' + (si.Faction & 3))}   position ({sx:F0}, {sy:F0}) m   spawned {si.SpawnedTotal} ships";
+            yield return $"  faction {Simulation.FactionTag(si.Faction)}   position ({sx:F0}, {sy:F0}) m   spawned {si.SpawnedTotal} ships";
             yield return $"  hull   {si.Hp}/{_cfg.StationHpMax} ({hpPct:F0}%)   shield {si.Shield}/{_cfg.StationShieldMax} ({shPct:F0}%)";
 
             // A station is never destroyed, only DISABLED — which is why one sits at 0 hull and keeps drawing fire.
@@ -844,6 +1053,14 @@ internal sealed class App : IDisposable
             }
             yield return $"  gun cooldown {si.Cooldown}/{_cfg.StationCooldownTicks} ticks   range {_cfg.StationWeaponRange:F0} m   damage {_cfg.StationDamage}";
             yield return "";
+        }
+
+        if (_sel.ArchetypeId == _host.ShipArchetypeId && TryReadSelectedShip(out var sc, out var sm, out var shx, out var shy))
+        {
+            foreach (var l in DescribeSelectedShip(sc, sm, shx, shy))
+            {
+                yield return l;
+            }
         }
 
         yield return $"  entityKey {_sel.EntityKey}   archetypeId {_sel.ArchetypeId}";
@@ -901,6 +1118,11 @@ internal sealed class App : IDisposable
         {
             _win.DispatchEvents();
             RunOneTick(dt);
+            // The census belongs here too, not only in the interactive frame loop: the counter leaks this demo exists to
+            // expose take tens of minutes of wall clock to show up at 1x, and auto mode is the only way to run the same
+            // tick count in a couple of minutes. Without it the one measurement that answers "is the page cache still
+            // filling up?" is unavailable in precisely the mode built for unattended runs.
+            WriteCensus();
             if (_mapWin is { IsOpen: true } && i % Math.Max(1, _cfg.FileMapEveryNTicks) == 0)
             {
                 _fileMap.Refresh();
@@ -960,11 +1182,12 @@ internal sealed class App : IDisposable
         DumpAsteroids();
         DumpMissingAabbs();
         Console.WriteLine();
-        Console.WriteLine($"ECONOMY  ships {_sim.ShipsAlive[0]} vs {_sim.ShipsAlive[1]}   miners {_sim.MinersAlive[0]} vs {_sim.MinersAlive[1]}   " +
+        Console.WriteLine($"ECONOMY  ships {Simulation.FactionTag(0)} {_sim.ShipsAlive[0]} vs {Simulation.FactionTag(1)} {_sim.ShipsAlive[1]}   " +
+                          $"miners {Simulation.FactionTag(0)} {_sim.MinersAlive[0]} vs {Simulation.FactionTag(1)} {_sim.MinersAlive[1]}   " +
                           $"material {_sim.Material[0]} vs {_sim.Material[1]}   asteroids {_sim.AsteroidsAlive}   mined {_sim.TotalMined}   killed {_sim.TotalKilled}");
         Console.WriteLine($"PICKUPS  collected {_sim.PickupsCollected}  absorbed {_sim.ShotsAbsorbed}  " +
-                          $"effect uptime A {(_sim.TicksElapsed > 0 ? 100.0 * _sim.EffectTicks[0] / _sim.TicksElapsed : 0):F1}%  " +
-                          $"B {(_sim.TicksElapsed > 0 ? 100.0 * _sim.EffectTicks[1] / _sim.TicksElapsed : 0):F1}%");
+                          $"effect uptime {Simulation.FactionTag(0)} {(_sim.TicksElapsed > 0 ? 100.0 * _sim.EffectTicks[0] / _sim.TicksElapsed : 0):F1}%  " +
+                          $"{Simulation.FactionTag(1)} {(_sim.TicksElapsed > 0 ? 100.0 * _sim.EffectTicks[1] / _sim.TicksElapsed : 0):F1}%");
         Console.WriteLine($"GEOMETRY oversized clusters (> {_cfg.FillMaxCellArea:F0} cell-areas): {_renderer.OversizedClusters} of {_renderer.DrawnClusters}");
         Console.WriteLine();
         var mm = _sim.MinerModeCount;
@@ -994,6 +1217,23 @@ internal sealed class App : IDisposable
                           $"aim staleness <= {_cfg.TargetReacquireTicks} ticks = {_cfg.TargetReacquireTicks * _cfg.ShipMaxSpeed / _cfg.TickRate:F0} m   " +
                           $"flight drift @{_cfg.WeaponRange:F0} m = " +
                           $"{_cfg.WeaponRange / _cfg.ShotSpeed * _cfg.ShipMaxSpeed:F0} m   hitRadius {_cfg.ShotHitRadius:F0} m");
+        var defendCalls = _sim.DefendersOnTarget + _sim.DefendersBlind;
+        Console.WriteLine($"DEFENCE  calls {defendCalls}   on target {_sim.DefendersOnTarget} " +
+                          $"({(defendCalls > 0 ? 100.0 * _sim.DefendersOnTarget / defendCalls : 0):F1}%)   " +
+                          $"blind {_sim.DefendersBlind}   at base (<2 km) {_sim.DefendersAtBase} " +
+                          $"({(defendCalls > 0 ? 100.0 * _sim.DefendersAtBase / defendCalls : 0):F1}%)   " +
+                          $"mean range to the point ordered {_sim.MeanDefendRange:F0} m   " +
+                          $"scan {_cfg.StationThreatScanRadius:F0} m  garrison ring {_cfg.StationGarrisonRadius:F0} m   " +
+                          $"stations lost {_sim.StationsDestroyed} destroyed / {_sim.StationsDisabled} disabled");
+        var defTicks = _sim.DefenderTicksAtPost + _sim.DefenderTicksAway;
+        Console.WriteLine($"GARRISON defender-ticks {defTicks}   at post {_sim.DefenderTicksAtPost} " +
+                          $"({(defTicks > 0 ? 100.0 * _sim.DefenderTicksAtPost / defTicks : 0):F1}%)   " +
+                          $"away {_sim.DefenderTicksAway} at {_sim.MeanDefenderAwayRange:F0} m mean   " +
+                          $"OUTBOUND {_sim.DefenderTicksOutbound} " +
+                          $"({(defTicks > 0 ? 100.0 * _sim.DefenderTicksOutbound / defTicks : 0):F1}% — the screen symptom)   " +
+                          $"unreachable sieges declined {_sim.DefenceCallsUnreachable}   " +
+                          $"leash {_cfg.StationDefendMaxTravelTicks:F0} ticks " +
+                          $"(= {_cfg.StationDefendMaxTravelTicks * _cfg.ShipMaxSpeed / _cfg.TickRate / 1000f:F1} km for a light hull)");
         Console.WriteLine(RenderLine());
         Console.WriteLine(CullLine());
         var layout = $"world {_cfg.WorldSize / 1000f:F0} km  layout {_cfg.StationLayout}/{_cfg.AsteroidLayout}";
@@ -1025,7 +1265,7 @@ internal sealed class App : IDisposable
         }
         Console.WriteLine("         stations: " + _sim.DescribeStations());
         Console.WriteLine($"         station health: {_sim.DescribeStationHealth()}   disabled {_sim.StationsDisabled}  rebuilt {_sim.StationsRebuilt}");
-        Console.WriteLine($"         stations alive: A {_sim.StationsAlive[0]}  B {_sim.StationsAlive[1]}   " +
+        Console.WriteLine($"         stations alive: {Simulation.FactionTag(0)} {_sim.StationsAlive[0]}  {Simulation.FactionTag(1)} {_sim.StationsAlive[1]}   " +
                           $"destroyed {_sim.StationsDestroyed} (destructible {_cfg.StationsDestructible})   " +
                           $"miners rehomed {_sim.MinersRehomed}");
 
@@ -1037,8 +1277,35 @@ internal sealed class App : IDisposable
         _host.DBE.ForceCheckpoint();
         System.Threading.Thread.Sleep(400);
         var dirty = _host.CheckpointStats0();
+
+        // Convergence probe: does repeated checkpointing at quiesce drain the residue to zero, or plateau?
+        // Draining means the residue is purely #824's per-cycle K-1 imbalance. A plateau means a second,
+        // frequency-independent component exists underneath and #824 is scoped wrong.
+        if (_cfg.QuiesceCheckpoints > 0)
+        {
+            var trail = new System.Text.StringBuilder().Append(dirty.Dirty);
+            for (var i = 0; i < _cfg.QuiesceCheckpoints; i++)
+            {
+                _host.DBE.ForceCheckpoint();
+                System.Threading.Thread.Sleep(300);
+                trail.Append(" -> ").Append(_host.CheckpointStats0().Dirty);
+            }
+            Console.WriteLine($"CONVERGE dirty pages across {_cfg.QuiesceCheckpoints} extra quiescent checkpoints: {trail}");
+            dirty = _host.CheckpointStats0();
+        }
+        if (_cfg.DirtyTraceAll)
+        {
+            // Marks and writeback debt are separate obligations with separate owners (PS-05 / PS-10), so report them
+            // separately. At quiesce BOTH must be zero: a mark outstanding is one its owner never released, and a page
+            // still owed is one the checkpoint never wrote. A single "dirty" number cannot tell those apart, which is
+            // why this demo spent a long time watching the wrong one.
+            Console.WriteLine($"MARKS    pages holding unreleased mutator marks at quiesce: {_host.CountMarkPages()} (must be 0)");
+        }
         Console.WriteLine($"PAGECACHE dirty {dirty.Dirty} of {dirty.Total} pages after a forced checkpoint, quiescent   " +
-                          $"({100.0 * dirty.Dirty / Math.Max(1, dirty.Total):F1}% unevictable)   first dirty page {dirty.FirstDirtyPage}");
+                          $"({100.0 * dirty.Dirty / Math.Max(1, dirty.Total):F1}% dirty)   first dirty page {dirty.FirstDirtyPage}");
+        var pinNow = _host.CountPinnedPages();
+        Console.WriteLine($"PINS     dirty {pinNow.Dirty}  acw {pinNow.Acw}  slotRef {pinNow.SlotRef}  epochHeld {pinNow.EpochHeld}   " +
+                          $"unevictable {pinNow.Unevictable} of {pinNow.Total} ({100.0 * pinNow.Unevictable / Math.Max(1, pinNow.Total):F1}%)");
         if (_cfg.DirtyTracePage >= 0)
         {
             Console.WriteLine($"DCLEAK   page {_cfg.DirtyTracePage}:{Typhon.Engine.Internals.PagedMMF.DescribeDirtyOutstanding()}");

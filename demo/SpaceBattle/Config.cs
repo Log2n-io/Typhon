@@ -96,10 +96,56 @@ public sealed class Config
     public int StationHpRegen = 3;
 
     /// <summary>Radius within which a fighter will break off to defend its own station under attack.</summary>
-    public float StationDefendRadius = 14000f;
+    // Effectively global: larger than the world diagonal (100 000 x 100 000 => ~141 500), so a threatened station is
+    // ALWAYS a candidate no matter where the defender is. It was 14 000 — 14 % of the map — which meant a faction could
+    // watch a base of its own die on the far side while its fleet, out of range of the check, never even considered
+    // going. A siege is the most important thing happening on the map; distance should decide who is nearest to answer
+    // it, not whether anyone answers at all.
+    public float StationDefendRadius = 200000f;
 
     /// <summary>How long a station counts as "under attack" after the last hit, for the purpose of pulling defenders.</summary>
     public int StationThreatTicks = 240;
+
+    /// <summary>
+    /// Radius searched around a threatened station to find the attacker the defenders should fly at.
+    /// </summary>
+    /// <remarks>
+    /// Must exceed the longest ship weapon range (<see cref="DestroyerWeaponRange"/> is currently the largest), or a
+    /// besieger can damage the station from beyond the radius that looks for it: the base would be flagged under
+    /// attack with no attacker found, defenders would rally to an empty point and the siege would proceed unopposed.
+    /// <see cref="Validate"/> enforces the inequality. Sized with margin above it so an attacker manoeuvring at the
+    /// edge of its own range does not flicker in and out of the defenders' picture from tick to tick.
+    /// </remarks>
+    public float StationThreatScanRadius = 3000f;
+
+    /// <summary>
+    /// Radius of the ring a defender holds around its station when it was recalled but no attacker is visible.
+    /// </summary>
+    /// <remarks>
+    /// Sits between <see cref="StationRadius"/> and <see cref="StationWeaponRange"/>: far enough out that the
+    /// garrison is not stacked on the structure, close enough that it is inside the station's own covering fire and
+    /// can reach anything that arrives. Set to 0 to disable the hold and let defenders park on the centre — the old
+    /// behaviour, and the one that let a garrison drift off its own base.
+    /// </remarks>
+    public float StationGarrisonRadius = 900f;
+
+    /// <summary>
+    /// The longest journey, in ticks, a ship will undertake to answer a siege. Reach, not distance.
+    /// </summary>
+    /// <remarks>
+    /// This is what <see cref="StationDefendRadius"/> was reaching for and could not express. A radius is a distance;
+    /// what decides whether a defender is useful is TIME, and time is distance over the hull's own speed — so the
+    /// same 20 km is a 25-second trip for an interceptor and a 3-minute one for a destroyer. Measured against the
+    /// global radius, the average defender was 43 km from its objective: a 6 450-tick journey against a 240-tick
+    /// threat flag, which it never completed.
+    /// <para>
+    /// 1 800 ticks is 30 seconds, which at <see cref="ShipMaxSpeed"/> is about 13 km — close to the 14 km radius
+    /// this mechanism originally used, but arrived at from reachability rather than picked, and now scaling
+    /// correctly per hull. Raising it does not make defence better: past the point where a ship arrives to a fight
+    /// that has already resolved, a longer leash only removes ships from the battle they were actually in.
+    /// </para>
+    /// </remarks>
+    public float StationDefendMaxTravelTicks = 1800f;
 
     /// <summary>
     /// When true a station at zero hull is DESTROYED — the entity is despawned and never comes back. When false it
@@ -161,7 +207,7 @@ public sealed class Config
     /// central 37 % of the map's height.
     /// </summary>
     public float StationLatticeInset = 0.04f;
-    public int MaxShipsPerFaction = 12500;
+    public int MaxShipsPerFaction = 20000;
     public int InitialShipsPerFaction = 6250;
 
     /// <summary>
@@ -371,6 +417,135 @@ public sealed class Config
     public float MinerRatio = 0.35f;
 
     /// <summary>
+    /// Hard ceiling on miners as a fraction of a faction's live fleet. Above it every spawn is a fighter.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="MinerRatio"/> cannot hold a population mix, because it governs the FLOW of new ships while the
+    /// standing army is flow × lifetime — and miners live far longer (2x hull and shield, and <c>Damage = 0</c>, so they
+    /// are never the ones trading fire). Measured before this cap: a 35 % spawn share settled at ~96 % of the fleet, and
+    /// with the population at its cap the loop is self-reinforcing — nearly every death is a fighter, each is replaced by
+    /// a miner a third of the time, so the fighter pool bleeds down and takes the kill rate with it.
+    /// </remarks>
+    public float MinerMaxShare = 0.40f;
+
+    /// <summary>Seconds between score-trend samples. The arrow shows the change over one such window.</summary>
+    public float ScoreTrendIntervalSeconds = 5f;
+
+    // ─── Comeback (underdog catch-up) ──────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Whether a trailing faction gets economic and industrial help to climb back.</summary>
+    public bool UnderdogEnabled = true;
+
+    /// <summary>
+    /// Score ratio against the leader below which help starts. At or above it a faction is on its own.
+    /// </summary>
+    /// <remarks>
+    /// A threshold rather than a continuous curve, so an even match is completely unassisted and the mechanic cannot
+    /// be accused of deciding a close game. It only engages once a side is measurably behind.
+    /// </remarks>
+    public float UnderdogThreshold = 0.85f;
+
+    /// <summary>
+    /// Extra income and production at total collapse (score 0), as a fraction. 1.0 = double, reached only in the limit.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately economic and industrial rather than combat. A damage or hull bonus would make the losing side's
+    /// ships individually better than the winning side's, which inverts the thing the score is measuring and would
+    /// undo the hull balance rather than compensate for position. Income and build rate let a beaten faction rebuild
+    /// and re-contest, which is a comeback; stronger ships would just be a handicap race.
+    /// </remarks>
+    public float UnderdogMaxBonus = 1.0f;
+
+    /// <summary>
+    /// A faction's LAST surviving station can be disabled but never destroyed.
+    /// </summary>
+    /// <remarks>
+    /// The one guard that stops a run becoming a formality. Production is per-station and miners can only bank ore at a
+    /// live station, so at zero stations a faction has no income AND no output — it is mathematically dead and nothing
+    /// can bring it back, however generous the catch-up. Measured across four seeds: every game was a blowout, the
+    /// loser had always lost stations first, and on one seed a faction was finished by tick ~4 000 with 14 000 ticks
+    /// left to play out. Station loss stays permanent everywhere else; this only refuses the final one.
+    /// </remarks>
+    public bool LastStationIndestructible = true;
+
+    /// <summary>
+    /// Whether the catch-up bonus also speeds a trailing faction's station repair.
+    /// </summary>
+    /// <remarks>
+    /// The economic half of the bonus arrives too late to matter, because it multiplies an output the loser no longer
+    /// has. Repair acts one step earlier — on whether the station survives at all — which is where the spiral actually
+    /// starts.
+    /// </remarks>
+    public bool UnderdogStationRepair = true;
+
+    /// <summary>
+    /// Ceiling on the per-station output multiplier a trailing faction gets to offset a station deficit. 1 disables it.
+    /// </summary>
+    /// <remarks>
+    /// Production is per-station, so a faction holding one base against three builds a third of the ships no matter how
+    /// rich it is — and the score-based bonus, capped at double, only ever took that to two thirds. Measured: it never
+    /// closed a single game. Scaling each surviving station's output by the deficit is what actually restores parity,
+    /// because it compensates in the same currency the loss happened in. Capped so a faction reduced to its last base
+    /// gets equality, not an advantage.
+    /// </remarks>
+    public float UnderdogStationDeficitCap = 3f;
+
+    /// <summary>
+    /// Score ratio below which a faction's ships cost no material. 0 disables it.
+    /// </summary>
+    /// <remarks>
+    /// The last dependency to break. Every other part of the catch-up multiplies something a collapsed faction no
+    /// longer has: production parity needs material, material needs live miners, and miners need fighters to survive
+    /// long enough to bank a load. Measured — with production compensation alone, a faction reduced to 180 ships
+    /// against 18 000 stayed there, because it could not pay for the ships its stations were now entitled to build.
+    /// Free hulls cut the loop at the point it actually breaks; the faction still has to fly them, hold its base and
+    /// re-take the map, which is a comeback rather than a gift.
+    /// </remarks>
+    public float UnderdogFreeShipsBelow = 0.25f;
+
+    // ─── Destroyer (underdog capital ship) ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Material a destroyer costs. Only a trailing faction may build one.</summary>
+    /// <remarks>
+    /// Expensive enough that it is a decision rather than a default, and pointedly NOT covered by
+    /// <see cref="UnderdogFreeShipsBelow"/>: a collapsing faction gets free fighters to stay alive, but a capital ship
+    /// has to be earned by mining. That keeps it a comeback tool rather than a consolation prize, and it means the
+    /// underdog must protect its miners long enough to afford one.
+    /// </remarks>
+    public int DestroyerCost = 500;
+
+    /// <summary>Destroyer hull. Twenty light fighters' worth, so a fleet has to commit to killing one.</summary>
+    public int DestroyerHp = 400;
+
+    /// <summary>Destroyer shield.</summary>
+    public int DestroyerShield = 240;
+
+    /// <summary>Destroyer damage per shot.</summary>
+    /// <remarks>
+    /// Cut from 40 to trim the hull's combat value by a quarter. Combat value goes as effective-HP x DPS, so taking
+    /// the whole 25 % out of damage and none out of the hull is the reading that leaves the design intact: the
+    /// destroyer was specified as slow, very resistant and deadly, and shaving the tank instead would have made it a
+    /// worse version of a heavy rather than a gentler capital ship.
+    /// </remarks>
+    public int DestroyerDamage = 30;
+
+    /// <summary>
+    /// Destroyer top speed — deliberately crawling.
+    /// </summary>
+    /// <remarks>
+    /// Slow enough that it cannot take the war to the enemy's bases in any reasonable time, which is the whole point:
+    /// it defends the ground its owner still holds and shreds anything that comes to it. A fast one would simply be a
+    /// win condition handed to the losing side.
+    /// </remarks>
+    public float DestroyerMaxSpeed = 110f;
+
+    /// <summary>Destroyer weapon reach. Outranges every other hull, so it opens fire first.</summary>
+    public float DestroyerWeaponRange = 1600f;
+
+    /// <summary>Whether a trailing faction may build destroyers at all.</summary>
+    public bool DestroyersEnabled = true;
+
+    /// <summary>
     /// Material a station must hold to spawn one ship. Spawning is gated on mining.
     /// </summary>
     /// <remarks>
@@ -380,7 +555,50 @@ public sealed class Config
     /// 1.9/s, so the population simply decayed back to where the economy could hold it. The ore SUPPLY has to scale
     /// with the fleet or the cap is decoration.
     /// </remarks>
-    public int ShipCost = 60;
+    /// <summary>Material a MINER costs. Unchanged at 60 — miners are the economy, not the war.</summary>
+    public int MinerCost = 60;
+
+    /// <summary>Material a light fighter costs.</summary>
+    public int LightCost = 120;
+
+    /// <summary>Material a heavy costs. Lumpy on purpose: one bad trade is worth three light fighters.</summary>
+    public int HeavyCost = 400;
+
+    /// <summary>Material an interceptor costs.</summary>
+    public int FastCost = 80;
+
+    // ─── Hull mix (fractions of NON-miner spawns; light takes the remainder) ────────────────────────────────────────
+
+    /// <summary>Share of non-miner spawns that are heavies.</summary>
+    public float HeavyShare = 0.15f;
+
+    /// <summary>Share of non-miner spawns that are interceptors.</summary>
+    public float FastShare = 0.25f;
+
+    // ─── Interceptor ───────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Interceptor top speed. Nearly twice a light fighter's, which is its entire reason to exist.</summary>
+    public float FastMaxSpeed = 800f;
+
+    /// <summary>Interceptor hull.</summary>
+    public int FastHp = 10;
+
+    /// <summary>Interceptor shield. Together with <see cref="FastHp"/> that is 20 effective HP — under two thirds of a light fighter's.</summary>
+    public int FastShield = 10;
+
+    /// <summary>
+    /// How far an interceptor will notice a contested pickup, against <see cref="PickupAttractRadius"/> for everyone else.
+    /// </summary>
+    /// <remarks>
+    /// This is what "priority to take the powerup" means mechanically. The engagement rule is already parameter-free —
+    /// a ship shoots whichever is nearer, the pickup or an enemy — so the only lever that makes a hull a specialist
+    /// racer is how early it hears about the objective. At 60 km an interceptor commits from most of the map while a
+    /// light fighter three times closer is still unaware.
+    /// </remarks>
+    public float FastPickupAttractRadius = 60000f;
+
+    /// <summary>Weapon range for heavies, metres. Everyone else uses <see cref="WeaponRange"/>.</summary>
+    public float HeavyWeaponRange = 1000f;
     public int StartingMaterial = 4000;
 
     /// <summary>
@@ -476,7 +694,13 @@ public sealed class Config
     public float AsteroidAnchorJitter = 0.10f;
 
     /// <summary>Material mined per tick while in range.</summary>
-    public int MineRate = 6;
+    /// <remarks>
+    /// Integer, and consumed as <c>(int)(MineRate * multiplier)</c>, so the rate quantises: 6 -> 7 is +16.7 %, and
+    /// 7.2 would truncate straight back to 7. Buying the last 3 % would mean carrying a fractional remainder per
+    /// miner, which is real per-entity state for a difference no one can see against the trip time that dominates a
+    /// mining cycle.
+    /// </remarks>
+    public int MineRate = 7;
 
     /// <summary>
     /// Distance at which a miner can extract ore. Must be close to <see cref="MineDockRange"/>.
@@ -525,7 +749,7 @@ public sealed class Config
     /// Ore a miner carries per trip. The real throughput knob at this scale: a 100 km map makes the round trip
     /// long, so delivery is limited by TRIPS rather than by how much ore exists or how fast it is extracted.
     /// </summary>
-    public int CargoMax = 250;
+    public int CargoMax = 200;
     /// <summary>Radius within which a miner looks for an asteroid. Must reach across most of the map or miners idle.</summary>
     public float OreSearchRadius = 40000f;
     /// <summary>Fighters with no enemy in sight rally to friendly miners inside this radius instead of the map centre.</summary>
@@ -615,6 +839,16 @@ public sealed class Config
     /// </summary>
     public int PickupMiningDurationTicks = 2700;
 
+    /// <summary>
+    /// Ticks a won PRODUCTION pickup doubles the winning faction's ship output for.
+    /// </summary>
+    /// <remarks>
+    /// The only pickup that acts on the <i>rate</i> a faction converts material into ships rather than on the ships
+    /// themselves. Production is hard-capped by station count and cooldown, so with material piling up unspent this is
+    /// the one boost that can actually move the fleet size — which also makes it the most contested.
+    /// </remarks>
+    public int PickupProductionDurationTicks = 3600;
+
     /// <summary>Speed multiplier applied to every ship while the speed effect is active.</summary>
     /// <remarks>
     /// Bounded by the tunnelling constraint on <see cref="ShotSpeed"/>, not by taste: a boosted ship closing
@@ -630,6 +864,30 @@ public sealed class Config
     /// <summary>Spawn area for pickups, as a fraction of WorldSize from the centre. Wider than the asteroid ring so
     /// they are not always on top of the mining fight, close enough that both factions can contest them.</summary>
     public float PickupSpawnRadiusPct = 0.30f;
+
+    /// <summary>
+    /// Probability, at total collapse, that a pickup spawns in the TRAILING faction's territory rather than at a
+    /// neutral ore anchor. Scales from 0 at <see cref="UnderdogThreshold"/> to this value at score 0. Set 0 to disable.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The powerup contest has the same runaway shape as everything else, but for a reason none of the other catch-up
+    /// levers touch: pickups spawn at neutral ore anchors, and the faction holding more of the map simply has ships
+    /// nearer to more of them. Winning wins powerups, powerups help you win. It is a COVERAGE advantage, so paying the
+    /// loser more (shorter effects for the leader, bonus duration for the trailing side) treats the symptom — the
+    /// leader still gets there first and still collects most of them.
+    /// </para>
+    /// <para>
+    /// Moving where the objective appears cancels the advantage at its source. A pickup in the loser's own space is one
+    /// its remaining ships are already close to, and one the leader has to cross contested ground to contest. It stays
+    /// a fight — nothing is handed over, and the leader may well still take it — but the loser is no longer structurally
+    /// out of position for every objective on the map.
+    /// </para>
+    /// </remarks>
+    public float PickupUnderdogBiasMax = 0.75f;
+
+    /// <summary>Radius around the trailing faction's station within which a biased pickup appears, as a fraction of the world.</summary>
+    public float PickupUnderdogSpawnRadiusPct = 0.10f;
 
     public float PickupRadius = 250f;
 
@@ -666,8 +924,15 @@ public sealed class Config
     /// </remarks>
     public float ShotSpeed = 3000f;
 
-    /// <summary>Ticks before a projectile expires. 20 ticks x 50 m = 1000 m, just past WeaponRange.</summary>
-    public int ShotLifeTicks = 20;
+    /// <summary>
+    /// Ticks before a projectile expires. 26 ticks x 50 m = 1300 m, just past the LONGEST weapon range.
+    /// </summary>
+    /// <remarks>
+    /// Was 20 (= 1000 m) when 800 m was the only range in the game. A heavy fires at 1000 m, so at 20 ticks its shots
+    /// expired at the exact instant they arrived and it could never land a hit at its own maximum — the range increase
+    /// would have been worth nothing, silently.
+    /// </remarks>
+    public int ShotLifeTicks = 26;
 
     /// <summary>
     /// Hit radius in metres. See the tunnelling note on <see cref="ShotSpeed"/> before lowering this — and note it
@@ -744,6 +1009,13 @@ public sealed class Config
     public int WalStagingBufferKB = 1024;
 
     /// <summary>Segments pre-allocated ahead of the write position (engine default 4).</summary>
+    /// <summary>
+    /// Checkpoint cadence in ms (engine default 30000). Exposed because the page cache can only reclaim a page once a
+    /// checkpoint has written it, so this knob sets the ceiling on how much writeback debt the cache accumulates before
+    /// anything drains it — and at this demo's write rate a 30-second interval accrues more than the cache holds.
+    /// </summary>
+    public int CheckpointIntervalMs = 30000;
+
     public int WalPreAllocateSegments = 8;
 
     /// <summary>Auto mode only: select the station nearest the map centre and dump its info panel to the console.</summary>
@@ -766,6 +1038,27 @@ public sealed class Config
 
     /// <summary>Trace DirtyCounter mutations for this memory page and report the increments never released (-1 = off).</summary>
     public int DirtyTracePage = -1;
+
+    /// <summary>
+    /// Append a census line every N ticks to <see cref="CensusFile"/> (0 = off). Exists because the failure being
+    /// studied (#824) kills the process: an end-of-run report tells you nothing when there is no end of run, and a
+    /// single post-mortem exception is one bit of information for half an hour of machine time.
+    /// </summary>
+    public int CensusEveryTicks = 0;
+
+    /// <summary>Where the census goes. CSV, appended, flushed per line so a hard crash keeps everything before it.</summary>
+    public string CensusFile = "census.csv";
+
+    /// <summary>Record the first DirtyCounter increment's call stack for every page, to group leaked pages by origin.</summary>
+    public bool DirtyTraceAll = false;
+
+    /// <summary>At end of run, force this many checkpoints back-to-back and report dirty pages after each.</summary>
+    /// <remarks>
+    /// Decides whether the dirty residue is purely the per-cycle K-1 imbalance of #824 — in which case repeated
+    /// cycles drain it toward zero — or whether a second, frequency-independent component exists underneath, which
+    /// would plateau above zero and mean #824's scope is wrong.
+    /// </remarks>
+    public int QuiesceCheckpoints = 0;
 
     // ─── Window / render ─────────────────────────────────────────────────────────────────────────────────────────
     public int WindowW = 1600;
@@ -1195,6 +1488,15 @@ public sealed class Config
         if (StationDockRange <= 0f)
         {
             errors.Add("StationDockRange must be > 0 (miners would never unload)");
+        }
+        // A scan radius under the longest weapon range means a station can be shot from a place the defence never
+        // looks. The failure is silent and looks like passive AI: the base flags itself under attack, every defender
+        // is recalled, and they all rally onto a point with nothing there.
+        var longestWeapon = MathF.Max(MathF.Max(WeaponRange, HeavyWeaponRange), DestroyerWeaponRange);
+        if (StationThreatScanRadius <= longestWeapon)
+        {
+            errors.Add($"StationThreatScanRadius ({StationThreatScanRadius}) must exceed the longest ship weapon range ({longestWeapon}) "
+                + "or defenders cannot see what is shooting their station");
         }
         // A non-positive budget does not stop the simulation — the deadline is tested after the first tick, so one
         // step always runs — but it does silently disable catch-up entirely. Reject it rather than let it look like

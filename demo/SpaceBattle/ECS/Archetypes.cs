@@ -3,7 +3,19 @@ using Typhon.Schema.Definition;
 namespace SpaceBattle;
 
 /// <summary>A combat ship. Dynamic: it moves every tick, so its clusters migrate and its AABBs churn.</summary>
-[Archetype]
+/// <remarks>
+/// <c>ClusterDurability.Checkpoint</c>, not the default <c>FenceWal</c>. Ships are the overwhelming majority of the
+/// entities here and every one of them writes position, motion and combat state EVERY tick, so at ~20 000 ships and
+/// 60 Hz the fence emits WAL records at 100-150 MB/s — for data whose value is measured in frames. Accepting
+/// checkpoint-interval loss on a ship's position is the correct trade for a simulation: after a crash the fleet
+/// resumes from the last checkpoint, which is indistinguishable from the fleet having been somewhere slightly
+/// different a moment earlier.
+/// <para>
+/// Stations keep <c>FenceWal</c> deliberately. They are few, they change rarely, and their state IS the run — losing
+/// which bases a faction still holds is not a rounding error the way a ship's position is.
+/// </para>
+/// </remarks>
+[Archetype(ClusterDurability = ClusterDurability.Checkpoint)]
 public partial class Ship : Archetype<Ship>
 {
     public static readonly Comp<Pos> Position = Register<Pos>();

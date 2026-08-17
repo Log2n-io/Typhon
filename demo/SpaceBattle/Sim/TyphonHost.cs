@@ -51,7 +51,7 @@ internal sealed class TyphonHost : IDisposable
             .AddDeadlineWatchdog()
             .AddScopedManagedPagedMemoryMappedFile(opt =>
             {
-                opt.DatabaseName = "SpaceBattle";
+                opt.DatabaseName = _cfg.Seed == 1234 ? "SpaceBattle" : $"SpaceBattle_{_cfg.Seed}";
                 opt.DatabaseDirectory = AppContext.BaseDirectory;
                 opt.DatabaseCacheSize = 256 * 1024 * 1024;
             })
@@ -64,6 +64,7 @@ internal sealed class TyphonHost : IDisposable
                 // below, so paying for crash durability buys nothing and the WAL writer is the demo's tightest
                 // throughput constraint: ~25 000 ships x ~92 B of changed components at 60 Hz is on the order of
                 // 100 MB/s of log, and a stall there surfaces as WalBackPressureTimeout in the tick fence.
+                opt.Resources.CheckpointIntervalMs = _cfg.CheckpointIntervalMs;
                 opt.Wal = new WalWriterOptions
                 {
                     UseFUA = _cfg.WalUseFua,
@@ -120,12 +121,6 @@ internal sealed class TyphonHost : IDisposable
     public int RockArchetypeId { get; private set; }
     public int LootArchetypeId { get; private set; }
 
-    /// <summary>Runs the engine's tick fence: migration detection, migration apply, AABB refresh, finalize.</summary>
-    /// <summary>
-    /// Checkpoint progress. A WAL segment can only be retired once a checkpoint has made its contents redundant,
-    /// so these counters are what distinguish "the log is written faster than the disk takes it" from "the log is
-    /// never retired at all" — measured, the demo accrued 31 GB across 116 segments with none recycled.
-    /// </summary>
     /// <summary>
     /// #817 step 1: is the coverage gate stuck on the SAME page every cycle, or a churning set? Identity decides
     /// the fix — a pinned page is a leaked-ACW / stale-counter bug with the gate behaving correctly, whereas a
@@ -182,10 +177,92 @@ internal sealed class TyphonHost : IDisposable
         return sb.ToString();
     }
 
+    /// <summary>Unevictability breakdown: writeback debt, live writers, slot refs, epoch holds, the union, and the cache size.</summary>
+    /// <remarks>
+    /// All six come from ONE pass over the page table, so they describe the same instant. An earlier version of this
+    /// method returned hardcoded zeros for slot-ref and epoch-held; the census column therefore read 0 for the entire run
+    /// and looked like evidence that epoch protection was never involved, while the back-pressure exception was
+    /// simultaneously reporting 17,164 epoch-held pages. A gauge that reports a constant is worse than no gauge.
+    /// </remarks>
+    public (int Dirty, int Acw, int SlotRef, int EpochHeld, int Unevictable, int Total) CountPinnedPages()
+        => DBE.MMF.CountUnevictablePages();
+
+    /// <summary>Worst cache pressure seen DURING a back-pressure wait — the only sample taken while it matters.</summary>
+    public (int Debt, int EpochHeld) PeakBackpressure() => (DBE.MMF.PeakBackpressureDebt, DBE.MMF.PeakBackpressureEpochHeld);
+
+
+    /// <summary>Pages holding a writer registration — must be 0 at quiesce (CP-13).</summary>
+    public int CountAcwPages() => DBE.MMF.CountPagesWithActiveChunkWriters();
+
+    /// <summary>
+    /// Everything worth knowing about the engine's page cache and epoch state, for a crash dump.
+    /// </summary>
+    /// <remarks>
+    /// Written to be read AFTER the fact by someone who was not watching. The back-pressure exception carries two
+    /// numbers and no context, and the five-second stall that precedes it leaves nothing behind at all — by the time a
+    /// human looks, the transaction that pinned the cache has unwound and every gauge reads clean.
+    /// </remarks>
+    public string DescribeEngineState()
+    {
+        var sb = new System.Text.StringBuilder();
+        try
+        {
+            var (debt, acw, slotRef, epochHeld, unevictable, total) = DBE.MMF.CountUnevictablePages();
+            sb.AppendLine($"  page cache : {total} resident of {DBE.MMF.PageCacheSlotCountForDiagnostics} slots");
+            sb.AppendLine($"  unevictable: {unevictable}  (writeback debt {debt}, activeWriters {acw}, slotRef {slotRef}, epochHeld {epochHeld})");
+            sb.AppendLine($"  marks held : {DBE.MMF.CountPagesWithDirtyMarks()} pages (must be 0 at quiesce — PS-05)");
+            sb.AppendLine($"  worst seen under back-pressure: debt {DBE.MMF.PeakBackpressureDebt}, epochHeld {DBE.MMF.PeakBackpressureEpochHeld}");
+            var cm = DBE.CheckpointManager;
+            if (cm != null)
+            {
+                sb.AppendLine($"  checkpoint : {cm.TotalCheckpoints} cycles ({cm.TotalPressureCheckpoints} from cache pressure), "
+                            + $"{cm.TotalPagesWritten} pages written, {cm.TotalSegmentsRecycled} WAL segments recycled");
+                sb.AppendLine($"  gate       : {cm.ConsecutiveGatedCycles} consecutive gated cycles, health {cm.Health}");
+            }
+        }
+        catch (Exception ex)
+        {
+            sb.AppendLine($"  (state capture failed: {ex.GetType().Name}: {ex.Message})");
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>Outstanding mutator marks — must be 0 at quiesce (PS-05).</summary>
+    public int CountMarkPages() => DBE.MMF.CountPagesWithDirtyMarks();
+
+    /// <summary>Total bytes and file count currently held by the WAL — the other unbounded resource.</summary>
+    public (long Bytes, int Files) WalFootprint()
+    {
+        try
+        {
+            var dir = System.IO.Path.Combine(AppContext.BaseDirectory, "SpaceBattle.typhon", "wal");
+            if (!System.IO.Directory.Exists(dir))
+            {
+                return (0, 0);
+            }
+            var files = System.IO.Directory.GetFiles(dir, "*.wal");
+            long total = 0;
+            foreach (var f in files)
+            {
+                total += new System.IO.FileInfo(f).Length;
+            }
+            return (total, files.Length);
+        }
+        catch (System.IO.IOException)
+        {
+            return (-1, -1);   // a segment being recycled underneath us is not worth failing a census line for
+        }
+    }
+
     /// <summary>Dirty-page census (#817 follow-up: PageCacheBackpressureTimeout).</summary>
     public (int Dirty, int Total, int FirstDirtyPage) CheckpointStats0() =>
         DBE.CheckpointManager?.CountDirtyPages() ?? (0, 0, -1);
 
+    /// <summary>
+    /// Checkpoint progress. A WAL segment can only be retired once a checkpoint has made its contents redundant,
+    /// so these counters are what distinguish "the log is written faster than the disk takes it" from "the log is
+    /// never retired at all" — measured, the demo accrued 31 GB across 116 segments with none recycled.
+    /// </summary>
     public (long Checkpoints, long SegmentsRecycled, long PagesWritten, long GatedCycles, bool Running) CheckpointStats()
     {
         var cm = DBE.CheckpointManager;

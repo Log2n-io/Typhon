@@ -109,12 +109,12 @@ internal sealed class Renderer
     /// <summary>Clusters whose AABB is too large to fill — i.e. spatially degenerate ones. A direct symptom count.</summary>
     public int OversizedClusters { get; private set; }
 
-    private static readonly Color FactionA = new(90, 170, 255);
+    internal static readonly Color FactionA = new(90, 170, 255);
     // Orange, not the salmon-red it used to be. The damage flash is red (255,60,50), and at (255,120,90) faction B
     // sat close enough to it in hue that a flashing BLUE station was indistinguishable from a healthy faction-B one
     // — the single most confusing thing on the map, because it inverted who was winning. Hue now carries team and
     // only team; red is reserved for "taking hull damage" and belongs to nobody.
-    private static readonly Color FactionB = new(255, 150, 30);
+    internal static readonly Color FactionB = new(255, 150, 30);
     private static readonly Color CellLine = new(60, 70, 90);
     private static readonly Color AabbShip = new(80, 230, 160, 200);
     private static readonly Color AabbShot = new(240, 220, 90, 150);
@@ -718,7 +718,10 @@ internal sealed class Renderer
                     Ring(_shields, x, y, r * _cfg.ShieldRingScale, ShieldColor, 12);
                 }
 
-                var size = c.Kind == Simulation.KindHeavy ? r * 1.8f : c.Kind == Simulation.KindMiner ? r * 1.4f : r;
+                var size = c.Kind == Simulation.KindDestroyer ? r * 3.2f
+                    : c.Kind == Simulation.KindHeavy ? r * 1.8f
+                    : c.Kind == Simulation.KindMiner ? r * 1.4f
+                    : r;
                 size = MarkerHalfSize(size);
                 if (c.Kind == Simulation.KindMiner)
                 {
@@ -741,6 +744,18 @@ internal sealed class Renderer
                         Quad(_points, x - os, y - os, x + os, y + os, CargoColor);
                         CargoCuesDrawn++;
                     }
+                }
+                else if (c.Kind == Simulation.KindDestroyer)
+                {
+                    // Broad and blunt — the opposite silhouette to the interceptor's needle, and the largest thing on
+                    // the map after a station. A capital ship the eye cannot pick out immediately defeats the point of
+                    // having built one.
+                    Tri(_ships, x, y, vx, vy, size, col, lengthScale: 0.9f, widthScale: 1.5f);
+                }
+                else if (c.Kind == Simulation.KindFast)
+                {
+                    // Long and thin: 2.2x the reach along its heading, a third of the width across it.
+                    Tri(_ships, x, y, vx, vy, size, col, lengthScale: 2.2f, widthScale: 0.33f);
                 }
                 else
                 {
@@ -841,7 +856,10 @@ internal sealed class Renderer
         Simulation.PickupPower => new Color(255, 70, 50),
         Simulation.PickupShield => new Color(90, 225, 255),
         Simulation.PickupSpeed => new Color(140, 255, 120),
-        _ => new Color(255, 190, 60),
+        Simulation.PickupMining => new Color(255, 190, 60),
+        // PRODUCTION — magenta, deliberately the one hue no faction, no damage flash and no other pickup uses, because
+        // it is the only boost that changes the shape of the run rather than a stat.
+        _ => new Color(235, 90, 235),
     };
 
     /// <summary>
@@ -1235,12 +1253,27 @@ internal sealed class Renderer
     }
 
     private static void Tri(VertexArray va, float x, float y, float dx, float dy, float s, Color c)
+        => Tri(va, x, y, dx, dy, s, c, lengthScale: 1f, widthScale: 1f);
+
+    /// <summary>
+    /// The ship dart, with independent scaling along and across its heading.
+    /// </summary>
+    /// <remarks>
+    /// The two scales exist for the interceptor, which is drawn as a long thin needle. Silhouette is the only channel
+    /// left to tell hulls apart: colour already carries faction and size already carries the heavy, so a third hull
+    /// needed a SHAPE or it would read as a light fighter that happens to be moving quickly — and "moving quickly" is
+    /// precisely the thing you are trying to see.
+    /// </remarks>
+    private static void Tri(VertexArray va, float x, float y, float dx, float dy, float s, Color c, float lengthScale, float widthScale)
     {
         var px = -dy;
         var py = dx;
-        va.Append(new Vertex(new Vector2f(x + dx * s * 1.8f, y + dy * s * 1.8f), c));
-        va.Append(new Vertex(new Vector2f(x - dx * s + px * s, y - dy * s + py * s), c));
-        va.Append(new Vertex(new Vector2f(x - dx * s - px * s, y - dy * s - py * s), c));
+        var nose = s * 1.8f * lengthScale;
+        var tail = s * lengthScale;
+        var half = s * widthScale;
+        va.Append(new Vertex(new Vector2f(x + dx * nose, y + dy * nose), c));
+        va.Append(new Vertex(new Vector2f(x - dx * tail + px * half, y - dy * tail + py * half), c));
+        va.Append(new Vertex(new Vector2f(x - dx * tail - px * half, y - dy * tail - py * half), c));
     }
 }
 

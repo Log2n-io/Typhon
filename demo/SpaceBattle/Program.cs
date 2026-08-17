@@ -40,6 +40,7 @@ public static class Program
         var sw = Stopwatch.StartNew();
         using var host = new TyphonHost(cfg);
         host.Boot();
+        InstallCrashHandler(host, cfg);
         var bootMs = sw.Elapsed.TotalMilliseconds;
 
         var sim = new Simulation(cfg, host);
@@ -63,6 +64,53 @@ public static class Program
             app.Run();
         }
         return 0;
+    }
+
+    /// <summary>
+    /// Dumps engine state to console and a file when the process dies of an unhandled exception.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The failures this demo exists to find kill the process from a background thread with two numbers and a stack —
+    /// and by the time anyone reads the terminal, the transaction that filled the page cache has unwound and every
+    /// gauge reads clean. Capturing at the moment of death is the difference between "back-pressure timeout, 18 652
+    /// epoch-protected" and knowing WHICH scope had been holding an epoch, for how long, and what the checkpoint had
+    /// managed in the meantime.
+    /// </para>
+    /// <para>
+    /// Writes to a file as well as the console because the interesting runs are the long unattended ones, where the
+    /// terminal has usually scrolled or been closed.
+    /// </para>
+    /// </remarks>
+    private static void InstallCrashHandler(TyphonHost host, Config cfg)
+    {
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            try
+            {
+                var ex = e.ExceptionObject as Exception;
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine("════════════════════════════════════════════════════════════════════");
+                sb.AppendLine($"CRASH  {DateTime.Now:yyyy-MM-dd HH:mm:ss}  seed {cfg.Seed}  tick {host.Tick}");
+                sb.AppendLine("════════════════════════════════════════════════════════════════════");
+                sb.AppendLine(ex?.ToString() ?? e.ExceptionObject?.ToString() ?? "(no exception object)");
+                sb.AppendLine();
+                sb.AppendLine("ENGINE STATE AT CRASH");
+                sb.Append(host.DescribeEngineState());
+
+                var text = sb.ToString();
+                Console.Error.WriteLine(text);
+
+                var path = System.IO.Path.Combine(AppContext.BaseDirectory, $"crash-{cfg.Seed}-{DateTime.Now:HHmmss}.txt");
+                System.IO.File.WriteAllText(path, text);
+                Console.Error.WriteLine($"crash report -> {path}");
+            }
+            catch (Exception inner)
+            {
+                // A handler that throws replaces the diagnosis with its own stack, which is strictly worse than none.
+                Console.Error.WriteLine($"[crash-handler] failed: {inner}");
+            }
+        };
     }
 
     /// <summary>

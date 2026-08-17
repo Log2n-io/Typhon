@@ -48,19 +48,91 @@ internal sealed class Simulation
     public const byte KindFighter = 0;
     public const byte KindHeavy = 1;
     public const byte KindMiner = 2;
+    public const byte KindFast = 3;
+    public const byte KindDestroyer = 4;
+
+    // Ship task, packed into SteerFlags bits 3-5. A byte of its own would take Combat from 32 to 33 and the CLR
+    // would pad it to 36 — and that struct's field order is deliberate precisely because a layout mismatch reads
+    // components back SHIFTED (see the note on Combat). Five spare bits were already there.
+    public const byte TaskIdle = 0;
+    public const byte TaskDefending = 1;
+    public const byte TaskEngaging = 2;
+    public const byte TaskRacingPickup = 3;
+    public const byte TaskEscorting = 4;
+    public const byte TaskSeekingOre = 5;
+    public const byte TaskMining = 6;
+    public const byte TaskHauling = 7;
+
+    private const byte TaskMask = 0b0011_1000;
+    private const int TaskShift = 3;
+
+    /// <summary>Reads the task a ship last committed to.</summary>
+    public static byte TaskOf(byte steerFlags) => (byte)((steerFlags & TaskMask) >> TaskShift);
+
+    private static void SetTask(ref Combat c, byte task)
+        => c.SteerFlags = (byte)((c.SteerFlags & ~TaskMask) | ((task << TaskShift) & TaskMask));
+
+    /// <summary>What a ship is currently doing, for the selection panel.</summary>
+    public static string TaskName(byte task) => task switch
+    {
+        TaskDefending => "DEFENDING a station under attack",
+        TaskEngaging => "ENGAGING the nearest enemy",
+        TaskRacingPickup => "RACING for the contested pickup",
+        TaskEscorting => "ESCORTING friendly miners",
+        TaskSeekingOre => "SEEKING ore",
+        TaskMining => "MINING an asteroid",
+        TaskHauling => "HAULING cargo home",
+        _ => "idle / patrolling",
+    };
+
+    /// <summary>Weapon reach of a hull, metres. Only the heavy differs.</summary>
+    public float WeaponRangeOf(byte kind) => kind switch
+    {
+        KindHeavy => _cfg.HeavyWeaponRange,
+        KindDestroyer => _cfg.DestroyerWeaponRange,
+        _ => _cfg.WeaponRange,
+    };
+
+    /// <summary>Material a hull costs to build.</summary>
+    public int CostOf(byte kind) => kind switch
+    {
+        KindMiner => _cfg.MinerCost,
+        KindHeavy => _cfg.HeavyCost,
+        KindFast => _cfg.FastCost,
+        KindDestroyer => _cfg.DestroyerCost,
+        _ => _cfg.LightCost,
+    };
 
     public const byte PickupPower = 0;
     public const byte PickupShield = 1;
     public const byte PickupSpeed = 2;
     public const byte PickupMining = 3;
-    public const int PickupKindCount = 4;
+    public const byte PickupProduction = 4;
+    public const int PickupKindCount = 5;
 
     public static string PickupName(byte kind) => kind switch
     {
         PickupPower => "POWER",
         PickupShield => "SHIELD",
         PickupSpeed => "SPEED",
-        _ => "MINING",
+        PickupMining => "MINING",
+        _ => "PRODUCTION",
+    };
+
+    /// <summary>
+    /// Single-letter tag for a faction, by COLOUR: B blue, O orange.
+    /// </summary>
+    /// <remarks>
+    /// Not A/B. Faction 1 renders orange, so calling it "B" put the letter B on the orange side while blue was "A" —
+    /// every reading of the HUD had to translate, and the one glance you want from a score line is which colour is
+    /// winning.
+    /// </remarks>
+    public static char FactionTag(int faction) => (faction & 3) switch
+    {
+        0 => 'B',
+        1 => 'O',
+        2 => 'G',
+        _ => 'P',
     };
 
     public int[] ShipsAlive { get; } = new int[4];
@@ -81,6 +153,9 @@ internal sealed class Simulation
 
     /// <summary>Ticks remaining of the faction-wide mining effect.</summary>
     public int[] MiningTicks { get; } = new int[4];
+
+    /// <summary>Ticks remaining of the faction-wide production effect — stations build at double rate.</summary>
+    public int[] ProductionTicks { get; } = new int[4];
 
     /// <summary>Hits landed on the live pickup, per faction — mirrored out of the component for the HUD.</summary>
     public int[] PickupProgress { get; } = new int[4];
@@ -237,6 +312,68 @@ internal sealed class Simulation
     /// <summary>Ticks each station still counts as "under attack", for pulling defenders.</summary>
     private int[] _stationThreat = [];
 
+    /// <summary>
+    /// Where a defender should actually go: the position of the enemy nearest to each threatened station, refreshed
+    /// once per tick by <see cref="ComputeStationRallyPoints"/>. <see cref="_stationRallyHasEnemy"/> says whether the
+    /// entry is a real enemy or a fallback to the station's own centre.
+    /// </summary>
+    /// <remarks>
+    /// Defenders used to be sent to the station's CENTRE, which is wrong in two compounding ways and produced ships
+    /// that fled the very base they were defending. First, a ship that has arrived is already there, so its steering
+    /// vector is the zero vector — and separation, which is added afterwards, then becomes the ONLY force acting on
+    /// it, so the garrison steadily pushes itself outward off the station. Second, the target was published with
+    /// <c>HasTarget = 0</c> ("do not shoot our own station"), which makes <see cref="ApplyStandoff"/> return early,
+    /// so nothing ever countered that drift and the ships never fired either. Aiming at the ATTACKER instead fixes
+    /// both at once: the vector stays meaningful at point-blank range, stand-off re-engages, and the defenders shoot.
+    /// <para>
+    /// Computed once per tick per threatened station rather than per defending ship. A fleet-wide defence call can be
+    /// thousands of ships converging on one base; a per-ship query for "who is hitting my station" would repeat the
+    /// same answer thousands of times.
+    /// </para>
+    /// </remarks>
+    private Vector2[] _stationRally = [];
+    private bool[] _stationRallyHasEnemy = [];
+
+    /// <summary>Smoothed incoming damage per tick per station, the input to <see cref="StationSurvivalTicks"/>.</summary>
+    private float[] _stationDamageEma = [];
+    private const float StationDamageEmaAlpha = 0.02f;
+
+    /// <summary>
+    /// Defence-call outcomes over the run: a defender sent at a besieger it can actually shoot, versus one rallying
+    /// on a base whose attacker is not visible.
+    /// </summary>
+    /// <remarks>
+    /// Counted per re-acquisition, not per ship per tick, so the absolute numbers scale with
+    /// <see cref="Config.TargetReacquireTicks"/> — the RATIO is the number to read. A run where BLIND dominates while
+    /// stations are dying means the defence is being summoned to fight nothing, which looks on screen exactly like a
+    /// fleet that ignores its own sieges.
+    /// </remarks>
+    public long DefendersOnTarget { get; private set; }
+    public long DefendersBlind { get; private set; }
+    private double _defendRangeSum;
+
+    /// <summary>
+    /// Defence calls issued to a ship already AT the base it was recalled to, within a fixed 2 km.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately a constant and not a multiple of <see cref="Config.StationGarrisonRadius"/>: this figure exists
+    /// to measure what that knob does, and a threshold that moved with it would measure nothing. Read it against
+    /// <see cref="DefendersBlind"/> — a garrison that holds keeps re-issuing its defence call from close range, so
+    /// the share rises; one that drifts off reports the call once on the way in and then never again from nearby.
+    /// </remarks>
+    public long DefendersAtBase { get; private set; }
+    private const float AtBaseMetres = 2000f;
+
+    /// <summary>Mean distance from a defender to the point it was ordered to, over the run.</summary>
+    public double MeanDefendRange
+    {
+        get
+        {
+            var n = DefendersOnTarget + DefendersBlind;
+            return n > 0 ? _defendRangeSum / n : 0d;
+        }
+    }
+
     /// <summary>Mirror of each station's disabled flag, so the linear scans never open a cluster.</summary>
     private bool[] _stationDown = [];
 
@@ -255,6 +392,32 @@ internal sealed class Simulation
 
     /// <summary>Surviving stations per faction. Zero means that faction can no longer spawn or bank ore.</summary>
     public int[] StationsAlive { get; } = new int[4];
+
+    /// <summary>
+    /// A single number for "how is this faction doing", so two sides can be compared at a glance.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Weighted so the terms are commensurate at full scale rather than by any deep theory: stations are few and their
+    /// loss is permanent, so each is worth a slice of the fleet; fighters count for more than miners because they are
+    /// what actually contests the map; material is a war chest that has not been spent yet, so it counts, but weakly.
+    /// </para>
+    /// <para>
+    /// It is deliberately a STOCK, not a running total of kills. A score that only accumulates can never go down, which
+    /// makes the trend meaningless — the point of pairing this with a delta is to see a faction losing ground while it
+    /// is happening.
+    /// </para>
+    /// </remarks>
+    public long Score(int faction)
+    {
+        var f = faction & 3;
+        var miners = MinersAlive[f];
+        var fighters = Math.Max(0, ShipsAlive[f] - miners);
+        return (StationsAlive[f] * 5000L)
+             + (fighters * 10L)
+             + (miners * 4L)
+             + (Material[f] / 50L);
+    }
 
     /// <summary>Live shield/HP mirrors for the HUD. Indexed as <see cref="_stationPos"/>.</summary>
     public int[] StationShield => _stationShield;
@@ -310,6 +473,9 @@ internal sealed class Simulation
         _stationThreat = new int[_stationPos.Count];
         _stationDown = new bool[_stationPos.Count];
         _stationDead = new bool[_stationPos.Count];
+        _stationRally = new Vector2[_stationPos.Count];
+        _stationRallyHasEnemy = new bool[_stationPos.Count];
+        _stationDamageEma = new float[_stationPos.Count];
         Array.Clear(StationsAlive);
         foreach (var f in _stationFaction)
         {
@@ -689,23 +855,74 @@ internal sealed class Simulation
             {
                 break;
             }
-            // Ships cost material. With no miners bringing ore home, a faction simply stops reinforcing.
-            if (!free)
-            {
-                if (Material[faction] < _cfg.ShipCost)
-                {
-                    break;
-                }
-                Material[faction] -= _cfg.ShipCost;
-            }
             var origin = PickStation(faction);
             var x = Clamp(origin.X + (float)(_rng.NextDouble() - 0.5) * spread, 0, _cfg.WorldSize);
             var y = Clamp(origin.Y + (float)(_rng.NextDouble() - 0.5) * spread, 0, _cfg.WorldSize);
 
             var pos = Pos.At(x, y);
-            var isMiner = _forceMiner || _rng.NextDouble() < _cfg.MinerRatio;
-            var heavy = !isMiner && _rng.NextDouble() < 0.15;
-            var kind = isMiner ? KindMiner : heavy ? KindHeavy : KindFighter;
+
+            // The spawn ratio is a flow; this is the stock. Once miners are at their share of the live fleet every
+            // further spawn is a fighter, whatever the dice say — without it the mix drifts to ~96 % miners, because
+            // miners outlive fighters by a wide margin and the population cap turns that into a ratchet.
+            // The endless-run floor (_forceMiner) still wins: a faction with no miners earns no material and can never
+            // recover, and that is a worse failure than being briefly over-share.
+            var minerCapped = !_forceMiner && MinersAlive[faction] >= (ShipsAlive[faction] + 1) * _cfg.MinerMaxShare;
+            var isMiner = _forceMiner || (!minerCapped && _rng.NextDouble() < _cfg.MinerRatio);
+            // Hull mix, rolled once over the non-miner share so the three fractions are read off one number rather
+            // than compounding through nested rolls (a second independent roll for "fast" would make the shares depend
+            // on evaluation order, which is exactly the kind of balance bug nobody finds by reading).
+            byte kind;
+            if (isMiner)
+            {
+                kind = KindMiner;
+            }
+            else
+            {
+                var roll = _rng.NextDouble();
+                kind = roll < _cfg.HeavyShare ? KindHeavy
+                    : roll < _cfg.HeavyShare + _cfg.FastShare ? KindFast
+                    : KindFighter;
+            }
+
+            // A trailing faction that has managed to bank 500 material builds a destroyer instead of whatever it
+            // rolled. Checked before the affordability logic below so the destroyer competes on its own terms: it is
+            // never downgraded into, and never paid for out of, the free-hull relief.
+            if (_cfg.DestroyersEnabled && !isMiner && !free
+                && UnderdogBonus[faction & 3] > 1f
+                && Material[faction] >= _cfg.DestroyerCost)
+            {
+                kind = KindDestroyer;
+            }
+
+            // Ships cost material, and the price is now per hull — so the check has to come AFTER the roll. It used to
+            // sit before it, back when every hull cost the same; leaving it there would charge heavy prices for light
+            // ships. A faction that cannot afford the hull it rolled builds the most expensive one it CAN afford rather
+            // than stalling the station: an idle station is a production ceiling nobody chose, and production is
+            // already the binding constraint on fleet size.
+            if (!free && !UnderdogFreeShips[faction & 3])
+            {
+                if (Material[faction] < CostOf(kind))
+                {
+                    if (kind == KindHeavy && Material[faction] >= _cfg.LightCost)
+                    {
+                        kind = KindFighter;
+                    }
+                    else if (kind != KindMiner && Material[faction] >= _cfg.FastCost)
+                    {
+                        kind = KindFast;
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+
+                Material[faction] -= CostOf(kind);
+            }
+
+            var heavy = kind == KindHeavy;
+            var fast = kind == KindFast;
+            var destroyer = kind == KindDestroyer;
             var speedScale = isMiner ? 0.7f : heavy ? 0.6f : 1f;
             var mot = new Motion
             {
@@ -713,13 +930,13 @@ internal sealed class Simulation
                 // simulation hardcoded in world units, so it was also the one thing that did not follow the rescale.
                 VX = (float)(_rng.NextDouble() - 0.5) * _cfg.ShipMaxSpeed * 0.06f,
                 VY = (float)(_rng.NextDouble() - 0.5) * _cfg.ShipMaxSpeed * 0.06f,
-                MaxSpeed = _cfg.ShipMaxSpeed * speedScale,
+                MaxSpeed = destroyer ? _cfg.DestroyerMaxSpeed : fast ? _cfg.FastMaxSpeed : _cfg.ShipMaxSpeed * speedScale,
             };
             var com = new Combat
             {
                 Faction = faction,
-                Hp = (short)(_cfg.ShipHp * (heavy ? 3 : isMiner ? 2 : 1)),
-                Shield = (short)(_cfg.ShipShieldMax * (heavy ? 3 : isMiner ? 2 : 1)),
+                Hp = (short)(destroyer ? _cfg.DestroyerHp : fast ? _cfg.FastHp : _cfg.ShipHp * (heavy ? 3 : isMiner ? 2 : 1)),
+                Shield = (short)(destroyer ? _cfg.DestroyerShield : fast ? _cfg.FastShield : _cfg.ShipShieldMax * (heavy ? 3 : isMiner ? 2 : 1)),
                 CalmTicks = short.MaxValue,
                 // Orbit direction, fixed for life. Half the fleet circles each way, so opposing groups interleave
                 // rather than all rotating together as one rigid body.
@@ -727,7 +944,7 @@ internal sealed class Simulation
                 Cooldown = (short)_rng.Next(_cfg.WeaponCooldownTicks),
                 ReacquireIn = (short)_rng.Next(_cfg.TargetReacquireTicks),
                 Kind = kind,
-                Damage = (short)(isMiner ? 0 : _cfg.ShipDamage * (heavy ? 2 : 1)),
+                Damage = (short)(destroyer ? _cfg.DestroyerDamage : isMiner ? 0 : _cfg.ShipDamage * (heavy ? 2 : 1)),
             };
             var min = new Miner
             {
@@ -894,13 +1111,92 @@ internal sealed class Simulation
         return false;
     }
 
-    /// <summary>Nearest own station that is currently under attack and within defending range.</summary>
-    private bool TryFindThreatenedStation(float px, float py, int faction, out float sx, out float sy)
+    /// <summary>
+    /// For every station currently under attack, finds the enemy ship nearest to it — the thing a defender should
+    /// actually be flying at. One spatial query per threatened station, once per tick.
+    /// </summary>
+    /// <remarks>
+    /// Runs between <c>StationTick</c> (which raises the threat flags from the damage banked last tick) and
+    /// <c>ShipTick</c> (which steers the defenders), so defenders act on this tick's picture rather than last tick's.
+    /// <para>
+    /// The scan radius is <see cref="Config.StationThreatScanRadius"/>, which must exceed the longest ship weapon
+    /// range or an attacker can hurt the station from outside the radius that looks for it — the defenders would then
+    /// be recalled to a base whose attacker they are structurally unable to see, which is the same do-nothing state
+    /// this method exists to remove. <c>Validate()</c> enforces the inequality.
+    /// </para>
+    /// <para>
+    /// Stations with no visible attacker keep their own centre as the rally point and are flagged
+    /// <c>hasEnemy = false</c>. That still happens legitimately: threat lingers for
+    /// <see cref="Config.StationThreatTicks"/> after the last hit, so a raid that has been wiped out leaves a base
+    /// "under attack" with nothing left to shoot. Falling back to the centre keeps the garrison home for the rest of
+    /// the window instead of scattering.
+    /// </para>
+    /// </remarks>
+    private void ComputeStationRallyPoints(ref SimStats stats)
+    {
+        var scan = _cfg.StationThreatScanRadius;
+        InvalidateFactionCache();
+        using var tr = _host.DBE.CreateQuickTransaction();
+        using var acc = tr.For<Ship>();
+
+        for (var i = 0; i < _stationPos.Count; i++)
+        {
+            _stationRally[i] = _stationPos[i];
+            _stationRallyHasEnemy[i] = false;
+            if (_stationThreat[i] <= 0 || _stationDead[i])
+            {
+                continue;
+            }
+
+            var sp = _stationPos[i];
+            var owner = _stationFaction[i];
+            var sphere = new BSphere2F { CenterX = sp.X, CenterY = sp.Y, Radius = scan };
+            var q = _host.DBE.ClusterSpatialQuery<Ship>().Radius(in sphere);
+            stats.AcquireQueries++;
+
+            var best = float.MaxValue;
+            var examined = 0;
+            while (q.MoveNext())
+            {
+                if (++examined > _cfg.AcquireScanCap)
+                {
+                    break;
+                }
+                var hit = q.Current;
+                if (hit.DistanceSq >= best)
+                {
+                    continue;
+                }
+                if (!TryReadShip(acc, hit.ClusterChunkId, hit.SlotIndex, out var hf, out _) || hf == owner)
+                {
+                    continue;
+                }
+                best = hit.DistanceSq;
+                _stationRally[i] = new Vector2(hit.MinX, hit.MinY);
+                _stationRallyHasEnemy[i] = true;
+            }
+            q.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Nearest own station that is currently under attack and within defending range, resolved to the point a
+    /// defender should fly at: the attacker nearest that station, or the station itself when none is visible.
+    /// </summary>
+    /// <remarks>
+    /// The station is selected by ITS distance to the ship — the nearest siege is the one to answer — but the point
+    /// returned is the attacker's. Selecting on the station and aiming at the attacker are two different questions
+    /// and conflating them is what produced defenders that flew to a base and then drifted off it.
+    /// </remarks>
+    private bool TryFindThreatenedStation(float px, float py, int faction, float speed, out float sx, out float sy, out bool hasEnemy)
     {
         sx = 0;
         sy = 0;
+        hasEnemy = false;
         var best = _cfg.StationDefendRadius * _cfg.StationDefendRadius;
         var found = false;
+        var rejected = false;
+        var metresPerTick = MathF.Max(1f, speed) / MathF.Max(1, _cfg.TickRate);
         for (var i = 0; i < _stationPos.Count; i++)
         {
             if (_stationFaction[i] != faction || _stationThreat[i] <= 0 || _stationDead[i])
@@ -910,16 +1206,72 @@ internal sealed class Simulation
             var dx = _stationPos[i].X - px;
             var dy = _stationPos[i].Y - py;
             var d2 = dx * dx + dy * dy;
-            if (d2 < best)
+            if (d2 >= best)
             {
-                best = d2;
-                sx = _stationPos[i].X;
-                sy = _stationPos[i].Y;
-                found = true;
+                continue;
             }
+
+            // ── reachability ──────────────────────────────────────────────────────────────────────────────────────
+            //
+            // Answer only a siege you can actually get to. A fixed radius cannot express this: at 200 km it is wider
+            // than the map, so EVERY ship answers EVERY siege, and measurement put the average defender 43 km from
+            // its objective — a 6 450-tick journey against a 240-tick threat flag. Those ships never arrived. They
+            // abandoned whatever they were doing, flew a fraction of the way, lost the order when the flag cleared
+            // and repeated, which on screen is a fleet permanently heading away from the fight it is standing in.
+            //
+            // Two bounds, and both are needed. The survival bound stops ships flying to a base that will be gone
+            // before they land; without it a fleet commits to a corpse. The travel cap stops the opposite failure,
+            // the one that dominates here: a lightly-harassed station projects a survival time of thousands of
+            // ticks, which the survival bound alone would happily deem reachable from anywhere, restoring exactly
+            // the pathology this replaces. Beyond the cap a ship is a spectator in transit, not a defender.
+            var travelTicks = MathF.Sqrt(d2) / metresPerTick;
+            if (travelTicks > _cfg.StationDefendMaxTravelTicks || travelTicks > StationSurvivalTicks(i))
+            {
+                rejected = true;
+                continue;
+            }
+
+            best = d2;
+            sx = _stationRally[i].X;
+            sy = _stationRally[i].Y;
+            hasEnemy = _stationRallyHasEnemy[i];
+            found = true;
+        }
+        if (rejected && !found)
+        {
+            DefenceCallsUnreachable++;
         }
         return found;
     }
+
+    /// <summary>
+    /// How long a station will last at the rate it is currently being hit, in ticks.
+    /// </summary>
+    /// <remarks>
+    /// Shield and hull are summed because a defender cares when the base STOPS WORKING, and that happens at zero
+    /// hull with the shield already spent — the split matters to the damage pass, not to the traveller deciding
+    /// whether the trip is worth taking. A station taking no measurable damage returns
+    /// <see cref="float.MaxValue"/>: it is not dying, so nothing about survival time should restrict who answers,
+    /// and the travel cap is left as the only bound. That case is common — threat lingers
+    /// <see cref="Config.StationThreatTicks"/> past the last hit, so a base whose attackers are already dead is
+    /// still flagged.
+    /// </remarks>
+    private float StationSurvivalTicks(int i)
+    {
+        var rate = _stationDamageEma[i];
+        if (rate <= 1e-3f)
+        {
+            return float.MaxValue;
+        }
+        return (_stationShield[i] + _stationHp[i]) / rate;
+    }
+
+    /// <summary>Defence calls where a siege was flagged but every candidate was out of reach.</summary>
+    /// <remarks>
+    /// Not a failure — it is the mechanism working. A base nobody can reach in time is lost, and saying so lets the
+    /// fleet keep fighting the battle in front of it instead of walking off the map toward one it cannot influence.
+    /// </remarks>
+    public long DefenceCallsUnreachable { get; private set; }
 
     /// <summary>Shield/HP percentages per station, for the report.</summary>
     public string DescribeStationHealth()
@@ -933,12 +1285,12 @@ internal sealed class Simulation
             }
             if (_stationDead[i])
             {
-                sb.Append((char)('A' + _stationFaction[i])).Append("=DESTROYED");
+                sb.Append(FactionTag(_stationFaction[i])).Append("=DESTROYED");
                 continue;
             }
             var sh = _cfg.StationShieldMax > 0 ? 100 * _stationShield[i] / _cfg.StationShieldMax : 0;
             var hp = _cfg.StationHpMax > 0 ? 100 * _stationHp[i] / _cfg.StationHpMax : 0;
-            sb.Append((char)('A' + _stationFaction[i]))
+            sb.Append(FactionTag(_stationFaction[i]))
               .Append(_stationDown[i] ? "!" : ":")
               .Append("s").Append(sh).Append("/h").Append(hp);
         }
@@ -972,7 +1324,7 @@ internal sealed class Simulation
             {
                 sb.Append("  ");
             }
-            sb.Append((char)('A' + _stationFaction[i]))
+            sb.Append(FactionTag(_stationFaction[i]))
               .Append('(').Append((int)(_stationPos[i].X / 1000f)).Append(',')
               .Append((int)(_stationPos[i].Y / 1000f)).Append(')');
         }
@@ -1067,8 +1419,82 @@ internal sealed class Simulation
 
     // ─── Tick ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Per-faction catch-up multiplier on mining income and station output. 1.0 = no help.
+    /// </summary>
+    /// <remarks>
+    /// Recomputed once per tick and read from the hot paths, rather than each site recomputing a score comparison.
+    /// </remarks>
+    public float[] UnderdogBonus { get; } = [1f, 1f, 1f, 1f];
+
+    /// <summary>
+    /// Per-faction multiplier on each surviving station's OUTPUT, offsetting a station deficit.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="UnderdogBonus"/> because it compensates a different thing: that bonus is scored on how
+    /// far behind a faction is overall, this one on how much of its industry it has actually lost. A faction can be
+    /// behind on score with all three bases intact (no help needed here) or level on score having lost two (help needed
+    /// badly), and one number cannot express both.
+    /// </remarks>
+    public float[] UnderdogStationBonus { get; } = [1f, 1f, 1f, 1f];
+
+    /// <summary>Factions whose collapse is deep enough that hulls are free until they climb back out.</summary>
+    public bool[] UnderdogFreeShips { get; } = new bool[4];
+
+    /// <summary>Recomputes <see cref="UnderdogBonus"/> from the current score spread.</summary>
+    private void UpdateUnderdogBonus()
+    {
+        if (!_cfg.UnderdogEnabled)
+        {
+            Array.Fill(UnderdogBonus, 1f);
+            Array.Fill(UnderdogStationBonus, 1f);
+            Array.Clear(UnderdogFreeShips);
+            return;
+        }
+
+        long lead = 0;
+        for (var f = 0; f < _cfg.Factions && f < 4; f++)
+        {
+            lead = Math.Max(lead, Score(f));
+        }
+
+        for (var f = 0; f < 4; f++)
+        {
+            if (f >= _cfg.Factions || lead <= 0)
+            {
+                UnderdogBonus[f] = 1f;
+                continue;
+            }
+
+            var ratio = (float)Score(f) / lead;
+            var below = _cfg.UnderdogThreshold - ratio;
+            // Zero at the threshold and rising to the full bonus at score 0, so the help arrives gradually instead of
+            // switching on — a step would make the trailing side lurch the moment it crossed the line.
+            var t01 = _cfg.UnderdogThreshold > 0f ? Math.Clamp(below / _cfg.UnderdogThreshold, 0f, 1f) : 0f;
+            UnderdogBonus[f] = 1f + (_cfg.UnderdogMaxBonus * t01);
+            UnderdogFreeShips[f] = _cfg.UnderdogFreeShipsBelow > 0f && ratio < _cfg.UnderdogFreeShipsBelow;
+        }
+
+        // Station-deficit compensation, measured against whichever faction holds the most bases. Only applied while
+        // ALSO behind on score, so a faction that is winning on a smaller industrial base is not handed free output.
+        var mostStations = 0;
+        for (var f = 0; f < _cfg.Factions && f < 4; f++)
+        {
+            mostStations = Math.Max(mostStations, StationsAlive[f]);
+        }
+
+        for (var f = 0; f < 4; f++)
+        {
+            var mine = f < _cfg.Factions ? StationsAlive[f] : 0;
+            UnderdogStationBonus[f] = mine > 0 && mine < mostStations && UnderdogBonus[f] > 1f
+                ? Math.Min((float)mostStations / mine, Math.Max(1f, _cfg.UnderdogStationDeficitCap))
+                : 1f;
+        }
+    }
+
     public SimStats Step(float dt)
     {
+        UpdateUnderdogBonus();
         var stats = default(SimStats);
         _pendingShots.Clear();
         _dead.Clear();
@@ -1103,6 +1529,8 @@ internal sealed class Simulation
         AsteroidTick(dt, ref stats);
         PickupTick(ref stats);
         StationTick(ref stats);
+        // Must sit between the two: StationTick raises the threat flags, ShipTick consumes the rally points.
+        ComputeStationRallyPoints(ref stats);
         ShipTick(dt, ref stats);
         if (_cfg.ProjectilesEnabled)
         {
@@ -1196,6 +1624,14 @@ internal sealed class Simulation
                     {
                         dmg = _stationDamage[idx];
                         _stationDamage[idx] = 0;
+
+                        // Exponential moving average of incoming damage, which is what turns "under attack" into a
+                        // survival TIME. A raw per-tick reading cannot: shots land in bursts, so most ticks of a real
+                        // siege read zero and would price the station as immortal, while the tick a volley lands
+                        // would price it as doomed. The smoothing constant is deliberately slow — this feeds a
+                        // decision about a journey measured in thousands of ticks, so it should track the siege, not
+                        // the volley.
+                        _stationDamageEma[idx] += (dmg - _stationDamageEma[idx]) * StationDamageEmaAlpha;
                     }
                     if (dmg > 0)
                     {
@@ -1215,7 +1651,12 @@ internal sealed class Simulation
                         {
                             s.Disabled = 1;
                             StationsDisabled++;
-                            if (_cfg.StationsDestructible && idx >= 0)
+                            // A faction's last station is disabled, never destroyed: at zero stations there is no
+                            // production and no place to bank ore, so the faction cannot act at all and the rest of the
+                            // run is a formality. It can still be held down indefinitely by a garrison — losing is
+                            // still losing — but it is never removed from the game.
+                            var isLastStanding = _cfg.LastStationIndestructible && StationsAlive[s.Faction & 3] <= 1;
+                            if (_cfg.StationsDestructible && idx >= 0 && !isLastStanding)
                             {
                                 // Destroyed for good. The entity is queued for the same Reap that collects dead
                                 // ships, so the despawn happens at the tick boundary rather than inside this
@@ -1245,9 +1686,15 @@ internal sealed class Simulation
                         // CalmTicks pinned at zero and the base stays out of the war; the moment the attackers
                         // leave or die, it starts coming back. Without this gate the rebuild ran regardless of the
                         // swarm parked on top of it, which made capturing ground pointless.
-                        if (s.CalmTicks >= _cfg.StationRegenDelayTicks)
+                        // A trailing faction repairs faster and waits less to start. Applied to the DELAY as well as
+                        // the rate because the delay is what a siege exploits: attackers only have to land a hit every
+                        // StationRegenDelayTicks to keep a wreck down for ever, and a faction that is losing cannot
+                        // spare the ships to clear them.
+                        var repair = _cfg.UnderdogStationRepair ? UnderdogBonus[s.Faction & 3] : 1f;
+                        var regenDelay = (int)(_cfg.StationRegenDelayTicks / repair);
+                        if (s.CalmTicks >= regenDelay)
                         {
-                            s.Hp = (short)Math.Min(_cfg.StationHpMax, s.Hp + _cfg.StationHpRegen);
+                            s.Hp = (short)Math.Min(_cfg.StationHpMax, s.Hp + (int)(_cfg.StationHpRegen * repair));
                             if (s.Hp >= _cfg.StationHpMax)
                             {
                                 s.Disabled = 0;
@@ -1256,9 +1703,13 @@ internal sealed class Simulation
                             }
                         }
                     }
-                    else if (s.CalmTicks >= _cfg.StationRegenDelayTicks && s.Shield < _cfg.StationShieldMax)
+                    else
                     {
-                        s.Shield = (short)Math.Min(_cfg.StationShieldMax, s.Shield + _cfg.StationShieldRegen);
+                        var repair = _cfg.UnderdogStationRepair ? UnderdogBonus[s.Faction & 3] : 1f;
+                        if (s.CalmTicks >= (int)(_cfg.StationRegenDelayTicks / repair) && s.Shield < _cfg.StationShieldMax)
+                        {
+                            s.Shield = (short)Math.Min(_cfg.StationShieldMax, s.Shield + (int)(_cfg.StationShieldRegen * repair));
+                        }
                     }
 
                     if (idx >= 0)
@@ -1306,9 +1757,16 @@ internal sealed class Simulation
                         s.SpawnCooldown--;
                         continue;
                     }
+                    // Doubling the BATCH rather than halving the cooldown: the cooldown is a short, and halving an
+                    // odd interval would quietly round, making the boost worth slightly more or less than the 2x it
+                    // advertises depending on a config value nobody would connect to it.
+                    var batch = (int)MathF.Round(_cfg.SpawnBatch
+                        * (ProductionTicks[s.Faction & 3] > 0 ? 2 : 1)
+                        * UnderdogBonus[s.Faction & 3]
+                        * UnderdogStationBonus[s.Faction & 3]);
                     s.SpawnCooldown = (short)_cfg.SpawnIntervalTicks;
-                    s.SpawnedTotal += _cfg.SpawnBatch;
-                    toSpawn.Add((s.Faction, _cfg.SpawnBatch));
+                    s.SpawnedTotal += batch;
+                    toSpawn.Add((s.Faction, batch));
                 }
                 if (touched)
                 {
@@ -1359,7 +1817,11 @@ internal sealed class Simulation
         using var e = acc.GetClusterEnumerator();
 
         var world = _cfg.WorldSize;
+        // Per-hull now (the heavy outranges everyone), so the squared range is resolved per ship below rather than
+        // hoisted. Kept as locals so the common hulls still cost one compare rather than a switch.
         var range2 = _cfg.WeaponRange * _cfg.WeaponRange;
+        var heavyRange2 = _cfg.HeavyWeaponRange * _cfg.HeavyWeaponRange;
+        var destroyerRange2 = _cfg.DestroyerWeaponRange * _cfg.DestroyerWeaponRange;
         var mineRange2 = _cfg.MineRange * _cfg.MineRange;
         var dropRange2 = _cfg.StationDockRange * _cfg.StationDockRange;
 
@@ -1428,7 +1890,9 @@ internal sealed class Simulation
                 }
                 else
                 {
-                    FighterSteer(ref c, px, py, ref stats, out dirX, out dirY);
+                    // The hull's own top speed, not a constant: reach is speed x time, so a 110 m/s destroyer and an
+                    // 800 m/s interceptor answer completely different sets of sieges from the same spot.
+                    FighterSteer(ref c, px, py, m.MaxSpeed, ref stats, out dirX, out dirY);
                     // Fighters only — miners must be able to close all the way onto a rock.
                     ApplyStandoff(ref c, px, py, ref dirX, ref dirY);
                     // Separation is applied OUTSIDE ApplyStandoff, which returns early for a fighter with no
@@ -1492,6 +1956,8 @@ internal sealed class Simulation
                 cluster.WriteSpatial(Ship.Position, i, Pos.At(nx, ny));
                 stats.ShipsMoved++;
 
+                SampleDefenderDrift(in c, nx, ny, m.VX, m.VY);
+
                 // ── firing: miners are unarmed ──
                 if (c.Kind == KindMiner)
                 {
@@ -1505,7 +1971,10 @@ internal sealed class Simulation
                 {
                     var ddx = c.TargetX - nx;
                     var ddy = c.TargetY - ny;
-                    if (ddx * ddx + ddy * ddy <= range2 && _cfg.ProjectilesEnabled && ShotsAlive < _cfg.MaxShots)
+                    var myRange2 = c.Kind == KindHeavy ? heavyRange2
+                        : c.Kind == KindDestroyer ? destroyerRange2
+                        : range2;
+                    if (ddx * ddx + ddy * ddy <= myRange2 && _cfg.ProjectilesEnabled && ShotsAlive < _cfg.MaxShots)
                     {
                         c.Cooldown = (short)_cfg.WeaponCooldownTicks;
                         c.RootTicks = (byte)Math.Clamp(_cfg.FireRootTicks, 0, 255);
@@ -1540,7 +2009,7 @@ internal sealed class Simulation
     /// Fighter behaviour: hunt the nearest enemy; with none in sight, escort friendly miners rather than charging
     /// the map centre. The escort rule is what keeps the fighting where the economy is.
     /// </summary>
-    private void FighterSteer(ref Combat c, float px, float py, ref SimStats stats, out float dirX, out float dirY)
+    private void FighterSteer(ref Combat c, float px, float py, float speed, ref SimStats stats, out float dirX, out float dirY)
     {
         if (c.ReacquireIn > 0)
         {
@@ -1550,29 +2019,78 @@ internal sealed class Simulation
         {
             c.ReacquireIn = (short)_cfg.TargetReacquireTicks;
 
-            // Defending a station under active attack outranks everything, including the pickup: a buff lasts
-            // thirty seconds, a station is the thing that produces ships at all. Gated on a RECENT hit, or
-            // fighters would garrison permanently and never leave home.
-            if (TryFindThreatenedStation(px, py, c.Faction, out var dsx, out var dsy))
+            // Defending a station under attack normally outranks the pickup — a buff lasts thirty seconds, a station
+            // is the thing that produces ships at all. But it must not outrank it UNCONDITIONALLY, and that is the
+            // trap this branch fell into the moment the defend radius went global: it returns early, so with any
+            // station anywhere under fire the pickup block below was unreachable and the entire fleet ignored every
+            // objective on the map.
+            //
+            // Two bounds, both of which keep the "come from far away to defend" behaviour that the radius was widened
+            // for. Interceptors are exempt outright — they are the objective specialists and their 60 km notice radius
+            // exists for exactly this — and everyone else defends only when the station is NEARER than the pickup,
+            // which is the same parameter-free "whichever is closer" rule the engage-or-race decision already uses.
+            var interceptor = c.Kind == KindFast;
+            if (!interceptor && TryFindThreatenedStation(px, py, c.Faction, speed, out var dsx, out var dsy, out var siegeVisible))
             {
                 stats.AcquireQueries++;
                 var sd2 = (dsx - px) * (dsx - px) + (dsy - py) * (dsy - py);
-                if (TryAcquireTarget(ref c, px, py, defending: true, out var eex, out var eey)
-                    && (eex - px) * (eex - px) + (eey - py) * (eey - py) < sd2)
+                var pickupIsCloser = TryFindPickup(px, py, _cfg.PickupAttractRadius, out var qx, out var qy)
+                    && (qx - px) * (qx - px) + (qy - py) * (qy - py) < sd2;
+
+                if (!pickupIsCloser)
                 {
-                    c.TargetX = eex;
-                    c.TargetY = eey;
-                    c.HasTarget = 1;
+                    if (TryAcquireTarget(ref c, px, py, defending: true, out var eex, out var eey)
+                        && (eex - px) * (eex - px) + (eey - py) * (eey - py) < sd2)
+                    {
+                        c.TargetX = eex;
+                        c.TargetY = eey;
+                        c.HasTarget = 1;
+                        SetTask(ref c, TaskEngaging);
+                    }
+                    else
+                    {
+                        c.TargetX = dsx;
+                        c.TargetY = dsy;
+
+                        // Shoot the besieger; hold fire when the rally point degenerated to our own station's centre
+                        // because no attacker is visible. HasTarget is not just "may I fire" — it also gates
+                        // ApplyStandoff, so a defender that HAS an attacker gets the orbit-and-hold behaviour instead
+                        // of driving its nose into the target and then being carried off by the separation term.
+                        c.HasTarget = (byte)(siegeVisible ? 1 : 0);
+                        SetTask(ref c, TaskDefending);
+
+                        if (siegeVisible)
+                        {
+                            DefendersOnTarget++;
+                        }
+                        else
+                        {
+                            DefendersBlind++;
+                        }
+                        _defendRangeSum += MathF.Sqrt(sd2);
+                        if (sd2 < AtBaseMetres * AtBaseMetres)
+                        {
+                            DefendersAtBase++;
+                        }
+                    }
+                    dirX = c.TargetX - px;
+                    dirY = c.TargetY - py;
+
+                    // A defender with no visible attacker is steering at its own station's CENTRE, and one that has
+                    // arrived therefore produces the zero vector — at which point separation, added downstream,
+                    // becomes the only force acting and the garrison steadily pushes itself off the base it was
+                    // recalled to hold. Stand-off cannot save it either: that runs only for a ship with a target.
+                    // So hold a ring here instead, which keeps the vector meaningful at point-blank range.
+                    //
+                    // This is not a rare corner. Threat lingers for StationThreatTicks after the last hit, so every
+                    // raid that is driven off leaves its target flagged with nothing left to shoot: measured over
+                    // 12 000 ticks, 56 % of all defence calls found no attacker.
+                    if (c.HasTarget == 0)
+                    {
+                        GarrisonHold(in c, px, py, ref dirX, ref dirY);
+                    }
+                    return;
                 }
-                else
-                {
-                    c.TargetX = dsx;
-                    c.TargetY = dsy;
-                    c.HasTarget = 0;   // steer home, but do not shoot our own station
-                }
-                dirX = c.TargetX - px;
-                dirY = c.TargetY - py;
-                return;
             }
 
             // ── The engage-or-race decision ──────────────────────────────────────────────────────────────────────
@@ -1586,7 +2104,8 @@ internal sealed class Simulation
             // enough to produce both behaviours without scripting either. On the fringe of the crowd the pickup is
             // nearer and you race; inside the crowd an enemy is nearer and you fight; and it self-balances,
             // because committing shots to enemies is committing them away from your own tally.
-            if (TryFindPickup(px, py, _cfg.PickupAttractRadius, out var lx, out var ly))
+            var attract = c.Kind == KindFast ? _cfg.FastPickupAttractRadius : _cfg.PickupAttractRadius;
+            if (TryFindPickup(px, py, attract, out var lx, out var ly))
             {
                 stats.AcquireQueries++;
                 var pd2 = (lx - px) * (lx - px) + (ly - py) * (ly - py);
@@ -1598,6 +2117,7 @@ internal sealed class Simulation
                         c.TargetX = ex;
                         c.TargetY = ey;
                         c.HasTarget = 1;
+                        SetTask(ref c, TaskEngaging);
                         dirX = c.TargetX - px;
                         dirY = c.TargetY - py;
                         return;
@@ -1606,6 +2126,7 @@ internal sealed class Simulation
                 c.TargetX = lx;
                 c.TargetY = ly;
                 c.HasTarget = 1;
+                SetTask(ref c, TaskRacingPickup);
                 dirX = c.TargetX - px;
                 dirY = c.TargetY - py;
                 return;
@@ -1616,10 +2137,12 @@ internal sealed class Simulation
                 c.TargetX = tx2;
                 c.TargetY = ty2;
                 c.HasTarget = 1;
+                SetTask(ref c, TaskEngaging);
             }
             else
             {
                 c.HasTarget = 0;
+                SetTask(ref c, TaskEscorting);
             }
             stats.AcquireQueries++;
         }
@@ -1628,6 +2151,24 @@ internal sealed class Simulation
         {
             dirX = c.TargetX - px;
             dirY = c.TargetY - py;
+            return;
+        }
+
+        // A defender must hold its ground on the ticks BETWEEN re-acquisitions as well — and everything below this
+        // point is the idle-fighter fallback, which a blind defender must never reach.
+        //
+        // The orders are refreshed once every TargetReacquireTicks; the other seven ticks in eight re-derive the
+        // heading from HasTarget alone. But a defender with no visible attacker carries HasTarget == 0 — there is
+        // nothing to shoot — which at this point is indistinguishable from a fighter that was never given orders.
+        // So it fell through to the hunting branch, took the nearest ENEMY station as a rally, set HasTarget itself
+        // and left to raid it, all while still tagged DEFENDING because SetTask only runs on the re-acquisition
+        // tick. That is a garrison that abandons its base seven ticks in eight, with the HUD insisting it is
+        // defending. The task tag is the only state that distinguishes the two cases, so it is what has to be read.
+        if (TaskOf(c.SteerFlags) == TaskDefending)
+        {
+            dirX = c.TargetX - px;   // the station centre, stored at the last re-acquisition
+            dirY = c.TargetY - py;
+            GarrisonHold(in c, px, py, ref dirX, ref dirY);
             return;
         }
 
@@ -1657,11 +2198,16 @@ internal sealed class Simulation
         // inside it. At 100 km that oscillated: approach, flip, drift out, flip back — an orbit that never crossed
         // the map. Fourteen thousand ticks produced 10,500 ore mined and ZERO shots fired.
         Vector2 rally;
+        var holdOnArrival = false;
         if (c.ThreatTicks > 0)
         {
             // Under fire: fall back to the nearest friendly base and defend the economy around it. No target is
             // set — steer home, but never shoot our own station.
             rally = NearestStation(px, py, f) ?? _minerCentroid[f];
+
+            // ...and hold a ring once there, for the same reason the defence call does: steering at a point you are
+            // already standing on yields the zero vector, and separation is then the only force left acting.
+            holdOnArrival = true;
         }
         else
         {
@@ -1686,6 +2232,10 @@ internal sealed class Simulation
         }
         dirX = rally.X - px;
         dirY = rally.Y - py;
+        if (holdOnArrival)
+        {
+            GarrisonHold(in c, px, py, ref dirX, ref dirY);
+        }
     }
 
     /// <summary>
@@ -1776,6 +2326,137 @@ internal sealed class Simulation
     }
 
     /// <summary>
+    /// Measures the thing that is actually observed on screen: a ship tagged DEFENDING that is travelling AWAY from
+    /// the nearest base of its own faction.
+    /// </summary>
+    /// <remarks>
+    /// Sampled every tick for every defender, deliberately, and that is the whole point of it. The first defence
+    /// instrument counted outcomes inside the re-acquisition branch — which is the one tick in
+    /// <see cref="Config.TargetReacquireTicks"/> where the orders were correct. It reported an improvement while the
+    /// fleet was still visibly abandoning its stations on the other seven, because the bug lived entirely in the
+    /// per-tick steering path that the instrument never looked at. An instrument that samples only where the
+    /// decision is made cannot see a defect in how the decision is carried out.
+    /// <para>
+    /// "Away" is the sign of the radial velocity component, evaluated only outside the garrison ring — a ship
+    /// circling the ring at the correct radius is moving tangentially and is not leaving, and counting it would
+    /// bury the signal under normal orbiting.
+    /// </para>
+    /// </remarks>
+    private void SampleDefenderDrift(in Combat c, float px, float py, float vx, float vy)
+    {
+        if (TaskOf(c.SteerFlags) != TaskDefending)
+        {
+            return;
+        }
+
+        // Measured against the point this ship was ORDERED to, not against the nearest friendly station. Those are
+        // different places whenever a defender is answering a siege somewhere else, which with a defend radius wider
+        // than the map is most of them — a ship crossing 40 km to reach station 3 passes station 1 and reads as
+        // "leaving" against the nearest-station yardstick, burying the real signal in ordinary transit. The order is
+        // the ship's own state, so there is nothing to infer and nothing to get wrong.
+        var dx = px - c.TargetX;
+        var dy = py - c.TargetY;
+        var d2 = dx * dx + dy * dy;
+        if (!float.IsFinite(d2))
+        {
+            return;
+        }
+
+        // The radius it is entitled to hold: the stand-off ring when it has an attacker to fight, the garrison ring
+        // when it is holding an empty base.
+        var ring = 1.5f * MathF.Max(1f, c.HasTarget != 0 ? _cfg.StandoffRange : _cfg.StationGarrisonRadius);
+        if (d2 <= ring * ring)
+        {
+            DefenderTicksAtPost++;
+            return;
+        }
+        DefenderTicksAway++;
+        _defenderAwayRangeSum += MathF.Sqrt(d2);
+
+        // Positive radial velocity outside the ring means it is still opening the distance, not returning.
+        if (dx * vx + dy * vy > 0f)
+        {
+            DefenderTicksOutbound++;
+        }
+    }
+
+    /// <summary>Defender-ticks spent on the garrison ring, versus beyond it, versus actively leaving.</summary>
+    /// <remarks>
+    /// <c>Outbound</c> is the number to watch: a defender beyond the ring is usually just inbound from wherever it
+    /// was recalled from, but one beyond the ring and still accelerating away is the screen symptom itself.
+    /// </remarks>
+    public long DefenderTicksAtPost { get; private set; }
+    public long DefenderTicksAway { get; private set; }
+    public long DefenderTicksOutbound { get; private set; }
+    private double _defenderAwayRangeSum;
+
+    /// <summary>Mean distance from home of the defenders that are beyond the garrison ring.</summary>
+    public double MeanDefenderAwayRange => DefenderTicksAway > 0 ? _defenderAwayRangeSum / DefenderTicksAway : 0d;
+
+    /// <summary>
+    /// Holds a ring around the station a defender was recalled to, when there is no attacker to fly at.
+    /// </summary>
+    /// <remarks>
+    /// The same radial/tangential shape as <see cref="ApplyStandoff"/>, but anchored on the station rather than on a
+    /// target, and reached by a different route: stand-off is gated on <c>HasTarget</c> precisely because it aims a
+    /// ship at something it intends to shoot, and a garrison must not shoot its own base. <c>dirX</c>/<c>dirY</c>
+    /// arrive as the vector to the station centre and are REPLACED, not added to — the caller's separation term is
+    /// applied afterwards and is what spreads the garrison out around the ring rather than stacking it on one point.
+    /// <para>
+    /// The orbit direction reuses bit 0 of <c>SteerFlags</c>, the same per-ship sign the stand-off rule uses, so a
+    /// ship that switches between defending and engaging keeps circling the same way instead of reversing.
+    /// </para>
+    /// </remarks>
+    private void GarrisonHold(in Combat c, float px, float py, ref float dirX, ref float dirY)
+    {
+        var hold = _cfg.StationGarrisonRadius;
+        if (hold <= 0f)
+        {
+            return;
+        }
+        var d2 = dirX * dirX + dirY * dirY;
+        if (!float.IsFinite(d2))
+        {
+            return;
+        }
+        var d = MathF.Sqrt(d2);
+        if (d < 1e-3f)
+        {
+            // Exactly on the centre: no radial to work with, so pick the tangent off the ship's orbit sign alone and
+            // let it drift out to the ring from there.
+            dirX = (c.SteerFlags & 1) != 0 ? -1f : 1f;
+            dirY = 0f;
+            return;
+        }
+
+        var rx = dirX / d;
+        var ry = dirY / d;
+        var tx = -ry;
+        var ty = rx;
+        if ((c.SteerFlags & 1) != 0)
+        {
+            tx = -tx;
+            ty = -ty;
+        }
+
+        // PROPORTIONAL, and allowed to exceed 1 — not the three-state approach/hold/retreat that the stand-off rule
+        // uses. Stand-off can afford three states because it acts against a target that is itself manoeuvring; a
+        // garrison acts against SeparationStrength, which the caller adds afterwards and which in a crowd points
+        // steadily outward. At 0.9 against a unit vector that is very nearly a fair fight, and a three-state rule
+        // makes it a losing one: it is exactly zero inside the dead band, so between the ring and the band's outer
+        // edge nothing at all opposes separation and the crowd walks itself out. Scaling with the error instead
+        // means the pull always wins beyond some bounded distance, which is what makes the ring an equilibrium
+        // rather than a suggestion. It settles a little outside `hold`, where the two forces balance.
+        var band = MathF.Max(1f, hold * 0.15f);
+        var radial = Math.Clamp((d - hold) / band, -3f, 3f);
+        var tangent = MathF.Abs(radial) < 1e-3f ? 1f : _cfg.OrbitStrength;
+        // rx/ry points from the ship TOWARD the station, and `radial` is positive when the ship is outside the ring,
+        // so the product already pulls the right way in both directions.
+        dirX = rx * radial + tx * tangent;
+        dirY = ry * radial + ty * tangent;
+    }
+
+    /// <summary>
     /// Adds the stored push-away-from-neighbours term to a fighter's steering.
     /// </summary>
     /// <remarks>
@@ -1809,6 +2490,7 @@ internal sealed class Simulation
         {
             MinerModeCount[3]++;
         }
+        SetTask(ref c, mi.Mode == 2 ? TaskHauling : mi.HasOre != 0 ? TaskMining : TaskSeekingOre);
         if (mi.Cargo > 0)
         {
             LadenMiners++;
@@ -1838,7 +2520,7 @@ internal sealed class Simulation
                 {
                     DropDistanceMax = drop;
                 }
-                Material[c.Faction & 3] += mi.Cargo;
+                Material[c.Faction & 3] += (int)(mi.Cargo * UnderdogBonus[c.Faction & 3]);
                 TotalMined += mi.Cargo;
                 stats.Delivered += mi.Cargo;
                 mi.Cargo = 0;
@@ -2427,7 +3109,7 @@ internal sealed class Simulation
         TicksElapsed++;
         for (var f = 0; f < 4; f++)
         {
-            if (PowerTicks[f] > 0 || ShieldTicks[f] > 0 || SpeedTicks[f] > 0 || MiningTicks[f] > 0)
+            if (PowerTicks[f] > 0 || ShieldTicks[f] > 0 || SpeedTicks[f] > 0 || MiningTicks[f] > 0 || ProductionTicks[f] > 0)
             {
                 EffectTicks[f]++;
             }
@@ -2446,6 +3128,10 @@ internal sealed class Simulation
             if (MiningTicks[f] > 0)
             {
                 MiningTicks[f]--;
+            }
+            if (ProductionTicks[f] > 0)
+            {
+                ProductionTicks[f]--;
             }
         }
 
@@ -2539,10 +3225,90 @@ internal sealed class Simulation
     /// interleaved layout. An ore anchor is by construction equidistant between two enemy stations, which is
     /// exactly the ground both sides already have a reason to hold.
     /// </remarks>
+    /// <summary>
+    /// Chooses a spawn point in the trailing faction's territory, with probability scaled by how far behind it is.
+    /// </summary>
+    /// <remarks>
+    /// Anchored on a surviving station rather than on the faction's centre of mass: a collapsing faction's ships are
+    /// scattered and mostly dying, so their average position is noise, while the station is where its remaining
+    /// production appears and the ground it must hold anyway. Falls through to the normal neutral placement whenever
+    /// the roll fails, the mechanic is off, or the trailing faction has nothing left to anchor to.
+    /// </remarks>
+    private bool TryPickUnderdogSpawn(out float x, out float y)
+    {
+        x = 0;
+        y = 0;
+        if (!_cfg.UnderdogEnabled || _cfg.PickupUnderdogBiasMax <= 0f)
+        {
+            return false;
+        }
+
+        // The faction furthest behind, and how far. UnderdogBonus already encodes exactly that (1.0 = level or ahead,
+        // rising as the gap widens), so reuse it rather than recomputing a second, subtly different notion of "losing".
+        var worst = -1;
+        var worstBonus = 1f;
+        for (var f = 0; f < _cfg.Factions && f < 4; f++)
+        {
+            if (UnderdogBonus[f] > worstBonus)
+            {
+                worstBonus = UnderdogBonus[f];
+                worst = f;
+            }
+        }
+
+        if (worst < 0)
+        {
+            return false;
+        }
+
+        // UnderdogBonus runs 1..1+UnderdogMaxBonus, so normalise back to the 0..1 "how far behind" it was built from.
+        var behind = _cfg.UnderdogMaxBonus > 0f ? (worstBonus - 1f) / _cfg.UnderdogMaxBonus : 0f;
+        if (_rng.NextDouble() >= behind * _cfg.PickupUnderdogBiasMax)
+        {
+            return false;
+        }
+
+        // A live station of that faction, chosen at random so repeated spawns do not pin to one base.
+        var candidates = new List<int>();
+        for (var i = 0; i < _stationPos.Count; i++)
+        {
+            if (_stationFaction[i] == worst && !_stationDead[i])
+            {
+                candidates.Add(i);
+            }
+        }
+
+        if (candidates.Count == 0)
+        {
+            return false;
+        }
+
+        var s = _stationPos[candidates[_rng.Next(candidates.Count)]];
+
+        // Offset well clear of the station itself: dropped on top of it the pickup would be collected by the garrison
+        // before anyone could contest it, which is a gift rather than a chance. At this radius it is inside friendly
+        // space but still out in the open.
+        var rad = _cfg.WorldSize * _cfg.PickupUnderdogSpawnRadiusPct * (0.4f + (float)_rng.NextDouble() * 0.6f);
+        var ang = (float)(_rng.NextDouble() * Math.PI * 2);
+        x = Clamp(s.X + MathF.Cos(ang) * rad, 0, _cfg.WorldSize);
+        y = Clamp(s.Y + MathF.Sin(ang) * rad, 0, _cfg.WorldSize);
+        return true;
+    }
+
     private void SpawnPickup(ref SimStats stats)
     {
         float x, y;
-        if (_oreAnchors.Count > 0)
+
+        // Objective placement is the one lever that acts on the CAUSE of powerup dominance rather than its effect: the
+        // leader wins pickups because it covers more ground, so relocating the pickup is what removes the advantage.
+        // Rolled per spawn rather than applied as a permanent rule, so the leader's own space still produces objectives
+        // and the map does not collapse into "all fights happen at the loser's base".
+        if (TryPickUnderdogSpawn(out var ux, out var uy))
+        {
+            x = ux;
+            y = uy;
+        }
+        else if (_oreAnchors.Count > 0)
         {
             var anchor = _oreAnchors[_rng.Next(_oreAnchors.Count)];
             var j = _cfg.WorldSize * 0.02f;
@@ -2579,7 +3345,8 @@ internal sealed class Simulation
             case PickupPower: PowerTicks[f] = _cfg.PickupPowerDurationTicks; break;
             case PickupShield: ShieldTicks[f] = _cfg.PickupShieldDurationTicks; break;
             case PickupSpeed: SpeedTicks[f] = _cfg.PickupSpeedDurationTicks; break;
-            default: MiningTicks[f] = _cfg.PickupMiningDurationTicks; break;
+            case PickupMining: MiningTicks[f] = _cfg.PickupMiningDurationTicks; break;
+            default: ProductionTicks[f] = _cfg.PickupProductionDurationTicks; break;
         }
         PickupsCollected++;
         stats.PickupsCollected++;
