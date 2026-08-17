@@ -489,6 +489,40 @@ CK-08 (flush-only cycles) are later increments.
             ClusterIndexSpiPersistenceTests.Checkpoint_IndexSpiChangedAlone_IsStillPersisted (an index root that changes while
             every other guard field holds is still written — dropping the index SPIs from the skip test fails it) [VerifiesRule]
 
+### CK-11: The page cache is drained on dirty-page pressure, not only on the clock `[fatal]`
+  invariant a cycle runs as soon as writeback debt reaches ResourceOptions.CheckpointDirtyPageThresholdPercent of the
+            page cache's SLOTS, without waiting for CheckpointIntervalMs
+  invariant a pressure-triggered cycle is an ORDINARY cycle: same CK-02 barrier, same CK-03 coverage gate, same
+            watermark advance, same CK-04 reclamation. It is not a second, weaker durability path — CK-08 describes the
+            only form permitted to do less, and this is not it
+  invariant pressure bypasses the "no new durable WAL records" early-out, on the same reasoning as the shutdown flush:
+            CreateOrGrow and the other structural-write paths dirty segment pages WITHOUT writing WAL records, so a cache
+            filled by structural work alone has durableLsn == checkpointLsn and gating on the log would skip exactly the
+            pages causing the pressure
+  invariant a poll wake that finds no pressure is NOT a timer tick — the durability cadence stays CheckpointIntervalMs
+            however often the loop looks
+  invariant threshold 0 disables the trigger, leaving timer + explicit force as the only causes
+  scope: CheckpointManager.CheckpointLoop, CheckpointManager.WaitMs, CheckpointManager.IsDirtyPagePressureReached,
+         PagedMMF.WritebackDebtPercent, ResourceOptions.CheckpointDirtyPageThresholdPercent
+  verified: CheckpointManagerTests.DirtyPagePressure_TriggersCheckpoint (interval = int.MaxValue, so a cycle at all
+            proves the trigger fired), CheckpointManagerTests.TriggerDisabled_LeavesCacheToTheTimer (the negative arm
+            that makes the first one evidence), CheckpointManagerTests.PressureCycle_AdvancesTheWatermark
+  on_violation: a page is reclaimable only once a checkpoint has written it (PS-10), so the cache's reclaim rate IS the
+                checkpoint rate. Without this trigger the peak debt is "everything dirtied inside one interval"; when
+                that exceeds the cache the next allocation has nothing to evict and the engine dies on
+                PageCacheBackpressureTimeout with a ~100%-dirty cache. Measured (#830): 32 758 of 32 768 pages owed
+  requires: PS-10 — the trigger exists because debt is only discharged by a durable write
+  rationale: NEW 2026-08-16 (#830). The overview's trigger list already claimed a dirty-page threshold
+    (`claude/overview/06-durability.md`) and the code had only the timer and ForceCheckpoint; the sole pressure-driven
+    path was OnBackpressure → ForceCheckpoint, which fires at 100% saturation and then has 5 s to drain a full cache
+    from a standing start. ADR-025 named the consequence — "checkpoint can be expensive if many pages are dirty
+    (mitigated by configurable interval)" — but the interval is a TIME knob and the constraint is a CAPACITY one, and
+    nothing derives one from the other. It stayed invisible while DirtyCounter leaked (#824): leaked marks made every
+    cycle rewrite pages that were already clean, which kept clean pages continuously available by accident.
+    Deliberately NOT a second writer thread: WritePagesForCheckpoint claims each page with CAS(ACW, -1, 0) and SKIPS on
+    failure, so a concurrent writer holding that sentinel makes the checkpoint skip the page, stillSkipped > 0, the
+    CK-03 gate stays shut and no WAL segment is ever recycled — #817's exact failure mode, by design.
+
 ---
 
 ---

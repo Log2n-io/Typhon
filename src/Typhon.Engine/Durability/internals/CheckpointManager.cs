@@ -97,6 +97,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     // ═══════════════════════════════════════════════════════════════
 
     private long _totalCheckpoints;
+    private long _totalPressureCheckpoints;
     private long _totalPagesWritten;
     private long _totalSegmentsRecycled;
     private long _totalUowTransitioned;
@@ -166,6 +167,16 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
 
     /// <summary>Total number of checkpoint cycles completed.</summary>
     public long TotalCheckpoints => Interlocked.Read(ref _totalCheckpoints);
+
+    /// <summary>
+    /// Of those, how many ran because the page cache reached its writeback-debt threshold rather than because the timer
+    /// elapsed or someone forced one (#830).
+    /// </summary>
+    /// <remarks>
+    /// The number to watch when tuning: zero over a long run means the timer alone is keeping up, and a value climbing
+    /// alongside back-pressure waits means the threshold is set too high to prevent the stall it exists to prevent.
+    /// </remarks>
+    public long TotalPressureCheckpoints => Interlocked.Read(ref _totalPressureCheckpoints);
 
     /// <summary>Total number of dirty pages written across all checkpoints.</summary>
     public long TotalPagesWritten => Interlocked.Read(ref _totalPagesWritten);
@@ -326,6 +337,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     public void ReadMetrics(IMetricWriter writer)
     {
         writer.WriteThroughput("Checkpoints", _totalCheckpoints);
+        writer.WriteThroughput("PressureCheckpoints", _totalPressureCheckpoints);
         writer.WriteThroughput("PagesWritten", _totalPagesWritten);
         writer.WriteThroughput("SegmentsRecycled", _totalSegmentsRecycled);
         writer.WriteThroughput("UowTransitioned", _totalUowTransitioned);
@@ -339,23 +351,76 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     // Checkpoint loop (runs on dedicated thread)
     // ═══════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// How often the loop re-examines page-cache pressure while the dirty-page trigger is armed, and therefore also the
+    /// closest two pressure-triggered cycles can be spaced.
+    /// </summary>
+    /// <remarks>
+    /// Not a knob. It is an implementation detail of "notice pressure promptly", not a tuning decision the user has any
+    /// basis to make — and it doubles as the floor between pressure cycles, which is what stops a cache that cannot be
+    /// drained (every page held by a live writer, say) from spinning barrier-fsync cycles back to back. 250 ms is far
+    /// below any interval worth configuring and far above the cost of one scan.
+    /// </remarks>
+    private const int DirtyPagePollIntervalMs = 250;
+
+    /// <summary>The configured interval as Stopwatch ticks.</summary>
+    private long IntervalTicks() =>
+        (long)(Math.Max(_resourceOptions.CheckpointIntervalMs, 0) / 1000.0 * Stopwatch.Frequency);
+
+    /// <summary>Whether the dirty-page trigger is configured on. Off ⇒ the loop is byte-for-byte the pre-#830 one.</summary>
+    private bool IsDirtyPageTriggerArmed => _resourceOptions.CheckpointDirtyPageThresholdPercent > 0;
+
+    /// <summary>
+    /// How long to block on the wake event: the poll interval when the dirty-page trigger is armed, the full checkpoint
+    /// interval when it is disabled.
+    /// </summary>
+    private int WaitMs()
+    {
+        var interval = Math.Max(_resourceOptions.CheckpointIntervalMs, 0);
+        return IsDirtyPageTriggerArmed ? Math.Min(interval, DirtyPagePollIntervalMs) : interval;
+    }
+
+    /// <summary>Whether the page cache owes enough writeback to justify a cycle ahead of the timer.</summary>
+    private bool IsDirtyPagePressureReached() =>
+        IsDirtyPageTriggerArmed && _mmf.WritebackDebtPercent() >= _resourceOptions.CheckpointDirtyPageThresholdPercent;
+
     private void CheckpointLoop()
     {
         try
         {
+            // The timer's due-time is tracked explicitly rather than inferred from the wait returning, because with the
+            // dirty-page trigger armed the wait is much shorter than the interval (#830). A poll that finds no pressure
+            // must not be mistaken for a timer tick, or the durability cadence silently becomes the poll cadence.
+            var nextTimerDue = Stopwatch.GetTimestamp() + IntervalTicks();
+
             while (!_shutdown)
             {
                 // Phase 8: Durability:Checkpoint:Sleep span — covers the inter-cycle wait.
-                // wakeReason: 0=timer, 1=force, 2=shutdown.
-                var sleepMs = (uint)Math.Max(_resourceOptions.CheckpointIntervalMs, 0);
-                var sleepScope = TyphonEvent.BeginDurabilityCheckpointSleep(sleepMs, 0);
+                // wakeReason: 0=timer, 1=force, 2=shutdown, 3=dirty-page pressure.
+                var waitMs = WaitMs();
+                var sleepScope = TyphonEvent.BeginDurabilityCheckpointSleep((uint)waitMs, 0);
+                bool force, timerDue, pressure;
                 try
                 {
-                    // Sleep until woken by: timer expiry, ForceCheckpoint, or shutdown
-                    _wakeEvent.Wait(_resourceOptions.CheckpointIntervalMs);
+                    // Sleep until woken by: the wait elapsing, ForceCheckpoint, or shutdown
+                    _wakeEvent.Wait(waitMs);
                     _wakeEvent.Reset();
 
-                    sleepScope.WakeReason = _shutdown ? (byte)2 : (_forceRequested ? (byte)1 : (byte)0);
+                    force = _forceRequested;
+                    _forceRequested = false;
+
+                    // When the trigger is disabled the wait above IS the checkpoint interval, so any wake is a tick and
+                    // the due-time must not be consulted: the event wait and Stopwatch are different clocks, and a wake
+                    // landing a few microseconds short of the due-time would skip the tick and silently double the
+                    // effective interval. Armed, the explicit due-time is required precisely because the wait is now the
+                    // poll interval and says nothing about the timer.
+                    timerDue = !IsDirtyPageTriggerArmed || Stopwatch.GetTimestamp() >= nextTimerDue;
+
+                    // Only pay for the page-cache scan when its answer can change what happens: a cycle is already going
+                    // to run if the timer is due or someone forced one.
+                    pressure = !_shutdown && !force && !timerDue && IsDirtyPagePressureReached();
+
+                    sleepScope.WakeReason = _shutdown ? (byte)2 : force ? (byte)1 : pressure ? (byte)3 : (byte)0;
                 }
                 finally
                 {
@@ -373,18 +438,35 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                     continue;
                 }
 
-                var force = _forceRequested;
-                _forceRequested = false;
-
-                // Check if we should run a checkpoint cycle
-                var durableLsn = _walManager.DurableLsn;
-                if (durableLsn <= Interlocked.Read(ref _checkpointLsn) && !force)
+                // A poll wake with nothing to do — the common case once the trigger is armed. Costs one scan and goes
+                // straight back to sleep, leaving the timer's due-time untouched.
+                if (!force && !timerDue && !pressure)
                 {
-                    // No new durable WAL records since last checkpoint and no force request
                     continue;
                 }
 
-                RunCheckpointCycle(durableLsn, force ? CheckpointReason.Forced : CheckpointReason.Periodic);
+                // Check if we should run a checkpoint cycle
+                var durableLsn = _walManager.DurableLsn;
+                if (durableLsn <= Interlocked.Read(ref _checkpointLsn) && !force && !pressure)
+                {
+                    // No new durable WAL records since last checkpoint, and nothing else is asking. This WAS a timer
+                    // tick, so re-arm it — otherwise the timer stays permanently overdue and every later poll reads as
+                    // one, which would run the pressure scan for nothing and mislabel every cycle as Periodic.
+                    nextTimerDue = Stopwatch.GetTimestamp() + IntervalTicks();
+                    continue;
+                }
+
+                // Pressure deliberately bypasses the LSN gate above, on the same reasoning the shutdown flush does:
+                // CreateOrGrow and the other structural-write paths dirty segment pages WITHOUT writing WAL records, so
+                // a cache filled by structural work alone has durableLsn == checkpointLsn. Gating on the log there would
+                // skip exactly the pages causing the pressure, and the pressure would never clear.
+                var reason = force ? CheckpointReason.Forced
+                    : timerDue ? CheckpointReason.Periodic
+                    : CheckpointReason.DirtyPagePressure;
+
+                // Any cycle does the timer's job, so re-arm from here rather than from the last timer tick.
+                nextTimerDue = Stopwatch.GetTimestamp() + IntervalTicks();
+                RunCheckpointCycle(durableLsn, reason);
             }
 
             // Shutdown: run one final checkpoint cycle to flush all dirty pages.
@@ -486,7 +568,12 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                     var pending = dirtyPages;
                     for (int pass = 0; pass < MaxCoveragePasses; pass++)
                     {
-                        _mmf.WritePagesForCheckpoint(pending, _stagingPool, out var writtenThisPass);
+                        // One slot per page this pass: the generation each page's snapshot covers, sampled under the ACW
+                        // sentinel inside WritePagesForCheckpoint. Publishing THESE values after the fsync is what
+                        // discharges the pages' writeback debt — a page re-modified between its capture and now has a
+                        // higher generation and therefore stays owed, which is CP-04 falling out of the comparison.
+                        var capturedGen = new long[pending.Length];
+                        _mmf.WritePagesForCheckpoint(pending, _stagingPool, out var writtenThisPass, capturedGen);
 
                         if (writtenThisPass > 0)
                         {
@@ -504,7 +591,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
 
                             for (int i = 0; i < writtenThisPass; i++)
                             {
-                                _mmf.DecrementDirty(pending[i]);
+                                _mmf.MarkCaptured(pending[i], capturedGen[i]);
                             }
                         }
 
@@ -586,6 +673,14 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             }
 
             Interlocked.Increment(ref _totalCheckpoints);
+            if (reason == CheckpointReason.DirtyPagePressure)
+            {
+                // Counted HERE, beside the cycle counter, not at the call site: RunCheckpointCycle returns early under
+                // _crashStop without counting, so a call-site increment would let TotalPressureCheckpoints exceed
+                // TotalCheckpoints and make "of those" a lie in exactly the crash-simulation runs someone would be
+                // reading it during.
+                Interlocked.Increment(ref _totalPressureCheckpoints);
+            }
 
             // A cycle that completed without throwing clears a prior Degraded state. A gated cycle (the coverage gate
             // working as designed) is NOT an error, so it also lands here as Ok. Fatal is terminal — never downgraded.

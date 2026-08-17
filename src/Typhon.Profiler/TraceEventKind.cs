@@ -849,7 +849,13 @@ public enum TraceEventKind : byte
     /// <summary>Checkpoint staging-exhaustion backpressure span. Payload: <c>waitMs: u32, exhausted: u8</c>.</summary>
     DurabilityCheckpointBackpressure = 223,
 
-    /// <summary>Checkpoint between-cycle sleep span. Payload: <c>sleepMs: u32, wakeReason: u8</c>.</summary>
+    /// <summary>Checkpoint between-cycle sleep span. Payload: <c>sleepMs: u32</c>, <c>wakeReason: u8</c>
+    /// (0=timer, 1=force, 2=shutdown, 3=dirty-page pressure).</summary>
+    /// <remarks>
+    /// With the dirty-page trigger armed (#830) <c>sleepMs</c> is the POLL interval, not the checkpoint interval, so most
+    /// spans of this kind end with wakeReason 0 and no cycle after them — the loop looked, found no pressure, and went back
+    /// to sleep. Counting these as timer ticks would badly overstate the checkpoint cadence.
+    /// </remarks>
     DurabilityCheckpointSleep = 224,
 
     // ── Durability:Recovery (mix; Start + Record are instants) ──
