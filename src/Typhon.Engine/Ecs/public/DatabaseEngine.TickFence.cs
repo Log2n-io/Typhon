@@ -43,7 +43,7 @@ public partial class DatabaseEngine
             if (ownChangeSet)
             {
                 changeSet.SaveChanges();
-                changeSet.ReleaseExcessDirtyMarks();
+                changeSet.ReleaseDirtyMarks();
             }
         }
 

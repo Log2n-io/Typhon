@@ -543,7 +543,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                             // ChangeSet, fall back to untracked EnsureDirtyAtLeast(1) — same DC outcome, just untracked.
                             if (changeSet == null)
                             {
-                                _store.EnsureDirtyAtLeast(endMemIdx, 1);
+                                _store.MarkPageModified(endMemIdx);
                             }
 
                             _store.UnlatchPageExclusive(endMemIdx);
@@ -572,7 +572,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                     // whether the caller provided a ChangeSet. CP-04 race defence needs DC ≥ 2 BEFORE the checkpoint
                     // snapshot fires, so even one DecrementDirty leaves DC ≥ 1 and the page stays dirty for the next
                     // cycle. With a ChangeSet, two tracked IncrementDirty calls (Add + RegisterReDirty) take DC to 2 —
-                    // ReleaseExcessDirtyMarks then drains the excess via the same primitive the checkpoint uses, no
+                    // ReleaseDirtyMarks then drains the excess via the same primitive the checkpoint uses, no
                     // race (issue #385). Without a ChangeSet, fall back to untracked EnsureDirtyAtLeast(2).
                     if (changeSet != null)
                     {
@@ -581,7 +581,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                     }
                     else
                     {
-                        _store.EnsureDirtyAtLeast(memPageIdx, 2);
+                        _store.MarkPageModified(memPageIdx);
                     }
                 }
 
@@ -615,7 +615,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
             }
             else
             {
-                _store.EnsureDirtyAtLeast(oldTailMemIdx, 1);
+                _store.MarkPageModified(oldTailMemIdx);
             }
             _store.UnlatchPageExclusive(oldTailMemIdx);
         }
@@ -654,7 +654,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
 
             // Durability: see comment in the map-page-update block above — CP-04 race defence needs DC ≥ 2 BEFORE the
             // checkpoint snapshot. With ChangeSet, two tracked IncrementDirty calls (Add + RegisterReDirty) take DC to 2
-            // and ReleaseExcessDirtyMarks drains the excess via the same primitive as the checkpoint — no race.
+            // and ReleaseDirtyMarks drains the excess via the same primitive as the checkpoint — no race.
             // Without ChangeSet, fall back to untracked EnsureDirtyAtLeast(2).
             if (changeSet != null)
             {
@@ -663,7 +663,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
             }
             else
             {
-                _store.EnsureDirtyAtLeast(memPageIdx, 2);
+                _store.MarkPageModified(memPageIdx);
             }
 
             _store.UnlatchPageExclusive(memPageIdx);

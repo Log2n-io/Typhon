@@ -76,7 +76,7 @@ public readonly unsafe struct PersistentStore : IPageStore
     public void IncrementDirty(int memPageIndex) => _mmf.IncrementDirty(memPageIndex);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void EnsureDirtyAtLeast(int memPageIndex, int minValue) => _mmf.EnsureDirtyAtLeast(memPageIndex, minValue);
+    public void MarkPageModified(int memPageIndex) => _mmf.MarkPageModified(memPageIndex);
 
     // ═══════════════════════════════════════════════════════════════════════
     // Slot Ref Counting

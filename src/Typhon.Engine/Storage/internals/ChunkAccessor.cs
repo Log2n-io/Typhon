@@ -140,7 +140,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     ///   rental within the same UoW), <see cref="PagedMMF.IncrementDirty"/> unconditionally bumps DC. This handles
     ///   the race where checkpoint snapshots the page (Step 3) between two accessor rentals: the snapshot is stale,
     ///   so IncrementDirty ensures DC &gt; 1, surviving the pending DecrementDirty (Step 5).
-    ///   <see cref="ChangeSet.ReleaseExcessDirtyMarks"/> caps DC at 1 when the UoW disposes.</item>
+    ///   <see cref="ChangeSet.ReleaseDirtyMarks"/> caps DC at 1 when the UoW disposes.</item>
     /// </list>
     /// </para>
     /// ActiveChunkWriters is decremented in <see cref="CommitChanges"/> for live slots, and deferred
@@ -174,7 +174,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
                     //   so the pending DecrementDirty (Step 5) leaves DC≥1, keeping the page dirty
                     //   for the next checkpoint cycle which will capture our new modifications.
                     // Routed through ChangeSet.RegisterReDirty (was: direct _store.IncrementDirty) so the
-                    // per-page mark count stays accurate — ReleaseExcessDirtyMarks then decrements the
+                    // per-page mark count stays accurate — ReleaseDirtyMarks then decrements the
                     // exact excess via the same conservation-respecting primitive as the checkpoint's
                     // own DecrementDirty, eliminating the cap-vs-decrement race captured in #385.
                     _changeSet.RegisterReDirty(memPageIndex);

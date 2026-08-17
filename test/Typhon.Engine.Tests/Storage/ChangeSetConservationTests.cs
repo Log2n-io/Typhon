@@ -10,13 +10,23 @@ using System.Threading.Tasks;
 namespace Typhon.Engine.Tests;
 
 /// <summary>
-/// Verifies the DirtyCounter (DC) conservation property of <see cref="ChangeSet"/> after the #385 fix that replaced the racing
-/// <c>DecrementDirtyToMin(p, 1)</c> cap with exact per-page <see cref="PagedMMF.DecrementDirty"/> calls. Every
-/// <see cref="ChangeSet.AddByMemPageIndex"/> + <see cref="ChangeSet.RegisterReDirty"/> issues exactly one IncrementDirty;
-/// <see cref="ChangeSet.ReleaseExcessDirtyMarks"/> drains <c>(count - 1)</c> and <see cref="ChangeSet.Reset"/> drains
-/// <c>count</c> per page. The final DC after a checkpoint-style ack should be exactly 0 — same as the pre-fix outcome under
-/// sequential composition, but now race-free.
+/// The mark arithmetic of <see cref="ChangeSet"/>, at the primitive level: a change set takes marks and releases exactly
+/// those marks, and nobody else touches them.
 /// </summary>
+/// <remarks>
+/// <para>
+/// This fixture used to assert the opposite of several of these — that a release leaves one mark behind for the
+/// checkpoint to consume, and that a checkpoint-style <c>DecrementDirty</c> composes with it. That contract could not be
+/// made to balance: marks arrive once per unit of work, the checkpoint acks once per cycle, and no fixed arithmetic
+/// reconciles the two (#824). The counter is now owner-scoped and the writeback obligation lives in the page's
+/// generation pair, so the arithmetic here is simply N in, N out.
+/// </para>
+/// <para>
+/// The concurrency arm below changed shape for the same reason: two owners releasing their own marks at once is the race
+/// worth pinning. A thread that decrements marks it never took is no longer a checkpoint — it is a bug, and the DEBUG
+/// conservation assert in <c>DecrementDirtyByDelta</c> now says so at the call site.
+/// </para>
+/// </remarks>
 [TestFixture]
 class ChangeSetConservationTests
 {
@@ -72,19 +82,19 @@ class ChangeSetConservationTests
         var cs = _pmmf.CreateChangeSet();
         var m = Fetch(1);
         Assert.That(cs.AddByMemPageIndex(m), Is.True);
-        Assert.That(Dc(m), Is.EqualTo(1), "AddByMemPageIndex must IncrementDirty exactly once on first registration");
+        Assert.That(Dc(m), Is.EqualTo(1), "AddByMemPageIndex must take exactly one mark on first registration");
     }
 
     [Test]
-    public void Add_ThenReleaseExcessDirtyMarks_LeavesDC_1()
+    public void Add_ThenReleaseDirtyMarks_LeavesDC_0()
     {
         using var _ep = EpochGuard.Enter(_em);
         var cs = _pmmf.CreateChangeSet();
         var m = Fetch(2);
         cs.AddByMemPageIndex(m);
-        cs.ReleaseExcessDirtyMarks();
-        Assert.That(Dc(m), Is.EqualTo(1),
-            "After one mark + Release: count was 1, excess (count-1)=0 decrements issued, DC stays at 1");
+        cs.ReleaseDirtyMarks();
+        Assert.That(Dc(m), Is.Zero, "one mark taken, one released — the counter is back to baseline");
+        Assert.That(_pmmf.HasWritebackDebt(m), Is.True, "and the page still owes a write, which is what keeps it resident");
     }
 
     [Test]
@@ -95,8 +105,7 @@ class ChangeSetConservationTests
         var m = Fetch(3);
         cs.AddByMemPageIndex(m);
         cs.Reset();
-        Assert.That(Dc(m), Is.EqualTo(0),
-            "Reset must fully undo every mark — DC returns to its pre-UoW baseline (rollback semantics)");
+        Assert.That(Dc(m), Is.Zero, "rollback returns every mark it took");
     }
 
     [Test]
@@ -107,37 +116,42 @@ class ChangeSetConservationTests
         var m = Fetch(4);
         cs.AddByMemPageIndex(m);
         for (var i = 0; i < 5; i++) cs.RegisterReDirty(m);
-        Assert.That(Dc(m), Is.EqualTo(6), "Add (1) + 5 × RegisterReDirty (+5) = DC 6 (each issues one IncrementDirty)");
+        Assert.That(Dc(m), Is.EqualTo(6), "Add (1) + 5 × RegisterReDirty (+5) = 6 marks held");
     }
 
     [Test]
-    public void Add_PlusFiveReDirty_ThenReleaseExcessDirtyMarks_LeavesDC_1()
+    public void Add_PlusFiveReDirty_ThenReleaseDirtyMarks_LeavesDC_0()
     {
         using var _ep = EpochGuard.Enter(_em);
         var cs = _pmmf.CreateChangeSet();
         var m = Fetch(5);
         cs.AddByMemPageIndex(m);
         for (var i = 0; i < 5; i++) cs.RegisterReDirty(m);
-        cs.ReleaseExcessDirtyMarks();
-        Assert.That(Dc(m), Is.EqualTo(1),
-            "Release must drain exactly (count - 1) = 5 IncrementDirty calls, leaving 1 mark for the next checkpoint ack");
+        cs.ReleaseDirtyMarks();
+        Assert.That(Dc(m), Is.Zero, "release drains exactly the 6 marks this change set took, not 5 of them");
     }
 
+    /// <summary>
+    /// The full unit-of-work lifecycle: mark, re-dirty, release. The page is clean of marks and still owed — and it is
+    /// the write, not the release, that settles it.
+    /// </summary>
     [Test]
-    public void Add_PlusFiveReDirty_ThenReleaseAndCheckpointAck_LeavesDC_0()
+    public void Release_LeavesNoMarks_AndTheWriteSettlesTheDebt()
     {
-        // Models the full WAL-mode lifecycle: a UoW touches a page N+1 times, commits (ReleaseExcessDirtyMarks), then the
-        // background checkpoint writes the page and acks (one DecrementDirty). Final DC must be 0 — the page is clean and
-        // evictable.
         using var _ep = EpochGuard.Enter(_em);
         var cs = _pmmf.CreateChangeSet();
         var m = Fetch(6);
         cs.AddByMemPageIndex(m);
         for (var i = 0; i < 5; i++) cs.RegisterReDirty(m);
-        cs.ReleaseExcessDirtyMarks();    // UoW commit
-        _pmmf.DecrementDirty(m);         // Checkpoint write ack (single decrement)
-        Assert.That(Dc(m), Is.EqualTo(0),
-            "Full UoW + checkpoint composition: 6 increments + 5 release decrements + 1 checkpoint decrement = 0");
+        cs.ReleaseDirtyMarks();
+
+        Assert.That(Dc(m), Is.Zero);
+        Assert.That(_pmmf.HasWritebackDebt(m), Is.True, "nothing has written the page yet");
+
+        _pmmf.MarkCaptured(m, _pmmf.WritebackGenOf(m));   // what a checkpoint publishes after its fsync
+
+        Assert.That(_pmmf.HasWritebackDebt(m), Is.False, "written and fsynced — now the page may be evicted");
+        Assert.That(Dc(m), Is.Zero, "and the write never touched the mark counter, which is not its to touch");
     }
 
     [Test]
@@ -149,56 +163,80 @@ class ChangeSetConservationTests
         cs.AddByMemPageIndex(m);
         for (var i = 0; i < 5; i++) cs.RegisterReDirty(m);
         cs.Reset();
-        Assert.That(Dc(m), Is.EqualTo(0),
-            "Rollback must decrement count times, fully reversing every increment regardless of mark depth");
+        Assert.That(Dc(m), Is.Zero, "rollback reverses every mark regardless of depth");
     }
 
+    /// <summary>
+    /// A repeated <c>Add</c> takes no second mark — but it DOES record the modification, because the caller has just
+    /// written to the page again.
+    /// </summary>
+    /// <remarks>
+    /// The second half is the half that bites. Deduplicating the mark is a bookkeeping convenience; deduplicating the
+    /// writeback obligation is a lost write, because a checkpoint may have captured and settled this page between the two
+    /// calls, and the second modification would then never reach disk.
+    /// </remarks>
     [Test]
-    public void Add_TwiceForSamePage_SecondCallReturnsFalse_DC_StaysAt_1()
+    public void Add_TwiceForSamePage_TakesOneMark_ButRecordsBothModifications()
     {
         using var _ep = EpochGuard.Enter(_em);
         var cs = _pmmf.CreateChangeSet();
         var m = Fetch(8);
-        Assert.That(cs.AddByMemPageIndex(m), Is.True, "First add returns true (fresh registration)");
-        Assert.That(cs.AddByMemPageIndex(m), Is.False, "Second add returns false (page already tracked)");
-        Assert.That(Dc(m), Is.EqualTo(1), "Repeated Add calls must NOT additionally increment DC");
+
+        Assert.That(cs.AddByMemPageIndex(m), Is.True, "first add is a fresh registration");
+        _pmmf.MarkCaptured(m, _pmmf.WritebackGenOf(m));   // a checkpoint settles the page between the two adds
+        Assert.That(_pmmf.HasWritebackDebt(m), Is.False, "precondition: settled");
+
+        Assert.That(cs.AddByMemPageIndex(m), Is.False, "second add finds the page already tracked");
+
+        Assert.That(Dc(m), Is.EqualTo(1), "repeated Add must not take a second mark");
+        Assert.That(_pmmf.HasWritebackDebt(m), Is.True, "but the second modification must still be owed, or it is lost");
     }
 
     /// <summary>
-    /// The whole point of the #385 fix: ReleaseExcessDirtyMarks and DecrementDirty must commute under concurrency. Hammer the
-    /// race between many threads to confirm DC never goes below 0 and ends at the expected value.
+    /// Many owners releasing their own marks on the same page at once converge to zero, and never below it.
     /// </summary>
+    /// <remarks>
+    /// This replaces an arm that raced <c>ReleaseDirtyMarks</c> against a bare <c>DecrementDirty</c> standing in for the
+    /// checkpoint. That composition is no longer legal — a thread releasing marks it never took is over-releasing by
+    /// definition, and the DEBUG assert in the primitive now fails the test at the call site rather than letting the
+    /// counter absorb it. The race that remains worth pinning is between genuine co-owners.
+    /// </remarks>
     [Test]
     [Repeat(10)]
-    public void Release_AndConcurrentCheckpointAck_NeverOverDecrements()
+    public void ConcurrentOwners_EachReleasingTheirOwnMarks_ConvergeToZero()
     {
         using var _ep = EpochGuard.Enter(_em);
         const int pageCount = 32;
         const int marksPerPage = 6;
-        var changeSets = new ChangeSet[pageCount];
+        const int ownersPerPage = 2;
         var memIndices = new int[pageCount];
+        var sets = new ChangeSet[pageCount, ownersPerPage];
 
         for (var i = 0; i < pageCount; i++)
         {
             memIndices[i] = Fetch(100 + i);
-            var cs = _pmmf.CreateChangeSet();
-            cs.AddByMemPageIndex(memIndices[i]);
-            for (var j = 0; j < marksPerPage - 1; j++) cs.RegisterReDirty(memIndices[i]);
-            changeSets[i] = cs;
+            for (var o = 0; o < ownersPerPage; o++)
+            {
+                var cs = _pmmf.CreateChangeSet();
+                cs.AddByMemPageIndex(memIndices[i]);
+                for (var j = 0; j < marksPerPage - 1; j++) cs.RegisterReDirty(memIndices[i]);
+                sets[i, o] = cs;
+            }
         }
 
-        // Each page is at DC = marksPerPage (6). Concurrently fire ReleaseExcessDirtyMarks (which decrements 5 times) AND
-        // a single DecrementDirty (modelling checkpoint ack). Final DC must be exactly 0; never negative under any
-        // interleaving.
         Parallel.For(0, pageCount, i =>
         {
             using var barrier = new ManualResetEventSlim(false);
-            var t1 = new Thread(() => { barrier.Wait(); changeSets[i].ReleaseExcessDirtyMarks(); });
-            var t2 = new Thread(() => { barrier.Wait(); _pmmf.DecrementDirty(memIndices[i]); });
-            t1.Start(); t2.Start();
-            Thread.Sleep(1);
+            var threads = new Thread[ownersPerPage];
+            for (var o = 0; o < ownersPerPage; o++)
+            {
+                var cs = sets[i, o];
+                threads[o] = new Thread(() => { barrier.Wait(); cs.ReleaseDirtyMarks(); });
+                threads[o].Start();
+            }
+
             barrier.Set();
-            t1.Join(); t2.Join();
+            foreach (var t in threads) { t.Join(); }
         });
 
         var bad = new ConcurrentBag<(int memIdx, int dc)>();
@@ -207,8 +245,9 @@ class ChangeSetConservationTests
             var d = Dc(memIndices[i]);
             if (d != 0) bad.Add((memIndices[i], d));
         }
+
         Assert.That(bad, Is.Empty,
-            "Concurrent Release + Decrement must converge to DC=0 for every page. Anomalies: " +
+            "every owner released exactly what it took, so the counter must land on 0 under any interleaving. Anomalies: " +
             string.Join(", ", bad.Select(b => $"page {b.memIdx}: DC={b.dc}")));
     }
 }

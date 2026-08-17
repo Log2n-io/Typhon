@@ -150,7 +150,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                     exclusiveCount++;
                     break;
             }
-            if (pi.DirtyCounter > 0)
+            if (HasWritebackDebt(pi.MemPageIndex))
             {
                 dirtyCount++;
             }
@@ -244,7 +244,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                     free++;
                     break;
                 case PageState.Idle:
-                    if (pi.DirtyCounter > 0)
+                    if (HasWritebackDebt(i))
                     {
                         dirtyUsed++;
                     }
@@ -1102,7 +1102,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             if (pi.FilePageIndex == filePageIndex && pi.PageState != PageState.Free)
             {
                 resident = true;
-                dirty = pi.DirtyCounter > 0;
+                dirty = HasWritebackDebt(pi.MemPageIndex);
                 return true;
             }
         }
@@ -1345,7 +1345,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                                 continue;
                             }
 
-                            if (p.DirtyCounter > 0)
+                            if (HasWritebackDebt(i))
                             {
                                 dirtyCount++;
                             }
@@ -1359,6 +1359,13 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                         bpScope.RetryCount = bpCtx.RetryCount;
                         bpScope.DirtyCount = dirtyCount;
                         bpScope.EpochCount = epochCount;
+
+                        // High-water marks, kept because this is the ONLY place the engine looks at the cache while it is
+                        // actually under pressure. Every other gauge samples between units of work, when nothing holds an
+                        // epoch and the numbers are uninformative by construction — which is exactly how a run can report
+                        // zero epoch-held pages in its census for 57,000 ticks and then die naming 17,164 of them.
+                        if (dirtyCount > PeakBackpressureDebt) { PeakBackpressureDebt = dirtyCount; }
+                        if (epochCount > PeakBackpressureEpochHeld) { PeakBackpressureEpochHeld = epochCount; }
 
                         ++_metrics.BackpressureWaitCount;
 
@@ -1396,7 +1403,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             if (evictedFilePageIndex >= 0)
             {
                 // Phase 5: dirtyBit reflects whether the displaced page was dirty at eviction time (still under the lock that gates clean reuse).
-                var dirtyBit = (byte)(pi.DirtyCounter > 0 ? 1 : 0);
+                var dirtyBit = (byte)(HasWritebackDebt(pi.MemPageIndex) ? 1 : 0);
                 TyphonEvent.EmitPageEvicted(evictedFilePageIndex, dirtyBit);
             }
 
@@ -1451,7 +1458,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         // EBR epoch protection prevents eviction of recently-accessed pages (long-term, bounded by re-stamp).
         if (state == PageState.Idle)
         {
-            if (info.SlotRefCount > 0 || info.ActiveChunkWriters > 0 || info.DirtyCounter > 0)
+            if (info.SlotRefCount > 0 || info.ActiveChunkWriters > 0 || info.DirtyCounter > 0 || HasWritebackDebt(info.MemPageIndex))
             {
                 return false;
             }
@@ -1481,7 +1488,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             {
                 // Re-check all protection layers under lock (may have changed since first pass)
                 if (info.PageState == PageState.Idle &&
-                    (info.SlotRefCount > 0 || info.ActiveChunkWriters > 0 || info.DirtyCounter > 0 || info.AccessEpoch >= minActiveEpoch))
+                    (info.SlotRefCount > 0 || info.ActiveChunkWriters > 0 || info.DirtyCounter > 0 || HasWritebackDebt(info.MemPageIndex)
+                     || info.AccessEpoch >= minActiveEpoch))
                 {
                     return false;
                 }
@@ -1504,6 +1512,12 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 info.ResetClockSweepCounter();
                 info.FilePageIndex = -1;
                 info.AccessEpoch = 0;  // Clear epoch tag on reallocation
+
+                // Clear the writeback ledger with the slot. The guards above already established that this slot owes nothing (both gens equal), so this is a
+                // normalisation, not a discard — but leaving a nonzero pair behind would make the NEXT occupant inherit a stale "already captured at gen N"
+                // claim, and the first N modifications to a freshly loaded page would then look durable when they are not.
+                Volatile.Write(ref info.WritebackGen, 0);
+                Volatile.Write(ref info.CapturedGen, 0);
                 info.PageState = PageState.Allocating;
                 Interlocked.Decrement(ref _metrics.FreeMemPageCount);
                 Debug.Assert(info.ExclusiveLatchDepth == 0);
@@ -1532,7 +1546,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <summary>
     /// Rent a reusable <see cref="ChangeSet"/> from the per-engine pool, falling back to a fresh allocation when the pool is empty. Caller must call
     /// <see cref="ReturnChangeSet"/> exactly once when done; pages tracked by the rented ChangeSet must have their dirty marks resolved
-    /// (via SaveChangesAsync / ReleaseExcessDirtyMarks / Reset) BEFORE returning, otherwise the next renter will receive stale state.
+    /// (via SaveChangesAsync / ReleaseDirtyMarks / Reset) BEFORE returning, otherwise the next renter will receive stale state.
     /// </summary>
     public ChangeSet RentChangeSet() => _changeSetPool.TryTake(out var cs) ? cs : new ChangeSet(this);
 
@@ -1908,6 +1922,235 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         return (n, _memPagesInfo.Length, first);
     }
 
+    /// <summary>
+    /// Records that this page's bytes changed, so the next checkpoint must write it and no one may evict it until then.
+    /// </summary>
+    /// <remarks>
+    /// The whole writeback contract is this one bump. It is idempotent in effect (any number of modifications between two
+    /// captures owe exactly one write) but strictly ordered against the capture: a bump that lands after the checkpoint
+    /// sampled <see cref="PageInfo.WritebackGen"/> leaves the page owed, which is precisely CP-04's re-dirty defence.
+    /// Callers that also need eviction protection for a mutation still in flight take a ChangeSet mark on top — that is a
+    /// separate concern and a separate field.
+    /// </remarks>
+    internal void MarkPageModified(int memPageIndex)
+    {
+        var pi = _memPagesInfo[memPageIndex];
+        Interlocked.Increment(ref pi.WritebackGen);
+    }
+
+    /// <summary>
+    /// Publishes that the bytes this page held at <paramref name="capturedGen"/> are durable on the data file.
+    /// </summary>
+    /// <remarks>
+    /// Monotonic: a stale or duplicate publication can never walk <see cref="PageInfo.CapturedGen"/> backwards, so two
+    /// writers racing on the same page settle on the newer capture rather than resurrecting an older one. Called only
+    /// after the fsync that made <paramref name="capturedGen"/>'s bytes durable (CP-03).
+    /// </remarks>
+    internal void MarkCaptured(int memPageIndex, long capturedGen)
+    {
+        var pi = _memPagesInfo[memPageIndex];
+        SpinWait sw = default;
+        while (true)
+        {
+            var current = Volatile.Read(ref pi.CapturedGen);
+            if (current >= capturedGen)
+            {
+                return;
+            }
+
+            if (Interlocked.CompareExchange(ref pi.CapturedGen, capturedGen, current) == current)
+            {
+                if (Volatile.Read(ref pi.DirtyCounter) == 0 && !HasWritebackDebt(memPageIndex))
+                {
+                    _backpressureStrategy.SignalPageAvailable();
+                }
+                return;
+            }
+
+            sw.SpinOnce();
+        }
+    }
+
+    /// <summary>Whether this page holds bytes that are not yet on the data file.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal bool HasWritebackDebt(int memPageIndex)
+    {
+        var pi = _memPagesInfo[memPageIndex];
+        return Volatile.Read(ref pi.WritebackGen) != Volatile.Read(ref pi.CapturedGen);
+    }
+
+    /// <summary>Live <see cref="PageInfo.WritebackGen"/> for a page. Diagnostic.</summary>
+    internal long WritebackGenOf(int memPageIndex) => Volatile.Read(ref _memPagesInfo[memPageIndex].WritebackGen);
+
+    /// <summary>Live <see cref="PageInfo.CapturedGen"/> for a page. Diagnostic.</summary>
+    internal long CapturedGenOf(int memPageIndex) => Volatile.Read(ref _memPagesInfo[memPageIndex].CapturedGen);
+
+    /// <summary>Pages owing a writeback, i.e. modified since their last durable capture. Diagnostic.</summary>
+    internal int CountPagesWithWritebackDebt()
+    {
+        var n = 0;
+        for (var i = 0; i < _memPagesInfo.Length; i++)
+        {
+            if (HasWritebackDebt(i))
+            {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /// <summary>
+    /// Percentage (0-100) of the page cache's slots that owe a writeback.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Denominated in TOTAL slots, not resident ones. The question this answers is "can the next allocation find a slot
+    /// to take", and a Free slot is as available as an evictable one — measuring against residency would report 100 %
+    /// on a cache that is mostly empty and trigger checkpoints on a database that has barely started.
+    /// </para>
+    /// <para>
+    /// One linear pass, same shape and cost as <see cref="CollectDirtyMemPageIndices"/>, which already runs once per
+    /// checkpoint cycle. Called from the checkpoint thread's poll, so it is off every hot path. A maintained counter was
+    /// considered and rejected: it would have to detect the clean→owed edge inside <see cref="MarkPageModified"/> on the
+    /// commit path, and a racing counter that drifts is worse than an exact scan nobody is waiting on.
+    /// </para>
+    /// </remarks>
+    internal int WritebackDebtPercent()
+    {
+        var pages = _memPagesInfo;
+        if (pages == null || pages.Length == 0)
+        {
+            return 0;
+        }
+
+        // Read through the captured array, NOT via HasWritebackDebt(i) — that helper re-reads _memPagesInfo on every
+        // call, and Dispose nulls it. This runs on the checkpoint thread, which is still polling while the engine tears
+        // down, so a scan that re-read the field would NRE on a perfectly ordinary shutdown.
+        var owed = 0;
+        for (var i = 0; i < pages.Length; i++)
+        {
+            var pi = pages[i];
+            if (pi != null && Volatile.Read(ref pi.WritebackGen) != Volatile.Read(ref pi.CapturedGen))
+            {
+                owed++;
+            }
+        }
+
+        return (int)((owed * 100L) / pages.Length);
+    }
+
+    /// <summary>Lowest-indexed resident (non-Free) page, or -1. Test seam.</summary>
+    /// <remarks>
+    /// Tests that need "a real page" must ask for one rather than inventing an index: a synthetic index runs off the end
+    /// of the live page-state array and tears the host down instead of failing an assertion.
+    /// </remarks>
+    internal int FirstResidentPage()
+    {
+        for (var i = 0; i < _memPagesInfo.Length; i++)
+        {
+            if (_memPagesInfo[i].PageState != PageState.Free && _memPagesInfo[i].FilePageIndex > 0)
+            {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /// <summary>Lowest-indexed resident page owing a writeback, or -1. Diagnostic / test seam.</summary>
+    internal int FirstPageWithWritebackDebt()
+    {
+        for (var i = 0; i < _memPagesInfo.Length; i++)
+        {
+            if (_memPagesInfo[i].PageState != PageState.Free && HasWritebackDebt(i))
+            {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /// <summary>Total page-cache slots, resident or not. Diagnostic.</summary>
+    internal int PageCacheSlotCountForDiagnostics => _memPagesInfo?.Length ?? 0;
+
+    /// <summary>Highest writeback-debt page count observed while the cache was under back-pressure. Diagnostic.</summary>
+    internal int PeakBackpressureDebt;
+
+    /// <summary>Highest epoch-held page count observed while the cache was under back-pressure. Diagnostic.</summary>
+    /// <remarks>
+    /// Epoch holds are bounded by how long a scope stays open, not by anything the storage layer does — so unlike debt or
+    /// writer registrations, this number cannot be brought down by checkpointing harder. A high value here means some
+    /// scope is living long enough to pin everything it has touched, and the fix is in the scope's lifetime.
+    /// </remarks>
+    internal int PeakBackpressureEpochHeld;
+
+    /// <summary>
+    /// The full unevictability breakdown, taken in ONE pass so the parts are mutually consistent.
+    /// </summary>
+    /// <remarks>
+    /// A page is unevictable if ANY of the four holds, so the individual counts overlap and do not sum — <c>Unevictable</c>
+    /// is the union and is the only one that answers "how much of the cache is unavailable". Reporting the parts
+    /// separately is what distinguishes the failure modes: writeback debt means the checkpoint is behind, ACW means a
+    /// writer is mid-mutation, and epoch means some scope is old enough to pin everything touched since it opened —
+    /// which, unlike the other three, is bounded by transaction LIFETIME rather than by anything the storage layer does.
+    /// </remarks>
+    internal (int Debt, int Acw, int SlotRef, int EpochHeld, int Unevictable, int Total) CountUnevictablePages()
+    {
+        var pages = _memPagesInfo;
+        if (pages == null)
+        {
+            return (0, 0, 0, 0, 0, 0);
+        }
+
+        var minActiveEpoch = EpochManager?.MinActiveEpoch ?? long.MaxValue;
+        int debt = 0, acw = 0, slotRef = 0, epochHeld = 0, unevictable = 0, total = 0;
+
+        // Captured array throughout — see WritebackDebtPercent: Dispose nulls the field, and every helper that re-reads
+        // it is a shutdown NRE waiting for the right interleaving.
+        for (var i = 0; i < pages.Length; i++)
+        {
+            var pi = pages[i];
+            if (pi == null || pi.PageState == PageState.Free)
+            {
+                continue;
+            }
+
+            total++;
+            var d = Volatile.Read(ref pi.WritebackGen) != Volatile.Read(ref pi.CapturedGen);
+            var a = Volatile.Read(ref pi.ActiveChunkWriters) != 0;
+            var s = Volatile.Read(ref pi.SlotRefCount) > 0;
+            var e = Volatile.Read(ref pi.AccessEpoch) >= minActiveEpoch;
+
+            if (d) { debt++; }
+            if (a) { acw++; }
+            if (s) { slotRef++; }
+            if (e) { epochHeld++; }
+            if (d || a || s || e) { unevictable++; }
+        }
+
+        return (debt, acw, slotRef, epochHeld, unevictable, total);
+    }
+
+    /// <summary>Pages holding outstanding mutator marks. At quiesce this must be zero — see the conservation rule.</summary>
+    internal int CountPagesWithDirtyMarks()
+    {
+        var n = 0;
+        for (var i = 0; i < _memPagesInfo.Length; i++)
+        {
+            if (Volatile.Read(ref _memPagesInfo[i].DirtyCounter) != 0)
+            {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /// <summary>
+    /// Takes one mutator mark on a page: it is being modified, and the modifier will release the mark when it is done.
+    /// </summary>
+    /// <remarks>
+    /// Also records the modification (<see cref="MarkPageModified"/>) — every mark implies changed bytes, and keeping the
+    /// two together here means no caller can take a mark and forget to owe the write.
+    /// </remarks>
     internal void IncrementDirty(int memPageIndex)
     {
         var pi = _memPagesInfo[memPageIndex];
@@ -1916,9 +2159,14 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         {
             RecordDcTrace(+1);
         }
+        Interlocked.Increment(ref pi.WritebackGen);
         Interlocked.Increment(ref pi.DirtyCounter);
     }
 
+    /// <summary>
+    /// Releases one mutator mark. Only the ChangeSet that took the mark may call this, and it must release exactly as many
+    /// as it took — the writeback obligation is <see cref="PageInfo.WritebackGen"/>'s business, never this counter's.
+    /// </summary>
     internal void DecrementDirty(int memPageIndex)
     {
         var pi = _memPagesInfo[memPageIndex];
@@ -1927,7 +2175,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             RecordDcTrace(-1);
         }
         var newVal = Interlocked.Decrement(ref pi.DirtyCounter);
-        if (newVal == 0)
+        Debug.Assert(newVal >= 0, $"DirtyCounter went negative on page {memPageIndex}: a mark was released twice, or by someone who never took it.");
+        if (newVal == 0 && !HasWritebackDebt(memPageIndex))
         {
             _backpressureStrategy.SignalPageAvailable();
         }
@@ -2144,79 +2393,18 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     }
 
     /// <summary>
-    /// Raises <see cref="PageInfo.DirtyCounter"/> to <paramref name="minValue"/> if it is currently below that threshold.
-    /// Used by <see cref="ChunkAccessor{TStore}.MarkSlotDirty"/> when re-dirtying a page already tracked by the ChangeSet:
-    /// <see cref="ChangeSet.AddByMemPageIndex"/> is idempotent (HashSet dedup), so subsequent accessor rentals
-    /// within the same UoW don't increment DC. If checkpoint has drained DC to 0 in the meantime, this ensures
-    /// the page stays dirty (DC &gt;= 1) to prevent premature eviction by the clock-sweep.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal void EnsureDirtyAtLeast(int memPageIndex, int minValue)
-    {
-        var pi = _memPagesInfo[memPageIndex];
-        SpinWait sw = default;
-        while (true)
-        {
-            var current = pi.DirtyCounter;
-            if (current >= minValue)
-            {
-                return;
-            }
-
-            if (Interlocked.CompareExchange(ref pi.DirtyCounter, minValue, current) == current)
-            {
-                if (DirtyTracePage == memPageIndex)
-                {
-                    RecordDcTrace(minValue - current);   // raising DC counts as increments, one per unit raised
-                }
-                return;
-            }
-
-            sw.SpinOnce();
-        }
-    }
-
-    internal void DecrementDirtyToMin(int memPageIndex, int minValue)
-    {
-        var pi = _memPagesInfo[memPageIndex];
-        SpinWait sw = default;
-        while (true)
-        {
-            var current = pi.DirtyCounter;
-            if (current <= minValue)
-            {
-                return;
-            }
-
-            if (Interlocked.CompareExchange(ref pi.DirtyCounter, minValue, current) == current)
-            {
-                if (DirtyTracePage == memPageIndex)
-                {
-                    RecordDcTrace(minValue - current);   // clamping decrement: record what was ACTUALLY applied
-                }
-                if (minValue == 0)
-                {
-                    _backpressureStrategy.SignalPageAvailable();
-                }
-
-                return;
-            }
-
-            sw.SpinOnce();
-        }
-    }
-
-    /// <summary>
-    /// Atomically decrements <see cref="PageInfo.DirtyCounter"/> by up to <paramref name="delta"/>, clamping at 0. Used by
-    /// <see cref="ChangeSet.ReleaseExcessDirtyMarks"/> and <see cref="ChangeSet.Reset"/> to drain an exact, known number of
-    /// previously-tracked dirty marks in a single CAS operation — O(1) regardless of <paramref name="delta"/> size, whereas
-    /// looping <see cref="DecrementDirty"/> calls is O(<paramref name="delta"/>) and dominates at scale (caller's tracked
-    /// count can reach thousands on hot pages in a long-running UoW).
+    /// Releases <paramref name="delta"/> mutator marks that this caller previously took, in one CAS.
     /// </summary>
     /// <remarks>
-    /// Conservation-respecting in concert with <see cref="DecrementDirty"/>: both are CAS-retry primitives reading
-    /// <c>current</c> and computing a known target. A concurrent <c>DecrementDirty(-1)</c> simply causes one extra retry of
-    /// this call (or vice versa); the final DC equals <c>original - sum-of-deltas</c>, never below 0.
+    /// <para>
+    /// O(1) regardless of <paramref name="delta"/>, where looping <see cref="DecrementDirty"/> is O(delta) and a hot page
+    /// in a long-running unit of work can carry thousands of marks.
+    /// </para>
+    /// <para>
+    /// Callers must pass exactly the number of marks they hold. The clamp at zero is a belt-and-braces guard against a
+    /// caller that over-releases, not a licence to: an over-release is a conservation bug and the DEBUG assert below names
+    /// it rather than absorbing it silently, which is how the old cap-to-1 primitive hid #385 for so long.
+    /// </para>
     /// </remarks>
     internal void DecrementDirtyByDelta(int memPageIndex, int delta)
     {
@@ -2225,24 +2413,37 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             return;
         }
 
-        var pi = _memPagesInfo[memPageIndex];
+        // The page table is gone: the store was disposed while a unit of work was still open, which is legal and
+        // deliberately exercised (a transaction outliving Dispose). There is no counter left to balance and nothing left
+        // to protect, so releasing is vacuously complete. Checked here rather than at every call site because release is
+        // the ONE operation that can legitimately arrive after teardown — a mark is taken while the store is alive by
+        // construction, but it is returned whenever its owner happens to unwind.
+        var pages = _memPagesInfo;
+        if (pages == null)
+        {
+            return;
+        }
+
+        var pi = pages[memPageIndex];
         SpinWait sw = default;
         while (true)
         {
-            var current = pi.DirtyCounter;
+            var current = Volatile.Read(ref pi.DirtyCounter);
             if (current == 0)
             {
+                Debug.Assert(false, $"DirtyCounter release of {delta} on page {memPageIndex} found the counter already at 0 — marks were released by someone who did not take them.");
                 return;
             }
 
+            Debug.Assert(current >= delta, $"DirtyCounter release of {delta} on page {memPageIndex} exceeds the {current} outstanding marks — releasing marks taken by another owner.");
             var newVal = current > delta ? current - delta : 0;
             if (Interlocked.CompareExchange(ref pi.DirtyCounter, newVal, current) == current)
             {
                 if (DirtyTracePage == memPageIndex)
                 {
-                    RecordDcTrace(newVal - current);   // clamping decrement: record what was ACTUALLY applied
+                    RecordDcTrace(newVal - current);
                 }
-                if (newVal == 0)
+                if (newVal == 0 && !HasWritebackDebt(memPageIndex))
                 {
                     _backpressureStrategy.SignalPageAvailable();
                 }
@@ -2279,7 +2480,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         for (int i = 0; i < MemPagesCount; i++)
         {
             var pi = _memPagesInfo[i];
-            if (pi != null && pi.DirtyCounter > 0 && pi.PageState != PageState.Free && !IsExternallyPersisted(pi.FilePageIndex))
+            if (pi != null && HasWritebackDebt(i) && pi.PageState != PageState.Free && !IsExternallyPersisted(pi.FilePageIndex))
             {
                 dirty.Add(i);
             }
@@ -2399,15 +2600,19 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// Pages with an actively-held writer (odd ModificationCounter for &gt;100ms) are skipped.</param>
     /// <param name="stagingPool">Pool from which to rent page-sized staging buffers.</param>
     /// <param name="writtenCount">Number of pages actually written (may be less than input length if pages were skipped).</param>
-    /// <param name="capturedDirty">
+    /// <param name="capturedGen">
     /// Optional, aligned with the WRITTEN prefix of <paramref name="memPageIndices"/> on return: the page's
-    /// DirtyCounter as observed at the instant of capture, under the ACW sentinel. The checkpoint must ack by THIS
-    /// value rather than by 1 — a page touched by K units of work inside one cycle carries K outstanding marks and
-    /// the capture covers all of them, so a fixed -1 leaves K-1 behind permanently and the page can never be
-    /// evicted. Marks that arrive AFTER the capture are deliberately not covered: they are exactly CP-04's
-    /// re-dirty defence and must survive the ack so the next cycle rewrites the page.
+    /// <see cref="PageInfo.WritebackGen"/> as observed at the instant of capture, under the ACW sentinel. After the fsync
+    /// that makes these bytes durable, the caller publishes each value via <see cref="MarkCaptured"/> — which is what
+    /// discharges the page's writeback debt.
+    /// <para>
+    /// Sampling BEFORE the copy is what makes CP-04's re-dirty defence automatic: a modification that lands between this
+    /// read and the copy bumps <see cref="PageInfo.WritebackGen"/> past the sampled value, so publishing the sample leaves
+    /// the page still owed and the next cycle rewrites it. Sampling after the copy would discharge a debt the copy does
+    /// not cover, which is the lost-write shape of #385.
+    /// </para>
     /// </param>
-    unsafe internal void WritePagesForCheckpoint(int[] memPageIndices, StagingBufferPool stagingPool, out int writtenCount, int[] capturedDirty = null)
+    unsafe internal void WritePagesForCheckpoint(int[] memPageIndices, StagingBufferPool stagingPool, out int writtenCount, long[] capturedGen = null)
     {
         writtenCount = 0;
 
@@ -2472,9 +2677,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // Rent a staging buffer and snapshot the live page via seqlock.
             // No concurrent OLC writers can start while ACW = -1 (they spin-wait).
             // Page-level latches (TryLatchPageExclusive) are still detected by the seqlock.
-            // Read under the ACW sentinel (ACW == -1 blocks new writers), so this is the mark count the capture
-            // below actually covers — not a racing sample.
-            var dcAtCapture = Volatile.Read(ref pi.DirtyCounter);
+            // Read under the ACW sentinel (ACW == -1 blocks new writers), so this is the generation the copy below
+            // actually covers — not a racing sample.
+            var genAtCapture = Volatile.Read(ref pi.WritebackGen);
 
             using var staging = stagingPool.Rent();
             if (!CopyPageWithSeqlock(livePageAddr, staging.Pointer, memPageIndex))
@@ -2529,9 +2734,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // caller can retry exactly the skipped tail in a later pass (coverage gate, CK-03) instead of losing track of which pages still need writing.
             memPageIndices[i] = memPageIndices[writtenCount];
             memPageIndices[writtenCount] = memPageIndex;
-            if (capturedDirty != null && writtenCount < capturedDirty.Length)
+            if (capturedGen != null && writtenCount < capturedGen.Length)
             {
-                capturedDirty[writtenCount] = dcAtCapture;
+                capturedGen[writtenCount] = genAtCapture;
             }
             writtenCount++;
 
@@ -2564,6 +2769,16 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
         // We want to generate as few IO operations as possible, so we sort the pages to identify the ones that are contiguous in the file
         Array.Sort(memPageIndices, (x, y) => x - y);
+
+        // Sample each page's writeback generation BEFORE anything is written, and publish these exact values once the fsync
+        // below has made the bytes durable. Same contract as the checkpoint's capture, same reason: a modification landing
+        // after this sample leaves the page owed, so it is rewritten rather than silently treated as clean. Sampled after the
+        // sort so the array stays index-aligned with memPageIndices.
+        var gensAtEntry = new long[memPageIndices.Length];
+        for (int i = 0; i < memPageIndices.Length; i++)
+        {
+            gensAtEntry[i] = Volatile.Read(ref _memPagesInfo[memPageIndices[i]].WritebackGen);
+        }
 
         // CK-05 (C2): protected segment-directory pages must be written to their ALTERNATE slot (gen+1 + CRC + fsync + flip,
         // all inside PersistProtectedPage) — they cannot be coalesced with their in-place neighbors. Handle them individually
@@ -2629,10 +2844,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
         if (normalPages.Length == 0)
         {
-            // Every page was a protected directory page — already written + fsynced + flipped. Just release DirtyCounter.
-            foreach (int memPageIndex in memPageIndices)
+            // Every page was a protected directory page — already written + fsynced + flipped. Discharge their debt.
+            for (int i = 0; i < memPageIndices.Length; i++)
             {
-                DecrementDirty(memPageIndex);
+                MarkCaptured(memPageIndices[i], gensAtEntry[i]);
             }
 
             if (flushSpanId != 0)
@@ -2730,13 +2945,13 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // risking stale reload after eviction if the OS hasn't flushed to stable media.
             FlushToDisk();
 
-            // Now the batch's bytes are durable — advance the file-size watermark BEFORE any page becomes evictable (DecrementDirty below).
-            // This keeps _fileSize honest: the read gate never authorizes a disk read of a not-yet-written page (fixes the short-read race).
+            // Now the batch's bytes are durable — advance the file-size watermark BEFORE any page becomes evictable (the debt discharge below). This keeps
+            // _fileSize honest: the read gate never authorizes a disk read of a not-yet-written page (fixes the short-read race).
             TrackFileGrowth(batchEndOffset);
 
-            foreach (int memPageIndex in memPageIndices)
+            for (int i = 0; i < memPageIndices.Length; i++)
             {
-                DecrementDirty(memPageIndex);
+                MarkCaptured(memPageIndices[i], gensAtEntry[i]);
             }
 
             // Completion event: captures the full "kickoff → writes done → fsync done" duration. No-op when either Flush or FlushCompleted

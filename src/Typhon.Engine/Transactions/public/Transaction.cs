@@ -200,6 +200,11 @@ public unsafe partial class Transaction : EntityAccessor
         // stays open so a DefaultDiscipline=Commit component can escalate the whole tx on first touch (CM-02).
         _discipline = discipline;
         _didInPlaceSvWrite = false;
+        // A unit of work in Deferred/GroupCommit mode owns a shared ChangeSet and releases it when it disposes. In
+        // Immediate mode it has none, so the transaction makes its own — and must therefore release it itself, which
+        // Dispose now does. Nothing did before: every mark taken by every Immediate-mode transaction was stranded for the
+        // life of the process, which is a far larger leak than the per-cycle drip #824 was opened for.
+        _ownsChangeSet = !readOnly && uow?.ChangeSet == null;
         _changeSet = readOnly ? null : (uow?.ChangeSet ?? _dbe.MMF.CreateChangeSet());
         State = TransactionState.Created;
         TSN = tsn;
@@ -326,6 +331,14 @@ public unsafe partial class Transaction : EntityAccessor
         ProcessDeferredCleanups();
         dbe.LogTxDispose(tsn, "FlushAccessors");
         FlushAccessors();
+
+        // Release the marks of a ChangeSet this transaction owns — after the flush and the deferred cleanups above, both of which may still dirty pages through
+        // it. A shared UoW ChangeSet is NOT released here: its owner does that on its own dispose, and releasing another owner's marks is the over-release that
+        // #385 was.
+        if (_ownsChangeSet)
+        {
+            _changeSet?.ReleaseDirtyMarks();
+        }
         // Mark disposed BEFORE ExitEpochAndRemove: Remove() pools the object, and a lock-free
         // CreateTransaction can immediately dequeue and Init it (_isDisposed = false). If we set _isDisposed = true AFTER Remove returns, we'd overwrite the
         // new owner's flag, causing their Dispose to skip Remove — leaking the chain node.
@@ -1612,7 +1625,7 @@ public unsafe partial class Transaction : EntityAccessor
                 ChunkBasedSegment<PersistentStore>.ExitBatchMode();
                 ChunkBasedSegment<PersistentStore>.EnterBatchMode();
 
-                _changeSet.ReleaseExcessDirtyMarks();
+                _changeSet.ReleaseDirtyMarks();
             }
 
             // Record the publish descriptor — drained by PublishComponent after the WAL Append (AP-01).

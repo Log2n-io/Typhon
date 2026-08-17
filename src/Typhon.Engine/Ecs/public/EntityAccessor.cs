@@ -70,6 +70,16 @@ public partial class EntityAccessor : IDisposable
     private protected ChangeSet _changeSet;
 
     /// <summary>
+    /// True when <see cref="_changeSet"/> was created by this accessor and must therefore be released by it.
+    /// </summary>
+    /// <remarks>
+    /// False when the ChangeSet belongs to an enclosing unit of work, which releases it on its own dispose. Releasing
+    /// another owner's marks destroys protection for work still in flight (#385); never releasing one's own strands every
+    /// mark for the life of the process (#824). The flag is what keeps the two apart.
+    /// </remarks>
+    private protected bool _ownsChangeSet;
+
+    /// <summary>
     /// Effective commit discipline for <see cref="StorageMode.SingleVersion"/> writes in this accessor's scope.
     /// Always <see cref="CommitDiscipline.TickFence"/> for a bare <see cref="EntityAccessor"/> (parallel workers never stage); a <see cref="Transaction"/>
     /// resolves it from the explicit argument or escalates on first touch of a <see cref="CommitDiscipline.Commit"/> component (CM-02).
@@ -122,6 +132,7 @@ public partial class EntityAccessor : IDisposable
         _owningThreadId = Environment.CurrentManagedThreadId;
         _entityOperationCount = 0;
         _changeSet = _dbe.MMF.CreateChangeSet();
+        _ownsChangeSet = true;
         TSN = tsn;
     }
 
@@ -270,7 +281,7 @@ public partial class EntityAccessor : IDisposable
             }
         }
 
-        _changeSet?.ReleaseExcessDirtyMarks();
+        _changeSet?.ReleaseDirtyMarks();
         var newEpoch = _epochManager.RefreshScope();
         ChunkBasedSegment<PersistentStore>.RefreshWarmCacheEpoch(newEpoch);
     }
@@ -338,7 +349,7 @@ public partial class EntityAccessor : IDisposable
             }
         }
 
-        _changeSet?.ReleaseExcessDirtyMarks();
+        _changeSet?.ReleaseDirtyMarks();
 
         // Update snapshot — ComponentInfo cache stays warm (ChunkAccessor page caches preserved)
         TSN = newTsn;
@@ -425,7 +436,7 @@ public partial class EntityAccessor : IDisposable
         // accessors from the cleanup thread (different from the creating thread).
         // Transaction.Dispose overrides and adds its own affinity check + epoch exit.
         FlushAccessors();
-        _changeSet?.ReleaseExcessDirtyMarks();
+        _changeSet?.ReleaseDirtyMarks();
         _isDisposed = true;
         // No epoch exit here — InitLightweight does not enter a persistent epoch scope.
         // Transaction.Dispose overrides and exits its own epoch scope.

@@ -293,12 +293,11 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
                 return false; // Already at maximum capacity
             }
 
-            // Prefer the caller's ChangeSet so that DirtyCounter increments for new pages are tracked by the UoW lifecycle
-            // (ReleaseExcessDirtyMarks caps at 1, checkpoint writes correct data, DC→0). When no ChangeSet is provided,
-            // a local one ensures pages are at least marked dirty — but these DC increments are "orphaned" (no UoW manages
-            // their lifecycle), meaning a single checkpoint cycle can write zeros and decrement DC to 0, making the page
-            // evictable before the caller protects it.
-            var effectiveChangeSet = changeSet ?? _store.CreateChangeSet();
+            // Prefer the caller's ChangeSet, whose unit of work will release the marks taken below. Without one we make a
+            // local set and release it ourselves before returning — it used to be created and simply abandoned, so every
+            // grow without a caller ChangeSet stranded one mark per new page for the lifetime of the process.
+            var localChangeSet = changeSet == null ? _store.CreateChangeSet() : null;
+            var effectiveChangeSet = changeSet ?? localChangeSet;
 
             // Grow the underlying logical segment (thread-safe, will allocate new pages)
             base.Grow(newLength, true, effectiveChangeSet);
@@ -312,14 +311,10 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
                     page.Metadata<long>(0, _bitmapLongsOther).Clear();
                     effectiveChangeSet?.AddByMemPageIndex(memPageIdx);
 
-                    // Protect new pages against the checkpoint race during Grow→first-access window.
-                    // After base.Grow unlatched each page (DC=1, ACW=0), checkpoint may have snapshot zeros,
-                    // written to disk, and DecrementDirty→DC=0 before we re-latched here. The ChangeSet add
-                    // above is idempotent (already tracked from base.Grow), so it doesn't re-increment DC.
-                    // EnsureDirtyAtLeast(2) guarantees DC survives one checkpoint cycle: checkpoint decrements
-                    // to 1 (page stays non-evictable) until AllocateBuffer's GetChunkAddress establishes
-                    // ACW>0 protection.
-                    _store.EnsureDirtyAtLeast(memPageIdx, 2);
+                    // The clear above happened after base.Grow unlatched the page, so a checkpoint may already have
+                    // snapshotted the pre-clear bytes. Record the modification so the page stays owed and is rewritten —
+                    // the write in flight covers an older generation and cannot discharge this one.
+                    _store.MarkPageModified(memPageIdx);
 
                     _store.UnlatchPageExclusive(memPageIdx);
                 }
@@ -378,6 +373,10 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
                 }
             }
             spliced:
+
+            // Release the marks the local set took. The new pages remain protected by their writeback debt until a
+            // checkpoint writes them, so nothing here depends on holding a counted mark past this point.
+            localChangeSet?.ReleaseDirtyMarks();
 
             return true;
         }
@@ -446,7 +445,7 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
             return; // already reserved
         }
 
-        _store.EnsureDirtyAtLeast(memPageIdx, 1);
+        _store.MarkPageModified(memPageIdx);
         Interlocked.Increment(ref _allocatedCount);
     }
 
@@ -586,21 +585,21 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
                     // restores bit=0 from disk — silently REVERTING our allocation. A subsequent AllocateChunk sees bit=0 and hands the SAME chunkId out a
                     // second time (the DOUBLE-ALLOC we caught at scale with the ground-truth tracker). The fix: register the metadata page with the ChangeSet
                     // (its AddByMemPageIndex does IncrementDirty on first registration); on re-registration, do an explicit IncrementDirty per CP-04.
-                    // ReleaseExcessDirtyMarks caps inflation back to 1 on UoW dispose. Without a ChangeSet (callers that don't care about CP-04), fall back to
+                    // ReleaseDirtyMarks caps inflation back to 1 on UoW dispose. Without a ChangeSet (callers that don't care about CP-04), fall back to
                     // the old EnsureDirtyAtLeast(1) — keeps the legacy behaviour for unit-test paths.
                     if (changeSet != null)
                     {
                         if (!changeSet.AddByMemPageIndex(memPageIdx))
                         {
                             // Re-dirty path — routed through ChangeSet.RegisterReDirty (was: direct _store.IncrementDirty) so the
-                            // per-page mark count is tracked accurately and ReleaseExcessDirtyMarks can drain the exact excess
+                            // per-page mark count is tracked accurately and ReleaseDirtyMarks can drain the exact excess
                             // via DecrementDirty (matching the checkpoint's own ack primitive). See #385.
                             changeSet.RegisterReDirty(memPageIdx);
                         }
                     }
                     else
                     {
-                        _store.EnsureDirtyAtLeast(memPageIdx, 1);
+                        _store.MarkPageModified(memPageIdx);
                     }
                     Interlocked.Increment(ref _allocatedCount);
 
@@ -727,12 +726,17 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
             return;
         }
 
-        // CRITICAL (#301): same CP-04 race as AllocateChunk. EnsureDirtyAtLeast(1) is a no-op when DC≥1, so if a concurrent checkpoint snapshotted the bitmap
-        // before our Interlocked.And, the snapshot has bit=1 (pre-AND, still allocated); after fsync + DC--, eviction + reload silently REVERTS our free.
-        // FreeChunk's signature doesn't take a ChangeSet, so we can't register the page for ReleaseExcessDirtyMarks capping here — but IncrementDirty is still
-        // the correct choice: it keeps the bit-clear durable. DC inflation on the metadata pages is bounded in practice by the next per-UoW
-        // ReleaseExcessDirtyMarks run (the metadata page is also touched via the chunk's content writes, which DO register it).
-        _store.IncrementDirty(memPageIdx);
+        // CRITICAL (#301): same race as AllocateChunk. If a concurrent checkpoint snapshotted the bitmap before our
+        // Interlocked.And, that snapshot still has bit=1 (allocated) — so unless this page is marked modified AFTER the
+        // clear, the write in flight discharges an obligation it does not cover, and a later eviction + reload silently
+        // REVERTS the free. Recording the modification is exactly right and costs nothing: the generation moves past
+        // whatever the checkpoint sampled, so the page stays owed and gets rewritten.
+        //
+        // This used to take a counted mark (IncrementDirty) instead. FreeChunk has no ChangeSet and therefore no lifecycle
+        // in which to release it, so every free permanently inflated the counter on a metadata page — a leak the old
+        // comment acknowledged and hand-waved as "bounded in practice by the next per-UoW release". It was not: that
+        // release only drains marks the ChangeSet itself took.
+        _store.MarkPageModified(memPageIdx);
         Interlocked.Decrement(ref _allocatedCount);
 
         // Add page to free list if not already present.
