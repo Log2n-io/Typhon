@@ -33,7 +33,18 @@ public partial class Station : Archetype<Station>
 }
 
 /// <summary>A projectile. Fast, short-lived, high churn.</summary>
-[Archetype]
+/// <remarks>
+/// <c>ClusterDurability.Checkpoint</c> for the same reason as <see cref="Ship"/>, only more so. A shot writes its
+/// position every tick and then ceases to exist within a second or two — it is the shortest-lived state in the
+/// simulation, and there is no crash outcome in which the exact position of a bullet mid-flight is worth a WAL record.
+/// Under <c>FenceWal</c> the projectile pass was the second-largest log producer here after ships, for data guaranteed
+/// to be irrelevant by the time any recovery reads it.
+/// <para>
+/// The hit it takes on recovery is that a crash loses shots in flight back to the last checkpoint. That is
+/// indistinguishable from the guns having fired a moment later.
+/// </para>
+/// </remarks>
+[Archetype(ClusterDurability = ClusterDurability.Checkpoint)]
 public partial class Shot : Archetype<Shot>
 {
     public static readonly Comp<Pos> Position = Register<Pos>();

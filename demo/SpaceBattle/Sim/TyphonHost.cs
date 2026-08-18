@@ -53,7 +53,7 @@ internal sealed class TyphonHost : IDisposable
             {
                 opt.DatabaseName = _cfg.Seed == 1234 ? "SpaceBattle" : $"SpaceBattle_{_cfg.Seed}";
                 opt.DatabaseDirectory = AppContext.BaseDirectory;
-                opt.DatabaseCacheSize = 256 * 1024 * 1024;
+                opt.DatabaseCacheSize = (ulong)_cfg.PageCacheMB * 1024UL * 1024UL;
             })
             .AddScopedDatabaseEngine(opt =>
             {
@@ -292,6 +292,9 @@ internal sealed class TyphonHost : IDisposable
     /// about whether one fence in ten thousand blocked for seconds. Mean latency cannot see the failure this
     /// instrument exists to catch, so the max and an over-threshold count are what get recorded.
     /// </remarks>
+    /// <summary>Cumulative UoW registry slot allocations — the quantity #844 overflowed. One per tick is the target.</summary>
+    public long UowCreatedTotal => DBE.UowRegistry?.CreatedTotal ?? 0;
+
     public void RunTickFence()
     {
         Tick++;

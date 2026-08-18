@@ -1018,6 +1018,28 @@ public sealed class Config
 
     public int WalPreAllocateSegments = 8;
 
+    /// <summary>
+    /// Page cache size in MB (was hardcoded at 256). Exposed to make cache-fill pressure a controlled variable.
+    /// </summary>
+    /// <remarks>
+    /// A long run's per-unit engine cost was measured to double as the cache went from a third full to completely full,
+    /// while the sim's own workload FELL — but occupancy and run length advance together, so neither can be blamed from
+    /// one run. Re-running the identical workload against a different cache size separates them: if the degradation is
+    /// driven by cache fill, its onset moves with this number; if it tracks ticks elapsed regardless, it is something
+    /// else and the cache is a bystander.
+    /// </remarks>
+    public int PageCacheMB = 256;
+
+    /// <summary>
+    /// Print per-segment allocated/free chunk counts every N ticks (0 = off).
+    /// </summary>
+    /// <remarks>
+    /// Answers "does storage track live entities or cumulative spawns?" — which a file size cannot, because a large
+    /// world and a leaking one look identical at one point in time. Separate from <see cref="CensusEveryTicks"/> and
+    /// deliberately coarse: enumerating segments copies every page list.
+    /// </remarks>
+    public int SegmentDumpEveryTicks = 0;
+
     /// <summary>Auto mode only: select the station nearest the map centre and dump its info panel to the console.</summary>
     public bool AutoSelectStation = false;
 
@@ -1522,6 +1544,10 @@ public sealed class Config
         if (WalPreAllocateSegments <= 0)
         {
             errors.Add("WalPreAllocateSegments must be > 0");
+        }
+        if (PageCacheMB < 8)
+        {
+            errors.Add("PageCacheMB must be >= 8 (the engine's minimum cache size)");
         }
         return errors;
     }

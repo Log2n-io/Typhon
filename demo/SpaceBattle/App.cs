@@ -278,6 +278,18 @@ internal sealed class App : IDisposable
     private long _nextCensusTick;
 
     /// <summary>
+    /// Sim-workload counters summed over the census window, so a rising <c>simMs</c> can be attributed.
+    /// </summary>
+    /// <remarks>
+    /// Without these the census measures only how long a tick took, which cannot distinguish "the engine got slower"
+    /// from "the sim asked it to do more". These are the sim's own per-tick tallies (entities stepped, queries issued,
+    /// entities spawned/destroyed) accumulated between census lines: if they stay flat while <c>simMs</c> climbs, the
+    /// cost is in the engine; if they climb together, the workload simply grew.
+    /// </remarks>
+    private long _accShipsMoved, _accShotsMoved, _accShotsFired, _accSpawned, _accDestroyed;
+    private long _accAcquireQ, _accHitQ, _accOreQ;
+
+    /// <summary>
     /// One CSV line every <see cref="Config.CensusEveryTicks"/> ticks, flushed immediately.
     /// </summary>
     /// <remarks>
@@ -301,7 +313,9 @@ internal sealed class App : IDisposable
             _census = new System.IO.StreamWriter(path, append: false) { AutoFlush = true };
             _census.WriteLine("tick,ships,dirtyPages,acwPages,slotRefPages,epochHeldPages,unevictablePages,totalPages," +
                               "scoreB,scoreO,stationsB,stationsO,shipsB,shipsO,peakBpDebt,peakBpEpochHeld," +
-                              "checkpoints,gatedCycles,segmentsRecycled,walBytes,walFiles,simMs,frameMs,worstFenceMs");
+                              "checkpoints,gatedCycles,segmentsRecycled,walBytes,walFiles,simMs,frameMs,worstFenceMs," +
+                              "shipsMoved,shotsMoved,shotsFired,spawned,destroyed,acquireQ,hitQ,oreQ," +
+                              "shipClusters,shotClusters,kFighter,kHeavy,kMiner,kFast,kDestroyer");
             Console.WriteLine($"census -> {path}");
         }
 
@@ -314,7 +328,62 @@ internal sealed class App : IDisposable
                           $"{_sim.Score(0)},{_sim.Score(1)},{_sim.StationsAlive[0]},{_sim.StationsAlive[1]},{_sim.ShipsAlive[0]},{_sim.ShipsAlive[1]}," +
                           $"{peak.Debt},{peak.EpochHeld}," +
                           $"{cp.Checkpoints},{cp.GatedCycles},{cp.SegmentsRecycled}," +
-                          $"{walBytes},{walFiles},{_simMsEma:F2},{_frameMsEma:F2},{_host.MaxFenceMs:F1}");
+                          $"{walBytes},{walFiles},{_simMsEma:F2},{_frameMsEma:F2},{_host.MaxFenceMs:F1}," +
+                          $"{_accShipsMoved},{_accShotsMoved},{_accShotsFired},{_accSpawned},{_accDestroyed}," +
+                          $"{_accAcquireQ},{_accHitQ},{_accOreQ}," +
+                          $"{_host.ClusterStateOf(_host.ShipArchetypeId)?.ActiveClusterCount ?? 0}," +
+                          $"{_host.ClusterStateOf(_host.ShotArchetypeId)?.ActiveClusterCount ?? 0}," +
+                          $"{_sim.ShipsByKind[0]},{_sim.ShipsByKind[1]},{_sim.ShipsByKind[2]}," +
+                          $"{_sim.ShipsByKind[3]},{_sim.ShipsByKind[4]}");
+
+        _accShipsMoved = _accShotsMoved = _accShotsFired = _accSpawned = _accDestroyed = 0;
+        _accAcquireQ = _accHitQ = _accOreQ = 0;
+    }
+
+    private long _nextSegmentDumpTick;
+
+    /// <summary>
+    /// Per-segment allocated/free chunk counts, printed on a coarse tick interval.
+    /// </summary>
+    /// <remarks>
+    /// This is the measurement #839 is defined by: a cluster-backed SingleVersion or Transient component must allocate
+    /// no content chunk, so a segment's allocated chunk count has to track LIVE entities. The defect's signature is that
+    /// it tracks CUMULATIVE spawns instead, which a single end-of-run number cannot distinguish from a legitimately
+    /// large world — only the trend against a flat entity population can. Deliberately not folded into the census: each
+    /// call copies every segment's page list, which at a 280 MB file is far too much garbage to emit every 250 ticks.
+    /// </remarks>
+    private void DumpSegments()
+    {
+        if (_cfg.SegmentDumpEveryTicks <= 0 || _host.Tick < _nextSegmentDumpTick)
+        {
+            return;
+        }
+        _nextSegmentDumpTick = _host.Tick + _cfg.SegmentDumpEveryTicks;
+
+        var segs = _host.DBE.EnumerateStorageSegments();
+        long alloc = 0, pages = 0;
+        foreach (var s in segs)
+        {
+            alloc += s.AllocatedChunkCount;
+            pages += s.Pages.Length;
+        }
+        var ships = _sim.ShipsAlive[0] + _sim.ShipsAlive[1];
+        Console.WriteLine($"SEGTOTAL tick {_host.Tick,7}  ships {ships,6}  segments {segs.Count,3}  " +
+                          $"allocatedChunks {alloc,9}  pages {pages,7}");
+
+        // Per-segment, so a growing TOTAL can be attributed to the structure that is actually growing. The aggregate
+        // cannot: these 32 segments are component columns, cluster stores, index B+Trees, entity maps and spatial cell
+        // pools, and only some of them are supposed to track live entities at all.
+        foreach (var s in segs)
+        {
+            if (s.AllocatedChunkCount == 0)
+            {
+                continue;
+            }
+            Console.WriteLine($"SEG      tick {_host.Tick,7}  root {s.RootPageIndex,6}  kind {s.Kind,-24}  " +
+                              $"stride {s.Stride,6}  alloc {s.AllocatedChunkCount,9}  cap {s.ChunkCapacity,9}  " +
+                              $"pages {s.Pages.Length,7}  perShip {(ships > 0 ? (double)s.AllocatedChunkCount / ships : 0),8:F2}");
+        }
     }
 
     private void RunOneTick(float dt)
@@ -322,6 +391,15 @@ internal sealed class App : IDisposable
         var t0 = Stopwatch.GetTimestamp();
         _lastStats = _sim.Step(dt);
         _simMsEma = _simMsEma * 0.9 + Stopwatch.GetElapsedTime(t0).TotalMilliseconds * 0.1;
+
+        _accShipsMoved += _lastStats.ShipsMoved;
+        _accShotsMoved += _lastStats.ShotsMoved;
+        _accShotsFired += _lastStats.ShotsFired;
+        _accSpawned += _lastStats.Spawned;
+        _accDestroyed += _lastStats.Destroyed;
+        _accAcquireQ += _lastStats.AcquireQueries;
+        _accHitQ += _lastStats.HitQueries;
+        _accOreQ += _lastStats.OreQueries;
     }
 
     // ─── Input ────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -1123,6 +1201,7 @@ internal sealed class App : IDisposable
             // tick count in a couple of minutes. Without it the one measurement that answers "is the page cache still
             // filling up?" is unavailable in precisely the mode built for unattended runs.
             WriteCensus();
+            DumpSegments();
             if (_mapWin is { IsOpen: true } && i % Math.Max(1, _cfg.FileMapEveryNTicks) == 0)
             {
                 _fileMap.Refresh();
@@ -1210,6 +1289,8 @@ internal sealed class App : IDisposable
         Console.WriteLine($"CLOCK    world running at {SimSpeedRatio:P0} of real time   {_ticksPerFrameEma:F2} ticks/frame   " +
                           $"sim budget {_cfg.SimBudgetMs:F0} ms/frame   backlog {_tickAccumulator:F1} ticks   " +
                           $"frame {_frameMsEma:F1} ms");
+        Console.WriteLine($"UOW      {_host.UowCreatedTotal:N0} registry slots allocated over {_host.Tick:N0} ticks = " +
+                          $"{(_host.Tick > 0 ? (double)_host.UowCreatedTotal / _host.Tick : 0):F1} per tick");
         Console.WriteLine($"PERF     sim {_simMsEma:F2} ms/tick   ships {_sim.ShipsAlive[0] + _sim.ShipsAlive[1]}   " +
                           $"reacquire every {_cfg.TargetReacquireTicks} ticks   acquireRadius {_cfg.AcquireRadius:F0} m");
         Console.WriteLine($"GUNNERY  fired {_sim.TotalShotsFired}  hits {_sim.TotalShotHits}  " +

@@ -136,6 +136,19 @@ internal sealed class Simulation
     };
 
     public int[] ShipsAlive { get; } = new int[4];
+
+    /// <summary>
+    /// Live ship count per hull class, indexed by <c>KindFighter</c>..<c>KindDestroyer</c>. Refreshed each tick.
+    /// </summary>
+    /// <remarks>
+    /// Exists to make fleet composition a measured variable rather than an assumed constant. A destroyer is the
+    /// underdog comeback ship — only a trailing faction may build one — so its share necessarily rises as a run goes on
+    /// and the score gap widens. Any per-tick cost model that treats "a ship" as one uniform unit therefore attributes
+    /// a composition shift to elapsed time, which is precisely how a gameplay effect gets misread as engine drift.
+    /// Filled by <see cref="ComputeCentroids"/>, which already walks every live ship and reads its Kind, so this costs
+    /// an array increment and no extra pass.
+    /// </remarks>
+    public int[] ShipsByKind { get; } = new int[5];
     public int[] MinersAlive { get; } = new int[4];
     /// <summary>Mined material per faction. Ships cost material, so the economy gates the war.</summary>
     public int[] Material { get; } = new int[4];
@@ -444,7 +457,7 @@ internal sealed class Simulation
 
     public void BuildWorld()
     {
-        using var tx = _host.DBE.CreateQuickTransaction();
+        using var tx = Tx();
 
         var slots = string.Equals(_cfg.StationLayout, "edges", StringComparison.OrdinalIgnoreCase)
             ? BuildEdgeStations()
@@ -799,7 +812,7 @@ internal sealed class Simulation
         var anchored = _oreAnchors.Count > 0;
         var chosen = anchored ? CollectLiveAsteroidPositions() : new List<Vector2>();
 
-        using var tx = _host.DBE.CreateQuickTransaction();
+        using var tx = Tx();
         for (var i = 0; i < count; i++)
         {
             var fieldR = _cfg.WorldSize * _cfg.AsteroidFieldRadiusPct;
@@ -848,7 +861,7 @@ internal sealed class Simulation
         {
             return;
         }
-        using var tx = _host.DBE.CreateQuickTransaction();
+        using var tx = Tx();
         for (var i = 0; i < count; i++)
         {
             if (ShipsAlive[faction] >= _cfg.MaxShipsPerFaction)
@@ -1054,7 +1067,7 @@ internal sealed class Simulation
         var best = float.MaxValue;
         var found = false;
         var sphere = new BSphere2F { CenterX = x, CenterY = y, Radius = _cfg.StationWeaponRange };
-        using var tr = _host.DBE.CreateQuickTransaction();
+        using var tr = Tx();
         var q = _host.DBE.ClusterSpatialQuery<Ship>().Radius(in sphere);
         using var acc = tr.For<Ship>();
         var examined = 0;
@@ -1136,7 +1149,7 @@ internal sealed class Simulation
     {
         var scan = _cfg.StationThreatScanRadius;
         InvalidateFactionCache();
-        using var tr = _host.DBE.CreateQuickTransaction();
+        using var tr = Tx();
         using var acc = tr.For<Ship>();
 
         for (var i = 0; i < _stationPos.Count; i++)
@@ -1357,7 +1370,7 @@ internal sealed class Simulation
         }
         var to = replacement.Value;
         var moved = 0;
-        using var tx = _host.DBE.CreateQuickTransaction();
+        using var tx = Tx();
         using var acc = tx.For<Ship>();
         using var e = acc.GetClusterEnumerator();
         foreach (var cluster in e)
@@ -1492,7 +1505,54 @@ internal sealed class Simulation
         }
     }
 
+    /// <summary>
+    /// The unit of work every transaction in a tick is created from. Owned by <see cref="Step"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This exists because <c>CreateQuickTransaction</c> is a UNIT-OF-WORK factory, not a transaction factory: it calls
+    /// <c>CreateUnitOfWork</c>, creates one transaction on it and sets <c>OwnsUnitOfWork = true</c>, so disposal frees
+    /// the registry slot. Every call was therefore a UoW registry allocate+free pair, and this simulation made about
+    /// 1 477 of them per tick — two per projectile (<see cref="TryHit"/> and <see cref="TryCollectWithShot"/>), one per
+    /// ship reacquiring, plus the per-system passes.
+    /// </para>
+    /// <para>
+    /// That is what overflowed the registry's wake semaphore after 2^31 frees and killed a 6 h 40 m soak (#844). The
+    /// engine defect there is fixed separately, but the client should not have been asking for a unit of work per
+    /// point-radius query in the first place: the intended shape is one UoW per tick, one transaction per system.
+    /// A UoW is explicitly designed to host many — see <c>UnitOfWork.TransitionToWalDurable</c>, "regardless of how many
+    /// transactions the UoW hosts". This takes the registry from ~1 477 allocate/free pairs per tick to one.
+    /// </para>
+    /// </remarks>
+    private UnitOfWork _tickUow;
+
+    /// <summary>
+    /// Opens a transaction on the current tick's unit of work. Replaces <c>CreateQuickTransaction</c> everywhere in the
+    /// simulation — see the remarks on <see cref="_tickUow"/> for why that mattered.
+    /// </summary>
+    /// <remarks>
+    /// Falls back to <c>CreateQuickTransaction</c> when no tick is in flight. World construction, the cell-size sweep
+    /// and the diagnostic probes all open transactions outside <see cref="Step"/>, and they are one-shot — the per-tick
+    /// UoW exists to collapse the ~1 477 allocations a TICK was making, not to police every call site. The fallback is
+    /// what keeps this a performance change rather than a lifecycle refactor of the whole demo.
+    /// </remarks>
+    private Transaction Tx() => _tickUow?.CreateTransaction() ?? _host.DBE.CreateQuickTransaction();
+
     public SimStats Step(float dt)
+    {
+        using var tickUow = _host.DBE.CreateUnitOfWork();
+        _tickUow = tickUow;
+        try
+        {
+            return StepCore(dt);
+        }
+        finally
+        {
+            _tickUow = null;
+        }
+    }
+
+    private SimStats StepCore(float dt)
     {
         UpdateUnderdogBonus();
         var stats = default(SimStats);
@@ -1552,7 +1612,8 @@ internal sealed class Simulation
         Span<int> n = stackalloc int[4];
         Span<Vector2> msum = stackalloc Vector2[4];
         Span<int> mn = stackalloc int[4];
-        using var tx = _host.DBE.CreateQuickTransaction();
+        Array.Clear(ShipsByKind);
+        using var tx = Tx();
         using var acc = tx.For<Ship>();
         using var e = acc.GetClusterEnumerator();
         foreach (var cluster in e)
@@ -1572,6 +1633,11 @@ internal sealed class Simulation
                 var p = new Vector2(pos[i].Bounds.MinX, pos[i].Bounds.MinY);
                 sum[f] += p;
                 n[f]++;
+                var kind = com[i].Kind;
+                if (kind < ShipsByKind.Length)
+                {
+                    ShipsByKind[kind]++;
+                }
                 if (com[i].Kind == KindMiner)
                 {
                     msum[f] += p;
@@ -1591,7 +1657,7 @@ internal sealed class Simulation
     {
         var toSpawn = new List<(byte faction, int count)>();
         var killed = new List<(Vector2 pos, byte faction)>();
-        using (var tx = _host.DBE.CreateQuickTransaction())
+        using (var tx = Tx())
         {
             using var acc = tx.For<Station>();
             using var e = acc.GetClusterEnumerator();
@@ -1812,7 +1878,7 @@ internal sealed class Simulation
 
     private void ShipTick(float dt, ref SimStats stats)
     {
-        using var tx = _host.DBE.CreateQuickTransaction();
+        using var tx = Tx();
         using var acc = tx.For<Ship>();
         using var e = acc.GetClusterEnumerator();
 
@@ -2653,7 +2719,7 @@ internal sealed class Simulation
         _sepNearest = float.MaxValue;
 
         var sphere = new BSphere2F { CenterX = x, CenterY = y, Radius = _cfg.AcquireRadius };
-        using var tr = _host.DBE.CreateQuickTransaction();
+        using var tr = Tx();
         var q = _host.DBE.ClusterSpatialQuery<Ship>().Radius(in sphere);
         using var acc = tr.For<Ship>();
 
@@ -2792,7 +2858,7 @@ internal sealed class Simulation
     private void ShotTick(float dt, ref SimStats stats)
     {
         var world = _cfg.WorldSize;
-        using var tx = _host.DBE.CreateQuickTransaction();
+        using var tx = Tx();
         using var acc = tx.For<Shot>();
         using var e = acc.GetClusterEnumerator();
 
@@ -2875,7 +2941,7 @@ internal sealed class Simulation
     private bool TryHit(float x, float y, byte faction, int damage)
     {
         var sphere = new BSphere2F { CenterX = x, CenterY = y, Radius = _cfg.ShotHitRadius };
-        using var tr = _host.DBE.CreateQuickTransaction();
+        using var tr = Tx();
         using var acc = tr.For<Ship>();
         var q = _host.DBE.ClusterSpatialQuery<Ship>().Radius(in sphere);
         try
@@ -2918,7 +2984,7 @@ internal sealed class Simulation
         {
             return;
         }
-        using var tx = _host.DBE.CreateQuickTransaction();
+        using var tx = Tx();
         using var acc = tx.For<Ship>();
         using var e = acc.GetClusterEnumerator();
         foreach (var cluster in e)
@@ -2990,7 +3056,7 @@ internal sealed class Simulation
         {
             return;
         }
-        using var tx = _host.DBE.CreateQuickTransaction();
+        using var tx = Tx();
         foreach (var s in _pendingShots)
         {
             if (ShotsAlive >= _cfg.MaxShots)
@@ -3020,7 +3086,7 @@ internal sealed class Simulation
         {
             return;
         }
-        using var tx = _host.DBE.CreateQuickTransaction();
+        using var tx = Tx();
         foreach (var id in _dead)
         {
             if (id.ArchetypeId == _host.ShotArchetypeId)
@@ -3043,7 +3109,7 @@ internal sealed class Simulation
         // Rebuilt every tick from the authoritative positions. There are eight asteroids, so this is free, and it
         // is what lets a miner mine the ROCK rather than the place the rock used to be.
         _orePos.Clear();
-        using (var tx = _host.DBE.CreateQuickTransaction())
+        using (var tx = Tx())
         {
             using var acc = tx.For<Rock>();
             using var e = acc.GetClusterEnumerator();
@@ -3146,7 +3212,7 @@ internal sealed class Simulation
         // Decay is applied on a shared tick phase rather than per-hit, so a tally measures SUSTAINED pressure.
         var decay = _cfg.PickupProgressDecayTicks > 0 && _host.Tick % _cfg.PickupProgressDecayTicks == 0;
 
-        using (var tx = _host.DBE.CreateQuickTransaction())
+        using (var tx = Tx())
         {
             using var acc = tx.For<Loot>();
             using var e = acc.GetClusterEnumerator();
@@ -3329,7 +3395,7 @@ internal sealed class Simulation
             Life = (short)Math.Min(short.MaxValue, _cfg.PickupLifeTicks),
             Kind = (byte)_rng.Next(PickupKindCount),
         };
-        using var tx = _host.DBE.CreateQuickTransaction();
+        using var tx = Tx();
         tx.Spawn<Loot>(Loot.Position.Set(in pos), Loot.Info.Set(in info));
         tx.Commit();
         PickupsAlive++;
@@ -3370,7 +3436,7 @@ internal sealed class Simulation
         var best = float.MaxValue;
         var found = false;
         var sphere = new BSphere2F { CenterX = x, CenterY = y, Radius = radius };
-        using var tr = _host.DBE.CreateQuickTransaction();
+        using var tr = Tx();
         var q = _host.DBE.ClusterSpatialQuery<Loot>().Radius(in sphere);
         try
         {
@@ -3408,7 +3474,7 @@ internal sealed class Simulation
             return false;
         }
         var sphere = new BSphere2F { CenterX = x, CenterY = y, Radius = _cfg.PickupRadius };
-        using var tr = _host.DBE.CreateQuickTransaction();
+        using var tr = Tx();
         using var acc = tr.For<Loot>();
         var q = _host.DBE.ClusterSpatialQuery<Loot>().Radius(in sphere);
         var hitChunk = -1;
@@ -3471,7 +3537,7 @@ internal sealed class Simulation
         {
             return;
         }
-        using var tx = _host.DBE.CreateQuickTransaction();
+        using var tx = Tx();
         using var acc = tx.For<Rock>();
         using var e = acc.GetClusterEnumerator();
         foreach (var cluster in e)
@@ -3513,7 +3579,7 @@ internal sealed class Simulation
     private List<Vector2> CollectLiveAsteroidPositions()
     {
         var list = new List<Vector2>();
-        using var tx = _host.DBE.CreateQuickTransaction();
+        using var tx = Tx();
         using var acc = tx.For<Rock>();
         using var e = acc.GetClusterEnumerator();
         foreach (var cluster in e)
