@@ -179,7 +179,7 @@ public unsafe ref struct EntityRef
                 EnsureVersionedResolved(slot);
                 int chunkId = _locations[slot];
                 var table = _engineState.SlotToComponentTable[slot];
-                return ref _accessor.ReadEcsComponentData<T>(table, chunkId, (long)_id.RawValue);
+                return ref _accessor.ReadEcsComponentData<T>(table, chunkId, (long)_id.RawValue, _isOwnSpawn);
             }
             // Commit-discipline read-your-own-writes: see this tx's staged value (point reads only; bulk spans read HEAD).
             if (_accessor.Discipline == CommitDiscipline.Commit)
@@ -195,7 +195,7 @@ public unsafe ref struct EntityRef
 
         int chunkId2 = _locations[slot];
         var table2 = _engineState.SlotToComponentTable[slot];
-        return ref _accessor.ReadEcsComponentData<T>(table2, chunkId2, (long)_id.RawValue);
+        return ref _accessor.ReadEcsComponentData<T>(table2, chunkId2, (long)_id.RawValue, _isOwnSpawn);
     }
 
     /// <summary>Write a component by handle. Returns a mutable ref into the chunk page (or cluster slot).
@@ -306,7 +306,11 @@ public unsafe ref struct EntityRef
             }
 
             // Commit discipline stages and reconciles indexes at commit — skip the per-tick shadow capture (which feeds the fence-time Move).
-            if (table.HasShadowableIndexes && _accessor.Discipline != CommitDiscipline.Commit)
+            // An own-spawn is skipped for two independent reasons. It has no OLD key to shadow: FinalizeSpawns inserts this entity's index entries fresh from
+            // the final staged bytes, so there is no Move for the fence to perform — the same argument DIRTY-01 makes about the dirty bit. And since #839 the
+            // location of an unpublished non-Versioned slot is a spawn-arena handle, which ShadowIndexedFields would dereference against the ComponentSegment,
+            // reading an unrelated chunk's bytes as the "old key" and recording the handle as a chunk id for fence-time index maintenance.
+            if (table.HasShadowableIndexes && _accessor.Discipline != CommitDiscipline.Commit && !_isOwnSpawn)
             {
                 _accessor.ShadowIndexedFields<T>(table, chunkId, _id);
             }
@@ -341,7 +345,7 @@ public unsafe ref struct EntityRef
                 EnsureVersionedResolved(slot);
                 int chunkId = _locations[slot];
                 var table = _engineState.SlotToComponentTable[slot];
-                return ref _accessor.ReadEcsComponentData<T>(table, chunkId, (long)_id.RawValue);
+                return ref _accessor.ReadEcsComponentData<T>(table, chunkId, (long)_id.RawValue, _isOwnSpawn);
             }
             // Commit-discipline read-your-own-writes: see this tx's staged value (point reads only; bulk spans read HEAD).
             if (_accessor.Discipline == CommitDiscipline.Commit)
@@ -357,7 +361,7 @@ public unsafe ref struct EntityRef
 
         int chunkId2 = _locations[slot];
         var table2 = _engineState.SlotToComponentTable[slot];
-        return ref _accessor.ReadEcsComponentData<T>(table2, chunkId2, (long)_id.RawValue);
+        return ref _accessor.ReadEcsComponentData<T>(table2, chunkId2, (long)_id.RawValue, _isOwnSpawn);
     }
 
     /// <summary>Write a component by type. Resolves slot via archetype metadata.
@@ -446,7 +450,11 @@ public unsafe ref struct EntityRef
             }
 
             // Commit discipline stages and reconciles indexes at commit — skip the per-tick shadow capture (which feeds the fence-time Move).
-            if (table.HasShadowableIndexes && _accessor.Discipline != CommitDiscipline.Commit)
+            // An own-spawn is skipped for two independent reasons. It has no OLD key to shadow: FinalizeSpawns inserts this entity's index entries fresh from
+            // the final staged bytes, so there is no Move for the fence to perform — the same argument DIRTY-01 makes about the dirty bit. And since #839 the
+            // location of an unpublished non-Versioned slot is a spawn-arena handle, which ShadowIndexedFields would dereference against the ComponentSegment,
+            // reading an unrelated chunk's bytes as the "old key" and recording the handle as a chunk id for fence-time index maintenance.
+            if (table.HasShadowableIndexes && _accessor.Discipline != CommitDiscipline.Commit && !_isOwnSpawn)
             {
                 _accessor.ShadowIndexedFields<T>(table, chunkId, _id);
             }
@@ -572,7 +580,7 @@ public unsafe ref struct EntityRef
                 EnsureVersionedResolved(slot);
                 int chunkId = _locations[slot];
                 var table = _engineState.SlotToComponentTable[slot];
-                value = _accessor.ReadEcsComponentData<T>(table, chunkId, (long)_id.RawValue);
+                value = _accessor.ReadEcsComponentData<T>(table, chunkId, (long)_id.RawValue, _isOwnSpawn);
                 return true;
             }
 
@@ -582,7 +590,7 @@ public unsafe ref struct EntityRef
 
         int chunkId2 = _locations[slot];
         var table2 = _engineState.SlotToComponentTable[slot];
-        value = _accessor.ReadEcsComponentData<T>(table2, chunkId2, (long)_id.RawValue);
+        value = _accessor.ReadEcsComponentData<T>(table2, chunkId2, (long)_id.RawValue, _isOwnSpawn);
         return true;
     }
 
@@ -644,7 +652,8 @@ public unsafe ref struct EntityRef
                 {
                     return default;
                 }
-                byte* vp = _accessor.ReadEcsComponentDataRaw(table, _archetype._componentTypeIds[slot], _archetype._slotToComponentType[slot], vChunkId);
+                byte* vp = _accessor.ReadEcsComponentDataRaw(table, _archetype._componentTypeIds[slot], _archetype._slotToComponentType[slot], vChunkId,
+                    _isOwnSpawn);
                 return new ReadOnlySpan<byte>(vp, size);
             }
             // SV cluster slot: direct SoA pointer.
@@ -657,7 +666,7 @@ public unsafe ref struct EntityRef
         {
             return default;
         }
-        byte* p = _accessor.ReadEcsComponentDataRaw(table, _archetype._componentTypeIds[slot], _archetype._slotToComponentType[slot], chunkId);
+        byte* p = _accessor.ReadEcsComponentDataRaw(table, _archetype._componentTypeIds[slot], _archetype._slotToComponentType[slot], chunkId, _isOwnSpawn);
         return new ReadOnlySpan<byte>(p, size);
     }
 

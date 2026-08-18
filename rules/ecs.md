@@ -4,7 +4,7 @@
 |-------|-------|
 | Status | Living |
 | Last Updated | 2026-08-17 |
-| Domain | Component schema identity, archetype registry, component-type identity, tick-fence dirty bitmaps |
+| Domain | Component schema identity, archetype registry, component-type identity, tick-fence dirty bitmaps, spawn payload staging |
 
 > Type-location: `Ecs/internals/ArchetypeRegistry.cs`, `Ecs/internals/ArchetypeMetadata.cs` (+ `ArchetypeEngineState`), `Ecs/public/DatabaseEngine.cs`
 > (`RegisterComponentFromAccessor`, the reopen schema-load path), `Schema.Definition/Attributes.cs` (`[Component]`).
@@ -294,3 +294,85 @@ Commit discipline.
             directly rather than inferring it from the absence of a crash, with
             SpawnThenWrite_EveryTick_LeavesTheRuntimeClockAdvancing covering the symptom that made this expensive: the
             clock, not the exception.
+
+---
+
+## Module: STAGE — Where a spawned entity's bytes live before it is published
+
+A spawned entity has no address until `FinalizeSpawns` claims its cluster slot at commit, so its component payloads need
+somewhere to sit in the meantime. Which "somewhere" is not a free choice: it decides whether the payload can ever be
+reclaimed.
+
+### STAGE-01: A cluster-backed non-Versioned spawn allocates no content chunk `[fatal]` `[silent]`
+  invariant ∀ entity e spawned into a cluster-eligible archetype, ∀ slot s of e with StorageMode ∈ {SingleVersion,
+            Transient}: the spawn allocates no chunk in `ComponentTable.ComponentSegment` nor in
+            `TransientComponentSegment` for s — the payload is staged in the transaction's `SpawnStagingArena` and its
+            durable home is the cluster slot
+  never a pre-publish location is dereferenced as a content chunk id without first asking the slot's storage mode. The
+        two address spaces are both `int` and both use 0 for "none", so a site that skips the question reads an
+        unrelated chunk and reports no error.
+  never allocating a content chunk whose id no persisted record can hold. The `ClusterEntityRecord` is `19 + 4×V` bytes:
+        header, `ClusterChunkId`, `SlotIndex`, and one `CompRevFirstChunkId` per VERSIONED slot. There is no field a
+        SingleVersion or Transient content-chunk id could occupy — that is a structural impossibility, not an omission.
+  scope: Transaction.SpawnInternal, Transaction.SpawnBatch, Transaction.SpawnBatchAllocate, Transaction.SpawnBatchWriteAll,
+         Transaction.FinalizeSpawns, Transaction.CleanupEcsState, Transaction.SpawnSlotLocation, Transaction.ResolveEntity,
+         EntityAccessor.ResolveSpawnAwarePayload, EntityAccessor.ShadowIndexedFields, EntityRef.Write,
+         EcsQuery.CollectPendingSpawnsFull, SpawnStagingArena, DeferredCleanupManager.ReleaseCollectionBuffers
+  on_violation: the chunk becomes unreachable the instant `FinalizeSpawns` copies the payload into the cluster, and
+                nothing frees it — every free site is gated on rollback or on Versioned. The file then grows with
+                CUMULATIVE spawns rather than live entities. Measured in the SpaceBattle demo before the fix: 491,930
+                `Bullet` chunks against ~1,200 live shots, 900,096 `Pos` chunks against ~20,200 live entities, and a
+                282 MB data file holding ~1.8 MB of live entity bytes — a 160× gap that only grew (#839). Silent: every
+                read returns correct data, because the authoritative copy is in the cluster the whole time.
+  note: VERSIONED is excluded and must stay excluded. There the same chunk becomes `elements[0].ComponentChunkId`, the
+        first revision's content, and the cluster slot is a HEAD cache over the chain rather than its owner — an MVCC
+        point read at an older TSN walks the chain, so that chunk is live data and is correctly reclaimed with the
+        chain. A fix that generalised to Versioned would silently discard history.
+  note: the arena's blocks are appended, never reallocated, because a write returns a `ref` into a staged payload and
+        spawn-spawn-write is ordinary usage — it is what `SpawnBatch` does. The `_commitStagingBuffer` next door does
+        realloc and documents that its refs die on growth; that contract is acceptable there and not here.
+  verified: ClusterSpawnChunkTests.SpawnDestroyChurn_DoesNotGrowTheSegments [VerifiesRule] — spawns and destroys a batch
+            repeatedly and requires the chunk count to track LIVE entities. Before the fix, four rounds of 32 left 129
+            chunks behind with zero entities alive; the count is the defect, so the count is what it asserts.
+            ClusterSpawnChunkTests.VersionedSpawn_StillAllocatesItsRevisionContentChunk is the guard on the note above.
+
+## Module: REAP — Reclaiming what a destroy leaves behind
+
+`Destroy` releases the cluster slot inline, but an entity's `EntityMap` record cannot go with it: a transaction older
+than the destroy must still be able to resolve that entity. The record is therefore queued and reclaimed later, once no
+live snapshot can reach it — which makes "later" a thing that has to actually happen.
+
+### REAP-01: Every deferred-cleanup queue has a production drain `[fatal]` `[silent]`
+  invariant ∀ queue Q that a committed transaction appends to: some code path reachable WITHOUT a test calling it
+            removes from Q, and does so for every entry once `minTSN` passes the entry's `DiedTSN`
+  invariant the drain's gate names every queue it drains. A gate that asks about one queue and then drains two is a
+            drain that never runs for any workload which fills only the other one
+  never gate the ECS entity drain on `DeferredCleanupManager.QueueSize`. That queue fills when a VERSIONED component is
+        superseded; the ECS queue fills on every destroy in EVERY storage mode. An all-SingleVersion database supersedes
+        no revision, so the first is permanently zero and the second is never reached.
+  never reclaim below `TransactionChain.ComputeNextMinTSN()` — the destroying transaction can never reclaim its own
+        victims, because it is itself the tail until it retires
+  scope: DatabaseEngine.EnqueueEcsCleanup, DatabaseEngine.ProcessEcsCleanups, DatabaseEngine.EcsCleanupQueueSize,
+         DatabaseEngine.FlushDeferredCleanups, Transaction.ProcessDeferredCleanups,
+         DeferredCleanupManager.ProcessDeferredCleanups
+  on_violation: the `EntityMap` retains one record per entity ever destroyed, for the life of the engine, and its
+                backing segment grows with CUMULATIVE destroys rather than live entities. Measured in the SpaceBattle
+                demo before the fix: 561,796 `EntityMap` chunks against a live population that never exceeded ~13,900,
+                holding 8,590 of the file's 9,692 pages — 89% — while every `Component` segment stayed flat at 30. The
+                cost is a smooth per-operation regression, not a crash: engine time per unit of simulation work doubled
+                (971 → 1,969 ns) over 100,000 ticks while the workload itself FELL (#681). Silent: every read returns
+                correct data throughout, because a tombstone resolves to "not alive" exactly as a reclaimed record does.
+  note: a drain that writes to a persistent structure must be given the ChangeSet that owns its dirty marks. PS-10 in
+        `rules/durability.md` is the binding rule — `ChunkAccessor.MarkSlotDirty` raises ActiveChunkWriters
+        unconditionally but reaches `IncrementDirty`, which is what also records the modification, only through a
+        non-null ChangeSet. A drain wired up with `CreateChunkAccessor()` would trade a leak for lost writes.
+  note: a queue whose only consumer is a test is worse than an absent one, because the suite reports on it. Both tests
+        that covered this called `ProcessEcsCleanups` themselves and then asserted the entities were invisible — which
+        destroy alone already guarantees — so they measured the call rather than the engine and stayed green for the
+        whole period the queue leaked.
+  verified: EcsCleanupDrainTests.SingleVersionChurn_LeavesTheEntityMapFlat_AcrossRounds [VerifiesRule] — churns an
+            all-SingleVersion archetype in rounds and requires `EntityMap.EntryCount` to stay flat. Before the fix,
+            round 1 held 52 records against 26 after round 0, with zero entities alive; a leak is a slope, so the test
+            measures rounds rather than a total. EcsCleanupDrainTests.CleanupQueue_DrainsWithoutAnyExplicitCall guards
+            the "reachable without a test calling it" clause, and Drain_LeavesNoOutstandingDirtyMarks_AtQuiesce guards
+            the ChangeSet note above.

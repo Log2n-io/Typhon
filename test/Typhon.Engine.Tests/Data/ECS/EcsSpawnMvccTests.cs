@@ -509,9 +509,12 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
             tx3.Commit();
         }
 
-        // Process cleanup — should free the destroyed entity's chunks
+        // Process cleanup — should free the destroyed entity's chunks. Routed through FlushDeferredCleanups because
+        // ProcessEcsCleanups now requires the ChangeSet that owns the dirty marks for the EntityMap pages it writes
+        // (PS-10); a test that fabricated its own would be asserting against a page-tracking arrangement production
+        // does not use.
         long minTSN = dbe.TransactionChain.MinTSN;
-        int cleaned = dbe.ProcessEcsCleanups(minTSN);
+        dbe.FlushDeferredCleanups(minTSN);
 
         // Note: cleanup may or may not have processed depending on MinTSN advancement
         // The important thing is no crash and the entity is gone
@@ -580,11 +583,16 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
             }
         }
 
-        // Process all cleanups
-        dbe.ProcessEcsCleanups(long.MaxValue);
+        // No manual drain. Before #681 this test called ProcessEcsCleanups itself — a method with no production caller
+        // — and then asserted only that the entities were invisible, which destroy alone already guarantees. It passed
+        // throughout the entire period the queue was leaking, because it was measuring the drain it had just invoked
+        // rather than the one the engine performs.
+        var engineState = dbe._archetypeStates[Archetype<EcsUnit>.Metadata.ArchetypeId];
+        Assert.That(dbe.EcsCleanupQueueSize, Is.Zero,
+            "the ECS cleanup queue must be drained by ordinary transaction disposal, with no test-only call");
+        Assert.That(engineState.EntityMap.EntryCount, Is.Zero,
+            "every destroyed entity's EntityMap record must be reclaimed — a retained tombstone is permanent (#681)");
 
-        // The entity map entries should be removed (though chunk freeing depends on GC timing)
-        // At minimum, no crash and entities are invisible
         using var txCheck = dbe.CreateQuickTransaction();
         Assert.That(txCheck.Query<EcsUnit>().Count(), Is.EqualTo(0));
     }

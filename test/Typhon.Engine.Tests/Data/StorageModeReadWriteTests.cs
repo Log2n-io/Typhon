@@ -221,6 +221,10 @@ class StorageModeReadWriteTests : TestBase<StorageModeReadWriteTests>
 
     // ── Rollback tests ──
 
+    /// <remarks>
+    /// Strengthened for #839. "The count came back" went vacuous when the spawn stopped allocating a chunk at all, so the assertion now runs INSIDE the
+    /// transaction as well: a pending spawn must never have taken a chunk in the first place, which is a stronger statement than rollback tidying up after it.
+    /// </remarks>
     [Test]
     public void Transient_Rollback_FreesChunks()
     {
@@ -232,13 +236,17 @@ class StorageModeReadWriteTests : TestBase<StorageModeReadWriteTests>
         {
             var comp = new CompSmTransient(1);
             tx.Spawn<TransientTestArchetype>(TransientTestArchetype.TransComp.Set(in comp));
+
+            Assert.That(table.TransientComponentSegment.AllocatedChunkCount, Is.EqualTo(allocBefore),
+                "a pending Transient spawn stages its payload in the transaction arena — it must not take a content chunk even before rollback (#839)");
             // Don't commit — triggers rollback on dispose
         }
 
         int allocAfter = table.TransientComponentSegment.AllocatedChunkCount;
-        Assert.That(allocAfter, Is.EqualTo(allocBefore), "Rollback should free chunks allocated by pending spawn");
+        Assert.That(allocAfter, Is.EqualTo(allocBefore), "Rollback should leave no chunks behind for a pending spawn");
     }
 
+    /// <remarks>Strengthened for #839 — see <see cref="Transient_Rollback_FreesChunks"/>.</remarks>
     [Test]
     public void SV_Rollback_FreesChunks()
     {
@@ -250,11 +258,14 @@ class StorageModeReadWriteTests : TestBase<StorageModeReadWriteTests>
         {
             var comp = new CompSmSingleVersion(1);
             tx.Spawn<SvTestArchetype>(SvTestArchetype.SvComp.Set(in comp));
+
+            Assert.That(table.ComponentSegment.AllocatedChunkCount, Is.EqualTo(allocBefore),
+                "a pending SingleVersion spawn stages its payload in the transaction arena — it must not take a content chunk even before rollback (#839)");
             // Don't commit
         }
 
         int allocAfter = table.ComponentSegment.AllocatedChunkCount;
-        Assert.That(allocAfter, Is.EqualTo(allocBefore), "Rollback should free chunks allocated by pending spawn");
+        Assert.That(allocAfter, Is.EqualTo(allocBefore), "Rollback should leave no chunks behind for a pending spawn");
     }
 
     // ── Versioned regression ──

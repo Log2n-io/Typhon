@@ -222,6 +222,10 @@ public unsafe partial class Transaction : EntityAccessor
         // Clean up ECS state BEFORE nulling _dbe — CleanupEcsState needs _dbe._archetypeStates
         CleanupEcsState();
 
+        // After CleanupEcsState, which still reads staged payloads to release ComponentCollection buffers (DC-01), and before the base reset. Rewinds only —
+        // the blocks are kept for this pooled instance's next use. TransactionChain frees them when the instance is discarded rather than pooled.
+        ResetSpawnArena();
+
         base.ResetCore();
 
         OwningUnitOfWork = null;
@@ -316,6 +320,12 @@ public unsafe partial class Transaction : EntityAccessor
                 _entityMapCacheAccessor.Dispose();
                 _hasEntityMapCache = false;
             }
+
+            // Before leaving the chain, not after: ComputeNextMinTSN reads the chain, and this transaction's own
+            // membership is what has been holding the cutoff back. A reader that removes itself first and drains second
+            // would be draining on someone else's behalf, having already lost the right to say whether it was the tail.
+            ProcessReadOnlyDeferredCleanups();
+
             _isDisposed = true;
             ExitEpochAndRemove();
             return;
@@ -358,22 +368,116 @@ public unsafe partial class Transaction : EntityAccessor
     }
 
     /// <summary>Process deferred cleanups if this transaction was blocking them as tail.</summary>
+    /// <remarks>
+    /// <para>
+    /// Drains TWO independent queues against the same cutoff, and the gate must ask about both. The revision-chain GC (<see cref="DeferredCleanupManager"/>)
+    /// and the ECS entity cleanup queue fill on different events: the former when a Versioned component is superseded, the latter on every destroy regardless
+    /// of storage mode. Gating the whole method on the revision queue alone meant an all-SingleVersion workload — where no revision chain is ever superseded,
+    /// so that queue is permanently empty — never reached the ECS drain at all, and its EntityMap tombstones accumulated for the life of the engine (#681).
+    /// Measured in the SpaceBattle demo: 561 796 EntityMap chunks against a live population that never exceeded ~13 900, holding 89 % of the data file.
+    /// </para>
+    /// <para>
+    /// Both drains require <c>isTail</c>: <c>ComputeNextMinTSN</c> is only meaningful for the oldest live transaction, and it is what guarantees no surviving
+    /// snapshot can still observe the records being removed.
+    /// </para>
+    /// </remarks>
     private void ProcessDeferredCleanups()
     {
+        if (_dbe.DeferredCleanupManager.QueueSize == 0 && _dbe.EcsCleanupQueueSize == 0)
+        {
+            return;
+        }
+
+        var wc = WaitContext.FromTimeout(TimeoutOptions.Current.TransactionChainLockTimeout);
+        if (!_dbe.TransactionChain.Control.EnterSharedAccess(ref wc))
+        {
+            return;
+        }
+
+        var isTail = _dbe.TransactionChain.Tail == this;
+        var nextMinTSN = isTail ? _dbe.TransactionChain.ComputeNextMinTSN() : 0;
+        _dbe.TransactionChain.Control.ExitSharedAccess();
+
+        if (!isTail)
+        {
+            return;
+        }
+
         if (_dbe.DeferredCleanupManager.QueueSize > 0)
         {
-            var wc = WaitContext.FromTimeout(TimeoutOptions.Current.TransactionChainLockTimeout);
-            if (_dbe.TransactionChain.Control.EnterSharedAccess(ref wc))
-            {
-                var isTail = _dbe.TransactionChain.Tail == this;
-                var nextMinTSN = isTail ? _dbe.TransactionChain.ComputeNextMinTSN() : 0;
-                _dbe.TransactionChain.Control.ExitSharedAccess();
+            _dbe.DeferredCleanupManager.ProcessDeferredCleanups(TSN, nextMinTSN, _dbe, _changeSet);
+        }
 
-                if (isTail)
-                {
-                    _dbe.DeferredCleanupManager.ProcessDeferredCleanups(TSN, nextMinTSN, _dbe, _changeSet);
-                }
-            }
+        // After the revision GC, not before: that pass may trim chains belonging to entities this one is about to unmap, and running it first means the chain
+        // roots this reads from the entity record have already settled.
+        DrainEcsCleanups(nextMinTSN);
+    }
+
+    /// <summary>
+    /// Drains the ECS entity cleanup queue up to <paramref name="nextMinTSN"/>. Caller must have established that this transaction is the tail.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="ProcessDeferredCleanups"/> because a READ-ONLY transaction never reaches that method — <see cref="Dispose"/> short-circuits
+    /// read-only disposal before it — yet a read-only transaction is exactly the one that most often holds this queue back. A long reader opened before a burst
+    /// of destroys keeps <c>ComputeNextMinTSN</c> behind them, so its retirement is what makes those records reclaimable; if it retires without draining, the
+    /// queue waits for the next writer, which in a read-mostly steady state can be a long time.
+    /// <para>
+    /// A read-only transaction has no ChangeSet (<c>_changeSet = readOnly ? null : …</c>), so one is created here. It releases exactly the marks it took and
+    /// deliberately does NOT <c>SaveChanges</c>: the release is what PS-05 requires of a locally-created set, while the pages keep the writeback debt
+    /// <c>IncrementDirty</c> recorded and the next checkpoint collects them (PS-10). Saving here instead would put synchronous page I/O on a dispose path.
+    /// </para>
+    /// </remarks>
+    private void DrainEcsCleanups(long nextMinTSN)
+    {
+        if (_dbe.EcsCleanupQueueSize == 0)
+        {
+            return;
+        }
+
+        if (_changeSet != null)
+        {
+            _dbe.ProcessEcsCleanups(nextMinTSN, _changeSet);
+            return;
+        }
+
+        var drainSet = _dbe.MMF.CreateChangeSet();
+        try
+        {
+            _dbe.ProcessEcsCleanups(nextMinTSN, drainSet);
+        }
+        finally
+        {
+            drainSet.ReleaseDirtyMarks();
+        }
+    }
+
+    /// <summary>
+    /// The read-only disposal counterpart: establish tail-ness, then drain the ECS queue.
+    /// </summary>
+    /// <remarks>
+    /// Only the ECS queue, deliberately. The revision-chain GC takes this transaction's ChangeSet, which a read-only transaction does not have, and extending
+    /// that path is a separate change with its own analysis — this one is scoped to #681.
+    /// </remarks>
+    private void ProcessReadOnlyDeferredCleanups()
+    {
+        if (_dbe.EcsCleanupQueueSize == 0)
+        {
+            return;
+        }
+
+        var wc = WaitContext.FromTimeout(TimeoutOptions.Current.TransactionChainLockTimeout);
+        if (!_dbe.TransactionChain.Control.EnterSharedAccess(ref wc))
+        {
+            return;
+        }
+
+        var isTail = _dbe.TransactionChain.Tail == this;
+        var nextMinTSN = isTail ? _dbe.TransactionChain.ComputeNextMinTSN() : 0;
+        _dbe.TransactionChain.Control.ExitSharedAccess();
+
+        if (isTail)
+        {
+            DrainEcsCleanups(nextMinTSN);
         }
     }
 
@@ -2422,14 +2526,17 @@ public unsafe partial class Transaction : EntityAccessor
                             continue;   // Versioned already logged (chains); Transient never logged
                         }
 
-                        int locChunkId = s.Loc[slot];
-                        if (locChunkId <= 0)
+                        // #839: a SingleVersion spawn payload is staged in the transaction's arena, not in a content chunk. This read is unaffected by the
+                        // move — it wants the [ComponentOverhead][value] bytes, and the arena slot has exactly that layout — so CM-06's emission keeps its
+                        // existing position BEFORE FinalizeSpawns rather than needing to be re-ordered after it.
+                        int stage = s.Stage[slot];
+                        if (stage <= 0)
                         {
                             continue;   // component not provided at spawn
                         }
 
                         var info = GetComponentInfo(table.Definition.POCOType);
-                        var payload = info.CompContentAccessor.GetChunkAsReadOnlySpan(locChunkId);
+                        var payload = new ReadOnlySpan<byte>(SpawnArena.Resolve(stage), table.ComponentOverhead + table.ComponentStorageSize);
                         // Wire identity is the per-archetype slot (LOG-06); here it's the spawn-iteration slot index.
                         var value = payload.Slice(info.ComponentOverhead, table.ComponentStorageSize);
                         batch.AddSlot((long)s.Id.RawValue, (ushort)slot, value, table.CollectionHandleRanges);

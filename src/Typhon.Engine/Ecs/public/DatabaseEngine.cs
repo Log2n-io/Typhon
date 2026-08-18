@@ -834,7 +834,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     private readonly List<EcsCleanupEntry> _ecsCleanupQueue = [];
     private readonly Lock _ecsCleanupLock = new();
+    private int _ecsCleanupCount;
     private readonly ILogger<DatabaseEngine> _logger;
+
+    /// <summary>
+    /// Number of entities awaiting ECS cleanup. A gate for the drain, readable without taking <c>_ecsCleanupLock</c>.
+    /// </summary>
+    /// <remarks>
+    /// Mutated only under the lock, published with a release store and read with an acquire load, so the drain site on <see cref="Transaction.Dispose"/> — the
+    /// hottest path in the engine — pays a plain load rather than a lock acquisition on every transaction. A stale read is benign in both directions: too low
+    /// merely defers the drain to the next transaction, and too high costs one empty <see cref="ProcessEcsCleanups"/> pass.
+    /// </remarks>
+    internal int EcsCleanupQueueSize => Volatile.Read(ref _ecsCleanupCount);
 
     /// <summary>Enqueue an ECS entity for deferred cleanup (LinearHash removal + chunk freeing).</summary>
     internal void EnqueueEcsCleanup(EntityId id, ArchetypeMetadata meta, long diedTSN)
@@ -842,20 +853,42 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         lock (_ecsCleanupLock)
         {
             _ecsCleanupQueue.Add(new EcsCleanupEntry { Id = id, Meta = meta, DiedTSN = diedTSN });
+            Volatile.Write(ref _ecsCleanupCount, _ecsCleanupQueue.Count);
         }
     }
 
     /// <summary>
-    /// Process ECS deferred cleanups: remove LinearHash entries and free component chunks for entities whose DiedTSN is below minTSN
-    /// (no active transaction can see them).
+    /// Process ECS deferred cleanups: remove LinearHash entries and free component chunks for entities whose DiedTSN is below minTSN (no active transaction can
+    /// see them).
     /// </summary>
-    internal unsafe int ProcessEcsCleanups(long minTSN)
+    /// <param name="minTSN">Cutoff: an entity is cleaned only once no live transaction can still observe it.</param>
+    /// <param name="changeSet">
+    /// Owner of the dirty marks for the EntityMap pages this method writes. <b>Required</b> — see remarks.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// The ChangeSet is not optional and the parameter is deliberately not defaulted. This method removes records from a PERSISTENT LinearHash, and dirty
+    /// tracking rides on the accessor: <c>ChunkAccessor.MarkSlotDirty</c> raises ActiveChunkWriters unconditionally but reaches <c>IncrementDirty</c> — the call
+    /// that also records the modification — only through a non-null ChangeSet. An accessor created without one therefore leaves the page with no writeback debt
+    /// at all, so once ACW falls to zero the clock sweep may evict it and the removal is silently undone on reload. That is PS-10 (<c>rules/durability.md</c>):
+    /// "every path that modifies a page's bytes records it", whose <c>on_violation</c> is exactly "an unrecorded modification is never written and is lost at
+    /// eviction".
+    /// </para>
+    /// <para>
+    /// This mattered only in theory while the sole callers were two tests (#681); it became load-bearing the moment the method was put on the production
+    /// destroy path, which is why the signature changed in the same commit that wired it up rather than being left for the caller to remember.
+    /// </para>
+    /// </remarks>
+    internal unsafe int ProcessEcsCleanups(long minTSN, ChangeSet changeSet)
     {
+        ArgumentNullException.ThrowIfNull(changeSet);
+
         List<EcsCleanupEntry> toProcess;
         lock (_ecsCleanupLock)
         {
             toProcess = _ecsCleanupQueue.FindAll(e => e.DiedTSN < minTSN);
             _ecsCleanupQueue.RemoveAll(e => e.DiedTSN < minTSN);
+            Volatile.Write(ref _ecsCleanupCount, _ecsCleanupQueue.Count);
         }
 
         if (toProcess.Count == 0)
@@ -876,7 +909,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             {
                 continue;
             }
-            var accessor = engineState.EntityMap.Segment.CreateChunkAccessor();
+            var accessor = engineState.EntityMap.Segment.CreateChunkAccessor(changeSet);
             var found = engineState.EntityMap.TryGet(entry.Id.EntityKey, readBuf, ref accessor);
 
             if (found)
@@ -891,24 +924,32 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 //
                 // A non-Versioned slot is skipped rather than missed: SingleVersion and Transient bytes live in the cluster slot itself, which ReleaseSlot
                 // reclaims on destroy, so there is no chain to free here.
+                // SlotToVersionedIndex is null when the archetype has NO Versioned component at all (documented on ArchetypeClusterInfo: "Null if no Versioned
+                // components"), so indexing it unguarded is an unconditional NullReferenceException for every all-SingleVersion or all-Transient archetype.
+                // The guard is the same one ArchetypeAccessor.ResolveClusterVersionedSlots already uses. It went unnoticed because this method's only callers
+                // were two tests, both on a Versioned archetype — the population that never takes this branch (#681).
                 var layout = meta.ClusterLayout;
-                for (var slot = 0; slot < meta.ComponentCount && engineState.SlotToComponentTable != null; slot++)
+                if (layout.SlotToVersionedIndex != null && engineState.SlotToComponentTable != null)
                 {
-                    var vi = layout.SlotToVersionedIndex[slot];
-                    if (vi < 0)
+                    for (var slot = 0; slot < meta.ComponentCount; slot++)
                     {
-                        continue;
-                    }
+                        var vi = layout.SlotToVersionedIndex[slot];
+                        if (vi < 0)
+                        {
+                            continue;
+                        }
 
-                    var chainRoot = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(readBuf, vi);
-                    if (chainRoot != 0)
-                    {
-                        engineState.SlotToComponentTable[slot].CompRevTableSegment?.FreeChunk(chainRoot);
+                        var chainRoot = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(readBuf, vi);
+                        if (chainRoot != 0)
+                        {
+                            engineState.SlotToComponentTable[slot].CompRevTableSegment?.FreeChunk(chainRoot);
+                        }
                     }
                 }
 
-                // Remove from LinearHash
-                engineState.EntityMap.Remove(entry.Id.EntityKey, ref accessor, null);
+                // Remove from LinearHash. The ChangeSet is threaded through even though Remove does not currently read it — the accessor above carries the
+                // dirty marks — so the call does not read as though this write is exempt from ownership.
+                engineState.EntityMap.Remove(entry.Id.EntityKey, ref accessor, changeSet);
             }
 
             accessor.Dispose();
@@ -935,6 +976,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         var changeSet = new ChangeSet(MMF);
         var result = DeferredCleanupManager.ProcessDeferredCleanups(long.MaxValue, nextMinTSN, this, changeSet);
+
+        // The ECS entity queue drains here too. It is a separate queue with a separate producer (every destroy, any storage mode) and a test that flushed only
+        // the revision GC would report "cleaned" while every EntityMap tombstone it was asked to reclaim was still there — which is how #681 stayed invisible
+        // to the suite.
+        result += ProcessEcsCleanups(nextMinTSN, changeSet);
+
+        // SaveChanges releases this set's marks itself (ChangeSet.cs:226) before handing the pages to SavePages, so the locally-created set PS-05 requires us
+        // to release is already discharged here.
         changeSet.SaveChanges();
         return result;
     }

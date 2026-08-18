@@ -99,6 +99,37 @@ internal unsafe class UowRegistry : IDisposable
     /// </remarks>
     private readonly SemaphoreSlim _slotFreed = new(0);
 
+    /// <summary>
+    /// Number of threads currently parked in <see cref="WaitForSlotFreed"/>. Gates the <c>Release</c> in
+    /// <see cref="Release"/> so a permit is only ever produced when there is a consumer for it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Without this gate the semaphore is a wake SIGNAL storing a LEVEL: <see cref="Release"/> runs on every slot free,
+    /// while <see cref="WaitForSlotFreed"/> is reached only when the registry is saturated. A workload that never
+    /// saturates therefore never consumes a permit, the count rises monotonically for the life of the process, and at
+    /// <see cref="int.MaxValue"/> <c>Release</c> throws <c>SemaphoreFullException</c> and kills it. Measured: a
+    /// SpaceBattle soak died after 1 454 985 ticks / 6 h 40 m — about 1 476 UoW frees per tick (#844).
+    /// </para>
+    /// <para>
+    /// <b>Bound.</b> Concurrent freers can each observe the same pre-release count and all release, so permits can
+    /// exceed the waiter count by up to the number of threads freeing at once. That is bounded by live thread count
+    /// (itself capped at 32 767), NOT by elapsed time or cumulative operations — which is the entire point. Surplus
+    /// permits are consumed by the next waiters; they cannot accumulate toward the ceiling.
+    /// </para>
+    /// </remarks>
+    private int _waiters;
+
+    /// <summary>
+    /// Outstanding permits on <see cref="_slotFreed"/>. Exposed so a test can assert the count does not grow with the
+    /// number of uncontended allocate/free cycles — the defect in #844 was invisible to every other observable, because
+    /// a registry leaking permits behaves identically to a correct one until the count reaches <see cref="int.MaxValue"/>.
+    /// </summary>
+    internal int SignalPermitCount => _slotFreed.CurrentCount;
+
+    /// <summary>Threads currently parked waiting for a free slot. Test observability for the gate above.</summary>
+    internal int WaiterCount => Volatile.Read(ref _waiters);
+
     // ═══════════════════════════════════════════════════════════════
     // Public Properties
     // ═══════════════════════════════════════════════════════════════
@@ -254,8 +285,20 @@ internal unsafe class UowRegistry : IDisposable
     /// </summary>
     private bool WaitForSlotFreed(ref WaitContext wc)
     {
+        // Publish our presence BEFORE the re-check below. Interlocked is a full fence, so a freer that reads _waiters
+        // after setting its bitmap bit either sees this increment (and releases) or had already set the bit before our
+        // re-check (which then finds it). Registering after the check instead would reopen exactly the lost-wakeup
+        // window the SemaphoreSlim choice was made to avoid — see the remarks on _slotFreed.
+        Interlocked.Increment(ref _waiters);
         try
         {
+            // Re-check with the registration visible. The caller's loop retries the claim on true, so a slot that
+            // appeared between its failed claim and our registration is taken rather than waited on.
+            if (HasFreeSlot())
+            {
+                return true;
+            }
+
             if (Unsafe.IsNullRef(ref wc))
             {
                 _slotFreed.Wait();
@@ -274,7 +317,25 @@ internal unsafe class UowRegistry : IDisposable
         {
             return false;
         }
+        finally
+        {
+            Interlocked.Decrement(ref _waiters);
+        }
         // No finally { Reset() } — SemaphoreSlim auto-consumes the signal on Wait()
+    }
+
+    /// <summary>Whether the allocation bitmap currently shows any free slot. Read-only scan, claims nothing.</summary>
+    private bool HasFreeSlot()
+    {
+        for (var w = 0; w < BitmapWords; w++)
+        {
+            if (Volatile.Read(ref _allocationBitmap[w]) != 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -316,8 +377,15 @@ internal unsafe class UowRegistry : IDisposable
             }
         }
 
-        // Wake any threads waiting in AllocateUowId() for a free slot
-        _slotFreed.Release();
+        // Wake any threads waiting in AllocateUowId() for a free slot — but ONLY when one exists. An unconditional
+        // Release turns this signal into a monotonic counter that overflows int.MaxValue and throws (#844). The
+        // allocation bit was set above with an Interlocked, so this read is ordered after it: a waiter that registered
+        // before our read is seen here, and one that registers after our read will find the bit in its own re-check.
+        var waiters = Volatile.Read(ref _waiters);
+        if (waiters > 0 && _slotFreed.CurrentCount < waiters)
+        {
+            _slotFreed.Release();
+        }
     }
 
     /// <summary>

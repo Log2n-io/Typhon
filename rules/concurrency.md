@@ -197,3 +197,36 @@ lock ordering and deadlock prevention are still to come.
         `SchemaEvolutionEngine.MigrateEntities`, `RederiveOccupancyOnCrash`, `StatisticsRebuilder.RebuildClusterAll`,
         `GetSchemaHistory`, `LoadPersistedArchetypes`. None is a post-condition and none is on the commit path. Widening
         the rule to cover them would make it false on the day it was written, which is worse than not covering them.
+
+## Module: SIGNAL — Wake signals versus resource counts
+
+A counting semaphore can model two different things: how many of a resource are available, or that something has
+happened. The two have opposite correctness conditions, and the type does not distinguish them.
+
+### SIGNAL-01: A permit is produced only when there is a consumer for it `[fatal]`
+  invariant ∀ counting primitive S used as a WAKE SIGNAL: a `Release` on S happens only when at least one thread is
+            registered as waiting on S
+  invariant a waiter registers BEFORE its final availability check, and re-checks after registering — the registration
+            and the check must bracket each other or the lost wakeup the semaphore was chosen to prevent returns
+  invariant outstanding permits are bounded by a quantity that does not grow with elapsed time: live waiters, or live
+            threads. Never by cumulative operations
+  never gate a `Release` on nothing. `Wait` on a wake signal is reached only under contention, so an unconditional
+        `Release` produces a permit per operation and consumes none — the count then rises for the life of the process
+  scope: UowRegistry.Release / WaitForSlotFreed / AllocateUowId / HasFreeSlot / SignalPermitCount / WaiterCount
+  on_violation: the count reaches `int.MaxValue` and `SemaphoreSlim.Release` throws `SemaphoreFullException` from
+                whatever ordinary call happened to be next, killing the process. Measured: a SpaceBattle soak died at
+                tick 1 454 985 after 6 h 40 m — 2 147 483 647 / 1 454 985 ≈ 1 476 UoW frees per tick, which is the
+                demo's actual transaction rate. The engine was HEALTHY at death (883 of 32 768 pages resident, zero
+                gated cycles, `health Ok`), so every gauge read normal until the instant it died (#844)
+  note: this is a property of the ROLE, not the type. `StagingBufferPool._available` is the same `SemaphoreSlim` used
+        correctly, because it models a RESOURCE COUNT: `Rent` waits unconditionally and `Return` releases
+        unconditionally, one for one, so the count is conserved and bounded by the pool capacity. `_slotFreed` models an
+        EVENT, and an event has no level to store.
+  note: a latch cannot have this defect at all. `ManualResetEventSlim.Set` and `AutoResetEvent.Set` are idempotent —
+        there is no count to accumulate — which is why the other twelve signalling primitives in the engine are immune
+        by construction rather than by review.
+  verified: UowRegistryTests.Registry_UncontendedAllocateFree_DoesNotAccumulateSemaphorePermits [VerifiesRule] — 550
+            uncontended allocate/free cycles must leave the permit count where 50 did. Before the fix it read exactly
+            550, one per free, which is the defect stated as a slope; the real ceiling is unreachable in a test, and
+            that is precisely why this reached production. The saturation and cross-thread wake cases already in that
+            fixture are the guard on the other direction — that gating the Release did not reintroduce a lost wakeup.

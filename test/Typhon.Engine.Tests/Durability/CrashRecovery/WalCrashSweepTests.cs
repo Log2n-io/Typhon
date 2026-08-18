@@ -61,7 +61,7 @@ internal sealed class WalCrashSweepTests
     private static readonly int[] CrashBoundaries = BuildCrashBoundaries();
 
     /// <summary>
-    /// Upper bound (exclusive) for both the seeded gate extras and the exhaustive nightly sweep. Held below the shortest MEASURED cycle (29 writes) so every
+    /// Upper bound (exclusive) for both the seeded gate extras and the exhaustive nightly sweep. Held below the shortest MEASURED cycle (27 writes) so every
     /// boundary it admits is guaranteed to land inside a cycle and actually inject a crash. Enforced, not assumed — see
     /// <see cref="PageAxis_EveryBoundary_IsWithinTheObservedWriteCount"/>.
     /// <para>
@@ -69,8 +69,14 @@ internal sealed class WalCrashSweepTests
     /// pages permanently dirty: leaked mutator marks used to pin them, so every cycle rewrote pages whose bytes were already on disk (#824). The writes that
     /// disappeared were redundant ones, and the probe below is exactly the guard that noticed, which is what it is for.
     /// </para>
+    /// <para>
+    /// Then 29 → 27, for the same reason a second time. #839 stopped a cluster-backed SingleVersion or Transient spawn allocating a content chunk it could
+    /// never address again, so those spawns no longer dirty a ComponentSegment page for the checkpoint to write out. Measured 2026-08-17 across the five
+    /// page-axis workloads: MixedDiscipline 27 (was 29), SingleTxSpawn 29, IndexedFlat 49, MultiValueDupKey 49, LifecycleChurn 79. Only MixedDiscipline moved
+    /// — it is the workload that spawns non-Versioned components — and the two writes it lost were writes of a chunk nothing would ever read.
+    /// </para>
     /// </summary>
-    private const int BoundaryCeiling = 29;
+    private const int BoundaryCeiling = 27;
 
     private static int[] BuildCrashBoundaries()
     {
