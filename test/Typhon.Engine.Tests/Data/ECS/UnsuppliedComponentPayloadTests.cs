@@ -509,6 +509,68 @@ class UnsuppliedComponentPayloadTests : TestBase<UnsuppliedComponentPayloadTests
         }
     }
 
+    /// <summary>
+    /// WAL replay of a value for a Versioned slot with NO chain root must CREATE the chain, not skip the append (#845).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Driven straight at <c>RecoveryApplier</c> rather than through a crash-and-reopen. The end-to-end route is the one
+    /// that looks right and proves nothing: an oracle-shaped version of this passed with the fix reverted, and throw-probes
+    /// showed neither <c>ApplySlotToExistingCluster</c> nor its dispatcher was reached, because the driver folded the
+    /// spawn and the slot record into a single <c>ApplySpawnedEntity</c> — a path that already creates chain roots
+    /// correctly. Coverage is which lines execute, not how realistic the setup looks.
+    /// </para>
+    /// <para>
+    /// The state under test is one the new contract created and recovery had never seen: an entity committed WITHOUT a
+    /// component, whose record therefore carries <c>CompRevFirstChunkId == 0</c>, and a later transaction supplying one.
+    /// The replay used to append to that root, and appending to root 0 is a silent no-op — the value reached the cluster
+    /// SoA and looked correct until the next open rebuilt the HEAD from a chain that was never there.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void Recovery_SlotApplyForARootlessVersionedSlot_CreatesTheChain()
+    {
+        using var dbe = SetupEngine();
+
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var pos = new EcsPosition(1, 2, 3);
+            id = tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos));   // Velocity absent → its record slot holds root 0
+            tx.Commit();
+        }
+
+        var meta = Archetype<EcsUnit>.Metadata;
+        var velSlot = meta.GetSlot(EcsUnit.Velocity._componentTypeId);
+
+        // The payload the WAL would carry: the component value, no overhead — the same shape BuildCommitBatch emits.
+        var replayed = new EcsVelocity(41, 42, 43);
+        var payload = new byte[System.Runtime.CompilerServices.Unsafe.SizeOf<EcsVelocity>()];
+        MemoryMarshal.Write(payload, in replayed);
+
+        using (var applier = new Typhon.Engine.Internals.RecoveryApplier(dbe))
+        {
+            // The real driver runs the whole replay inside one epoch scope; chunk accessors assert on it.
+            using var epoch = Typhon.Engine.Internals.EpochGuard.Enter(dbe.EpochManager);
+
+            // Same order the driver uses: enabled-bits first, then the slot payloads. Both records are what an
+            // Enable(comp, in value) commit emits, and the slot apply alone leaves the component unreadable.
+            applier.ApplySetEnabledBitsToExisting((long)id.RawValue, (ushort)(1 << velSlot | 1 << meta.GetSlot(EcsUnit.Position._componentTypeId)));
+
+            applier.ApplySlotToExisting((long)id.RawValue,
+            [
+                new Typhon.Engine.Internals.RecoveryApplier.SlotData { SlotIndex = velSlot, Payload = payload, Tsn = 1 },
+            ]);
+        }
+
+        using var read = dbe.CreateQuickTransaction();
+        ref readonly var vr = ref read.Open(id).Read(EcsUnit.Velocity);
+        var v = vr;
+
+        Assert.That(v.Dx, Is.EqualTo(41f),
+            "the replayed value must be readable — if it is not, the apply wrote the cluster SoA and created no chain, so the point read resolves nothing");
+    }
+
     /// <summary>Spawns B against a chunk deliberately recycled from a destroyed A, omitting Velocity.</summary>
     private static EntityId SpawnRecycledVersioned(DatabaseEngine dbe)
     {

@@ -3545,7 +3545,12 @@ internal sealed unsafe class ArchetypeClusterState
     /// cannot repair these — the chain it needs is genuinely not reachable — but it can stop being quiet about them, which is the difference between a
     /// diagnosable defect and one that took a 1-in-4 arm64 nightly to notice.
     /// </param>
-    public void RebuildVersionedHeadFromChain(ArchetypeMetadata meta, ArchetypeEngineState engineState, ChangeSet changeSet, out VersionedHeadRebuildSkips skips)
+    /// <param name="enabledBitsTrusted">
+    /// False when the EntityMap this reads was re-derived on the crash path, where <c>EnabledBits</c> is reconstructed from the cluster SoA copy whose
+    /// durability is the open gap in #398. A rootless slot cannot then be classified, so it is counted as a defect rather than as expected absence.
+    /// </param>
+    public void RebuildVersionedHeadFromChain(ArchetypeMetadata meta, ArchetypeEngineState engineState, ChangeSet changeSet, bool enabledBitsTrusted,
+        out VersionedHeadRebuildSkips skips)
     {
         skips = default;
         if (meta.VersionedSlotMask == 0)
@@ -3637,7 +3642,11 @@ internal sealed unsafe class ArchetypeClusterState
                             // bit CLEAR is a component the spawn never supplied — absent by design since #845, routine on any partially-spawned entity — while
                             // bit SET means the component has a value whose pointer is gone. Only the latter is counted toward the warned Total; counting both
                             // would fire a Warning on every healthy database and train operators to ignore the log #688 exists to produce.
-                            if ((EntityRecordAccessor.GetHeader(recordBuf).EnabledBits & (1 << slot)) != 0)
+                            if (!enabledBitsTrusted)
+                            {
+                                skips.RootlessUnclassifiable++;
+                            }
+                            else if ((EntityRecordAccessor.GetHeader(recordBuf).EnabledBits & (1 << slot)) != 0)
                             {
                                 skips.ChainRootLost++;
                             }

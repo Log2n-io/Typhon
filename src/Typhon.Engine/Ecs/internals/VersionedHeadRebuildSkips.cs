@@ -47,8 +47,20 @@ internal struct VersionedHeadRebuildSkips
     /// <summary>A chain root exists and <c>RevisionChainReader.WalkChain</c> failed. Never benign.</summary>
     public int ChainWalkFailed;
 
+    /// <summary>
+    /// A rootless slot on a pass where the enabled bit could not be trusted, so absence and a lost root are indistinguishable. Counted as a defect.
+    /// </summary>
+    /// <remarks>
+    /// The bit separating <see cref="AbsentByDesign"/> from <see cref="ChainRootLost"/> is only as good as its source. On the crash path the EntityMap is
+    /// re-derived by <c>RebuildEntityMapsFromPersistedData</c>, which reconstructs <c>EnabledBits</c> from the cluster SoA copy — and the durability of that
+    /// copy is the open gap tracked in #398. An entity that lost BOTH its chain root and its SoA bit would then read as "bit clear, root 0" and be filed as
+    /// expected absence, which is exactly the #688 case being silently dropped by the counter that exists to catch it. Where the bit cannot be trusted the
+    /// honest answer is neither bucket, and the safe one is to warn: this feeds <see cref="Total"/>.
+    /// </remarks>
+    public int RootlessUnclassifiable;
+
     /// <summary>Total pairs left un-rebuilt by this pass that indicate a DEFECT — <see cref="AbsentByDesign"/> is expected and excluded.</summary>
-    public readonly int Total => EntityNotInMap + ChainRootLost + ChainWalkFailed;
+    public readonly int Total => EntityNotInMap + ChainRootLost + ChainWalkFailed + RootlessUnclassifiable;
 
     /// <summary>Accumulate another pass's counts into this one.</summary>
     public void Add(in VersionedHeadRebuildSkips other)
@@ -57,5 +69,6 @@ internal struct VersionedHeadRebuildSkips
         AbsentByDesign += other.AbsentByDesign;
         ChainRootLost += other.ChainRootLost;
         ChainWalkFailed += other.ChainWalkFailed;
+        RootlessUnclassifiable += other.RootlessUnclassifiable;
     }
 }

@@ -1774,11 +1774,12 @@ internal sealed class DifferentialRecoveryOracleTests
     /// SECOND reopen, not merely the first — a single-reopen assertion passes against the bug.
     /// </para>
     /// <para>
-    /// <b>Coverage limit, measured not assumed.</b> This case does NOT currently reach <c>RecoveryApplier.ApplySlotToExistingCluster</c>: a throw-probe at that
-    /// method's entry, and at its <c>ApplySlotToExisting</c> dispatcher, fired in neither. It still passes with that method's chain-root creation reverted, so
-    /// it is a genuine end-to-end regression test for the paths it does traverse, but it is NOT the verifier for the cluster update path. Reaching that path
-    /// needs a workload where the entity is checkpoint-durable AND the replay is not aggregated into <c>ApplySpawnedEntity</c>; establishing which boundary
-    /// produces that is open work. Do not read a green here as proof the cluster update path creates chain roots.
+    /// <b>Coverage limit, measured not assumed.</b> This case does NOT reach <c>RecoveryApplier.ApplySlotToExistingCluster</c>: a throw-probe at that method's
+    /// entry, and at its <c>ApplySlotToExisting</c> dispatcher, fired in neither, because the driver folds the spawn and the later slot record into a single
+    /// <c>ApplySpawnedEntity</c> — a path that already creates chain roots. It still passes with the update path's chain-root creation reverted, so it is a
+    /// genuine end-to-end regression test for the paths it does traverse and NOT the verifier for the cluster update path.
+    /// <c>UnsuppliedComponentPayloadTests.Recovery_SlotApplyForARootlessVersionedSlot_CreatesTheChain</c> is that verifier: it drives the applier directly, and
+    /// it does go red when the fix is reverted.
     /// </para>
     /// </remarks>
     [Test]

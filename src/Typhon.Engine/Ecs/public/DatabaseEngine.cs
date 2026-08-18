@@ -3688,7 +3688,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                             {
                                 using var vEpoch = EpochGuard.Enter(EpochManager);
                                 var vStart = Stopwatch.GetTimestamp();
-                                clusterState.RebuildVersionedHeadFromChain(meta, _archetypeStates[meta.ArchetypeId], changeSet, out var headSkips);
+                                // Reached only when WillRebuildEntityMapOnCrash is false, i.e. the loaded EntityMap is trusted — so are its enabled bits.
+                                clusterState.RebuildVersionedHeadFromChain(meta, _archetypeStates[meta.ArchetypeId], changeSet, true, out var headSkips);
                                 NoteVersionedHeadRebuildSkips(meta, in headSkips);
                                 versionedHeadTicks += Stopwatch.GetTimestamp() - vStart;
                                 LastOpenVersionedHeadRebuildCount++;
@@ -4657,7 +4658,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // Order matters. The loop above established WHERE each entity lives; the slots themselves are still zeroed, because the component bytes live in the
         // revision chains. Fill the HEADs from those chains first, then build the indexes over real values — indexing first yields one entry per zeroed slot.
-        clusterState.RebuildVersionedHeadFromChain(meta, state, cs, out var headSkips);
+        // Untrusted, and here the reason is circularity rather than durability: the loop above SET each slot's enabled bit from whether the entity had a chain
+        // head (enabled ⟺ head != 0), so the bit carries no information independent of the root being classified. Asking it whether a rootless slot is expected
+        // would always answer yes, by construction.
+        clusterState.RebuildVersionedHeadFromChain(meta, state, cs, false, out var headSkips);
         NoteVersionedHeadRebuildSkips(meta, in headSkips);
 
         // Every entity just moved to a new (clusterChunkId, slotIndex), and a per-archetype index entry IS a cluster position, so any tree that survived the
@@ -4870,7 +4874,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             try
             {
                 using var vEpoch = EpochGuard.Enter(EpochManager);
-                clusterState.RebuildVersionedHeadFromChain(meta, state, changeSet, out var headSkips);
+                // Deferred precisely BECAUSE the EntityMap was re-derived — RebuildEntityMapsFromPersistedData rebuilt its EnabledBits from the cluster SoA,
+                // so a clear bit here cannot be told from one that was never persisted (#398). Absence is unclassifiable on this path.
+                clusterState.RebuildVersionedHeadFromChain(meta, state, changeSet, false, out var headSkips);
                 NoteVersionedHeadRebuildSkips(meta, in headSkips);
                 LastOpenVersionedHeadRebuildCount++;
             }
@@ -5560,14 +5566,16 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
 
         LogVersionedHeadRebuildSkips(meta?.ArchetypeType?.Name ?? meta?.ArchetypeId.ToString() ?? "<unknown>",
-            skips.Total, skips.EntityNotInMap, skips.ChainRootLost, skips.ChainWalkFailed);
+            skips.Total, skips.EntityNotInMap, skips.ChainRootLost, skips.ChainWalkFailed, skips.RootlessUnclassifiable);
     }
 
     [LoggerMessage(LogLevel.Warning,
         "Open: archetype {archetype} — {total} Versioned HEAD slot(s) left un-rebuilt (entityNotInMap {entityNotInMap}, chainRootLost {chainRootLost}, "
-        + "chainWalkFailed {chainWalkFailed}). Those slots serve whatever they already held, which on a fresh reopen is zero. Components never supplied at "
-        + "spawn are absent by design and are NOT counted here.")]
-    private partial void LogVersionedHeadRebuildSkips(string archetype, int total, int entityNotInMap, int chainRootLost, int chainWalkFailed);
+        + "chainWalkFailed {chainWalkFailed}, rootlessUnclassifiable {rootlessUnclassifiable}). Those slots serve whatever they already held, which on a fresh "
+        + "reopen is zero. Components never supplied at spawn are absent by design and are NOT counted here; rootlessUnclassifiable is the same shape on a pass "
+        + "where the enabled bit could not be trusted to tell the two apart.")]
+    private partial void LogVersionedHeadRebuildSkips(string archetype, int total, int entityNotInMap, int chainRootLost, int chainWalkFailed,
+        int rootlessUnclassifiable);
 
     [LoggerMessage(LogLevel.Information,
         "Open: total {totalMs:F0} ms — engineConstruct {engineConstructMs:F0} ms (incl. WAL recovery + system-schema load), schemaDllLoad {schemaDllMs:F0} ms, initializeArchetypes {initArchetypesMs:F0} ms")]
