@@ -175,6 +175,19 @@ public partial class EntityAccessor : IDisposable
         return GetComponentInfo(componentType);
     }
 
+    /// <summary>
+    /// The already-created <see cref="ComponentInfo"/> for <paramref name="componentTypeId"/>, or null — never creates one.
+    /// </summary>
+    /// <remarks>
+    /// The counterpart to <see cref="GetComponentInfoByTypeId"/>, for callers asking "did THIS accessor touch that component?" rather than "give me its info".
+    /// A non-null answer means the component was read, written or spawned here, so its <c>SingleCache</c> is worth probing; a null answer is definitive and
+    /// costs one array index. Using the creating overload for that question allocates a ComponentInfo per untouched component — see the resolver's absent-slot
+    /// path (#845), which asks it for every Versioned slot of every entity it opens.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private protected ComponentInfo TryGetExistingComponentInfo(int componentTypeId)
+        => componentTypeId >= 0 && componentTypeId < _componentInfosByTypeId.Length ? _componentInfosByTypeId[componentTypeId] : null;
+
     private protected ComponentInfo GetComponentInfo(Type componentType)
     {
         // Fast path: array-indexed lookup by componentTypeId (avoids Dictionary hash + equality check)

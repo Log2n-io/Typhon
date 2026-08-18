@@ -899,7 +899,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         using var guard = EpochGuard.Enter(EpochManager);
 
         // Hoist stackalloc out of loop — max record size is 78B (14B header + 16 components × 4B)
-        var readBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        var readBuf = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
 
         foreach (var entry in toProcess)
         {
@@ -4691,7 +4691,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private unsafe void BuildFlatEntityMapEntries(ArchetypeMetadata meta, ArchetypeEngineState state, ChangeSet mapCs, bool duringRebuild,
         Dictionary<long, ushort> enabledSnapshot = null)
     {
-        var recordBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        var recordBuf = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
 
         // Phase 1: Scan each Versioned slot's CompRevTableSegment to find chain heads. slotMaps[slot] = { EntityPK → compRevFirstChunkId }.
         var slotMaps = new Dictionary<long, int>[meta.ComponentCount];
@@ -5551,20 +5551,23 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <summary>Accumulate one archetype's un-rebuilt HEAD pairs and log them, so the silent case in #688 leaves a trace (see the field's remarks).</summary>
     private void NoteVersionedHeadRebuildSkips(ArchetypeMetadata meta, in VersionedHeadRebuildSkips skips)
     {
+        // Accumulate unconditionally — AbsentByDesign is excluded from Total, and gating the accumulation on Total would make it permanently unobservable.
+        LastOpenVersionedHeadRebuildSkips.Add(in skips);
+
         if (skips.Total <= 0)
         {
             return;
         }
 
-        LastOpenVersionedHeadRebuildSkips.Add(in skips);
         LogVersionedHeadRebuildSkips(meta?.ArchetypeType?.Name ?? meta?.ArchetypeId.ToString() ?? "<unknown>",
-            skips.Total, skips.EntityNotInMap, skips.NoChainRoot, skips.ChainWalkFailed);
+            skips.Total, skips.EntityNotInMap, skips.ChainRootLost, skips.ChainWalkFailed);
     }
 
     [LoggerMessage(LogLevel.Warning,
-        "Open: archetype {archetype} — {total} Versioned HEAD slot(s) left un-rebuilt (entityNotInMap {entityNotInMap}, noChainRoot {noChainRoot}, "
-        + "chainWalkFailed {chainWalkFailed}). Those slots serve whatever they already held, which on a fresh reopen is zero.")]
-    private partial void LogVersionedHeadRebuildSkips(string archetype, int total, int entityNotInMap, int noChainRoot, int chainWalkFailed);
+        "Open: archetype {archetype} — {total} Versioned HEAD slot(s) left un-rebuilt (entityNotInMap {entityNotInMap}, chainRootLost {chainRootLost}, "
+        + "chainWalkFailed {chainWalkFailed}). Those slots serve whatever they already held, which on a fresh reopen is zero. Components never supplied at "
+        + "spawn are absent by design and are NOT counted here.")]
+    private partial void LogVersionedHeadRebuildSkips(string archetype, int total, int entityNotInMap, int chainRootLost, int chainWalkFailed);
 
     [LoggerMessage(LogLevel.Information,
         "Open: total {totalMs:F0} ms — engineConstruct {engineConstructMs:F0} ms (incl. WAL recovery + system-schema load), schemaDllLoad {schemaDllMs:F0} ms, initializeArchetypes {initArchetypesMs:F0} ms")]

@@ -707,4 +707,16 @@ public unsafe partial class EntityAccessor
     internal virtual void StageEnableDisable(EntityId id, ushort newEnabledBits)
         => throw new InvalidOperationException(
             "EntityAccessor does not support Enable/Disable operations. Use a full Transaction for structural component changes.");
+
+    /// <summary>
+    /// Creates a Versioned slot's content chunk and first revision for a LIVE entity, and writes <paramref name="value"/> into it.
+    /// </summary>
+    /// <remarks>
+    /// Backs <see cref="EntityRef.Enable{T}(Comp{T}, in T)"/> for the one case the no-value overload refuses: a component the spawn never supplied, which has
+    /// no chain and therefore nothing to enable. Spawn used to be the only producer of a first revision, because design decision #14 guaranteed every slot
+    /// existed from spawn; once an unsupplied slot is genuinely absent (#845) that guarantee is gone and a component can begin mid-life.
+    /// </remarks>
+    internal virtual int CreateVersionedContentAndWrite<T>(EntityId id, byte slot, in T value) where T : unmanaged
+        => throw new InvalidOperationException(
+            "EntityAccessor does not support supplying a component value. Use a full Transaction for structural component changes.");
 }

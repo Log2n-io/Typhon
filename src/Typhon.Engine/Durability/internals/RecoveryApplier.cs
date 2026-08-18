@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using Typhon.Schema.Definition;
@@ -133,7 +133,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
 
         var key = EntityId.FromRaw(entityIdRaw).EntityKey;
 
-        byte* recordPtr = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        byte* recordPtr = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
 
         // Idempotent spawn (AP-12): re-running recovery — e.g. after a crash mid-seal that persisted this entity to the data file
         // but did not advance CheckpointLSN, so its records are replayed again — must NOT double-insert (EntityMap.InsertNew skips
@@ -196,7 +196,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     private void ApplySpawnedEntityToCluster(long entityIdRaw, ushort enabledBits, long bornTsn, IReadOnlyCollection<SlotData> slots)
     {
         var key = EntityId.FromRaw(entityIdRaw).EntityKey;
-        byte* recordPtr = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        byte* recordPtr = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
 
         if (_engineState.EntityMap.TryGet(key, recordPtr, ref _mapAccessor))
         {
@@ -289,7 +289,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         EnsureArchetype(eid.ArchetypeId);
 
         var key = eid.EntityKey;
-        byte* readBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        byte* readBuf = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
         if (!_engineState.EntityMap.TryGet(key, readBuf, ref _mapAccessor))
         {
             return; // not in the base map (already gone / never persisted) — nothing to tombstone
@@ -339,7 +339,9 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         BeginEntity();
 
         var key = eid.EntityKey;
-        byte* readBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        // Cluster-sized (83B), not legacy-sized (78B): the dispatch below hands this buffer to the CLUSTER path, whose record carries a 5-byte locator the
+        // legacy record does not — and TryGet fills meta._entityRecordSize bytes into it either way.
+        byte* readBuf = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
         if (!_engineState.EntityMap.TryGet(key, readBuf, ref _mapAccessor))
         {
             return;
@@ -419,6 +421,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     /// <summary>Cluster counterpart of <see cref="ApplySlotToExisting"/>: writes the committed values into the SoA slot the entity already occupies.</summary>
     private void ApplySlotToExistingCluster(long entityIdRaw, byte* recordPtr, IReadOnlyCollection<SlotData> slots)
     {
+        var recordRewritten = false;
         var clusterState = _engineState.ClusterState;
         var layout = clusterState.Layout;
         var clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(recordPtr);
@@ -464,8 +467,26 @@ internal sealed unsafe class RecoveryApplier : IDisposable
                         AppendVersionedRevision(table, root, slot.Tsn, slot.Payload, out var appendedContent);
                         _appliedContentChunkBySlot[slotIndex] = appendedContent;
                     }
+                    else
+                    {
+                        // No root: the entity was spawned WITHOUT this component and a later transaction supplied one (#845). There is no chain to append to,
+                        // so this replay has to create it — the same construction the spawn path uses above. Skipping it (as this did before #845, when an
+                        // absent component was impossible) writes the value into the SoA HEAD and leaves it rootless, so the next open's
+                        // RebuildVersionedHeadFromChain finds nothing to rebuild from and collapses the HEAD back to zero.
+                        var chainRoot = CreateVersionedChainRoot(table, entityIdRaw, slot.Tsn, slot.Payload, out var createdContent);
+                        ClusterEntityRecordAccessor.SetCompRevFirstChunkId(recordPtr, vi, chainRoot);
+                        _appliedContentChunkBySlot[slotIndex] = createdContent;
+                        recordRewritten = true;
+                    }
                 }
             }
+        }
+
+        // The record is a stack buffer: unlike an append or an in-place SoA overwrite, creating a chain root CHANGES it, so it has to go back to the EntityMap
+        // or the root is lost when this frame returns.
+        if (recordRewritten)
+        {
+            _engineState.EntityMap.Upsert(EntityId.FromRaw(entityIdRaw).EntityKey, recordPtr, ref _mapAccessor, _changeSet);
         }
     }
 
@@ -558,7 +579,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         var eid = EntityId.FromRaw(entityIdRaw);
         EnsureArchetype(eid.ArchetypeId);
 
-        byte* recordPtr = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        byte* recordPtr = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
         if (!_engineState.EntityMap.TryGet(eid.EntityKey, recordPtr, ref _mapAccessor))
         {
             BeginEntity();
@@ -670,7 +691,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         EnsureArchetype(eid.ArchetypeId);
 
         var key = eid.EntityKey;
-        byte* readBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        byte* readBuf = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
         if (!_engineState.EntityMap.TryGet(key, readBuf, ref _mapAccessor))
         {
             return;

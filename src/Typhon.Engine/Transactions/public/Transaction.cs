@@ -1712,8 +1712,13 @@ public unsafe partial class Transaction : EntityAccessor
             }
 
             // Cluster path — Phase A only here (per-archetype B+Tree index updates + view notify). Phase B (HEAD→cluster slot copy) is the
-            // visibility act, deferred to PublishComponent. copyToCluster is false for spawns (FinalizeSpawns handles cluster copy for those).
-            bool copyToCluster = (compRevInfo.Operations & ComponentInfo.OperationType.Created) == 0;
+            // visibility act, deferred to PublishComponent.
+            //
+            // The exemption is PENDING SPAWNS, not the Created flag. FinalizeSpawns does the cluster copy for entities spawned in this transaction, so
+            // repeating it here would be redundant — but since #845 a component can also be CREATED mid-life on an already-published entity, via
+            // EntityRef.Enable(comp, in value) on a slot the spawn never supplied. That carries Created too, and testing the flag alone silently skipped its
+            // Phase B: the new value reached the revision chain but never the cluster slot the read resolves through, so it read as zero.
+            bool copyToCluster = (compRevInfo.Operations & ComponentInfo.OperationType.Created) == 0 || !SpawnedContains(EntityId.FromRaw(pk));
             PrepareClusterVersionedSlot(pk, commitMeta, compRevInfo, readCompChunkId, info.ComponentTable, info.ComponentTypeId, copyToCluster,
                 out clusterCopyPending, out clusterChunkId, out slotIndex, out compSlot);
 

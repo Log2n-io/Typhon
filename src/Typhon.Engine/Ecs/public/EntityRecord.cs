@@ -189,6 +189,14 @@ public static unsafe class ClusterEntityRecordAccessor
     /// <summary>Byte offset where compRevFirstChunkId array starts (immediately after SlotIndex).</summary>
     public const int CompRevOffset = BaseRecordSize;
 
+    /// <summary>Maximum cluster entity record size in bytes: BaseRecordSize(19) + 16 Versioned slots × 4 = 83.</summary>
+    /// <remarks>
+    /// Larger than <see cref="EntityRecordAccessor.MaxRecordSize"/> (78), because a cluster record carries a 5-byte cluster locator the legacy record does
+    /// not. A buffer that must hold EITHER shape has to be sized on this constant; sizing it on the legacy one overflows by 5 bytes for an archetype whose
+    /// every component is Versioned.
+    /// </remarks>
+    public const int MaxRecordSize = BaseRecordSize + EntityRecordAccessor.MaxComponentCount * sizeof(int);
+
     /// <summary>Compute the total record size for a cluster archetype with <paramref name="versionedSlotCount"/> Versioned components.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int RecordSize(int versionedSlotCount) => BaseRecordSize + versionedSlotCount * sizeof(int);

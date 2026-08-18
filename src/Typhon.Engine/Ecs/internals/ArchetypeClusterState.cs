@@ -3633,9 +3633,19 @@ internal sealed unsafe class ArchetypeClusterState
                         int compRevFirstChunkId = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(recordBuf, vi);
                         if (compRevFirstChunkId == 0)
                         {
-                            // No chain root recorded for this Versioned slot. Legitimate for a slot never written; indistinguishable, from here, from a record
-                            // whose root was lost — which is why it is counted rather than assumed benign.
-                            skips.NoChainRoot++;
+                            // No chain root for this Versioned slot. The enabled bit says which of the two states this is, and they are not the same event:
+                            // bit CLEAR is a component the spawn never supplied — absent by design since #845, routine on any partially-spawned entity — while
+                            // bit SET means the component has a value whose pointer is gone. Only the latter is counted toward the warned Total; counting both
+                            // would fire a Warning on every healthy database and train operators to ignore the log #688 exists to produce.
+                            if ((EntityRecordAccessor.GetHeader(recordBuf).EnabledBits & (1 << slot)) != 0)
+                            {
+                                skips.ChainRootLost++;
+                            }
+                            else
+                            {
+                                skips.AbsentByDesign++;
+                            }
+
                             continue;
                         }
 

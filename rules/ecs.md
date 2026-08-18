@@ -1,4 +1,4 @@
-# ECS Rules
+﻿# ECS Rules
 
 | Field | Value |
 |-------|-------|
@@ -335,6 +335,51 @@ reclaimed.
             repeatedly and requires the chunk count to track LIVE entities. Before the fix, four rounds of 32 left 129
             chunks behind with zero entities alive; the count is the defect, so the count is what it asserts.
             ClusterSpawnChunkTests.VersionedSpawn_StillAllocatesItsRevisionContentChunk is the guard on the note above.
+
+### STAGE-02: A Versioned component the spawn does not supply is ABSENT, not zeroed `[fatal]` `[silent]`
+  invariant ∀ entity e spawned into a cluster-eligible archetype, ∀ slot s of e with StorageMode = Versioned that the
+            spawn does not supply a value for: no content chunk and no revision chain are allocated for (e, s), the
+            record's `CompRevFirstChunkId[vi(s)]` stays 0, and e's EnabledBits bit for s stays clear
+  invariant absence and disabled are DISTINCT persisted states, both derivable from the record alone:
+            (bit set, root ≠ 0) = present; (bit clear, root ≠ 0) = supplied then disabled, value retained;
+            (bit clear, root = 0) = never supplied. No fourth field is needed and none may be added.
+  never deriving one of those two signals from the other. `enabled ⟺ root ≠ 0` re-enables a component the caller
+        disabled; `root = 0 ⟹ defect` warns on every partial spawn.
+  never inventing a value for an unsupplied component — neither the previous occupant's bytes nor zero. `Enable(comp)`
+        must refuse, because it has no value to enable; `Enable(comp, in value)` is the way to supply one mid-life.
+  scope: EntityRef.Enable, EntityRef.IsVersionedSlotAbsent, EntityRef.ReadRaw, Transaction.CreateVersionedContentAndWrite,
+         Transaction.AllocateVersionedSlotContent, Transaction.PublishNewVersionedChainRoots,
+         Transaction.SpawnBatchAllocate, Transaction.SpawnBatchWriteAll, Transaction.FinalizeSpawns,
+         ArchetypeClusterState.RebuildVersionedHeadFromChain, VersionedHeadRebuildSkips
+  on_violation: the slot's storage is a RECYCLED chunk, so enabling an unsupplied component serves whatever a destroyed
+                entity last committed there — one live entity reading another's data through the ordinary public API
+                (#845). Silent in the worst way: the values are well-formed and plausible, and a fixture that happens to
+                get a fresh chunk reads zero and passes, which is why the old contract's own tests asserted
+                zero-initialisation and held for the entire period the leak existed.
+  note: this REVERSES design decision #14, which specified zero-init for unsupplied components. That decision bought a
+        real property — every declared component always readable — but the property was false: the zero it promised was
+        never written, so what it actually guaranteed was that the read would not fault, not that the bytes were zero.
+        Absence is the state the engine could not previously express; `RebuildClusterFromChains` already assumed it
+        (`DatabaseEngine.cs`, "a Versioned slot with no chain head for this entity genuinely carries no component").
+  note: publication of a chain root created mid-life rides in `FlushPendingEnableDisable`'s existing record round trip.
+        That relies on a coupling worth stating: supplying a value REQUIRES enabling, because `Write` is gated by the
+        same EnabledBits as `Read`, so a mid-life creation cannot occur without a pending enable to carry its root.
+  note: the pending-spawn case must record the allocation in the `SpawnEntry`, not through the live-entity path.
+        `FinalizeSpawns` writes `CompRevFirstChunkId` unconditionally from `entry.Rev[slot]`, so a root published any
+        other way is clobbered by a still-zero entry and the value is lost at commit with no error.
+  verified: UnsuppliedComponentPayloadTests.Versioned_EnablingANeverSuppliedComponent_IsRefused [VerifiesRule] — the
+            refusal itself, decided from the record's root and the resolved location, so it does not depend on what the
+            slot's bytes hold. The RECYCLE (spawn a pattern, destroy, drain, re-spawn omitting the component) is what
+            makes the old defect observable, and it is Versioned_EnableWithAValue_SuppliesAndEnables and the
+            SingleVersion sibling that actually read through it — a fresh chunk reads zero for uninteresting reasons.
+            Siblings cover the neighbouring states:
+            Versioned_EnableWithAValue_SuppliesAndEnables (supply mid-life on a live entity),
+            Versioned_EnableWithAValue_OnAPendingSpawn_SurvivesTheCommit (the SpawnEntry route),
+            Versioned_DisableThenEnable_KeepsTheValue_AndNeedsNoNewOne (the round trip the refusal must NOT catch),
+            Versioned_ComponentSuppliedMidLife_IsWritableFromALaterTransaction (the root reached the persisted record,
+            not merely the transaction's cache), and
+            NonGenericEntityAccessTests.ReadRaw_NeverSuppliedComponent_ReturnsAnEmptySpan (absent ≠ disabled for raw
+            consumers).
 
 ## Module: REAP — Reclaiming what a destroy leaves behind
 
