@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using SFML.Graphics;
 using SFML.System;
@@ -211,6 +211,28 @@ internal sealed class Renderer
         _densityQuads.Clear();
         ClusterBoxes.Clear();
         Landmarks.Clear();
+
+        // Emitted here rather than from the ship pass, and deliberately so: that pass only walks VISIBLE clusters, so a
+        // marker built there would vanish from the minimap the moment the camera looked away — which is the one time a
+        // minimap marker is worth having. The simulation records the position every tick regardless of what is on
+        // screen, so this is the source that answers "where is it" rather than "where is it, if you can already see it".
+        if (_sim != null)
+        {
+            for (var f = 0; f < _sim.TheOneAlive.Length; f++)
+            {
+                if (!_sim.TheOneAlive[f])
+                {
+                    continue;
+                }
+                Landmarks.Add(new Landmark
+                {
+                    X = _sim.TheOnePos[f].X,
+                    Y = _sim.TheOnePos[f].Y,
+                    Kind = LandmarkKind.TheOne,
+                    Faction = (byte)f,
+                });
+            }
+        }
         _sel = sel;
         _cam = cam;
         SingletonClusters = 0;
@@ -718,12 +740,17 @@ internal sealed class Renderer
                     Ring(_shields, x, y, r * _cfg.ShieldRingScale, ShieldColor, 12);
                 }
 
-                var size = c.Kind == Simulation.KindDestroyer ? r * 3.2f
+                var size = c.Kind == Simulation.KindTheOne ? r * _cfg.TheOneSizeScale
+                    : c.Kind == Simulation.KindDestroyer ? r * 3.2f
                     : c.Kind == Simulation.KindHeavy ? r * 1.8f
                     : c.Kind == Simulation.KindMiner ? r * 1.4f
                     : r;
                 size = MarkerHalfSize(size);
-                if (c.Kind == Simulation.KindMiner)
+                if (c.Kind == Simulation.KindTheOne)
+                {
+                    TheOne(_ships, _shields, x, y, vx, vy, size, col);
+                }
+                else if (c.Kind == Simulation.KindMiner)
                 {
                     // Miners are octagons, not darts — instantly distinguishable at any zoom, and distinct from
                     // the asteroids' squares.
@@ -1256,6 +1283,51 @@ internal sealed class Renderer
         => Tri(va, x, y, dx, dy, s, c, lengthScale: 1f, widthScale: 1f);
 
     /// <summary>
+    /// "The one": three overlapping triangles — a long central fuselage flanked by two shorter reactor darts — drawn
+    /// white, over a faction-tinted halo.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// White is the brief, and white alone would cost the one thing every other hull gets for free: whose side it is
+    /// on. The halo goes into the SHIELD array rather than the ship array, because that array is submitted before
+    /// <c>_ships</c> and there is no depth buffer here — draw order is z-order, so anything queued into <c>_ships</c>
+    /// alongside the body would paint over it depending on nothing more than loop order.
+    /// </para>
+    /// <para>
+    /// The reactors are offset across the heading and set BACK along it, so they overlap the fuselage's rear third
+    /// rather than sitting beside it as three separate darts. Overlap is what makes the silhouette read as one object
+    /// with engines instead of a tight formation, which at this size it otherwise does.
+    /// </para>
+    /// </remarks>
+    private static void TheOne(VertexArray ships, VertexArray halo, float x, float y, float dx, float dy, float s, Color faction)
+    {
+        var px = -dy;
+        var py = dx;
+
+        // Faction halo first (submitted earlier ⇒ drawn under), dimmed so the white body stays the brightest thing.
+        Ring(halo, x, y, s * 1.35f, new Color(faction.R, faction.G, faction.B, 150), 16);
+
+        // Reactors, set back and out. Drawn BEFORE the fuselage so the body reads as the front-most surface.
+        var back = s * 0.45f;
+        var lateral = s * 0.62f;
+        for (var side = -1; side <= 1; side += 2)
+        {
+            var rx = x - dx * back + px * lateral * side;
+            var ry = y - dy * back + py * lateral * side;
+            Tri(ships, rx, ry, dx, dy, s * 0.62f, ReactorColor, lengthScale: 1.15f, widthScale: 0.62f);
+        }
+
+        // Fuselage: long and narrow, overlapping both reactors along its rear third.
+        Tri(ships, x, y, dx, dy, s, TheOneColor, lengthScale: 1.45f, widthScale: 0.58f);
+    }
+
+    /// <summary>The one's hull: pure white, the only thing on the map drawn at full white.</summary>
+    private static readonly Color TheOneColor = new(255, 255, 255);
+
+    /// <summary>Its reactors, a shade down so the three triangles remain separable at a glance.</summary>
+    private static readonly Color ReactorColor = new(200, 214, 235);
+
+    /// <summary>
     /// The ship dart, with independent scaling along and across its heading.
     /// </summary>
     /// <remarks>
@@ -1300,6 +1372,9 @@ internal enum LandmarkKind : byte
     Station,
     Asteroid,
     Pickup,
+
+    /// <summary>"The one". Emitted from the simulation's own record, not from the visible set — see below.</summary>
+    TheOne,
 }
 
 /// <summary>A point of interest — station, ore field or contested pickup. Drawn at every zoom, in both views.</summary>

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using SFML.Graphics;
 using SFML.System;
@@ -134,6 +134,24 @@ internal sealed class Minimap
                         // Ore reads as a diamond, so shape alone distinguishes it from a station at 6 px.
                         var c = new Color(235, 215, 160);
                         Diamond(_marks, px, py, lp * 0.7f, c);
+                        break;
+                    }
+
+                    case LandmarkKind.TheOne:
+                    {
+                        // White, and the only thing on this map drawn with a crosshair. Shape carries it rather than
+                        // colour alone: at 6 px a white diamond and a pale station square are the same smudge, and
+                        // the whole point of this marker is to be findable in one glance without hunting.
+                        var mr = lp * 1.3f;
+                        Diamond(_marks, px, py, mr, new Color(255, 255, 255));
+
+                        // Faction tint on the crosshair, not the body — the body stays white to match the ship, but
+                        // "which side does the invincible thing belong to" is the first question anyone asks of it.
+                        var fc = l.Faction == 0 ? new Color(120, 190, 255) : new Color(255, 175, 70);
+                        Line(_lines, px - mr * 2.4f, py, px - mr * 1.2f, py, fc);
+                        Line(_lines, px + mr * 1.2f, py, px + mr * 2.4f, py, fc);
+                        Line(_lines, px, py - mr * 2.4f, px, py - mr * 1.2f, fc);
+                        Line(_lines, px, py + mr * 1.2f, px, py + mr * 2.4f, fc);
                         break;
                     }
 

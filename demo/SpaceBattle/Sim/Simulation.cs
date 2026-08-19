@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -51,6 +51,12 @@ internal sealed class Simulation
     public const byte KindFast = 3;
     public const byte KindDestroyer = 4;
 
+    /// <summary>
+    /// "The one": a unique, indestructible hull handed to a faction that has effectively lost. See
+    /// <see cref="TheOneTick"/>.
+    /// </summary>
+    public const byte KindTheOne = 5;
+
     // Ship task, packed into SteerFlags bits 3-5. A byte of its own would take Combat from 32 to 33 and the CLR
     // would pad it to 36 — and that struct's field order is deliberate precisely because a layout mismatch reads
     // components back SHIFTED (see the note on Combat). Five spare bits were already there.
@@ -90,12 +96,15 @@ internal sealed class Simulation
     {
         KindHeavy => _cfg.HeavyWeaponRange,
         KindDestroyer => _cfg.DestroyerWeaponRange,
+        KindTheOne => _cfg.TheOneWeaponRange,
         _ => _cfg.WeaponRange,
     };
 
     /// <summary>Material a hull costs to build.</summary>
     public int CostOf(byte kind) => kind switch
     {
+        // The one is never bought — TheOneTick spawns it directly, outside the station economy — so it has no price.
+        KindTheOne => 0,
         KindMiner => _cfg.MinerCost,
         KindHeavy => _cfg.HeavyCost,
         KindFast => _cfg.FastCost,
@@ -148,8 +157,56 @@ internal sealed class Simulation
     /// Filled by <see cref="ComputeCentroids"/>, which already walks every live ship and reads its Kind, so this costs
     /// an array increment and no extra pass.
     /// </remarks>
-    public int[] ShipsByKind { get; } = new int[5];
+    public int[] ShipsByKind { get; } = new int[6];
     public int[] MinersAlive { get; } = new int[4];
+
+    /// <summary>Whether each faction currently has its instance of "the one" alive.</summary>
+    /// <remarks>
+    /// Derived every tick from the live fleet rather than tracked as a flag alongside a stored EntityId. The flag
+    /// would be a second source of truth for something the cluster walk already knows, and the two drift the moment
+    /// anything destroys the ship by a route that does not go through the retirement path.
+    /// </remarks>
+    public bool[] TheOneAlive { get; } = new bool[4];
+
+    /// <summary>
+    /// Where each faction's instance of "the one" is, valid only while the matching <see cref="TheOneAlive"/> is set.
+    /// </summary>
+    /// <remarks>
+    /// Recorded here rather than read off the render pass, because both consumers need it when it is NOT on screen: the
+    /// minimap marker exists precisely to show where the thing is while you are looking somewhere else, and the focus
+    /// key has to be able to fly the camera to a ship it cannot currently see. A position sourced from the visible set
+    /// would silently do nothing in exactly those cases.
+    /// </remarks>
+    public Vector2[] TheOnePos { get; } = new Vector2[4];
+
+    /// <summary>
+    /// Fighting ships per faction EXCLUDING "the one" — the quantity its retirement is scored on.
+    /// </summary>
+    /// <remarks>
+    /// Excluding it is the whole point: counted in its own total, the one contributes to the balance it is waiting to
+    /// see restored, so it would retire one ship earlier than the fight actually justifies — and on a faction reduced
+    /// to nothing but the one, it would read as parity with a rival that still has a fleet.
+    /// </remarks>
+    public int[] FightersExcludingTheOne { get; } = new int[4];
+
+    /// <summary>
+    /// Total gun output per faction, EXCLUDING "the one" — the sum of <see cref="Combat.Damage"/> over its armed ships.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The balance quantity "the one" is scored on, at both ends. Damage-weighted rather than a plain hull count
+    /// because the fleets are not interchangeable: a destroyer is worth several fighters and a faction reduced to
+    /// three destroyers is not in the same position as one with three interceptors, though a count says it is. Summing
+    /// damage costs the same pass and folds count and composition into one number — more ships raise it, better ships
+    /// raise it more.
+    /// </para>
+    /// <para>
+    /// Miners contribute nothing: they are unarmed (<see cref="Combat.Damage"/> is 0 on a miner), so they fall out of
+    /// this arithmetic on their own without a special case. That is correct for a measure of who can win a fight, and
+    /// it is why this is not simply <see cref="ShipsAlive"/> minus <see cref="MinersAlive"/>.
+    /// </para>
+    /// </remarks>
+    public long[] FirepowerExcludingTheOne { get; } = new long[4];
     /// <summary>Mined material per faction. Ships cost material, so the economy gates the war.</summary>
     public int[] Material { get; } = new int[4];
     public int AsteroidsAlive { get; private set; }
@@ -897,12 +954,18 @@ internal sealed class Simulation
                     : KindFighter;
             }
 
-            // A trailing faction that has managed to bank 500 material builds a destroyer instead of whatever it
-            // rolled. Checked before the affordability logic below so the destroyer competes on its own terms: it is
-            // never downgraded into, and never paid for out of, the free-hull relief.
+            // A trailing faction that has banked enough material builds a destroyer instead of whatever it rolled —
+            // but only for a SHARE of its spawns. The gate used to be affordability alone, which is a ratchet rather
+            // than a choice: past the threshold every single non-miner spawn became a destroyer, so a trailing faction
+            // converted its whole production line to capitals and fielded no fighters, no interceptors and no screen
+            // at all. A fleet of one hull type has no answers to anything it is bad against.
+            //
+            // Checked before the affordability logic below so the destroyer competes on its own terms: it is never
+            // downgraded into, and never paid for out of, the free-hull relief.
             if (_cfg.DestroyersEnabled && !isMiner && !free
                 && UnderdogBonus[faction & 3] > 1f
-                && Material[faction] >= _cfg.DestroyerCost)
+                && Material[faction] >= _cfg.DestroyerCost
+                && _rng.NextDouble() < _cfg.DestroyerShare)
             {
                 kind = KindDestroyer;
             }
@@ -976,6 +1039,331 @@ internal sealed class Simulation
         }
         tx.Commit();
     }
+
+    /// <summary>
+    /// Spawn or retire "the one": a unique, indestructible hull for a faction whose fleet has been crushed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Both ends are scored on the same quantity — <see cref="FirepowerExcludingTheOne"/>, the summed gun output of a
+    /// faction's armed ships — with different thresholds. One number for both is what makes the behaviour a clean
+    /// hysteresis: it arrives at <see cref="Config.TheOneTriggerRatio"/> of the best rival's firepower and leaves at
+    /// <see cref="Config.TheOneRetireRatio"/>, and Validate() requires the second to exceed the first, so there is a
+    /// band in between where it neither spawns nor retires.
+    /// </para>
+    /// <para>
+    /// It is NOT scored on <see cref="Score"/>, which was the first attempt. Score weights a surviving station at
+    /// 5 000 against 10 for a fighter, so with the default three bases per faction a side still holding one scores
+    /// 5 000 against a leader's ~15 000 — 33 %, above any sane trigger. The threshold only became reachable once the
+    /// last base fell, and a faction with no bases can never rebuild a fleet, so the retirement condition was then
+    /// unreachable in turn: it would have spawned only in the situation where it could never leave. Firepower has
+    /// neither problem, and it is also the thing the unit is actually about.
+    /// </para>
+    /// <para>
+    /// Runs after <see cref="ComputeCentroids"/>, which is what fills <see cref="TheOneAlive"/> and the firepower
+    /// tallies, and before <see cref="ShipTick"/>, so one spawned this tick flies on this tick.
+    /// </para>
+    /// </remarks>
+    private void TheOneTick(ref SimStats stats)
+    {
+        if (!_cfg.TheOneEnabled)
+        {
+            return;
+        }
+
+        var factions = Math.Min(4, _cfg.Factions);
+        for (var f = 0; f < factions; f++)
+        {
+            // The best RIVAL, not the global best — against itself a faction is always at ratio 1 and nothing fires.
+            long bestRival = 0;
+            var bestRivalStations = 0;
+            for (var r = 0; r < factions; r++)
+            {
+                if (r != f)
+                {
+                    bestRival = Math.Max(bestRival, FirepowerExcludingTheOne[r]);
+                    bestRivalStations = Math.Max(bestRivalStations, StationsAlive[r]);
+                }
+            }
+
+            var mine = FirepowerExcludingTheOne[f];
+
+            if (TheOneAlive[f])
+            {
+                // Equality restored — stand down. A rival with no guns left also counts: there is no fight to restore,
+                // and an invincible ship left alone on the map is the one outcome this must not produce.
+                if (bestRival == 0 || mine >= bestRival * _cfg.TheOneRetireRatio)
+                {
+                    RetireTheOne((byte)f, ref stats);
+                }
+                continue;
+            }
+
+            // Tick zero, before any fleet exists, reads 0 against 0 for everyone — which is a tie, not a rout.
+            if (bestRival <= 0)
+            {
+                continue;
+            }
+
+            // A faction with nothing left at all is eliminated, not trailing; handing it an invincible ship would be a
+            // resurrection rather than a comeback.
+            if (ShipsAlive[f] + StationsAlive[f] == 0)
+            {
+                continue;
+            }
+
+            // Scored on whichever of the two is WORSE. Firepower is the stock of guns; stations are the flow that
+            // replaces them, and a faction can hold the first roughly level while the second has already decided the
+            // outcome. Measured: 42 % firepower on ONE base against three, outnumbered four to one — a position with no
+            // recovery from it, that the firepower ratio alone never scored below any sane threshold.
+            var firepowerRatio = (double)mine / bestRival;
+            var ratio = firepowerRatio;
+            if (_cfg.TheOneTriggerOnStations && bestRivalStations > 0)
+            {
+                ratio = Math.Min(ratio, (double)StationsAlive[f] / bestRivalStations);
+            }
+
+            if (ratio <= _cfg.TheOneTriggerRatio)
+            {
+                SpawnTheOne((byte)f, ref stats);
+            }
+        }
+    }
+
+    /// <summary>Spawns the single instance of "the one" for a faction.</summary>
+    /// <remarks>
+    /// Deliberately outside <see cref="SpawnShips"/>. That path is the station economy — it charges material, honours
+    /// the population cap, rolls a hull from the mix and can downgrade what it rolled. Every one of those is wrong
+    /// here: the one is free, unique, exempt from the cap, and is the hull it is. Routing it through would mean five
+    /// special cases inside a method whose whole shape is "roll and pay".
+    /// </remarks>
+    private void SpawnTheOne(byte faction, ref SimStats stats)
+    {
+        var origin = PickStation(faction);
+        var pos = Pos.At(Clamp(origin.X, 0, _cfg.WorldSize), Clamp(origin.Y, 0, _cfg.WorldSize));
+
+        var mot = new Motion
+        {
+            VX = 0,
+            VY = 0,
+            MaxSpeed = _cfg.TheOneMaxSpeed,
+        };
+        var com = new Combat
+        {
+            Faction = faction,
+            // HP and shield are not what keeps it alive — ApplyDamage refuses to touch it — but they must not read as
+            // zero or dead: the HUD, the selection panel and every "is this thing hurt" cue divide by them.
+            Hp = short.MaxValue,
+            Shield = short.MaxValue,
+            CalmTicks = short.MaxValue,
+            SteerFlags = (byte)_rng.Next(2),
+            Cooldown = 0,
+            ReacquireIn = 0,
+            Kind = KindTheOne,
+            Damage = _cfg.TheOneDamage,
+        };
+        var min = new Miner
+        {
+            HomeX = origin.X,
+            HomeY = origin.Y,
+            CargoMax = (short)_cfg.CargoMax,
+            OreKey = 0,
+        };
+
+        using var tx = Tx();
+        tx.Spawn<Ship>(Ship.Position.Set(in pos), Ship.Motion.Set(in mot), Ship.Combat.Set(in com), Ship.Miner.Set(in min));
+        tx.Commit();
+
+        ShipsAlive[faction & 3]++;
+        TheOneAlive[faction & 3] = true;
+        TotalSpawned++;
+        TheOneSpawns++;
+    }
+
+    /// <summary>Self-destructs a faction's instance of "the one" once the fight is level again.</summary>
+    /// <remarks>
+    /// Goes through <c>_dead</c> and the ordinary <see cref="Reap"/>, not a direct destroy: reaping is where the
+    /// entity is removed and the counters settle, and a second removal path would be a second place for the alive
+    /// count to drift.
+    /// </remarks>
+    private void RetireTheOne(byte faction, ref SimStats stats)
+    {
+        using var tx = Tx();
+        using var acc = tx.For<Ship>();
+        using var e = acc.GetClusterEnumerator();
+        foreach (var cluster in e)
+        {
+            var bits = cluster.OccupancyBits;
+            if (bits == 0)
+            {
+                continue;
+            }
+            var com = cluster.GetSpan(Ship.Combat);
+            var touched = false;
+            while (bits != 0)
+            {
+                var i = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                ref var c = ref com[i];
+                if (c.Kind != KindTheOne || (c.Faction & 3) != (faction & 3) || c.Dead != 0)
+                {
+                    continue;
+                }
+                c.Dead = 1;
+                touched = true;
+                _dead.Add(cluster.GetEntityId(i));
+                ShipsAlive[faction & 3]--;
+                TheOneAlive[faction & 3] = false;
+                TheOneRetirements++;
+            }
+            if (touched)
+            {
+                cluster.MarkDirty(Ship.Combat);
+            }
+        }
+        tx.Commit();
+
+        RestoreStationOnStandDown(faction);
+    }
+
+    /// <summary>
+    /// Rebuilds one destroyed station for a faction whose "the one" has just stood down, and stocks it with material.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The half of the comeback that "the one" itself cannot deliver. The ship restores the FIGHT — it thins the enemy
+    /// until the gun counts are level, which is exactly its retirement condition — but a faction reduced to one base
+    /// against three has lost the PRODUCTION that replaces losses, so the level it was returned to lasts only until the
+    /// next exchange. Rebuilding a base is what turns the reprieve into a position it can hold.
+    /// </para>
+    /// <para>
+    /// On the ORIGINAL site, from <c>_stationPos</c>, which survives the station's death — the entity is destroyed but
+    /// the layout arrays are built once and never shrink. That matters beyond tidiness: those arrays are the identity
+    /// space for damage, threat and health, indexed positionally, and <c>StationIndexAt</c> resolves a station back to
+    /// its slot BY POSITION. A base rebuilt anywhere else would be a station the bookkeeping could not find.
+    /// </para>
+    /// <para>
+    /// Material comes with it. Production is gated on banked ore and a faction in this state has none — its miners are
+    /// dead and its rocks are held by someone else — so a base without a stock is a building rather than a shipyard.
+    /// </para>
+    /// </remarks>
+    private void RestoreStationOnStandDown(byte faction)
+    {
+        if (!_cfg.TheOneRestoresStation)
+        {
+            return;
+        }
+
+        var f = faction & 3;
+        if (StationsAlive[f] >= _cfg.StationsPerFaction)
+        {
+            return;   // nothing was lost — a stand-down is not a reward
+        }
+
+        // First destroyed slot belonging to this faction. Positional order, so a faction rebuilds its bases in the
+        // layout order they were created in rather than somewhere arbitrary.
+        var slot = -1;
+        for (var i = 0; i < _stationPos.Count; i++)
+        {
+            if (_stationFaction[i] == faction && _stationDead[i])
+            {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0)
+        {
+            return;
+        }
+
+        var pos = Pos.At(_stationPos[slot].X, _stationPos[slot].Y);
+        var info = new StationInfo
+        {
+            Faction = faction,
+            SpawnCooldown = (short)_rng.Next(_cfg.SpawnIntervalTicks),
+            Hp = (short)Math.Min(short.MaxValue, _cfg.StationHpMax),
+            Shield = (short)Math.Min(short.MaxValue, _cfg.StationShieldMax),
+            CalmTicks = short.MaxValue,
+        };
+
+        using (var tx = Tx())
+        {
+            tx.Spawn<Station>(Station.Position.Set(in pos), Station.Info.Set(in info));
+            tx.Commit();
+        }
+
+        // Clear the tombstone AFTER the spawn: every scan keyed on _stationDead skips this slot until it is a real
+        // station again, and StationIndexAt resolves the new entity back to this slot by its position.
+        _stationDead[slot] = false;
+        _stationDamage[slot] = 0;
+        _stationDamageEma[slot] = 0;
+        _stationThreat[slot] = 0;
+        StationsAlive[f]++;
+        StationsRestored++;
+
+        Material[f] += _cfg.TheOneRestoreShipsWorth * _cfg.LightCost;
+        SeedAsteroidsAt(_stationPos[slot]);
+    }
+
+    /// <summary>Seeds a couple of asteroids beside a rebuilt station, inside its dock range.</summary>
+    /// <remarks>
+    /// <para>
+    /// The material grant buys one fleet; these are what let the faction keep earning. A base with a stock and no ore
+    /// within reach spends it, rebuilds nothing, and is back in the position that summoned "the one" — the grant would
+    /// be a stipend rather than a recovery.
+    /// </para>
+    /// <para>
+    /// Placed inside <see cref="Config.StationDockRange"/> deliberately: a miner working them is also within unloading
+    /// distance of the base, so the round trip that funds the comeback costs almost nothing. A faction reduced to one
+    /// station has by definition lost the ground its old fields sat on, and sending it to contest a distant field it
+    /// cannot hold is the same as not helping it.
+    /// </para>
+    /// <para>
+    /// Deliberately NOT routed through <c>SpawnAsteroids</c>. That places rocks on the ore-anchor lattice or uniformly
+    /// over the central disc — both of which are "wherever the field is", which is exactly what this needs to override.
+    /// </para>
+    /// </remarks>
+    private void SeedAsteroidsAt(Vector2 centre)
+    {
+        var n = _cfg.TheOneRestoreAsteroids;
+        if (n <= 0)
+        {
+            return;
+        }
+
+        var reach = _cfg.StationDockRange * _cfg.TheOneRestoreAsteroidRangeScale;
+        using var tx = Tx();
+        for (var i = 0; i < n; i++)
+        {
+            // Spread around the station rather than clustered on one side, so two miners do not have to share a lane.
+            var theta = (float)(_rng.NextDouble() * Math.PI * 2);
+            var rad = reach * (0.5f + 0.5f * (float)_rng.NextDouble());
+            var x = Clamp(centre.X + MathF.Cos(theta) * rad, 0, _cfg.WorldSize);
+            var y = Clamp(centre.Y + MathF.Sin(theta) * rad, 0, _cfg.WorldSize);
+
+            var ang = (float)(_rng.NextDouble() * Math.PI * 2);
+            var speed = _cfg.AsteroidSpeed * (0.3f + (float)_rng.NextDouble());
+            var cap = (int)(_cfg.AsteroidCapacity * (0.5 + _rng.NextDouble()));
+            var pos = Pos.At(x, y);
+            var a = new Asteroid
+            {
+                VX = MathF.Cos(ang) * speed,
+                VY = MathF.Sin(ang) * speed,
+                Capacity = cap,
+                MaxCapacity = cap,
+            };
+            tx.Spawn<Rock>(Rock.Position.Set(in pos), Rock.Asteroid.Set(in a));
+            AsteroidsAlive++;
+        }
+        tx.Commit();
+    }
+
+    /// <summary>Stations rebuilt by a stand-down. HUD counter.</summary>
+    public int StationsRestored { get; private set; }
+
+    /// <summary>Times "the one" has been spawned this run, and stood down again. HUD counters.</summary>
+    public int TheOneSpawns { get; private set; }
+    public int TheOneRetirements { get; private set; }
 
     /// <summary>Spawns exactly one free miner for a faction that has fallen below the floor.</summary>
     private void SpawnMiner(byte faction, ref SimStats stats)
@@ -1097,9 +1485,44 @@ internal sealed class Simulation
     /// <summary>
     /// A projectile against the stations. Linear scan, deliberately — see the note in <see cref="Config"/>.
     /// </summary>
-    private bool TryHitStation(float x, float y, byte faction, int damage)
+    /// <summary>
+    /// Collision radius for one round: at least half the distance it covers in a tick, so it cannot pass through a
+    /// target between frames.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Collision here is a point test resampled once per tick, not a swept volume, so a round is only ever checked at
+    /// discrete positions along its path. A shot that moves further per tick than its own diameter therefore steps OVER
+    /// targets — the faster it flies, the more it misses.
+    /// </para>
+    /// <para>
+    /// This is not hypothetical and it bit this feature directly. "The one" fires at 3x speed, which was chosen to
+    /// shrink lead error: a round aimed at a target's last known position misses by however far the target moves during
+    /// its flight, so a faster round is a more accurate one. At 60 Hz that reasoning is right about lead and wrong
+    /// overall — 3x <see cref="Config.ShotSpeed"/> is 150 m per tick against a 35 m radius, so the rounds tunnelled
+    /// clean through and the most accurate gun on the map hit nothing. Half the per-tick travel is the smallest radius
+    /// that closes the gap, and for every ordinary round it is far below the configured one, so nothing else changes.
+    /// </para>
+    /// </remarks>
+    private float ShotHitRadiusFor(in Bullet b)
+    {
+        var perTick = MathF.Sqrt(b.VX * b.VX + b.VY * b.VY) / MathF.Max(1f, _cfg.TickRate);
+        var configured = b.FromTheOne != 0 ? _cfg.TheOneShotHitRadius : _cfg.ShotHitRadius;
+        return MathF.Max(configured, perTick * 0.5f);
+    }
+
+    private bool TryHitStation(float x, float y, byte faction, int damage, bool fromTheOne)
     {
         var reach = _cfg.StationRadius + _cfg.ShotHitRadius;
+        if (fromTheOne)
+        {
+            // "The one" is an anti-SHIP weapon by design: it exists to restore a fight, and a hull that cannot be
+            // stopped would otherwise level every base on the map long before the fleets came level — ending the run
+            // rather than rebooting it. Blocked here, at the point of contact, rather than by trying to keep it away
+            // from bases: its rounds cross the map and would collide with a station whatever the ship was aiming at.
+            return false;
+        }
+
         var reach2 = reach * reach;
         for (var i = 0; i < _stationPos.Count; i++)
         {
@@ -1586,6 +2009,9 @@ internal sealed class Simulation
 
         InvalidateFactionCache();
         ComputeCentroids();
+        // After the census (which fills TheOneAlive / FightersExcludingTheOne) and before ShipTick, so one spawned
+        // this tick flies on this tick.
+        TheOneTick(ref stats);
         AsteroidTick(dt, ref stats);
         PickupTick(ref stats);
         StationTick(ref stats);
@@ -1612,7 +2038,10 @@ internal sealed class Simulation
         Span<int> n = stackalloc int[4];
         Span<Vector2> msum = stackalloc Vector2[4];
         Span<int> mn = stackalloc int[4];
+        Span<int> fighters = stackalloc int[4];
+        Span<long> firepower = stackalloc long[4];
         Array.Clear(ShipsByKind);
+        Array.Clear(TheOneAlive, 0, TheOneAlive.Length);
         using var tx = Tx();
         using var acc = tx.For<Ship>();
         using var e = acc.GetClusterEnumerator();
@@ -1638,10 +2067,20 @@ internal sealed class Simulation
                 {
                     ShipsByKind[kind]++;
                 }
-                if (com[i].Kind == KindMiner)
+                if (kind == KindMiner)
                 {
                     msum[f] += p;
                     mn[f]++;
+                }
+                else if (kind == KindTheOne)
+                {
+                    TheOneAlive[f] = true;
+                    TheOnePos[f] = p;
+                }
+                else
+                {
+                    fighters[f]++;
+                    firepower[f] += com[i].Damage;
                 }
             }
         }
@@ -1650,6 +2089,8 @@ internal sealed class Simulation
             _centroid[f] = n[f] > 0 ? sum[f] / n[f] : new Vector2(_cfg.WorldSize * 0.5f, _cfg.WorldSize * 0.5f);
             _hasMiners[f] = mn[f] > 0;
             _minerCentroid[f] = mn[f] > 0 ? msum[f] / mn[f] : _centroid[f];
+            FightersExcludingTheOne[f] = fighters[f];
+            FirepowerExcludingTheOne[f] = firepower[f];
         }
     }
 
@@ -1794,20 +2235,33 @@ internal sealed class Simulation
                     {
                         if (TryAcquireForStation(sx, sy, s.Faction, out var tx2, out var ty2))
                         {
-                            s.Cooldown = (short)_cfg.StationCooldownTicks;
+                            // "The one" mode. While the ship is flying for this faction its bases fight the same way:
+                            // one round, one kill. Without it the ship is a lone unit doing the work of a whole navy
+                            // while the bases that produced it plink for 6 damage a shot — and the observed failure was
+                            // exactly that, both sides' last stations ringed by enemies hammering them, the fleets in
+                            // perfect balance and no way for either to break the deadlock.
+                            var oneMode = _cfg.TheOneEnabled && TheOneAlive[s.Faction & 3];
+
+                            s.Cooldown = (short)(oneMode ? _cfg.TheOneStationCooldownTicks : _cfg.StationCooldownTicks);
                             var ddx = tx2 - sx;
                             var ddy = ty2 - sy;
                             var l = MathF.Sqrt(ddx * ddx + ddy * ddy);
                             if (l > 1e-3f && !float.IsNaN(l))
                             {
+                                var shotSpeed = oneMode ? _cfg.ShotSpeed * _cfg.TheOneShotSpeedScale : _cfg.ShotSpeed;
                                 _pendingShots.Add(new PendingShot
                                 {
                                     X = sx, Y = sy,
-                                    VX = ddx / l * _cfg.ShotSpeed,
-                                    VY = ddy / l * _cfg.ShotSpeed,
+                                    VX = ddx / l * shotSpeed,
+                                    VY = ddy / l * shotSpeed,
                                     Faction = s.Faction,
-                                    Damage = (short)_cfg.StationDamage,
+                                    Damage = oneMode ? _cfg.TheOneDamage : (short)_cfg.StationDamage,
                                     Boosted = false,
+
+                                    // Tagged as the one's rounds so they inherit the wide collision radius AND the
+                                    // station immunity: a base firing one-shot ordnance across the map must not be able
+                                    // to flatten the enemy's bases with it. Restoring the fight, not ending it.
+                                    FromTheOne = oneMode,
                                 });
                             }
                         }
@@ -1888,6 +2342,7 @@ internal sealed class Simulation
         var range2 = _cfg.WeaponRange * _cfg.WeaponRange;
         var heavyRange2 = _cfg.HeavyWeaponRange * _cfg.HeavyWeaponRange;
         var destroyerRange2 = _cfg.DestroyerWeaponRange * _cfg.DestroyerWeaponRange;
+        var theOneRange2 = _cfg.TheOneWeaponRange * _cfg.TheOneWeaponRange;
         var mineRange2 = _cfg.MineRange * _cfg.MineRange;
         var dropRange2 = _cfg.StationDockRange * _cfg.StationDockRange;
 
@@ -1985,6 +2440,24 @@ internal sealed class Simulation
                     m.VX *= 0.85f;
                     m.VY *= 0.85f;
                 }
+                else if (c.Kind == KindTheOne)
+                {
+                    // Thrust matched to its speed, and NO wander. The jitter term is a fraction of acceleration, so at
+                    // this hull's thrust the shared WanderStrength would inject +/- 5 600 m/s^2 of random steering —
+                    // the ship would shake itself off course faster than it could aim. Wander exists to stop a fleet
+                    // moving as one rigid body; there is one of these, so it buys nothing here and costs everything.
+                    m.VX += dirX * _cfg.TheOneAccel * dt;
+                    m.VY += dirY * _cfg.TheOneAccel * dt;
+
+                    // Active braking across the direction of travel. Thrust alone turns a fast hull along a wide arc,
+                    // because the old velocity is still there and only decays by being overcome; bleeding the sideways
+                    // component instead lets it pivot, which is what "able on the move" means at this speed.
+                    var vDotD = m.VX * dirX + m.VY * dirY;
+                    var latX = m.VX - dirX * vDotD;
+                    var latY = m.VY - dirY * vDotD;
+                    m.VX -= latX * _cfg.TheOneLateralBrake;
+                    m.VY -= latY * _cfg.TheOneLateralBrake;
+                }
                 else
                 {
                     var jitter = _cfg.WanderStrength;
@@ -2037,13 +2510,17 @@ internal sealed class Simulation
                 {
                     var ddx = c.TargetX - nx;
                     var ddy = c.TargetY - ny;
+                    var theOne = c.Kind == KindTheOne;
                     var myRange2 = c.Kind == KindHeavy ? heavyRange2
                         : c.Kind == KindDestroyer ? destroyerRange2
+                        : theOne ? theOneRange2
                         : range2;
                     if (ddx * ddx + ddy * ddy <= myRange2 && _cfg.ProjectilesEnabled && ShotsAlive < _cfg.MaxShots)
                     {
-                        c.Cooldown = (short)_cfg.WeaponCooldownTicks;
-                        c.RootTicks = (byte)Math.Clamp(_cfg.FireRootTicks, 0, 255);
+                        c.Cooldown = (short)(theOne ? _cfg.TheOneCooldownTicks : _cfg.WeaponCooldownTicks);
+                        // The one is never rooted by its own fire. Root ticks exist to stop a ship kiting while it
+                        // shoots; on a hull whose brief is "very high speed" that would cancel the speed outright.
+                        c.RootTicks = theOne ? (byte)0 : (byte)Math.Clamp(_cfg.FireRootTicks, 0, 255);
                         var l = MathF.Sqrt(ddx * ddx + ddy * ddy);
                         if (l > 1e-3f && !float.IsNaN(l))
                         {
@@ -2052,15 +2529,28 @@ internal sealed class Simulation
                                 continue;
                             }
                             var boosted = PowerTicks[c.Faction & 3] > 0;
+                            // Accuracy: every ship aims at its target's LAST KNOWN position, so the miss is however
+                            // far the target moves during the round's flight. A faster round shortens that flight and
+                            // shrinks the error proportionally — cheaper and more predictable than a lead-prediction
+                            // aimer, and it needs no new state on the projectile.
+                            var shotSpeed = theOne ? _cfg.ShotSpeed * _cfg.TheOneShotSpeedScale : _cfg.ShotSpeed;
                             _pendingShots.Add(new PendingShot
                             {
                                 X = nx, Y = ny,
-                                VX = ddx / l * _cfg.ShotSpeed,
-                                VY = ddy / l * _cfg.ShotSpeed,
+                                VX = ddx / l * shotSpeed,
+                                VY = ddy / l * shotSpeed,
                                 Faction = c.Faction,
-                                Damage = (short)(boosted ? c.Damage * _cfg.PowerDamageMultiplier : c.Damage),
+                                // Its damage is already lethal to anything; the power multiplier would overflow the
+                                // short and wrap NEGATIVE, healing whatever it hit.
+                                Damage = (short)(boosted && !theOne ? c.Damage * _cfg.PowerDamageMultiplier : c.Damage),
                                 Boosted = boosted,
+                                FromTheOne = theOne,
                             });
+
+                            // Deliberately does NOT reset ReacquireIn here. Zeroing it on every shot was the same
+                            // mistake as re-acquiring every tick — it cancelled the commitment window from the other
+                            // side, so the ship re-chose its target every time it pulled the trigger, which at a
+                            // 3-tick cooldown is very nearly every tick.
                         }
                     }
                 }
@@ -2077,6 +2567,23 @@ internal sealed class Simulation
     /// </summary>
     private void FighterSteer(ref Combat c, float px, float py, float speed, ref SimStats stats, out float dirX, out float dirY)
     {
+        // "The one" has exactly one job, so it gets its own branch ahead of every other consideration rather than a
+        // set of exemptions threaded through the fighter's. Left on the ordinary path it did nothing useful, for three
+        // compounding reasons worth recording because each looked reasonable alone:
+        //
+        //   · PickupAttractRadius is 15 km, so it spent its life racing an objective across the map instead of fighting;
+        //   · AcquireRadius (1 600 m) is SHORTER than its own weapon range (TheOneWeaponRange), so it could not see the
+        //     targets it was built to outrange — the one hull where the two are ordered that way;
+        //   · ApplyStandoff holds every ship at 600 m and circles, which is right for a fighter trading shots and wrong
+        //     for something that one-shots what it touches.
+        //
+        // Together they produced a ship flying in circles around a pickup, which is what was observed.
+        if (c.Kind == KindTheOne)
+        {
+            TheOneSteer(ref c, px, py, ref stats, out dirX, out dirY);
+            return;
+        }
+
         if (c.ReacquireIn > 0)
         {
             c.ReacquireIn--;
@@ -2305,6 +2812,105 @@ internal sealed class Simulation
     }
 
     /// <summary>
+    /// Steering for "the one": find the nearest enemy ship and fly straight at it. No orbit, no objectives, no escort.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Deliberately the shortest behaviour in the simulation. Everything the fighter AI does — hold a stand-off ring,
+    /// race pickups, garrison a threatened base, escort miners — exists to make a fragile ship trading shots survive
+    /// and contribute. None of it applies to a hull that cannot be hurt and kills whatever it reaches, and each piece
+    /// actively prevents the one thing it is for.
+    /// </para>
+    /// <para>
+    /// It searches at its own weapon range rather than <see cref="Config.AcquireRadius"/>, because it is the only hull
+    /// whose reach exceeds that radius: using the shared one, it would be unable to acquire targets it could already
+    /// shoot. With nothing in reach it sweeps toward the enemy fleet's centroid, so it crosses the map hunting instead
+    /// of idling where it happens to be — an invincible ship holding station in empty space is the failure mode here.
+    /// </para>
+    /// </remarks>
+    private void TheOneSteer(ref Combat c, float px, float py, ref SimStats stats, out float dirX, out float dirY)
+    {
+        // COMMIT to a target rather than re-picking one every tick. Selection is nearest-enemy, so re-choosing each
+        // tick makes the choice flip between two candidates as the ship moves between them — it turns toward each in
+        // turn and the net movement over a cycle is nil. Holding the choice for a dwell window is what turns "engaging"
+        // into actually arriving; the aim point is still refreshed below on the tick the commitment ends.
+        if (c.ReacquireIn > 0 && c.HasTarget != 0)
+        {
+            c.ReacquireIn--;
+
+            // Hold the commitment until the target is within WEAPON range, not merely until a timer expires. The
+            // hunt radius is a third of the map and the dwell is measured in ticks, so a target picked at 30 km needs
+            // ~350 ticks to reach: a short dwell re-picked a different distant ship every 45 ticks and the approach
+            // never converged — it hunted continuously and fired nothing. The timer survives only as a safety net for
+            // a target that died en route, which would otherwise be chased as a stale coordinate for ever.
+            var cdx = c.TargetX - px;
+            var cdy = c.TargetY - py;
+            if (cdx * cdx + cdy * cdy > _cfg.TheOneWeaponRange * _cfg.TheOneWeaponRange)
+            {
+                SetTask(ref c, TaskEngaging);
+                dirX = cdx;
+                dirY = cdy;
+                return;
+            }
+
+            // In range. Re-acquire so it engages the nearest of whatever it has just reached rather than staying
+            // committed to one ship inside a crowd it can already shoot.
+            c.ReacquireIn = 0;
+        }
+
+        // TWO STAGES, near before far. Once it is inside a melee this method runs nearly every tick — it re-acquires on
+        // arrival so it engages the nearest of whatever it reached — and a single 33 km sweep each time drowns in its own
+        // side: measured at 14.5 million friendly contacts examined over 8 500 ticks, with a quarter of acquisitions
+        // truncated by the scan cap before reaching an enemy. That is the original never-finds-a-target failure, degraded
+        // rather than cured, and it worsens as the fleet grows.
+        //
+        // The close pass covers the case that actually dominates: an enemy already in weapon reach. It is a small bubble,
+        // so it is cheap and its contacts are mostly relevant. The wide sweep is then what it always should have been —
+        // the fallback for a ship with nothing to shoot, paid for once per journey instead of once per tick.
+        stats.AcquireQueries++;
+        var found = TryAcquireTarget(ref c, px, py, defending: false, out var ex, out var ey, _cfg.TheOneWeaponRange);
+        if (!found)
+        {
+            stats.AcquireQueries++;
+            found = TryAcquireTarget(ref c, px, py, defending: false, out ex, out ey, _cfg.TheOneHuntRadius);
+        }
+
+        if (found)
+        {
+            c.TargetX = ex;
+            c.TargetY = ey;
+            c.HasTarget = 1;
+            c.ReacquireIn = (short)_cfg.TheOneTargetDwellTicks;
+            SetTask(ref c, TaskEngaging);
+            dirX = ex - px;
+            dirY = ey - py;
+            return;
+        }
+
+        // Nothing within a third of the world: sweep toward the strongest rival's centre of mass. This is now a true
+        // last resort rather than the normal case, and it is labelled honestly — a ship with no target is not engaging
+        // anything, and calling it "ENGAGING" is what made a ship that had never fired look like one that was fighting.
+        c.HasTarget = 0;
+        SetTask(ref c, TaskIdle);
+
+        var me = c.Faction & 3;
+        var best = -1;
+        long bestFp = -1;
+        for (var f = 0; f < 4; f++)
+        {
+            if (f != me && FirepowerExcludingTheOne[f] > bestFp)
+            {
+                bestFp = FirepowerExcludingTheOne[f];
+                best = f;
+            }
+        }
+
+        var aim = best >= 0 ? _centroid[best] : new Vector2(_cfg.WorldSize * 0.5f, _cfg.WorldSize * 0.5f);
+        dirX = aim.X - px;
+        dirY = aim.Y - py;
+    }
+
+    /// <summary>
     /// Rewrites a fighter's steering so it holds <see cref="Config.StandoffRange"/> from its target and circles,
     /// instead of flying into it.
     /// </summary>
@@ -2328,6 +2934,12 @@ internal sealed class Simulation
     {
         if (c.HasTarget == 0)
         {
+            return;
+        }
+        if (c.Kind == KindTheOne)
+        {
+            // Never held off, never circling. A stand-off ring is a survival tactic for a ship that can be killed while
+            // it closes; applied here it turns the hull into a spectator orbiting its own target at 600 m.
             return;
         }
         var dx = c.TargetX - px;
@@ -2703,7 +3315,11 @@ internal sealed class Simulation
     /// switch produces the behaviour you want: raids push through toward the miners, but a fighter being shot at
     /// turns and fights instead of ignoring its attacker.
     /// </summary>
-    private bool TryAcquireTarget(ref Combat c, float x, float y, bool defending, out float tx, out float ty)
+    /// <param name="theOneRadius">
+    /// Search radius for "the one", which picks it per call: its weapon reach while fighting, the hunt radius when it
+    /// has nothing. Ignored for every other hull, which uses <see cref="Config.AcquireRadius"/>.
+    /// </param>
+    private bool TryAcquireTarget(ref Combat c, float x, float y, bool defending, out float tx, out float ty, float theOneRadius = 0f)
     {
         var faction = c.Faction;
         tx = 0;
@@ -2718,17 +3334,23 @@ internal sealed class Simulation
         _sepY = 0f;
         _sepNearest = float.MaxValue;
 
-        var sphere = new BSphere2F { CenterX = x, CenterY = y, Radius = _cfg.AcquireRadius };
+        // Radius is the caller's choice for "the one" — see TheOneSteer's two-stage search — and the shared value for
+        // everyone else.
+        var acquireRadius = c.Kind == KindTheOne && theOneRadius > 0f ? theOneRadius : _cfg.AcquireRadius;
+        var sphere = new BSphere2F { CenterX = x, CenterY = y, Radius = acquireRadius };
         using var tr = Tx();
         var q = _host.DBE.ClusterSpatialQuery<Ship>().Radius(in sphere);
         using var acc = tr.For<Ship>();
 
         var examined = 0;
+        // See TheOneScanCap: the shared cap is sized for a fighter already in a melee. A hull that starts inside its own
+        // formation spends the whole budget on friendly contacts and reports no enemy on the map.
+        var scanCap = c.Kind == KindTheOne ? _cfg.TheOneScanCap : _cfg.AcquireScanCap;
         var sepR = _cfg.SeparationRadius;
         var sepR2 = sepR * sepR;
         while (q.MoveNext())
         {
-            if (++examined > _cfg.AcquireScanCap)
+            if (++examined > scanCap)
             {
                 break;
             }
@@ -2761,6 +3383,17 @@ internal sealed class Simulation
             {
                 continue;
             }
+
+            // "The one" does not hunt miners. Two reasons, and the second is the load-bearing one. It is an anti-WARSHIP
+            // unit by brief; and its stand-down is scored on the enemy's FIREPOWER, which miners contribute nothing to
+            // (their Damage is 0) — so every round spent on one is a round that cannot advance the condition it is
+            // waiting for. A version that shot miners would prolong its own deployment while doing nothing about the
+            // imbalance that summoned it.
+            if (c.Kind == KindTheOne && hk == KindMiner)
+            {
+                continue;
+            }
+
             if (hit.DistanceSq < best)
             {
                 best = hit.DistanceSq;
@@ -2916,7 +3549,7 @@ internal sealed class Simulation
                 // Stations first, and by LINEAR SCAN over six cached positions — see the note in Config. Six
                 // distance comparisons, against the ~1000 entity examinations a spatial query would cost. Doing
                 // this the "consistent" way would have doubled the hottest path in the simulation for six entities.
-                if (TryHitStation(nx, ny, b.Faction, b.Damage))
+                if (TryHitStation(nx, ny, b.Faction, b.Damage, b.FromTheOne != 0))
                 {
                     b.Dead = 1;
                     _dead.Add(cluster.GetEntityId(i));
@@ -2925,7 +3558,7 @@ internal sealed class Simulation
                 }
 
                 // ── hit test: a TINY radius query inside a HUGE cell — the pathological shape ──
-                if (TryHit(nx, ny, b.Faction, b.Damage))
+                if (TryHit(nx, ny, b.Faction, b.Damage, ShotHitRadiusFor(in b), b.FromTheOne != 0))
                 {
                     b.Dead = 1;
                     _dead.Add(cluster.GetEntityId(i));
@@ -2938,9 +3571,12 @@ internal sealed class Simulation
         tx.Commit();
     }
 
-    private bool TryHit(float x, float y, byte faction, int damage)
+    /// <param name="hitRadius">
+    /// Collision radius for THIS round, which is not a constant across the fleet — see <see cref="ShotHitRadiusFor"/>.
+    /// </param>
+    private bool TryHit(float x, float y, byte faction, int damage, float hitRadius, bool fromTheOne)
     {
-        var sphere = new BSphere2F { CenterX = x, CenterY = y, Radius = _cfg.ShotHitRadius };
+        var sphere = new BSphere2F { CenterX = x, CenterY = y, Radius = hitRadius };
         using var tr = Tx();
         using var acc = tr.For<Ship>();
         var q = _host.DBE.ClusterSpatialQuery<Ship>().Radius(in sphere);
@@ -2949,7 +3585,16 @@ internal sealed class Simulation
             while (q.MoveNext())
             {
                 var hit = q.Current;
-                if (!TryReadFaction(acc, hit.ClusterChunkId, hit.SlotIndex, out var hf) || hf == faction)
+                if (!TryReadShip(acc, hit.ClusterChunkId, hit.SlotIndex, out var hf, out var hk) || hf == faction)
+                {
+                    continue;
+                }
+
+                // "The one's" rounds pass through miners, as they already do through stations. Excluding miners from its
+                // TARGET selection was not enough on its own: its collision radius is 220 m, so a miner standing near
+                // the warship it aimed at died anyway — measured at 11 such kills in 1 500 ticks. Collateral is still
+                // killing the economy, which is the thing this unit must not do; it is here to restore a FIGHT.
+                if (fromTheOne && hk == KindMiner)
                 {
                     continue;
                 }
@@ -3009,6 +3654,14 @@ internal sealed class Simulation
                 ref var c = ref com[slot];
                 if (c.Dead != 0)
                 {
+                    continue;
+                }
+                if (c.Kind == KindTheOne)
+                {
+                    // Indestructible. The flash still fires, deliberately: rounds ARE landing, and a ship that shrugs
+                    // off visible fire reads as invulnerable, where one that ignores it entirely reads as a bug.
+                    c.HitFlash = (byte)Math.Min(255, _cfg.HitFlashTicks);
+                    touched = true;
                     continue;
                 }
                 // Shield first, hull with the remainder. A round that only grazes the shield still resets the calm
@@ -3071,6 +3724,7 @@ internal sealed class Simulation
                 Faction = s.Faction,
                 Damage = s.Damage,
                 Boosted = (byte)(s.Boosted ? 1 : 0),
+                FromTheOne = (byte)(s.FromTheOne ? 1 : 0),
             };
             tx.Spawn<Shot>(Shot.Position.Set(in pos), Shot.Bullet.Set(in b));
             ShotsAlive++;
@@ -3675,6 +4329,7 @@ internal sealed class Simulation
         public byte Faction;
         public short Damage;
         public bool Boosted;
+        public bool FromTheOne;
     }
 }
 

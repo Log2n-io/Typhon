@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using SFML.Graphics;
@@ -264,6 +264,10 @@ internal sealed class App : IDisposable
         }
 
         _ticksPerFrameEma = _ticksPerFrameEma * 0.9 + ticksThisFrame * 0.1;
+
+        // After the ticks, before the draw: the ship has just moved, and following a position from the previous frame
+        // would trail it by a frame — at 5 600 m/s that is ~90 m of visible lag, which reads as the camera lagging.
+        UpdateFollowTheOne();
         SampleScoreTrend();
         WriteCensus();
 
@@ -315,7 +319,7 @@ internal sealed class App : IDisposable
                               "scoreB,scoreO,stationsB,stationsO,shipsB,shipsO,peakBpDebt,peakBpEpochHeld," +
                               "checkpoints,gatedCycles,segmentsRecycled,walBytes,walFiles,simMs,frameMs,worstFenceMs," +
                               "shipsMoved,shotsMoved,shotsFired,spawned,destroyed,acquireQ,hitQ,oreQ," +
-                              "shipClusters,shotClusters,kFighter,kHeavy,kMiner,kFast,kDestroyer");
+                              "shipClusters,shotClusters,kFighter,kHeavy,kMiner,kFast,kDestroyer,kTheOne,fpB,fpO,armedB,armedO");
             Console.WriteLine($"census -> {path}");
         }
 
@@ -334,7 +338,13 @@ internal sealed class App : IDisposable
                           $"{_host.ClusterStateOf(_host.ShipArchetypeId)?.ActiveClusterCount ?? 0}," +
                           $"{_host.ClusterStateOf(_host.ShotArchetypeId)?.ActiveClusterCount ?? 0}," +
                           $"{_sim.ShipsByKind[0]},{_sim.ShipsByKind[1]},{_sim.ShipsByKind[2]}," +
-                          $"{_sim.ShipsByKind[3]},{_sim.ShipsByKind[4]}");
+                          $"{_sim.ShipsByKind[3]},{_sim.ShipsByKind[4]},{_sim.ShipsByKind[5]}," +
+                          // The balance "the one" is scored on, logged next to its hull count so a run can be read as
+                          // cause and effect rather than "an invincible ship appeared at some point".
+                          $"{_sim.FirepowerExcludingTheOne[0]},{_sim.FirepowerExcludingTheOne[1]}," +
+                          // Per-faction ARMED hull counts. kMiner in this row is both factions combined, so without
+                          // these the split that explains a ship-count/firepower divergence cannot be recovered.
+                          $"{_sim.FightersExcludingTheOne[0]},{_sim.FightersExcludingTheOne[1]}");
 
         _accShipsMoved = _accShotsMoved = _accShotsFired = _accSpawned = _accDestroyed = 0;
         _accAcquireQ = _accHitQ = _accOreQ = 0;
@@ -554,10 +564,65 @@ internal sealed class App : IDisposable
                 break;
             case Keyboard.Key.M: ToggleFileMapWindow(); break;
             case Keyboard.Key.H: _cfg.ShowHud = !_cfg.ShowHud; break;
+            case Keyboard.Key.O: ToggleFollowTheOne(); break;
             case Keyboard.Key.P: _probeActive = !_probeActive; break;
             case Keyboard.Key.F12: SaveScreenshot($"spacebattle-{DateTime.Now:HHmmss}.png", report: true); break;
         }
     }
+
+    /// <summary>
+    /// Toggles a follow-lock on "the one". Cycles through the sides that have one, then off.
+    /// </summary>
+    /// <remarks>
+    /// A lock rather than a jump, and deliberately no zoom change. At 5 600 m/s the ship crosses a tactical view in
+    /// well under a second, so a one-shot jump puts it off screen before you have looked at it — following is the only
+    /// way to actually watch it work. Zoom is left alone because the operator's current magnification is a choice they
+    /// made, and stamping over it is the behaviour that made the earlier jump-and-zoom version unusable.
+    /// </remarks>
+    private void ToggleFollowTheOne()
+    {
+        var start = _followTheOne < 0 ? 0 : _followTheOne + 1;
+        for (var f = start; f < _sim.TheOneAlive.Length; f++)
+        {
+            if (_sim.TheOneAlive[f])
+            {
+                _followTheOne = f;
+                _cam.UserPanned = false;   // arming the lock is not an override of it
+                return;
+            }
+        }
+
+        _followTheOne = -1;   // past the last one that exists — the press means "stop following"
+    }
+
+    /// <summary>
+    /// Keeps the camera on the followed ship, and releases the lock when it is no longer there to follow.
+    /// </summary>
+    /// <remarks>
+    /// Two independent releases, and both matter. A manual pan means the operator wants to look elsewhere and the lock
+    /// must not fight them for the cursor. The ship ceasing to exist — shot down is impossible, but standing down is
+    /// routine — would otherwise leave the camera pinned to the last place it was, which reads as a frozen view rather
+    /// than a finished engagement.
+    /// </remarks>
+    private void UpdateFollowTheOne()
+    {
+        if (_followTheOne < 0)
+        {
+            return;
+        }
+        if (_cam.UserPanned || !_sim.TheOneAlive[_followTheOne])
+        {
+            _followTheOne = -1;
+            _cam.UserPanned = false;
+            return;
+        }
+
+        var p = _sim.TheOnePos[_followTheOne];
+        _cam.JumpTo(new Vector2f(p.X, p.Y));
+    }
+
+    /// <summary>Faction whose "the one" the camera is locked to, or -1 for free.</summary>
+    private int _followTheOne = -1;
 
     private void SelectAt(Vector2f world)
     {
@@ -896,7 +961,12 @@ internal sealed class App : IDisposable
                    $"{_ticksPerFrameEma:F2} ticks/frame   budget {_cfg.SimBudgetMs:F0} ms   " +
                    $"backlog {_tickAccumulator:F1} ticks",
                    keepingUp ? new Color(150, 220, 170) : bad));
-        lines.Add(($"ships {Simulation.FactionTag(0)} {_sim.ShipsAlive[0]} vs {Simulation.FactionTag(1)} {_sim.ShipsAlive[1]}   shots {_sim.ShotsAlive}   spawned {_sim.TotalSpawned}  killed {_sim.TotalKilled}", white));
+        // ARMED counts beside the hull counts. Without them the two headline numbers appear to contradict each other:
+        // a 4x lead in ships next to a 2.5x lead in firepower reads as a bug, when it is only that ~41 % of all hulls
+        // are unarmed miners and the two fleets carry very different shares of them.
+        lines.Add(($"ships {Simulation.FactionTag(0)} {_sim.ShipsAlive[0]} vs {Simulation.FactionTag(1)} {_sim.ShipsAlive[1]}   "
+                 + $"armed {Simulation.FactionTag(0)} {_sim.FightersExcludingTheOne[0]} vs {Simulation.FactionTag(1)} {_sim.FightersExcludingTheOne[1]}   "
+                 + $"shots {_sim.ShotsAlive}   spawned {_sim.TotalSpawned}  killed {_sim.TotalKilled}", white));
         lines.Add(($"miners {Simulation.FactionTag(0)} {_sim.MinersAlive[0]} vs {Simulation.FactionTag(1)} {_sim.MinersAlive[1]}   " +
                    $"material {Simulation.FactionTag(0)} {_sim.Material[0]} vs {Simulation.FactionTag(1)} {_sim.Material[1]}   " +
                    $"asteroids {_sim.AsteroidsAlive}   mined {_sim.TotalMined}", new Color(190, 220, 170)));
@@ -906,6 +976,7 @@ internal sealed class App : IDisposable
         lines.Add(($"pickups won {_sim.PickupsCollected}  hits landed {_sim.PickupHits}  shots absorbed {_sim.ShotsAbsorbed}   " +
                    $"{Simulation.FactionTag(0)}[{Effect(0)}]  {Simulation.FactionTag(1)}[{Effect(1)}]", new Color(255, 220, 140)));
         lines.Add((PickupLine(), _sim.LivePickupKind >= 0 ? new Color(255, 235, 150) : dim));
+        lines.Add((TheOneLine(), _sim.TheOneAlive[0] || _sim.TheOneAlive[1] ? new Color(255, 255, 255) : dim));
         lines.Add(("", dim));
         lines.Add((RenderLine(), _renderer.Lod.Tier == LodTier.Density ? new Color(255, 220, 140) : white));
         lines.Add((CullLine(), _renderer.CullActive ? dim : warn));
@@ -955,6 +1026,13 @@ internal sealed class App : IDisposable
         lines.Add(("MMB pan · wheel zoom · LMB select (or click/drag the minimap) · RMB probe · space pause · . step · [ ] speed · 0 reset · F frame", dim));
         lines.Add(("1 cells  2 heat  3 cluster AABB  4 ships  5 shots  6 target lines  7 selectivity  8 asteroids  9 CLUSTER COLOUR", dim));
         lines.Add(("N minimap   V motion vectors   L force LOD   C culling   D density source   M file map   H hud   F12 shot   Esc quit", dim));
+        var followHint = _followTheOne >= 0
+            ? $" — LOCKED on {Simulation.FactionTag(_followTheOne)} (pan or press O to release)"
+            : " (press again to cycle sides, then off)";
+        var followColor = _followTheOne >= 0 ? new Color(255, 255, 255)
+            : _sim.TheOneAlive[0] || _sim.TheOneAlive[1] ? new Color(210, 220, 235)
+            : dim;
+        lines.Add(($"O follow THE ONE{followHint}", followColor));
         lines.Add(($"window layout: {_layout.Describe()}", dim));
         if (_cfg.ClusterColorMode)
         {
@@ -1054,6 +1132,46 @@ internal sealed class App : IDisposable
     /// The state of the contested-pickup race. Without this the 200-hit contest is invisible — you can see a
     /// crowd of ships around an object but not who is winning, or by how much.
     /// </summary>
+    /// <summary>
+    /// The firepower balance "the one" is scored on, expressed the way the RULE expresses it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Directional — one named faction's firepower over its strongest rival's — and deliberately not the symmetric
+    /// weaker/stronger ratio it used to show. That version could never exceed 100 % and never said whose ratio it was,
+    /// so it disagreed with the condition it was supposed to be reporting at exactly the moment that matters: the one
+    /// stands down when ITS side reaches parity, and the instant it crosses ahead the symmetric figure starts falling
+    /// again. A stand-down at a true 1.05 was displayed as 95 %, and at 1.67 as 60 % — the ship vanishing at "60 %
+    /// balance" when the threshold reads 100 %.
+    /// </para>
+    /// <para>
+    /// While one is flying the subject is ITS faction, because that is the ratio being tested for stand-down. With none
+    /// on the field the subject is whichever side is behind, because that is the one being tested for the trigger.
+    /// </para>
+    /// </remarks>
+    private string TheOneLine()
+    {
+        var fp0 = _sim.FirepowerExcludingTheOne[0];
+        var fp1 = _sim.FirepowerExcludingTheOne[1];
+
+        // Subject: the side that owns the decision right now.
+        var subject = _sim.TheOneAlive[0] ? 0
+            : _sim.TheOneAlive[1] ? 1
+            : fp0 <= fp1 ? 0 : 1;
+
+        var mine = subject == 0 ? fp0 : fp1;
+        var rival = subject == 0 ? fp1 : fp0;
+        var ratio = rival > 0 ? (float)mine / rival : 1f;
+
+        var on = (_sim.TheOneAlive[0] ? $" — THE ONE flying for {Simulation.FactionTag(0)}" : string.Empty)
+               + (_sim.TheOneAlive[1] ? $" — THE ONE flying for {Simulation.FactionTag(1)}" : string.Empty);
+
+        return $"firepower {Simulation.FactionTag(0)} {fp0} vs {Simulation.FactionTag(1)} {fp1}   "
+             + $"{Simulation.FactionTag(subject)} is at {ratio:P0} of its rival "
+             + $"(spawns at {_cfg.TheOneTriggerRatio:P0}, stands down at {_cfg.TheOneRetireRatio:P0})   "
+             + $"scrambled {_sim.TheOneSpawns}  stood down {_sim.TheOneRetirements}  bases rebuilt {_sim.StationsRestored}{on}";
+    }
+
     private string PickupLine()
     {
         if (_sim.LivePickupKind < 0)

@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using Typhon.Schema.Definition;
 
 namespace SpaceBattle;
@@ -161,7 +161,14 @@ public struct Bullet
     [Field] public byte Dead;
     /// <summary>Fired while the faction's weapon-power effect was active: double damage, drawn big and red.</summary>
     [Field] public byte Boosted;
-    [Field] public byte Pad1;      // 4+4+2+2+1+1+1+1 = 16 = sizeof(Bullet)
+
+    /// <summary>Fired by "the one", which is an anti-ship weapon: these rounds pass through stations without harming them.</summary>
+    /// <remarks>
+    /// Carried on the PROJECTILE rather than resolved from the firer, because by the time a round reaches a station the
+    /// ship that fired it is elsewhere and may have stood down entirely — the shot has to know its own rules. Occupies
+    /// what was a pad byte, so <c>Bullet</c> stays 16 bytes and the tight-vs-CLR layout agreement is unchanged.
+    /// </remarks>
+    [Field] public byte FromTheOne;   // 4+4+2+2+1+1+1+1 = 16 = sizeof(Bullet)
 }
 
 /// <summary>

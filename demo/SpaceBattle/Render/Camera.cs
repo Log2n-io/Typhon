@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using SFML.Graphics;
 using SFML.System;
 using SFML.Window;
@@ -95,6 +95,16 @@ internal sealed class Camera
         }
     }
 
+    /// <summary>
+    /// Set whenever the operator PANS the camera, so a follow-lock can tell it has been overridden and let go.
+    /// </summary>
+    /// <remarks>
+    /// Panning only. Zooming deliberately does not set this: changing magnification while tracking something is a
+    /// normal thing to want, and a lock that dropped on every wheel click would be unusable at exactly the moment it
+    /// is useful. Cleared by whoever consumes it.
+    /// </remarks>
+    public bool UserPanned { get; set; }
+
     public void OnMouseMove(Vector2i pos)
     {
         if (!_panning)
@@ -103,6 +113,7 @@ internal sealed class Camera
         }
         var d = pos - _lastMouse;
         _lastMouse = pos;
+        UserPanned = true;
         var aspect = _win.Size.X / (float)_win.Size.Y;
         Center.X -= d.X * (ViewHeight * aspect) / _win.Size.X;
         Center.Y -= d.Y * ViewHeight / _win.Size.Y;
@@ -120,6 +131,7 @@ internal sealed class Camera
     /// <summary>Fits the whole world in view on BOTH axes — on a wide window, height alone leaves it letterboxed.</summary>
     public void FrameWorld(float worldSize)
     {
+        UserPanned = true;
         Center = new Vector2f(worldSize * 0.5f, worldSize * 0.5f);
         var aspect = _win.Size.X / (float)_win.Size.Y;
         ViewHeight = aspect >= 1f ? worldSize * 1.06f : worldSize * 1.06f / aspect;

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -272,7 +272,19 @@ public sealed class Config
 
     /// <summary>Ship radius in metres — a 10 m hull. 1:10,000 of the world width.</summary>
     public float ShipRadius = 5f;
-    public int ShipHp = 20;
+    public int ShipHp = 29;
+    /// <summary>Damage one shot removes from shield, then hull.</summary>
+    /// <remarks>
+    /// Deliberately NOT cut when the fleet was made 30 % less lethal — the hulls were made 43 % tougher instead, which
+    /// is the same time-to-kill and is exactly representable. At 2 a 30 % reduction rounds to 1, i.e. 50 %, and every
+    /// other hull derives from this value (heavy 2x, interceptor 1x), so the rounding error would propagate across the
+    /// whole roster. Damage and durability are reciprocal in every outcome that matters here and only one of them has
+    /// the resolution to express the change.
+    /// <para>
+    /// It also leaves the firepower tally — which sums exactly this field — on its existing scale, so the thresholds
+    /// that gate "the one" still mean what they were measured against.
+    /// </para>
+    /// </remarks>
     public int ShipDamage = 2;
 
     /// <summary>
@@ -283,7 +295,7 @@ public sealed class Config
     /// 26-tick cooldown and a 38 % hit rate a single attacker deals ~1.75 damage/s, so regen much above that means
     /// a lone attacker can never finish a kill and skirmishes become endless rather than longer.
     /// </remarks>
-    public int ShipShieldMax = 12;
+    public int ShipShieldMax = 17;
 
     /// <summary>Ticks per point of shield regenerated. 30 = 2/s, comfortably under one attacker's ~1.75 dmg/s.</summary>
     public int ShipShieldRegenTicks = 30;
@@ -512,38 +524,366 @@ public sealed class Config
     /// has to be earned by mining. That keeps it a comeback tool rather than a consolation prize, and it means the
     /// underdog must protect its miners long enough to afford one.
     /// </remarks>
-    public int DestroyerCost = 500;
+    public int DestroyerCost = 350;
 
     /// <summary>Destroyer hull. Twenty light fighters' worth, so a fleet has to commit to killing one.</summary>
-    public int DestroyerHp = 400;
+    public int DestroyerHp = 572;
 
     /// <summary>Destroyer shield.</summary>
-    public int DestroyerShield = 240;
+    public int DestroyerShield = 343;
 
     /// <summary>Destroyer damage per shot.</summary>
     /// <remarks>
-    /// Cut from 40 to trim the hull's combat value by a quarter. Combat value goes as effective-HP x DPS, so taking
-    /// the whole 25 % out of damage and none out of the hull is the reading that leaves the design intact: the
-    /// destroyer was specified as slow, very resistant and deadly, and shaving the tank instead would have made it a
-    /// worse version of a heavy rather than a gentler capital ship.
+    /// <para>
+    /// Cut from 30 to 15 and then to 10. The hull was over-valued for what it can actually accomplish: it is too slow
+    /// to retake ground, so its damage buys local defence and never translates into recovered territory. Paying full
+    /// price in the balance for a capability that cannot be delivered is what made it unbalanced. At 10 it is five
+    /// fighters' worth of gun for four fighters' worth of material, which is close to par — the premium now sits in its
+    /// durability and reach, where the hull's actual advantages are.
+    /// </para>
+    /// <para>
+    /// It also weighed on a second scale that did not exist when 30 was chosen. <c>Damage</c> is now the term in the
+    /// firepower tally that gates "the one" — so at 30 a single destroyer counted for fifteen fighters, and a trailing
+    /// faction banking material into capitals inflated its own score back above the trigger and denied itself the
+    /// comeback unit. The two comeback mechanisms were partly cancelling.
+    /// </para>
+    /// <para>
+    /// Cut from damage rather than from the hull, for the reason the original note gives: combat value goes as
+    /// effective-HP x DPS, and the destroyer is specified as slow, very resistant and deadly. Shaving the tank would
+    /// make it a worse heavy rather than a gentler capital ship.
+    /// </para>
     /// </remarks>
-    public int DestroyerDamage = 30;
+    public int DestroyerDamage = 10;
 
     /// <summary>
-    /// Destroyer top speed — deliberately crawling.
+    /// Destroyer top speed — slow, but no longer crawling.
     /// </summary>
     /// <remarks>
-    /// Slow enough that it cannot take the war to the enemy's bases in any reasonable time, which is the whole point:
-    /// it defends the ground its owner still holds and shreds anything that comes to it. A fast one would simply be a
-    /// win condition handed to the losing side.
+    /// <para>
+    /// Raised 30 % from 110. The original was set so the hull could not take the war to the enemy's bases, on the
+    /// reasoning that a fast capital ship would hand the losing side a win condition. In practice it was slow enough
+    /// that it could not retake ground at all — it defended the ground its owner already held and never converted its
+    /// firepower into territory, which is why the hull ended up over-priced in the balance rather than over-powered.
+    /// </para>
+    /// <para>
+    /// Still well under a light fighter's <see cref="ShipMaxSpeed"/>, so the character is unchanged: it arrives late
+    /// and cannot chase. It can now cross contested space in a useful time, which is the difference between a mobile
+    /// asset and a turret.
+    /// </para>
     /// </remarks>
-    public float DestroyerMaxSpeed = 110f;
+    public float DestroyerMaxSpeed = 143f;
 
     /// <summary>Destroyer weapon reach. Outranges every other hull, so it opens fire first.</summary>
     public float DestroyerWeaponRange = 1600f;
 
+    /// <summary>
+    /// Fraction of an eligible faction's non-miner spawns that become destroyers, rather than all of them.
+    /// </summary>
+    /// <remarks>
+    /// Without this the destroyer gate was affordability alone, which is a ratchet and not a choice: the moment a
+    /// trailing faction could pay for one, EVERY subsequent non-miner spawn became a destroyer and its fleet composition
+    /// collapsed to a single hull — no fighters, no interceptors, no screen. A monoculture has no answer to anything it
+    /// happens to be bad against, and it also removes the hull-mix variation this demo exists to observe.
+    /// <para>
+    /// Sized against <see cref="HeavyShare"/> and <see cref="FastShare"/> so capitals read as the rarest hull rather
+    /// than the default one.
+    /// </para>
+    /// </remarks>
+    public float DestroyerShare = 0.20f;
+
     /// <summary>Whether a trailing faction may build destroyers at all.</summary>
     public bool DestroyersEnabled = true;
+
+    // ─── The One (last-resort unique hull) ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Whether a collapsing faction may be given "the one" at all.</summary>
+    /// <remarks>
+    /// A deliberately unfair unit, and the only one in the simulation that is. It exists to answer "what does the
+    /// engine do when a single entity interacts with everything on the map every tick" — every other hull's reach is
+    /// bounded by its weapon range, so nothing else produces that access pattern. Off by default in a run where you
+    /// want the balance mechanics measured rather than overridden.
+    /// </remarks>
+    public bool TheOneEnabled = true;
+
+    /// <summary>
+    /// Firepower ratio at or below which a faction is handed "the one": its armed fleet's total gun output divided by
+    /// the strongest rival's.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Firepower, not <c>Score</c>. Score weights a surviving station at 5 000 against 10 for a fighter, so a faction
+    /// still holding one base sits around a third of a three-base leader whatever has happened to its fleet — the
+    /// threshold was unreachable until the last base fell, and a faction with no bases can never rebuild, so the
+    /// retirement condition became unreachable in turn. Scoring both ends on the same fleet-strength number removes
+    /// both problems and measures the thing the unit exists to fix.
+    /// </para>
+    /// <para>
+    /// Damage-weighted rather than a hull count, so a fleet of destroyers is not read as equal to the same number of
+    /// interceptors. Miners contribute nothing, having no gun — which is correct for a measure of who can win a fight.
+    /// </para>
+    /// <para>
+    /// Raised from 0.30 against measurement, not taste. Over a 57 000-tick run one faction slid steadily for fifty
+    /// thousand ticks, bottomed at 34 % and recovered to 42 % — never crossing 30 %, while losing two of its three
+    /// bases and being outnumbered four to one. The underdog relief was strong enough to hold it above the threshold
+    /// and far too weak to turn it around: a stable, permanent losing equilibrium in which the comeback unit could
+    /// never fire. The old value was carried over from the original brief without knowing what ratios this simulation
+    /// actually reaches.
+    /// </para>
+    /// </remarks>
+    public float TheOneTriggerRatio = 0.45f;
+
+    /// <summary>
+    /// Whether the trigger also considers the STATION ratio, taking whichever of the two is worse.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Firepower is a STOCK; surviving stations are the FLOW that replaces it. A faction can hold its gun count roughly
+    /// level while being structurally unable to recover, because losses and replacement happen to net out — and a stock
+    /// metric reads that plateau as health right up until it collapses. Measured: a faction sat at 42 % firepower with
+    /// ONE base against three, outnumbered four to one, in a state it could never recover from and which the firepower
+    /// ratio alone never scored below the trigger.
+    /// </para>
+    /// <para>
+    /// Applies to the trigger ONLY, never to the stand-down. Retirement stays on firepower alone, deliberately: a
+    /// faction reduced to one base can rarely rebuild the others, so a station term in the retirement condition would
+    /// mean the one could never leave. It is here to restore the fight, not to retake the territory.
+    /// </para>
+    /// </remarks>
+    public bool TheOneTriggerOnStations = true;
+
+    /// <summary>
+    /// Whether standing "the one" down also rebuilds one of its faction's destroyed stations, on its original site.
+    /// </summary>
+    /// <remarks>
+    /// Without it the comeback is temporary by construction. "The one" restores the FIGHT — it thins the enemy fleet
+    /// until the gun counts are level — but it cannot restore the PRODUCTION that replaces losses, and a faction down to
+    /// one base against three re-loses the moment the ship departs. Measured over 57 000 ticks: a faction slid to one
+    /// station and sat in a permanent losing equilibrium it had no route out of. Handing back a base at the moment of
+    /// stand-down is what converts a reprieve into a recovery.
+    /// </remarks>
+    public bool TheOneRestoresStation = true;
+
+    /// <summary>
+    /// Ships' worth of material granted with the restored station, priced in <see cref="LightCost"/>.
+    /// </summary>
+    /// <remarks>
+    /// A base with no material is a building, not a shipyard: production is gated on banked ore, and a faction that has
+    /// just been reduced to one station has none — its miners are dead and its asteroids are held by someone else. The
+    /// grant is expressed in SHIPS rather than as a raw number so it stays meaningful if hull prices move.
+    /// </remarks>
+    public int TheOneRestoreShipsWorth = 40;
+
+    /// <summary>Asteroids seeded beside a station rebuilt by a stand-down.</summary>
+    /// <remarks>
+    /// A base with material but no ore in reach is a one-off grant, not an economy: the stock buys a fleet once and
+    /// then the faction is back where it was. Its own rocks are what let it keep earning, and a faction reduced to a
+    /// single base has by definition lost the ground its old fields were on.
+    /// </remarks>
+    public int TheOneRestoreAsteroids = 2;
+
+    /// <summary>How close those asteroids sit to the rebuilt station, as a fraction of <see cref="StationDockRange"/>.</summary>
+    /// <remarks>
+    /// Inside dock range rather than merely nearby, so a miner working them is also within unloading distance of the
+    /// base — the round trip that funds the recovery is then almost free, which is the point of placing them here
+    /// rather than letting the faction go and contest a distant field it cannot hold.
+    /// </remarks>
+    public float TheOneRestoreAsteroidRangeScale = 0.8f;
+
+    /// <summary>
+    /// Firepower ratio at or above which "the one" self-destructs, against the same measure as
+    /// <see cref="TheOneTriggerRatio"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// One quantity for both ends, two thresholds: that is what makes this a hysteresis rather than a switch. Validate()
+    /// requires this to exceed the trigger, leaving a band where the one neither spawns nor retires — without it the
+    /// two conditions meet and it flickers once per tick.
+    /// </para>
+    /// <para>
+    /// The one is excluded from its own faction's firepower when this is evaluated. Counted in its own total it would
+    /// contribute to the balance it is waiting to see restored, satisfying its retirement sooner the longer it
+    /// survived, which is backwards.
+    /// </para>
+    /// </remarks>
+    public float TheOneRetireRatio = 1.0f;
+
+    /// <summary>Top speed — 7x the interceptor, which is otherwise the quickest thing on the map.</summary>
+    /// <remarks>
+    /// It has to CROSS the map to do its job, not merely win the fight it is standing in. Its faction is by definition
+    /// the one that has lost ground, so the enemy fleet is usually somewhere else entirely, and at fighter speeds a
+    /// single ship spends most of its life in transit — which reads, correctly, as doing nothing.
+    /// </remarks>
+    public float TheOneMaxSpeed = 5600f;
+
+    /// <summary>
+    /// Damage per shot. Set to exceed any hull's effective HP so every hit is a kill.
+    /// </summary>
+    /// <remarks>
+    /// The brief is "one-shots every ship", so this is scored against the toughest target rather than picked as a
+    /// round number: a destroyer is <see cref="DestroyerHp"/> + <see cref="DestroyerShield"/>, and damage lands on the
+    /// shield first with the remainder carrying to the hull, so anything above their sum kills in one round.
+    /// <c>short.MaxValue</c> leaves headroom for those to be raised without silently turning this into a two-shot.
+    /// </remarks>
+    public short TheOneDamage = short.MaxValue;
+
+    /// <summary>
+    /// Collision radius of "the one's" rounds, against <see cref="ShotHitRadius"/> for everything else.
+    /// </summary>
+    /// <remarks>
+    /// This is where "high accuracy" actually lives. Two other things were tried first and neither is sufficient: a
+    /// faster round shrinks lead error but tunnels (see <c>ShotHitRadiusFor</c>), and re-acquiring every tick refreshes
+    /// the aim point but not the target's velocity, which is what the shot has to lead. With both in place the gun
+    /// still connected on roughly one shot in twenty, because the firer itself moves ~93 m per tick and the geometry it
+    /// aimed along is stale by the time the round leaves.
+    /// <para>
+    /// Widening the round is the cheap, legible answer: it is still under a tenth of the hull's weapon reach, so it
+    /// does not turn into an area weapon, and it makes the thing hit what it is pointed at — which is the whole of the
+    /// specification. Modelling target velocity would be the "proper" fix and is a great deal more machinery for a
+    /// unit that exists to be unfair.
+    /// </para>
+    /// </remarks>
+    public float TheOneShotHitRadius = 220f;
+
+    /// <summary>
+    /// Ticks "the one" stays committed to a chosen target before it is allowed to pick a different one.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Without this it re-acquired every tick, and re-acquiring is not the same operation as re-aiming — the first
+    /// re-CHOOSES, the second only refreshes. Selection is nearest-enemy, so as the ship moves the nearest flips
+    /// between two candidates, it turns toward each in turn, and it oscillates on the spot: every step toward one
+    /// target is a step away from the other, and the net displacement over a cycle is roughly zero. Observed as a ship
+    /// stuck in "engaging the nearest enemy" that never went anywhere.
+    /// </para>
+    /// <para>
+    /// The commitment normally ends on ARRIVAL — within <see cref="TheOneWeaponRange"/> — not on this timer, which is
+    /// only the safety net for a target that died mid-approach and would otherwise be chased as a stale coordinate for
+    /// ever. It is therefore scored against the longest approach the ship can undertake: <see cref="TheOneHuntRadius"/>
+    /// at <see cref="TheOneMaxSpeed"/>, plus slack. A timer shorter than that re-picks a new distant target before the
+    /// current one is reached, which is the same oscillation at map scale — measured, it hunted continuously and fired
+    /// not one shot.
+    /// </para>
+    /// </remarks>
+    public int TheOneTargetDwellTicks = 420;
+
+    /// <summary>
+    /// Radius "the one" searches for prey, against <see cref="AcquireRadius"/> for every other hull.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The fix for a ship that fired zero shots in two thousand ticks. Searching at its weapon reach (2.4 km) is right
+    /// for shooting and useless for HUNTING: with nothing in that bubble it fell back to steering at the enemy fleet's
+    /// centroid, and a centroid is a statistical mean, not a place — in a 100 km world with dispersed fleets it is
+    /// typically empty space between formations. The ship flew 58 km to a mathematical point, found nobody, and sat
+    /// there. Task read "ENGAGING the nearest enemy" the whole time, because that label was set on intent rather than
+    /// on having a target.
+    /// </para>
+    /// <para>
+    /// A third of the world, so it can nearly always name a real ship to fly at instead of an average of ships. The
+    /// query cost is bounded by <see cref="AcquireScanCap"/> and paid once per <see cref="TheOneTargetDwellTicks"/> by
+    /// at most one hull per faction, which is nothing beside the per-tick acquisitions the fleet already runs.
+    /// </para>
+    /// </remarks>
+    public float TheOneHuntRadius = 33000f;
+
+    /// <summary>
+    /// Candidates "the one" will examine per acquisition, against <see cref="AcquireScanCap"/> for every other hull.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The actual reason it never fired, and a wider radius alone could not fix it. The scan stops after this many hits
+    /// whether or not an enemy was among them, and the query returns them nearest-first — so a ship that spawns at its
+    /// own station, ringed by its own fleet, spends the entire budget on FRIENDLY contacts and concludes there is no
+    /// enemy anywhere. For a fighter that is harmless: it is in a mixed melee, so an enemy is among the first 48. "The
+    /// one" is the only hull that starts deep inside a friendly formation and has to reach across the map, which is
+    /// exactly the case the cap was never sized for.
+    /// </para>
+    /// <para>
+    /// Set high enough to see past a home fleet. One hull per faction re-acquires once per approach, so this runs
+    /// perhaps twice a second against the thousands of per-tick acquisitions the fleets already perform.
+    /// </para>
+    /// </remarks>
+    public int TheOneScanCap = 4000;
+
+    /// <summary>
+    /// Station reload while "the one" is flying for that faction, against <see cref="StationCooldownTicks"/> normally.
+    /// </summary>
+    /// <remarks>
+    /// A faction that has earned "the one" fights that way everywhere, not just in the one hull. The case this answers
+    /// was watched rather than predicted: both sides' last stations ringed by enemies grinding them down, the fleets in
+    /// near-perfect balance so no comeback trigger ever fired, no miners left to fund a recovery, and no route out for
+    /// either side. A ship alone cannot break that — it can only be in one place — but a base that one-shots whatever
+    /// comes into range clears its own siege, which is what lets production restart.
+    /// </remarks>
+    public int TheOneStationCooldownTicks = 6;
+
+    /// <summary>
+    /// Thrust for "the one", against <see cref="ShipAccel"/> for every other hull.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Agility has to be specified WITH speed or the two fight each other. Every ship shares one acceleration, and at
+    /// the shared 750 m/s² a 5 600 m/s hull needs 7.5 s to reach its own top speed and 15 s — nine hundred ticks — to
+    /// reverse. The result is a ship that crosses the map beautifully and then sails straight past its target, spending
+    /// the rest of the engagement coming about. Fast and unable to turn is not fast.
+    /// </para>
+    /// <para>
+    /// Scaled to give roughly a quarter-second to full speed and half a second to reverse, so its turning circle is
+    /// tight relative to its own weapon reach rather than to the world. A normal fighter takes 0.6 s to reach ITS top
+    /// speed, so this is deliberately more agile in proportion, not merely proportionally the same.
+    /// </para>
+    /// </remarks>
+    public float TheOneAccel = 22400f;
+
+    /// <summary>
+    /// Fraction of "the one's" SIDEWAYS velocity shed each tick — how hard it can pivot rather than drift.
+    /// </summary>
+    /// <remarks>
+    /// Thrust alone is not enough to turn a hull this fast. Pointing the engines a new way leaves the old velocity in
+    /// place to be overcome, so the ship sweeps a wide arc; at 5 600 m/s that arc is kilometres across and it orbits
+    /// its target without ever closing. Killing the component ACROSS the intended heading is what converts a drift into
+    /// a pivot. 0 is pure Newtonian drift, 1 snaps the velocity onto the heading instantly — this sits high, because
+    /// the brief is a ship that is unfairly good at manoeuvring, not a plausible one.
+    /// </remarks>
+    public float TheOneLateralBrake = 0.35f;
+
+    /// <summary>Weapon reach. Must stay under <see cref="StationThreatScanRadius"/> — see Validate().</summary>
+    public float TheOneWeaponRange = 2400f;
+
+    /// <summary>Ticks between shots. Near-continuous fire.</summary>
+    /// <remarks>
+    /// Zero means a shot EVERY tick, which is the floor: the fire path decrements the counter when it is non-zero and
+    /// fires when it is not, so 1 would already mean every OTHER tick. Only the global <see cref="MaxShots"/> ceiling
+    /// gates it above that.
+    /// </remarks>
+    public int TheOneCooldownTicks = 0;
+
+    /// <summary>
+    /// Projectile speed multiplier for its rounds, over <see cref="ShotSpeed"/>.
+    /// </summary>
+    /// <remarks>
+    /// This IS the accuracy model. Ships fire at the target's last known position, so the miss is the distance the
+    /// target travels during the round's flight — proportional to time of flight, and therefore inversely
+    /// proportional to shot speed. Making the round faster is a smaller change than a lead-prediction aimer and
+    /// removes the same error; re-acquiring every tick (below) removes the rest.
+    /// </remarks>
+    public float TheOneShotSpeedScale = 3f;
+
+    /// <summary>
+    /// How much of "the one's" weapon envelope the O key frames vertically, as a multiple of
+    /// <see cref="TheOneWeaponRange"/>.
+    /// </summary>
+    /// <remarks>
+    /// Framed on its REACH, not on its hull. Sizing the view from the ship put the camera so close that the screen was
+    /// the ship and nothing else — you could see the thing beautifully and not a single one of its targets, which is
+    /// the opposite of what you press the key to find out. At this scale the hull is still clearly the largest object
+    /// on screen and everything it can currently shoot is on screen with it.
+    /// </remarks>
+    public float TheOneFocusRangeScale = 2.5f;
+
+    /// <summary>Render size multiplier, against the base ship marker.</summary>
+    /// <remarks>Larger than the destroyer's 3.2 — the brief is that nothing on the map is bigger.</remarks>
+    public float TheOneSizeScale = 5.5f;
 
     /// <summary>
     /// Material a station must hold to spawn one ship. Spawning is gated on mining.
@@ -556,16 +896,16 @@ public sealed class Config
     /// with the fleet or the cap is decoration.
     /// </remarks>
     /// <summary>Material a MINER costs. Unchanged at 60 — miners are the economy, not the war.</summary>
-    public int MinerCost = 60;
+    public int MinerCost = 42;
 
     /// <summary>Material a light fighter costs.</summary>
-    public int LightCost = 120;
+    public int LightCost = 84;
 
     /// <summary>Material a heavy costs. Lumpy on purpose: one bad trade is worth three light fighters.</summary>
-    public int HeavyCost = 400;
+    public int HeavyCost = 280;
 
     /// <summary>Material an interceptor costs.</summary>
-    public int FastCost = 80;
+    public int FastCost = 56;
 
     // ─── Hull mix (fractions of NON-miner spawns; light takes the remainder) ────────────────────────────────────────
 
@@ -581,10 +921,10 @@ public sealed class Config
     public float FastMaxSpeed = 800f;
 
     /// <summary>Interceptor hull.</summary>
-    public int FastHp = 10;
+    public int FastHp = 14;
 
     /// <summary>Interceptor shield. Together with <see cref="FastHp"/> that is 20 effective HP — under two thirds of a light fighter's.</summary>
-    public int FastShield = 10;
+    public int FastShield = 14;
 
     /// <summary>
     /// How far an interceptor will notice a contested pickup, against <see cref="PickupAttractRadius"/> for everyone else.
@@ -660,7 +1000,7 @@ public sealed class Config
     /// <summary>Asteroids drift, slowly. Non-zero so their clusters still churn and occasionally migrate.</summary>
     public float AsteroidSpeed = 30f;
     /// <summary>Ticks between respawn attempts once below AsteroidCount. Deliberately slow: material is scarce.</summary>
-    public int AsteroidRespawnTicks = 200;
+    public int AsteroidRespawnTicks = 140;
     /// <summary>
     /// Drawn radius of a FULL asteroid, world units. The rendered size is <c>AsteroidRadius × (Capacity/MaxCapacity)</c>,
     /// i.e. normalised to each asteroid's own starting capacity — so raising <see cref="AsteroidCapacity"/> makes an
@@ -1514,7 +1854,19 @@ public sealed class Config
         // A scan radius under the longest weapon range means a station can be shot from a place the defence never
         // looks. The failure is silent and looks like passive AI: the base flags itself under attack, every defender
         // is recalled, and they all rally onto a point with nothing there.
-        var longestWeapon = MathF.Max(MathF.Max(WeaponRange, HeavyWeaponRange), DestroyerWeaponRange);
+        // TheOneWeaponRange belongs in this max, not just the three standard hulls: it is the longest reach in the
+        // simulation, so omitting it makes the guard below pass while the condition it checks is violated — the exact
+        // silent failure the guard exists to prevent.
+        var longestWeapon = MathF.Max(MathF.Max(WeaponRange, HeavyWeaponRange), MathF.Max(DestroyerWeaponRange, TheOneEnabled ? TheOneWeaponRange : 0f));
+        if (TheOneEnabled && (TheOneTriggerRatio <= 0f || TheOneTriggerRatio >= 1f))
+        {
+            errors.Add($"TheOneTriggerRatio ({TheOneTriggerRatio}) must be in (0,1) — it is a fraction of the LEADER's score");
+        }
+        if (TheOneEnabled && TheOneRetireRatio <= TheOneTriggerRatio)
+        {
+            errors.Add($"TheOneRetireRatio ({TheOneRetireRatio}) must exceed TheOneTriggerRatio ({TheOneTriggerRatio}), "
+                + "or the one retires the tick it spawns and flickers once per tick for the rest of the run");
+        }
         if (StationThreatScanRadius <= longestWeapon)
         {
             errors.Add($"StationThreatScanRadius ({StationThreatScanRadius}) must exceed the longest ship weapon range ({longestWeapon}) "
