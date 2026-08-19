@@ -2849,11 +2849,14 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 }
             }
 
-            // Copy locations from SpawnEntry into EntityLocations
+            // Copy locations from SpawnEntry into EntityLocations. Since #839 a slot's location means one of two things while the entity is unpublished: a
+            // real content chunk id for Versioned (that chunk is the first revision's payload) or a spawn-arena handle for SingleVersion and Transient. The
+            // EntityRef built from these is an own-spawn ref, and its read path disambiguates on that flag — see EntityAccessor.ResolveSpawnAwarePayload.
             var locs = new EntityLocations();
+            var slotTables = _tx.SlotTablesFor(meta);
             for (var s = 0; s < meta.ComponentCount; s++)
             {
-                locs.Values[s] = entry.Loc[s];
+                locs.Values[s] = Transaction.SpawnSlotLocation(in entry, slotTables[s], s);
             }
 
             results.Add((entry.Id, meta, enabledBits, locs));

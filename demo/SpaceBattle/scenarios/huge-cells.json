@@ -1,0 +1,8 @@
+{
+  // "A hashmap cell is huge in the space/volume it occupies" — the stated design intent.
+  // 12.5 km cells over 100 km = an 8x8 grid, so a cell holds many clusters.
+  "CellSize": 12500,
+  "InitialShipsPerFaction": 800,
+  "MaxShipsPerFaction": 1600,
+  "ProbeRadius": 2000
+}

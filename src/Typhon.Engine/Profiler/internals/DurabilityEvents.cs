@@ -86,6 +86,8 @@ internal ref partial struct DurabilityCheckpointSleepEvent
 {
     [BeginParam]
     public uint SleepMs;
+
+    /// <summary>0=timer, 1=force, 2=shutdown, 3=dirty-page pressure (#830).</summary>
     [BeginParam]
     public byte WakeReason;
 }

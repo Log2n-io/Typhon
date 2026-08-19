@@ -135,7 +135,7 @@ internal unsafe struct TransientStore : IPageStore, IDisposable
 
     /// <inheritdoc />
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void EnsureDirtyAtLeast(int memPageIndex, int minValue) { }
+    public void MarkPageModified(int memPageIndex) { }
 
     // ═══════════════════════════════════════════════════════════════════════
     // Slot Ref Counting — no-ops (pages are always resident, never evicted)

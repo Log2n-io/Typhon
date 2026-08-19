@@ -108,34 +108,24 @@ public partial class ManagedPagedMMF
         }
 
         /// <summary>
-        /// Keeps an occupancy bitmap data page durable after a bit change. With a ChangeSet the page rides the UoW lifecycle
-        /// (AddByMemPageIndex → IncrementDirty, ReleaseExcessDirtyMarks caps at 1). WITHOUT one (archetype / cluster / entity-map
-        /// allocations pass <c>null</c>), the bit would otherwise be set in memory only — and since the directory-only root (v4)
-        /// moved the L0 words off the always-resident segment root onto a plain data page, that page can be evicted between
-        /// allocations and reload stale, dropping the bit so the same pages get handed out twice (and losing the bit across a
-        /// reopen).
+        /// Keeps an occupancy bitmap data page durable after a bit change. With a ChangeSet the page rides the UoW lifecycle;
+        /// WITHOUT one (archetype / cluster / entity-map allocations pass <c>null</c>) the modification is recorded directly.
+        /// Either way the page cannot be evicted until a write has actually captured the bit.
         /// </summary>
         /// <remarks>
-        /// The floor is TWO, not one, and that is the whole fix for the lost-bit race (#30).
+        /// This is the lost-bit race (#30), and it is now closed by construction rather than by arithmetic.
         /// <para>
-        /// A flush is not atomic with respect to the counter: <c>SavePages</c> copies the page content, fsyncs, and only THEN calls
-        /// <c>DecrementDirty</c>. A bit set inside that window is not in the bytes that reached disk, so the mark protecting it must
-        /// survive the decrement. At a floor of one it cannot — <see cref="IPageStore.EnsureDirtyAtLeast"/> is a no-op while the
-        /// counter already reads 1, so the flush's decrement drops it to 0, the page becomes evictable while holding an unwritten
-        /// bit, and the next allocation reloads it stale and hands the same pages out twice. That is exactly what was observed:
-        /// the same occupancy page came back in a different cache slot with the bits missing.
+        /// A flush is not atomic with respect to the page: <c>SavePages</c> copies the content, fsyncs, and only then discharges
+        /// the page's obligation. A bit set inside that window is not in the bytes that reached disk. The old defence was a
+        /// counter floor of two — enough to survive one in-flight flush's decrement — which worked only while flushes of a given
+        /// page were serialized, and which the comment here already flagged as needing "a write-generation stamp instead of a
+        /// counter" if that ever stopped holding. It also silently did nothing whenever the counter happened to already sit
+        /// above the floor, which on a busy page is most of the time.
         /// </para>
         /// <para>
-        /// A floor of two leaves ≥1 after a single in-flight flush's decrement, so the page stays dirty and un-evictable until a
-        /// flush that actually captured the bit. It drains normally afterwards (2 → 1 → 0 across later flushes, each of which did
-        /// write the current content), so nothing is pinned permanently. Plain <c>IncrementDirty</c> would also close the race but
-        /// is unbounded here — with no ChangeSet there is no owner to release the marks, so the counter would climb with every
-        /// allocation and the page would never become evictable again.
-        /// </para>
-        /// <para>
-        /// This rests on flushes of a GIVEN page being serialized (the checkpoint thread runs cycles one at a time). Two concurrent
-        /// flushes of the same page could still double-decrement; if that ever becomes possible the floor is no longer sufficient
-        /// and this needs a write-generation stamp instead of a counter.
+        /// <see cref="IPageStore.MarkPageModified"/> is that stamp. The bit-set advances the page's generation past whatever the
+        /// in-flight flush sampled, so that flush cannot discharge it, the page stays owed, and the next write covers the bit.
+        /// No floor, no arithmetic, and no dependence on how many flushes are in flight.
         /// </para>
         /// </remarks>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -147,7 +137,7 @@ public partial class ManagedPagedMMF
             }
             else
             {
-                _segment.Store.EnsureDirtyAtLeast(memPageIdx, 2);
+                _segment.Store.MarkPageModified(memPageIdx);
             }
         }
 

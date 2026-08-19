@@ -1,0 +1,17 @@
+{
+  // The scaling target, not the current comfort zone: 10k ships. Expect the SIMULATION to be the wall
+  // long before the renderer is — projectile hit-testing dominates, which is exactly the measurement
+  // the spatial investigation is about. Use it to check that the LOD, the minimap and the culling all
+  // hold up while the tick rate does not.
+  "InitialShipsPerFaction": 5000,
+  "MaxShipsPerFaction": 8000,
+  "SpawnIntervalTicks": 4,
+  "SpawnBatch": 6,
+  "WeaponCooldownTicks": 14,
+  "MaxShots": 80000,
+  // NOT raised to save queries: a stale aim point was measured to cost MORE, because engagements that
+  // cannot resolve keep accumulating ships that keep querying. 60 ticks here dropped the hit rate to 12.9%.
+  "TargetReacquireTicks": 8,
+  "AcquireScanCap": 32,
+  "DensitySource": "cells"
+}

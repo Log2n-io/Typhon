@@ -17,7 +17,7 @@ public class ChangeSet
     private readonly PagedMMF _owner;
     // Per-page count of IncrementDirty calls registered THROUGH this ChangeSet. Each call to AddByMemPageIndex (first-time per
     // page) or RegisterReDirty (subsequent re-dirty) bumps this counter AND calls PagedMMF.IncrementDirty. The exact count is the
-    // source of truth for ReleaseExcessDirtyMarks and Reset, so both can decrement using the same conservation-respecting
+    // source of truth for ReleaseDirtyMarks and Reset, so both can decrement using the same conservation-respecting
     // primitive (PagedMMF.DecrementDirty) — NOT the racing cap-to-1 primitive (DecrementDirtyToMin) that used to live here.
     // See claude/research/Durability/DCManagementRace.md (#385) and ADR-NNN for the full rationale.
     private readonly Dictionary<int, int> _marksByPage;
@@ -148,21 +148,29 @@ public class ChangeSet
     /// <returns><c>true</c> if this was the first registration for this page in this ChangeSet; <c>false</c> if already tracked.</returns>
     public bool AddByMemPageIndex(int memPageIndex)
     {
+        bool firstRegistration;
         EnterMutation(nameof(AddByMemPageIndex));
         try
         {
-            if (!_marksByPage.TryAdd(memPageIndex, 1))
-            {
-                return false;
-            }
+            firstRegistration = _marksByPage.TryAdd(memPageIndex, 1);
         }
         finally
         {
             ExitMutation();
         }
 
-        _owner.IncrementDirty(memPageIndex);
-        return true;
+        if (firstRegistration)
+        {
+            _owner.IncrementDirty(memPageIndex);   // takes a mark AND records the modification
+            return true;
+        }
+
+        // Already tracked, so no second mark — but the caller has just modified the page again, and that MUST be
+        // recorded. Only the counted mark is idempotent here; the writeback obligation never is. Skipping it was a real
+        // lost write: a checkpoint that captured and discharged this page between the first registration and now would
+        // leave the page looking clean while holding bytes that reached no disk, and the next eviction would drop them.
+        _owner.MarkPageModified(memPageIndex);
+        return false;
     }
 
     /// <summary>
@@ -171,7 +179,7 @@ public class ChangeSet
     /// ChangeSet's accounting perspective. Used by <see cref="ChunkAccessor{T}.MarkSlotDirty"/> and
     /// <see cref="ChunkBasedSegment{T}.AllocateChunk(ChangeSet, ref ChunkAccessor{T})"/> when an already-tracked page is re-dirtied within the same UoW —
     /// previously these sites called <c>_store.IncrementDirty</c> directly, which left the increment "untracked" and forced
-    /// <see cref="ReleaseExcessDirtyMarks"/> to use a non-conservation cap-to-1 (the source of the #385 race).
+    /// <see cref="ReleaseDirtyMarks"/> to use a non-conservation cap-to-1 (the source of the #385 race).
     /// </summary>
     /// <remarks>
     /// If the page is NOT already tracked (caller forgot to call <see cref="AddByMemPageIndex"/> first), this method treats
@@ -207,78 +215,93 @@ public class ChangeSet
             return Task.CompletedTask;
         }
 
-        // SavePages writes each page once and decrements DC once per page in its continuation. This is the synchronous structural-write path
-        // (bootstrap / schema evolution / segment growth / recovery replay), distinct from the user-data UoW path — which is drained by the
-        // checkpoint and never calls SaveChanges. AddByMemPageIndex's first-add is balanced by SavePages's single decrement; structural ChangeSets
-        // are one-shot (created, saved, discarded), so they don't run ReleaseExcessDirtyMarks and any surplus RegisterReDirty marks are harmless.
+        // The structural-write path (bootstrap / schema evolution / segment growth / recovery replay), distinct from the user-data UoW path — which
+        // is drained by the checkpoint and never calls SaveChanges.
+        //
+        // Release our marks HERE, not in SavePages. SavePages writes the pages and discharges their writeback debt; it has no idea how many marks
+        // this ChangeSet took, and the old arrangement — where it decremented once per page — silently leaked N-1 on any page this set had
+        // re-dirtied. Owner-scoped release keeps the counter conserved: we took N, we release N, and the pages stay protected until SavePages'
+        // fsync clears the debt.
         var pages = _marksByPage.Keys.ToArray();
-        _marksByPage.Clear();
+        ReleaseDirtyMarks();
         _saveTask = _owner.SavePages(pages);
         return _saveTask;
     }
 
     /// <summary>
-    /// Drains the excess <c>DirtyCounter</c> marks tracked by this ChangeSet, leaving exactly one mark per page for the next
-    /// checkpoint cycle to ack. Replaces the previous cap-to-1 implementation (<c>DecrementDirtyToMin(p, 1)</c>) which raced
-    /// with the background checkpoint's <see cref="PagedMMF.DecrementDirty"/> and caused the lost-write durability bug
-    /// captured in issue #385.
-    /// <para>
-    /// For user-data (UoW) pages, <see cref="SaveChangesAsync"/> is never called — the checkpoint writes them, so WAL records replace the need
-    /// for per-UoW dirty page writeback. However, <see cref="AddByMemPageIndex"/> and <see cref="RegisterReDirty"/> still call <c>IncrementDirty</c>
-    /// for every mark, so without this release hot pages would accumulate a DirtyCounter equal to the number of UoWs (and
-    /// re-dirty events) that touched them — permanently unevictable by the page cache clock-sweep.
-    /// </para>
-    /// <para>
-    /// Conservation property (this is the FIX): for a page with tracked mark count <c>N</c>, we issue exactly
-    /// <c>(N - 1)</c> <see cref="PagedMMF.DecrementDirty"/> calls. After this method runs, the page contributes exactly
-    /// one outstanding mark from this UoW. The next checkpoint cycle's single <c>DecrementDirty</c> brings DC back to its
-    /// pre-UoW baseline. Both decrement operations are now the same primitive, so they cannot over-decrement under any
-    /// thread interleaving.
-    /// </para>
+    /// Releases <b>every</b> <c>DirtyCounter</c> mark this ChangeSet took — exactly <c>N</c> per page, matching the <c>N</c>
+    /// it registered. After this returns the ChangeSet owes nothing and tracks nothing; further dirtying re-registers from
+    /// scratch.
     /// </summary>
-    public void ReleaseExcessDirtyMarks()
+    /// <remarks>
+    /// <para>
+    /// It used to leave one mark per page behind, deliberately, so that the page stayed non-evictable until a checkpoint
+    /// wrote it. That is what made the counter leak: the marks arrive once per unit of work, the checkpoint acks once per
+    /// <i>cycle</i>, and K units of work inside one cycle therefore strand K-1 marks that nothing will ever release. The
+    /// page becomes permanently unevictable, the cache fills with pages that are clean on disk, and the engine dies on
+    /// page-cache backpressure (#824). Releasing N-1 of N is not a conservation rule — it is a slow leak with a rule's
+    /// shape.
+    /// </para>
+    /// <para>
+    /// Releasing all N is safe now because eviction protection for unwritten bytes no longer rides on this counter: the
+    /// page's writeback generation carries it, and only a durable write discharges it. So the page stays put until
+    /// it has actually been written, which is the guarantee the retained mark was approximating.
+    /// </para>
+    /// </remarks>
+    public void ReleaseDirtyMarks()
     {
         if (_marksByPage.Count == 0)
         {
             return;
         }
 
-        foreach (var kv in _marksByPage)
+        EnterMutation(nameof(ReleaseDirtyMarks));
+        try
         {
-            var excess = kv.Value - 1;
-            if (excess > 0)
+            foreach (var kv in _marksByPage)
             {
-                _owner.DecrementDirtyByDelta(kv.Key, excess);
+                _owner.DecrementDirtyByDelta(kv.Key, kv.Value);
             }
+            _marksByPage.Clear();
         }
-        _marksByPage.Clear();
+        finally
+        {
+            ExitMutation();
+        }
     }
 
     /// <summary>
-    /// Undo all dirty marks tracked by this ChangeSet (used on transaction rollback). For each tracked page, calls
-    /// <see cref="PagedMMF.DecrementDirty"/> exactly <c>N</c> times where <c>N</c> is the tracked mark count — fully reverses
-    /// every <see cref="AddByMemPageIndex"/> + <see cref="RegisterReDirty"/> the UoW issued. Unlike the prior implementation
-    /// (which decremented once per page and intentionally left excess marks behind for "next checkpoint" cleanup), this is now
-    /// fully conservation-respecting.
+    /// Undoes every dirty mark this ChangeSet took (transaction rollback). Identical accounting to
+    /// <see cref="ReleaseDirtyMarks"/> — the two differ only in intent, and both are exact.
     /// </summary>
+    /// <remarks>
+    /// Rollback does NOT clear the page's writeback debt, and must not: the bytes were modified in place before the
+    /// rollback decided to abandon them, so the page on disk is stale either way and still has to be rewritten.
+    /// </remarks>
     public void Reset()
     {
-        foreach (var kv in _marksByPage)
-        {
-            _owner.DecrementDirtyByDelta(kv.Key, kv.Value);
-        }
-        _marksByPage.Clear();
+        ReleaseDirtyMarks();
         _saveTask = null;
     }
 
     /// <summary>
     /// Clear ChangeSet state for reuse via <see cref="PagedMMF.RentChangeSet"/> / <see cref="PagedMMF.ReturnChangeSet"/>.
     /// Caller must guarantee dirty marks have already been resolved (via <see cref="SaveChangesAsync"/> /
-    /// <see cref="ReleaseExcessDirtyMarks"/> / <see cref="Reset"/>) before clearing — this only zeroes the local
+    /// <see cref="ReleaseDirtyMarks"/> / <see cref="Reset"/>) before clearing — this only zeroes the local
     /// tracking buffers without touching DirtyCounter / ACW / SlotRefCount on owner pages.
     /// </summary>
+    /// <remarks>
+    /// The DEBUG check below turns that "must" into something that fails. Dropping the map while it still holds marks
+    /// leaks every one of them: the pages stay non-evictable for the life of the process and nothing anywhere records
+    /// that they should not be. It is the exact shape of #824, it is silent, and a pooled ChangeSet is returned thousands
+    /// of times a second at 60 Hz — so a caller that forgets once forgets constantly.
+    /// </remarks>
     internal void ClearForReuse()
     {
+        System.Diagnostics.Debug.Assert(_marksByPage.Count == 0,
+            $"ChangeSet returned to the pool still holding marks on {_marksByPage.Count} page(s). Release them first "
+            + "(ReleaseDirtyMarks / Reset / SaveChangesAsync) — clearing the map here does not return them, it strands them (PS-05).");
+
         _marksByPage.Clear();
         _deferredEvictions?.Clear();
         _saveTask = null;

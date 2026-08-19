@@ -427,7 +427,15 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         Assert.That(read.Open(b).Read(CmEntity.Position).X, Is.EqualTo(22f));
     }
 
-    /// <summary>#713: the same sequence under the default TickFence discipline already worked — this locks it so a fix cannot regress the other side.</summary>
+    /// <summary>
+    /// #713: the same sequence under the default TickFence discipline, locked so a fix cannot regress the other side.
+    /// </summary>
+    /// <remarks>
+    /// This test claimed the sequence "already worked". It did not — it stopped one line short of finding out. #837 was
+    /// exactly this shape and killed every tick it ran in, because the write marked the spawn-staging chunk dirty and the
+    /// fence then read a zero entity PK out of it. The fence call below is the line that was missing; without it the
+    /// fixture passed 15/15 against a P0. See <see cref="SpawnThenWriteFenceTests"/> and rule DIRTY-01.
+    /// </remarks>
     [Test]
     public void TickFenceDiscipline_SpawnThenWrite_SameTransaction()
     {
@@ -442,6 +450,8 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
             tx.OpenMut(id).Write(CmEntity.Position).X = 42;
             tx.Commit();
         }
+
+        dbe.WriteTickFence(1);
 
         using var read = dbe.CreateQuickTransaction();
         ref readonly var rp = ref read.Open(id).Read(CmEntity.Position);

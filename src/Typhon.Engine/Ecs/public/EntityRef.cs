@@ -179,7 +179,7 @@ public unsafe ref struct EntityRef
                 EnsureVersionedResolved(slot);
                 int chunkId = _locations[slot];
                 var table = _engineState.SlotToComponentTable[slot];
-                return ref _accessor.ReadEcsComponentData<T>(table, chunkId, (long)_id.RawValue);
+                return ref _accessor.ReadEcsComponentData<T>(table, chunkId, (long)_id.RawValue, _isOwnSpawn);
             }
             // Commit-discipline read-your-own-writes: see this tx's staged value (point reads only; bulk spans read HEAD).
             if (_accessor.Discipline == CommitDiscipline.Commit)
@@ -195,7 +195,7 @@ public unsafe ref struct EntityRef
 
         int chunkId2 = _locations[slot];
         var table2 = _engineState.SlotToComponentTable[slot];
-        return ref _accessor.ReadEcsComponentData<T>(table2, chunkId2, (long)_id.RawValue);
+        return ref _accessor.ReadEcsComponentData<T>(table2, chunkId2, (long)_id.RawValue, _isOwnSpawn);
     }
 
     /// <summary>Write a component by handle. Returns a mutable ref into the chunk page (or cluster slot).
@@ -306,7 +306,11 @@ public unsafe ref struct EntityRef
             }
 
             // Commit discipline stages and reconciles indexes at commit — skip the per-tick shadow capture (which feeds the fence-time Move).
-            if (table.HasShadowableIndexes && _accessor.Discipline != CommitDiscipline.Commit)
+            // An own-spawn is skipped for two independent reasons. It has no OLD key to shadow: FinalizeSpawns inserts this entity's index entries fresh from
+            // the final staged bytes, so there is no Move for the fence to perform — the same argument DIRTY-01 makes about the dirty bit. And since #839 the
+            // location of an unpublished non-Versioned slot is a spawn-arena handle, which ShadowIndexedFields would dereference against the ComponentSegment,
+            // reading an unrelated chunk's bytes as the "old key" and recording the handle as a chunk id for fence-time index maintenance.
+            if (table.HasShadowableIndexes && _accessor.Discipline != CommitDiscipline.Commit && !_isOwnSpawn)
             {
                 _accessor.ShadowIndexedFields<T>(table, chunkId, _id);
             }
@@ -341,7 +345,7 @@ public unsafe ref struct EntityRef
                 EnsureVersionedResolved(slot);
                 int chunkId = _locations[slot];
                 var table = _engineState.SlotToComponentTable[slot];
-                return ref _accessor.ReadEcsComponentData<T>(table, chunkId, (long)_id.RawValue);
+                return ref _accessor.ReadEcsComponentData<T>(table, chunkId, (long)_id.RawValue, _isOwnSpawn);
             }
             // Commit-discipline read-your-own-writes: see this tx's staged value (point reads only; bulk spans read HEAD).
             if (_accessor.Discipline == CommitDiscipline.Commit)
@@ -357,7 +361,7 @@ public unsafe ref struct EntityRef
 
         int chunkId2 = _locations[slot];
         var table2 = _engineState.SlotToComponentTable[slot];
-        return ref _accessor.ReadEcsComponentData<T>(table2, chunkId2, (long)_id.RawValue);
+        return ref _accessor.ReadEcsComponentData<T>(table2, chunkId2, (long)_id.RawValue, _isOwnSpawn);
     }
 
     /// <summary>Write a component by type. Resolves slot via archetype metadata.
@@ -446,7 +450,11 @@ public unsafe ref struct EntityRef
             }
 
             // Commit discipline stages and reconciles indexes at commit — skip the per-tick shadow capture (which feeds the fence-time Move).
-            if (table.HasShadowableIndexes && _accessor.Discipline != CommitDiscipline.Commit)
+            // An own-spawn is skipped for two independent reasons. It has no OLD key to shadow: FinalizeSpawns inserts this entity's index entries fresh from
+            // the final staged bytes, so there is no Move for the fence to perform — the same argument DIRTY-01 makes about the dirty bit. And since #839 the
+            // location of an unpublished non-Versioned slot is a spawn-arena handle, which ShadowIndexedFields would dereference against the ComponentSegment,
+            // reading an unrelated chunk's bytes as the "old key" and recording the handle as a chunk id for fence-time index maintenance.
+            if (table.HasShadowableIndexes && _accessor.Discipline != CommitDiscipline.Commit && !_isOwnSpawn)
             {
                 _accessor.ShadowIndexedFields<T>(table, chunkId, _id);
             }
@@ -572,7 +580,7 @@ public unsafe ref struct EntityRef
                 EnsureVersionedResolved(slot);
                 int chunkId = _locations[slot];
                 var table = _engineState.SlotToComponentTable[slot];
-                value = _accessor.ReadEcsComponentData<T>(table, chunkId, (long)_id.RawValue);
+                value = _accessor.ReadEcsComponentData<T>(table, chunkId, (long)_id.RawValue, _isOwnSpawn);
                 return true;
             }
 
@@ -582,7 +590,7 @@ public unsafe ref struct EntityRef
 
         int chunkId2 = _locations[slot];
         var table2 = _engineState.SlotToComponentTable[slot];
-        value = _accessor.ReadEcsComponentData<T>(table2, chunkId2, (long)_id.RawValue);
+        value = _accessor.ReadEcsComponentData<T>(table2, chunkId2, (long)_id.RawValue, _isOwnSpawn);
         return true;
     }
 
@@ -644,7 +652,8 @@ public unsafe ref struct EntityRef
                 {
                     return default;
                 }
-                byte* vp = _accessor.ReadEcsComponentDataRaw(table, _archetype._componentTypeIds[slot], _archetype._slotToComponentType[slot], vChunkId);
+                byte* vp = _accessor.ReadEcsComponentDataRaw(table, _archetype._componentTypeIds[slot], _archetype._slotToComponentType[slot], vChunkId,
+                    _isOwnSpawn);
                 return new ReadOnlySpan<byte>(vp, size);
             }
             // SV cluster slot: direct SoA pointer.
@@ -657,7 +666,7 @@ public unsafe ref struct EntityRef
         {
             return default;
         }
-        byte* p = _accessor.ReadEcsComponentDataRaw(table, _archetype._componentTypeIds[slot], _archetype._slotToComponentType[slot], chunkId);
+        byte* p = _accessor.ReadEcsComponentDataRaw(table, _archetype._componentTypeIds[slot], _archetype._slotToComponentType[slot], chunkId, _isOwnSpawn);
         return new ReadOnlySpan<byte>(p, size);
     }
 
@@ -680,6 +689,69 @@ public unsafe ref struct EntityRef
         }
     }
 
+    /// <summary>True when <paramref name="slot"/> is a Versioned component this entity has no revision chain for — genuinely absent (#845).</summary>
+    /// <remarks>
+    /// Three signals, because three different resolvers build an <see cref="EntityRef"/> and they populate different fields.
+    /// <list type="bullet">
+    /// <item><c>_chainRoots[slot]</c> is the record's <c>CompRevFirstChunkId</c> and is the authoritative absence signal — but it is never populated on an
+    /// own-spawn ref, whose slot state lives in <c>_locations</c> (the SpawnEntry's VerLoc).</item>
+    /// <item><c>_locations[slot]</c> alone is 0 for a FAILED chain walk and for every slot still unresolved on the deferred path, neither of which is
+    /// absence.</item>
+    /// <item><c>_clusterLayout</c> cannot be consulted at all: it is null on an own-spawn ref, which is what made the first version of this guard throw a
+    /// NullReferenceException on the ordinary disable/enable round trip.</item>
+    /// </list>
+    /// <c>VersionedSlotMask</c> is zeroed for non-cluster archetypes, so the whole predicate short-circuits to false there.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool IsVersionedSlotAbsent(byte slot) => (_archetype.VersionedSlotMask & (1 << slot)) != 0 && _chainRoots[slot] == 0 && _locations[slot] == 0;
+
+    /// <summary>
+    /// Supplies a value for a component and enables it, in one step.
+    /// </summary>
+    /// <remarks>
+    /// The complement to <see cref="Enable{T}(Comp{T})"/>, not a replacement for it. The no-value overload re-enables a component that already has one —
+    /// disabling preserves the payload, so a disable/enable round trip needs no value and must not demand one. This overload exists for the case that
+    /// overload refuses: a component the spawn never supplied, which has no value to enable. Write is gated by the same EnabledBits as Read, so a caller
+    /// cannot set the value first; enabling and supplying have to happen together (#845).
+    /// </remarks>
+    public void Enable<T>(Comp<T> comp, in T value) where T : unmanaged
+    {
+        if (CheckConfig.Enabled && !_writable)
+        {
+            ThrowHelper.ThrowInvalidOp($"EntityRef opened as read-only");
+        }
+
+        byte slot = _archetype.GetSlot(comp._componentTypeId);
+        if (CheckConfig.Enabled && slot >= _archetype.ComponentCount)
+        {
+            ThrowHelper.ThrowInvalidOp($"Component slot {slot} is out of range for archetype {_archetype.ArchetypeId}");
+        }
+
+        var needsContent = IsVersionedSlotAbsent(slot);
+
+        // A never-supplied Versioned slot has no chain, so Write's copy-on-write has nothing to copy from — it must be CREATED, not written. Everything else
+        // (a re-enable, or any non-Versioned slot) already has storage, so the ordinary enable-then-write path applies.
+        if (needsContent)
+        {
+            SetLocation(slot, _accessor.CreateVersionedContentAndWrite(_id, slot, in value));
+        }
+
+        // Enable AFTER the content exists: the bit is what makes the slot readable, so publishing it earlier would briefly expose a slot with no value.
+        _enabledBits |= (ushort)(1 << slot);
+        _accessor.StageEnableDisable(_id, _enabledBits);
+
+        if (_clusterBase != null)
+        {
+            ref ulong enableBits = ref *(ulong*)(_clusterBase + _clusterLayout.EnabledBitsOffset(slot));
+            enableBits |= 1UL << _clusterSlotIndex;
+        }
+
+        if (!needsContent)
+        {
+            Write(comp) = value;
+        }
+    }
+
     /// <summary>Enable a component by handle. Stages the change for commit.</summary>
     public void Enable<T>(Comp<T> comp) where T : unmanaged
     {
@@ -688,6 +760,25 @@ public unsafe ref struct EntityRef
             ThrowHelper.ThrowInvalidOp($"EntityRef opened as read-only");
         }
         byte slot = _archetype.GetSlot(comp._componentTypeId);
+        if (CheckConfig.Enabled && slot >= _archetype.ComponentCount)
+        {
+            ThrowHelper.ThrowInvalidOp($"Component slot {slot} is out of range for archetype {_archetype.ArchetypeId}");
+        }
+
+        // #845: refuse to enable a Versioned component that has no value. A spawn allocates a slot's chunk and chain only for the components it supplies, so
+        // an unsupplied one has no content at all and _locations stays 0 — the same "never written" state every chain-root reader in the engine already
+        // recognises. Enabling it used to hand back whatever a recycled chunk held, which against a reused chunk is a DESTROYED entity's committed values.
+        //
+        // This is the case Disable/Enable cannot express: disabling preserves the payload, so a re-enable is fine and finds a non-zero location. There is no
+        // way for a caller to initialise a never-supplied slot first, because Write is gated by the same EnabledBits as Read — which is why the old contract
+        // (design decision #14) zero-initialised instead. Use the Enable(comp, in value) overload to supply the value and enable in one step.
+        if (IsVersionedSlotAbsent(slot))
+        {
+            ThrowHelper.ThrowInvalidOp(
+                $"Component at slot {slot} was never supplied for this entity, so it has no value to enable. "
+              + "Use Enable(comp, in value) to supply one, or set it at Spawn.");
+        }
+
         _enabledBits |= (ushort)(1 << slot);
         _accessor.StageEnableDisable(_id, _enabledBits);
 

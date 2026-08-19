@@ -20,6 +20,52 @@ class UowRegistryTests : TestBase<UowRegistryTests>
     // Allocation Tests
     // ═══════════════════════════════════════════════════════════════
 
+    // ═══════════════════════════════════════════════════════════════
+    // #844 — the wake signal must not accumulate permits
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Uncontended allocate/free cycles must not grow the semaphore's permit count.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>Release</c> ran on every slot free while <c>WaitForSlotFreed</c> is reached only when the registry is
+    /// saturated, so a workload that never saturates produced a permit per free and consumed none. The count rose
+    /// monotonically for the life of the process and threw <c>SemaphoreFullException</c> at <see cref="int.MaxValue"/>,
+    /// killing it — measured in a SpaceBattle soak at 1 454 985 ticks / 6 h 40 m, roughly 1 476 frees per tick (#844).
+    /// </para>
+    /// <para>
+    /// This asserts the SLOPE, not a total: a permit count that tracks cumulative frees is the defect, so the test
+    /// compares two sample points and requires no growth between them. Reaching the real ceiling in a test is
+    /// impossible by construction — that is precisely why the defect survived to production.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SIGNAL-01")]
+    public void Registry_UncontendedAllocateFree_DoesNotAccumulateSemaphorePermits()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        var reg = dbe.UowRegistry;
+
+        for (var i = 0; i < 50; i++)
+        {
+            reg.Release(reg.AllocateUowId());
+        }
+
+        var afterFirstBatch = reg.SignalPermitCount;
+
+        for (var i = 0; i < 500; i++)
+        {
+            reg.Release(reg.AllocateUowId());
+        }
+
+        Assert.That(reg.WaiterCount, Is.Zero, "precondition: nothing may be waiting, or the releases are legitimate");
+        Assert.That(reg.SignalPermitCount, Is.EqualTo(afterFirstBatch),
+            $"the permit count rose to {reg.SignalPermitCount} after 550 uncontended allocate/free cycles versus "
+            + $"{afterFirstBatch} after 50. A count that tracks cumulative frees rather than live waiters overflows "
+            + "int.MaxValue and throws SemaphoreFullException, killing the process (#844)");
+    }
+
     [Test]
     public void Registry_AllocateUowId_ReturnsUniqueIds()
     {

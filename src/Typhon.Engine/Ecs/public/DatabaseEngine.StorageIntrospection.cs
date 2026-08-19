@@ -797,6 +797,20 @@ public partial class DatabaseEngine
         var capacity = MMF.OccupancyCapacityPages;
         var wordCount = (Math.Max(capacity, pageCount) + 63) / 64;
         var owned = new long[wordCount];
+
+        // Claim limit for pages whose ownership is recorded in durable metadata rather than discovered by walking written pages: the occupancy reserves and the
+        // CK-05 twins. Those are allocated — and bit-set in the persisted occupancy bitmap — the moment they are handed out, but nothing writes to them until
+        // they are first used, and `pageCount` is the high-water of what has been WRITTEN. Clipping them to the file therefore drops pages that are genuinely
+        // owned, and this bitmap is adopted WHOLESALE by the crash-path re-derive: a dropped page is written free while the metadata still names it, and the
+        // next allocation hands it to a second owner (CK-09 on_violation).
+        //
+        // It stayed invisible because those pages were usually written by accident. Leaked dirty marks kept unrelated pages permanently "dirty", so every
+        // checkpoint rewrote them and the file grew past the reserves and twins long before anyone looked. Conserving the marks removed the accident.
+        //
+        // Both twin paths — the registered one below and ClaimDirectoryTwin on the persisted walk — use THIS limit, not pageCount. They have to agree: the two
+        // reconstructions are asserted bit-identical (OwnedBitmapIsIdenticalWithAndWithoutSchema), and lifting the bound on one alone makes ownership depend on
+        // whether the caller happened to register the schema, which is the very thing CK-09 forbids.
+        var ownedLimit = (long)wordCount * 64;
         var segments = MMF.RegisteredSegments;
 
         var claimed = 0;
@@ -854,10 +868,10 @@ public partial class DatabaseEngine
                 }
 
                 var arch = kv.Value.Arch;
-                ClaimPersistedSegment(arch.EntityMapSPI, spiGuard.Epoch, owned, pageCount, ref claimed, ref unresolvedPersistedSpis);
-                ClaimPersistedSegment(arch.ClusterSegmentSPI, spiGuard.Epoch, owned, pageCount, ref claimed, ref unresolvedPersistedSpis);
-                ClaimPersistedSegment(arch.ClusterIndexSPI, spiGuard.Epoch, owned, pageCount, ref claimed, ref unresolvedPersistedSpis);
-                ClaimPersistedSegment(arch.ClusterString64IndexSPI, spiGuard.Epoch, owned, pageCount, ref claimed, ref unresolvedPersistedSpis);
+                ClaimPersistedSegment(arch.EntityMapSPI, spiGuard.Epoch, owned, pageCount, ownedLimit, ref claimed, ref unresolvedPersistedSpis);
+                ClaimPersistedSegment(arch.ClusterSegmentSPI, spiGuard.Epoch, owned, pageCount, ownedLimit, ref claimed, ref unresolvedPersistedSpis);
+                ClaimPersistedSegment(arch.ClusterIndexSPI, spiGuard.Epoch, owned, pageCount, ownedLimit, ref claimed, ref unresolvedPersistedSpis);
+                ClaimPersistedSegment(arch.ClusterString64IndexSPI, spiGuard.Epoch, owned, pageCount, ownedLimit, ref claimed, ref unresolvedPersistedSpis);
             }
         }
 
@@ -875,8 +889,8 @@ public partial class DatabaseEngine
                 }
 
                 var comp = kv.Value.Comp;
-                ClaimPersistedSegment(comp.ComponentSPI, compGuard.Epoch, owned, pageCount, ref claimed, ref unresolvedPersistedSpis);
-                ClaimPersistedSegment(comp.VersionSPI, compGuard.Epoch, owned, pageCount, ref claimed, ref unresolvedPersistedSpis);
+                ClaimPersistedSegment(comp.ComponentSPI, compGuard.Epoch, owned, pageCount, ownedLimit, ref claimed, ref unresolvedPersistedSpis);
+                ClaimPersistedSegment(comp.VersionSPI, compGuard.Epoch, owned, pageCount, ownedLimit, ref claimed, ref unresolvedPersistedSpis);
             }
         }
 
@@ -888,16 +902,25 @@ public partial class DatabaseEngine
         }
 
         // Occupancy reserves — the pages held outside any segment for occupancy-machinery growth (data, map-extension, and the map-extension twin).
+        //
+        // Bounded by the BITMAP's extent, not by the file page count as every other claim here is. A reserve is recorded in the root header and allocated in the
+        // occupancy bitmap the moment it is handed out, but nothing writes to it until it is consumed — and the file's page count is the high-water of what has
+        // been WRITTEN. So a freshly reserved page legitimately sits one past the end of the file, and clipping it here drops a page that is genuinely owned.
+        //
+        // The consequence was not cosmetic: this bitmap is adopted WHOLESALE by the crash-path re-derive, so a dropped reserve is cleared to free while the root
+        // header still names it — and the next allocation hands the same page to a second owner. It went unnoticed because the reserve was usually written by
+        // accident: leaked dirty marks kept unrelated pages permanently "dirty", every checkpoint rewrote them, and the file grew past the reserve. Fixing the
+        // leak removed the accident and left the real bug exposed, which is the only reason it is visible now.
         var (dataReserve, mapReserve, mapTwinReserve) = MMF.ReservedOccupancyPages;
-        if ((uint)dataReserve < (uint)pageCount)
+        if (dataReserve > 0 && dataReserve < ownedLimit)
         {
             owned[dataReserve >> 6] |= 1L << (dataReserve & 0x3F);
         }
-        if ((uint)mapReserve < (uint)pageCount)
+        if (mapReserve > 0 && mapReserve < ownedLimit)
         {
             owned[mapReserve >> 6] |= 1L << (mapReserve & 0x3F);
         }
-        if ((uint)mapTwinReserve < (uint)pageCount)
+        if (mapTwinReserve > 0 && mapTwinReserve < ownedLimit)
         {
             owned[mapTwinReserve >> 6] |= 1L << (mapTwinReserve & 0x3F);
         }
@@ -905,7 +928,7 @@ public partial class DatabaseEngine
         // CK-05 (C2) directory twins — each is bit-set in the occupancy bitmap but lives in no segment's page list; the pair state owns them.
         foreach (var (_, twin) in MMF.DirectoryPairs)
         {
-            if ((uint)twin < (uint)pageCount)
+            if (twin > 0 && twin < ownedLimit)
             {
                 owned[twin >> 6] |= 1L << (twin & 0x3F);
             }
@@ -931,7 +954,7 @@ public partial class DatabaseEngine
     /// <c>unresolved</c> so the caller can refuse to adopt an incomplete picture.
     /// </para>
     /// </remarks>
-    private void ClaimPersistedSegment(int rootPageIndex, long epoch, long[] owned, int pageCount, ref int claimed, ref int unresolved)
+    private void ClaimPersistedSegment(int rootPageIndex, long epoch, long[] owned, int pageCount, long ownedLimit, ref int claimed, ref int unresolved)
     {
         if (rootPageIndex <= 0 || (uint)rootPageIndex >= (uint)pageCount)
         {
@@ -960,7 +983,7 @@ public partial class DatabaseEngine
 
             owned[rootPageIndex >> 6] |= 1L << (rootPageIndex & 0x3F);
             claimed++;
-            ClaimDirectoryTwin(page, owned, pageCount);
+            ClaimDirectoryTwin(page, owned, ownedLimit);
 
             // Same directory traversal as LogicalSegment.Load: the root's index section, then each map-extension page in the LogicalSegmentNextMapPBID chain.
             // The extension pages are themselves owned (they are bit-set but appear in no segment's Pages list), so they are claimed as they are walked.
@@ -995,7 +1018,7 @@ public partial class DatabaseEngine
 
                 store.RequestPageEpoch(next, epoch, out memPageIndex);
                 page = store.GetPage(memPageIndex);
-                ClaimDirectoryTwin(page, owned, pageCount);
+                ClaimDirectoryTwin(page, owned, ownedLimit);
                 rd = page.RawDataReadOnly<int>(0, LogicalSegment<PersistentStore>.NextHeadersIndexSectionCount);
                 maxIndicesForPage = LogicalSegment<PersistentStore>.NextHeadersIndexSectionCount;
                 i = 0;
@@ -1024,10 +1047,10 @@ public partial class DatabaseEngine
     /// The registered path's twin and map-extension blocks do not advance it either, so counting here would make the same
     /// database report a different total depending on whether its schema was registered.
     /// </remarks>
-    private static void ClaimDirectoryTwin(PageAccessor page, long[] owned, int pageCount)
+    private static void ClaimDirectoryTwin(PageAccessor page, long[] owned, long ownedLimit)
     {
         var twin = page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).TwinPageIndex;
-        if (twin == 0 || (uint)twin >= (uint)pageCount)
+        if (twin <= 0 || twin >= ownedLimit)
         {
             return;
         }

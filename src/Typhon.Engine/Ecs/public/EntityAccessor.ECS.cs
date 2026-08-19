@@ -397,12 +397,14 @@ public unsafe partial class EntityAccessor
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>Read component data via the existing ComponentInfo accessor cache. Zero-copy — returns a ref into the page.
-    /// <paramref name="pk"/> is the entity's raw <see cref="EntityId"/>, the key of the Commit-discipline staging map.</summary>
+    /// <paramref name="pk"/> is the entity's raw <see cref="EntityId"/>, the key of the Commit-discipline staging map.
+    /// <paramref name="isOwnSpawn"/> marks an entity this transaction spawned and has not published, whose non-Versioned payload lives in the spawn arena
+    /// rather than in a content chunk (#839) — so <paramref name="location"/> is an arena handle, not a chunk id.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal ref readonly T ReadEcsComponentData<T>(ComponentTable table, int chunkId, long pk) where T : unmanaged
+    internal ref readonly T ReadEcsComponentData<T>(ComponentTable table, int location, long pk, bool isOwnSpawn) where T : unmanaged
     {
         var info = GetComponentInfo(typeof(T));
-        byte* ptr = table.StorageMode == StorageMode.Transient ? info.TransientCompContentAccessor.GetChunkAddress(chunkId) : info.CompContentAccessor.GetChunkAddress(chunkId);
+        byte* ptr = ResolveSpawnAwarePayload(table, location, isOwnSpawn, info.TransientCompContentAccessor, info.CompContentAccessor);
         // Commit-discipline read-your-own-writes: return this tx's staged value if it has staged this (component, entity). The staging map is keyed by
         // entity PK, which the CALLER supplies — reading it back out of the chunk header instead was #713: a spawn-staging chunk has no PK written yet
         // (FinalizeSpawns stamps it at publish), so every own-spawn lookup keyed on 0.
@@ -420,11 +422,32 @@ public unsafe partial class EntityAccessor
     /// <c>ComponentStorageSize</c> bytes and decodes fields by offset. Backs <see cref="EntityRef.ReadRaw"/> for runtime tooling (the Workbench Data Browser).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal byte* ReadEcsComponentDataRaw(ComponentTable table, int componentTypeId, Type componentType, int chunkId)
+    internal byte* ReadEcsComponentDataRaw(ComponentTable table, int componentTypeId, Type componentType, int location, bool isOwnSpawn)
     {
         var info = GetComponentInfoByTypeId(componentTypeId, componentType);
-        byte* ptr = table.StorageMode == StorageMode.Transient ? info.TransientCompContentAccessor.GetChunkAddress(chunkId) : info.CompContentAccessor.GetChunkAddress(chunkId);
+        byte* ptr = ResolveSpawnAwarePayload(table, location, isOwnSpawn, info.TransientCompContentAccessor, info.CompContentAccessor);
         return ptr + info.ComponentOverhead;
+    }
+
+    /// <summary>
+    /// Resolves a per-slot payload address, which since #839 depends on whether the entity is published.
+    /// </summary>
+    /// <remarks>
+    /// A spawned-but-unpublished entity has no cluster slot and, for a SingleVersion or Transient component, no content chunk either — its bytes sit in the
+    /// transaction's <see cref="SpawnStagingArena"/> and <paramref name="location"/> is a handle into it. A Versioned slot keeps a real content chunk even
+    /// while unpublished, because that chunk IS the first revision's payload. Everything published resolves through the component accessors as before.
+    /// The single choke point exists so the "is this an arena handle or a chunk id?" question is answered in one place rather than at every read site.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private byte* ResolveSpawnAwarePayload(ComponentTable table, int location, bool isOwnSpawn, ChunkAccessor<TransientStore> transientAccessor,
+        ChunkAccessor<PersistentStore> persistentAccessor)
+    {
+        if (isOwnSpawn && table.StorageMode != StorageMode.Versioned)
+        {
+            return SpawnArenaOrNull.Resolve(location);
+        }
+
+        return table.StorageMode == StorageMode.Transient ? transientAccessor.GetChunkAddress(location) : persistentAccessor.GetChunkAddress(location);
     }
 
     /// <summary>Write component data via the existing ComponentInfo accessor cache. Returns mutable ref.
@@ -459,7 +482,17 @@ public unsafe partial class EntityAccessor
         }
 
         byte* ptr;
-        if (table.StorageMode == StorageMode.Transient)
+        if (isOwnSpawn)
+        {
+            // #839: an unpublished spawn's non-Versioned payload is in the transaction arena, so `chunkId` is an arena handle. A Versioned slot never reaches
+            // here — EntityRef takes the copy-on-write branch for it first.
+            ptr = SpawnArenaOrNull.Resolve(chunkId);
+            if (table.StorageMode != StorageMode.Transient)
+            {
+                _didInPlaceSvWrite = true;   // CM-02: still an in-place TickFence write, wherever the bytes happen to live
+            }
+        }
+        else if (table.StorageMode == StorageMode.Transient)
         {
             ptr = info.TransientCompContentAccessor.GetChunkAddress(chunkId, true);
         }
@@ -468,7 +501,19 @@ public unsafe partial class EntityAccessor
             ptr = info.CompContentAccessor.GetChunkAddress(chunkId, true);
             _didInPlaceSvWrite = true;   // CM-02: a TickFence in-place SingleVersion write happened — blocks late escalation to Commit
         }
-        table.DirtyBitmap?.Set(chunkId);
+
+        // DIRTY-01 (rules/ecs.md): a spawn sets no dirty bit. These bitmaps track write mutations to entities that are already PUBLISHED, and FinalizeSpawns
+        // deliberately marks neither this one nor ClusterDirtyBitmap for a spawn. For an own-spawn `chunkId` names the spawn-staging chunk, which has no
+        // published identity to report: the entity PK is stamped into that chunk's overhead only for TRANSIENT slots, so the fence reads PK 0 and dies on
+        // GetMetaByRouting(0) — silently, in Release (#837). A Transient own-spawn does carry its PK and so reached the change-filtered dispatch scan instead,
+        // which calls table.ComponentSegment.CreateChunkAccessor() — null on a Transient table, which builds only its transient segments. Both are the same
+        // mistake: a staging chunk id where a published one is expected. Nothing is lost by withholding the bit; see DIRTY-01's rationale for the
+        // per-discipline durability argument.
+        if (!isOwnSpawn)
+        {
+            table.DirtyBitmap?.Set(chunkId);
+        }
+
         return ref Unsafe.AsRef<T>(ptr + info.ComponentOverhead);
     }
 
@@ -539,6 +584,26 @@ public unsafe partial class EntityAccessor
     private protected byte* _commitStagingBuffer;
     private protected int _commitStagingCapacity;
     private protected int _commitStagingUsed;
+
+    /// <summary>
+    /// Payload store for entities this transaction has spawned but not yet published (#839). Lazily created on the first spawn, reset with the transaction.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately NOT the <see cref="_commitStagingBuffer"/> above, despite the similar job: that one reallocates, and its contract says so — a staged ref
+    /// dies at the next growing allocation. A spawn's payload cannot accept that, because <c>ref</c>s into it outlive later spawns in the same transaction
+    /// (<c>SpawnBatch</c> is precisely spawn-spawn-write). <see cref="SpawnStagingArena"/> appends fixed blocks and never moves one.
+    /// </remarks>
+    /// <summary>
+    /// The owning transaction's spawn arena, or <see langword="null"/> on an accessor that cannot spawn.
+    /// </summary>
+    /// <remarks>
+    /// Storage lives on <see cref="Transaction"/>, not here, even though the two resolve sites above are on this class. Spawning is a transaction-only
+    /// operation, but <see cref="EntityAccessor"/> is also the base of the READ path: <see cref="PointInTimeAccessor"/> holds one instance PER PARALLEL WORKER
+    /// for lock-free entity access at a frozen TSN, and those can never spawn. A field here would put native staging memory on every worker accessor, kept
+    /// harmless only by the laziness of its initialiser — harmless by accident rather than by construction. The resolve sites are shared because reading an
+    /// own-spawn payload is shared; the ownership is not.
+    /// </remarks>
+    private protected virtual SpawnStagingArena SpawnArenaOrNull => null;
 
     /// <summary>Reserve <paramref name="size"/> bytes in the native staging buffer; returns the 0-based offset.</summary>
     private int StageAlloc(int size)
@@ -642,4 +707,16 @@ public unsafe partial class EntityAccessor
     internal virtual void StageEnableDisable(EntityId id, ushort newEnabledBits)
         => throw new InvalidOperationException(
             "EntityAccessor does not support Enable/Disable operations. Use a full Transaction for structural component changes.");
+
+    /// <summary>
+    /// Creates a Versioned slot's content chunk and first revision for a LIVE entity, and writes <paramref name="value"/> into it.
+    /// </summary>
+    /// <remarks>
+    /// Backs <see cref="EntityRef.Enable{T}(Comp{T}, in T)"/> for the one case the no-value overload refuses: a component the spawn never supplied, which has
+    /// no chain and therefore nothing to enable. Spawn used to be the only producer of a first revision, because design decision #14 guaranteed every slot
+    /// existed from spawn; once an unsupplied slot is genuinely absent (#845) that guarantee is gone and a component can begin mid-life.
+    /// </remarks>
+    internal virtual int CreateVersionedContentAndWrite<T>(EntityId id, byte slot, in T value) where T : unmanaged
+        => throw new InvalidOperationException(
+            "EntityAccessor does not support supplying a component value. Use a full Transaction for structural component changes.");
 }

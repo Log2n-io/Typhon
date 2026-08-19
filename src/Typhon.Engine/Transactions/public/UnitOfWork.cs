@@ -238,7 +238,7 @@ public sealed class UnitOfWork : IDisposable
         // ChangeSet incremented DirtyCounter for pages it touched, but the balancing DecrementDirty (from SavePages completion) never runs. Cap at 1 so that:
         //   (a) Pages stay dirty for checkpoint (counter >= 1)
         //   (b) One checkpoint cycle makes them evictable (1 → 0)
-        ChangeSet?.ReleaseExcessDirtyMarks();
+        ChangeSet?.ReleaseDirtyMarks();
 
         // Cancel any outstanding operations
         _cts.Cancel();

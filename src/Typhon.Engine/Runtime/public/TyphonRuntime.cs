@@ -2125,7 +2125,7 @@ public sealed partial class TyphonRuntime : IDisposable
     /// </summary>
     private void RunParallelFence(DagScheduler scheduler)
     {
-        // WAL + checkpoint are mandatory (ADR-054), so the per-worker ChangeSet cleanup via ReleaseExcessDirtyMarks is always correct here: the checkpoint
+        // WAL + checkpoint are mandatory (ADR-054), so the per-worker ChangeSet cleanup via ReleaseDirtyMarks is always correct here: the checkpoint
         // thread drains the capped pages. The serial WriteTickFence path is reached only via the EnableParallelFence=false opt-out (call site in
         // OnTickEndInternal).
         var ctx = Engine.FenceContext;
@@ -2141,17 +2141,26 @@ public sealed partial class TyphonRuntime : IDisposable
             DormancyReporter.DrainAll(Engine._archetypeStates);
 
             // Serial table fences on TickDriver. Uses the UoW's ChangeSet (single-thread context).
-            foreach (var table in Engine.GetAllComponentTables())
+            //
+            // The epoch scope is NOT optional: ProcessTableFence creates a ChunkAccessor over the component segment, which requires one, and the serial
+            // WriteTickFenceCore and the worker-side FenceExecSystem both take one for exactly this reason. This path did not, and was reachable only
+            // through #837 — a spawn-staging chunk in a table's DirtyBitmap was the sole way to make entryCount non-zero for a cluster archetype, so the
+            // accessor was never created and the omission never surfaced. Scoped to the loop alone: an epoch scope pins every page touched inside it for
+            // its whole life (EP-01), and the Fence DAG dispatched below takes its own per-worker scopes.
+            using (EpochGuard.Enter(Engine.EpochManager))
             {
-                if (table.StorageMode == StorageMode.Versioned || table.DirtyBitmap == null)
+                foreach (var table in Engine.GetAllComponentTables())
                 {
-                    continue;
-                }
+                    if (table.StorageMode == StorageMode.Versioned || table.DirtyBitmap == null)
+                    {
+                        continue;
+                    }
 
-                long lsn = Engine.ProcessTableFence(table, ctx.TickNumber, ctx.UowChangeSet);
-                if (lsn > ctx.HighestTableLsn)
-                {
-                    ctx.HighestTableLsn = lsn;
+                    long lsn = Engine.ProcessTableFence(table, ctx.TickNumber, ctx.UowChangeSet);
+                    if (lsn > ctx.HighestTableLsn)
+                    {
+                        ctx.HighestTableLsn = lsn;
+                    }
                 }
             }
         });

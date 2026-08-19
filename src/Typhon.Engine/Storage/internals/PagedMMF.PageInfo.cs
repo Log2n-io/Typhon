@@ -13,7 +13,45 @@ public partial class PagedMMF
         public readonly int MemPageIndex;
         public int FilePageIndex;
         public int ClockSweepCounter => _clockSweepCounter;
+
+        /// <summary>
+        /// Number of live mutator marks on this page — one per <see cref="ChangeSet.AddByMemPageIndex"/> /
+        /// <see cref="ChangeSet.RegisterReDirty"/> that has not yet been released by the ChangeSet that took it.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// STRICTLY CONSERVED: the only code that may raise this is a ChangeSet registering a mark, and the only code that
+        /// may lower it is that same ChangeSet releasing its own marks. No other subsystem — checkpoint included — touches
+        /// it. That is the whole point of the field: an owner-scoped count is balanced by construction, so it cannot drift.
+        /// </para>
+        /// <para>
+        /// This is <b>not</b> "the page needs writing" — that is <see cref="WritebackGen"/>. Conflating the two is what
+        /// made this counter leak: mutator marks arrive K times per checkpoint cycle (once per unit of work) while the
+        /// checkpoint acks once per cycle, so any scheme where the writer decrements the mutator's count leaves K-1
+        /// behind for ever (#824), and any scheme where it decrements ALL of them destroys marks taken after the capture
+        /// (#385). Neither is fixable while one integer carries both meanings.
+        /// </para>
+        /// </remarks>
         public int DirtyCounter;
+
+        /// <summary>
+        /// Monotonic stamp bumped by every path that modifies this page's bytes. Compared against
+        /// <see cref="CapturedGen"/> to answer "are the current bytes on disk?".
+        /// </summary>
+        /// <remarks>
+        /// <c>WritebackGen != CapturedGen</c> means the page carries unwritten bytes: it must be collected by the next
+        /// checkpoint and must not be evicted. The writer captures the value it snapshotted and, after fsync, publishes it
+        /// to <see cref="CapturedGen"/>. A modification racing the capture bumps <see cref="WritebackGen"/> past the
+        /// captured value, so the page stays owed — CP-04's re-dirty defence falls out of the comparison instead of
+        /// needing a count to survive a decrement.
+        /// </remarks>
+        public long WritebackGen;
+
+        /// <summary>
+        /// The <see cref="WritebackGen"/> value whose bytes are known durable on the data file. Only ever advanced, and
+        /// only by a writer that has fsynced the snapshot it took at that generation.
+        /// </summary>
+        public long CapturedGen;
 
         public AccessControlSmall StateSyncRoot;
         public PageState PageState;                     // Must always be changed under StateSyncRoot lock

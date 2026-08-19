@@ -174,6 +174,17 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
         using var dbe = SetupEngine();
         var ids = Populate(dbe);
 
+        // Opened BEFORE the destroy and held for the rest of the test. The death watermark exists for exactly one
+        // reader — one whose snapshot predates the death and must therefore still be shown the tombstone — so the
+        // scenario this test corrupts only exists while such a reader is live. Without the pin the destroyed entity's
+        // EntityMap record is reclaimed as soon as the destroying transaction retires (nothing can see it any more),
+        // the audit finds no dead entity in the cluster, and a lowered watermark bounds nothing: 0 issues, correctly.
+        //
+        // This used to pass without the pin only because the reclamation never happened — the ECS cleanup queue had no
+        // production drain, so every destroyed entity's record was retained for the life of the engine (#681). The test
+        // was reading a leak as if it were the steady state.
+        using var snapshotOlderThanTheDeath = dbe.CreateQuickTransaction();
+
         using (var destroy = dbe.CreateQuickTransaction())
         {
             destroy.Destroy(ids[0]);

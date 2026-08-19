@@ -68,20 +68,60 @@ class EnableDisableTests : TestBase<EnableDisableTests>
         Assert.That(entity.IsEnabled(EcsUnit.Position), Is.True); // still enabled
     }
 
+    /// <summary>
+    /// Named for the case it does NOT exercise: an unsupplied component was never "disabled", it is absent (#845).
+    /// </summary>
+    /// <remarks>
+    /// The distinction this test used to blur is the whole of #845. Disabled means "has a value, hidden" — re-enabling
+    /// is free and returns the value. Absent means "no value was ever supplied" — there is nothing to re-enable. Both
+    /// used to read as a clear EnabledBits bit, so both took the same path and absence silently borrowed a recycled
+    /// chunk. The genuine disable/enable round trip is
+    /// <c>UnsuppliedComponentPayloadTests.Versioned_DisableThenEnable_KeepsTheValue_AndNeedsNoNewOne</c>.
+    /// </remarks>
     [Test]
-    public void Enable_DisabledComponent_BecomesEnabled()
+    public void Enable_NeverSuppliedComponent_IsRefused()
     {
         using var dbe = SetupEngine();
 
         using var t = dbe.CreateQuickTransaction();
         var pos = new EcsPosition(1, 2, 3);
-        var id = t.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos)); // Velocity not provided = disabled
+        var id = t.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos)); // Velocity not provided = ABSENT, not disabled
 
         var entity = t.OpenMut(id);
         Assert.That(entity.IsEnabled(EcsUnit.Velocity), Is.False);
 
-        entity.Enable(EcsUnit.Velocity);
+        var refused = false;
+        try
+        {
+            entity.Enable(EcsUnit.Velocity);
+        }
+        catch (System.InvalidOperationException ex)
+        {
+            refused = true;
+            Assert.That(ex.Message, Does.Contain("never supplied"));
+        }
+
+        Assert.That(refused, Is.True, "an absent component has no value to enable — Enable(comp, in value) supplies one");
+    }
+
+    /// <summary>The complement: supplying the value at the same time is accepted, even before the spawn commits.</summary>
+    [Test]
+    public void EnableWithValue_NeverSuppliedComponent_IsAccepted()
+    {
+        using var dbe = SetupEngine();
+
+        using var t = dbe.CreateQuickTransaction();
+        var pos = new EcsPosition(1, 2, 3);
+        var id = t.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos));
+
+        var vel = new EcsVelocity(9, 8, 7);
+        var entity = t.OpenMut(id);
+        entity.Enable(EcsUnit.Velocity, in vel);
+
         Assert.That(entity.IsEnabled(EcsUnit.Velocity), Is.True);
+
+        ref readonly var vr = ref t.Open(id).Read(EcsUnit.Velocity);
+        Assert.That(vr.Dx, Is.EqualTo(9f));
     }
 
     [Test]
@@ -436,12 +476,22 @@ class EnableDisableTests : TestBase<EnableDisableTests>
         }
     }
 
+    /// <summary>
+    /// A component the spawn never supplied is ABSENT, so the no-value <c>Enable</c> is refused and the value-supplying
+    /// overload is the way in (#845).
+    /// </summary>
+    /// <remarks>
+    /// This asserted the reverse until #845: that enabling an unsupplied component yielded zeros. It never did. The
+    /// component's storage was a RECYCLED chunk, so what surfaced was whatever a destroyed entity had last committed
+    /// there; the test only read zero because its fixture happened to hand out a fresh chunk. Absence is now a state the
+    /// engine represents — no chunk, no chain, root 0 — rather than a value it invents.
+    /// </remarks>
     [Test]
     public void EnableDisable_SpawnWithPartial_ThenEnableMissing()
     {
         using var dbe = SetupEngine();
 
-        // Spawn with only Position (Velocity disabled by default)
+        // Spawn with only Position — Velocity is not merely disabled, it has no storage at all
         EntityId id;
         using (var t = dbe.CreateQuickTransaction())
         {
@@ -450,27 +500,44 @@ class EnableDisableTests : TestBase<EnableDisableTests>
             t.Commit();
         }
 
-        // Enable the missing component — its data should be zero-initialized
+        // The no-value Enable must refuse: there is no value to enable
         using (var t = dbe.CreateQuickTransaction())
         {
             var entity = t.OpenMut(id);
             Assert.That(entity.IsEnabled(EcsUnit.Velocity), Is.False);
-            entity.Enable(EcsUnit.Velocity);
-            Assert.That(entity.IsEnabled(EcsUnit.Velocity), Is.True);
 
-            // Velocity data should be zero (default-initialized from chunk allocation)
-            ref readonly var vel = ref entity.Read(EcsUnit.Velocity);
-            Assert.That(vel.Dx, Is.EqualTo(0));
-            Assert.That(vel.Dy, Is.EqualTo(0));
-            Assert.That(vel.Dz, Is.EqualTo(0));
+            var refused = false;
+            try
+            {
+                entity.Enable(EcsUnit.Velocity);
+            }
+            catch (System.InvalidOperationException ex)
+            {
+                refused = true;
+                Assert.That(ex.Message, Does.Contain("never supplied"));
+            }
+
+            Assert.That(refused, Is.True,
+                "enabling a component the spawn never supplied must be refused — it has no value, and inventing one "
+              + "(zero, or whatever the recycled chunk held) is exactly the defect #845 records");
+        }
+
+        // The value-supplying overload is the sanctioned way to add it mid-life
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            var vel = new EcsVelocity(4, 5, 6);
+            t.OpenMut(id).Enable(EcsUnit.Velocity, in vel);
             t.Commit();
         }
 
-        // Verify persisted
         using (var t = dbe.CreateQuickTransaction())
         {
             var entity = t.Open(id);
             Assert.That(entity.IsEnabled(EcsUnit.Velocity), Is.True);
+
+            ref readonly var vr = ref entity.Read(EcsUnit.Velocity);
+            var v = vr;
+            Assert.That(v.Dx, Is.EqualTo(4f), "the supplied value must persist across the commit");
         }
     }
 }

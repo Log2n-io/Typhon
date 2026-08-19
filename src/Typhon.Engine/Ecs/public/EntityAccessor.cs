@@ -70,6 +70,16 @@ public partial class EntityAccessor : IDisposable
     private protected ChangeSet _changeSet;
 
     /// <summary>
+    /// True when <see cref="_changeSet"/> was created by this accessor and must therefore be released by it.
+    /// </summary>
+    /// <remarks>
+    /// False when the ChangeSet belongs to an enclosing unit of work, which releases it on its own dispose. Releasing
+    /// another owner's marks destroys protection for work still in flight (#385); never releasing one's own strands every
+    /// mark for the life of the process (#824). The flag is what keeps the two apart.
+    /// </remarks>
+    private protected bool _ownsChangeSet;
+
+    /// <summary>
     /// Effective commit discipline for <see cref="StorageMode.SingleVersion"/> writes in this accessor's scope.
     /// Always <see cref="CommitDiscipline.TickFence"/> for a bare <see cref="EntityAccessor"/> (parallel workers never stage); a <see cref="Transaction"/>
     /// resolves it from the explicit argument or escalates on first touch of a <see cref="CommitDiscipline.Commit"/> component (CM-02).
@@ -122,6 +132,7 @@ public partial class EntityAccessor : IDisposable
         _owningThreadId = Environment.CurrentManagedThreadId;
         _entityOperationCount = 0;
         _changeSet = _dbe.MMF.CreateChangeSet();
+        _ownsChangeSet = true;
         TSN = tsn;
     }
 
@@ -163,6 +174,19 @@ public partial class EntityAccessor : IDisposable
         // Fall back to full creation path (only on first access)
         return GetComponentInfo(componentType);
     }
+
+    /// <summary>
+    /// The already-created <see cref="ComponentInfo"/> for <paramref name="componentTypeId"/>, or null — never creates one.
+    /// </summary>
+    /// <remarks>
+    /// The counterpart to <see cref="GetComponentInfoByTypeId"/>, for callers asking "did THIS accessor touch that component?" rather than "give me its info".
+    /// A non-null answer means the component was read, written or spawned here, so its <c>SingleCache</c> is worth probing; a null answer is definitive and
+    /// costs one array index. Using the creating overload for that question allocates a ComponentInfo per untouched component — see the resolver's absent-slot
+    /// path (#845), which asks it for every Versioned slot of every entity it opens.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private protected ComponentInfo TryGetExistingComponentInfo(int componentTypeId)
+        => componentTypeId >= 0 && componentTypeId < _componentInfosByTypeId.Length ? _componentInfosByTypeId[componentTypeId] : null;
 
     private protected ComponentInfo GetComponentInfo(Type componentType)
     {
@@ -270,7 +294,7 @@ public partial class EntityAccessor : IDisposable
             }
         }
 
-        _changeSet?.ReleaseExcessDirtyMarks();
+        _changeSet?.ReleaseDirtyMarks();
         var newEpoch = _epochManager.RefreshScope();
         ChunkBasedSegment<PersistentStore>.RefreshWarmCacheEpoch(newEpoch);
     }
@@ -338,7 +362,7 @@ public partial class EntityAccessor : IDisposable
             }
         }
 
-        _changeSet?.ReleaseExcessDirtyMarks();
+        _changeSet?.ReleaseDirtyMarks();
 
         // Update snapshot — ComponentInfo cache stays warm (ChunkAccessor page caches preserved)
         TSN = newTsn;
@@ -425,7 +449,7 @@ public partial class EntityAccessor : IDisposable
         // accessors from the cleanup thread (different from the creating thread).
         // Transaction.Dispose overrides and adds its own affinity check + epoch exit.
         FlushAccessors();
-        _changeSet?.ReleaseExcessDirtyMarks();
+        _changeSet?.ReleaseDirtyMarks();
         _isDisposed = true;
         // No epoch exit here — InitLightweight does not enter a persistent epoch scope.
         // Transaction.Dispose overrides and exits its own epoch scope.

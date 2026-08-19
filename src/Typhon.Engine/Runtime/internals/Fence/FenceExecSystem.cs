@@ -15,7 +15,7 @@ namespace Typhon.Engine.Internals;
 /// <para><b>Per-chunk ChangeSet ownership.</b> The shared UoW <see cref="ChangeSet"/> is single-thread-affine
 /// (<c>claude/design/Transactions/transaction-overview.md §3.2</c>) — it cannot be threaded into parallel workers. Each chunk that needs page-dirty tracking
 /// creates a LOCAL ChangeSet via <see cref="CreateChunkChangeSet"/> (overridden by Prep / Migrate; returns null for Finalize which doesn't dirty pages).
-/// The base <see cref="Execute"/> caps the local <c>DirtyCounter</c>s via <c>ReleaseExcessDirtyMarks</c> at chunk end, then discards the ChangeSet.
+/// The base <see cref="Execute"/> caps the local <c>DirtyCounter</c>s via <c>ReleaseDirtyMarks</c> at chunk end, then discards the ChangeSet.
 /// Capping (not <c>SaveChanges</c>) is the correct lifecycle because WAL + checkpoint are mandatory (ADR-054): the checkpoint thread always drains the capped
 /// pages.</para>
 /// </summary>
@@ -183,7 +183,7 @@ internal abstract class FencePhaseExecSystemBase : ChunkedCallbackSystem<FenceCo
             // UnitOfWork.Dispose's cleanup. WAL + checkpoint are mandatory (ADR-054), so the checkpoint thread always drains these — no per-worker SaveChanges.
             if (chunkCs != null)
             {
-                chunkCs.ReleaseExcessDirtyMarks();
+                chunkCs.ReleaseDirtyMarks();
                 Engine.MMF.ReturnChangeSet(chunkCs); // pool reuse — saves ~thousands of allocations/sec at 60 Hz
             }
         }
