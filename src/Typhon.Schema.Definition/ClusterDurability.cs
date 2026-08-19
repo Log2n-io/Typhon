@@ -15,7 +15,13 @@ namespace Typhon.Schema.Definition;
 /// <para>
 /// It applies only to <see cref="StorageMode.SingleVersion"/> values in the cluster. <see cref="StorageMode.Versioned"/> components are unaffected in every
 /// setting: their revision chain is WAL-logged at commit and is authoritative, and the cluster HEAD is a cache rebuilt from it on reopen. Transaction
-/// atomicity, lifecycle records (Spawn / Destroy / SetEnabledBits) and <c>CommitDiscipline.Commit</c> writes are likewise untouched.
+/// atomicity, the Destroy and SetEnabledBits lifecycle records, and <c>CommitDiscipline.Commit</c> writes are likewise untouched.
+/// </para>
+/// <para>
+/// <b>The one lifecycle record it does affect (rule CM-07).</b> A <see cref="Checkpoint"/> archetype with no Versioned slot emits NO <c>Spawn</c> record for a
+/// spawn made under a non-<c>Commit</c> discipline, so an entity born since the last checkpoint is ABSENT after a crash rather than present-with-default-values.
+/// That is what "checkpoint-durable" means, and emitting the record while suppressing the values that fill it delivered something strictly worse. Destroy is
+/// never suppressed: the asymmetry is deliberate and load-bearing, because it makes the replay window able only to remove entities, never to create one.
 /// </para>
 /// <para>
 /// Design: <c>claude/design/Durability/cluster-page-durability.md</c>. Issue #568.
@@ -28,17 +34,23 @@ public enum ClusterDurability : byte
     /// Default, and the pre-#568 behaviour. Dirty SingleVersion values are written to the WAL at every tick fence.
     /// </summary>
     /// <remarks>
-    /// ⚠️ The ≤1-tick loss window this is meant to provide is <b>nominal, not currently delivered</b>: crash recovery has no <c>ApplySlotToExisting</c>, so it
-    /// discards these records for any entity that already existed at the last checkpoint — which in a steady-state simulation is effectively all of them. In
-    /// practice such entities recover at checkpoint granularity, exactly like <see cref="Checkpoint"/>, while still paying the full WAL cost. Tracked by #569;
-    /// until it is fixed, the only difference this setting makes for a pre-existing entity is the write amplification.
+    /// The ≤1-tick loss window is delivered for an entity that already existed at the last checkpoint: recovery applies these records through
+    /// <c>RecoveryApplier.ApplySlotToExisting</c>. (Until #569 landed it did not — the payloads were aggregated correctly and then dropped, so such an entity
+    /// really recovered at checkpoint granularity while paying the full WAL cost. Any doc still saying that is stale.)
+    /// <para>
+    /// ⚠️ It is <b>not</b> delivered for an entity SPAWNED inside the window and never written afterwards. A spawn does not set the cluster dirty bit the fence
+    /// emits from (<i>that bitmap tracks write mutations for change-filtered dispatch</i>), so the fence never carries its values and it recovers with defaults.
+    /// One subsequent write to it closes the gap. This is D5's documented non-guarantee and it applies to this setting too, not only to <see cref="Checkpoint"/>
+    /// — use <c>CommitDiscipline.Commit</c> for a spawn that must be durable immediately (rule CM-06).
+    /// </para>
     /// </remarks>
     FenceWal = 0,
 
     /// <summary>
     /// No fence WAL records. SingleVersion values reach disk through the checkpoint — the same path cluster STRUCTURE (slot claim, occupancy, entity keys,
-    /// growth) has always used. <b>A crash loses up to one checkpoint interval of value updates</b> (<c>ResourceOptions.CheckpointIntervalMs</c>, 30 s by
-    /// default): the entities survive, their values are as of the last checkpoint.
+    /// growth) has always used. <b>A crash rolls the archetype back to the last checkpoint</b> (<c>ResourceOptions.CheckpointIntervalMs</c>, 30 s by default):
+    /// every entity that the checkpoint captured survives with its checkpoint values, and every entity born since it is absent (rule CM-07). Population and
+    /// values are as of the same instant — a coherent point in time, not a mixture.
     /// </summary>
     /// <remarks>
     /// <para>

@@ -575,6 +575,37 @@ rejected and is the TLA+ mutant.
                 successful recovery
   verified: ClusterAllSv_PrimaryAxis_SurvivesCrash [VerifiesRule]
 
+### CM-07: A Checkpoint archetype's non-Commit spawn emits NO Spawn record `[fatal]` `[silent]`
+  invariant ∀ entity e spawned in transaction t into archetype a: t emits a Spawn lifecycle record for e UNLESS
+            (a.ClusterDurability = Checkpoint ∧ t.discipline ≠ Commit ∧ a.VersionedSlotCount = 0), in which case it
+            emits none. A crash therefore returns e ABSENT, never present-with-default-values.
+  invariant the suppression is MONOTONE: Destroy and SetEnabledBits are ALWAYS emitted, for every archetype and every
+            discipline. With no Spawn record the replay window can only REMOVE entities, never create one, so no
+            interleaving of mixed-discipline transactions can resurrect a destroyed entity.
+  never suppressing the Destroy record as well. Safety would require proving e absent from the checkpoint base — a
+        decision taken at emit time that races the checkpoint which actually lands (born TSN 100, last checkpoint 50,
+        destroy at 150 ⇒ "born after, suppress"; a checkpoint completing at 120 puts e IN the base and the crash
+        resurrects it). Not decidable locally, and the error direction is silent.
+  never suppressing when the archetype has a Versioned slot. The SingleCache loop emits that component's revision
+        content at commit regardless of cluster durability (the chain stays authoritative — no ClusterDurability
+        setting may lose a Versioned value), and ApplySlotToExisting NO-OPS for an entity absent from the base map
+        rather than failing loudly, so a dropped Spawn would strand the revision silently.
+  requires: recovery tolerates every record whose Spawn never arrived, as an explicit no-op and never a loud failure —
+            RecoveryApplier.ApplyDestroyToExisting, .ApplySlotToExisting (AP-12 idempotence), .ApplySetEnabledBitsToExisting.
+  requires: enumeration never depends on the record — cluster pages are self-describing, the EntityMap is discarded and
+            re-derived from the occupancy walk BEFORE WAL apply, and NextEntityKey comes from that same walk (CK-09/RB-06).
+  rationale: D5 declares a plain TickFence spawn "checkpoint-durable only — the documented non-guarantee, not a bug".
+             Emitting the Spawn while the mode suppresses the fence that would carry the values delivers something
+             STRICTLY WORSE than that guarantee: the entity recovers alive with default values. "Checkpoint-durable
+             only" means ABSENT when it was not checkpointed, and this rule is what makes the implementation say what
+             the contract says. It is not a bandwidth optimisation; the WAL saving is a consequence.
+  scope: Transaction.SuppressSpawnRecord, Transaction.BuildCommitBatch
+  on_violation: a window-spawned entity recovers as a valueless phantom at the origin of every field — well-formed,
+                plausible, and flagged by open-time integrity as DataLoss while the database opens anyway. The
+                pre-CM-07 engine returned 32 entities of which 16 were zeroed, measured in both cells of
+                CheckpointDurabilityCrashTests.
+  verified: WindowSpawn_SurvivesHardCrash_ButWithWhatValues [VerifiesRule] + [RuleMutant]
+
 ## Module: WAL Pipeline
 
 The temporal chain that all durability depends on:

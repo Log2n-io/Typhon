@@ -2493,6 +2493,52 @@ public unsafe partial class Transaction : EntityAccessor
     /// ordering). The schema-stable <see cref="ComponentInfo.ComponentTypeId"/> is the WAL identity (LOG-06). SV components flow
     /// through the fence path, not here.
     /// </summary>
+    /// <summary>
+    /// ECS-STAGE-03: whether this transaction's Spawn lifecycle record for <paramref name="archetypeId"/> is suppressed. True only for a
+    /// <see cref="ClusterDurability.Checkpoint"/> archetype, spawned under a non-<see cref="CommitDiscipline.Commit"/> transaction, whose components are all
+    /// non-Versioned.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why.</b> <see cref="ClusterDurability.Checkpoint"/> declares its entities checkpoint-durable — D5, <c>03-recovery.md:172</c>: <i>"A plain TickFence
+    /// spawn stays checkpoint-durable only — the documented non-guarantee, not a bug."</i> But emitting the Spawn record while suppressing the fence that
+    /// would carry the values delivers something WORSE than that guarantee: the entity recovers alive with default values — the phantom this file's own #395
+    /// Face B comment names below. Measured, both cells, by <c>CheckpointDurabilityCrashTests</c>. Suppressing the record makes a window spawn ABSENT after a
+    /// crash, which is exactly what "checkpoint-durable only" means.
+    /// </para>
+    /// <para>
+    /// <b>Why Destroy is NOT suppressed, and must never be.</b> Suppression is safe here only because it is MONOTONE: with no Spawn record the replay window
+    /// can only remove entities, never create one, so no ordering of mixed-discipline transactions can resurrect a destroyed entity. Suppressing Destroy
+    /// instead would need proof that the entity is absent from the base — a decision made at emit time that races the checkpoint which actually lands (born
+    /// TSN 100, last checkpoint 50, destroy at 150 ⇒ "born after, suppress"; a checkpoint completing at 120 then puts it IN the base, and the crash resurrects
+    /// it silently). Not decidable locally.
+    /// </para>
+    /// <para>
+    /// <b>The three terms.</b> <c>Checkpoint</c> — the archetype opted into the weaker window. Non-<c>Commit</c> discipline — CM-06 <c>[fatal]</c> requires a
+    /// Commit-discipline spawn to be atomically durable per commit, and the branch below logs its values, which would be orphaned without the Spawn.
+    /// No Versioned slots — the <c>SingleCache</c> loop below emits revision content for a Versioned component at commit regardless of cluster durability
+    /// (§2.4: the chain stays authoritative, so no <c>ClusterDurability</c> setting may lose a Versioned value); dropping the Spawn would strand it, since
+    /// <c>ApplySlotToExisting</c> no-ops for an entity absent from the base map rather than failing loudly.
+    /// </para>
+    /// <para>
+    /// <b>Recovery tolerates the gap by construction.</b> Every consumer of a record whose Spawn never arrived is an explicit no-op, not a loud failure:
+    /// <c>ApplyDestroyToExisting</c> (<c>RecoveryApplier.cs:293</c>), <c>ApplySlotToExisting</c> (<c>:344</c>, AP-12 idempotence),
+    /// <c>ApplySetEnabledBitsToExisting</c> (<c>:695</c>). And recovery never needed the record to ENUMERATE: cluster pages are self-describing, the EntityMap
+    /// is discarded and re-derived from the occupancy walk before WAL apply, and <c>NextEntityKey</c> comes from that same walk.
+    /// </para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool SuppressSpawnRecord(ushort archetypeId)
+    {
+        if (_discipline == CommitDiscipline.Commit)
+        {
+            return false;
+        }
+
+        var meta = _dbe.GetMetaByRouting(archetypeId);
+        return meta.ClusterDurability == ClusterDurability.Checkpoint && meta.VersionedSlotCount == 0;
+    }
+
     private void BuildCommitBatch(ref CommitBatchBuilder batch)
     {
         // Spawn lifecycle.
@@ -2501,6 +2547,11 @@ public unsafe partial class Transaction : EntityAccessor
             for (int i = 0; i < _spawnedEntities.Count; i++)
             {
                 var s = _spawnedEntities[i];
+                if (SuppressSpawnRecord(s.Id.ArchetypeId))
+                {
+                    continue;
+                }
+
                 batch.AddSpawn((long)s.Id.RawValue, s.Id.ArchetypeId, s.EnabledBits);
             }
 
