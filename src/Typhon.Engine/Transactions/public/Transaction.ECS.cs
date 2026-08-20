@@ -1,6 +1,7 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 using Typhon.Schema.Definition;
 
@@ -8,6 +9,108 @@ namespace Typhon.Engine;
 
 public unsafe partial class Transaction
 {
+
+    /// <summary>
+    /// Creates a Versioned slot's content chunk and its first revision. Called ONLY for a slot the spawn actually supplies.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A slot nobody supplied gets nothing: no chunk, no chain, and <c>CompRevFirstChunkId</c> stays 0. That is not a special case bolted on — it is the state
+    /// every chain-root reader in the engine already expects, and <c>ArchetypeClusterState</c>'s rebuild says so outright: "Legitimate for a slot never
+    /// written". The spawn path used to be the one place that contradicted it, fabricating a revision stamped
+    /// <see cref="ComponentInfo.OperationType.Created"/> for a component that was never created, pointing at a chunk allocated with <c>clearContent: false</c>.
+    /// Against a recycled chunk, enabling that slot then read the previous entity's committed values (#845).
+    /// </para>
+    /// <para>
+    /// This REPLACES design decision #14 ("Spawn always allocates all components… Omitted components are zero-initialized and disabled"). Zero-init was the
+    /// right answer only because <see cref="EntityRef.Enable{T}(Comp{T})"/> had no way to tell "never supplied" from "written then disabled" — both being a
+    /// clear bit with a live payload — so it had to be total. A missing chain root distinguishes them for free, in a field the record already carries, so
+    /// Enable can refuse instead of inventing a value. SingleVersion and Transient keep zero-init because their bytes live in the cluster slot, which exists
+    /// the moment the entity does: there is no absent state to represent.
+    /// </para>
+    /// </remarks>
+    private int AllocateVersionedSlotContent(ArchetypeMetadata meta, ComponentTable table, int slot, EntityId entityId, out int compRevChunkId)
+    {
+        var compType = meta._slotToComponentType[slot];
+        var info = GetComponentInfo(compType);
+        var chunkId = table.ComponentSegment.AllocateChunk(false, _changeSet);
+        compRevChunkId = ComponentRevisionManager.AllocCompRevStorage(info, TSN, UowId, chunkId, (long)entityId.RawValue);
+
+        var cri = new ComponentInfo.CompRevInfo
+        {
+            Operations = ComponentInfo.OperationType.Created,
+            PrevCompContentChunkId = 0,
+            PrevRevisionIndex = -1,
+            CurCompContentChunkId = chunkId,
+            CompRevTableFirstChunkId = compRevChunkId,
+            CurRevisionIndex = 0,
+            ReadCommitSequence = 1,
+            ReadRevisionIndex = 0,
+        };
+        info.AddNew((long)entityId.RawValue, cri);
+        return chunkId;
+    }
+
+    /// <inheritdoc/>
+    internal override int CreateVersionedContentAndWrite<T>(EntityId id, byte slot, in T value)
+    {
+        EnsureMutable();
+
+        var meta = _dbe.GetMetaByRouting(id.ArchetypeId);
+        var engineState = _dbe._archetypeStates[meta.ArchetypeId];
+        var table = engineState.SlotToComponentTable[slot];
+        var compType = meta._slotToComponentType[slot];
+        var info = GetComponentInfo(compType);
+
+        // An entity still pending in THIS transaction has no EntityMap record yet, so there is nothing for the mid-life publication path to write a chain root
+        // into. Worse, FinalizeSpawns writes SetCompRevFirstChunkId(recordPtr, vi, entry.Rev[slot]) unconditionally, so a root published any other way would be
+        // clobbered by a still-zero entry.Rev. The spawn owns this entity's publication: record the allocation in its SpawnEntry and let FinalizeSpawns do the
+        // one thing it already does correctly.
+        int spawnIdx = SpawnedIndexOf(id);
+        if (spawnIdx >= 0)
+        {
+            ref var entry = ref CollectionsMarshal.AsSpan(_spawnedEntities)[spawnIdx];
+            if (entry.VerLoc[slot] == 0)
+            {
+                entry.VerLoc[slot] = AllocateVersionedSlotContent(meta, table, slot, id, out var spawnRev);
+                entry.Rev[slot] = spawnRev;
+            }
+
+            entry.EnabledBits |= (ushort)(1 << slot);
+
+            var spawnDst = info.CompContentAccessor.GetChunkAddress(entry.VerLoc[slot], true);
+            Unsafe.AsRef<T>(spawnDst + table.ComponentOverhead) = value;
+            return entry.VerLoc[slot];
+        }
+
+        // Same construction the spawn path uses, at the CURRENT TSN rather than the spawn's, so the revision is a normal mid-life creation: a reader on an
+        // older snapshot resolves no chain for this slot and correctly sees the component as absent.
+        var chunkId = AllocateVersionedSlotContent(meta, table, slot, id, out _);
+
+        var dst = info.CompContentAccessor.GetChunkAsSpan(chunkId, true);
+        Unsafe.AsRef<T>((byte*)Unsafe.AsPointer(ref dst.GetPinnableReference()) + table.ComponentOverhead) = value;
+        return chunkId;
+    }
+
+    /// <summary>Native staging for spawned-but-unpublished payloads. Created on first spawn; rewound on reset; freed on dispose.</summary>
+    private SpawnStagingArena _spawnArena;
+
+    /// <summary>The spawn payload arena, created on first use. Only a transaction can spawn, so only a transaction owns one.</summary>
+    internal SpawnStagingArena SpawnArena => _spawnArena ??= new SpawnStagingArena();
+
+    private protected override SpawnStagingArena SpawnArenaOrNull => _spawnArena;
+
+    /// <summary>Rewinds the arena between pooled uses, retaining one block. Frees nothing — see <see cref="DisposeSpawnArena"/>.</summary>
+    private protected void ResetSpawnArena() => _spawnArena?.Reset();
+
+    /// <summary>
+    /// Releases the arena's native memory. Called when this transaction is discarded for good rather than returned to the pool.
+    /// </summary>
+    internal void DisposeSpawnArena()
+    {
+        _spawnArena?.Dispose();
+        _spawnArena = null;
+    }
     // ═══════════════════════════════════════════════════════════════════════
     // ECS State
     // ═══════════════════════════════════════════════════════════════════════
@@ -24,11 +127,39 @@ public unsafe partial class Transaction
     {
         public EntityId Id;
         public ushort EnabledBits;
-        /// <summary>Per-slot component content chunk IDs (for same-tx reads and rollback).</summary>
-        public fixed int Loc[16];
+        /// <summary>
+        /// Per-slot payload address for a spawned-but-unpublished entity. <b>What it addresses depends on the slot's storage mode</b>, which is why the two
+        /// homes are separate fields rather than one overloaded <c>int</c>: a VERSIONED slot holds a real
+        /// <see cref="ComponentTable.ComponentSegment"/> content chunk id — the first revision's payload, owned by the chain — while a SingleVersion or
+        /// Transient slot holds a <see cref="SpawnStagingArena"/> handle, because its bytes belong in the cluster slot and allocating a content chunk for them
+        /// produced one that no <c>ClusterEntityRecord</c> could address and nothing could free (#839).
+        /// <para>
+        /// Both use <c>0</c> for "this slot has no payload". Do not merge them: an int that means a chunk id in one archetype and an arena handle in another,
+        /// distinguished only by a lookup the reader has to remember to perform, is the ST-05 bug class (<c>rules/spatial.md</c>) that caused #548.
+        /// </para>
+        /// </summary>
+        public fixed int VerLoc[16];
+        /// <summary>Per-slot spawn-arena handles for SingleVersion and Transient slots. See <see cref="VerLoc"/> for why this is a separate field.</summary>
+        public fixed int Stage[16];
         /// <summary>Per-slot compRevFirstChunkIds for Versioned components (used at commit for EntityRecord).</summary>
         public fixed int Rev[16];
     }
+
+    /// <summary>
+    /// The location of one slot of a spawned-but-unpublished entity, in whichever address space that slot uses.
+    /// </summary>
+    /// <remarks>
+    /// Since #839 the answer depends on storage mode — a Versioned slot has a real content chunk (the first revision's payload), everything else has a
+    /// <see cref="SpawnStagingArena"/> handle. Both callers that hand these to an <see cref="EntityRef"/> go through here so the choice is made once;
+    /// the ref's read and write paths then disambiguate on <c>_isOwnSpawn</c> (see <c>EntityAccessor.ResolveSpawnAwarePayload</c>).
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static int SpawnSlotLocation(in SpawnEntry entry, ComponentTable table, int slot) =>
+        table.StorageMode == StorageMode.Versioned ? entry.VerLoc[slot] : entry.Stage[slot];
+
+    /// <summary>The per-slot component tables for <paramref name="meta"/>, for callers that must pick a spawn slot's address space.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal ComponentTable[] SlotTablesFor(ArchetypeMetadata meta) => _dbe._archetypeStates[meta.ArchetypeId].SlotToComponentTable;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private bool SpawnedContains(EntityId id)
@@ -294,51 +425,52 @@ public unsafe partial class Transaction
             for (int slot = 0; slot < meta.ComponentCount; slot++)
             {
                 var table = engineState.SlotToComponentTable[slot];
-                int chunkId = table.StorageMode == StorageMode.Transient
-                    ? table.TransientComponentSegment.AllocateChunk(false)
-                    : table.ComponentSegment.AllocateChunk(false, _changeSet);
 
-                // Copy shared component value if provided for this slot
+                // #839: a content chunk only for Versioned — see SpawnInternal for the full reasoning.
+                var isVersioned = table.StorageMode == StorageMode.Versioned;
+
+                // #845: find the supplied value BEFORE allocating, so an unsupplied Versioned slot gets no chunk and no chain.
                 int slotTypeId = meta._componentTypeIds[slot];
+                int sharedIndex = -1;
                 for (int v = 0; v < sharedValues.Length; v++)
                 {
                     if (sharedValues[v].ComponentTypeId == slotTypeId)
                     {
-                        var compType = meta._slotToComponentType[slot];
-                        var info = GetComponentInfo(compType);
-                        var dst = table.StorageMode == StorageMode.Transient
-                            ? info.TransientCompContentAccessor.GetChunkAsSpan(chunkId, true)
-                            : info.CompContentAccessor.GetChunkAsSpan(chunkId, true);
-                        int overhead = table.ComponentOverhead;
-                        int copySize = Math.Min(sharedValues[v].DataSize, dst.Length - overhead);
-                        new ReadOnlySpan<byte>((byte*)Unsafe.AsPointer(ref Unsafe.AsRef(in sharedValues[v])) + 12, copySize)
-                            .CopyTo(dst.Slice(overhead));
-                        entry.EnabledBits |= (ushort)(1 << slot);
+                        sharedIndex = v;
                         break;
                     }
                 }
 
-                if (table.StorageMode == StorageMode.Versioned)
+                int chunkId = 0;
+                int stage = isVersioned ? 0 : SpawnArena.Alloc(table.ComponentOverhead + table.ComponentStorageSize);
+                if (isVersioned && sharedIndex >= 0)
                 {
-                    var compType = meta._slotToComponentType[slot];
-                    var info = GetComponentInfo(compType);
-                    var compRevChunkId = ComponentRevisionManager.AllocCompRevStorage(info, TSN, UowId, chunkId, (long)entityId.RawValue);
-                    var cri = new ComponentInfo.CompRevInfo
-                    {
-                        Operations = ComponentInfo.OperationType.Created,
-                        PrevCompContentChunkId = 0,
-                        PrevRevisionIndex = -1,
-                        CurCompContentChunkId = chunkId,
-                        CompRevTableFirstChunkId = compRevChunkId,
-                        CurRevisionIndex = 0,
-                        ReadCommitSequence = 1,
-                        ReadRevisionIndex = 0,
-                    };
-                    info.AddNew((long)entityId.RawValue, cri);
+                    chunkId = AllocateVersionedSlotContent(meta, table, slot, entityId, out var compRevChunkId);
                     entry.Rev[slot] = compRevChunkId;
                 }
 
-                entry.Loc[slot] = chunkId;
+                if (sharedIndex >= 0)
+                {
+                    int overhead = table.ComponentOverhead;
+                    Span<byte> dst;
+                    if (isVersioned)
+                    {
+                        var compType = meta._slotToComponentType[slot];
+                        var info = GetComponentInfo(compType);
+                        dst = info.CompContentAccessor.GetChunkAsSpan(chunkId, true);
+                    }
+                    else
+                    {
+                        dst = new Span<byte>(SpawnArena.Resolve(stage), overhead + table.ComponentStorageSize);
+                    }
+                    int copySize = Math.Min(sharedValues[sharedIndex].DataSize, dst.Length - overhead);
+                    new ReadOnlySpan<byte>((byte*)Unsafe.AsPointer(ref Unsafe.AsRef(in sharedValues[sharedIndex])) + 12, copySize)
+                        .CopyTo(dst.Slice(overhead));
+                    entry.EnabledBits |= (ushort)(1 << slot);
+                }
+
+                entry.VerLoc[slot] = chunkId;
+                entry.Stage[slot] = stage;
             }
 
             _spawnedEntityIndexStale = true;
@@ -410,30 +542,15 @@ public unsafe partial class Transaction
             for (int slot = 0; slot < meta.ComponentCount; slot++)
             {
                 var table = engineState.SlotToComponentTable[slot];
-                int chunkId = table.StorageMode == StorageMode.Transient ? 
-                    table.TransientComponentSegment.AllocateChunk(false) : table.ComponentSegment.AllocateChunk(false, _changeSet);
 
-                if (table.StorageMode == StorageMode.Versioned)
-                {
-                    var compType = meta._slotToComponentType[slot];
-                    var info = GetComponentInfo(compType);
-                    var compRevChunkId = ComponentRevisionManager.AllocCompRevStorage(info, TSN, UowId, chunkId, (long)entityId.RawValue);
-                    var cri = new ComponentInfo.CompRevInfo
-                    {
-                        Operations = ComponentInfo.OperationType.Created,
-                        PrevCompContentChunkId = 0,
-                        PrevRevisionIndex = -1,
-                        CurCompContentChunkId = chunkId,
-                        CompRevTableFirstChunkId = compRevChunkId,
-                        CurRevisionIndex = 0,
-                        ReadCommitSequence = 1,
-                        ReadRevisionIndex = 0,
-                    };
-                    info.AddNew((long)entityId.RawValue, cri);
-                    entry.Rev[slot] = compRevChunkId;
-                }
+                // #839: a content chunk only for Versioned — see SpawnInternal for the full reasoning.
+                var isVersioned = table.StorageMode == StorageMode.Versioned;
 
-                entry.Loc[slot] = chunkId;
+                // #845: this entry point supplies NO values — SpawnBatchWriteAll fills them in afterwards, one component at a time. So a Versioned slot gets
+                // nothing here and SpawnBatchWriteAll allocates its chunk and chain on first write. A batch that writes 2 of 5 components therefore allocates
+                // 2 chunks per entity rather than 5, and a component never written stays genuinely absent instead of holding a recycled chunk's bytes.
+                entry.VerLoc[slot] = 0;
+                entry.Stage[slot] = isVersioned ? 0 : SpawnArena.Alloc(table.ComponentOverhead + table.ComponentStorageSize);
             }
 
             if ((n & 127) == 127)
@@ -465,16 +582,28 @@ public unsafe partial class Transaction
         var engineState = _dbe._archetypeStates[meta.ArchetypeId];
         var table = engineState.SlotToComponentTable[slot];
         var info = GetComponentInfo(typeof(T));
-        bool isTransient = table.StorageMode == StorageMode.Transient;
         int overhead = table.ComponentOverhead;
         ushort bitMask = (ushort)(1 << slot);
+
+        // #839: SpawnBatchAllocate stages non-Versioned payloads in the transaction arena, so the write lands there. A Versioned slot still has a real content
+        // chunk (the first revision's payload) and is written through the component accessor as before.
+        var isVersioned = table.StorageMode == StorageMode.Versioned;
+        var arena = isVersioned ? null : SpawnArena;
 
         for (int i = 0; i < count; i++)
         {
             ref var entry = ref span[baseIndex + i];
-            int chunkId = entry.Loc[slot];
 
-            byte* ptr = isTransient ? info.TransientCompContentAccessor.GetChunkAddress(chunkId, true) : info.CompContentAccessor.GetChunkAddress(chunkId, true);
+            // #845: SpawnBatchAllocate leaves a Versioned slot with no chunk and no chain, because it does not know which components will be written. This is
+            // this first write, so the content is created here. The zero test is the same "never written" state every chain-root reader in the engine already
+            // recognizes; a second write to the same slot in the same batch finds a non-zero id and reuses it.
+            if (isVersioned && entry.VerLoc[slot] == 0)
+            {
+                entry.VerLoc[slot] = AllocateVersionedSlotContent(meta, table, slot, entry.Id, out var compRevChunkId);
+                entry.Rev[slot] = compRevChunkId;
+            }
+
+            byte* ptr = isVersioned ? info.CompContentAccessor.GetChunkAddress(entry.VerLoc[slot], true) : arena.Resolve(entry.Stage[slot]);
 
             Unsafe.AsRef<T>(ptr + overhead) = values[i];
             entry.EnabledBits |= bitMask;
@@ -530,48 +659,48 @@ public unsafe partial class Transaction
         for (int slot = 0; slot < meta.ComponentCount; slot++)
         {
             var table = engineState.SlotToComponentTable[slot];
-            int chunkId = table.StorageMode == StorageMode.Transient ? 
-                table.TransientComponentSegment.AllocateChunk(false) : table.ComponentSegment.AllocateChunk(false, _changeSet);
+
+            // #839: only a VERSIONED slot gets a content chunk — there the chunk IS the first revision's payload, owned by the chain and reclaimed with it.
+            // A SingleVersion or Transient slot's bytes belong in the cluster slot, so it stages in the transaction arena instead; the chunk it used to get
+            // became unreachable the moment FinalizeSpawns copied the payload out, because no ClusterEntityRecord field can hold its id.
+            var isVersioned = table.StorageMode == StorageMode.Versioned;
+            int vi = valueBySlot[slot];
+            var supplied = vi >= 0;
+
+            // #845: a Versioned slot gets its chunk and chain only when the spawn supplies a value. Unsupplied leaves CompRevFirstChunkId at 0 — the "never
+            // written" state the rest of the engine already reads. SingleVersion and Transient always stage, because their bytes live in the cluster slot and
+            // there is no absent state to represent there.
+            int chunkId = 0;
+            int stage = isVersioned ? 0 : SpawnArena.Alloc(table.ComponentOverhead + table.ComponentStorageSize);
+            if (isVersioned && supplied)
+            {
+                chunkId = AllocateVersionedSlotContent(meta, table, slot, entityId, out var compRevChunkId);
+                entry.Rev[slot] = compRevChunkId;
+            }
 
             // Copy component value data if provided for this slot
-            int vi = valueBySlot[slot];
-            if (vi >= 0)
+            if (supplied)
             {
-                var compType = meta._slotToComponentType[slot];
-                var info = GetComponentInfo(compType);
-                var dst = table.StorageMode == StorageMode.Transient ? 
-                    info.TransientCompContentAccessor.GetChunkAsSpan(chunkId, true) : info.CompContentAccessor.GetChunkAsSpan(chunkId, true);
                 int overhead = table.ComponentOverhead;
+                Span<byte> dst;
+                if (isVersioned)
+                {
+                    var compType = meta._slotToComponentType[slot];
+                    var info = GetComponentInfo(compType);
+                    dst = info.CompContentAccessor.GetChunkAsSpan(chunkId, true);
+                }
+                else
+                {
+                    dst = new Span<byte>(SpawnArena.Resolve(stage), overhead + table.ComponentStorageSize);
+                }
                 int copySize = Math.Min(values[vi].DataSize, dst.Length - overhead);
                 new ReadOnlySpan<byte>((byte*)Unsafe.AsPointer(ref Unsafe.AsRef(in values[vi])) + 12, copySize)
                     .CopyTo(dst.Slice(overhead));
                 entry.EnabledBits |= (ushort)(1 << slot);
             }
 
-            // Versioned: create revision chain (CompRevStorageHeader + first revision entry).
-            // This populates _componentInfos so CommitComponentCore handles secondary indexes, WAL, and IsolationFlag clearing.
-            if (table.StorageMode == StorageMode.Versioned)
-            {
-                var compType = meta._slotToComponentType[slot];
-                var info = GetComponentInfo(compType);
-                var compRevChunkId = ComponentRevisionManager.AllocCompRevStorage(info, TSN, UowId, chunkId, (long)entityId.RawValue);
-
-                var cri = new ComponentInfo.CompRevInfo
-                {
-                    Operations = ComponentInfo.OperationType.Created,
-                    PrevCompContentChunkId = 0,
-                    PrevRevisionIndex = -1,
-                    CurCompContentChunkId = chunkId,
-                    CompRevTableFirstChunkId = compRevChunkId,
-                    CurRevisionIndex = 0,
-                    ReadCommitSequence = 1,
-                    ReadRevisionIndex = 0,
-                };
-                info.AddNew((long)entityId.RawValue, cri);
-                entry.Rev[slot] = compRevChunkId;
-            }
-
-            entry.Loc[slot] = chunkId;
+            entry.VerLoc[slot] = chunkId;
+            entry.Stage[slot] = stage;
         }
 
         // Store in flat list — index rebuilt lazily on first Contains/IndexOf call
@@ -833,27 +962,36 @@ public unsafe partial class Transaction
                     continue;
                 }
 
-                int chunkId = entry.Loc[target.FkSlotIndex];
-                if (chunkId == 0)
-                {
-                    continue;
-                }
-
-                // For Versioned FK slot: chunkId is compContentChunkId in GetLoc, but need to check SingleCache for COW
+                // Resolve the slot's table first: since #839 the payload's home depends on its storage mode — a Versioned slot has a real content chunk (the
+                // first revision's), everything else stages in the transaction arena.
                 var spawnMeta = _dbe.GetMetaByRouting(entry.Id.ArchetypeId);
                 var spawnES = _dbe._archetypeStates[spawnMeta.ArchetypeId];
                 var table = spawnES.SlotToComponentTable[target.FkSlotIndex];
                 var compType = spawnMeta._slotToComponentType[target.FkSlotIndex];
                 var info = GetComponentInfo(compType);
 
-                int dataChunkId = chunkId;
-                if (table.StorageMode == StorageMode.Versioned && info.SingleCache.TryGetValue((long)entry.Id.RawValue, out var cri))
+                byte* ptr;
+                if (table.StorageMode == StorageMode.Versioned)
                 {
-                    dataChunkId = cri.CurCompContentChunkId;
-                }
+                    int chunkId = entry.VerLoc[target.FkSlotIndex];
+                    if (chunkId == 0)
+                    {
+                        continue;
+                    }
 
-                byte* ptr = table.StorageMode == StorageMode.Transient ? 
-                    info.TransientCompContentAccessor.GetChunkAddress(dataChunkId) : info.CompContentAccessor.GetChunkAddress(dataChunkId);
+                    // A same-tx copy-on-write supersedes the spawn's own chunk, so prefer the cache's current content chunk.
+                    int dataChunkId = info.SingleCache.TryGetValue((long)entry.Id.RawValue, out var cri) ? cri.CurCompContentChunkId : chunkId;
+                    ptr = info.CompContentAccessor.GetChunkAddress(dataChunkId);
+                }
+                else
+                {
+                    int stage = entry.Stage[target.FkSlotIndex];
+                    if (stage == 0)
+                    {
+                        continue;
+                    }
+                    ptr = SpawnArena.Resolve(stage);
+                }
 
                 var fkEntityId = *(EntityId*)(ptr + table.ComponentOverhead + target.FkFieldOffset);
                 if (fkEntityId == parentId)
@@ -983,10 +1121,13 @@ public unsafe partial class Transaction
             }
 
             var result = new EntityRef(id, meta, es, this, enabledBits, writable);
-            result._isOwnSpawn = true;   // #713: no HEAD yet — a Commit-discipline write goes in place into the staging chunk, not through the staging arena
+            result._isOwnSpawn = true;   // #713: no HEAD yet — a Commit-discipline write goes in place into the staging payload, not through the staging buffer
             for (int slot = 0; slot < meta.ComponentCount; slot++)
             {
-                result.SetLocation(slot, entry.Loc[slot]);
+                // #839: the location's MEANING depends on the slot's storage mode while the entity is unpublished — a spawn-arena handle for SingleVersion and
+                // Transient, a real content chunk id for Versioned (that chunk is the first revision's payload). The read and write paths disambiguate on
+                // EntityRef._isOwnSpawn, which is set just above; see EntityAccessor.ResolveSpawnAwarePayload.
+                result.SetLocation(slot, SpawnSlotLocation(in entry, es.SlotToComponentTable[slot], slot));
             }
 
             // For Versioned: override from SingleCache (same as before — Spawn already populated it)
@@ -1126,14 +1267,26 @@ public unsafe partial class Transaction
                             continue;
                         }
 
+                        var compTypeId = meta._componentTypeIds[slot];
                         int compRevFirstChunkId = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(readBuf, vi);
                         if (compRevFirstChunkId == 0)
                         {
+                            // Root 0 usually means the component is absent (#845) — but it ALSO means "created by this transaction and not yet published",
+                            // because the root only reaches the record at commit. Distinguishing them needs the component's SingleCache, and asking for the
+                            // ComponentInfo through the creating overload would allocate one for every genuinely-absent slot of every entity opened. The
+                            // non-creating lookup answers it for an array index: null ⇒ this transaction never touched the component ⇒ absent for certain.
+                            var pending = TryGetExistingComponentInfo(compTypeId);
+                            if (pending == null || !pending.SingleCache.TryGetValue((long)id.RawValue, out var created))
+                            {
+                                continue;
+                            }
+
+                            result.SetLocation(slot, created.CurCompContentChunkId);
+                            result.SetChainRoot(slot, created.CompRevTableFirstChunkId);
                             continue;
                         }
 
 
-                        var compTypeId = meta._componentTypeIds[slot];
                         var info = GetComponentInfoByTypeId(compTypeId, meta._slotToComponentType[slot]);
                         long pk = (long)id.RawValue;
 
@@ -1642,14 +1795,30 @@ public unsafe partial class Transaction
                     int computedCellKey = -1;
                     if (useCellClaim)
                     {
-                        int spatialSrcChunkId = entry.Loc[spatialSlotIdx];
-                        if (spatialSrcChunkId == 0)
+                        // #839: the spatial payload is in the spawn arena unless the component is Versioned, in which case it still has a content chunk.
+                        // [SpatialIndex] is rejected on Transient at schema build, so only these two cases exist here.
+                        var spatialTable = ctx.EngineState.SlotToComponentTable[spatialSlotIdx];
+                        byte* spatialSrcAddr;
+                        if (spatialTable.StorageMode == StorageMode.Versioned)
                         {
-                            throw new InvalidOperationException(
-                                $"Spatial archetype must provide its spatial component at spawn time (slot {spatialSlotIdx} is missing).");
+                            int spatialSrcChunkId = entry.VerLoc[spatialSlotIdx];
+                            if (spatialSrcChunkId == 0)
+                            {
+                                throw new InvalidOperationException(
+                                    $"Spatial archetype must provide its spatial component at spawn time (slot {spatialSlotIdx} is missing).");
+                            }
+                            spatialSrcAddr = ctx.ClusterSrcAccessors[spatialSlotIdx].GetChunkAddress(spatialSrcChunkId);
                         }
-                        ref var spatialSrcAccessor = ref ctx.ClusterSrcAccessors[spatialSlotIdx];
-                        byte* spatialSrcAddr = spatialSrcAccessor.GetChunkAddress(spatialSrcChunkId);
+                        else
+                        {
+                            int spatialStage = entry.Stage[spatialSlotIdx];
+                            if (spatialStage == 0)
+                            {
+                                throw new InvalidOperationException(
+                                    $"Spatial archetype must provide its spatial component at spawn time (slot {spatialSlotIdx} is missing).");
+                            }
+                            spatialSrcAddr = SpawnArena.Resolve(spatialStage);
+                        }
                         byte* spatialFieldPtr = spatialSrcAddr + ctx.SpatialComponentOverheadCached + ctx.SpatialFieldOffsetCached;
                         computedCellKey = ctx.SpatialGridCached.WorldToCellKeyFromSpatialField(spatialFieldPtr, ctx.SpatialFieldTypeCached);
                     }
@@ -1699,28 +1868,34 @@ public unsafe partial class Transaction
                     ushort transientMask = ctx.Meta.TransientSlotMask;
                     for (int slot = 0; slot < ctx.ComponentCount; slot++)
                     {
-                        int srcChunkId = entry.Loc[slot];
-                        if (srcChunkId == 0)
-                        {
-                            continue;
-                        }
                         var table = ctx.EngineState.SlotToComponentTable[slot];
                         int overhead = table.ComponentOverhead;
                         int compSize = layout.ComponentSize(slot);
 
+                        // #839: the source is the spawn arena for SingleVersion and Transient, and a real content chunk only for Versioned — where the chunk
+                        // is the first revision's payload and the cluster slot is a HEAD cache over the chain.
                         byte* srcAddr;
                         byte* dstBase;
-                        if ((transientMask & (1 << slot)) != 0)
+                        if (table.StorageMode == StorageMode.Versioned)
                         {
-                            // Transient slot: read from TransientComponentSegment, write to TransientSegment (or primary for pure-T)
-                            srcAddr = ctx.ClusterTransientSrcAccessors[slot].GetChunkAddress(srcChunkId);
-                            dstBase = clusterTransientBase != null ? clusterTransientBase : clusterBase; // pure-T: clusterBase IS TransientStore
+                            int srcChunkId = entry.VerLoc[slot];
+                            if (srcChunkId == 0)
+                            {
+                                continue;
+                            }
+                            srcAddr = ctx.ClusterSrcAccessors[slot].GetChunkAddress(srcChunkId);
+                            dstBase = clusterBase;
                         }
                         else
                         {
-                            // SV/V slot: read from ComponentSegment, write to ClusterSegment
-                            srcAddr = ctx.ClusterSrcAccessors[slot].GetChunkAddress(srcChunkId);
-                            dstBase = clusterBase;
+                            int srcStage = entry.Stage[slot];
+                            if (srcStage == 0)
+                            {
+                                continue;
+                            }
+                            srcAddr = SpawnArena.Resolve(srcStage);
+                            // A Transient slot's bytes go to the TransientSegment; a pure-Transient archetype has no separate one, so clusterBase IS it.
+                            dstBase = (transientMask & (1 << slot)) != 0 ? (clusterTransientBase != null ? clusterTransientBase : clusterBase) : clusterBase;
                         }
                         byte* dstAddr = dstBase + layout.ComponentOffset(slot) + slotIdx * compSize;
                         Unsafe.CopyBlockUnaligned(dstAddr, srcAddr + overhead, (uint)compSize);
@@ -1871,13 +2046,17 @@ public unsafe partial class Transaction
                         {
                             int trSlot = trSlots[si];
                             var table = ctx.EngineState.SlotToComponentTable[trSlot];
-                            int srcChunkId = entry.Loc[trSlot];
-                            if (srcChunkId == 0 || table.Definition.EntityPKOverheadSize == 0)
+                            int srcStage = entry.Stage[trSlot];
+                            if (srcStage == 0 || table.Definition.EntityPKOverheadSize == 0)
                             {
                                 continue;
                             }
 
-                            *(long*)ctx.TrCompAccessors[si].GetChunkAddress(srcChunkId, true) = (long)entry.Id.RawValue;
+                            // #839: the staged payload now lives in the spawn arena, so the PK lands there rather than in a Transient content chunk. This
+                            // stamp keeps the staged bytes a well-formed [PK][value] payload, which is what the comment above means by a layout invariant.
+                            // NOTE for review: with the chunk gone, the arena slot is discarded at commit and no reader outlives it, so this write may now be
+                            // dead. It is kept because proving that negative is a separate exercise from relocating the payload, and it costs one store.
+                            *(long*)SpawnArena.Resolve(srcStage) = (long)entry.Id.RawValue;
                         }
                     }
                 }
@@ -1886,10 +2065,16 @@ public unsafe partial class Transaction
                     // ═══════════════════════════════════════════════════════════════
                     // Legacy path: build location array from SpawnEntry
                     // ═══════════════════════════════════════════════════════════════
+                    // A persisted EntityRecord location is a chunk id, so ONLY a Versioned slot has anything to put here since #839 — a SingleVersion or
+                    // Transient payload lives in the spawn arena, whose handles are transaction-scoped and must never reach the file. This whole branch is
+                    // dead in practice (every archetype has been cluster-eligible since #666); the guard states the constraint rather than trusting it.
                     var locDest = (int*)(recordPtr + EntityRecordAccessor.HeaderSize);
                     for (int slot = 0; slot < ctx.ComponentCount; slot++)
                     {
-                        locDest[slot] = (ctx.VersionedMask & (1 << slot)) != 0 ? entry.Rev[slot] : entry.Loc[slot];
+                        var isVersionedSlot = (ctx.VersionedMask & (1 << slot)) != 0;
+                        CheckConfig.Require(CheckConfig.Enabled, isVersionedSlot || entry.Stage[slot] == 0,
+                            $"Legacy flat spawn: slot {slot} is staged in the spawn arena, so it has no chunk id to persist (#839).");
+                        locDest[slot] = isVersionedSlot ? entry.Rev[slot] : entry.VerLoc[slot];
                     }
 
                     // Insert into EntityMap — skip duplicate check (EntityKey is freshly generated, guaranteed unique)
@@ -2299,8 +2484,9 @@ public unsafe partial class Transaction
 
         using var guard = EpochGuard.Enter(_epochManager);
 
-        // Hoist stackalloc out of loop — max record size is 78B (14B header + 16 components × 4B)
-        byte* readBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        // Hoist stackalloc out of loop. Sized on the CLUSTER record (83B), not the legacy one (78B): this loop reads records of both shapes, and TryGet fills
+        // meta._entityRecordSize bytes — so a cluster archetype whose every component is Versioned overflowed the legacy size by 5 bytes.
+        byte* readBuf = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
 
         // Hoist EntityMap accessor — reuse when archetype matches (same pattern as FinalizeSpawns)
         ushort lastArchId = 0;
@@ -2564,7 +2750,7 @@ public unsafe partial class Transaction
         ushort lastArchId = 0;
         var emAccessor = default(ChunkAccessor<PersistentStore>);
         bool hasEmAccessor = false;
-        byte* readBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        byte* readBuf = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
 
         try
         {
@@ -2734,7 +2920,7 @@ public unsafe partial class Transaction
     private void ResolveClusterVersionedForDestroy(EntityId entityId, ArchetypeMetadata meta, ArchetypeEngineState engineState, long pk)
     {
         var layout = meta.ClusterLayout;
-        byte* record = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        byte* record = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
         var emAccessor = engineState.EntityMap.Segment.CreateChunkAccessor();
         try
         {
@@ -2789,8 +2975,9 @@ public unsafe partial class Transaction
 
         using var guard = EpochGuard.Enter(_epochManager);
 
-        // Hoist stackalloc out of loop — max record size is 78B (14B header + 16 components × 4B)
-        byte* readBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        // Hoist stackalloc out of loop. Sized on the CLUSTER record (83B), not the legacy one (78B): this loop reads records of both shapes, and TryGet fills
+        // meta._entityRecordSize bytes — so a cluster archetype whose every component is Versioned overflowed the legacy size by 5 bytes.
+        byte* readBuf = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
 
         foreach (var kvp in _pendingEnableDisable)
         {
@@ -2834,9 +3021,63 @@ public unsafe partial class Transaction
                 // EntityRef.Enable/Disable (the immediate-visibility write); its DURABLE persistence on the cluster path is tracked under #398
                 // (the same enabled-bits crash-durability gap), so it is intentionally NOT re-written here without a covering cluster test.
                 EntityRecordAccessor.GetHeader(readBuf).EnabledBits = newBits;
+                PublishNewVersionedChainRoots(entityId, meta, readBuf);
                 engineState.EntityMap.Upsert(entityId.EntityKey, readBuf, ref accessor, _changeSet);
             }
             accessor.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Writes the revision-chain root into <paramref name="recordBuf"/> for every Versioned slot this transaction CREATED mid-life (#845).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="FinalizeSpawns"/> is the commit path's only other writer of <c>CompRevFirstChunkId</c>, and it runs solely for entities spawned in the same
+    /// transaction. Without this, a component created on a LIVE entity got a correct chain and a correct content chunk that nothing pointed at, and every
+    /// point-read resolver treats root 0 as absence, leaves the location 0, and the read returns zeros.
+    /// </para>
+    /// <para>
+    /// It runs here rather than in the publish phase's per-component path because this method already holds the record between a <c>TryGet</c> and its
+    /// <c>Upsert</c> — the root rides along in the write the enable bits were going to make anyway, costing no extra EntityMap lookup.
+    /// </para>
+    /// <para>
+    /// The condition is "this transaction CREATED a chain for (entity, slot)", read from the component's <c>SingleCache</c> — deliberately not "the slot's
+    /// enable bit went 0 → 1". Those differ whenever a caller supplies a value and disables it again before committing: the enable delta is then empty, so a
+    /// delta-driven publication skips the slot while the commit's component pipeline still indexes the created revision and copies it into the cluster. That
+    /// leaves index entries and cluster bytes for a component the record calls absent, and an orphaned chain the entity can never reach again.
+    /// </para>
+    /// <para>
+    /// Reaching this at all still depends on the entity being in <c>_pendingEnableDisable</c>, which holds because supplying a value REQUIRES enabling —
+    /// <c>Write</c> is gated by the same EnabledBits as <c>Read</c> — and a subsequent disable updates that entry rather than removing it.
+    /// </para>
+    /// </remarks>
+    private void PublishNewVersionedChainRoots(EntityId entityId, ArchetypeMetadata meta, byte* recordBuf)
+    {
+        var slotToVi = meta.ClusterLayout?.SlotToVersionedIndex;
+        if (slotToVi == null)
+        {
+            return;
+        }
+
+        var pk = (long)entityId.RawValue;
+        for (var slot = 0; slot < meta.ComponentCount; slot++)
+        {
+            var vi = slotToVi[slot];
+            if (vi < 0 || ClusterEntityRecordAccessor.GetCompRevFirstChunkId(recordBuf, vi) != 0)
+            {
+                continue;
+            }
+
+            // Root 0: either genuinely absent, or created by this transaction and not yet published. Only the component's own cache can tell, and the
+            // non-creating lookup keeps the absent case at one array index instead of materialising a ComponentInfo per untouched slot.
+            var info = TryGetExistingComponentInfo(meta._componentTypeIds[slot]);
+            if (info?.SingleCache == null || !info.SingleCache.TryGetValue(pk, out var cri) || cri.CompRevTableFirstChunkId == 0)
+            {
+                continue;
+            }
+
+            ClusterEntityRecordAccessor.SetCompRevFirstChunkId(recordBuf, vi, cri.CompRevTableFirstChunkId);
         }
     }
 
@@ -2915,7 +3156,7 @@ public unsafe partial class Transaction
                     if (table.StorageMode == StorageMode.Versioned)
                     {
                         // Versioned: free componentChunkId from SpawnEntry + compRev chain from SingleCache
-                        int chunkId = entry.Loc[slot];
+                        int chunkId = entry.VerLoc[slot];
                         if (chunkId > 0)
                         {
                             // CC-aware free: release any ComponentCollection buffers the rolled-back spawn chunk holds before freeing it.
@@ -2933,19 +3174,15 @@ public unsafe partial class Transaction
                     }
                     else
                     {
-                        // SV/Transient: free componentChunkId from SpawnEntry directly
-                        int chunkId = entry.Loc[slot];
-                        if (chunkId != 0)
+                        // SV/Transient: nothing to free — since #839 the payload is a slot in the transaction's spawn arena, which the reset drops wholesale.
+                        // But the CC-aware half of the old FreeContentChunk call still has to happen: a rolled-back spawn that populated a ComponentCollection
+                        // holds a VSBS buffer id in its payload, and dropping the arena would leak that buffer. DC-01 is [fatal][silent], so this is the one
+                        // piece of the old free path that must survive the chunk's removal.
+                        int stage = entry.Stage[slot];
+                        if (stage != 0 && table.HasCollections)
                         {
-                            if (table.StorageMode == StorageMode.Transient)
-                            {
-                                table.TransientComponentSegment.FreeChunk(chunkId);
-                            }
-                            else
-                            {
-                                // CC-aware free: release any SingleVersion ComponentCollection buffers before freeing the rolled-back spawn chunk.
-                                DeferredCleanupManager.FreeContentChunk(table, chunkId);
-                            }
+                            DeferredCleanupManager.ReleaseCollectionBuffers(
+                                table, new ReadOnlySpan<byte>(SpawnArena.Resolve(stage), table.ComponentOverhead + table.ComponentStorageSize));
                         }
                     }
                 }
@@ -2968,6 +3205,7 @@ public unsafe partial class Transaction
                     foreach (var cacheKvp in info.SingleCache)
                     {
                         var cri = cacheKvp.Value;
+
                         // Free copy-on-write chunks (Updated but not Created — Created chunks are freed above)
                         if ((cri.Operations & ComponentInfo.OperationType.Updated) != 0 &&
                             (cri.Operations & ComponentInfo.OperationType.Created) == 0 &&

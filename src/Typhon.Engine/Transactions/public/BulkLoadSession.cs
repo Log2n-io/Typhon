@@ -103,7 +103,7 @@ public sealed class BulkLoadSession : IDisposable
     private const int TransactionRecycleThreshold = 5_000;
 
     /// <summary>
-    /// Operations between independent <c>ChangeSet.ReleaseExcessDirtyMarks</c> calls — caps the per-page <c>DirtyCounter</c> at 1 and clears the tracking
+    /// Operations between independent <c>ChangeSet.ReleaseDirtyMarks</c> calls — caps the per-page <c>DirtyCounter</c> at 1 and clears the tracking
     /// HashSet, preventing DC inflation in long sessions. Critical for the destroy phase: at low destroy rates (random-access cache-bound workload) the
     /// Transaction recycle is too infrequent to keep DC bounded, so this independent cleanup keeps the cache evictable. Matches the cadence used by
     /// <c>EntityAccessor.FlushAndRefreshEpoch</c> (128 ops).
@@ -111,7 +111,7 @@ public sealed class BulkLoadSession : IDisposable
     private const int DirtyMarkReleaseInterval = 128;
 
     /// <summary>
-    /// Calls <c>ChangeSet.ReleaseExcessDirtyMarks</c> on the bulk's UoW every <see cref="DirtyMarkReleaseInterval"/> operations. This is independent of
+    /// Calls <c>ChangeSet.ReleaseDirtyMarks</c> on the bulk's UoW every <see cref="DirtyMarkReleaseInterval"/> operations. This is independent of
     /// transaction recycling — it runs frequently enough to keep the page cache healthy even when the bulk's operation rate is too low for recycles to fire
     /// (e.g., the destroy phase's random-access cache-bound regime). Cheap: walks the ChangeSet's tracked-page set, capping each page's DC at 1.
     /// </summary>
@@ -123,7 +123,7 @@ public sealed class BulkLoadSession : IDisposable
             return;
         }
 
-        _uow.ChangeSet?.ReleaseExcessDirtyMarks();
+        _uow.ChangeSet?.ReleaseDirtyMarks();
         _opsSinceLastDirtyRelease = 0;
     }
 
@@ -406,7 +406,7 @@ public sealed class BulkLoadSession : IDisposable
     private int _spawnsInCurrentTx;
 
     /// <summary>
-    /// Operations since the last <c>ChangeSet.ReleaseExcessDirtyMarks</c> call. Independent of <see cref="_spawnsInCurrentTx"/> — the dirty-mark release runs
+    /// Operations since the last <c>ChangeSet.ReleaseDirtyMarks</c> call. Independent of <see cref="_spawnsInCurrentTx"/> — the dirty-mark release runs
     /// at a much finer cadence (<see cref="DirtyMarkReleaseInterval"/> ops) than the transaction recycle, because at low operation rates the recycle is too
     /// infrequent to keep the cache healthy on its own.
     /// </summary>

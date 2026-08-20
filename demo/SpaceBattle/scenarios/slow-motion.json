@@ -1,0 +1,19 @@
+{
+  // Few entities, slow clock: for watching a single cluster migrate between cells step by step (press '.').
+  // Small world so the whole thing fits in the tactical LOD and entities never collapse to points.
+  "WorldSize": 8000,
+  "CellSize": 2000,
+  "InitialShipsPerFaction": 40,
+  "MaxShipsPerFaction": 80,
+  "SpawnIntervalTicks": 60,
+  "SpawnBatch": 1,
+  "StartSpeed": 0.15,
+  "ShipRadius": 30,
+  "AsteroidRadius": 200,
+  "StationRadius": 90,
+  "ProbeRadius": 400,
+  // 40 ships do not need the 5x-fleet ore economy; without this they bank 400k material they can never spend.
+  "AsteroidCapacity": 4000,
+  "CargoMax": 50,
+  "MineRate": 2
+}

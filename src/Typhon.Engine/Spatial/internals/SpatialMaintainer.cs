@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Runtime.CompilerServices;
 using Microsoft.Extensions.Logging;
 using Typhon.Schema.Definition;
@@ -540,7 +540,7 @@ internal static unsafe partial class SpatialMaintainer
         }
 
         // Read the entity record to get the component chunkId
-        byte* recordBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        byte* recordBuf = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
         var emAccessor = archState.EntityMap.Segment.CreateChunkAccessor();
         try
         {

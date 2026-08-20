@@ -1,4 +1,4 @@
----
+﻿---
 uid: feature-ecs-entity-lifecycle-crud-batch-soa-spawn
 title: 'Batch & SoA Spawn'
 description: 'Bulk entity creation — shared-value batches or per-entity SoA spans — amortizing per-call overhead across thousands of entities.'
@@ -54,8 +54,8 @@ tx.Commit();
   batch — for distinct per-entity data, use the SoA path instead.
 - The caller supplies the pre-sized `ids` output span (`stackalloc` for small batches) — there is no internal
   allocation for the id list itself.
-- All component chunks for all entities are allocated up front, mirroring single `Spawn` semantics — any
-  component not covered by shared values or a `SpawnBatchWriteAll` call stays zero-initialized and disabled.
+- Storage is allocated per component actually written, mirroring single `Spawn` semantics — any component not
+  covered by shared values or a `SpawnBatchWriteAll` call stays absent and disabled.
 - The generated SoA `SpawnBatch` overload requires the archetype be declared `partial`; all input spans must
   have equal length (`Debug.Assert`-checked — not validated in a Release build).
 - Epoch refresh happens every 128 entities, not per-entity, bounding page-cache pressure during very large

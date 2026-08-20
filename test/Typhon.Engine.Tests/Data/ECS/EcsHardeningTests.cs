@@ -148,30 +148,52 @@ class EcsHardeningTests : TestBase<EcsHardeningTests>
     // A.1 — Enable/Disable API
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// Supplying a never-supplied component mid-life makes it readable; the no-value <c>Enable</c> cannot (#845).
+    /// </summary>
+    /// <remarks>
+    /// This asserted zero-initialisation until #845. An unsupplied Versioned component has no chunk and no revision
+    /// chain, so there is no storage to be zero — the zero it used to read came from a chunk that happened to be fresh,
+    /// and against a recycled one it read a destroyed entity's values instead.
+    /// </remarks>
     [Test]
-    public void Enable_PreviouslyDisabledComponent_ReadSucceeds()
+    public void EnableWithValue_NeverSuppliedComponent_ReadSucceeds()
     {
         using var dbe = SetupEngine();
         using var t = dbe.CreateQuickTransaction();
 
-        // Spawn with only Position provided → Velocity is disabled
+        // Spawn with only Position provided → Velocity is absent, not merely disabled
         var pos = new EcsPosition(1, 2, 3);
         var id = t.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos));
 
-        // Verify Velocity is disabled
         var entity = t.Open(id);
         Assert.That(entity.IsEnabled(EcsUnit.Velocity), Is.False);
         Assert.That(entity.IsEnabled(EcsUnit.Position), Is.True);
 
-        // Enable Velocity
-        var mut = t.OpenMut(id);
-        mut.Enable(EcsUnit.Velocity);
+        // The no-value overload has nothing to enable and must say so
+        // Message-checked deliberately: Enable also throws InvalidOperationException for "opened as read-only", so a bare
+        // catch would report safety if the refusal ever fired for an unrelated reason.
+        string message = null;
+        try
+        {
+            t.OpenMut(id).Enable(EcsUnit.Velocity);
+        }
+        catch (System.InvalidOperationException ex)
+        {
+            message = ex.Message;
+        }
 
-        // Now read succeeds (zero-initialized)
+        Assert.That(message, Is.Not.Null, "an absent component cannot be enabled without a value");
+        Assert.That(message, Does.Contain("never supplied"), "and it must be refused for THAT reason, not some other InvalidOperationException");
+
+        // Supplying one does enable it, and the read returns what was supplied
+        var vel = new EcsVelocity(1.5f, 2.5f, 3.5f);
+        t.OpenMut(id).Enable(EcsUnit.Velocity, in vel);
+
         var entity2 = t.Open(id);
         Assert.That(entity2.IsEnabled(EcsUnit.Velocity), Is.True);
-        ref readonly var vel = ref entity2.Read(EcsUnit.Velocity);
-        Assert.That(vel.Dx, Is.EqualTo(0f));
+        ref readonly var read = ref entity2.Read(EcsUnit.Velocity);
+        Assert.That(read.Dx, Is.EqualTo(1.5f));
     }
 
     [Test]

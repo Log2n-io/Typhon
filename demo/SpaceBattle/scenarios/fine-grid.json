@@ -1,0 +1,9 @@
+{
+  // Many small cells. More migration, marginally better selectivity, and cluster AABBs that are STILL
+  // about half a cell each — the finding that says this is not a tuning problem.
+  // 500 m cells over 100 km = a 200x200 grid (Morton-padded to 256).
+  "CellSize": 500,
+  "InitialShipsPerFaction": 600,
+  "MaxShipsPerFaction": 1200,
+  "ProbeRadius": 400
+}

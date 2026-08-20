@@ -878,10 +878,10 @@ public partial class DatabaseEngine
                 clusterAccessor.Dispose();
             }
 
-            // saveChanges and ReleaseExcessDirtyMarks are deliberately NOT called here. ExecuteMigrations operates on the UoW's shared ChangeSet (passed
+            // saveChanges and ReleaseDirtyMarks are deliberately NOT called here. ExecuteMigrations operates on the UoW's shared ChangeSet (passed
             // by the caller through WriteClusterTickFence → WriteTickFence). The UoW owns the commit lifecycle: in WAL mode SaveChanges is never called
             // (WAL records replace direct page writes); in WAL-less GroupCommit/Deferred modes UoW.Flush invokes SaveChanges + FlushToDisk centrally;
-            // ReleaseExcessDirtyMarks happens once at UoW disposal. See claude/overview/02-execution.md §2.1 (UoW lifecycle) and §2.3 (durability modes).
+            // ReleaseDirtyMarks happens once at UoW disposal. See claude/overview/02-execution.md §2.1 (UoW lifecycle) and §2.3 (durability modes).
             // Test/admin callers that invoke WriteTickFence without a UoW get a one-shot local ChangeSet created and committed by WriteTickFence itself.
 
             // NOTE: PendingMigrationCount is reset to 0 by FinalizeArchetypeFence after ALL slices have completed — resetting here would race with sibling

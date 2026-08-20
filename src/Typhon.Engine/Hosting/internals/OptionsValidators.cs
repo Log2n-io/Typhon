@@ -60,6 +60,15 @@ internal sealed class DatabaseEngineOptionsValidator : IValidateOptions<Database
             failures.Add($"Resources.CheckpointBarrierTimeoutMs must be > 0 (was {resources.CheckpointBarrierTimeoutMs}).");
         }
 
+        // A percentage, so out-of-range is a typo rather than a preference — 250 does not mean "very eager", it means the
+        // trigger never fires and the cache is back to being protected only by the timer.
+        if (resources.CheckpointDirtyPageThresholdPercent is < 0 or > 100)
+        {
+            failures.Add(
+                $"Resources.CheckpointDirtyPageThresholdPercent must be between 0 and 100 (was {resources.CheckpointDirtyPageThresholdPercent}). "
+                + "0 disables the dirty-page trigger.");
+        }
+
         // WalWriterOptions is the real WAL config (unlike the removed vestigial ResourceOptions budget knobs). Validate its
         // wired invariants when present; the engine tolerates a null Wal by deriving defaults, so a null is not an error here.
         var wal = options.Wal;

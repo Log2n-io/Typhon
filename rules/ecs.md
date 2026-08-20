@@ -1,10 +1,10 @@
-# ECS Rules
+﻿# ECS Rules
 
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-07-20 |
-| Domain | Component schema identity, archetype registry, component-type identity |
+| Last Updated | 2026-08-17 |
+| Domain | Component schema identity, archetype registry, component-type identity, tick-fence dirty bitmaps, spawn payload staging |
 
 > Type-location: `Ecs/internals/ArchetypeRegistry.cs`, `Ecs/internals/ArchetypeMetadata.cs` (+ `ArchetypeEngineState`), `Ecs/public/DatabaseEngine.cs`
 > (`RegisterComponentFromAccessor`, the reopen schema-load path), `Schema.Definition/Attributes.cs` (`[Component]`).
@@ -247,3 +247,177 @@ popcounts the occupancy word on the strength of the grant alone and has nothing 
              churning archetype used to latch onto the per-entity probe forever. The cost is that "the bit is cleared at
              destroy" became load-bearing for every caller, and two callers never held it.
   requires CLUSTERVIS-01 (same summary, the publication half)
+
+---
+
+## Module: DIRTY — Dirty bitmaps track published-entity mutations
+
+Two bitmaps drive the tick fence: `ComponentTable.DirtyBitmap`, keyed by content chunk id, and
+`ArchetypeClusterState.ClusterDirtyBitmap`, keyed `clusterChunkId * 64 + slotIndex`. Both answer one question — *which
+already-published entities did this tick mutate?* — and both feed the same two consumers: WAL emission at the fence, and
+change-filtered system dispatch.
+
+A **spawn is not a mutation** for this purpose, and `FinalizeSpawns` says so where it publishes: *"We do NOT set
+ClusterDirtyBitmap here — that bitmap tracks write mutations for change-filtered dispatch, same as per-ComponentTable
+DirtyBitmap (which is also not set during FinalizeSpawns for non-cluster SV entities)."* A spawn's bytes reach disk by a
+different route — page-level dirty marks and the checkpoint under TickFence discipline, its own CM-06 Slot record under
+Commit discipline.
+
+### DIRTY-01: A spawn sets no dirty bit, in either bitmap `[fatal]` `[silent]`
+  invariant ∀ entity e spawned in transaction T: at commit(T), e contributes no bit to `ComponentTable.DirtyBitmap` nor
+            to `ClusterDirtyBitmap` — including when T also WRITES e before committing
+  never marking a spawn-staging chunk id dirty. Until `FinalizeSpawns` publishes it, a spawned entity has no cluster slot
+        — which is why the write lands on the pre-publish branch in the first place — so there is no correct bit to set,
+        not merely an inconvenient one.
+  scope: EntityAccessor.WriteEcsComponentData, Transaction.FinalizeSpawns, DatabaseEngine.ProcessTableFence
+  on_violation: a SingleVersion staging chunk reaches the fence, which reads the entity PK from its overhead and gets 0 —
+                the PK is stamped into a staging chunk only for TRANSIENT slots, while `EntityPKOverheadSize` is 8 for
+                every non-Versioned component. Routing id 0 is reserved and never assigned, so `GetMetaByRouting` returns
+                null and the fence throws. In Release the scheduler swallows it: measured over 55 s with every tick
+                poisoned — 6,602 fence exceptions, 6,602 leaked `UnitOfWork` objects (1:1 with poisoned ticks), 321 MB of
+                WAL across 5 unrecycled segments, and `CurrentTickNumber` frozen at 0, because the throw escapes before
+                the counter's only mutation. Systems keep running and the timer keeps firing; the whole Fence DAG is
+                skipped. The engine neither crashes nor blocks — its clock stops while it burns CPU and disk (#837). A
+                TRANSIENT staging chunk fails differently and just as hard: its PK IS stamped, so it survives the fence
+                and reaches the change-filtered dispatch scan, which calls `ComponentSegment.CreateChunkAccessor()` —
+                null on a Transient table, which builds only its transient segments.
+  note: this rule constrains PRODUCERS. `ProcessTableFence` now skips a zero-PK chunk rather than dereferencing routing
+        id 0 — matching what the cluster walker already did for an unoccupied slot — so a future producer degrades to a
+        dropped fence record instead of a frozen clock. That guard is defence in depth, not a substitute: a zero PK in
+        that bitmap still means someone violated this rule.
+  rationale: nothing is lost by withholding the bit. Under TickFence discipline a spawn's SingleVersion values are
+             checkpoint-durable BY DESIGN and were never WAL-logged at the fence anyway; under Commit discipline the
+             spawn's own CM-06 Slot record carries them, built from the staging chunk AFTER the in-place write, because
+             own-spawns deliberately skip write staging (#713). Index entries are inserted by `FinalizeSpawns` itself
+             from the same final bytes.
+  verified: SpawnThenWriteFenceTests.OwnSpawnWrite_LeavesTheTableDirtyBitmapClean [VerifiesRule] — asserts the bitmap
+            directly rather than inferring it from the absence of a crash, with
+            SpawnThenWrite_EveryTick_LeavesTheRuntimeClockAdvancing covering the symptom that made this expensive: the
+            clock, not the exception.
+
+---
+
+## Module: STAGE — Where a spawned entity's bytes live before it is published
+
+A spawned entity has no address until `FinalizeSpawns` claims its cluster slot at commit, so its component payloads need
+somewhere to sit in the meantime. Which "somewhere" is not a free choice: it decides whether the payload can ever be
+reclaimed.
+
+### STAGE-01: A cluster-backed non-Versioned spawn allocates no content chunk `[fatal]` `[silent]`
+  invariant ∀ entity e spawned into a cluster-eligible archetype, ∀ slot s of e with StorageMode ∈ {SingleVersion,
+            Transient}: the spawn allocates no chunk in `ComponentTable.ComponentSegment` nor in
+            `TransientComponentSegment` for s — the payload is staged in the transaction's `SpawnStagingArena` and its
+            durable home is the cluster slot
+  never a pre-publish location is dereferenced as a content chunk id without first asking the slot's storage mode. The
+        two address spaces are both `int` and both use 0 for "none", so a site that skips the question reads an
+        unrelated chunk and reports no error.
+  never allocating a content chunk whose id no persisted record can hold. The `ClusterEntityRecord` is `19 + 4×V` bytes:
+        header, `ClusterChunkId`, `SlotIndex`, and one `CompRevFirstChunkId` per VERSIONED slot. There is no field a
+        SingleVersion or Transient content-chunk id could occupy — that is a structural impossibility, not an omission.
+  scope: Transaction.SpawnInternal, Transaction.SpawnBatch, Transaction.SpawnBatchAllocate, Transaction.SpawnBatchWriteAll,
+         Transaction.FinalizeSpawns, Transaction.CleanupEcsState, Transaction.SpawnSlotLocation, Transaction.ResolveEntity,
+         EntityAccessor.ResolveSpawnAwarePayload, EntityAccessor.ShadowIndexedFields, EntityRef.Write,
+         EcsQuery.CollectPendingSpawnsFull, SpawnStagingArena, DeferredCleanupManager.ReleaseCollectionBuffers
+  on_violation: the chunk becomes unreachable the instant `FinalizeSpawns` copies the payload into the cluster, and
+                nothing frees it — every free site is gated on rollback or on Versioned. The file then grows with
+                CUMULATIVE spawns rather than live entities. Measured in the SpaceBattle demo before the fix: 491,930
+                `Bullet` chunks against ~1,200 live shots, 900,096 `Pos` chunks against ~20,200 live entities, and a
+                282 MB data file holding ~1.8 MB of live entity bytes — a 160× gap that only grew (#839). Silent: every
+                read returns correct data, because the authoritative copy is in the cluster the whole time.
+  note: VERSIONED is excluded and must stay excluded. There the same chunk becomes `elements[0].ComponentChunkId`, the
+        first revision's content, and the cluster slot is a HEAD cache over the chain rather than its owner — an MVCC
+        point read at an older TSN walks the chain, so that chunk is live data and is correctly reclaimed with the
+        chain. A fix that generalised to Versioned would silently discard history.
+  note: the arena's blocks are appended, never reallocated, because a write returns a `ref` into a staged payload and
+        spawn-spawn-write is ordinary usage — it is what `SpawnBatch` does. The `_commitStagingBuffer` next door does
+        realloc and documents that its refs die on growth; that contract is acceptable there and not here.
+  verified: ClusterSpawnChunkTests.SpawnDestroyChurn_DoesNotGrowTheSegments [VerifiesRule] — spawns and destroys a batch
+            repeatedly and requires the chunk count to track LIVE entities. Before the fix, four rounds of 32 left 129
+            chunks behind with zero entities alive; the count is the defect, so the count is what it asserts.
+            ClusterSpawnChunkTests.VersionedSpawn_StillAllocatesItsRevisionContentChunk is the guard on the note above.
+
+### STAGE-02: A Versioned component the spawn does not supply is ABSENT, not zeroed `[fatal]` `[silent]`
+  invariant ∀ entity e spawned into a cluster-eligible archetype, ∀ slot s of e with StorageMode = Versioned that the
+            spawn does not supply a value for: no content chunk and no revision chain are allocated for (e, s), the
+            record's `CompRevFirstChunkId[vi(s)]` stays 0, and e's EnabledBits bit for s stays clear
+  invariant absence and disabled are DISTINCT persisted states, both derivable from the record alone:
+            (bit set, root ≠ 0) = present; (bit clear, root ≠ 0) = supplied then disabled, value retained;
+            (bit clear, root = 0) = never supplied. No fourth field is needed and none may be added.
+  never deriving one of those two signals from the other. `enabled ⟺ root ≠ 0` re-enables a component the caller
+        disabled; `root = 0 ⟹ defect` warns on every partial spawn.
+  never inventing a value for an unsupplied component — neither the previous occupant's bytes nor zero. `Enable(comp)`
+        must refuse, because it has no value to enable; `Enable(comp, in value)` is the way to supply one mid-life.
+  scope: EntityRef.Enable, EntityRef.IsVersionedSlotAbsent, EntityRef.ReadRaw, Transaction.CreateVersionedContentAndWrite,
+         Transaction.AllocateVersionedSlotContent, Transaction.PublishNewVersionedChainRoots,
+         Transaction.SpawnBatchAllocate, Transaction.SpawnBatchWriteAll, Transaction.FinalizeSpawns,
+         ArchetypeClusterState.RebuildVersionedHeadFromChain, VersionedHeadRebuildSkips
+  on_violation: the slot's storage is a RECYCLED chunk, so enabling an unsupplied component serves whatever a destroyed
+                entity last committed there — one live entity reading another's data through the ordinary public API
+                (#845). Silent in the worst way: the values are well-formed and plausible, and a fixture that happens to
+                get a fresh chunk reads zero and passes, which is why the old contract's own tests asserted
+                zero-initialisation and held for the entire period the leak existed.
+  note: this REVERSES design decision #14, which specified zero-init for unsupplied components. That decision bought a
+        real property — every declared component always readable — but the property was false: the zero it promised was
+        never written, so what it actually guaranteed was that the read would not fault, not that the bytes were zero.
+        Absence is the state the engine could not previously express; `RebuildClusterFromChains` already assumed it
+        (`DatabaseEngine.cs`, "a Versioned slot with no chain head for this entity genuinely carries no component").
+  note: publication of a chain root created mid-life rides in `FlushPendingEnableDisable`'s existing record round trip.
+        That relies on a coupling worth stating: supplying a value REQUIRES enabling, because `Write` is gated by the
+        same EnabledBits as `Read`, so a mid-life creation cannot occur without a pending enable to carry its root.
+  note: the pending-spawn case must record the allocation in the `SpawnEntry`, not through the live-entity path.
+        `FinalizeSpawns` writes `CompRevFirstChunkId` unconditionally from `entry.Rev[slot]`, so a root published any
+        other way is clobbered by a still-zero entry and the value is lost at commit with no error.
+  verified: UnsuppliedComponentPayloadTests.Versioned_EnablingANeverSuppliedComponent_IsRefused [VerifiesRule] — the
+            refusal itself, decided from the record's root and the resolved location, so it does not depend on what the
+            slot's bytes hold. The RECYCLE (spawn a pattern, destroy, drain, re-spawn omitting the component) is what
+            makes the old defect observable, and it is Versioned_EnableWithAValue_SuppliesAndEnables and the
+            SingleVersion sibling that actually read through it — a fresh chunk reads zero for uninteresting reasons.
+            Siblings cover the neighbouring states:
+            Versioned_EnableWithAValue_SuppliesAndEnables (supply mid-life on a live entity),
+            Versioned_EnableWithAValue_OnAPendingSpawn_SurvivesTheCommit (the SpawnEntry route),
+            Versioned_DisableThenEnable_KeepsTheValue_AndNeedsNoNewOne (the round trip the refusal must NOT catch),
+            Versioned_ComponentSuppliedMidLife_IsWritableFromALaterTransaction (the root reached the persisted record,
+            not merely the transaction's cache), and
+            NonGenericEntityAccessTests.ReadRaw_NeverSuppliedComponent_ReturnsAnEmptySpan (absent ≠ disabled for raw
+            consumers).
+
+## Module: REAP — Reclaiming what a destroy leaves behind
+
+`Destroy` releases the cluster slot inline, but an entity's `EntityMap` record cannot go with it: a transaction older
+than the destroy must still be able to resolve that entity. The record is therefore queued and reclaimed later, once no
+live snapshot can reach it — which makes "later" a thing that has to actually happen.
+
+### REAP-01: Every deferred-cleanup queue has a production drain `[fatal]` `[silent]`
+  invariant ∀ queue Q that a committed transaction appends to: some code path reachable WITHOUT a test calling it
+            removes from Q, and does so for every entry once `minTSN` passes the entry's `DiedTSN`
+  invariant the drain's gate names every queue it drains. A gate that asks about one queue and then drains two is a
+            drain that never runs for any workload which fills only the other one
+  never gate the ECS entity drain on `DeferredCleanupManager.QueueSize`. That queue fills when a VERSIONED component is
+        superseded; the ECS queue fills on every destroy in EVERY storage mode. An all-SingleVersion database supersedes
+        no revision, so the first is permanently zero and the second is never reached.
+  never reclaim below `TransactionChain.ComputeNextMinTSN()` — the destroying transaction can never reclaim its own
+        victims, because it is itself the tail until it retires
+  scope: DatabaseEngine.EnqueueEcsCleanup, DatabaseEngine.ProcessEcsCleanups, DatabaseEngine.EcsCleanupQueueSize,
+         DatabaseEngine.FlushDeferredCleanups, Transaction.ProcessDeferredCleanups,
+         DeferredCleanupManager.ProcessDeferredCleanups
+  on_violation: the `EntityMap` retains one record per entity ever destroyed, for the life of the engine, and its
+                backing segment grows with CUMULATIVE destroys rather than live entities. Measured in the SpaceBattle
+                demo before the fix: 561,796 `EntityMap` chunks against a live population that never exceeded ~13,900,
+                holding 8,590 of the file's 9,692 pages — 89% — while every `Component` segment stayed flat at 30. The
+                cost is a smooth per-operation regression, not a crash: engine time per unit of simulation work doubled
+                (971 → 1,969 ns) over 100,000 ticks while the workload itself FELL (#681). Silent: every read returns
+                correct data throughout, because a tombstone resolves to "not alive" exactly as a reclaimed record does.
+  note: a drain that writes to a persistent structure must be given the ChangeSet that owns its dirty marks. PS-10 in
+        `rules/durability.md` is the binding rule — `ChunkAccessor.MarkSlotDirty` raises ActiveChunkWriters
+        unconditionally but reaches `IncrementDirty`, which is what also records the modification, only through a
+        non-null ChangeSet. A drain wired up with `CreateChunkAccessor()` would trade a leak for lost writes.
+  note: a queue whose only consumer is a test is worse than an absent one, because the suite reports on it. Both tests
+        that covered this called `ProcessEcsCleanups` themselves and then asserted the entities were invisible — which
+        destroy alone already guarantees — so they measured the call rather than the engine and stayed green for the
+        whole period the queue leaked.
+  verified: EcsCleanupDrainTests.SingleVersionChurn_LeavesTheEntityMapFlat_AcrossRounds [VerifiesRule] — churns an
+            all-SingleVersion archetype in rounds and requires `EntityMap.EntryCount` to stay flat. Before the fix,
+            round 1 held 52 records against 26 after round 0, with zero entities alive; a leak is a slope, so the test
+            measures rounds rather than a total. EcsCleanupDrainTests.CleanupQueue_DrainsWithoutAnyExplicitCall guards
+            the "reachable without a test calling it" clause, and Drain_LeavesNoOutstandingDirtyMarks_AtQuiesce guards
+            the ChangeSet note above.

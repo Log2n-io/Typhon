@@ -1758,4 +1758,99 @@ internal sealed class DifferentialRecoveryOracleTests
         Assert.That(dbe.IsEntityMapRebuildable(Archetype<FlatSvArch>.Metadata), Is.True,
             "{SV + Transient-indexed} is cluster-backed since #655 → cluster occupancy + EntityKeys[N] make its EntityMap re-derivable like any other");
     }
+
+    /// <summary>
+    /// A Versioned component supplied MID-LIFE (never at spawn) must survive a hard crash with no checkpoint (#845).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The new contract creates a state recovery had never seen: an entity whose <c>ClusterEntityRecord</c> carries NO chain root for a slot, which a later
+    /// transaction then supplies through <c>Enable(comp, in value)</c>. The commit logs the value as an ordinary Slot record, so the WAL is complete — but
+    /// <c>RecoveryApplier</c>'s update path only APPENDED to an existing chain, and appending to root 0 is a no-op it silently skipped.
+    /// </para>
+    /// <para>
+    /// The failure that produces is invisible at the point of replay: the value lands in the cluster SoA HEAD and looks correct, and only the NEXT open
+    /// notices, when <c>RebuildVersionedHeadFromChain</c> finds no chain to rebuild the HEAD from and collapses it back to zero. So this asserts through a
+    /// SECOND reopen, not merely the first — a single-reopen assertion passes against the bug.
+    /// </para>
+    /// <para>
+    /// <b>Coverage limit, measured not assumed.</b> This case does NOT reach <c>RecoveryApplier.ApplySlotToExistingCluster</c>: a throw-probe at that method's
+    /// entry, and at its <c>ApplySlotToExisting</c> dispatcher, fired in neither, because the driver folds the spawn and the later slot record into a single
+    /// <c>ApplySpawnedEntity</c> — a path that already creates chain roots. It still passes with the update path's chain-root creation reverted, so it is a
+    /// genuine end-to-end regression test for the paths it does traverse and NOT the verifier for the cluster update path.
+    /// <c>UnsuppliedComponentPayloadTests.Recovery_SlotApplyForARootlessVersionedSlot_CreatesTheChain</c> is that verifier: it drives the applier directly, and
+    /// it does go red when the fix is reverted.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    public void MidLifeSuppliedVersionedComponent_SurvivesCrash()
+    {
+        EntityId id;
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<EcsPosition>();
+            dbe.RegisterComponentFromAccessor<EcsVelocity>();
+            dbe.InitializeArchetypes();
+
+            // Spawn WITHOUT Velocity: the record gets no chain root for that slot.
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                using var tx = uow.CreateTransaction();
+                var pos = new EcsPosition(1, 2, 3);
+                id = tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos));
+                tx.Commit();
+                uow.Flush();
+            }
+
+            // Checkpoint the spawn so it is already durable and only the enable sits in the WAL window. The intent was to stop recovery folding both into one
+            // ApplySpawnedEntity and so reach the update path — but the probe in this test's remarks shows it does NOT, and the test still passes with the
+            // update path's fix reverted. Kept because it is the right shape for the workload; do not read it as establishing coverage.
+            dbe.ForceCheckpoint();
+
+            // Supply it mid-life. This is the operation that had no recovery path.
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                using var tx = uow.CreateTransaction();
+                var vel = new EcsVelocity(61, 62, 63);
+                tx.OpenMut(id).Enable(EcsUnit.Velocity, in vel);
+                tx.Commit();
+                uow.Flush();
+            }
+
+            dbe.SimulateHardCrash();
+        }
+
+        // First reopen: replays the WAL window.
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var recovered = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            recovered.RegisterComponentFromAccessor<EcsPosition>();
+            recovered.RegisterComponentFromAccessor<EcsVelocity>();
+            recovered.InitializeArchetypes();
+
+            using var read = recovered.CreateQuickTransaction();
+            var e = read.Open(id);
+            Assert.That(e.IsEnabled(EcsUnit.Velocity), Is.True, "the mid-life enable must be recovered");
+
+            ref readonly var vr = ref e.Read(EcsUnit.Velocity);
+            Assert.That(vr.Dx, Is.EqualTo(61f), "the mid-life supplied value must survive the crash");
+        }
+
+        // Second reopen: the HEAD is rebuilt from the chain, so a value with no chain behind it collapses here.
+        using (var scope3 = _serviceProvider.CreateScope())
+        {
+            var reopened = scope3.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            reopened.RegisterComponentFromAccessor<EcsPosition>();
+            reopened.RegisterComponentFromAccessor<EcsVelocity>();
+            reopened.InitializeArchetypes();
+
+            using var read = reopened.CreateQuickTransaction();
+            ref readonly var vr = ref read.Open(id).Read(EcsUnit.Velocity);
+            Assert.That(vr.Dx, Is.EqualTo(61f),
+                "recovery must have CREATED the revision chain, not just written the SoA HEAD — a rootless HEAD is rebuilt back to zero on the next open");
+        }
+    }
 }

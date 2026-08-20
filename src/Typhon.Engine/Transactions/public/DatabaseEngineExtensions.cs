@@ -27,6 +27,17 @@ public static class DatabaseEngineExtensions
     /// tx.Commit();
     /// // tx.Dispose() also disposes the backing UoW
     /// </code>
+    /// <para>
+    /// <b>Do not call this inside a tick.</b> The name says "transaction", but the expensive half is the UNIT OF WORK: every call claims a UoW registry
+    /// slot — bitmap claim, capacity growth, entry initialisation and the page writes that go with it — and gives it back on dispose. One per operation is a
+    /// per-operation cost that reads as free at the call site, which is exactly what makes it a trap. A tick already has a unit of work; create transactions
+    /// from it with <see cref="UnitOfWork.CreateTransaction"/> instead. A UoW is designed to host many — see the remarks on <see cref="UnitOfWork.Flush"/>,
+    /// "regardless of how many transactions the UoW hosts" — so there is nothing to gain by giving each one its own.
+    /// </para>
+    /// <para>
+    /// It remains the right call where a unit of work genuinely IS the unit of work: unit tests, one-shot setup, diagnostics, tooling, and any path where the
+    /// cost is paid once rather than per entity per frame.
+    /// </para>
     /// </remarks>
     [return: TransfersOwnership]
     public static Transaction CreateQuickTransaction(this DatabaseEngine dbe, DurabilityMode durabilityMode = DurabilityMode.Deferred,

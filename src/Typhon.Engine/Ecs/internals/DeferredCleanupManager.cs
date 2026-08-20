@@ -372,19 +372,46 @@ internal class DeferredCleanupManager
         if (ct.HasCollections)
         {
             var accessor = ct.ComponentSegment.CreateChunkAccessor();
-            foreach (var f in ct.CollectionFields)
-            {
-                // The descriptor's offset is within the component struct; content chunks prefix it with ComponentOverhead
-                // (Versioned = 0, SingleVersion = 8 for the entity PK). Cluster slots have no overhead.
-                var bufferId = accessor.GetChunkAsReadOnlySpan(chunkId).Slice(ct.ComponentOverhead + f.OffsetInComponentStorage).Cast<byte, int>()[0];
-                var collAccessor = f.Vsbs.Segment.CreateChunkAccessor();
-                f.Vsbs.BufferRelease(bufferId, ref collAccessor);
-                collAccessor.Dispose();
-            }
+            ReleaseCollectionBuffers(ct, accessor.GetChunkAsReadOnlySpan(chunkId));
             accessor.Dispose();
         }
 
         ct.ComponentSegment.FreeChunk(chunkId);
+    }
+
+    /// <summary>
+    /// Releases every <c>ComponentCollection</c> buffer referenced by one component payload, given the payload's bytes.
+    /// </summary>
+    /// <param name="ct">The component's table — supplies the collection field descriptors and the payload's overhead.</param>
+    /// <param name="payload">
+    /// The full <c>[ComponentOverhead][value]</c> payload. It does not matter where those bytes live: this is the half of
+    /// <see cref="FreeContentChunk"/> that has nothing to do with chunks, split out so a spawn payload staged in the
+    /// transaction's <c>SpawnStagingArena</c> can be cleaned up on rollback (#839). Before that split, the buffer release
+    /// and the chunk free were welded together, so removing the chunk would have silently taken the release with it —
+    /// and DC-01 is <c>[fatal][silent]</c>.
+    /// </param>
+    internal static void ReleaseCollectionBuffers(ComponentTable ct, ReadOnlySpan<byte> payload)
+    {
+        foreach (var f in ct.CollectionFields)
+        {
+            // The descriptor's offset is within the component struct; a content payload prefixes it with ComponentOverhead
+            // (Versioned = 0, SingleVersion = 8 for the entity PK). Cluster slots have no overhead.
+            var bufferId = payload.Slice(ct.ComponentOverhead + f.OffsetInComponentStorage).Cast<byte, int>()[0];
+
+            // 0 means the field never got a buffer. BufferRelease has no zero guard of its own: it would decrement the
+            // refcount of the RESERVED root chunk 0 and, on reaching zero, free its chain. The cluster-destroy path
+            // guards this at ArchetypeClusterState (`if (bufferId != 0)`) and this path must too — more so since #839,
+            // because a spawn payload is now zeroed on allocation, which turns "unpopulated collection" from
+            // whatever-the-recycled-chunk-held into a reliable 0.
+            if (bufferId == 0)
+            {
+                continue;
+            }
+
+            var collAccessor = f.Vsbs.Segment.CreateChunkAccessor();
+            f.Vsbs.BufferRelease(bufferId, ref collAccessor);
+            collAccessor.Dispose();
+        }
     }
 
     /// <summary>

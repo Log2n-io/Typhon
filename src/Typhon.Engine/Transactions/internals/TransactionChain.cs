@@ -245,6 +245,12 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
             transaction.Reset();
             _pool.Enqueue(transaction);
         }
+        else
+        {
+            // Dropped rather than pooled, so nothing will ever reset or reuse it. Its spawn arena holds native memory that only Dispose returns — Reset now
+            // RETAINS a block by design, so a discarded transaction that ever spawned would leak that block for the process lifetime.
+            transaction.DisposeSpawnArena();
+        }
     }
 
     /// <summary>
@@ -294,6 +300,12 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
 
         if (disposing)
         {
+            // Free each pooled transaction's retained arena block before dropping the queue. Clear() alone releases the managed references and leaks the
+            // native memory behind them, which Reset deliberately keeps alive between uses.
+            while (_pool.TryDequeue(out var pooled))
+            {
+                pooled.DisposeSpawnArena();
+            }
             _pool.Clear();
         }
 

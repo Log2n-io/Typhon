@@ -200,6 +200,11 @@ public unsafe partial class Transaction : EntityAccessor
         // stays open so a DefaultDiscipline=Commit component can escalate the whole tx on first touch (CM-02).
         _discipline = discipline;
         _didInPlaceSvWrite = false;
+        // A unit of work in Deferred/GroupCommit mode owns a shared ChangeSet and releases it when it disposes. In
+        // Immediate mode it has none, so the transaction makes its own — and must therefore release it itself, which
+        // Dispose now does. Nothing did before: every mark taken by every Immediate-mode transaction was stranded for the
+        // life of the process, which is a far larger leak than the per-cycle drip #824 was opened for.
+        _ownsChangeSet = !readOnly && uow?.ChangeSet == null;
         _changeSet = readOnly ? null : (uow?.ChangeSet ?? _dbe.MMF.CreateChangeSet());
         State = TransactionState.Created;
         TSN = tsn;
@@ -216,6 +221,10 @@ public unsafe partial class Transaction : EntityAccessor
     {
         // Clean up ECS state BEFORE nulling _dbe — CleanupEcsState needs _dbe._archetypeStates
         CleanupEcsState();
+
+        // After CleanupEcsState, which still reads staged payloads to release ComponentCollection buffers (DC-01), and before the base reset. Rewinds only —
+        // the blocks are kept for this pooled instance's next use. TransactionChain frees them when the instance is discarded rather than pooled.
+        ResetSpawnArena();
 
         base.ResetCore();
 
@@ -311,6 +320,12 @@ public unsafe partial class Transaction : EntityAccessor
                 _entityMapCacheAccessor.Dispose();
                 _hasEntityMapCache = false;
             }
+
+            // Before leaving the chain, not after: ComputeNextMinTSN reads the chain, and this transaction's own
+            // membership is what has been holding the cutoff back. A reader that removes itself first and drains second
+            // would be draining on someone else's behalf, having already lost the right to say whether it was the tail.
+            ProcessReadOnlyDeferredCleanups();
+
             _isDisposed = true;
             ExitEpochAndRemove();
             return;
@@ -326,6 +341,14 @@ public unsafe partial class Transaction : EntityAccessor
         ProcessDeferredCleanups();
         dbe.LogTxDispose(tsn, "FlushAccessors");
         FlushAccessors();
+
+        // Release the marks of a ChangeSet this transaction owns — after the flush and the deferred cleanups above, both of which may still dirty pages through
+        // it. A shared UoW ChangeSet is NOT released here: its owner does that on its own dispose, and releasing another owner's marks is the over-release that
+        // #385 was.
+        if (_ownsChangeSet)
+        {
+            _changeSet?.ReleaseDirtyMarks();
+        }
         // Mark disposed BEFORE ExitEpochAndRemove: Remove() pools the object, and a lock-free
         // CreateTransaction can immediately dequeue and Init it (_isDisposed = false). If we set _isDisposed = true AFTER Remove returns, we'd overwrite the
         // new owner's flag, causing their Dispose to skip Remove — leaking the chain node.
@@ -345,22 +368,116 @@ public unsafe partial class Transaction : EntityAccessor
     }
 
     /// <summary>Process deferred cleanups if this transaction was blocking them as tail.</summary>
+    /// <remarks>
+    /// <para>
+    /// Drains TWO independent queues against the same cutoff, and the gate must ask about both. The revision-chain GC (<see cref="DeferredCleanupManager"/>)
+    /// and the ECS entity cleanup queue fill on different events: the former when a Versioned component is superseded, the latter on every destroy regardless
+    /// of storage mode. Gating the whole method on the revision queue alone meant an all-SingleVersion workload — where no revision chain is ever superseded,
+    /// so that queue is permanently empty — never reached the ECS drain at all, and its EntityMap tombstones accumulated for the life of the engine (#681).
+    /// Measured in the SpaceBattle demo: 561 796 EntityMap chunks against a live population that never exceeded ~13 900, holding 89 % of the data file.
+    /// </para>
+    /// <para>
+    /// Both drains require <c>isTail</c>: <c>ComputeNextMinTSN</c> is only meaningful for the oldest live transaction, and it is what guarantees no surviving
+    /// snapshot can still observe the records being removed.
+    /// </para>
+    /// </remarks>
     private void ProcessDeferredCleanups()
     {
+        if (_dbe.DeferredCleanupManager.QueueSize == 0 && _dbe.EcsCleanupQueueSize == 0)
+        {
+            return;
+        }
+
+        var wc = WaitContext.FromTimeout(TimeoutOptions.Current.TransactionChainLockTimeout);
+        if (!_dbe.TransactionChain.Control.EnterSharedAccess(ref wc))
+        {
+            return;
+        }
+
+        var isTail = _dbe.TransactionChain.Tail == this;
+        var nextMinTSN = isTail ? _dbe.TransactionChain.ComputeNextMinTSN() : 0;
+        _dbe.TransactionChain.Control.ExitSharedAccess();
+
+        if (!isTail)
+        {
+            return;
+        }
+
         if (_dbe.DeferredCleanupManager.QueueSize > 0)
         {
-            var wc = WaitContext.FromTimeout(TimeoutOptions.Current.TransactionChainLockTimeout);
-            if (_dbe.TransactionChain.Control.EnterSharedAccess(ref wc))
-            {
-                var isTail = _dbe.TransactionChain.Tail == this;
-                var nextMinTSN = isTail ? _dbe.TransactionChain.ComputeNextMinTSN() : 0;
-                _dbe.TransactionChain.Control.ExitSharedAccess();
+            _dbe.DeferredCleanupManager.ProcessDeferredCleanups(TSN, nextMinTSN, _dbe, _changeSet);
+        }
 
-                if (isTail)
-                {
-                    _dbe.DeferredCleanupManager.ProcessDeferredCleanups(TSN, nextMinTSN, _dbe, _changeSet);
-                }
-            }
+        // After the revision GC, not before: that pass may trim chains belonging to entities this one is about to unmap, and running it first means the chain
+        // roots this reads from the entity record have already settled.
+        DrainEcsCleanups(nextMinTSN);
+    }
+
+    /// <summary>
+    /// Drains the ECS entity cleanup queue up to <paramref name="nextMinTSN"/>. Caller must have established that this transaction is the tail.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="ProcessDeferredCleanups"/> because a READ-ONLY transaction never reaches that method — <see cref="Dispose"/> short-circuits
+    /// read-only disposal before it — yet a read-only transaction is exactly the one that most often holds this queue back. A long reader opened before a burst
+    /// of destroys keeps <c>ComputeNextMinTSN</c> behind them, so its retirement is what makes those records reclaimable; if it retires without draining, the
+    /// queue waits for the next writer, which in a read-mostly steady state can be a long time.
+    /// <para>
+    /// A read-only transaction has no ChangeSet (<c>_changeSet = readOnly ? null : …</c>), so one is created here. It releases exactly the marks it took and
+    /// deliberately does NOT <c>SaveChanges</c>: the release is what PS-05 requires of a locally-created set, while the pages keep the writeback debt
+    /// <c>IncrementDirty</c> recorded and the next checkpoint collects them (PS-10). Saving here instead would put synchronous page I/O on a dispose path.
+    /// </para>
+    /// </remarks>
+    private void DrainEcsCleanups(long nextMinTSN)
+    {
+        if (_dbe.EcsCleanupQueueSize == 0)
+        {
+            return;
+        }
+
+        if (_changeSet != null)
+        {
+            _dbe.ProcessEcsCleanups(nextMinTSN, _changeSet);
+            return;
+        }
+
+        var drainSet = _dbe.MMF.CreateChangeSet();
+        try
+        {
+            _dbe.ProcessEcsCleanups(nextMinTSN, drainSet);
+        }
+        finally
+        {
+            drainSet.ReleaseDirtyMarks();
+        }
+    }
+
+    /// <summary>
+    /// The read-only disposal counterpart: establish tail-ness, then drain the ECS queue.
+    /// </summary>
+    /// <remarks>
+    /// Only the ECS queue, deliberately. The revision-chain GC takes this transaction's ChangeSet, which a read-only transaction does not have, and extending
+    /// that path is a separate change with its own analysis — this one is scoped to #681.
+    /// </remarks>
+    private void ProcessReadOnlyDeferredCleanups()
+    {
+        if (_dbe.EcsCleanupQueueSize == 0)
+        {
+            return;
+        }
+
+        var wc = WaitContext.FromTimeout(TimeoutOptions.Current.TransactionChainLockTimeout);
+        if (!_dbe.TransactionChain.Control.EnterSharedAccess(ref wc))
+        {
+            return;
+        }
+
+        var isTail = _dbe.TransactionChain.Tail == this;
+        var nextMinTSN = isTail ? _dbe.TransactionChain.ComputeNextMinTSN() : 0;
+        _dbe.TransactionChain.Control.ExitSharedAccess();
+
+        if (isTail)
+        {
+            DrainEcsCleanups(nextMinTSN);
         }
     }
 
@@ -1595,8 +1712,13 @@ public unsafe partial class Transaction : EntityAccessor
             }
 
             // Cluster path — Phase A only here (per-archetype B+Tree index updates + view notify). Phase B (HEAD→cluster slot copy) is the
-            // visibility act, deferred to PublishComponent. copyToCluster is false for spawns (FinalizeSpawns handles cluster copy for those).
-            bool copyToCluster = (compRevInfo.Operations & ComponentInfo.OperationType.Created) == 0;
+            // visibility act, deferred to PublishComponent.
+            //
+            // The exemption is PENDING SPAWNS, not the Created flag. FinalizeSpawns does the cluster copy for entities spawned in this transaction, so
+            // repeating it here would be redundant — but since #845 a component can also be CREATED mid-life on an already-published entity, via
+            // EntityRef.Enable(comp, in value) on a slot the spawn never supplied. That carries Created too, and testing the flag alone silently skipped its
+            // Phase B: the new value reached the revision chain but never the cluster slot the read resolves through, so it read as zero.
+            bool copyToCluster = (compRevInfo.Operations & ComponentInfo.OperationType.Created) == 0 || !SpawnedContains(EntityId.FromRaw(pk));
             PrepareClusterVersionedSlot(pk, commitMeta, compRevInfo, readCompChunkId, info.ComponentTable, info.ComponentTypeId, copyToCluster,
                 out clusterCopyPending, out clusterChunkId, out slotIndex, out compSlot);
 
@@ -1612,7 +1734,7 @@ public unsafe partial class Transaction : EntityAccessor
                 ChunkBasedSegment<PersistentStore>.ExitBatchMode();
                 ChunkBasedSegment<PersistentStore>.EnterBatchMode();
 
-                _changeSet.ReleaseExcessDirtyMarks();
+                _changeSet.ReleaseDirtyMarks();
             }
 
             // Record the publish descriptor — drained by PublishComponent after the WAL Append (AP-01).
@@ -2371,6 +2493,52 @@ public unsafe partial class Transaction : EntityAccessor
     /// ordering). The schema-stable <see cref="ComponentInfo.ComponentTypeId"/> is the WAL identity (LOG-06). SV components flow
     /// through the fence path, not here.
     /// </summary>
+    /// <summary>
+    /// ECS-STAGE-03: whether this transaction's Spawn lifecycle record for <paramref name="archetypeId"/> is suppressed. True only for a
+    /// <see cref="ClusterDurability.Checkpoint"/> archetype, spawned under a non-<see cref="CommitDiscipline.Commit"/> transaction, whose components are all
+    /// non-Versioned.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why.</b> <see cref="ClusterDurability.Checkpoint"/> declares its entities checkpoint-durable — D5, <c>03-recovery.md:172</c>: <i>"A plain TickFence
+    /// spawn stays checkpoint-durable only — the documented non-guarantee, not a bug."</i> But emitting the Spawn record while suppressing the fence that
+    /// would carry the values delivers something WORSE than that guarantee: the entity recovers alive with default values — the phantom this file's own #395
+    /// Face B comment names below. Measured, both cells, by <c>CheckpointDurabilityCrashTests</c>. Suppressing the record makes a window spawn ABSENT after a
+    /// crash, which is exactly what "checkpoint-durable only" means.
+    /// </para>
+    /// <para>
+    /// <b>Why Destroy is NOT suppressed, and must never be.</b> Suppression is safe here only because it is MONOTONE: with no Spawn record the replay window
+    /// can only remove entities, never create one, so no ordering of mixed-discipline transactions can resurrect a destroyed entity. Suppressing Destroy
+    /// instead would need proof that the entity is absent from the base — a decision made at emit time that races the checkpoint which actually lands (born
+    /// TSN 100, last checkpoint 50, destroy at 150 ⇒ "born after, suppress"; a checkpoint completing at 120 then puts it IN the base, and the crash resurrects
+    /// it silently). Not decidable locally.
+    /// </para>
+    /// <para>
+    /// <b>The three terms.</b> <c>Checkpoint</c> — the archetype opted into the weaker window. Non-<c>Commit</c> discipline — CM-06 <c>[fatal]</c> requires a
+    /// Commit-discipline spawn to be atomically durable per commit, and the branch below logs its values, which would be orphaned without the Spawn.
+    /// No Versioned slots — the <c>SingleCache</c> loop below emits revision content for a Versioned component at commit regardless of cluster durability
+    /// (§2.4: the chain stays authoritative, so no <c>ClusterDurability</c> setting may lose a Versioned value); dropping the Spawn would strand it, since
+    /// <c>ApplySlotToExisting</c> no-ops for an entity absent from the base map rather than failing loudly.
+    /// </para>
+    /// <para>
+    /// <b>Recovery tolerates the gap by construction.</b> Every consumer of a record whose Spawn never arrived is an explicit no-op, not a loud failure:
+    /// <c>ApplyDestroyToExisting</c> (<c>RecoveryApplier.cs:293</c>), <c>ApplySlotToExisting</c> (<c>:344</c>, AP-12 idempotence),
+    /// <c>ApplySetEnabledBitsToExisting</c> (<c>:695</c>). And recovery never needed the record to ENUMERATE: cluster pages are self-describing, the EntityMap
+    /// is discarded and re-derived from the occupancy walk before WAL apply, and <c>NextEntityKey</c> comes from that same walk.
+    /// </para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool SuppressSpawnRecord(ushort archetypeId)
+    {
+        if (_discipline == CommitDiscipline.Commit)
+        {
+            return false;
+        }
+
+        var meta = _dbe.GetMetaByRouting(archetypeId);
+        return meta.ClusterDurability == ClusterDurability.Checkpoint && meta.VersionedSlotCount == 0;
+    }
+
     private void BuildCommitBatch(ref CommitBatchBuilder batch)
     {
         // Spawn lifecycle.
@@ -2379,6 +2547,11 @@ public unsafe partial class Transaction : EntityAccessor
             for (int i = 0; i < _spawnedEntities.Count; i++)
             {
                 var s = _spawnedEntities[i];
+                if (SuppressSpawnRecord(s.Id.ArchetypeId))
+                {
+                    continue;
+                }
+
                 batch.AddSpawn((long)s.Id.RawValue, s.Id.ArchetypeId, s.EnabledBits);
             }
 
@@ -2409,14 +2582,17 @@ public unsafe partial class Transaction : EntityAccessor
                             continue;   // Versioned already logged (chains); Transient never logged
                         }
 
-                        int locChunkId = s.Loc[slot];
-                        if (locChunkId <= 0)
+                        // #839: a SingleVersion spawn payload is staged in the transaction's arena, not in a content chunk. This read is unaffected by the
+                        // move — it wants the [ComponentOverhead][value] bytes, and the arena slot has exactly that layout — so CM-06's emission keeps its
+                        // existing position BEFORE FinalizeSpawns rather than needing to be re-ordered after it.
+                        int stage = s.Stage[slot];
+                        if (stage <= 0)
                         {
                             continue;   // component not provided at spawn
                         }
 
                         var info = GetComponentInfo(table.Definition.POCOType);
-                        var payload = info.CompContentAccessor.GetChunkAsReadOnlySpan(locChunkId);
+                        var payload = new ReadOnlySpan<byte>(SpawnArena.Resolve(stage), table.ComponentOverhead + table.ComponentStorageSize);
                         // Wire identity is the per-archetype slot (LOG-06); here it's the spawn-iteration slot index.
                         var value = payload.Slice(info.ComponentOverhead, table.ComponentStorageSize);
                         batch.AddSlot((long)s.Id.RawValue, (ushort)slot, value, table.CollectionHandleRanges);

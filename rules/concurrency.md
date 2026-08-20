@@ -3,8 +3,8 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-07-29 |
-| Domain | UnitOfWorkContext, HoldoffScope, Deadline, AccessControl, AccessControlSmall, ResourceAccessControl |
+| Last Updated | 2026-08-17 |
+| Domain | UnitOfWorkContext, HoldoffScope, Deadline, AccessControl, AccessControlSmall, ResourceAccessControl, EpochManager, EpochGuard |
 
 > Invariants governing cooperative cancellation and the structural-mutation regions it must not
 > interrupt. The two are a **coupled pair**: neither is safe to change without the other, which is
@@ -129,3 +129,104 @@ not in the chain buys nothing — and the reader cannot tell the difference by l
        root in the slot location, and CompRev chunk id 1 happened to name content chunk id 1, which still held the
        pre-update value. Three tests passed on that. The eligibility flip did not break them; it stopped a coincidence from
        covering for them.
+
+---
+
+## Module: EP — epoch pinning and page eviction
+
+`RequestPageEpoch` raises a page's `AccessEpoch` by CAS-max, and the **only** thing that lowers it is
+`UnlatchPageExclusive`, which resets it to 0 (PS-03, `durability.md:1119-1124`). So under PS-01 a page that is written —
+stamped, latched, unlatched — ends up costing nothing, while a page that is merely **read** stays unevictable until the
+scope that read it lets go. Reading a page therefore does not cost a pin *for the read*; it costs a pin **for the whole
+enclosing scope**.
+
+That asymmetry is the trap. Write loops look expensive and are not; a read-only verification pass looks free and is not.
+
+And the scope is the caller's. `Transaction.Init` enters at `Transaction.cs:189` and exits only at `:388`; a nested
+`EpochGuard.Enter` inside a callee does **not** re-pin, because `EpochThreadRegistry.PinCurrentThread` stamps only at
+`depth == 0`. So every page any callee touches is pinned for the entire transaction, and a callee cannot buy itself
+relief by opening a scope of its own. `EpochManager.RefreshScope` would, but it is not available to a callee holding
+live page pointers: it makes exactly the pages behind those pointers evictable (PS-01/PS-02 use-after-free).
+
+This is the module `README.md`'s roadmap calls out as high priority because "the epoch/eviction interaction spans
+multiple subsystems". It starts with the one invariant #838 cost a P0 to establish; the AccessControl state machine,
+lock ordering and deadlock prevention are still to come.
+
+### EP-01: A post-condition check reads only what its operation wrote `[fatal]`
+  invariant ∀ operation O with a post-condition check C running inside O's caller epoch scope: pages(C) ⊆ pages(O)
+  never proving a local mutation correct by re-reading the whole structure it lives in
+  scope: LogicalSegment.cs, VerifyGrownChainLinks, ChainLinkMatches, WalkForwardChainPageCount, RequestPageEpoch
+  on_violation: the check pins O(structure) pages the operation never touched, for the caller's whole scope. Once the
+                structure outgrows the page cache the operation blocks waiting for eviction of pages its own scope
+                protects — a self-deadlock, surfaced as `PageCacheBackpressureTimeoutException`, whose summary says
+                "Transient — IO will eventually complete and free pages" and sends the reader hunting the disk. #838
+                measured it as a commit holding a 5071.9 ms pin against a 5000 ms back-pressure timeout.
+  rationale: a bounded check is not a weaker check — PROVIDED the bound is drawn around what the operation WRITES and
+             not around a convenient index range. `CreateOrGrow` writes the chain FIELD in exactly two places, the
+             old-tail patch and the data-page-init loop, both inside `[growFrom-1, end]`. But it also rewrites the ROOT
+             page's `LogicalSegmentHeader` when a grow pushes the directory past `RootHeaderIndexSectionCount` and needs
+             a map-extension page, and `LogicalSegmentNextMapPBID` is the field ADJACENT to
+             `LogicalSegmentNextRawDataPBID` in that struct — so a wrong-field write there is squarely this
+             post-condition's bug class, while with `growFrom` past 2000 the root sits outside the index range. Hence
+             index 0 is ALWAYS verified as well; it costs no extra fetch, because `VerifyDirectoryAgainst` faults the
+             root immediately afterwards. Over the verified set the positional comparison that replaced the whole-chain
+             count is strictly stronger: it also rejects "right count, wrong target".
+  note: the check is NOT free, and the earlier claim that it was ("the pages were already latched by this call") was
+        wrong in a way worth recording: the write loops UNLATCH, which resets `AccessEpoch` to 0, so the grow's own
+        writes leave nothing pinned and this post-condition is the ONLY thing a grow leaves pinned. The bound therefore
+        does not remove the cost, it makes the cost proportional to the grow instead of to the segment — a caller that
+        grows by N has already committed to touching N pages, so O(N) is the right ceiling and O(segment) is not.
+  enforce: no strict-mode escape hatch re-runs the exhaustive walk on this path. `CheckConfig.Enabled` is what a user
+           turns on to diagnose a stall, and this walk is what produces the stall; the engine's own test suite runs
+           strict mode on for every fixture, so "nobody will enable it in anger" is already false. Exhaustive structural
+           walks belong where no caller scope spans them — `LogicalSegment.Load` on reopen, `RunStorageIntegrityCheck`
+           on demand.
+  note: what the bound gives up, accepted deliberately — prefix damage this method did NOT cause (a stale forward
+        pointer below `growFrom-1` from a lost write, or a cycle in the prefix) is no longer noticed at the next grow.
+        Both are still caught, by `Load` on the next reopen and by `RunStorageIntegrityCheck` on demand; the detection
+        LATENCY grows from "next grow" to "next restart". Accepted because the old check mis-attributed that damage to
+        `CreateOrGrow` anyway — #840 is a live example, a loss that happened in memory and was reported as "not
+        persistence".
+  verified: SegmentGrowEpochPinTests.Grow_InsideCallerEpochScope_PinsOnlyTheGrownRange [VerifiesRule] — counts pinned
+            pages rather than waiting for the timeout, so it measures the invariant instead of a downstream symptom:
+            13 pins for a 10-page grow, against 2410 (the whole segment) before the fix. It asserts a LOWER bound too,
+            because zero pins would mean `RequestPageEpoch` had stopped stamping — a PS-01 use-after-free passing as a
+            success.
+  note: the walk sites #838 tabulates as latent copies are NOT covered by this rule and remain O(segment) today —
+        `RunStorageIntegrityCheck`, `LogicalSegment.Load`, `Clear`/`Fill`, `EnumerateVersionedChainHeads`,
+        `SchemaEvolutionEngine.MigrateEntities`, `RederiveOccupancyOnCrash`, `StatisticsRebuilder.RebuildClusterAll`,
+        `GetSchemaHistory`, `LoadPersistedArchetypes`. None is a post-condition and none is on the commit path. Widening
+        the rule to cover them would make it false on the day it was written, which is worse than not covering them.
+
+## Module: SIGNAL — Wake signals versus resource counts
+
+A counting semaphore can model two different things: how many of a resource are available, or that something has
+happened. The two have opposite correctness conditions, and the type does not distinguish them.
+
+### SIGNAL-01: A permit is produced only when there is a consumer for it `[fatal]`
+  invariant ∀ counting primitive S used as a WAKE SIGNAL: a `Release` on S happens only when at least one thread is
+            registered as waiting on S
+  invariant a waiter registers BEFORE its final availability check, and re-checks after registering — the registration
+            and the check must bracket each other or the lost wakeup the semaphore was chosen to prevent returns
+  invariant outstanding permits are bounded by a quantity that does not grow with elapsed time: live waiters, or live
+            threads. Never by cumulative operations
+  never gate a `Release` on nothing. `Wait` on a wake signal is reached only under contention, so an unconditional
+        `Release` produces a permit per operation and consumes none — the count then rises for the life of the process
+  scope: UowRegistry.Release / WaitForSlotFreed / AllocateUowId / HasFreeSlot / SignalPermitCount / WaiterCount
+  on_violation: the count reaches `int.MaxValue` and `SemaphoreSlim.Release` throws `SemaphoreFullException` from
+                whatever ordinary call happened to be next, killing the process. Measured: a SpaceBattle soak died at
+                tick 1 454 985 after 6 h 40 m — 2 147 483 647 / 1 454 985 ≈ 1 476 UoW frees per tick, which is the
+                demo's actual transaction rate. The engine was HEALTHY at death (883 of 32 768 pages resident, zero
+                gated cycles, `health Ok`), so every gauge read normal until the instant it died (#844)
+  note: this is a property of the ROLE, not the type. `StagingBufferPool._available` is the same `SemaphoreSlim` used
+        correctly, because it models a RESOURCE COUNT: `Rent` waits unconditionally and `Return` releases
+        unconditionally, one for one, so the count is conserved and bounded by the pool capacity. `_slotFreed` models an
+        EVENT, and an event has no level to store.
+  note: a latch cannot have this defect at all. `ManualResetEventSlim.Set` and `AutoResetEvent.Set` are idempotent —
+        there is no count to accumulate — which is why the other twelve signalling primitives in the engine are immune
+        by construction rather than by review.
+  verified: UowRegistryTests.Registry_UncontendedAllocateFree_DoesNotAccumulateSemaphorePermits [VerifiesRule] — 550
+            uncontended allocate/free cycles must leave the permit count where 50 did. Before the fix it read exactly
+            550, one per free, which is the defect stated as a slope; the real ceiling is unreachable in a test, and
+            that is precisely why this reached production. The saturation and cross-thread wake cases already in that
+            fixture are the guard on the other direction — that gating the Release did not reintroduce a lost wakeup.

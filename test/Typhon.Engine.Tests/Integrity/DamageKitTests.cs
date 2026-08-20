@@ -137,9 +137,14 @@ internal sealed class DamageKitTests : IntegrityFixtureBase
         DamageKit.Baseline(BundlePath);
         var pageCount = (int)(new FileInfo(DamageKit.DataPath(BundlePath)).Length / IntegrityConstants.PageSize);
 
-        // The last page of this fixture is a derived-segment page, so a torn byte there is Divergence rather than
-        // DataLoss — the caller states that, because only the caller knows which page it picked.
-        var damage = DamageKit.FlipByteInPage(BundlePath, pageCount - 1, IntegrityVerdict.Divergent);
+        // The last page of this fixture holds cluster rows, so a torn byte there is DataLoss — the caller states that,
+        // because only the caller knows which page it picked.
+        //
+        // It was Divergence when the fixture's last page was a derived-segment page. The file used to run one page
+        // longer than its data: leaked dirty marks kept clean pages permanently "dirty", every checkpoint rewrote them,
+        // and the tail of the file was slack. Conserving the marks stopped the redundant writes, so the file now ends on
+        // the last page that actually holds rows — and a torn byte there costs rows, which is what DataLoss means.
+        var damage = DamageKit.FlipByteInPage(BundlePath, pageCount - 1, IntegrityVerdict.DataLoss);
         var report = DamageKit.Scan(BundlePath);
 
         DamageKit.AssertDetectedExactly(report, damage);

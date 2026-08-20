@@ -97,20 +97,28 @@ public unsafe interface IPageStore
     void DecrementActiveChunkWriters(int memPageIndex);
 
     /// <summary>
-    /// Increment DirtyCounter for a page. Prevents eviction while DC &gt; 0.
-    /// Called by ChangeSet on page registration (first dirty) and re-dirty (CP-04 safety).
+    /// Take one mutator mark on a page (and record the modification). Prevents eviction while the mark is held.
+    /// Called by ChangeSet on page registration (first dirty) and re-dirty (CP-04 safety) — every mark must be released by
+    /// the same ChangeSet, so nothing else should call this directly.
     /// <para>Transient: no-op.</para>
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     void IncrementDirty(int memPageIndex);
 
     /// <summary>
-    /// Atomically ensure DirtyCounter &gt;= <paramref name="minValue"/>. Used during segment
-    /// growth to protect new pages against checkpoint race (value 2 for growth, 1 for maintenance).
-    /// <para>Transient: no-op.</para>
+    /// Record that a page's bytes changed: the next checkpoint must write it, and it cannot be evicted until then.
     /// </summary>
+    /// <remarks>
+    /// This is the right call for any path that modifies a page WITHOUT holding a ChangeSet — segment growth, bitmap
+    /// maintenance, chunk free. Those paths have no lifecycle in which to release a counted mark, so they must not take
+    /// one; the writeback obligation they genuinely have is exactly what this records, and a durable write is what clears
+    /// it. The predecessor (<c>EnsureDirtyAtLeast</c>) raised a counter to a floor instead, which was a no-op whenever the
+    /// counter happened to already be above that floor — so the protection it advertised was silently absent on precisely
+    /// the busy pages that needed it.
+    /// <para>Transient: no-op.</para>
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    void EnsureDirtyAtLeast(int memPageIndex, int minValue);
+    void MarkPageModified(int memPageIndex);
 
     // ═══════════════════════════════════════════════════════════════════════
     // Slot Ref Counting

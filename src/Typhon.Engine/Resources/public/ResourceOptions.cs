@@ -79,7 +79,39 @@ public class ResourceOptions
     /// <summary>
     /// Checkpoint interval when idle (milliseconds).
     /// </summary>
+    /// <remarks>
+    /// This is a <b>durability</b> knob — it bounds how much WAL a crash has to replay. It is deliberately NOT the knob
+    /// that keeps the page cache alive; that is <see cref="CheckpointDirtyPageThresholdPercent"/>, because cache
+    /// survival depends on how fast pages are dirtied, not on the clock.
+    /// </remarks>
     public int CheckpointIntervalMs { get; set; } = 30000;  // 30 seconds
+
+    /// <summary>
+    /// Run a checkpoint as soon as this percentage of the page cache owes a writeback, without waiting for
+    /// <see cref="CheckpointIntervalMs"/>. <c>0</c> disables the trigger, leaving the timer and explicit forces as the
+    /// only causes — which is the pre-#830 behaviour.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A page cannot be evicted until a checkpoint has written it (PS-10), so the cache's reclaim rate IS the checkpoint
+    /// rate and the peak writeback debt is "everything dirtied inside one interval". On a workload that dirties more
+    /// than the cache holds in <see cref="CheckpointIntervalMs"/>, the cache saturates and the next page allocation has
+    /// nothing to evict — the engine dies on <c>PageCacheBackpressureTimeout</c> with a cache that is ~100 % dirty.
+    /// Measured on the SpaceBattle demo (256 MiB cache, ~25 000 entities at 60 Hz): the 30 s default died at ~58 000
+    /// ticks with 32 758 of 32 768 pages owed, while a 1 s cadence ran to 104 506 ticks with debt never above 15 %.
+    /// </para>
+    /// <para>
+    /// The default of 25 % leaves three quarters of the cache as headroom for the cycle to complete while it runs. The
+    /// clock cannot serve this purpose: the safe interval is a function of cache size and write rate, and nothing in the
+    /// engine derives one from the other — the user only finds out they configured it wrong when the engine stops.
+    /// </para>
+    /// <para>
+    /// Raising the frequency is not the trade against throughput it looks like. On the measurement above the simulation
+    /// got <i>faster</i> (14–28 ms per tick → 9–15 ms) and the WAL stopped sawtoothing to 6 GB, because back-pressure
+    /// stalls and giant flush bursts both disappeared. Caveat: that is one workload on one machine.
+    /// </para>
+    /// </remarks>
+    public int CheckpointDirtyPageThresholdPercent { get; set; } = 25;
 
     /// <summary>
     /// Bounded budget (milliseconds) for the checkpoint cycle's WAL durability barrier waits (CK-02). On timeout the

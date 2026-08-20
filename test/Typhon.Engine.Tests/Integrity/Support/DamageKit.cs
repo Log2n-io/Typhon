@@ -2096,11 +2096,19 @@ internal static class DamageKit
 
         // A truncation is a length change, not a byte rewrite — AssertOnlyDeclaredBytesChanged does not apply to it,
         // and saying so here is cheaper than a special case that silently passes.
+        //
+        // CHK-SEG-06 is declared alongside the boundary finding because the truncated page is a segment page, and a
+        // segment whose directory names a page past the end of the file genuinely cannot be walked. This used to report
+        // CHK-BOO-01 alone only because the fixture's last page was an unreferenced trailing page: leaked dirty marks
+        // made every checkpoint rewrite pages that were already on disk, so the file ran one page longer than the data
+        // needed and the truncation landed on slack. With the marks conserved the file ends where the data ends, the
+        // truncation decapitates a live cluster page, and both findings are correct. Declaring one of them would make
+        // the report look like it over-reported.
         return new DamageRecord(
             "truncation",
             $"data file truncated to {newLength} bytes, mid-page",
             [],
-            ["CHK-BOO-01"],
+            ["CHK-BOO-01", "CHK-SEG-06"],
             IntegrityVerdict.Divergent,
             RepairIsLossless: false);
     }

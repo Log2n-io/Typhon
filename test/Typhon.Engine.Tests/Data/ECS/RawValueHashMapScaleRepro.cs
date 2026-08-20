@@ -170,7 +170,7 @@ unsafe class RawValueHashMapScaleRepro
             // unbounded DC and the cache fills up (page cache backpressure). Mirrors BulkLoadSession's
             // periodic ReleaseDirtyMarksIfNeeded — but called per-batch here (5 000 ops) instead of every
             // 128 ops, which is plenty for our 500 K total.
-            cs.ReleaseExcessDirtyMarks();
+            cs.ReleaseDirtyMarks();
 
             // Force checkpoint synchronously — drives DC decrements 1→0, making pages evictable, which is
             // the suspected race trigger (eviction reload of a chunk whose init writes haven't been

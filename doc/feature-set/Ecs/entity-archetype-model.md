@@ -1,4 +1,4 @@
----
+﻿---
 uid: feature-ecs-entity-archetype-model
 title: 'Entity & Archetype Model'
 description: 'Structured 64-bit entity identity, C# class-hierarchy archetypes, and typed zero-copy component handles — the schema backbone of every other ECS feature.'
@@ -69,7 +69,7 @@ t.Commit();
 
 ## ⚠️ Guarantees & limits
 
-- **Schema enforcement at creation**: `Spawn<T>` always allocates every component slot of the archetype (omitted ones zero-initialized and disabled) — there is no "entity missing a required component" error class.
+- **Schema enforcement at creation**: `Spawn<T>` accepts values for any subset of the archetype's components — there is no "entity missing a required component" error class. An omitted component is *absent*, not zero-filled: reading it fails the same way reading a disabled one does, and `Enable(comp, in value)` is how you supply one later.
 - **O(1) entity→component routing**: one lookup per `Open`/`OpenMut` resolves all component locations for that entity; `Read`/`Write` afterward are direct, ~1-5ns for SingleVersion/Transient, ~50-100ns for Versioned (MVCC revision walk).
 - **Zero-copy access**: `Read` returns `ref readonly T`, `Write` returns `ref T` — no struct copies into or out of storage.
 - **Stale references always miss, safely**: `EntityKey` is monotonic and never recycled, so there's no version field and no ABA hazard — a held `EntityId` for a destroyed entity simply fails to resolve.

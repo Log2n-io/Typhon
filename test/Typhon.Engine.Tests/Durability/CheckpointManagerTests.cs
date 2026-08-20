@@ -246,15 +246,22 @@ public class CheckpointManagerTests : AllocatorTestBase
         _walManager = CreateWalManager();
         ProduceWalRecords(_walManager);
 
-        // Dirty a page by writing to it via ChangeSet
+        // Dirty a page the checkpoint actually owns.
+        //
+        // This used to dirty file page 0, which is MetaSlotA — externally persisted, written only by PersistMetaNow, and
+        // deliberately excluded from CollectDirtyMemPageIndices. So the page named here was never the one that satisfied
+        // the assertion below: the writes came from unrelated bootstrap pages that leaked dirty marks and were therefore
+        // rewritten by EVERY cycle for the life of the process. With the marks conserved those pages are written once and
+        // stay clean, and a test that dirties an uncollectable page correctly observes zero writes. Page 8 is the first
+        // index past InitialReservedPageCount, so it is a plain data page.
         using (var guard = EpochGuard.Enter(_epochManager))
         {
             var cs = _mmf.CreateChangeSet();
-            _mmf.RequestPageEpoch(0, guard.Epoch, out var memPageIdx);
-            var latched = _mmf.TryLatchPageExclusive(memPageIdx);
+            _mmf.RequestPageEpoch(8, guard.Epoch, out var memPageIdx);
+            _mmf.TryLatchPageExclusive(memPageIdx);
             cs.AddByMemPageIndex(memPageIdx);
             _mmf.UnlatchPageExclusive(memPageIdx);
-            // Don't call SaveChanges — leave page dirty
+            cs.ReleaseDirtyMarks();   // the page stays owed a write; the mark is not what keeps it collectable
         }
 
         using var ckpt = new CheckpointManager(_mmf, _uowRegistry, _walManager, _resourceOptions, _epochManager, _stagingPool, AllocationResource);
@@ -396,6 +403,205 @@ public class CheckpointManagerTests : AllocatorTestBase
 
         Assert.That(ckpt.TotalCheckpoints, Is.GreaterThan(0));
         Assert.That(ckpt.CheckpointLsn, Is.GreaterThan(0));
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Dirty-page trigger (#830 / CK-11)
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Dirties <paramref name="pageCount"/> plain data pages and leaves them owing a writeback.
+    /// </summary>
+    /// <remarks>
+    /// Starts past <c>InitialReservedPageCount</c> so none of these is the externally-persisted meta pair, which
+    /// <c>CollectDirtyMemPageIndices</c> excludes by design — dirtying those would produce debt the checkpoint is never
+    /// going to clear and the test would be measuring the wrong thing.
+    /// </remarks>
+    private void DirtyPages(int pageCount)
+    {
+        using var guard = EpochGuard.Enter(_epochManager);
+        var cs = _mmf.CreateChangeSet();
+        for (var i = 0; i < pageCount; i++)
+        {
+            _mmf.RequestPageEpoch(8 + i, guard.Epoch, out var memPageIdx);
+            _mmf.TryLatchPageExclusive(memPageIdx);
+            cs.AddByMemPageIndex(memPageIdx);
+            _mmf.UnlatchPageExclusive(memPageIdx);
+        }
+
+        cs.ReleaseDirtyMarks();
+    }
+
+    /// <summary>
+    /// Page-cache pressure runs a cycle even though the timer cannot possibly fire.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The interval is <see cref="int.MaxValue"/> — about 24 days — so a checkpoint happening AT ALL is proof the
+    /// dirty-page trigger fired. That is the whole design of this test: no sleeping on a real interval, no racing a
+    /// timer, and no way for a passing result to be attributed to anything else.
+    /// </para>
+    /// <para>
+    /// Without this trigger the page cache can only reclaim at timer cadence, so a workload that dirties more than the
+    /// cache holds inside one interval saturates it and the next allocation has nothing to evict — measured as a
+    /// <c>PageCacheBackpressureTimeout</c> with 32 758 of 32 768 pages owed (#830).
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("CK-11")]
+    public void DirtyPagePressure_TriggersCheckpoint()
+    {
+        CreateTestInfrastructure();
+        _walManager = CreateWalManager();
+        ProduceWalRecords(_walManager);
+
+        _resourceOptions.CheckpointIntervalMs = int.MaxValue;   // the timer is out of the picture
+        _resourceOptions.CheckpointDirtyPageThresholdPercent = 5;
+
+        using var ckpt = new CheckpointManager(_mmf, _uowRegistry, _walManager, _resourceOptions, _epochManager, _stagingPool, AllocationResource);
+        ckpt.Start();
+
+        var slots = (int)(PagedMMF.MinimumCacheSize / PagedMMF.PageSize);
+        DirtyPages((slots / 10) + 1);   // 10 % — comfortably over the 5 % threshold
+
+        Assert.That(SpinWait.SpinUntil(() => ckpt.TotalCheckpoints > 0, 10_000), Is.True,
+            "the cache passed its writeback-debt threshold and the timer is 24 days away, so the only thing that can "
+            + "produce a cycle is the dirty-page trigger — and nothing did");
+
+        Assert.That(ckpt.TotalPressureCheckpoints, Is.GreaterThan(0),
+            "the cycle must be attributed to pressure, not silently counted as periodic");
+    }
+
+    /// <summary>
+    /// A threshold of zero restores the pre-#830 behaviour exactly: the timer and explicit forces are the only causes.
+    /// </summary>
+    /// <remarks>
+    /// The negative arm of the test above, and the one that makes it mean something. Same fixture, same debt, same
+    /// unreachable timer — only the threshold differs. Without it, "a checkpoint happened" is not evidence the trigger
+    /// caused it.
+    /// </remarks>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("CK-11")]
+    public void TriggerDisabled_LeavesCacheToTheTimer()
+    {
+        CreateTestInfrastructure();
+        _walManager = CreateWalManager();
+        ProduceWalRecords(_walManager);
+
+        _resourceOptions.CheckpointIntervalMs = int.MaxValue;
+        _resourceOptions.CheckpointDirtyPageThresholdPercent = 0;   // disabled
+
+        using var ckpt = new CheckpointManager(_mmf, _uowRegistry, _walManager, _resourceOptions, _epochManager, _stagingPool, AllocationResource);
+        ckpt.Start();
+
+        var slots = (int)(PagedMMF.MinimumCacheSize / PagedMMF.PageSize);
+        DirtyPages((slots / 2) + 1);   // half the cache — far past any threshold that was armed
+
+        Assert.That(SpinWait.SpinUntil(() => ckpt.TotalCheckpoints > 0, 1500), Is.False,
+            "with the trigger disabled the cache is the timer's problem alone, however dirty it gets");
+        Assert.That(ckpt.TotalPressureCheckpoints, Is.Zero);
+    }
+
+    /// <summary>
+    /// With the trigger disabled, the timer still fires on its first interval — it is not delayed to the second.
+    /// </summary>
+    /// <remarks>
+    /// Guards a regression the due-time bookkeeping can introduce: the event wait and <see cref="Stopwatch"/> are
+    /// different clocks, so a wake landing a hair short of the computed due-time would read as "not due", skip the tick,
+    /// and silently double the effective checkpoint interval. When the trigger is off the wait IS the interval, so the
+    /// loop must not consult the due-time at all. The 400 ms budget is well under two 200 ms intervals, so a skipped
+    /// tick fails this and a correct one does not.
+    /// <para>
+    /// Repeated because the skew is intermittent, and a single run is a weak detector. Measured against the mutant that
+    /// removes the <c>!IsDirtyPageTriggerArmed</c> short-circuit: it fails roughly one run in five, so one execution
+    /// would wave it through 80 % of the time. Ten make that ~11 %, and the correct implementation passes every run.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [Repeat(10)]
+    [CancelAfter(15_000)]
+    [VerifiesRule("CK-11")]
+    public void TriggerDisabled_TimerStillFiresOnItsFirstInterval()
+    {
+        CreateTestInfrastructure();
+        _walManager = CreateWalManager();
+        ProduceWalRecords(_walManager);
+
+        _resourceOptions.CheckpointIntervalMs = 200;
+        _resourceOptions.CheckpointDirtyPageThresholdPercent = 0;
+
+        using var ckpt = new CheckpointManager(_mmf, _uowRegistry, _walManager, _resourceOptions, _epochManager, _stagingPool, AllocationResource);
+        ckpt.Start();
+
+        Assert.That(SpinWait.SpinUntil(() => ckpt.TotalCheckpoints > 0, 400), Is.True,
+            "the first interval must produce the first cycle; needing a second one means the wake was not recognised as a timer tick");
+    }
+
+    /// <summary>
+    /// Polling for pressure does not turn the poll interval into the durability cadence.
+    /// </summary>
+    /// <remarks>
+    /// The trap this guards: once the trigger is armed the loop wakes every 250 ms instead of every
+    /// <c>CheckpointIntervalMs</c>, and if a wake were treated as a timer tick the engine would silently checkpoint four
+    /// times a second on an idle database — burning a WAL barrier and an fsync each time for nothing. The loop therefore
+    /// tracks the timer's due-time explicitly rather than inferring it from the wait returning.
+    /// <para>
+    /// Runs with a clean cache so no pressure exists: any cycle here could only have come from a mis-read poll.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("CK-11")]
+    public void PollingForPressure_DoesNotBecomeTheTimerCadence()
+    {
+        CreateTestInfrastructure();
+        _walManager = CreateWalManager();
+        ProduceWalRecords(_walManager);
+
+        _resourceOptions.CheckpointIntervalMs = int.MaxValue;   // no timer tick may occur during this test
+        _resourceOptions.CheckpointDirtyPageThresholdPercent = 90;   // armed, so the loop polls — but far above idle debt
+
+        using var ckpt = new CheckpointManager(_mmf, _uowRegistry, _walManager, _resourceOptions, _epochManager, _stagingPool, AllocationResource);
+        ckpt.Start();
+
+        // Several poll intervals' worth. Each one wakes, finds no pressure, and must go back to sleep.
+        Assert.That(SpinWait.SpinUntil(() => ckpt.TotalCheckpoints > 0, 1500), Is.False,
+            "a poll that finds no pressure is not a timer tick — treating it as one makes the poll interval the "
+            + "durability cadence and checkpoints an idle database four times a second");
+    }
+
+    /// <summary>
+    /// A pressure cycle is an ordinary cycle: it advances the checkpoint watermark like any other.
+    /// </summary>
+    /// <remarks>
+    /// The point of this issue's approach is that nothing about the pipeline changes — same CK-02 barrier, same CK-03
+    /// coverage gate, same watermark advance and segment reclamation. A "cheap" cycle that skipped the gate would be a
+    /// second, weaker durability path, and CK-08 exists precisely to describe the one form allowed to do less.
+    /// </remarks>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("CK-11")]
+    public void PressureCycle_AdvancesTheWatermark()
+    {
+        CreateTestInfrastructure();
+        _walManager = CreateWalManager();
+        ProduceWalRecords(_walManager);
+
+        _resourceOptions.CheckpointIntervalMs = int.MaxValue;
+        _resourceOptions.CheckpointDirtyPageThresholdPercent = 5;
+
+        using var ckpt = new CheckpointManager(_mmf, _uowRegistry, _walManager, _resourceOptions, _epochManager, _stagingPool, AllocationResource);
+        ckpt.Start();
+
+        var slots = (int)(PagedMMF.MinimumCacheSize / PagedMMF.PageSize);
+        DirtyPages((slots / 10) + 1);
+
+        Assert.That(SpinWait.SpinUntil(() => ckpt.TotalCheckpoints > 0, 10_000), Is.True);
+
+        Assert.That(ckpt.CheckpointLsn, Is.GreaterThan(0),
+            "a pressure-triggered cycle runs the full pipeline, so it advances CheckpointLSN exactly as a periodic one does");
     }
 
     // ═══════════════════════════════════════════════════════════════

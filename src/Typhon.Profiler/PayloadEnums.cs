@@ -83,4 +83,16 @@ public enum CheckpointReason : byte
 
     /// <summary>Shutdown — final checkpoint before process exit.</summary>
     Shutdown = 2,
+
+    /// <summary>
+    /// The page cache reached <c>ResourceOptions.CheckpointDirtyPageThresholdPercent</c> writeback debt, so the cycle ran
+    /// early rather than waiting out the timer (#830).
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="Forced"/> on purpose. <c>Forced</c> covers the back-pressure escape hatch, which fires
+    /// only once the cache is already 100 % dirty and an allocation is blocked; this fires at a threshold, before
+    /// anything is stalled. Reading them as one number hides whether the trigger is doing its job or the engine is
+    /// repeatedly falling off the cliff it exists to prevent.
+    /// </remarks>
+    DirtyPagePressure = 3,
 }

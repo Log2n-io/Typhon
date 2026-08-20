@@ -834,7 +834,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     private readonly List<EcsCleanupEntry> _ecsCleanupQueue = [];
     private readonly Lock _ecsCleanupLock = new();
+    private int _ecsCleanupCount;
     private readonly ILogger<DatabaseEngine> _logger;
+
+    /// <summary>
+    /// Number of entities awaiting ECS cleanup. A gate for the drain, readable without taking <c>_ecsCleanupLock</c>.
+    /// </summary>
+    /// <remarks>
+    /// Mutated only under the lock, published with a release store and read with an acquire load, so the drain site on <see cref="Transaction.Dispose"/> — the
+    /// hottest path in the engine — pays a plain load rather than a lock acquisition on every transaction. A stale read is benign in both directions: too low
+    /// merely defers the drain to the next transaction, and too high costs one empty <see cref="ProcessEcsCleanups"/> pass.
+    /// </remarks>
+    internal int EcsCleanupQueueSize => Volatile.Read(ref _ecsCleanupCount);
 
     /// <summary>Enqueue an ECS entity for deferred cleanup (LinearHash removal + chunk freeing).</summary>
     internal void EnqueueEcsCleanup(EntityId id, ArchetypeMetadata meta, long diedTSN)
@@ -842,20 +853,42 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         lock (_ecsCleanupLock)
         {
             _ecsCleanupQueue.Add(new EcsCleanupEntry { Id = id, Meta = meta, DiedTSN = diedTSN });
+            Volatile.Write(ref _ecsCleanupCount, _ecsCleanupQueue.Count);
         }
     }
 
     /// <summary>
-    /// Process ECS deferred cleanups: remove LinearHash entries and free component chunks for entities whose DiedTSN is below minTSN
-    /// (no active transaction can see them).
+    /// Process ECS deferred cleanups: remove LinearHash entries and free component chunks for entities whose DiedTSN is below minTSN (no active transaction can
+    /// see them).
     /// </summary>
-    internal unsafe int ProcessEcsCleanups(long minTSN)
+    /// <param name="minTSN">Cutoff: an entity is cleaned only once no live transaction can still observe it.</param>
+    /// <param name="changeSet">
+    /// Owner of the dirty marks for the EntityMap pages this method writes. <b>Required</b> — see remarks.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// The ChangeSet is not optional and the parameter is deliberately not defaulted. This method removes records from a PERSISTENT LinearHash, and dirty
+    /// tracking rides on the accessor: <c>ChunkAccessor.MarkSlotDirty</c> raises ActiveChunkWriters unconditionally but reaches <c>IncrementDirty</c> — the call
+    /// that also records the modification — only through a non-null ChangeSet. An accessor created without one therefore leaves the page with no writeback debt
+    /// at all, so once ACW falls to zero the clock sweep may evict it and the removal is silently undone on reload. That is PS-10 (<c>rules/durability.md</c>):
+    /// "every path that modifies a page's bytes records it", whose <c>on_violation</c> is exactly "an unrecorded modification is never written and is lost at
+    /// eviction".
+    /// </para>
+    /// <para>
+    /// This mattered only in theory while the sole callers were two tests (#681); it became load-bearing the moment the method was put on the production
+    /// destroy path, which is why the signature changed in the same commit that wired it up rather than being left for the caller to remember.
+    /// </para>
+    /// </remarks>
+    internal unsafe int ProcessEcsCleanups(long minTSN, ChangeSet changeSet)
     {
+        ArgumentNullException.ThrowIfNull(changeSet);
+
         List<EcsCleanupEntry> toProcess;
         lock (_ecsCleanupLock)
         {
             toProcess = _ecsCleanupQueue.FindAll(e => e.DiedTSN < minTSN);
             _ecsCleanupQueue.RemoveAll(e => e.DiedTSN < minTSN);
+            Volatile.Write(ref _ecsCleanupCount, _ecsCleanupQueue.Count);
         }
 
         if (toProcess.Count == 0)
@@ -866,7 +899,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         using var guard = EpochGuard.Enter(EpochManager);
 
         // Hoist stackalloc out of loop — max record size is 78B (14B header + 16 components × 4B)
-        var readBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        var readBuf = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
 
         foreach (var entry in toProcess)
         {
@@ -876,7 +909,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             {
                 continue;
             }
-            var accessor = engineState.EntityMap.Segment.CreateChunkAccessor();
+            var accessor = engineState.EntityMap.Segment.CreateChunkAccessor(changeSet);
             var found = engineState.EntityMap.TryGet(entry.Id.EntityKey, readBuf, ref accessor);
 
             if (found)
@@ -891,24 +924,32 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 //
                 // A non-Versioned slot is skipped rather than missed: SingleVersion and Transient bytes live in the cluster slot itself, which ReleaseSlot
                 // reclaims on destroy, so there is no chain to free here.
+                // SlotToVersionedIndex is null when the archetype has NO Versioned component at all (documented on ArchetypeClusterInfo: "Null if no Versioned
+                // components"), so indexing it unguarded is an unconditional NullReferenceException for every all-SingleVersion or all-Transient archetype.
+                // The guard is the same one ArchetypeAccessor.ResolveClusterVersionedSlots already uses. It went unnoticed because this method's only callers
+                // were two tests, both on a Versioned archetype — the population that never takes this branch (#681).
                 var layout = meta.ClusterLayout;
-                for (var slot = 0; slot < meta.ComponentCount && engineState.SlotToComponentTable != null; slot++)
+                if (layout.SlotToVersionedIndex != null && engineState.SlotToComponentTable != null)
                 {
-                    var vi = layout.SlotToVersionedIndex[slot];
-                    if (vi < 0)
+                    for (var slot = 0; slot < meta.ComponentCount; slot++)
                     {
-                        continue;
-                    }
+                        var vi = layout.SlotToVersionedIndex[slot];
+                        if (vi < 0)
+                        {
+                            continue;
+                        }
 
-                    var chainRoot = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(readBuf, vi);
-                    if (chainRoot != 0)
-                    {
-                        engineState.SlotToComponentTable[slot].CompRevTableSegment?.FreeChunk(chainRoot);
+                        var chainRoot = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(readBuf, vi);
+                        if (chainRoot != 0)
+                        {
+                            engineState.SlotToComponentTable[slot].CompRevTableSegment?.FreeChunk(chainRoot);
+                        }
                     }
                 }
 
-                // Remove from LinearHash
-                engineState.EntityMap.Remove(entry.Id.EntityKey, ref accessor, null);
+                // Remove from LinearHash. The ChangeSet is threaded through even though Remove does not currently read it — the accessor above carries the
+                // dirty marks — so the call does not read as though this write is exempt from ownership.
+                engineState.EntityMap.Remove(entry.Id.EntityKey, ref accessor, changeSet);
             }
 
             accessor.Dispose();
@@ -935,6 +976,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         var changeSet = new ChangeSet(MMF);
         var result = DeferredCleanupManager.ProcessDeferredCleanups(long.MaxValue, nextMinTSN, this, changeSet);
+
+        // The ECS entity queue drains here too. It is a separate queue with a separate producer (every destroy, any storage mode) and a test that flushed only
+        // the revision GC would report "cleaned" while every EntityMap tombstone it was asked to reclaim was still there — which is how #681 stayed invisible
+        // to the suite.
+        result += ProcessEcsCleanups(nextMinTSN, changeSet);
+
+        // SaveChanges releases this set's marks itself (ChangeSet.cs:226) before handing the pages to SavePages, so the locally-created set PS-05 requires us
+        // to release is already discharged here.
         changeSet.SaveChanges();
         return result;
     }
@@ -3639,7 +3688,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                             {
                                 using var vEpoch = EpochGuard.Enter(EpochManager);
                                 var vStart = Stopwatch.GetTimestamp();
-                                clusterState.RebuildVersionedHeadFromChain(meta, _archetypeStates[meta.ArchetypeId], changeSet, out var headSkips);
+                                // Reached only when WillRebuildEntityMapOnCrash is false, i.e. the loaded EntityMap is trusted — so are its enabled bits.
+                                clusterState.RebuildVersionedHeadFromChain(meta, _archetypeStates[meta.ArchetypeId], changeSet, true, out var headSkips);
                                 NoteVersionedHeadRebuildSkips(meta, in headSkips);
                                 versionedHeadTicks += Stopwatch.GetTimestamp() - vStart;
                                 LastOpenVersionedHeadRebuildCount++;
@@ -4608,7 +4658,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // Order matters. The loop above established WHERE each entity lives; the slots themselves are still zeroed, because the component bytes live in the
         // revision chains. Fill the HEADs from those chains first, then build the indexes over real values — indexing first yields one entry per zeroed slot.
-        clusterState.RebuildVersionedHeadFromChain(meta, state, cs, out var headSkips);
+        // Untrusted, and here the reason is circularity rather than durability: the loop above SET each slot's enabled bit from whether the entity had a chain
+        // head (enabled ⟺ head != 0), so the bit carries no information independent of the root being classified. Asking it whether a rootless slot is expected
+        // would always answer yes, by construction.
+        clusterState.RebuildVersionedHeadFromChain(meta, state, cs, false, out var headSkips);
         NoteVersionedHeadRebuildSkips(meta, in headSkips);
 
         // Every entity just moved to a new (clusterChunkId, slotIndex), and a per-archetype index entry IS a cluster position, so any tree that survived the
@@ -4642,7 +4695,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private unsafe void BuildFlatEntityMapEntries(ArchetypeMetadata meta, ArchetypeEngineState state, ChangeSet mapCs, bool duringRebuild,
         Dictionary<long, ushort> enabledSnapshot = null)
     {
-        var recordBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        var recordBuf = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
 
         // Phase 1: Scan each Versioned slot's CompRevTableSegment to find chain heads. slotMaps[slot] = { EntityPK → compRevFirstChunkId }.
         var slotMaps = new Dictionary<long, int>[meta.ComponentCount];
@@ -4821,7 +4874,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             try
             {
                 using var vEpoch = EpochGuard.Enter(EpochManager);
-                clusterState.RebuildVersionedHeadFromChain(meta, state, changeSet, out var headSkips);
+                // Deferred precisely BECAUSE the EntityMap was re-derived — RebuildEntityMapsFromPersistedData rebuilt its EnabledBits from the cluster SoA,
+                // so a clear bit here cannot be told from one that was never persisted (#398). Absence is unclassifiable on this path.
+                clusterState.RebuildVersionedHeadFromChain(meta, state, changeSet, false, out var headSkips);
                 NoteVersionedHeadRebuildSkips(meta, in headSkips);
                 LastOpenVersionedHeadRebuildCount++;
             }
@@ -5502,20 +5557,25 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <summary>Accumulate one archetype's un-rebuilt HEAD pairs and log them, so the silent case in #688 leaves a trace (see the field's remarks).</summary>
     private void NoteVersionedHeadRebuildSkips(ArchetypeMetadata meta, in VersionedHeadRebuildSkips skips)
     {
+        // Accumulate unconditionally — AbsentByDesign is excluded from Total, and gating the accumulation on Total would make it permanently unobservable.
+        LastOpenVersionedHeadRebuildSkips.Add(in skips);
+
         if (skips.Total <= 0)
         {
             return;
         }
 
-        LastOpenVersionedHeadRebuildSkips.Add(in skips);
         LogVersionedHeadRebuildSkips(meta?.ArchetypeType?.Name ?? meta?.ArchetypeId.ToString() ?? "<unknown>",
-            skips.Total, skips.EntityNotInMap, skips.NoChainRoot, skips.ChainWalkFailed);
+            skips.Total, skips.EntityNotInMap, skips.ChainRootLost, skips.ChainWalkFailed, skips.RootlessUnclassifiable);
     }
 
     [LoggerMessage(LogLevel.Warning,
-        "Open: archetype {archetype} — {total} Versioned HEAD slot(s) left un-rebuilt (entityNotInMap {entityNotInMap}, noChainRoot {noChainRoot}, "
-        + "chainWalkFailed {chainWalkFailed}). Those slots serve whatever they already held, which on a fresh reopen is zero.")]
-    private partial void LogVersionedHeadRebuildSkips(string archetype, int total, int entityNotInMap, int noChainRoot, int chainWalkFailed);
+        "Open: archetype {archetype} — {total} Versioned HEAD slot(s) left un-rebuilt (entityNotInMap {entityNotInMap}, chainRootLost {chainRootLost}, "
+        + "chainWalkFailed {chainWalkFailed}, rootlessUnclassifiable {rootlessUnclassifiable}). Those slots serve whatever they already held, which on a fresh "
+        + "reopen is zero. Components never supplied at spawn are absent by design and are NOT counted here; rootlessUnclassifiable is the same shape on a pass "
+        + "where the enabled bit could not be trusted to tell the two apart.")]
+    private partial void LogVersionedHeadRebuildSkips(string archetype, int total, int entityNotInMap, int chainRootLost, int chainWalkFailed,
+        int rootlessUnclassifiable);
 
     [LoggerMessage(LogLevel.Information,
         "Open: total {totalMs:F0} ms — engineConstruct {engineConstructMs:F0} ms (incl. WAL recovery + system-schema load), schemaDllLoad {schemaDllMs:F0} ms, initializeArchetypes {initArchetypesMs:F0} ms")]

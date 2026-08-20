@@ -230,6 +230,14 @@ class NonGenericEntityAccessTests : TestBase<NonGenericEntityAccessTests>
         Assert.That(names, Does.Contain(NameOf<EcsVelocity>(dbe)));
     }
 
+    /// <summary>
+    /// A component that WAS supplied and then disabled keeps its bytes, and <c>ReadRaw</c> still hands them out.
+    /// </summary>
+    /// <remarks>
+    /// This is the Data Browser's contract: disabled components render greyed, with values. It requires an explicit
+    /// disable — spawning without the component no longer produces this state, because since #845 an unsupplied
+    /// component is ABSENT rather than disabled-with-storage (see the sibling test below).
+    /// </remarks>
     [Test]
     public void ReadRaw_DisabledComponent_StillReadable_IsEnabledReportsFalse()
     {
@@ -238,7 +246,48 @@ class NonGenericEntityAccessTests : TestBase<NonGenericEntityAccessTests>
         EntityId id;
         using (var t = dbe.CreateQuickTransaction())
         {
-            // Only Position provided → Velocity is disabled but its storage still exists.
+            id = t.Spawn<EcsUnit>(
+                EcsUnit.Position.Set(new EcsPosition(1, 1, 1)),
+                EcsUnit.Velocity.Set(new EcsVelocity(5, 6, 7)));
+            t.Commit();
+        }
+
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            t.OpenMut(id).Disable(EcsUnit.Velocity);
+            t.Commit();
+        }
+
+        using var read = dbe.CreateReadOnlyTransaction();
+        var e = read.Open(id);
+
+        int velSlot = SlotByName(e, NameOf<EcsVelocity>(dbe));
+        Assert.That(e.IsEnabled((byte)velSlot), Is.False);
+        var raw = e.ReadRaw(velSlot);
+        Assert.That(raw.Length, Is.GreaterThanOrEqualTo(Unsafe.SizeOf<EcsVelocity>()),
+            "disable hides a component, it does not discard it — the bytes must still be reachable through ReadRaw");
+
+        // Decode them: a length check alone passes over a span of garbage, which is exactly what this test exists to rule out.
+        var kept = MemoryMarshal.Read<EcsVelocity>(raw);
+        Assert.That(kept.Dx, Is.EqualTo(5f), "and they must be the VALUES that were written, not merely bytes of the right size");
+    }
+
+    /// <summary>
+    /// A component the spawn never supplied has no bytes at all, so <c>ReadRaw</c> returns an EMPTY span (#845).
+    /// </summary>
+    /// <remarks>
+    /// The third state a raw consumer has to handle. Absent is not disabled: there is no chunk and no revision chain, so
+    /// there is nothing to render greyed — a renderer must distinguish "hidden value" from "no value". Before #845 this
+    /// returned a full-length span over a RECYCLED chunk, i.e. a destroyed entity's bytes.
+    /// </remarks>
+    [Test]
+    public void ReadRaw_NeverSuppliedComponent_ReturnsAnEmptySpan()
+    {
+        using var dbe = SetupEngine();
+
+        EntityId id;
+        using (var t = dbe.CreateQuickTransaction())
+        {
             id = t.Spawn<EcsUnit>(EcsUnit.Position.Set(new EcsPosition(1, 1, 1)));
             t.Commit();
         }
@@ -248,8 +297,9 @@ class NonGenericEntityAccessTests : TestBase<NonGenericEntityAccessTests>
 
         int velSlot = SlotByName(e, NameOf<EcsVelocity>(dbe));
         Assert.That(e.IsEnabled((byte)velSlot), Is.False);
-        // ReadRaw works regardless of enabled state — the Data Browser renders disabled components greyed, with values.
-        Assert.That(e.ReadRaw(velSlot).Length, Is.GreaterThanOrEqualTo(Unsafe.SizeOf<EcsVelocity>()));
+        Assert.That(e.ReadRaw(velSlot).Length, Is.Zero,
+            "an unsupplied component has no storage — handing back a sized span would expose whatever the recycled "
+          + "chunk last held, which is the defect #845 records");
     }
 
     [Test]

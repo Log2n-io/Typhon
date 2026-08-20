@@ -489,6 +489,40 @@ CK-08 (flush-only cycles) are later increments.
             ClusterIndexSpiPersistenceTests.Checkpoint_IndexSpiChangedAlone_IsStillPersisted (an index root that changes while
             every other guard field holds is still written — dropping the index SPIs from the skip test fails it) [VerifiesRule]
 
+### CK-11: The page cache is drained on dirty-page pressure, not only on the clock `[fatal]`
+  invariant a cycle runs as soon as writeback debt reaches ResourceOptions.CheckpointDirtyPageThresholdPercent of the
+            page cache's SLOTS, without waiting for CheckpointIntervalMs
+  invariant a pressure-triggered cycle is an ORDINARY cycle: same CK-02 barrier, same CK-03 coverage gate, same
+            watermark advance, same CK-04 reclamation. It is not a second, weaker durability path — CK-08 describes the
+            only form permitted to do less, and this is not it
+  invariant pressure bypasses the "no new durable WAL records" early-out, on the same reasoning as the shutdown flush:
+            CreateOrGrow and the other structural-write paths dirty segment pages WITHOUT writing WAL records, so a cache
+            filled by structural work alone has durableLsn == checkpointLsn and gating on the log would skip exactly the
+            pages causing the pressure
+  invariant a poll wake that finds no pressure is NOT a timer tick — the durability cadence stays CheckpointIntervalMs
+            however often the loop looks
+  invariant threshold 0 disables the trigger, leaving timer + explicit force as the only causes
+  scope: CheckpointManager.CheckpointLoop, CheckpointManager.WaitMs, CheckpointManager.IsDirtyPagePressureReached,
+         PagedMMF.WritebackDebtPercent, ResourceOptions.CheckpointDirtyPageThresholdPercent
+  verified: CheckpointManagerTests.DirtyPagePressure_TriggersCheckpoint (interval = int.MaxValue, so a cycle at all
+            proves the trigger fired), CheckpointManagerTests.TriggerDisabled_LeavesCacheToTheTimer (the negative arm
+            that makes the first one evidence), CheckpointManagerTests.PressureCycle_AdvancesTheWatermark
+  on_violation: a page is reclaimable only once a checkpoint has written it (PS-10), so the cache's reclaim rate IS the
+                checkpoint rate. Without this trigger the peak debt is "everything dirtied inside one interval"; when
+                that exceeds the cache the next allocation has nothing to evict and the engine dies on
+                PageCacheBackpressureTimeout with a ~100%-dirty cache. Measured (#830): 32 758 of 32 768 pages owed
+  requires: PS-10 — the trigger exists because debt is only discharged by a durable write
+  rationale: NEW 2026-08-16 (#830). The overview's trigger list already claimed a dirty-page threshold
+    (`claude/overview/06-durability.md`) and the code had only the timer and ForceCheckpoint; the sole pressure-driven
+    path was OnBackpressure → ForceCheckpoint, which fires at 100% saturation and then has 5 s to drain a full cache
+    from a standing start. ADR-025 named the consequence — "checkpoint can be expensive if many pages are dirty
+    (mitigated by configurable interval)" — but the interval is a TIME knob and the constraint is a CAPACITY one, and
+    nothing derives one from the other. It stayed invisible while DirtyCounter leaked (#824): leaked marks made every
+    cycle rewrite pages that were already clean, which kept clean pages continuously available by accident.
+    Deliberately NOT a second writer thread: WritePagesForCheckpoint claims each page with CAS(ACW, -1, 0) and SKIPS on
+    failure, so a concurrent writer holding that sentinel makes the checkpoint skip the page, stillSkipped > 0, the
+    CK-03 gate stays shut and no WAL segment is ever recycled — #817's exact failure mode, by design.
+
 ---
 
 ---
@@ -540,6 +574,37 @@ rejected and is the TLA+ mutant.
   on_violation: a Commit-discipline-spawned entity recovers alive-but-default → silent value loss masquerading as a
                 successful recovery
   verified: ClusterAllSv_PrimaryAxis_SurvivesCrash [VerifiesRule]
+
+### CM-07: A Checkpoint archetype's non-Commit spawn emits NO Spawn record `[fatal]` `[silent]`
+  invariant ∀ entity e spawned in transaction t into archetype a: t emits a Spawn lifecycle record for e UNLESS
+            (a.ClusterDurability = Checkpoint ∧ t.discipline ≠ Commit ∧ a.VersionedSlotCount = 0), in which case it
+            emits none. A crash therefore returns e ABSENT, never present-with-default-values.
+  invariant the suppression is MONOTONE: Destroy and SetEnabledBits are ALWAYS emitted, for every archetype and every
+            discipline. With no Spawn record the replay window can only REMOVE entities, never create one, so no
+            interleaving of mixed-discipline transactions can resurrect a destroyed entity.
+  never suppressing the Destroy record as well. Safety would require proving e absent from the checkpoint base — a
+        decision taken at emit time that races the checkpoint which actually lands (born TSN 100, last checkpoint 50,
+        destroy at 150 ⇒ "born after, suppress"; a checkpoint completing at 120 puts e IN the base and the crash
+        resurrects it). Not decidable locally, and the error direction is silent.
+  never suppressing when the archetype has a Versioned slot. The SingleCache loop emits that component's revision
+        content at commit regardless of cluster durability (the chain stays authoritative — no ClusterDurability
+        setting may lose a Versioned value), and ApplySlotToExisting NO-OPS for an entity absent from the base map
+        rather than failing loudly, so a dropped Spawn would strand the revision silently.
+  requires: recovery tolerates every record whose Spawn never arrived, as an explicit no-op and never a loud failure —
+            RecoveryApplier.ApplyDestroyToExisting, .ApplySlotToExisting (AP-12 idempotence), .ApplySetEnabledBitsToExisting.
+  requires: enumeration never depends on the record — cluster pages are self-describing, the EntityMap is discarded and
+            re-derived from the occupancy walk BEFORE WAL apply, and NextEntityKey comes from that same walk (CK-09/RB-06).
+  rationale: D5 declares a plain TickFence spawn "checkpoint-durable only — the documented non-guarantee, not a bug".
+             Emitting the Spawn while the mode suppresses the fence that would carry the values delivers something
+             STRICTLY WORSE than that guarantee: the entity recovers alive with default values. "Checkpoint-durable
+             only" means ABSENT when it was not checkpointed, and this rule is what makes the implementation say what
+             the contract says. It is not a bandwidth optimisation; the WAL saving is a consequence.
+  scope: Transaction.SuppressSpawnRecord, Transaction.BuildCommitBatch
+  on_violation: a window-spawned entity recovers as a valueless phantom at the origin of every field — well-formed,
+                plausible, and flagged by open-time integrity as DataLoss while the database opens anyway. The
+                pre-CM-07 engine returned 32 entities of which 16 were zeroed, measured in both cells of
+                CheckpointDurabilityCrashTests.
+  verified: WindowSpawn_SurvivesHardCrash_ButWithWhatValues [VerifiesRule] + [RuleMutant]
 
 ## Module: WAL Pipeline
 
@@ -742,30 +807,33 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   → [7: Advance CheckpointLSN + fsync header] → [8: Recycle WAL segments]
 ```
 
-### CP-03: DirtyCounter decremented only after fsync `[fatal]`
-  invariant ∀path that calls DecrementDirty: data file fsync must complete first
-  impl checkpoint: Step 4 (fsync) before Step 5 (DecrementDirty)
-  impl SavePages: FlushToDisk() in ContinueWith before DecrementDirty loop
-  scope: CheckpointManager.cs, PagedMMF.SavePages, PagedMMF.cs
+### CP-03: Writeback debt discharged only after fsync `[fatal]`
+  invariant ∀path that calls MarkCaptured: the data file fsync covering the sampled generation must complete first
+  impl checkpoint: Step 4 (fsync) before Step 5 (MarkCaptured)
+  impl SavePages: FlushToDisk() in ContinueWith before the MarkCaptured loop
+  scope: CheckpointManager.cs, PagedMMF.SavePages, PagedMMF.MarkCaptured
   on_violation: page marked clean before durably on disk;
     eviction discards modifications; crash loses data
-  requires: PS-01
+  requires: PS-01, PS-10
+  rationale: 🔴 CORRECTED 2026-08-16. Was phrased on DecrementDirty, which no longer marks a page clean — writers do not
+    touch the mutator's counter at all (PS-05). The ordering constraint is unchanged; the operation it constrains moved.
 
-### CP-04: Re-dirty safety via DirtyCounter > 1 `[fatal][silent]`
-  invariant page re-dirtied during Step 3 has DirtyCounter > 1
-  post after Step 5 decrement: DirtyCounter ≥ 1 (stays dirty for next cycle)
-  impl: ChunkAccessor.MarkSlotDirty uses IncrementDirty (not EnsureDirtyAtLeast)
-    on re-registration — always +1, so DC survives pending checkpoint decrement.
-    EnsureDirtyAtLeast(1) is wrong: no-op when DC=1, checkpoint decrements to 0.
-    EnsureDirtyAtLeast(2) is wrong: livelock — checkpoint 2→1, re-dirty bumps 1→2, never 0.
-    ReleaseExcessDirtyMarks SUBTRACTS this ChangeSet's excess marks (N → 1 of its own) on UoW dispose, preventing
-    inflation. 🔴 CORRECTED 2026-07-27: it does NOT clamp DC — a clamp races the pending checkpoint decrement (#385).
-    ChunkAccessor.MarkSlotDirty now routes through ChangeSet.RegisterReDirty, not a direct IncrementDirty.
-  never DecrementDirtyToMin on the UoW-dispose path
-  scope: CheckpointManager.cs, ChunkAccessor.MarkSlotDirty,
-         ChangeSet.RegisterReDirty / ReleaseExcessDirtyMarks / Reset, PagedMMF.DecrementDirtyByDelta
+### CP-04: Re-dirty safety — a modification racing the capture keeps the page owed `[fatal][silent]`
+  invariant a page modified after the checkpoint sampled its generation still has WritebackGen != CapturedGen when the
+            cycle publishes that sample, so the next cycle rewrites it
+  impl the checkpoint samples WritebackGen BEFORE the seqlock copy, under the ACW sentinel, and publishes THAT value
+    after its fsync. Any modification in between advances the generation past it, so MarkCaptured's monotonic CAS leaves
+    the page owed. No counter floor, and no dependence on how many writes are in flight.
+  scope: CheckpointManager.cs, ChunkAccessor.MarkSlotDirty, ChangeSet.AddByMemPageIndex / RegisterReDirty,
+         PagedMMF.WritePagesForCheckpoint, PagedMMF.MarkCaptured
+  verified: ChangeSetDirtyMarkConservationTests
   on_violation: concurrent modification lost — page appears clean,
     eviction discards the re-dirty, data silently gone
+  rationale: 🔴 REWRITTEN 2026-08-16. The old formulation was arithmetic on the mutator's counter — "re-dirty pushes DC
+    to ≥2 so the checkpoint's decrement leaves ≥1" — and it carried its own contradiction: the impl notes recorded that
+    EnsureDirtyAtLeast(1) is a no-op at DC=1 and EnsureDirtyAtLeast(2) LIVELOCKS (checkpoint 2→1, re-dirty 1→2, never
+    0), while four live call sites used exactly those forms. Comparing generations removes the arithmetic and with it
+    both failure modes.
 
 ### CP-05: CheckpointLSN advanced only after data fsync AND full coverage (Step 7 after Step 4) `[fatal]`
   pre data file fsync complete for every page written this cycle (Step 4)
@@ -1089,25 +1157,60 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
 ### PS-04: DirtyCounter mutations are atomic read-modify-write `[fatal]`
   invariant every DirtyCounter mutation uses an Interlocked RMW (Increment / Decrement / CAS-retry loop)
   never read-then-write DirtyCounter non-atomically
-  scope: PagedMMF.IncrementDirty / DecrementDirty / DecrementDirtyByDelta / DecrementDirtyToMin
+  scope: PagedMMF.IncrementDirty / DecrementDirty / DecrementDirtyByDelta
   rationale: 🔴 CORRECTED 2026-07-27. This rule previously required the per-page StateSyncRoot lock. The implementation
     moved to lock-free atomics, which is STRICTLY STRONGER for the failure mode the rule names (negative DC) and is not
     taken under StateSyncRoot on any path — so the rule as written described neither the code nor the better guarantee.
   on_violation: racing increment/decrement → negative DC;
     clock-sweep interprets as clean → premature eviction of dirty page
 
-### PS-05: UoW dispose releases its OWN excess dirty marks — it never clamps DC `[fatal]`
-  invariant for a page with N marks tracked by this ChangeSet, ReleaseExcessDirtyMarks issues exactly (N-1)
-            conservation-respecting DecrementDirty calls, leaving one outstanding mark from this UoW
-  never clamp DC to a floor (DecrementDirtyToMin) on the UoW-dispose path
-  never drive DC to 0 before the checkpoint has written the page
-  scope: ChangeSet.ReleaseExcessDirtyMarks / RegisterReDirty / Reset, PagedMMF.DecrementDirtyByDelta, UnitOfWork.Dispose
-  on_violation: DC = 0 before checkpoint → page evictable; dirty data lost before reaching stable media
-  rationale: 🔴 CORRECTED 2026-07-27. This rule previously read "ReleaseExcessDirtyMarks caps DC at 1", which is the
-    cap-to-1 implementation (DecrementDirtyToMin(p, 1)) that RACED the background checkpoint's DecrementDirty and caused
-    the lost-write durability bug #385 — see the doc comment on ChangeSet.ReleaseExcessDirtyMarks, which names the issue.
-    DecrementDirtyToMin still exists on PagedMMF, so "fixing" code to match the old rule text was a one-line regression
-    back into #385. The conservation property (subtract exactly the marks you added, minus one) is the fix.
+### PS-05: DirtyCounter marks are owner-scoped and exactly conserved `[fatal]`
+  invariant only a ChangeSet may raise DirtyCounter, and only via AddByMemPageIndex / RegisterReDirty
+  invariant a ChangeSet releases exactly the N marks it took, for every page it took them on — no more, no fewer
+  invariant every ChangeSet is released by whoever created it: a UoW-owned set on UoW dispose, a
+            transaction-owned set on transaction dispose, a locally-created set before its creator returns
+  never release marks taken by another owner (that is #385's lost write)
+  never retain a mark "for the checkpoint to consume" (that is #824's leak)
+  never let the checkpoint, SavePages, or any writer touch DirtyCounter at all
+  invariant at quiesce — no unit of work open, no checkpoint running — every page has DirtyCounter == 0
+  scope: ChangeSet.AddByMemPageIndex / RegisterReDirty / ReleaseDirtyMarks / Reset, PagedMMF.DecrementDirtyByDelta,
+         UnitOfWork.Dispose, Transaction.Dispose, EntityAccessor
+  verified: ChangeSetDirtyMarkConservationTests
+  on_violation: under-release → page permanently unevictable, cache starves after tens of minutes (#824);
+    over-release → page evictable with unwritten bytes, data lost before reaching stable media (#385)
+  rationale: 🔴 REWRITTEN 2026-08-16. This rule used to REQUIRE the defect: "issues exactly (N-1) decrements, leaving one
+    outstanding mark from this UoW". That balances only if exactly one unit of work touches a page per checkpoint cycle.
+    A cycle is wall-clock (30 s by default) and says nothing about how many units of work run inside it, so K of them
+    strand K-1 marks that nothing will ever release — the page can never be evicted, and the cache starves (#824).
+    Measured directly: K=2 left 3, K=8 left 9, K=26 left 27.
+    The retained mark was standing in for "the bytes are not on disk yet". That is a real obligation, but it is not a
+    count and it does not belong to the mutator — it now lives in the page's writeback generation (see PS-10), which
+    only a durable write can discharge. With the two separated, the counter is exactly conserved and the protection is
+    strictly stronger than the mark it replaced.
+    Six earlier attempts tried to reconcile the two meanings inside one integer — acking the observed count at capture,
+    sequence pairs, generation pairs bolted onto the counter — and every one either leaked or lost writes. The lesson is
+    the rule: one field, one owner, one meaning.
+
+### PS-10: A page's writeback debt is discharged only by a durable write `[fatal][silent]`
+  invariant every path that modifies a page's bytes records it (MarkPageModified, or IncrementDirty which implies it)
+  invariant WritebackGen != CapturedGen ⟺ the page holds bytes that are not on the data file
+  invariant a page with writeback debt is never evicted, whatever its DirtyCounter says
+  invariant a page with writeback debt is always collected by the next checkpoint
+  invariant MarkCaptured is called only after the fsync that made the sampled generation's bytes durable (CP-03)
+  invariant MarkCaptured is monotonic — a stale publication never lowers CapturedGen
+  invariant the generation is sampled BEFORE the page is copied, so a modification racing the capture stays owed
+  never record the mark without recording the modification — a repeated AddByMemPageIndex takes no second mark but
+        must still record the write, or a checkpoint that settled the page between the two calls loses it
+  scope: PagedMMF.MarkPageModified / MarkCaptured / HasWritebackDebt / WritePagesForCheckpoint / SavePages /
+         CollectDirtyMemPageIndices / TryAcquire, IPageStore.MarkPageModified, CheckpointManager.RunCheckpointCycle
+  verified: ChangeSetDirtyMarkConservationTests
+  on_violation: an unrecorded modification is never written and is lost at eviction (#385, #301, #30);
+    a debt never discharged pins the page for ever (#824)
+  rationale: NEW 2026-08-16. Replaces the counter-floor idiom (EnsureDirtyAtLeast(memPage, 2)) that the paths without a
+    ChangeSet used to protect themselves. A floor is a no-op whenever the counter already sits above it, so on exactly
+    the busy pages that needed it the protection was silently absent; and it depended on flushes of a given page being
+    serialised, which MarkOccupancyPageDurable's own comment had already flagged as needing "a write-generation stamp
+    instead of a counter" if that ever stopped holding. This is that stamp.
 
 ### PS-06: Page state transitions under StateSyncRoot `[fatal]`
   invariant all PageState transitions performed under per-page StateSyncRoot lock

@@ -1,4 +1,4 @@
----
+﻿---
 uid: feature-ecs-entity-lifecycle-crud-enable-disable-components
 title: 'Enable/Disable Components'
 description: 'O(1) bit-flip to toggle a component''s participation without freeing its data, copying it, or migrating the entity.'
@@ -38,14 +38,15 @@ actually filters on enabled state.
 ```csharp
 using var tx = dbe.CreateQuickTransaction();
 var id = tx.Spawn<Unit>(Unit.Pos.Set(new Position { X = 0, Y = 0, Z = 0 }));
-// Velocity omitted at Spawn — starts disabled, its chunk is zero-initialized
+// Velocity omitted at Spawn — absent: disabled, and with no storage at all
 tx.Commit();
 
 using var wtx = dbe.CreateQuickTransaction();
 EntityRef e = wtx.OpenMut(id);
 bool moving = e.IsEnabled(Unit.Vel);   // false — never set at Spawn
-e.Enable(Unit.Vel);                     // O(1) bit flip — data zero-initialized, now live
+e.Enable(Unit.Vel, in vel);             // absent → supply a value and enable; Enable(Unit.Vel) alone would throw
 e.Disable(Unit.Pos);                    // O(1) bit flip — data preserved, not freed
+e.Enable(Unit.Pos);                     // O(1) bit flip — the value is still there, no need to re-supply it
 wtx.Commit();
 
 // Safe optional read — false if disabled or absent, no exception
@@ -58,10 +59,14 @@ HashSet<EntityId> moving2 = rtx.Query<Unit>().Enabled<Velocity>().Execute();
 
 ## ⚠️ Guarantees & limits
 
-- Always O(1) — a single bit flip on the `EntityRef`'s cached bits; no chunk allocation, no data copy.
+- O(1) for a component that has a value — a single bit flip on the `EntityRef`'s cached bits, no allocation, no copy.
 - Disabling never frees or reallocates a component's chunk — data is preserved and immediately available on
-  re-enable; chunks are freed only when the entity itself is destroyed.
-- Two-state only (enabled/disabled) — no partial or graded state.
+  re-enable, and it does **not** have to be supplied again; chunks are freed only when the entity is destroyed.
+- **Three states, not two.** A component the spawn never supplied is *absent*, distinct from disabled: it has no
+  value at all (for `Versioned` storage, no chunk and no revision chain). `Enable(comp)` on it throws — there is
+  nothing to enable — and `Enable(comp, in value)` is the way in, costing an allocation rather than a bit flip.
+  Reading an absent component fails exactly as reading a disabled one does, and `ReadRaw` returns an empty span
+  where a disabled component still yields its bytes.
 - `Enable`/`Disable` require the `Comp<T>` handle overload — there is no bare-type-parameter form.
 - Requires a full `Transaction` — a read-only `EntityAccessor`/`PointInTimeAccessor` worker accessor throws
   (`StageEnableDisable` is Transaction-only).
