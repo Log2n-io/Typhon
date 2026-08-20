@@ -21,8 +21,9 @@ writes several components on the same entity, that's redundant hashmap work per 
 transaction's TSN, and return an `EntityRef` — a `ref struct` caching the per-slot component locations. From
 there, `Read<T>(Comp<T>)` / `Write<T>(Comp<T>)` resolve a component slot in O(1) and return a typed ref straight
 into chunk or cluster memory: `Versioned` writes copy-on-write into a new revision, `SingleVersion`/`Transient`
-writes mutate in place. `Spawn` allocates all of an archetype's components up front (omitted ones
-zero-initialized and disabled) and stages the entity invisibly until commit; `Destroy` tombstones it
+writes mutate in place. `Spawn` allocates storage only for components actually supplied; omitted `Versioned`
+components are *absent* (no chunk, no revision chain), omitted `SingleVersion`/`Transient` are
+zero-initialized and disabled. The entity is staged invisibly until commit; `Destroy` tombstones it
 (cascade-deleting configured children) — data is freed later by deferred GC, never by the destroying
 transaction itself.
 
@@ -42,7 +43,7 @@ partial class Unit : Archetype<Unit>
     public static readonly Comp<UnitStats> Stats = Register<UnitStats>();
 }
 
-// ─── Spawn — all components provided up front; omitted ones are zero-init + disabled ───
+// ─── Spawn — supply any subset; omitted Versioned components are absent (not zero-init) ───
 using var tx = dbe.CreateQuickTransaction();
 EntityId id = tx.Spawn<Unit>(
     Unit.Pos.Set(new Position { X = 0, Y = 0, Z = 0 }),
@@ -83,8 +84,10 @@ dtx.Commit();
 - `Spawn`/`SpawnBatch` entities are invisible to other transactions until commit (`BornTSN = commit TSN`);
   `Destroy` only tombstones (`DiedTSN = commit TSN`) — entries/chunks are reclaimed by deferred GC once no live
   transaction can still see the entity.
-- Enable/Disable never frees or reallocates a chunk — data is preserved for an immediate, zero-cost re-enable.
-  Two-state only (no partial); zero overhead unless a concurrent transaction is mid-`Enable`/`Disable`.
+- Enable/Disable never frees or reallocates a chunk — data is preserved for an immediate, zero-cost re-enable
+  (`Disable` then `Enable` alone, no value required). Three states: *enabled*, *disabled* (value stored, O(1) re-enable),
+  and *absent* (Versioned component never supplied at Spawn — `Enable(comp)` throws; use `Enable(comp, in value)`).
+  Zero overhead unless a concurrent transaction is mid-`Enable`/`Disable`.
 - There is no `tx.Read<T>(id)` shorthand — always `Open`/`OpenMut` first to obtain an `EntityRef`.
 - The old flat CRUD API (`CreateEntity`/`ReadEntity`/`UpdateEntity`/`DeleteEntity`) is gone — `EntityRef` is the
   only entity manipulation path.
