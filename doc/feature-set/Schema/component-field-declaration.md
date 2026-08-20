@@ -74,6 +74,7 @@ int healthOffset = def.FieldsByName["Health"].OffsetInComponentStorage;
 - `FieldId` is stable across reopens via name matching (or `PreviousName` for renames) — not C# declaration order — so secondary index identity survives field reordering or insertion.
 - Field lookup by id is a dense-array O(1) dereference (`definition[fieldId]`), not a dictionary — chosen for hot-path performance over flexibility.
 - Components must be blittable `unmanaged` structs; only public instance fields are reflected (static fields are ignored).
+- **`bool` and `char` fields are refused on the reflection-only path.** `RegisterComponentFromAccessor<T>()` uses the Typhon source generator's compile-time spec (managed offsets, measured with `Unsafe.ByteOffset`) and is unaffected. `RegisterComponentByType()` falls back to `Marshal.OffsetOf`, which reports the marshalled layout; `bool` is 4 bytes marshalled and 1 managed, `char` is 1 byte marshalled and 2 managed — offsets that are wrong for every field placed after them. Registration throws `InvalidOperationException` for such a component rather than silently storing addresses that read the wrong bytes (rule SCHEMA-07). Use `byte` for a flag and `ushort` for a code unit, or build with the source generator so the correct offsets are measured at compile time.
 - At most one `[SpatialIndex]` field per component; unsupported on `StorageMode.Transient`.
 - `[ForeignKey]` requires the field type to be `long`.
 - Field names must be a single alphabetic word, UTF-8-encoded, ≤ 63 bytes.
