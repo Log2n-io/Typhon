@@ -208,30 +208,52 @@ public class ResourceSnapshotTests
         Assert.That(snapshot.Rates.ContainsNode("Root/Storage/PageCache"), Is.True);
     }
 
+    /// <remarks>
+    /// The oracle reads the interval the engine itself measured (<see cref="ResourceSnapshot.Timestamp"/> on both
+    /// snapshots) rather than assuming <see cref="Thread.Sleep(int)"/> honours its argument. Asserting a rate band
+    /// derived from the requested 100ms is what reddened the arm64 nightly twice: a hosted macOS VM overslept 2.5x,
+    /// so 100 ops landed in a 250ms window and the "approximately 1000 ops/sec" came out at 400. The sleep below
+    /// only has to make the interval non-zero - its accuracy is deliberately not part of the assertion.
+    /// </remarks>
     [Test]
     public void GetSnapshot_RatesComputedCorrectly()
     {
+        // Non-zero starting counts so that delta != absolute count: starting both at 0 would make a
+        // "rate = count / elapsed" regression indistinguishable from the correct "rate = delta / elapsed".
         var resource = new TestMetricResource("PageCache", _registry.Storage)
         {
-            CacheHits = 0,
-            CacheMisses = 0
+            CacheHits = 1000,
+            CacheMisses = 400
         };
         _registry.Storage.RegisterChild(resource);
 
-        // First snapshot
-        _graph.GetSnapshot();
+        var first = _graph.GetSnapshot();
 
-        // Wait 100ms and add 100 hits
-        Thread.Sleep(100);
-        resource.CacheHits = 100;
+        // DateTime.UtcNow advances in ~15.6ms steps on Windows, so sleep a few ticks' worth to guarantee the
+        // interval is non-zero - ComputeRates returns null for elapsed <= 0.
+        Thread.Sleep(50);
+        resource.CacheHits = 1100;   // delta 100
+        resource.CacheMisses = 450;  // delta 50
 
-        // Second snapshot
-        var snapshot = _graph.GetSnapshot();
+        var second = _graph.GetSnapshot();
 
-        // Should be approximately 1000 ops/sec (100 ops in 0.1 sec)
-        var rate = snapshot.Rates.GetRate("Root/Storage/PageCache", "CacheHits");
-        Assert.That(rate, Is.GreaterThan(500), "Rate should be > 500 ops/sec");
-        Assert.That(rate, Is.LessThan(2000), "Rate should be < 2000 ops/sec");
+        var elapsedSeconds = (second.Timestamp - first.Timestamp).TotalSeconds;
+        Assert.That(elapsedSeconds, Is.GreaterThan(0), "Snapshot timestamps must advance for rates to exist");
+
+        var hitRate = second.Rates.GetRate("Root/Storage/PageCache", "CacheHits");
+        var missRate = second.Rates.GetRate("Root/Storage/PageCache", "CacheMisses");
+
+        Assert.Multiple(() =>
+        {
+            // Rate is the counter DELTA over the measured window, in ops/sec - not the absolute count, and not
+            // ops/ms. Both are pinned against the window the engine reported.
+            Assert.That(hitRate, Is.EqualTo(100 / elapsedSeconds).Within(1e-6).Percent, "CacheHits rate is delta/elapsed");
+            Assert.That(missRate, Is.EqualTo(50 / elapsedSeconds).Within(1e-6).Percent, "CacheMisses rate is delta/elapsed");
+
+            // Clock-independent cross-check: both metrics span the SAME window, so their rates must hold the same
+            // ratio as their deltas whatever the wall-clock did. No amount of scheduler jitter can perturb this.
+            Assert.That(hitRate, Is.EqualTo(missRate * 2).Within(1e-6).Percent, "100 hits vs 50 misses over one window");
+        });
     }
 
     [Test]
