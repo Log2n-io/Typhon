@@ -1,0 +1,62 @@
+// typhon.telemetry.json — written by `typhon telemetry`. Only explicit flags are listed;
+// everything else inherits (see the telemetry flags reference). Env vars override this file.
+{
+  "Typhon": {
+    "Profiler": {
+      // Live TCP port for the Workbench to attach to — also published in the database's db.lock,
+      // so opening that database while this app holds it can offer to watch it.
+      "Live": 9100,
+      // Global profiler enable/disable. When false, all profiler-emitted telemetry is disabled regardless of individual component settings.
+      "Enabled": true,
+      "CpuSampling": {
+        // Whether opt-in in-process CPU stack sampling is requested by configuration.
+        "Enabled": true
+      },
+      "Durability": {
+        // Combined gate for the Durability tracing subtree (WAL, checkpoint, recovery, UoW spans).
+        "Enabled": true
+      },
+      "ECS": {
+        // Combined gate for the ECS tracing subtree (query-construction and view-maintenance spans).
+        "Enabled": true
+      },
+      "Gauges": {
+        // Whether opt-in per-tick gauge snapshots are requested by configuration.
+        "Enabled": true
+      },
+      "GcTracing": {
+        // Whether opt-in .NET runtime GC-event tracing is requested by configuration.
+        "Enabled": true
+      },
+      "MemoryAllocations": {
+        // Whether opt-in per-allocation tracking is requested by configuration.
+        "Enabled": true
+      },
+      "Query": {
+        // Combined gate for the Query tracing subtree (parse/plan/execute spans).
+        "Enabled": true
+      },
+      "Runtime": {
+        // Combined gate for the Runtime tracing subtree (UoW phase, transaction lifecycle, subscription spans).
+        "Enabled": true,
+        "Phase": {
+          "Enabled": false
+        },
+        "Subscription": {
+          "Enabled": false
+        },
+        "Transaction": {
+          "Enabled": false
+        }
+      },
+      "Scheduler": {
+        // Whether Scheduler component telemetry is enabled in configuration.
+        "Enabled": true
+      },
+      "Spatial": {
+        // Combined gate for the entire Spatial subsystem (parent of all Spatial:* leaves).
+        "Enabled": true
+      }
+    }
+  }
+}

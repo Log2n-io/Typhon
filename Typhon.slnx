@@ -41,6 +41,7 @@
         </Project>
         <Project Path="demo/AntHill/AntHill.Harness/AntHill.Harness.csproj" />
         <Project Path="demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj" />
+        <Project Path="demo/SpaceBattle/SpaceBattle.csproj" />
     </Folder>
     <Folder Name="/tools/">
         <Project Path="tools/Typhon.Workbench/Typhon.Workbench.csproj" />
