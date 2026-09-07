@@ -97,6 +97,12 @@ class Program
                 return;
             }
 
+            if (args.Contains("--query-phases"))
+            {
+                QueryPhaseProfile.Run(args);
+                return;
+            }
+
             if (args.Contains("--storage-model"))
             {
                 StorageModelProfile.Run(args);
