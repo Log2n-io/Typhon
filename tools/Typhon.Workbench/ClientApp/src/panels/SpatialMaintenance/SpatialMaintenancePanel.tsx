@@ -121,7 +121,7 @@ export default function SpatialMaintenancePanel(_props: IDockviewPanelProps) {
                 that made an 8 ms budget buy one repair unit. The span beside it is what makes this figure readable:
                 their ratio is the parallelism the work achieved. */}
             <Stat label="Migration cost" value={sample.row.migrationCpuMs} decimals={3} unit="CPU-ms" hint="Summed across workers, not a span." />
-            <FenceSpan gaugeSeries={gaugeData.gaugeSeries} migrationCpuMs={sample.row.migrationCpuMs} />
+            <FenceSpan gaugeSeries={gaugeData.gaugeSeries} migrationCpuMs={sample.row.migrationCpuMs} tickNumber={sample.tickNumber} />
           </Group>
 
           <Group title="Structure" testId="spatial-group-structure" hint="What the partition looks like right now.">
@@ -219,8 +219,16 @@ function Reading({ testId, title, ok, detail, note }: {
  *
  * Absent series is a real state and is said out loud: a host that drives `WriteTickFence` itself never runs the
  * phase-exec systems that time the span, so there is nothing to report — which is not the same as a free fence.
+ *
+ * <b>The gauge sample is selected by tick, not by recency.</b> The span rides the engine-wide gauge channel and the CPU-ms
+ * comes from the archetype's own record, so "newest of each" is two different ticks whenever the archetype has been quiet at
+ * the end of the window — and their ratio is then a number about nothing. The panel's rule is that the tick is named, never
+ * implied; a span shown under a header labelled with a row's tick has to BE that tick's span.
  */
-function FenceSpan({ gaugeSeries, migrationCpuMs }: { gaugeSeries: Map<GaugeId, GaugeSeries>; migrationCpuMs: number }) {
+function FenceSpan(
+  { gaugeSeries, migrationCpuMs, tickNumber }:
+  { gaugeSeries: Map<GaugeId, GaugeSeries>; migrationCpuMs: number; tickNumber: number },
+) {
   const series = gaugeSeries.get(GaugeId.ClusterFenceSpanUs);
   if (series === undefined || series.samples.length === 0) {
     return (
@@ -231,7 +239,20 @@ function FenceSpan({ gaugeSeries, migrationCpuMs }: { gaugeSeries: Map<GaugeId, 
     );
   }
 
-  const spanMs = series.samples[series.samples.length - 1].value / 1000;
+  // "The series exists but not for THIS tick" is a third state, and collapsing it into either of the other two lies. Showing the
+  // newest sample would pair a span from one tick with CPU-ms from another under a header naming the second; showing "not
+  // measured" would claim a serial fence on an engine that plainly has a parallel one.
+  const matching = series.samples.find((s) => s.tickNumber === tickNumber);
+  if (matching === undefined) {
+    return (
+      <div className="flex items-baseline justify-between gap-2 text-fs-xs" data-testid="spatial-fence-span-tick-mismatch">
+        <span className="text-muted-foreground">Fence span</span>
+        <span className="font-mono text-muted-foreground">no span recorded for tick {tickNumber.toLocaleString()}</span>
+      </div>
+    );
+  }
+
+  const spanMs = matching.value / 1000;
   // Parallelism, shown only when both terms are real: CPU-ms over span is how many workers' worth of CPU one unit of
   // span bought, and it is the whole reason the two are printed together.
   const parallelism = spanMs > 0 && migrationCpuMs > 0 ? migrationCpuMs / spanMs : 0;

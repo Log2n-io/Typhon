@@ -1045,7 +1045,6 @@ public partial class DatabaseEngine
             migrationScope.CrossingCount = crossingCount;
             migrationScope.RelocationCount = relocationCount;
             migrationScope.RepairCount = repairCount;
-            migrationScope.Dispose();
 
             emAccessor.Dispose();
             if (hasTransientClusterAccessor)
@@ -1056,6 +1055,12 @@ public partial class DatabaseEngine
             {
                 clusterAccessor.Dispose();
             }
+
+            // AFTER the accessor disposals, which is where `using var migrationScope` used to put it before the readonly-field rules forced an explicit
+            // Dispose. The argument the comment at the span's START makes — that moving it shrinks kind 60 with no work getting faster, and silently breaks
+            // every timeline comparison against a pre-#911 trace — applies to the END in exactly the same way. Releasing three accessors is real work this
+            // method does, and the span has always covered it.
+            migrationScope.Dispose();
 
             // saveChanges and ReleaseDirtyMarks are deliberately NOT called here. ExecuteMigrations operates on the UoW's shared ChangeSet (passed
             // by the caller through WriteClusterTickFence → WriteTickFence). The UoW owns the commit lifecycle: in WAL mode SaveChanges is never called

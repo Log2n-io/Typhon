@@ -156,4 +156,21 @@ describe('ratePerSecond', () => {
   it('is zero for a window with no samples', () => {
     expect(ratePerSecond([tick(1, null)], ARCH, (r) => r.migrations)).toBe(0);
   });
+
+  it('divides by the whole window, not by the span of the ticks that carried a row', () => {
+    // The settled-world case, and the one that was wrong: 100 migrations on ONE 1 ms tick inside a 1 s window is 100/s.
+    // Spanning only the carrying tick makes the denominator 1 ms and reports ~100 000/s — a rate that grows as the
+    // archetype gets quieter, which is precisely backwards.
+    const ticks = [
+      tick(1, [row({ migrations: 100 })], 0, 1000),
+      ...Array.from({ length: 9 }, (_, i) => tick(i + 2, null, (i + 1) * 100_000, ((i + 1) * 100_000) + 1000)),
+    ];
+    ticks.push(tick(11, null, 900_000, 1_000_000));
+
+    expect(ratePerSecond(ticks, ARCH, (r) => r.migrations)).toBeCloseTo(100, 3);
+  });
+
+  it('is zero for an empty window', () => {
+    expect(ratePerSecond([], ARCH, (r) => r.migrations)).toBe(0);
+  });
 });

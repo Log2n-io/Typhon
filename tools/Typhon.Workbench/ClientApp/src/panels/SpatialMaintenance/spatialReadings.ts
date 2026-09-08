@@ -180,18 +180,18 @@ export function detectRepairPin(ticks: readonly TickData[], archetypeId: number)
 export function ratePerSecond(
   ticks: readonly TickData[], archetypeId: number, select: (row: SpatialTickTelemetry) => number,
 ): number {
-  let total = 0;
-  let firstUs = Number.POSITIVE_INFINITY;
-  let lastUs = Number.NEGATIVE_INFINITY;
+  if (ticks.length === 0) return 0;
 
+  let total = 0;
   for (const t of ticks) {
     const row = t.spatialByArchetype?.get(archetypeId);
-    if (row === undefined) continue;
-    total += select(row);
-    if (t.startUs < firstUs) firstUs = t.startUs;
-    if (t.endUs > lastUs) lastUs = t.endUs;
+    if (row !== undefined) total += select(row);
   }
 
-  const spanUs = lastUs - firstUs;
+  // The denominator is the WHOLE window, not the span of the ticks that happened to carry a row. Deriving it from the carrying ticks
+  // divides by the wrong thing exactly when the archetype has been quiet: 100 migrations on a single 1 ms tick inside a 1 s window
+  // is 100/s, and spanning only that tick reports ~100,000/s. A rate whose denominator shrinks as activity gets rarer inflates
+  // precisely the readings a quiet world should make small.
+  const spanUs = ticks[ticks.length - 1].endUs - ticks[0].startUs;
   return spanUs > 0 ? (total * 1_000_000) / spanUs : 0;
 }

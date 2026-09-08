@@ -40,11 +40,11 @@ function tick(tickNumber: number, rows: SpatialTickTelemetry[]): TickData {
   } as unknown as TickData;
 }
 
-function setLive(ticks: TickData[], gauges: Array<[GaugeId, number]> = []) {
+function setLive(ticks: TickData[], gauges: Array<[GaugeId, number]> = [], gaugeTick = 1) {
   live.data = {
     windowedTicks: ticks,
     gaugeData: {
-      gaugeSeries: new Map(gauges.map(([id, value]) => [id, { id, samples: [{ tickNumber: 1, timestampUs: 0, value }] }])),
+      gaugeSeries: new Map(gauges.map(([id, value]) => [id, { id, samples: [{ tickNumber: gaugeTick, timestampUs: 0, value }] }])),
       gaugeCapacities: new Map(),
       memoryAllocEvents: [], gcEvents: [], gcSuspensions: [], offCpuBySlot: new Map(),
     },
@@ -151,6 +151,20 @@ describe('Spatial Maintenance panel (#911 O3)', () => {
     setLive(Array.from({ length: 6 }, (_, i) => tick(i + 1, [row({ repairUnits: 1, repairUnitsRefused: 2 })])));
     render(<SpatialMaintenancePanel {...NO_PROPS} />);
     expect(screen.getByTestId('spatial-reading-repair-pin-badge').textContent).toBe('check');
+  });
+
+  it('will not pair a span from one tick with CPU-ms from another', () => {
+    // The span rides the engine-wide gauge channel and the CPU-ms comes from the archetype's own record, so "newest of each" is
+    // two different ticks the moment the archetype goes quiet at the end of the window. Their ratio would then be a number about
+    // nothing, printed under a header naming only one of them.
+    setLive([tick(7, [row({ migrationCpuMs: 36 })])], [[GaugeId.ClusterFenceSpanUs, 9000]], 5);
+    render(<SpatialMaintenancePanel {...NO_PROPS} />);
+
+    const mismatch = screen.getByTestId('spatial-fence-span-tick-mismatch');
+    expect(mismatch.textContent).toContain('7');
+    expect(mismatch.textContent).not.toContain('9.000');
+    // And it must not claim a serial fence either — the engine has a span, just not for this tick.
+    expect(screen.queryByTestId('spatial-fence-span-absent')).toBeNull();
   });
 
   it('says an engine with no grid emits no occupancy series, rather than drawing zeros', () => {
