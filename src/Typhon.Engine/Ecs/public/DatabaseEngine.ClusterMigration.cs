@@ -427,7 +427,7 @@ public partial class DatabaseEngine
                     var entityPK = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
                     var fieldPtr = clusterBase + compOffset + slotIndex * compSize + ss.FieldOffset;
                     SpatialGrid.ReadSpatialCenter3D(fieldPtr, fieldType, out var posX, out var posY, out var posZ);
-                    if (!float.IsFinite(posX) || !float.IsFinite(posY) || !float.IsFinite(posZ))
+                    if (!double.IsFinite(posX) || !double.IsFinite(posY) || !double.IsFinite(posZ))
                     {
                         throw new InvalidOperationException(
                             $"Non-finite position on spatial entity: entityId=0x{entityPK:X16}, clusterChunkId={clusterChunkId}, slotIndex={slotIndex}, "
@@ -469,7 +469,7 @@ public partial class DatabaseEngine
                             var ex = posX < curCellMinX ? (curCellMinX - posX) : (posX > curCellMaxX ? (posX - curCellMaxX) : 0f);
                             var ey = posY < curCellMinY ? (curCellMinY - posY) : (posY > curCellMaxY ? (posY - curCellMaxY) : 0f);
                             var ez = posZ < curCellMinZ ? (curCellMinZ - posZ) : (posZ > curCellMaxZ ? (posZ - curCellMaxZ) : 0f);
-                            TyphonEvent.EmitSpatialClusterMigrationHysteresis(archetypeId, clusterChunkId, (ex * ex) + (ey * ey) + (ez * ez));
+                            TyphonEvent.EmitSpatialClusterMigrationHysteresis(archetypeId, clusterChunkId, (float)((ex * ex) + (ey * ey) + (ez * ez)));
                         }
                     }
                 }
@@ -738,9 +738,9 @@ public partial class DatabaseEngine
                         var srcFieldPtr = srcPrimaryPre + spatialCompOffset + srcSlot * spatialCompSize + ss.FieldOffset;
                         SpatialGrid.ReadSpatialCenter3D(srcFieldPtr, ss.FieldInfo.FieldType, out var migrantX, out var migrantY, out var migrantZ);
                         grid.CellOrigin(destCellKey, out var destOriginX, out var destOriginY, out var destOriginZ);
-                        destPx = migrantX - destOriginX;
-                        destPy = migrantY - destOriginY;
-                        destPz = migrantZ - destOriginZ;
+                        destPx = (float)(migrantX - destOriginX);
+                        destPy = (float)(migrantY - destOriginY);
+                        destPz = (float)(migrantZ - destOriginZ);
                     }
 
                     if (hasClusterAccessor)
@@ -903,8 +903,8 @@ public partial class DatabaseEngine
                         var dstCellKey = clusterState.ClusterCellMap[dstChunkId];
                         if (dstCellKey >= 0)
                         {
-                            _spatialGrid.CellOrigin(dstCellKey, out float dstOriginX, out float dstOriginY, out float dstOriginZ);
-                            if (ss.FieldInfo.FieldType == SpatialFieldType.AABB3F || ss.FieldInfo.FieldType == SpatialFieldType.BSphere3F)
+                            _spatialGrid.CellOrigin(dstCellKey, out double dstOriginX, out double dstOriginY, out double dstOriginZ);
+                            if (ss.FieldInfo.FieldType.Is3D())
                             {
                                 dstClusterAabb.Union3F(
                                     ClusterSpatialAabb.ToCellRelativeMin(migrantCoords[0], dstOriginX),

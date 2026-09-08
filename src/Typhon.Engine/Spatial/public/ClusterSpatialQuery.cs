@@ -15,9 +15,9 @@ namespace Typhon.Engine;
 /// Without it, the per-cell index is never populated and querying throws <see cref="InvalidOperationException"/>.
 /// </para>
 /// <para>
-/// <b>Current scope.</b> 2D and 3D f32 bounds (AABB2F/AABB3F and BSphere2F/BSphere3F); f64 tiers (AABB2D/AABB3D) throw <see cref="NotSupportedException"/>
-/// pending a follow-up sub-issue of #228. Queries traverse both the per-cell dynamic and static indexes. No overflow R-Tree — the broadphase is a linear
-/// scan over all clusters in each cell, which is optimal for typical AntHill cell populations (≤80 clusters).
+/// <b>Current scope.</b> All four tiers since #914 — 2D and 3D, f32 and f64 (AABB2F/AABB3F/AABB2D/AABB3D and the matching BSphere variants). Queries
+/// traverse both the per-cell dynamic and static indexes. No overflow R-Tree — the broadphase is a linear scan over all clusters in each cell, which is
+/// optimal for typical AntHill cell populations (≤80 clusters).
 /// </para>
 /// <para>
 /// <b>Implementation.</b> This generic entry point exists to provide the tier-aware public API surface with a JIT-specialized dispatch path per concrete box
@@ -60,9 +60,19 @@ public readonly ref struct ClusterSpatialQuery<TArch> where TArch : Archetype<TA
     /// Thrown when the archetype has no spatial index, or when <typeparamref name="TBox"/>'s tier does not match the archetype's cluster storage tier.
     /// </exception>
     /// <exception cref="NotSupportedException">
-    /// Thrown for f64 <typeparamref name="TBox"/> variants (AABB2D, AABB3D). f32 variants (AABB2F, AABB3F) are fully supported. f64 support is deferred to
-    /// a follow-up sub-issue of #228 and will fill in mechanically.
+    /// Thrown only for an <see cref="ISpatialBox"/> implementer with no dispatch branch here. All four box types that exist are supported since #914.
     /// </exception>
+    /// <remarks>
+    /// <b><see cref="MethodImplOptions.AggressiveInlining"/> is load-bearing and was measured, not assumed (#919 AC-6).</b> Adding the two f64 dispatch
+    /// branches took this method's IL from 716 to 814 bytes. The JIT decides inlining from IL size <i>before</i> it folds the
+    /// <c>typeof(TBox) == typeof(...)</c> tests, so the specialised body that actually runs stayed small while the method stopped being inlined — and
+    /// because it RETURNS a <see cref="AabbClusterEnumerator"/> by value, that cost every query one extra copy of a 1.6 KB <c>ref struct</c>. Measured
+    /// interleaved against the pre-#914 build: <b>+44 ns on every query</b>, fixed rather than per-cell, which at a 3×3-cell query is a tenth of the whole
+    /// thing. The attribute takes it back to +6 ns.
+    /// <para>So: <b>if another box variant is added here, re-measure.</b> The branches are free once specialised, but each one spends IL budget that the
+    /// inliner counts before it can know that.</para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public AabbClusterEnumerator AABB<TBox>(in TBox box, uint categoryMask = uint.MaxValue) where TBox : struct, ISpatialBox
     {
         if (_state == null || !_state.SpatialSlot.HasSpatialIndex)
@@ -95,7 +105,7 @@ public readonly ref struct ClusterSpatialQuery<TArch> where TArch : Archetype<TA
             // 2D queries against 2D cluster storage: set the Z range to +/- infinity so the Z overlap test trivially passes against any stored Z bounds
             // (2D archetypes leave Z at the Empty sentinel). The unified AabbClusterEnumerator always runs a 3D overlap check, and infinite Z bounds make
             // it a no-op for 2D queries without needing a separate code path.
-            return _state.QueryAabb(_grid, b.MinX, b.MinY, float.NegativeInfinity, b.MaxX, b.MaxY, float.PositiveInfinity, categoryMask);
+            return _state.QueryAabb(_grid, b.MinX, b.MinY, double.NegativeInfinity, b.MaxX, b.MaxY, double.PositiveInfinity, categoryMask);
         }
         if (typeof(TBox) == typeof(AABB3F))
         {
@@ -104,15 +114,16 @@ public readonly ref struct ClusterSpatialQuery<TArch> where TArch : Archetype<TA
         }
         if (typeof(TBox) == typeof(AABB2D))
         {
-            throw new NotSupportedException(
-                $"ClusterSpatialQuery<{typeof(TArch).Name}>.AABB<AABB2D>: 2D f64 cluster queries are not yet " +
-                "implemented. Deferred to a follow-up sub-issue of #228.");
+            // The f64 branches are the f32 ones with no conversion at all, which is what #914 phase C actually amounted to here: the enumerator's query box
+            // is f64, so an AABB2D's doubles are simply passed through where an AABB2F's floats are widened. The tier check above has already established
+            // that the archetype's storage matches, so a caller cannot reach this branch against an f32 archetype.
+            ref var b = ref Unsafe.As<TBox, AABB2D>(ref Unsafe.AsRef(in box));
+            return _state.QueryAabb(_grid, b.MinX, b.MinY, double.NegativeInfinity, b.MaxX, b.MaxY, double.PositiveInfinity, categoryMask);
         }
         if (typeof(TBox) == typeof(AABB3D))
         {
-            throw new NotSupportedException(
-                $"ClusterSpatialQuery<{typeof(TArch).Name}>.AABB<AABB3D>: 3D f64 cluster queries are not yet " +
-                "implemented. Deferred to a follow-up sub-issue of #228.");
+            ref var b = ref Unsafe.As<TBox, AABB3D>(ref Unsafe.AsRef(in box));
+            return _state.QueryAabb(_grid, b.MinX, b.MinY, b.MinZ, b.MaxX, b.MaxY, b.MaxZ, categoryMask);
         }
 
         // Unreachable under the ISpatialBox constraint + the 4 concrete implementers that exist today. Kept as a safety net: if a future box variant is added
@@ -145,7 +156,7 @@ public readonly ref struct ClusterSpatialQuery<TArch> where TArch : Archetype<TA
             throw new InvalidOperationException(
                 $"ClusterSpatialQuery<{typeof(TArch).Name}>.Radius(BSphere2F): " +
                 $"query tier Tier2F does not match archetype storage tier {storageTier}. " +
-                "Use the BSphere3F overload for 3D archetypes (or AABB2D/AABB3D follow-ups once f64 cluster queries ship).");
+                "Use the overload matching your archetype's dimensionality and precision (BSphere2F / BSphere3F / BSphere2D / BSphere3D).");
         }
 
         return _state.QueryRadius(_grid, sphere.CenterX, sphere.CenterY, 0f, sphere.Radius, categoryMask);
@@ -170,7 +181,57 @@ public readonly ref struct ClusterSpatialQuery<TArch> where TArch : Archetype<TA
             throw new InvalidOperationException(
                 $"ClusterSpatialQuery<{typeof(TArch).Name}>.Radius(BSphere3F): " +
                 $"query tier Tier3F does not match archetype storage tier {storageTier}. " +
-                "Use the BSphere2F overload for 2D archetypes (or AABB2D/AABB3D follow-ups once f64 cluster queries ship).");
+                "Use the overload matching your archetype's dimensionality and precision (BSphere2F / BSphere3F / BSphere2D / BSphere3D).");
+        }
+
+        return _state.QueryRadius(_grid, sphere.CenterX, sphere.CenterY, sphere.CenterZ, sphere.Radius, categoryMask);
+    }
+
+    /// <summary>
+    /// f64 counterpart of <see cref="Radius(in BSphere2F, uint)"/> (#914). The archetype must be 2D f64 (tier <c>Tier2D</c>).
+    /// </summary>
+    public AabbClusterEnumerator Radius(in BSphere2D sphere, uint categoryMask = uint.MaxValue)
+    {
+        if (_state == null || !_state.SpatialSlot.HasSpatialIndex)
+        {
+            throw new InvalidOperationException(
+                $"ClusterSpatialQuery<{typeof(TArch).Name}>: archetype has no spatial index. " +
+                "Ensure the archetype has a SpatialIndex field and that ConfigureSpatialGrid was called " +
+                "on the engine before InitializeArchetypes.");
+        }
+
+        var storageTier = _state.SpatialSlot.FieldInfo.FieldType.ToTier();
+        if (storageTier != SpatialTier.Tier2D)
+        {
+            throw new InvalidOperationException(
+                $"ClusterSpatialQuery<{typeof(TArch).Name}>.Radius(BSphere2D): " +
+                $"query tier Tier2D does not match archetype storage tier {storageTier}. " +
+                "Use the overload matching your archetype's dimensionality and precision (BSphere2F / BSphere3F / BSphere2D / BSphere3D).");
+        }
+
+        return _state.QueryRadius(_grid, sphere.CenterX, sphere.CenterY, 0d, sphere.Radius, categoryMask);
+    }
+
+    /// <summary>
+    /// f64 counterpart of <see cref="Radius(in BSphere3F, uint)"/> (#914). The archetype must be 3D f64 (tier <c>Tier3D</c>).
+    /// </summary>
+    public AabbClusterEnumerator Radius(in BSphere3D sphere, uint categoryMask = uint.MaxValue)
+    {
+        if (_state == null || !_state.SpatialSlot.HasSpatialIndex)
+        {
+            throw new InvalidOperationException(
+                $"ClusterSpatialQuery<{typeof(TArch).Name}>: archetype has no spatial index. " +
+                "Ensure the archetype has a SpatialIndex field and that ConfigureSpatialGrid was called " +
+                "on the engine before InitializeArchetypes.");
+        }
+
+        var storageTier = _state.SpatialSlot.FieldInfo.FieldType.ToTier();
+        if (storageTier != SpatialTier.Tier3D)
+        {
+            throw new InvalidOperationException(
+                $"ClusterSpatialQuery<{typeof(TArch).Name}>.Radius(BSphere3D): " +
+                $"query tier Tier3D does not match archetype storage tier {storageTier}. " +
+                "Use the overload matching your archetype's dimensionality and precision (BSphere2F / BSphere3F / BSphere2D / BSphere3D).");
         }
 
         return _state.QueryRadius(_grid, sphere.CenterX, sphere.CenterY, sphere.CenterZ, sphere.Radius, categoryMask);
@@ -182,6 +243,14 @@ public readonly ref struct ClusterSpatialQuery<TArch> where TArch : Archetype<TA
 /// bounds as read by the narrowphase, and — for Radius queries — the squared distance from the query center to the closest point on the entity's AABB.
 /// For AABB queries, <see cref="DistanceSq"/> is <c>0</c> and should be ignored.
 /// </summary>
+/// <remarks>
+/// <b>The bounds are f64 since #914</b>, because they are WORLD coordinates and the world frame is f64. For an f32 tier the values are the stored floats
+/// widened — exact, so an <c>AABB2F</c> archetype reads back precisely what it stored — and for an f64 tier they are the only way the caller can see the
+/// coordinate the component actually holds. This is what "the query supports f64" has to mean beyond the query box: a result that narrowed the answer back
+/// to f32 would hand an <c>AABB3D</c> archetype at 10⁹ a bound quantised to ~128-unit steps, and the tier would be internal-only in the way #914 exists to
+/// stop. It also costs the narrowphase nothing: <c>ReadAndValidateBoundsFromPtr</c> already produced doubles, so the six per-entity conversions that used to
+/// narrow them are gone rather than added.
+/// </remarks>
 public readonly struct ClusterSpatialQueryResult
 {
     /// <summary>Entity id of the matched entity.</summary>
@@ -195,30 +264,30 @@ public readonly struct ClusterSpatialQueryResult
 
     /// <summary>Squared distance from the query center to the closest point on the entity's AABB. Populated by Radius queries; always <c>0</c> for AABB
     /// queries. Used by <c>ArchetypeClusterState.QueryNearest</c> for top-k sorting. Issue #230 Phase 3.</summary>
-    public readonly float DistanceSq;
+    public readonly double DistanceSq;
 
     /// <summary>
     /// Minimum X of the entity's tight AABB, as read by the narrowphase. Reading these bounds off the result lets callers skip a second component-table read.
     /// </summary>
-    public readonly float MinX;
+    public readonly double MinX;
 
     /// <summary>Minimum Y of the entity's tight AABB.</summary>
-    public readonly float MinY;
+    public readonly double MinY;
 
     /// <summary>Minimum Z of the entity's tight AABB. For 2D archetypes this reflects the query's Z range (typically an infinity sentinel) and should be ignored.</summary>
-    public readonly float MinZ;
+    public readonly double MinZ;
 
     /// <summary>Maximum X of the entity's tight AABB.</summary>
-    public readonly float MaxX;
+    public readonly double MaxX;
 
     /// <summary>Maximum Y of the entity's tight AABB.</summary>
-    public readonly float MaxY;
+    public readonly double MaxY;
 
     /// <summary>Maximum Z of the entity's tight AABB. For 2D archetypes this reflects the query's Z range (typically an infinity sentinel) and should be ignored.</summary>
-    public readonly float MaxZ;
+    public readonly double MaxZ;
 
-    internal ClusterSpatialQueryResult(long entityId, int clusterChunkId, int slotIndex, float minX, float minY, float minZ, float maxX, float maxY, float maxZ,
-        float distanceSq = 0f)
+    internal ClusterSpatialQueryResult(long entityId, int clusterChunkId, int slotIndex, double minX, double minY, double minZ, double maxX, double maxY,
+        double maxZ, double distanceSq = 0d)
     {
         EntityId = entityId;
         ClusterChunkId = clusterChunkId;

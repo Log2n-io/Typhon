@@ -181,14 +181,15 @@ class ClusterSpatialTests : TestBase<ClusterSpatialTests>
             // that span rather than equal it exactly.
             var cellKey = cs.ClusterCellMap[chunkId];
             dbe.SpatialGrid.CellOrigin(cellKey, out var ox, out var oy, out var oz);
-            Assert.That(ClusterSpatialAabb.ToWorldMin(aabb.MinX, (float)ox), Is.LessThanOrEqualTo(9f), "the bound must still contain the surviving entities");
-            Assert.That(ClusterSpatialAabb.ToWorldMax(aabb.MaxX, (float)ox), Is.GreaterThanOrEqualTo(21f), "the bound must still contain the surviving entities");
-            Assert.That(ClusterSpatialAabb.ToWorldMax(aabb.MaxY, (float)oy), Is.GreaterThanOrEqualTo(21f));
-            Assert.That(ClusterSpatialAabb.ToWorldMax(aabb.MaxZ, (float)oz), Is.GreaterThanOrEqualTo(21f));
+            const string Contains = "the bound must still contain the surviving entities";
+            Assert.That(ClusterSpatialAabb.ToWorldExact(aabb.MinX, ox), Is.LessThanOrEqualTo(9d), Contains);
+            Assert.That(ClusterSpatialAabb.ToWorldExact(aabb.MaxX, ox), Is.GreaterThanOrEqualTo(21d), Contains);
+            Assert.That(ClusterSpatialAabb.ToWorldExact(aabb.MaxY, oy), Is.GreaterThanOrEqualTo(21d), Contains);
+            Assert.That(ClusterSpatialAabb.ToWorldExact(aabb.MaxZ, oz), Is.GreaterThanOrEqualTo(21d), Contains);
 
             // And it must NOT have been stretched to the degenerate entity's old position at 1000.
             // The inverted box spans 40..60, entirely outside the healthy 9..21 span. Accepting it would stretch the bound to 60.
-            Assert.That(ClusterSpatialAabb.ToWorldMax(aabb.MaxX, (float)ox), Is.LessThan(30f),
+            Assert.That(ClusterSpatialAabb.ToWorldExact(aabb.MaxX, ox), Is.LessThan(30d),
                 "the degenerate slot was folded into the bound instead of being skipped");
         });
 

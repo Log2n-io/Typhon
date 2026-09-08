@@ -204,7 +204,7 @@ public static class Program
                 continue;
             }
             var a = cluster.SpatialBounds;
-            if (!(a.MinX <= a.MaxX) || float.IsInfinity(a.MinX))
+            if (!(a.MinX <= a.MaxX) || double.IsInfinity(a.MinX))
             {
                 continue;
             }
@@ -213,7 +213,7 @@ public static class Program
             {
                 ArchetypeId = host.ShipArchetypeId,
                 ChunkId = cluster.ChunkId,
-                MinX = a.MinX, MinY = a.MinY, MaxX = a.MaxX, MaxY = a.MaxY,
+                MinX = (float)a.MinX, MinY = (float)a.MinY, MaxX = (float)a.MaxX, MaxY = (float)a.MaxY,
                 LiveCount = cluster.LiveCount,
                 HomeCellKey = home,
                 CentreCellKey = host.Grid.WorldToCellKey(0.5f * (a.MinX + a.MaxX), 0.5f * (a.MinY + a.MaxY), 0f),

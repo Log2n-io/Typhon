@@ -365,16 +365,19 @@ internal sealed class Renderer
     private void BuildGrid()
     {
         var g = _host.GridConfig;
-        var cs = g.CellSize;
+        // f64 world frame (#914) narrowed once for the renderer, which works in f32 throughout.
+        var cs = (float)g.CellSize;
+        var worldMinX = (float)g.WorldMin.X;
+        var worldMinY = (float)g.WorldMin.Y;
         var w = g.GridWidth;
         var h = g.GridHeight;
 
         // Only the cells on screen. Zoomed in over a 50x50 grid this is a handful instead of 2,500.
         var inv = 1f / cs;
-        var vx0 = Math.Clamp((int)MathF.Floor((_visible.MinX - g.WorldMin.X) * inv), 0, w - 1);
-        var vy0 = Math.Clamp((int)MathF.Floor((_visible.MinY - g.WorldMin.Y) * inv), 0, h - 1);
-        var vx1 = Math.Clamp((int)MathF.Floor((_visible.MaxX - g.WorldMin.X) * inv), 0, w - 1);
-        var vy1 = Math.Clamp((int)MathF.Floor((_visible.MaxY - g.WorldMin.Y) * inv), 0, h - 1);
+        var vx0 = Math.Clamp((int)MathF.Floor((_visible.MinX - worldMinX) * inv), 0, w - 1);
+        var vy0 = Math.Clamp((int)MathF.Floor((_visible.MinY - worldMinY) * inv), 0, h - 1);
+        var vx1 = Math.Clamp((int)MathF.Floor((_visible.MaxX - worldMinX) * inv), 0, w - 1);
+        var vy1 = Math.Clamp((int)MathF.Floor((_visible.MaxY - worldMinY) * inv), 0, h - 1);
 
         if (_cfg.ShowCellHeat)
         {
@@ -402,8 +405,8 @@ internal sealed class Renderer
                     // sqrt keeps sparse cells visible next to one very hot cell
                     var t = MathF.Sqrt(n / (float)maxN);
                     var c = new Color((byte)(20 + 60 * t), (byte)(30 + 40 * t), (byte)(70 + 90 * t), (byte)(40 + 110 * t));
-                    var x0 = g.WorldMin.X + cx * cs;
-                    var y0 = g.WorldMin.Y + cy * cs;
+                    var x0 = worldMinX + cx * cs;
+                    var y0 = worldMinY + cy * cs;
                     Quad(_heat, x0, y0, x0 + cs, y0 + cs, c);
                 }
             }
@@ -411,13 +414,13 @@ internal sealed class Renderer
 
         for (var cy = vy0; cy <= vy1 + 1; cy++)
         {
-            var y = g.WorldMin.Y + cy * cs;
-            Line(_lines, g.WorldMin.X + vx0 * cs, y, g.WorldMin.X + (vx1 + 1) * cs, y, CellLine);
+            var y = worldMinY + cy * cs;
+            Line(_lines, worldMinX + vx0 * cs, y, worldMinX + (vx1 + 1) * cs, y, CellLine);
         }
         for (var cx = vx0; cx <= vx1 + 1; cx++)
         {
-            var x = g.WorldMin.X + cx * cs;
-            Line(_lines, x, g.WorldMin.Y + vy0 * cs, x, g.WorldMin.Y + (vy1 + 1) * cs, CellLine);
+            var x = worldMinX + cx * cs;
+            Line(_lines, x, worldMinY + vy0 * cs, x, worldMinY + (vy1 + 1) * cs, CellLine);
         }
     }
 
@@ -477,24 +480,29 @@ internal sealed class Renderer
         }
     }
 
-    private void AddClusterBox(int archetypeId, int chunkId, in ClusterSpatialAabb a, int liveCount, Color col,
+    private void AddClusterBox(int archetypeId, int chunkId, in ClusterWorldAabb world, int liveCount, Color col,
                                float spriteClearance = 0f)
     {
+        // Narrowed once, here: the engine's world box is f64 since #914 and SpaceBattle is an f32 world, so the conversion
+        // is exact and everything below stays the float arithmetic SFML wants. A game with an f64 world would keep the
+        // doubles and narrow at the projection instead.
+        float aMinX = (float)world.MinX, aMinY = (float)world.MinY, aMaxX = (float)world.MaxX, aMaxY = (float)world.MaxY;
+
         // The empty sentinel is +inf/-inf — a cluster with no spatial index, or none live.
         // All four components must be finite — the original check omitted Y, and a single non-finite vertex in a
         // Triangles array renders as undefined geometry across the whole viewport.
-        if (!(a.MinX <= a.MaxX) || !(a.MinY <= a.MaxY) ||
-            !float.IsFinite(a.MinX) || !float.IsFinite(a.MaxX) || !float.IsFinite(a.MinY) || !float.IsFinite(a.MaxY))
+        if (!(aMinX <= aMaxX) || !(aMinY <= aMaxY) ||
+            !float.IsFinite(aMinX) || !float.IsFinite(aMaxX) || !float.IsFinite(aMinY) || !float.IsFinite(aMaxY))
         {
             return;
         }
         var homeCell = _host.ClusterHomeCell(archetypeId, chunkId);
-        var centreCell = _host.Grid.WorldToCellKey(0.5f * (a.MinX + a.MaxX), 0.5f * (a.MinY + a.MaxY), 0f);
+        var centreCell = _host.Grid.WorldToCellKey(0.5f * (aMinX + aMaxX), 0.5f * (aMinY + aMaxY), 0f);
         ClusterBoxes.Add(new ClusterBox
         {
             ArchetypeId = archetypeId,
             ChunkId = chunkId,
-            MinX = a.MinX, MinY = a.MinY, MaxX = a.MaxX, MaxY = a.MaxY,
+            MinX = aMinX, MinY = aMinY, MaxX = aMaxX, MaxY = aMaxY,
             LiveCount = liveCount,
             HomeCellKey = homeCell,
             CentreCellKey = centreCell,
@@ -515,7 +523,7 @@ internal sealed class Renderer
             return;
         }
         // Off-screen boxes are still COLLECTED (the stats above) but not emitted as geometry.
-        if (!isSelected && !_visible.Overlaps(a.MinX, a.MinY, a.MaxX, a.MaxY))
+        if (!isSelected && !_visible.Overlaps(aMinX, aMinY, aMaxX, aMaxY))
         {
             return;
         }
@@ -532,7 +540,7 @@ internal sealed class Renderer
 
         // Inflate for DISPLAY only. Two floors: a pixel floor so a degenerate box is visible at any zoom, and a
         // sprite-clearance floor so the box is never drawn underneath the very entities it contains.
-        float bx0 = a.MinX, by0 = a.MinY, bx1 = a.MaxX, by1 = a.MaxY;
+        float bx0 = aMinX, by0 = aMinY, bx1 = aMaxX, by1 = aMaxY;
         if (_cfg.MinClusterBoxPixels > 0f)
         {
             var scale = _cam?.Scale ?? 1f;
@@ -549,7 +557,7 @@ internal sealed class Renderer
         var fillA = (byte)(fillRaw <= 0f ? 0 : Math.Clamp((int)MathF.Ceiling(fillRaw), 1, 255));
 
         var cellArea = _host.GridConfig.CellSize * _host.GridConfig.CellSize;
-        var area = (a.MaxX - a.MinX) * (a.MaxY - a.MinY);   // TRUE area — the inflation must not make a box look oversized
+        var area = (aMaxX - aMinX) * (aMaxY - aMinY);   // TRUE area — the inflation must not make a box look oversized
         if (cellArea > 0 && area > _cfg.FillMaxCellArea * cellArea)
         {
             // Degenerate: filling it would paint over the whole view. Outline it in a warning colour instead.

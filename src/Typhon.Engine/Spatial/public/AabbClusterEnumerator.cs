@@ -5,11 +5,11 @@ using System.Runtime.CompilerServices;
 namespace Typhon.Engine;
 
 /// <summary>
-/// Zero-allocation f32 AABB query enumerator over the per-cell cluster spatial index of a single archetype (issue #230 Phase 3). Shared between the
+/// Zero-allocation AABB query enumerator over the per-cell cluster spatial index of a single archetype (issue #230 Phase 3). Shared between the
 /// game-facing generic entry point <see cref="ClusterSpatialQuery{TArch}.AABB{TBox}"/> and the engine-facing non-generic entry point
-/// <see cref="ArchetypeClusterState.QueryAabb"/>. Handles both 2D (AABB2F / BSphere2F) and 3D (AABB3F / BSphere3F) cluster storage tiers through a single
-/// state machine — the 3D overlap test is a strict superset of the 2D test, and 2D archetypes are queried with an infinite Z range that trivially passes
-/// the Z component of the overlap check.
+/// <see cref="ArchetypeClusterState.QueryAabb"/>. Handles all four cluster storage tiers — 2D and 3D, f32 and f64 — through a single state machine: the 3D
+/// overlap test is a strict superset of the 2D test, and 2D archetypes are queried with an infinite Z range that trivially passes the Z component of the
+/// overlap check.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -21,8 +21,10 @@ namespace Typhon.Engine;
 /// <para>
 /// <b>Tier handling.</b> The narrowphase branches on <see cref="SpatialFieldInfo.FieldType"/> to unpack entity coordinates correctly: 2D fields write 4
 /// doubles <c>[minX, minY, maxX, maxY]</c> via <see cref="SpatialMaintainer.ReadAndValidateBoundsFromPtr"/> while 3D fields write 6 doubles
-/// <c>[minX, minY, minZ, maxX, maxY, maxZ]</c>. The storage layer (<see cref="ClusterSpatialAabb"/> / <see cref="CellSpatialIndex"/>) uses unified 6-float
-/// storage, so the broadphase overlap test always runs in 3D and implicitly handles 2D via infinite Z sentinels.
+/// <c>[minX, minY, minZ, maxX, maxY, maxZ]</c>. That decoder has always produced doubles and handled all eight field types, which is why #914 needed no new
+/// decode path — only for the query box on the other side of the comparison to stop being f32. The storage layer
+/// (<see cref="ClusterSpatialAabb"/> / <see cref="CellSpatialIndex"/>) stays unified 6-<b>float</b> CELL-RELATIVE storage per <c>C15</c>, so the broadphase
+/// overlap test always runs in 3D f32 and implicitly handles 2D via infinite Z sentinels.
 /// </para>
 /// <para>
 /// <b>Epoch scope.</b> The caller must be inside an <see cref="EpochGuard"/> scope; the enumerator creates a <see cref="ChunkAccessor{TStore}"/> on the
@@ -40,14 +42,19 @@ public unsafe ref struct AabbClusterEnumerator
     private readonly ArchetypeClusterState _state;
     private readonly SpatialGrid _grid;
 
-    // Query bounds in world units (f32). For 2D queries, the Z components are set to +/- infinity by the caller so the Z overlap test trivially passes
-    // against 2D cluster storage (which leaves Z bounds at the ClusterSpatialAabb.Empty sentinel values).
-    private readonly float _queryMinX;
-    private readonly float _queryMinY;
-    private readonly float _queryMinZ;
-    private readonly float _queryMaxX;
-    private readonly float _queryMaxY;
-    private readonly float _queryMaxZ;
+    // Query bounds in world units, f64 since #914. For 2D queries, the Z components are set to +/- infinity by the caller so the Z overlap test trivially
+    // passes against 2D cluster storage (which leaves Z bounds at the ClusterSpatialAabb.Empty sentinel values).
+    //
+    // f64 and not f32 because this is a WORLD coordinate and the world frame is f64. The width is paid exactly twice per query and once per cell: the
+    // narrowphase compares against it directly — in double, matching the doubles ReadAndValidateBoundsFromPtr already produces, so the six per-entity
+    // narrowing conversions this loop used to do are gone rather than widened — and SetCellQueryFrame narrows it into the cell frame once per cell, where
+    // the broadphase's f32 SoA scan meets it. The hot inner loops did not change width; the query box did.
+    private readonly double _queryMinX;
+    private readonly double _queryMinY;
+    private readonly double _queryMinZ;
+    private readonly double _queryMaxX;
+    private readonly double _queryMaxY;
+    private readonly double _queryMaxZ;
 
     // The query box expressed in the CURRENT cell's frame. Cluster bounds are C15 cell-relative (#872 step 9), so the broadphase compare needs both sides in
     // the same frame. Converted once per CELL rather than once per cluster: the origin is constant across every cluster in a cell, so this is six
@@ -83,10 +90,10 @@ public unsafe ref struct AabbClusterEnumerator
     // is within sqrt(_radiusSq). The broadphase still uses the enclosing AABB — the caller is responsible for constructing an enumerator whose
     // _queryMin*/_queryMax* bounds match the sphere's enclosing AABB, so the cell expansion and cluster AABB overlap cover every candidate. When
     // <see cref="_radiusSq"/> is zero, the narrowphase runs the pure AABB check only (legacy AabbClusterEnumerator behavior).
-    private readonly float _radiusSq;
-    private readonly float _radiusCenterX;
-    private readonly float _radiusCenterY;
-    private readonly float _radiusCenterZ;
+    private readonly double _radiusSq;
+    private readonly double _radiusCenterX;
+    private readonly double _radiusCenterY;
+    private readonly double _radiusCenterZ;
 
     // Cluster segment accessor for narrowphase entity reads. Disposed via Dispose().
     private ChunkAccessor<PersistentStore> _accessor;
@@ -143,8 +150,8 @@ public unsafe ref struct AabbClusterEnumerator
     // Last-yielded result.
     private ClusterSpatialQueryResult _current;
 
-    internal AabbClusterEnumerator(ArchetypeClusterState state, SpatialGrid grid, float minX, float minY, float minZ, float maxX, float maxY, float maxZ,
-        uint categoryMask, float radiusSq = 0f, float radiusCenterX = 0f, float radiusCenterY = 0f, float radiusCenterZ = 0f)
+    internal AabbClusterEnumerator(ArchetypeClusterState state, SpatialGrid grid, double minX, double minY, double minZ, double maxX, double maxY,
+        double maxZ, uint categoryMask, double radiusSq = 0d, double radiusCenterX = 0d, double radiusCenterY = 0d, double radiusCenterZ = 0d)
     {
         _state = state;
         _grid = grid;
@@ -171,7 +178,7 @@ public unsafe ref struct AabbClusterEnumerator
         _spatialCompSize = state.Layout.ComponentSize(ss.Slot);
         _spatialFieldOffset = ss.FieldOffset;
         _fieldInfo = ss.FieldInfo;
-        _is3D = ss.FieldInfo.FieldType == SpatialFieldType.AABB3F || ss.FieldInfo.FieldType == SpatialFieldType.BSphere3F;
+        _is3D = ss.FieldInfo.FieldType.Is3D();
 
         // A 2D archetype's query carries ±Infinity on Z, meaning "every Z", which WorldToCellRange saturates to the full depth. Left alone that makes every
         // such query sweep every Z plane of a deep grid, of which exactly one can ever hold a cell: ReadSpatialCenter3D reports posZ = 0 for both 2D field
@@ -219,7 +226,7 @@ public unsafe ref struct AabbClusterEnumerator
     /// </remarks>
     private void SetCellQueryFrame(int cellKey)
     {
-        _grid.CellOrigin(cellKey, out float originX, out float originY, out float originZ);
+        _grid.CellOrigin(cellKey, out double originX, out double originY, out double originZ);
         _cellQueryMinX = ClusterSpatialAabb.ToCellRelativeMin(_queryMinX, originX);
         _cellQueryMinY = ClusterSpatialAabb.ToCellRelativeMin(_queryMinY, originY);
         _cellQueryMinZ = ClusterSpatialAabb.ToCellRelativeMin(_queryMinZ, originZ);
@@ -301,22 +308,22 @@ public unsafe ref struct AabbClusterEnumerator
                 // Unpack entity coordinates based on the archetype's spatial field tier. 2D fields produce [minX, minY, maxX, maxY]; 3D fields produce
                 // [minX, minY, minZ, maxX, maxY, maxZ]. The _is3D branch is precomputed at construction so the JIT can hoist it. For 2D entities we leave Z
                 // bounds at the query Z range (which is itself infinite for 2D queries) so the Z overlap test trivially passes.
-                float eMinX, eMinY, eMinZ, eMaxX, eMaxY, eMaxZ;
+                double eMinX, eMinY, eMinZ, eMaxX, eMaxY, eMaxZ;
                 if (_is3D)
                 {
-                    eMinX = (float)entityCoords[0];
-                    eMinY = (float)entityCoords[1];
-                    eMinZ = (float)entityCoords[2];
-                    eMaxX = (float)entityCoords[3];
-                    eMaxY = (float)entityCoords[4];
-                    eMaxZ = (float)entityCoords[5];
+                    eMinX = entityCoords[0];
+                    eMinY = entityCoords[1];
+                    eMinZ = entityCoords[2];
+                    eMaxX = entityCoords[3];
+                    eMaxY = entityCoords[4];
+                    eMaxZ = entityCoords[5];
                 }
                 else
                 {
-                    eMinX = (float)entityCoords[0];
-                    eMinY = (float)entityCoords[1];
-                    eMaxX = (float)entityCoords[2];
-                    eMaxY = (float)entityCoords[3];
+                    eMinX = entityCoords[0];
+                    eMinY = entityCoords[1];
+                    eMaxX = entityCoords[2];
+                    eMaxY = entityCoords[3];
                     // 2D entity has no Z extent. Set to the query Z range so the Z overlap test always passes for 2D entities (regardless of what the
                     // 2D query's _queryMinZ/_queryMaxZ are — they're typically +/- infinity, but even if they're not, making the entity Z match the query
                     // Z guarantees the test passes).
@@ -344,12 +351,12 @@ public unsafe ref struct AabbClusterEnumerator
                 // the entity if the squared distance exceeds the sphere's squared radius. "Any-point-in-sphere" semantic matches the legacy
                 // SpatialRTree.QueryRadius behavior — a tight entity AABB that just kisses the sphere boundary is accepted. The computed distSq is also
                 // carried into the result struct so QueryNearest can sort without re-reading the entity's AABB.
-                float distSq = 0f;
-                if (_radiusSq > 0f)
+                double distSq = 0d;
+                if (_radiusSq > 0d)
                 {
-                    float dx = _radiusCenterX - Math.Clamp(_radiusCenterX, eMinX, eMaxX);
-                    float dy = _radiusCenterY - Math.Clamp(_radiusCenterY, eMinY, eMaxY);
-                    float dz = _radiusCenterZ - Math.Clamp(_radiusCenterZ, eMinZ, eMaxZ);
+                    double dx = _radiusCenterX - Math.Clamp(_radiusCenterX, eMinX, eMaxX);
+                    double dy = _radiusCenterY - Math.Clamp(_radiusCenterY, eMinY, eMaxY);
+                    double dz = _radiusCenterZ - Math.Clamp(_radiusCenterZ, eMinZ, eMaxZ);
                     distSq = dx * dx + dy * dy + dz * dz;
                     if (distSq > _radiusSq)
                     {

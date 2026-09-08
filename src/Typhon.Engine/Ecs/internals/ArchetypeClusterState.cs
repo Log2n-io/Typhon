@@ -2163,10 +2163,10 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// singleton and the state has no other reason to hold a reference to it.</param>
     /// <param name="minX">Query bounds min-X.</param>
     /// <param name="minY">Query bounds min-Y.</param>
-    /// <param name="minZ">Query bounds min-Z. For 2D queries against a 2D cluster archetype, pass <see cref="float.NegativeInfinity"/>.</param>
+    /// <param name="minZ">Query bounds min-Z. For 2D queries against a 2D cluster archetype, pass <see cref="double.NegativeInfinity"/>.</param>
     /// <param name="maxX">Query bounds max-X.</param>
     /// <param name="maxY">Query bounds max-Y.</param>
-    /// <param name="maxZ">Query bounds max-Z. For 2D queries against a 2D cluster archetype, pass <see cref="float.PositiveInfinity"/>.</param>
+    /// <param name="maxZ">Query bounds max-Z. For 2D queries against a 2D cluster archetype, pass <see cref="double.PositiveInfinity"/>.</param>
     /// <param name="categoryMask">Category bitmask; a cluster is skipped if its union mask does not intersect. Pass <see cref="uint.MaxValue"/> to accept all.</param>
     /// <remarks>
     /// This method does not validate <see cref="ClusterSpatialSlot.HasSpatialIndex"/> — the enumerator returns an empty result set naturally when the per-cell
@@ -2174,7 +2174,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// themselves first. This matches the ergonomics the existing cluster-archetype iteration loops in <c>SpatialTriggerSystem</c> and <c>SpatialInterestSystem</c>
     /// expect.
     /// </remarks>
-    public AabbClusterEnumerator QueryAabb(SpatialGrid grid, float minX, float minY, float minZ, float maxX, float maxY, float maxZ,
+    public AabbClusterEnumerator QueryAabb(SpatialGrid grid, double minX, double minY, double minZ, double maxX, double maxY, double maxZ,
         uint categoryMask = uint.MaxValue) => new(this, grid, minX, minY, minZ, maxX, maxY, maxZ, categoryMask);
 
     /// <summary>
@@ -2190,16 +2190,17 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// Z overlap test trivially passes against 2D entities.</param>
     /// <param name="radius">Sphere radius in world units.</param>
     /// <param name="categoryMask">Category bitmask; <c>0</c> means "no filter".</param>
-    public AabbClusterEnumerator QueryRadius(SpatialGrid grid, float centerX, float centerY, float centerZ, float radius, uint categoryMask = uint.MaxValue)
+    public AabbClusterEnumerator QueryRadius(SpatialGrid grid, double centerX, double centerY, double centerZ, double radius,
+        uint categoryMask = uint.MaxValue)
     {
         var minX = centerX - radius;
         var minY = centerY - radius;
         var maxX = centerX + radius;
         var maxY = centerY + radius;
-        var is3D = SpatialSlot.FieldInfo.FieldType == SpatialFieldType.AABB3F || SpatialSlot.FieldInfo.FieldType == SpatialFieldType.BSphere3F;
-        var minZ = is3D ? centerZ - radius : float.NegativeInfinity;
-        var maxZ = is3D ? centerZ + radius : float.PositiveInfinity;
-        var effectiveCenterZ = is3D ? centerZ : 0f;
+        var is3D = SpatialSlot.FieldInfo.FieldType.Is3D();
+        var minZ = is3D ? centerZ - radius : double.NegativeInfinity;
+        var maxZ = is3D ? centerZ + radius : double.PositiveInfinity;
+        var effectiveCenterZ = is3D ? centerZ : 0d;
         return new AabbClusterEnumerator(this, grid, minX, minY, minZ, maxX, maxY, maxZ, categoryMask, radius * radius, centerX, centerY, effectiveCenterZ);
     }
 
@@ -4186,7 +4187,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // 6 doubles covers both 2D ([minX, minY, maxX, maxY]) and 3D ([minX, minY, minZ, maxX, maxY, maxZ]) layouts produced by
         // SpatialMaintainer.ReadAndValidateBoundsFromPtr. The tail slots cost nothing for 2D reads.
         Span<double> coords = stackalloc double[6];
-        var is3D = ss.FieldInfo.FieldType == SpatialFieldType.AABB3F || ss.FieldInfo.FieldType == SpatialFieldType.BSphere3F;
+        var is3D = ss.FieldInfo.FieldType.Is3D();
 
         var bits = occupancy;
         while (bits != 0)
@@ -4603,7 +4604,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         var maxExtent = 0f;
         var cellSize = 0f;
         var inverseCellSize = 0f;
-        var outlierGuardActive = grid != null && (cellSize = grid.Config.CellSize) > 0f;
+        var outlierGuardActive = grid != null && (cellSize = (float)grid.Config.CellSize) > 0f;
         var driftTargetExtent = 0f;
         // #872 step 12 (P7). A THIRD threshold, deliberately not one of the two above. The design proposes reusing the outlier guard's cellSize x 1.2, but
         // that check exists to catch a cluster whose bound has escaped its own cell — which only happens when it holds entities that should have migrated
@@ -4632,7 +4633,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // Hoisted out of the per-cluster loop, which is the whole point of taking it as a parameter (D1). 64 slots is the cluster capacity ceiling and
         // three axes are cached, so this is 768 bytes on the slice worker's stack, reused for every cluster the slice touches. Allocating it per cluster
         // would put a stackalloc inside a loop.
-        Span<float> centreScratch = stackalloc float[3 * MaxSlotsPerCluster];
+        Span<double> centreScratch = stackalloc double[3 * MaxSlotsPerCluster];
 
         // Per-WORKER, not per-slice — see _candidateScratch. Reused across ticks, so the steady state allocates nothing.
         var candidateScratch = CandidateScratch ??= new List<RelocationCandidate>(64);
@@ -4744,10 +4745,10 @@ internal sealed unsafe partial class ArchetypeClusterState
                     TyphonEvent.EmitSpatialCellIndexUpdate(cellKey, indexSlot);
 
                     // The Z term matters because FlagOutliersForMigration tests all three axes: without it a cluster that drifts purely on Z never
-                    // reaches the check that would notice, and the Z half of that method is dead in exactly the case it was written for. It is
-                    // UNREACHABLE today — WriteSpatial supports AABB2F only, so no cluster AABB grows on Z at write time, and a 2D union leaves
-                    // MinZ/MaxZ at the ±Infinity sentinel whose difference is -Infinity. It goes in now rather than being discovered missing when 3D
-                    // write support lands (steps 9-10).
+                    // reaches the check that would notice, and the Z half of that method is dead in exactly the case it was written for.
+                    // LIVE since #914 — it was written speculatively while WriteSpatial handled AABB2F only, so no cluster AABB could grow on Z at write
+                    // time and a 2D union left MinZ/MaxZ at the ±Infinity sentinel whose difference is -Infinity. The 3D write tiers make it reachable,
+                    // and OutlierGuardZAxisTests covers it. A 2D archetype still produces -Infinity here, which fails the extent test as it always did.
                     // ── D1: ONE gather, then two cheap consumers ──────────────────────────────────────────────────
                     //
                     // Gated so a healthy cluster still costs nothing per entity. The guard's threshold is cellSize x 1.2 and
@@ -4972,10 +4973,8 @@ internal sealed unsafe partial class ArchetypeClusterState
                 TyphonEvent.EmitSpatialCellIndexUpdate(cellKey, indexSlot);
 
                 // The Z term matters because FlagOutliersForMigration tests all three axes: without it a cluster that drifts purely on Z never
-                // reaches the check that would notice, and the Z half of that method is dead in exactly the case it was written for. It is
-                // UNREACHABLE today — WriteSpatial supports AABB2F only, so no cluster AABB grows on Z at write time, and a 2D union leaves
-                // MinZ/MaxZ at the ±Infinity sentinel whose difference is -Infinity. It goes in now rather than being discovered missing when 3D
-                // write support lands (steps 9-10).
+                // reaches the check that would notice, and the Z half of that method is dead in exactly the case it was written for.
+                // LIVE since #914 — see the identical note on the parallel arm above.
 
                 // See the bitmap branch above — one gather, same gating, same reason. The repair nomination for this branch sits before the
                 // process-bit skip above, so `targets` has already been resolved for this cell by the time this runs.
@@ -5575,6 +5574,10 @@ internal sealed unsafe partial class ArchetypeClusterState
 
             // Raw cell boundary (no hysteresis) — force migrate anything outside. A 2D field reports posZ = 0 and the grid is one cell deep there, so the Z
             // pair is always false for a flat world: the third axis costs two comparisons and changes no flat-world outcome.
+            //
+            // For a 3D archetype it is load-bearing, and only became reachable with #914's 3D write tiers: an entity that leaves its cell purely on Z passes
+            // both the X and the Y test, so deleting the Z pair would strand it in the wrong cell with every counter balancing. OutlierGuardZAxisTests is the
+            // test that reddens if it goes.
             if (posX < cellMinX || posX > cellMaxX || posY < cellMinY || posY > cellMaxY || posZ < cellMinZ || posZ > cellMaxZ)
             {
                 var newCellKey = grid.WorldToCellKey(posX, posY, posZ);
@@ -5598,7 +5601,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </summary>
     internal void AddClusterToPerCellIndex(int clusterChunkId, int cellKey, in ClusterSpatialAabb aabb)
     {
-        NoteClusterOverhang(in aabb, Grid?.Config.CellSize ?? 0f);
+        NoteClusterOverhang(in aabb, (float)(Grid?.Config.CellSize ?? 0d));
 
         // The growers take _finalizeLock themselves (non-reentrant), so they run BEFORE the latch below; what they publish is monotonic, so the
         // references re-read under the latch are current and at least as long as what was just ensured.
@@ -6124,7 +6127,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     internal void WidenClusterInPerCellIndex(int clusterChunkId, int cellKey, in ClusterSpatialAabb aabb)
     {
-        NoteClusterOverhang(in aabb, Grid?.Config.CellSize ?? 0f);   // a spawn straddling its cell's edge widens every KNN ring — noted here as the add did
+        // A spawn straddling its cell's edge widens every KNN ring — noted here as the add did.
+        NoteClusterOverhang(in aabb, (float)(Grid?.Config.CellSize ?? 0d));
 
         var perCell = Volatile.Read(ref PerCellIndex);
         if (perCell == null || (uint)cellKey >= (uint)perCell.Length)

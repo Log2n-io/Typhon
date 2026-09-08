@@ -20,7 +20,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     private ref struct KnnCandidateHeap
     {
         internal int[] Chunk;
-        internal float[] Dist;
+        internal double[] Dist;
         internal int Count;
     }
 
@@ -42,7 +42,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// broadphase filter is exact — no per-entity re-check, matching <see cref="AabbClusterEnumerator"/>'s convention where a zero mask means "no filter".
     /// </para>
     /// </remarks>
-    public int QueryNearest(SpatialGrid grid, float centerX, float centerY, float centerZ, int k, Span<(long entityId, float distSq)> results,
+    public int QueryNearest(SpatialGrid grid, double centerX, double centerY, double centerZ, int k, Span<(long entityId, double distSq)> results,
         uint categoryMask = uint.MaxValue) =>
         QueryNearest(grid, centerX, centerY, centerZ, k, results, out _, categoryMask);
 
@@ -51,7 +51,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// Whether the lower bound is actually pruning is a property of the search, not of the machine it ran on, so this is what a test asserts on rather than a
     /// wall-clock threshold that would redden on a busy box.
     /// </remarks>
-    public int QueryNearest(SpatialGrid grid, float centerX, float centerY, float centerZ, int k, Span<(long entityId, float distSq)> results,
+    public int QueryNearest(SpatialGrid grid, double centerX, double centerY, double centerZ, int k, Span<(long entityId, double distSq)> results,
         out int clustersOpened, uint categoryMask = uint.MaxValue)
     {
         clustersOpened = 0;
@@ -62,11 +62,11 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         int target = Math.Min(k, results.Length);
         ref readonly var ss = ref SpatialSlot;
-        bool is3D = ss.FieldInfo.FieldType == SpatialFieldType.AABB3F || ss.FieldInfo.FieldType == SpatialFieldType.BSphere3F;
+        bool is3D = ss.FieldInfo.FieldType.Is3D();
 
         // A 2D archetype's entities all lie in the plane containing world Z = 0, so the query point is projected onto it rather than searching Z shells that
         // are empty by construction — the same reasoning AabbClusterEnumerator applies to its cell range.
-        float queryZ = is3D ? centerZ : 0f;
+        double queryZ = is3D ? centerZ : 0d;
 
         grid.WorldToCellCoords(centerX, centerY, queryZ, out int originCellX, out int originCellY, out int originCellZ);
 
@@ -88,7 +88,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 // better, so it stays on the heap — and if the ring test below ends the search, it is never opened at all.
                 while (heap.Count > 0)
                 {
-                    float bestBound = heap.Dist[0];
+                    double bestBound = heap.Dist[0];
                     if (resultCount == target && bestBound >= results[0].distSq)
                     {
                         break;
@@ -123,7 +123,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
     /// <summary>Push every cluster in the cells of one shell onto the candidate heap, keyed by the lower bound its box implies.</summary>
     private void CollectRingCandidates(SpatialGrid grid, int ring, int originCellX, int originCellY, int originCellZ, bool is3D,
-        float px, float py, float pz, uint categoryMask, ref KnnCandidateHeap heap)
+        double px, double py, double pz, uint categoryMask, ref KnnCandidateHeap heap)
     {
         int zLo = is3D ? originCellZ - ring : originCellZ;
         int zHi = is3D ? originCellZ + ring : originCellZ;
@@ -158,7 +158,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                         continue;
                     }
 
-                    grid.CellOrigin(cellKey, out float originX, out float originY, out float originZ);
+                    grid.CellOrigin(cellKey, out double originX, out double originY, out double originZ);
                     PushCellClusters(slot, isStatic: false, originX, originY, originZ, px, py, pz, categoryMask, ref heap);
                     PushCellClusters(slot, isStatic: true, originX, originY, originZ, px, py, pz, categoryMask, ref heap);
                 }
@@ -169,8 +169,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>Push one half of a cell — whichever structure serves it — onto the candidate heap.</summary>
-    private void PushCellClusters(PerCellSpatialSlot slot, bool isStatic, float originX, float originY, float originZ,
-        float px, float py, float pz, uint categoryMask, ref KnnCandidateHeap heap)
+    private void PushCellClusters(PerCellSpatialSlot slot, bool isStatic, double originX, double originY, double originZ,
+        double px, double py, double pz, uint categoryMask, ref KnnCandidateHeap heap)
     {
         var tree = slot.ReadTree(isStatic);   // acquire — see PerCellSpatialSlot.PublishDynamicTree
         if (tree != null)
@@ -195,7 +195,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         return;
     }
 
-    private void PushCandidate(int clusterChunkId, float originX, float originY, float originZ, float px, float py, float pz,
+    private void PushCandidate(int clusterChunkId, double originX, double originY, double originZ, double px, double py, double pz,
         uint categoryMask, ref KnnCandidateHeap heap)
     {
         if ((uint)clusterChunkId >= (uint)ClusterAabbs.Length)
@@ -215,30 +215,34 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         // Cell-relative to world (C15), then the squared distance from the point to the box. Zero when the point is inside, which correctly sorts such a
         // cluster first.
-        // Directed OUTWARD: this box feeds a LOWER BOUND, and a bound rounded inward overstates the distance, which lets the early-termination test prune a
-        // cluster that holds a closer entity.
-        float minX = ClusterSpatialAabb.ToWorldMin(aabb.MinX, originX);
-        float minY = ClusterSpatialAabb.ToWorldMin(aabb.MinY, originY);
-        float maxX = ClusterSpatialAabb.ToWorldMax(aabb.MaxX, originX);
-        float maxY = ClusterSpatialAabb.ToWorldMax(aabb.MaxY, originY);
+        //
+        // ToWorldExact since #919 F2, where the directed ToWorldMin/Max pair used to be. The direction mattered because those RETURN an f32 and the
+        // narrowing could round this box inward — OVERSTATING the lower bound, which lets the early-termination test prune a cluster holding a closer
+        // entity. In double the residual is at most half a double ULP (~4e-6 at 2^36), against a stored bound already rounded outward by up to one f32 ULP
+        // in the cell frame (~6e-5 across a 1 000-unit cell). The bound therefore still UNDER-states the distance, which is the direction that keeps the
+        // pruning sound.
+        double minX = ClusterSpatialAabb.ToWorldExact(aabb.MinX, originX);
+        double minY = ClusterSpatialAabb.ToWorldExact(aabb.MinY, originY);
+        double maxX = ClusterSpatialAabb.ToWorldExact(aabb.MaxX, originX);
+        double maxY = ClusterSpatialAabb.ToWorldExact(aabb.MaxY, originY);
 
-        float dx = MathF.Max(MathF.Max(minX - px, 0f), px - maxX);
-        float dy = MathF.Max(MathF.Max(minY - py, 0f), py - maxY);
-        float bound = (dx * dx) + (dy * dy);
+        double dx = Math.Max(Math.Max(minX - px, 0d), px - maxX);
+        double dy = Math.Max(Math.Max(minY - py, 0d), py - maxY);
+        double bound = (dx * dx) + (dy * dy);
 
         // A 2D cluster carries the ±Infinity Z sentinel, which contributes nothing to a planar distance.
         if (!float.IsPositiveInfinity(aabb.MinZ) && !float.IsNegativeInfinity(aabb.MaxZ))
         {
-            float minZ = ClusterSpatialAabb.ToWorldMin(aabb.MinZ, originZ);
-            float maxZ = ClusterSpatialAabb.ToWorldMax(aabb.MaxZ, originZ);
-            float dz = MathF.Max(MathF.Max(minZ - pz, 0f), pz - maxZ);
+            double minZ = ClusterSpatialAabb.ToWorldExact(aabb.MinZ, originZ);
+            double maxZ = ClusterSpatialAabb.ToWorldExact(aabb.MaxZ, originZ);
+            double dz = Math.Max(Math.Max(minZ - pz, 0d), pz - maxZ);
             bound += dz * dz;
         }
 
         if (heap.Chunk == null)
         {
             heap.Chunk = new int[64];
-            heap.Dist = new float[64];
+            heap.Dist = new double[64];
         }
         if (heap.Count == heap.Chunk.Length)
         {
@@ -295,8 +299,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>Read every occupied entity of one cluster and offer it to the result heap.</summary>
-    private void ScanClusterForNearest(int clusterChunkId, ref ChunkAccessor<PersistentStore> accessor, float px, float py, float pz, bool is3D,
-        int target, Span<(long entityId, float distSq)> results, ref int resultCount, ref int clustersOpened)
+    private void ScanClusterForNearest(int clusterChunkId, ref ChunkAccessor<PersistentStore> accessor, double px, double py, double pz, bool is3D,
+        int target, Span<(long entityId, double distSq)> results, ref int resultCount, ref int clustersOpened)
     {
         ref readonly var ss = ref SpatialSlot;
         int compOffset = Layout.ComponentOffset(ss.Slot);
@@ -319,20 +323,20 @@ internal sealed unsafe partial class ArchetypeClusterState
                 continue;
             }
 
-            float eMinX = (float)entityCoords[0];
-            float eMinY = (float)entityCoords[1];
-            float eMaxX = is3D ? (float)entityCoords[3] : (float)entityCoords[2];
-            float eMaxY = is3D ? (float)entityCoords[4] : (float)entityCoords[3];
+            double eMinX = entityCoords[0];
+            double eMinY = entityCoords[1];
+            double eMaxX = is3D ? entityCoords[3] : entityCoords[2];
+            double eMaxY = is3D ? entityCoords[4] : entityCoords[3];
 
-            float dx = MathF.Max(MathF.Max(eMinX - px, 0f), px - eMaxX);
-            float dy = MathF.Max(MathF.Max(eMinY - py, 0f), py - eMaxY);
-            float distSq = (dx * dx) + (dy * dy);
+            double dx = Math.Max(Math.Max(eMinX - px, 0d), px - eMaxX);
+            double dy = Math.Max(Math.Max(eMinY - py, 0d), py - eMaxY);
+            double distSq = (dx * dx) + (dy * dy);
 
             if (is3D)
             {
-                float eMinZ = (float)entityCoords[2];
-                float eMaxZ = (float)entityCoords[5];
-                float dz = MathF.Max(MathF.Max(eMinZ - pz, 0f), pz - eMaxZ);
+                double eMinZ = entityCoords[2];
+                double eMaxZ = entityCoords[5];
+                double dz = Math.Max(Math.Max(eMinZ - pz, 0d), pz - eMaxZ);
                 distSq += dz * dz;
             }
 
@@ -347,7 +351,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>Offer one entity to the bounded max-heap of results, evicting the current worst once it is full.</summary>
-    private static void PushResult(Span<(long entityId, float distSq)> results, ref int resultCount, int target, long entityId, float distSq)
+    private static void PushResult(Span<(long entityId, double distSq)> results, ref int resultCount, int target, long entityId, double distSq)
     {
         if (resultCount < target)
         {
@@ -370,7 +374,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         SiftDownMax(results[..resultCount]);
     }
 
-    private static void SiftDownMax(Span<(long entityId, float distSq)> heap)
+    private static void SiftDownMax(Span<(long entityId, double distSq)> heap)
     {
         int i = 0;
         while (true)
@@ -408,36 +412,41 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// centred at (205,150) reaching x=180, ring 0 declared 50 units covered, 50^2 beat the point's 40^2, and the nearer box was never opened. Subtracting the
     /// overhang is what makes the stopping rule true again; it costs breadth, and only where extended entities actually exist.</para>
     /// </remarks>
-    private float CoveredRadiusSq(SpatialGrid grid, int ring, int originCellX, int originCellY, int originCellZ, bool is3D,
-        float px, float py, float pz)
+    private double CoveredRadiusSq(SpatialGrid grid, int ring, int originCellX, int originCellY, int originCellZ, bool is3D,
+        double px, double py, double pz)
     {
         ref readonly var config = ref grid.Config;
-        float cell = config.CellSize;
+        double cell = config.CellSize;
 
-        float safe = AxisSlack(px, config.WorldMin.X, originCellX, ring, cell, config.GridWidth);
-        safe = MathF.Min(safe, AxisSlack(py, config.WorldMin.Y, originCellY, ring, cell, config.GridHeight));
+        double safe = AxisSlack(px, config.WorldMin.X, originCellX, ring, cell, config.GridWidth);
+        safe = Math.Min(safe, AxisSlack(py, config.WorldMin.Y, originCellY, ring, cell, config.GridHeight));
         if (is3D)
         {
-            safe = MathF.Min(safe, AxisSlack(pz, config.WorldMin.Z, originCellZ, ring, cell, config.GridDepth));
+            safe = Math.Min(safe, AxisSlack(pz, config.WorldMin.Z, originCellZ, ring, cell, config.GridDepth));
         }
 
-        if (float.IsPositiveInfinity(safe))
+        if (double.IsPositiveInfinity(safe))
         {
-            return float.PositiveInfinity;
+            return double.PositiveInfinity;
         }
 
         safe -= Volatile.Read(ref MaxClusterOverhang);
-        return safe <= 0f ? 0f : safe * safe;
+        return safe <= 0d ? 0d : safe * safe;
     }
 
-    private static float AxisSlack(float p, float worldMin, int originCell, int ring, float cell, int gridExtent)
+    private static double AxisSlack(double p, double worldMin, int originCell, int ring, double cell, int gridExtent)
     {
         int lo = originCell - ring;
         int hi = originCell + ring;
 
         // Both faces at the world bound: this axis can hide nothing further out.
-        float loSlack = lo <= 0 ? float.PositiveInfinity : p - (worldMin + (lo * cell));
-        float hiSlack = hi >= gridExtent - 1 ? float.PositiveInfinity : (worldMin + ((hi + 1) * cell)) - p;
-        return MathF.Max(0f, MathF.Min(loSlack, hiSlack));
+        //
+        // The slack is a distance of at most a few cells, so f32 would hold it exactly where a world coordinate would not — which is why it used to be
+        // narrowed here. It is kept in double since #919 F2 for a different reason than magnitude: the SUBTRACTION is what has to be exact, and its two
+        // operands are world coordinates. Narrowing the difference after computing it in double was already right; narrowing it is simply no longer
+        // needed now that the consumer compares against an f64 distSq.
+        double loSlack = lo <= 0 ? double.PositiveInfinity : p - (worldMin + (lo * cell));
+        double hiSlack = hi >= gridExtent - 1 ? double.PositiveInfinity : (worldMin + ((hi + 1) * cell)) - p;
+        return Math.Max(0d, Math.Min(loSlack, hiSlack));
     }
 }

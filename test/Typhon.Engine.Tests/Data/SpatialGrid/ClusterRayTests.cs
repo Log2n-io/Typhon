@@ -110,7 +110,7 @@ class ClusterRayTests : TestBase<ClusterRayTests>
 
         var cs = ClusterStateOf(dbe);
 
-        var buffer = new (long entityId, float distance)[512];
+        var buffer = new (long entityId, double distance)[512];
         int n;
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
@@ -120,7 +120,7 @@ class ClusterRayTests : TestBase<ClusterRayTests>
         var hits = new List<(long id, float t)>();
         for (int i = 0; i < n; i++)
         {
-            hits.Add((buffer[i].entityId, buffer[i].distance));
+            hits.Add((buffer[i].entityId, (float)buffer[i].distance));
         }
 
         // Oracle: every entity in the world, tested directly.
@@ -132,7 +132,7 @@ class ClusterRayTests : TestBase<ClusterRayTests>
         {
             foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 0f, 0f, float.NegativeInfinity, WorldExtent, WorldExtent, float.PositiveInfinity))
             {
-                if (OracleRayHit(ox, oy, ndx, ndy, maxDist, r.MinX, r.MinY, r.MaxX, r.MaxY, out float t))
+                if (OracleRayHit(ox, oy, ndx, ndy, maxDist, (float)r.MinX, (float)r.MinY, (float)r.MaxX, (float)r.MaxY, out float t))
                 {
                     oracle.Add((r.EntityId, t));
                 }

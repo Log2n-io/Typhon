@@ -60,13 +60,18 @@ internal sealed class SpatialProbe
     {
         Reset();
         var g = host.GridConfig;
-        CellArea = g.CellSize * g.CellSize;
+
+        // The world frame is f64 since #914; this is a diagnostics overlay drawn in f32, so it narrows once here rather than at every use.
+        var cellSize = (float)g.CellSize;
+        var worldMinX = (float)g.WorldMin.X;
+        var worldMinY = (float)g.WorldMin.Y;
+        CellArea = cellSize * cellSize;
 
         // Stage 1 — cell range, exactly as WorldToCellRange computes it (raw bounds, no margin).
-        var cx0 = (int)MathF.Floor((qx0 - g.WorldMin.X) / g.CellSize);
-        var cy0 = (int)MathF.Floor((qy0 - g.WorldMin.Y) / g.CellSize);
-        var cx1 = (int)MathF.Floor((qx1 - g.WorldMin.X) / g.CellSize);
-        var cy1 = (int)MathF.Floor((qy1 - g.WorldMin.Y) / g.CellSize);
+        var cx0 = (int)MathF.Floor((qx0 - worldMinX) / cellSize);
+        var cy0 = (int)MathF.Floor((qy0 - worldMinY) / cellSize);
+        var cx1 = (int)MathF.Floor((qx1 - worldMinX) / cellSize);
+        var cy1 = (int)MathF.Floor((qy1 - worldMinY) / cellSize);
         cx0 = Math.Clamp(cx0, 0, g.GridWidth - 1);
         cy0 = Math.Clamp(cy0, 0, g.GridHeight - 1);
         cx1 = Math.Clamp(cx1, 0, g.GridWidth - 1);

@@ -825,7 +825,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         grid.CellOrigin(cellKey, out var originX, out var originY, out var originZ);
         var flat = SpatialSlot.FieldInfo.FieldType is SpatialFieldType.AABB2F or SpatialFieldType.BSphere2F;
 
-        Span<float> centreScratch = stackalloc float[3 * MaxSlotsPerCluster];
+        Span<double> centreScratch = stackalloc double[3 * MaxSlotsPerCluster];
         var count = 0;
         for (var i = 0; i < unitClusters && count < population; i++)
         {
@@ -841,8 +841,8 @@ internal sealed unsafe partial class ArchetypeClusterState
                 var slot = BitOperations.TrailingZeroCount(bits);
                 bits &= bits - 1;
 
-                var key = EncodeIntraCellMorton(centres.X(slot) - originX, centres.Y(slot) - originY,
-                    flat ? 0f : centres.Z(slot) - originZ, cfg.InverseCellSize);
+                var key = EncodeIntraCellMorton((float)(centres.X(slot) - originX), (float)(centres.Y(slot) - originY),
+                    flat ? 0f : (float)(centres.Z(slot) - originZ), (float)cfg.InverseCellSize);
                 entries[count++] = new RepairEntry(key, (long)chunkId * MaxSlotsPerCluster + slot);
             }
         }

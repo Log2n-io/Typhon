@@ -384,8 +384,8 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
     [Test]
     public void ValidateSupportedFieldType_F32Variants_Accepted()
     {
-        // Issue #230 Phase 3 extended support from 2D-only to all f32 tiers (2D and 3D). Cells are still 2D (XY) — 3D archetypes bucket into cells by their
-        // XY center and get Z filtering at the query narrowphase.
+        // Issue #230 Phase 3 extended support from 2D-only to all f32 tiers (2D and 3D). 3D archetypes bucket into cells by their centre on all three axes
+        // and get Z filtering at the query narrowphase.
         SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.AABB2F, "MyArch");
         SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.BSphere2F, "MyArch");
         SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.AABB3F, "MyArch");
@@ -393,17 +393,14 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
     }
 
     [Test]
-    public void ValidateSupportedFieldType_F64Variants_Throw()
+    public void ValidateSupportedFieldType_F64Variants_Accepted()
     {
-        // f64 spatial tiers are still deferred to a follow-up sub-issue of #228.
-        Assert.Throws<NotSupportedException>(
-            () => SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.AABB2D, "MyArch"));
-        Assert.Throws<NotSupportedException>(
-            () => SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.AABB3D, "MyArch"));
-        Assert.Throws<NotSupportedException>(
-            () => SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.BSphere2D, "MyArch"));
-        Assert.Throws<NotSupportedException>(
-            () => SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.BSphere3D, "MyArch"));
+        // Inverted by #914: these four threw until the f64 write barrier and the f64 query API landed together. Kept as the positive assertion rather than
+        // deleted, because "the gate is open" is the precondition every other f64 test in the suite depends on.
+        Assert.DoesNotThrow(() => SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.AABB2D, "MyArch"));
+        Assert.DoesNotThrow(() => SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.AABB3D, "MyArch"));
+        Assert.DoesNotThrow(() => SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.BSphere2D, "MyArch"));
+        Assert.DoesNotThrow(() => SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.BSphere3D, "MyArch"));
     }
 
     // ═══════════════════════════════════════════════════════════════════════

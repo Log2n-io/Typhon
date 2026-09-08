@@ -119,7 +119,7 @@ class ClusterFrustumTests : TestBase<ClusterFrustumTests>
         {
             foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 0f, 0f, float.NegativeInfinity, WorldExtent, WorldExtent, float.PositiveInfinity))
             {
-                if (OracleAccepts(planes, 4, r.MinX, r.MinY, r.MaxX, r.MaxY))
+                if (OracleAccepts(planes, 4, (float)r.MinX, (float)r.MinY, (float)r.MaxX, (float)r.MaxY))
                 {
                     oracle.Add(r.EntityId);
                 }

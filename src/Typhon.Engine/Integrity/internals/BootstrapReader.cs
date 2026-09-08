@@ -328,13 +328,14 @@ internal static class BootstrapReader
             case >= BootstrapDictionary.ValueType.Int1 and <= BootstrapDictionary.ValueType.Int6:
             case BootstrapDictionary.ValueType.Int7:
             case BootstrapDictionary.ValueType.Int8:
+            case BootstrapDictionary.ValueType.Int16:
                 var count = BootstrapDictionary.IntCountOf(type);
                 if (pos + (count * 4) > end)
                 {
                     return false;
                 }
 
-                Span<int> ints = stackalloc int[8];
+                Span<int> ints = stackalloc int[16];   // the widest int-vector type, Int16 (#914) — was 8 when Int8 was the cap
                 for (var i = 0; i < count; i++)
                 {
                     ints[i] = MemoryMarshal.Read<int>(stream[(pos + (i * 4))..]);

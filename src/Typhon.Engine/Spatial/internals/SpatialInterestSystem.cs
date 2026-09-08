@@ -388,26 +388,28 @@ internal sealed unsafe class SpatialInterestSystem
             if (_spatialState.ClusterArchetypes != null)
             {
                 var grid = _table.DBE.SpatialGrid;
-                float qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ;
+                // f64 throughout since #919 — the region arrives as doubles and QueryAabb takes doubles, so nothing narrows in between. An interest
+                // region quantised to f32 admits and drops observers by up to an f32 step, which at 10^9 is ~128 units of silently wrong membership.
+                double qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ;
                 if (coordCount == 4)
                 {
                     // 2D region — [minX, minY, maxX, maxY] with infinite Z bounds so the Z overlap test trivially passes.
-                    qMinX = (float)queryCoords[0];
-                    qMinY = (float)queryCoords[1];
-                    qMinZ = float.NegativeInfinity;
-                    qMaxX = (float)queryCoords[2];
-                    qMaxY = (float)queryCoords[3];
-                    qMaxZ = float.PositiveInfinity;
+                    qMinX = queryCoords[0];
+                    qMinY = queryCoords[1];
+                    qMinZ = double.NegativeInfinity;
+                    qMaxX = queryCoords[2];
+                    qMaxY = queryCoords[3];
+                    qMaxZ = double.PositiveInfinity;
                 }
                 else
                 {
                     // 3D region — [minX, minY, minZ, maxX, maxY, maxZ].
-                    qMinX = (float)queryCoords[0];
-                    qMinY = (float)queryCoords[1];
-                    qMinZ = (float)queryCoords[2];
-                    qMaxX = (float)queryCoords[3];
-                    qMaxY = (float)queryCoords[4];
-                    qMaxZ = (float)queryCoords[5];
+                    qMinX = queryCoords[0];
+                    qMinY = queryCoords[1];
+                    qMinZ = queryCoords[2];
+                    qMaxX = queryCoords[3];
+                    qMaxY = queryCoords[4];
+                    qMaxZ = queryCoords[5];
                 }
 
                 foreach (var clusterState in _spatialState.ClusterArchetypes)

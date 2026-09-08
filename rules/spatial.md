@@ -204,6 +204,83 @@
     the pre-existing 200-entity ray test never filled the heap. Partition PERPENDICULAR to the ray so every node
     shares an entry distance and siblings pile up unconsumed.
 
+### SQ-06: The cluster query answers at the tier's declared width, in both frames `[fatal][silent]`
+  invariant 🔴 an archetype's dimensionality is DERIVED from its SpatialFieldType, never enumerated:
+    SpatialFieldTypeExtensions.Is3D(fieldType), not `fieldType == AABB3F || fieldType == BSphere3F`
+    the enumerated form was correct only while ValidateSupportedFieldType rejected the f64 tiers. Opening that
+    gate (#914) turned all nine sites that spelled it that way into a silent misclassification: an AABB3D
+    archetype reads as 2D, AabbClusterEnumerator pins _cellMinZ = _cellMaxZ = grid.FlatPlaneZ, the walk sweeps
+    ONE Z plane of a deep grid, and every entity elsewhere on Z is never visited. SQ-01's own failure mode,
+    reached through a predicate rather than through the traversal.
+  invariant the query runs in TWO frames and each has its own width, deliberately:
+    broadphase — cluster bound vs query box, CELL-RELATIVE f32 (C15). SetCellQueryFrame converts once per cell;
+                 the ray and kNN paths convert the CLUSTER bound outward instead, through ToWorldExact.
+    narrowphase — entity bound vs query box, WORLD f64. Both sides come from the component and the caller
+                  unnarrowed; ReadAndValidateBoundsFromPtr has always produced doubles.
+    never narrow the world frame to f32 anywhere on the query path, in ANY of the four shapes — AABB, radius, ray,
+    frustum, kNN. At 2^36 one f32 step is 8 192 units — wider than a 1 000-unit cell — so an f32 narrowphase
+    compares two coordinates that are the SAME number and accepts every entity in the cell. That is a false
+    POSITIVE set containing the true one, so SQ-01 still holds and nothing throws; the query simply stops
+    discriminating, which is why this is [silent]. The frustum's failure is coarser and worth stating separately:
+    its planes were always f64, but its caller-supplied BOUNDING BOX resolves the cell range, so narrowing that
+    collapses the range and skips whole cells of the view — an SQ-01 false negative, not a loss of discrimination.
+  invariant an f32-TIER archetype may not be registered on a world f32 cannot address. The check is
+    SpatialGrid.ValidateWorldExtentForFieldType, at InitializeArchetypes, and it is a configuration error rather
+    than a runtime branch: the archetype's own component stores f32 WORLD coordinates, so once one f32 step at the
+    world's extreme EXCEEDS the cell size, two entities a cell apart round to the same value and the grid files them
+    together. Nothing downstream can repair that — the precision was gone before the engine saw the value. The
+    remedy the message names is the f64 tier, not a wider internal representation.
+    the line is `ulp_f32(extreme) < cellSize`, NOT "every cell origin is exactly representable in f32". The second
+    is stricter and wrong: a world spanning 0.1..1000.1 with 100-unit cells has no exactly-representable origin and
+    resolves ~1e-8, four orders finer than a cell. Failing startup for a world that works is the worse bug.
+    an accepted world may still be COARSE and that is deliberate — at 2^30 with 1 000-unit cells an f32 step is 128,
+    so the application's own component is quantised to 128 while the cell-relative stored bounds (C15) keep full
+    resolution. That is the trade an f32 tier is, not a defect the engine should refuse.
+  invariant a query box's tier must equal the archetype's storage tier — ClusterSpatialQuery.AABB<TBox> and the
+    four Radius overloads throw InvalidOperationException rather than converting. An f32 box would widen
+    implicitly and silently answer a different question at a precision the caller did not choose.
+  invariant ClusterSpatialQueryResult carries WORLD f64 bounds for every tier. For an f32 tier the widening is
+    exact, so an AABB2F archetype reads back precisely what it stored; for an f64 tier it is the only way the
+    caller sees the coordinate the component holds.
+  scope: SpatialFieldTypeExtensions.Is3D, AabbClusterEnumerator (constructor, MoveNext, SetCellQueryFrame),
+         ArchetypeClusterState.QueryAabb, ArchetypeClusterState.QueryRadius, ArchetypeClusterState.QueryRay,
+         ArchetypeClusterState.QueryFrustum, ArchetypeClusterState.QueryNearest,
+         ClusterSpatialQuery`1.AABB, ClusterSpatialQuery`1.Radius,
+         SpatialGrid.ReadSpatialCenter3D, SpatialGrid.ValidateSupportedFieldType,
+         SpatialGrid.ValidateWorldExtentForFieldType, SpatialGrid.AxisIsResolvableInF32,
+         ClusterSpatialAabb.ToWorldExact, ClusterWorldAabb, Vector3Like
+  verified: F64SpatialTierTests — NarrowQueryBoxAtExtent_SelectsOneOfTwoEntitiesInTheSameCell,
+    OneUnitQueryBoxAtExtent_ReturnsExactlyTheEntityInsideIt and ResultBoundsComeBackAtFullPrecision cover the
+    width invariant for AABB; RayAtExtent_HitsTheEntityInItsPathAndNotTheOneBesideIt,
+    FrustumAtExtent_SelectsTheHalfSpaceItNames_FromATightBoxSeveralCellsOut and
+    KnnAtExtent_OrdersNeighboursByAnF64Distance cover the other three shapes;
+    ZSeparatedEntities_AreBothFoundAndSeparatelySelectable covers the dimensionality one; and
+    QueryingAnF64ArchetypeWithAnF32Box_StillThrows covers the tier check. F64WorldLifecycleTests covers the
+    configuration gate (F32Archetype_OnAWorldF32CannotAddress_FailsAtStartup, and the two positive cases that keep
+    it from being a blanket ban, one of which — F32Archetype_OnASmallWorldWithFractionalBounds_IsAccepted — is the
+    regression guard for the over-strict first version) plus
+    TheResolutionCriterion_AgreesWithWhetherF32CanSeparateAdjacentCells, which pins the O(1) criterion against the
+    property it stands for, quantified over position rather than sampled at one point. Each precision case carries a PRECONDITION assertion
+    that f32 cannot represent it, so a fixture that drifted to a smaller magnitude fails loudly instead of passing
+    for the wrong reason.
+  note no [RuleMutant]: every mutant for this rule is an EDIT TO ENGINE CODE — narrow the narrowphase, the ray
+    origin, the kNN operands or the frustum's bounding box to f32; restore the two-way dimensionality test; make
+    the extent check always pass — not an input that can be driven through a verifier's assertion path.
+    All six were run by hand when the rule was written (2026-09-08) and each reddens exactly the cases above.
+    RuleMutants.AssertDetects deliberately requires the verifier's own failure marker, and there is no such helper
+    here to drive.
+  note (performance, not correctness) ClusterSpatialQuery`1.AABB carries [AggressiveInlining] because adding the
+    two f64 dispatch branches took its IL from 716 to 814 bytes. The JIT sizes an inlining candidate BEFORE folding
+    the typeof(TBox) tests, so the specialised body stayed small while the method stopped being inlined — and it
+    returns a 1.6 KB ref struct by value, so every query paid an extra full-struct copy. Measured interleaved
+    against the pre-#914 build: +44 ns fixed per query, a tenth of a 3x3-cell query. Adding a further box variant
+    spends more of that budget; re-measure if one is added.
+  on_violation:
+    dimensionality misread → a 3D f64 archetype answers only from one Z plane (SQ-01 false negative, silent)
+    world frame narrowed → the query stops discriminating inside a cell; every hit, no error
+    result narrowed → the caller reads a coordinate quantised to ~64-unit steps at 10^9 and cannot tell
+  requires: C15 (stored bounds are cell-relative f32 — this rule is why that is not a limitation), CA-01
+
 ---
 
 ## Module: Fat AABB Updates

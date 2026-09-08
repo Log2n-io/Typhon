@@ -1472,9 +1472,12 @@ internal sealed class Simulation
             }
             if (hit.DistanceSq < best)
             {
-                best = hit.DistanceSq;
-                tx = hit.MinX;
-                ty = hit.MinY;
+                // ClusterSpatialQueryResult carries f64 world bounds since #914. SpaceBattle's world fits in f32, so every consumer here narrows at the
+                // point of use — the conversion is exact for this game and the simulation stays the float arithmetic it has always been. A game whose world
+                // did NOT fit would keep the doubles instead; that choice is the caller's, which is why the engine no longer makes it.
+                best = (float)hit.DistanceSq;
+                tx = (float)hit.MinX;
+                ty = (float)hit.MinY;
                 found = true;
             }
         }
@@ -1607,8 +1610,8 @@ internal sealed class Simulation
                 {
                     continue;
                 }
-                best = hit.DistanceSq;
-                _stationRally[i] = new Vector2(hit.MinX, hit.MinY);
+                best = (float)hit.DistanceSq;
+                _stationRally[i] = new Vector2((float)hit.MinX, (float)hit.MinY);
                 _stationRallyHasEnemy[i] = true;
             }
             q.Dispose();
@@ -3364,10 +3367,10 @@ internal sealed class Simulation
             // inverse-square law would fling them apart at absurd speed.
             if (sepR > 0f && hit.DistanceSq < sepR2 && hit.DistanceSq > 1e-6f)
             {
-                var nd = MathF.Sqrt(hit.DistanceSq);
+                var nd = MathF.Sqrt((float)hit.DistanceSq);
                 var w = 1f - nd / sepR;
-                _sepX += (x - hit.MinX) / nd * w;
-                _sepY += (y - hit.MinY) / nd * w;
+                _sepX += (float)((x - hit.MinX) / nd * w);
+                _sepY += (float)((y - hit.MinY) / nd * w);
                 if (nd < _sepNearest)
                 {
                     _sepNearest = nd;
@@ -3396,16 +3399,16 @@ internal sealed class Simulation
 
             if (hit.DistanceSq < best)
             {
-                best = hit.DistanceSq;
-                tx = hit.MinX;
-                ty = hit.MinY;
+                best = (float)hit.DistanceSq;
+                tx = (float)hit.MinX;
+                ty = (float)hit.MinY;
                 found = true;
             }
             if (hk == KindMiner && hit.DistanceSq < bestMiner)
             {
-                bestMiner = hit.DistanceSq;
-                minerX = hit.MinX;
-                minerY = hit.MinY;
+                bestMiner = (float)hit.DistanceSq;
+                minerX = (float)hit.MinX;
+                minerY = (float)hit.MinY;
                 foundMiner = true;
             }
         }
@@ -4099,9 +4102,9 @@ internal sealed class Simulation
                 var hit = q.Current;
                 if (hit.DistanceSq < best)
                 {
-                    best = hit.DistanceSq;
-                    px = hit.MinX;
-                    py = hit.MinY;
+                    best = (float)hit.DistanceSq;
+                    px = (float)hit.MinX;
+                    py = (float)hit.MinY;
                     found = true;
                 }
             }

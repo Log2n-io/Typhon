@@ -52,7 +52,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         ref readonly var ss = ref SpatialSlot;
-        bool is3D = ss.FieldInfo.FieldType == SpatialFieldType.AABB3F || ss.FieldInfo.FieldType == SpatialFieldType.BSphere3F;
+        bool is3D = ss.FieldInfo.FieldType.Is3D();
         int dim = is3D ? 3 : 2;
         int stride = dim + 1;
         if (planes.Length < planeCount * stride)
@@ -60,8 +60,8 @@ internal sealed unsafe partial class ArchetypeClusterState
             ThrowHelper.ThrowInvalidOp($"Frustum query needs {planeCount * stride} doubles for {planeCount} planes in {dim}D, got {planes.Length}.");
         }
 
-        grid.WorldToCellRange(boundsMin.X, boundsMin.Y, is3D ? boundsMin.Z : float.NegativeInfinity,
-            boundsMax.X, boundsMax.Y, is3D ? boundsMax.Z : float.PositiveInfinity,
+        grid.WorldToCellRange(boundsMin.X, boundsMin.Y, is3D ? boundsMin.Z : double.NegativeInfinity,
+            boundsMax.X, boundsMax.Y, is3D ? boundsMax.Z : double.PositiveInfinity,
             out int cellMinX, out int cellMinY, out int cellMinZ, out int cellMaxX, out int cellMaxY, out int cellMaxZ);
 
         if (!is3D)
@@ -103,10 +103,10 @@ internal sealed unsafe partial class ArchetypeClusterState
                             continue;
                         }
 
-                        grid.CellOrigin(cellKey, out float originX, out float originY, out float originZ);
+                        grid.CellOrigin(cellKey, out double originX, out double originY, out double originZ);
 
                         // Reject the whole cell before touching its clusters. The cell's own box is exactly one classification, against up to a few thousand.
-                        float cellSize = grid.Config.CellSize;
+                        double cellSize = grid.Config.CellSize;
                         box[0] = originX;
                         box[1] = originY;
                         box[dim] = originX + cellSize;
@@ -121,7 +121,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                             continue;
                         }
 
-                        ShiftPlanes(planes, shifted, planeCount, dim, originX, originY, is3D ? originZ : 0f);
+                        ShiftPlanes(planes, shifted, planeCount, dim, originX, originY, is3D ? originZ : 0d);
 
                         FrustumScanHalf(slot, isStatic: false, ref accessor, shifted, planes, planeCount, dim, is3D, categoryMask, box, aabbs,
                             ref visited, results, ref count);
@@ -141,7 +141,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>Re-express each plane in a cell's frame: the normal is unchanged by a translation, the distance shifts by its dot with the origin.</summary>
-    private static void ShiftPlanes(ReadOnlySpan<double> planes, Span<double> shifted, int planeCount, int dim, float ox, float oy, float oz)
+    private static void ShiftPlanes(ReadOnlySpan<double> planes, Span<double> shifted, int planeCount, int dim, double ox, double oy, double oz)
     {
         int stride = dim + 1;
         for (int p = 0; p < planeCount; p++)
@@ -305,11 +305,11 @@ internal sealed unsafe partial class ArchetypeClusterState
 /// <summary>Minimal three-float point, so the frustum entry point does not force a dependency on a particular vector type.</summary>
 internal readonly struct Vector3Like
 {
-    public readonly float X;
-    public readonly float Y;
-    public readonly float Z;
+    public readonly double X;
+    public readonly double Y;
+    public readonly double Z;
 
-    public Vector3Like(float x, float y, float z)
+    public Vector3Like(double x, double y, double z)
     {
         X = x;
         Y = y;

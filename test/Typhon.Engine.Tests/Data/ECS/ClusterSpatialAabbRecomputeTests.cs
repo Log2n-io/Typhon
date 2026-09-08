@@ -437,12 +437,12 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
         // so a raw `before.MinX == 110f` reads the offset 10 and fails. The sibling assertions elsewhere in this fixture happen to survive the change only
         // because their clusters live in cell (0,0,0), where the origin is zero and the two frames coincide. Converting here keeps the test saying what it
         // means rather than what the storage happens to hold.
-        dbe.SpatialGrid.CellOrigin(cellB, out float cbOriginX, out float cbOriginY, out _);
+        dbe.SpatialGrid.CellOrigin(cellB, out double cbOriginX, out double cbOriginY, out _);
         var before = cs.ClusterAabbs[cbChunkId];
-        Assert.That(ClusterSpatialAabb.ToWorld(before.MinX, cbOriginX), Is.EqualTo(110f).Within(0.001f));
-        Assert.That(ClusterSpatialAabb.ToWorld(before.MaxX, cbOriginX), Is.EqualTo(190f).Within(0.001f));
-        Assert.That(ClusterSpatialAabb.ToWorld(before.MinY, cbOriginY), Is.EqualTo(10f).Within(0.001f));
-        Assert.That(ClusterSpatialAabb.ToWorld(before.MaxY, cbOriginY), Is.EqualTo(90f).Within(0.001f));
+        Assert.That(ClusterSpatialAabb.ToWorldExact(before.MinX, cbOriginX), Is.EqualTo(110f).Within(0.001f));
+        Assert.That(ClusterSpatialAabb.ToWorldExact(before.MaxX, cbOriginX), Is.EqualTo(190f).Within(0.001f));
+        Assert.That(ClusterSpatialAabb.ToWorldExact(before.MinY, cbOriginY), Is.EqualTo(10f).Within(0.001f));
+        Assert.That(ClusterSpatialAabb.ToWorldExact(before.MaxY, cbOriginY), Is.EqualTo(90f).Within(0.001f));
 
         // Destroy m2 in one transaction (no dirty bit set by destroy alone).
         using (var tx = dbe.CreateQuickTransaction())
@@ -468,10 +468,10 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
         // Critically, m2's old (190,90) position must NOT contribute — the recompute scans live occupancy.
         // World space again — see the `before` assertions for why the raw fields cannot be compared against world coordinates.
         var after = cs.ClusterAabbs[cbChunkId];
-        Assert.That(ClusterSpatialAabb.ToWorld(after.MinX, cbOriginX), Is.EqualTo(110f).Within(0.001f), "min X = m1");
-        Assert.That(ClusterSpatialAabb.ToWorld(after.MinY, cbOriginY), Is.EqualTo(10f).Within(0.001f), "min Y = m1");
-        Assert.That(ClusterSpatialAabb.ToWorld(after.MaxX, cbOriginX), Is.EqualTo(150f).Within(0.001f), "max X = migrant (m2 excluded)");
-        Assert.That(ClusterSpatialAabb.ToWorld(after.MaxY, cbOriginY), Is.EqualTo(50f).Within(0.001f), "max Y = migrant (m2 excluded)");
+        Assert.That(ClusterSpatialAabb.ToWorldExact(after.MinX, cbOriginX), Is.EqualTo(110f).Within(0.001f), "min X = m1");
+        Assert.That(ClusterSpatialAabb.ToWorldExact(after.MinY, cbOriginY), Is.EqualTo(10f).Within(0.001f), "min Y = m1");
+        Assert.That(ClusterSpatialAabb.ToWorldExact(after.MaxX, cbOriginX), Is.EqualTo(150f).Within(0.001f), "max X = migrant (m2 excluded)");
+        Assert.That(ClusterSpatialAabb.ToWorldExact(after.MaxY, cbOriginY), Is.EqualTo(50f).Within(0.001f), "max Y = migrant (m2 excluded)");
 
         // The per-cell index row must mirror the tightened AABB — in the SAME frame, which is what makes this a mirror check rather than a second
         // world-space assertion.
