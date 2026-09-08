@@ -121,7 +121,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         var ys = scratch.Slice(MaxSlotsPerCluster, MaxSlotsPerCluster);
         var zs = scratch.Slice(2 * MaxSlotsPerCluster, MaxSlotsPerCluster);
 
-        var ss = SpatialSlot;
+        ref readonly var ss = ref SpatialSlot;
         var clusterBase = accessor.GetChunkAddress(clusterChunkId);
         var occupancy = *(ulong*)clusterBase;
         var compOffset = Layout.ComponentOffset(ss.Slot);

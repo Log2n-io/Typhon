@@ -155,7 +155,34 @@
 ### SQ-05: Traversal buffer safety `[silent]`
   invariant stackTop < 256 for all DFS-based queries
   invariant RayEnumerator never drops a child that hits within maxDist while below MaxRayHeapCapacity
-  scope: AABBQueryEnumerator, FrustumEnumerator, CountInAABB, RayEnumerator
+  invariant 🔴 ∀ two enumerators live on one thread at once: their traversal stacks are DISTINCT arrays
+  scope: AABBQueryEnumerator, FrustumEnumerator, CountInAABB, RayEnumerator, QueryStackPool
+  pooled stack (added 2026-09-08, #916 O1): AABBQueryEnumerator's stack is no longer the inline
+    QueryStackBuffer. It is an int[256] rented from QueryStackPool, a per-thread FREE LIST, and returned in
+    Dispose. Capacity is unchanged, so the 256 bound above still reads against the same number — PushChild
+    tests QueryStackPool.Capacity.
+    The distinctness invariant is new and is the whole reason the pool is a list rather than one buffer.
+    Nested spatial queries are legal — query A, and for each hit query B — and were safe by CONSTRUCTION while
+    each enumerator embedded its own 1 KB array. A single [ThreadStatic] buffer does not crash: the inner query
+    overwrites the outer's stack, the outer resumes describing a different subtree, and it returns a SUBSET.
+    That is an SQ-01 false negative arriving through this rule, which is why it is 🔴 and not a note.
+    Two mechanisms hold it, and both are needed. (1) The enumerator rents LAZILY, on first descent rather than
+    in the constructor, because GetEnumerator() returns a COPY — a constructor-time rent would put one array on
+    both the copy and the discarded original. (2) Every buffer carries an ownership TOKEN past its DFS slots
+    (QueryStackPool.TokenSlot); a rent stamps a fresh value and hands the same value out, and Return is accepted
+    only while the two agree, zeroing the stamp on the way.
+    An identity scan of the free list is NOT sufficient and was the first attempt: it catches a double return
+    only while the buffer is still parked, and misses the case that matters — a copy that already rented returns
+    the buffer, another query rents it, then the original returns it again. At that moment the buffer is
+    legitimately on loan, so the scan finds nothing and parks a stack that is still being written. The token
+    fails that return on the stamp instead. No in-repo caller does this today, but AabbClusterEnumerator is
+    public and reaches game code through ClusterSpatialQuery, so "no caller does that" is not load-bearing.
+    Buffers are returned DIRTY and must stay that way. The DFS protocol writes a slot before reading it and
+    stackTop is the only liveness marker, so zeroing on rent or return would reintroduce the 1 KB memset the
+    change exists to remove (measured: query setup 75.45 -> 58.09 ns on an M4, medians of interleaved sets).
+    verified by: QueryStackPoolTests (incl. StaleReturnAfterReRentIsIgnored),
+    CellTreePromotionTests.NestedQueriesOverPromotedCells_AnswerAsTheyDoAlone,
+    CellTreePromotionTests.WarmQueryPathAllocatesNothing_AndNeverOverflowsTheStack
   note OccupantQueryEnumerator was a fifth DFS enumerator here until #872 step 13. It yielded the payload id AND
        the owning component's chunk id, which only the entity-level tree could supply; its last two callers were
        the interest and trigger systems' entity-tree paths, removed with that tree.

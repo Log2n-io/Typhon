@@ -51,7 +51,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             ThrowHelper.ThrowInvalidOp($"A frustum query is limited to {MaxFrustumPlanes} planes; got {planeCount}.");
         }
 
-        var ss = SpatialSlot;
+        ref readonly var ss = ref SpatialSlot;
         bool is3D = ss.FieldInfo.FieldType == SpatialFieldType.AABB3F || ss.FieldInfo.FieldType == SpatialFieldType.BSphere3F;
         int dim = is3D ? 3 : 2;
         int stride = dim + 1;
@@ -66,9 +66,8 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         if (!is3D)
         {
-            grid.WorldToCellCoords(0f, 0f, 0f, out _, out _, out int planeZ);
-            cellMinZ = planeZ;
-            cellMaxZ = planeZ;
+            cellMinZ = grid.FlatPlaneZ;   // computed once at grid construction — #916's O2
+            cellMaxZ = grid.FlatPlaneZ;
         }
 
         Span<double> shifted = stackalloc double[planeCount * stride];
@@ -251,7 +250,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
 
-        var ss = SpatialSlot;
+        ref readonly var ss = ref SpatialSlot;
         int compOffset = Layout.ComponentOffset(ss.Slot);
         int compSize = Layout.ComponentSize(ss.Slot);
         int fieldOffset = ss.FieldOffset;
@@ -268,7 +267,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             occupancy &= occupancy - 1;
 
             byte* fieldPtr = clusterBase + compOffset + (slot * compSize) + fieldOffset;
-            if (!SpatialMaintainer.ReadAndValidateBoundsFromPtr(fieldPtr, ss.FieldInfo, entityCoords, ss.Descriptor))
+            if (!SpatialMaintainer.ReadAndValidateBoundsFromPtr(fieldPtr, ss.FieldInfo, entityCoords))
             {
                 continue;
             }

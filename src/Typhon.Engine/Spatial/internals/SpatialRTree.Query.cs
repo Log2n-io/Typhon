@@ -98,9 +98,32 @@ internal unsafe partial class SpatialRTree<TStore>
         private readonly int _coordCount;
         private readonly uint _categoryMask;
 
-        // DFS stack of chunk IDs to visit
-        private QueryStackBuffer _stack;
+        /// <summary>
+        /// DFS stack of chunk ids to visit — a buffer borrowed from <see cref="QueryStackPool"/>, <c>null</c> until this enumerator first descends a tree.
+        /// </summary>
+        /// <remarks>
+        /// <para><b>Why it is rented lazily rather than in the constructor, which is the whole reason this is safe.</b> <see cref="GetEnumerator"/> returns
+        /// <c>this</c> — a COPY. A constructor-time rent would put the same array on both the copy and the original, and a caller writing
+        /// <c>using var e = tree.QueryAABB(…);</c> and then <c>foreach (… in e)</c> disposes both, returning one buffer twice and handing it to two live
+        /// enumerators. Renting on the first stack write instead means the discarded original owns nothing, and only the instance that actually iterates
+        /// ever holds a buffer. <see cref="QueryStackPool.Return"/> guards the same case a second time; this is what makes it unreachable.</para>
+        /// <para>Two live enumerators on one thread therefore hold two distinct arrays, which is what lets nested queries stay correct — see
+        /// <see cref="QueryStackPool"/>.</para>
+        /// </remarks>
+        private int[] _stack;
         private int _stackTop;
+
+        /// <summary>Proof that this instance, and not a copy of it, owns <see cref="_stack"/> — see <c>QueryStackPool.TokenSlot</c>.</summary>
+        private int _stackToken;
+
+        /// <summary>
+        /// The root to seed the stack with on first descent, or <c>0</c> for an empty tree or a stack already seeded.
+        /// </summary>
+        /// <remarks>
+        /// The constructor used to push the root directly. It cannot any more without renting, so it records the root here and the first pass through the
+        /// DFS loop does the push — see <see cref="_stack"/>.
+        /// </remarks>
+        private int _pendingRootChunkId;
 
         // Current leaf iteration
         private int _currentLeafChunkId;
@@ -203,12 +226,10 @@ internal unsafe partial class SpatialRTree<TStore>
 
             _floatBoxIsAuthoritative = false;
 
-            // Push root
-            if (tree._rootChunkId != 0)
-            {
-                _stack[0] = tree._rootChunkId;
-                _stackTop = 1;
-            }
+            // Root recorded, not pushed — the stack is rented on first descent. See _stack.
+            _stack = null;
+            _stackToken = 0;
+            _pendingRootChunkId = tree._rootChunkId;
 
             // Gated on the span's OWN flag, which is a generated `static readonly bool` — so with the profiler off the JIT drops the
             // call, the interceptor behind it and the struct it would have returned. Begun unconditionally this cost ~40 ns on every
@@ -287,11 +308,10 @@ internal unsafe partial class SpatialRTree<TStore>
                 }
             }
 
-            if (tree._rootChunkId != 0)
-            {
-                _stack[0] = tree._rootChunkId;
-                _stackTop = 1;
-            }
+            // Root recorded, not pushed — the stack is rented on first descent. See _stack.
+            _stack = null;
+            _stackToken = 0;
+            _pendingRootChunkId = tree._rootChunkId;
 
             _span = SpatialQueryTuning.GateQuerySpan && !TelemetryConfig.SpatialQueryAabbActive
                 ? default
@@ -516,6 +536,17 @@ internal unsafe partial class SpatialRTree<TStore>
                 }
             }
 
+            // First descent: take a traversal stack and seed it with the root. Every earlier return path in this method needs a leaf this loop has already
+            // entered, so nothing above can run before this — and a query that finds no candidate cell never reaches here and never rents at all, which is
+            // what keeps the empty-query path free of the tree entirely.
+            if (_pendingRootChunkId != 0)
+            {
+                _stack = QueryStackPool.Rent(out _stackToken);
+                _stack[0] = _pendingRootChunkId;
+                _stackTop = 1;
+                _pendingRootChunkId = 0;
+            }
+
             // DFS traversal
             while (_stackTop > 0)
             {
@@ -643,7 +674,7 @@ internal unsafe partial class SpatialRTree<TStore>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void PushChild(int childId, bool contained)
         {
-            if (_stackTop < 256)
+            if (_stackTop < QueryStackPool.Capacity)
             {
                 _stack[_stackTop++] = contained ? childId | FullyContainedFlag : childId;
             }
@@ -688,6 +719,13 @@ internal unsafe partial class SpatialRTree<TStore>
             _currentLeafFullyContained = false;
             if (_tree._rootChunkId != 0)
             {
+                // Only ever reached from inside the DFS loop, which rents before it runs — the null-coalesce is for the refactor that moves a caller, not for
+                // a path that exists today.
+                if (_stack == null)
+                {
+                    _stack = QueryStackPool.Rent(out _stackToken);
+                }
+
                 _stack[0] = _tree._rootChunkId;
                 _stackTop = 1;
             }
@@ -742,6 +780,15 @@ internal unsafe partial class SpatialRTree<TStore>
             if (!_disposed)
             {
                 _disposed = true;
+
+                // Nulled before it is handed back, so this instance can never name a buffer the pool has already re-issued. A query that never descended a
+                // tree rented nothing and returns nothing.
+                var stack = _stack;
+                var token = _stackToken;
+                _stack = null;
+                _stackToken = 0;
+                QueryStackPool.Return(stack, token);
+
                 _span.Dispose();
                 if (Unsafe.IsNullRef(ref _borrowed))
                 {

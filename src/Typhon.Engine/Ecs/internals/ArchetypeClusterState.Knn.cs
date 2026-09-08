@@ -61,7 +61,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         int target = Math.Min(k, results.Length);
-        var ss = SpatialSlot;
+        ref readonly var ss = ref SpatialSlot;
         bool is3D = ss.FieldInfo.FieldType == SpatialFieldType.AABB3F || ss.FieldInfo.FieldType == SpatialFieldType.BSphere3F;
 
         // A 2D archetype's entities all lie in the plane containing world Z = 0, so the query point is projected onto it rather than searching Z shells that
@@ -298,7 +298,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     private void ScanClusterForNearest(int clusterChunkId, ref ChunkAccessor<PersistentStore> accessor, float px, float py, float pz, bool is3D,
         int target, Span<(long entityId, float distSq)> results, ref int resultCount, ref int clustersOpened)
     {
-        var ss = SpatialSlot;
+        ref readonly var ss = ref SpatialSlot;
         int compOffset = Layout.ComponentOffset(ss.Slot);
         int compSize = Layout.ComponentSize(ss.Slot);
         int fieldOffset = ss.FieldOffset;
@@ -314,7 +314,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             occupancy &= occupancy - 1;
 
             byte* fieldPtr = clusterBase + compOffset + (slot * compSize) + fieldOffset;
-            if (!SpatialMaintainer.ReadAndValidateBoundsFromPtr(fieldPtr, ss.FieldInfo, entityCoords, ss.Descriptor))
+            if (!SpatialMaintainer.ReadAndValidateBoundsFromPtr(fieldPtr, ss.FieldInfo, entityCoords))
             {
                 continue;
             }

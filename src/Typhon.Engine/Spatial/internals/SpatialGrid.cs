@@ -122,7 +122,23 @@ internal sealed unsafe class SpatialGrid
         _logBlockY = BitOperations.Log2((uint)_blockDimY);
         _logBlockZ = BitOperations.Log2((uint)_blockDimZ);
         _blockCellCount = _blockDimX * _blockDimY * _blockDimZ;
+
+        WorldToCellCoords(0f, 0f, 0f, out _, out _, out FlatPlaneZ);
     }
+
+    /// <summary>
+    /// The Z plane containing world Z = 0 — the only plane a 2D archetype's entities can occupy, and therefore the Z range every 2D query collapses to.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Why it is a field and not a call.</b> A 2D query carries ±Infinity on Z, meaning "every Z", which <see cref="WorldToCellRange"/> saturates to
+    /// the grid's full depth; left alone that sweeps every Z plane of a volumetric grid, of which exactly one can ever hold a cell, because
+    /// <c>ReadSpatialCenter3D</c> reports <c>posZ = 0</c> for both 2D field types. Collapsing to this plane is not an approximation of the answer — the other
+    /// planes are empty by construction.</para>
+    /// <para>The value cannot change for the grid's lifetime: it is a function of <see cref="Config"/> alone, which is assigned once here. Recomputing it per
+    /// query cost three <c>IsFinite</c> tests and three clamped conversions on <b>every 2D query, ray and frustum walk</b> — #916's O2, measured as part of a
+    /// setup term that was ~10 % of a 3x3-cell query and ~40 % of a single-cell one.</para>
+    /// </remarks>
+    internal readonly int FlatPlaneZ;
 
     /// <summary>
     /// Per-axis block extent: <c>clamp(nextPow2(extentInCells), 1, 16)</c>. A flat world's Z extent is 1, so its blocks are <c>16 x 16 x 1</c> and the Z term

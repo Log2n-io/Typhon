@@ -3303,7 +3303,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         EnsureClusterCellMapCapacity(PrimarySegmentCapacity);
         Array.Fill(ClusterCellMap, -1);
 
-        var ss = SpatialSlot;
+        ref readonly var ss = ref SpatialSlot;
         var componentOffset = Layout.ComponentOffset(ss.Slot);
         var compStride = Layout.ComponentSize(ss.Slot);
         var fieldType = ss.FieldInfo.FieldType;
@@ -3448,7 +3448,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             return result;
         }
 
-        var ss = SpatialSlot;
+        ref readonly var ss = ref SpatialSlot;
         var firstSlot = BitOperations.TrailingZeroCount(occupancy);
         var firstFieldPtr = clusterBase + Layout.ComponentOffset(ss.Slot) + firstSlot * Layout.ComponentSize(ss.Slot) + ss.FieldOffset;
         grid.ReadCellCoordsFromSpatialField(firstFieldPtr, ss.FieldInfo.FieldType, out result.CellX, out result.CellY, out result.CellZ);
@@ -4141,7 +4141,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal ClusterSpatialAabb RecomputeClusterAabb(int clusterChunkId, ref ChunkAccessor<PersistentStore> accessor,
         double originX, double originY, double originZ, out int slotsScanned)
     {
-        var ss = SpatialSlot;
+        ref readonly var ss = ref SpatialSlot;
         var clusterBase = accessor.GetChunkAddress(clusterChunkId);
         var occupancy = *(ulong*)clusterBase;
         slotsScanned = BitOperations.PopCount(occupancy);
@@ -4195,7 +4195,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             bits &= bits - 1;
 
             var fieldPtr = clusterBase + componentOffset + slot * componentStride + ss.FieldOffset;
-            if (!SpatialMaintainer.ReadAndValidateBoundsFromPtr(fieldPtr, ss.FieldInfo, coords, ss.Descriptor))
+            if (!SpatialMaintainer.ReadAndValidateBoundsFromPtr(fieldPtr, ss.FieldInfo, coords))
             {
                 continue; // skip degenerate slot
             }

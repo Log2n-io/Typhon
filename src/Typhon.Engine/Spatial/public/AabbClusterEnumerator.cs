@@ -74,7 +74,6 @@ public unsafe ref struct AabbClusterEnumerator
     private readonly int _spatialCompSize;
     private readonly int _spatialFieldOffset;
     private readonly SpatialFieldInfo _fieldInfo;
-    private readonly SpatialNodeDescriptor _descriptor;
 
     // Is the cluster's spatial field 3D? Precomputed at construction so the narrowphase inner loop doesn't re-dispatch on FieldType every iteration.
     private readonly bool _is3D;
@@ -165,23 +164,26 @@ public unsafe ref struct AabbClusterEnumerator
         // handles null slots gracefully. The Z range is narrowed again below for a 2D archetype.
         grid.WorldToCellRange(minX, minY, minZ, maxX, maxY, maxZ, out _cellMinX, out _cellMinY, out _cellMinZ, out _cellMaxX, out _cellMaxY, out _cellMaxZ);
 
-        var ss = state.SpatialSlot;
+        // ref readonly, not a copy: ClusterSpatialSlot is ~104 bytes, 72 of them the descriptor, and copying it here to read five fields was 104 bytes of
+        // memcpy on every query construction (#916 O3). The rest of the codebase already reads it this way.
+        ref readonly var ss = ref state.SpatialSlot;
         _spatialCompOffset = state.Layout.ComponentOffset(ss.Slot);
         _spatialCompSize = state.Layout.ComponentSize(ss.Slot);
         _spatialFieldOffset = ss.FieldOffset;
         _fieldInfo = ss.FieldInfo;
-        _descriptor = ss.Descriptor;
         _is3D = ss.FieldInfo.FieldType == SpatialFieldType.AABB3F || ss.FieldInfo.FieldType == SpatialFieldType.BSphere3F;
 
         // A 2D archetype's query carries ±Infinity on Z, meaning "every Z", which WorldToCellRange saturates to the full depth. Left alone that makes every
         // such query sweep every Z plane of a deep grid, of which exactly one can ever hold a cell: ReadSpatialCenter3D reports posZ = 0 for both 2D field
         // types, so a 2D archetype's entities all live in the plane containing world Z = 0. Collapsing to that plane is not an optimisation of the answer —
         // the other planes are empty by construction. A flat world is already one plane deep, so this only bites a 2D archetype sharing a volumetric grid.
+        //
+        // The plane itself is a function of the grid config alone, so it is computed once at construction (SpatialGrid.FlatPlaneZ) rather than per query —
+        // #916's O2.
         if (!_is3D)
         {
-            grid.WorldToCellCoords(0f, 0f, 0f, out _, out _, out int planeZ);
-            _cellMinZ = planeZ;
-            _cellMaxZ = planeZ;
+            _cellMinZ = grid.FlatPlaneZ;
+            _cellMaxZ = grid.FlatPlaneZ;
         }
 
         _accessor = default;
@@ -289,7 +291,9 @@ public unsafe ref struct AabbClusterEnumerator
 
                 // Read entity's tight bounds and test against query AABB.
                 byte* fieldPtr = _currentClusterBase + _spatialCompOffset + slot * _spatialCompSize + _spatialFieldOffset;
-                if (!SpatialMaintainer.ReadAndValidateBoundsFromPtr(fieldPtr, _fieldInfo, entityCoords, _descriptor))
+                // No descriptor argument: this enumerator carried a 72-byte SpatialNodeDescriptor field solely to pass it here, and the callee never read it.
+                // Both are gone (#916 O3) — see SpatialMaintainer.ReadAndValidateBoundsFromPtr.
+                if (!SpatialMaintainer.ReadAndValidateBoundsFromPtr(fieldPtr, _fieldInfo, entityCoords))
                 {
                     continue; // degenerate — skip
                 }

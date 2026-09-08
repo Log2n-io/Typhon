@@ -2194,7 +2194,7 @@ public unsafe partial class Transaction
 
                         if (ctx.ClusterState.ClusterCellMap != null)
                         {
-                            if (SpatialMaintainer.ReadAndValidateBoundsFromPtr(spatialFieldPtr, ss.FieldInfo, spawnSpatialCoords, ss.Descriptor))
+                            if (SpatialMaintainer.ReadAndValidateBoundsFromPtr(spatialFieldPtr, ss.FieldInfo, spawnSpatialCoords))
                             {
                                 ctx.ClusterState.EnsureClusterAabbsCapacity(clusterChunkId + 1);
                                 ctx.ClusterState.EnsureClusterSpatialIndexSlotCapacity(clusterChunkId + 1);

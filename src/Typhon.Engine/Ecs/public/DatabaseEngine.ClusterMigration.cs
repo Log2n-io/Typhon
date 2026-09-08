@@ -882,7 +882,7 @@ public partial class DatabaseEngine
                 // If src becomes empty, ReleaseSlot below → FinaliseEmptyClusterCellState removes it from the per-cell index.
                 if (ss.FieldInfo.Mode == SpatialMode.Dynamic && clusterState.ClusterCellMap != null)
                 {
-                    if (SpatialMaintainer.ReadAndValidateBoundsFromPtr(dstFieldPtr, ss.FieldInfo, migrantCoords, ss.Descriptor))
+                    if (SpatialMaintainer.ReadAndValidateBoundsFromPtr(dstFieldPtr, ss.FieldInfo, migrantCoords))
                     {
                         clusterState.EnsureClusterAabbsCapacity(dstChunkId + 1);
                         clusterState.EnsureClusterSpatialIndexSlotCapacity(dstChunkId + 1);

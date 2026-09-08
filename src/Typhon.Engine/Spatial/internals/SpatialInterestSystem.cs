@@ -302,7 +302,6 @@ internal sealed unsafe class SpatialInterestSystem
                     int spatialFieldOffset = ss.FieldOffset;
                     uint archetypeCategory = ss.FieldInfo.Category;
                     var fieldInfo = ss.FieldInfo;
-                    var descriptor = ss.Descriptor;
 
                     var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
                     try
@@ -335,7 +334,7 @@ internal sealed unsafe class SpatialInterestSystem
 
                                 // Read entity's tight bounds from the cluster SoA storage.
                                 byte* fieldPtr = clusterBase + spatialCompOffset + slotIndex * spatialCompSize + spatialFieldOffset;
-                                if (!SpatialMaintainer.ReadAndValidateBoundsFromPtr(fieldPtr, fieldInfo, clCoords, descriptor))
+                                if (!SpatialMaintainer.ReadAndValidateBoundsFromPtr(fieldPtr, fieldInfo, clCoords))
                                 {
                                     continue;
                                 }
