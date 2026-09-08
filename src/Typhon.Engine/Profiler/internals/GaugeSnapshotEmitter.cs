@@ -63,6 +63,14 @@ internal static class GaugeSnapshotEmitter
     /// strictly greater than zero; pass <c>0</c> to skip. No capacity counterpart is emitted — the transient store has no fixed
     /// ceiling (see the rationale comment inside the method body).
     /// </param>
+    /// <param name="gridOccupancy">
+    /// The spatial grid's occupancy and memory (#911 O3). Emitted as the <c>SpatialGrid*</c> group only when the engine actually has a grid — a database with
+    /// no spatial archetype produces no series rather than five zero series, which is how every other optional group here behaves.
+    /// </param>
+    /// <param name="fenceSpanMs">
+    /// The previous fence's SPAN in milliseconds (#911). Emitted as <see cref="GaugeId.ClusterFenceSpanUs"/> only when positive — a serial-fence host has no
+    /// span to report, and a zero series would read as "the fence was free" rather than "nothing measured it".
+    /// </param>
     /// <param name="firstSnapshotEmitted">
     /// In/out. Callers initialize this to <c>false</c> and pass the same variable into every subsequent call. The helper emits
     /// fixed-at-init capacity gauges only when this is <c>false</c> on entry, then sets it to <c>true</c>.
@@ -73,7 +81,8 @@ internal static class GaugeSnapshotEmitter
     /// reaches into a <see cref="DatabaseEngine"/> handle to pull the right subsystem references and forwards to this method.
     /// </remarks>
     internal static void EmitSnapshot(uint tickNumber, MemoryAllocator memoryAllocator, PagedMMF pagedMmf, TransactionChain txChain, UowRegistry uowRegistry,
-        WalManager walManager, StagingBufferPool stagingBufferPool, long transientBytesUsed, ref bool firstSnapshotEmitted)
+        WalManager walManager, StagingBufferPool stagingBufferPool, long transientBytesUsed, SpatialGridOccupancy gridOccupancy, double fenceSpanMs,
+        ref bool firstSnapshotEmitted)
     {
         if (!TelemetryConfig.ProfilerGaugesActive)
         {
@@ -199,6 +208,28 @@ internal static class GaugeSnapshotEmitter
             values[n++] = GaugeValue.FromU64(GaugeId.TransientStoreBytesUsed, (ulong)transientBytesUsed);
         }
 
+        // #911 O3. Engine-wide, so it rides the gauge channel rather than the per-archetype snapshot event — duplicating one grid's occupancy onto every
+        // archetype's record would invite a reader to sum it. BlockCount is the "there is a grid at all" test: a database with no spatial archetype never
+        // materialises one, and five zero series would be noise in every trace the engine ever produces.
+        if (gridOccupancy.BlockCount > 0)
+        {
+            values[n++] = GaugeValue.FromU32(GaugeId.SpatialGridBlockCount, (uint)gridOccupancy.BlockCount);
+            values[n++] = GaugeValue.FromU32(GaugeId.SpatialGridOccupiedCells, (uint)gridOccupancy.OccupiedCellCount);
+            // FromPercentHundredths, not FromU32: the factory is what stamps the value KIND on the wire, and GaugeId declares this one as
+            // U32PercentHundredths. Tagging it as a raw count makes any consumer that formats by kind render 7500 instead of 75.00 %.
+            // IntraBlockFill is a 0..1 fraction, so x10000 gives hundredths of a percent.
+            values[n++] = GaugeValue.FromPercentHundredths(
+                GaugeId.SpatialGridIntraBlockFill, (uint)Math.Clamp(gridOccupancy.IntraBlockFill * 10_000d, 0d, uint.MaxValue));
+            values[n++] = GaugeValue.FromU64(GaugeId.SpatialGridResidentBytes, (ulong)Math.Max(0L, gridOccupancy.ResidentBytes));
+            values[n++] = GaugeValue.FromU64(GaugeId.SpatialGridDenseEquivalentBytes, (ulong)Math.Max(0L, gridOccupancy.DenseEquivalentBytes));
+        }
+
+        // #911. Microseconds, so a sub-millisecond fence — which is the healthy case — does not quantise to 0 or 1.
+        if (fenceSpanMs > 0d)
+        {
+            values[n++] = GaugeValue.FromU32(GaugeId.ClusterFenceSpanUs, (uint)Math.Clamp(fenceSpanMs * 1000d, 0d, uint.MaxValue));
+        }
+
         TyphonEvent.EmitPerTickSnapshot(tickNumber, Stopwatch.GetTimestamp(), 0u, values[..n]);
 
         firstSnapshotEmitted = true;
@@ -217,6 +248,6 @@ internal static class GaugeSnapshotEmitter
         }
         var allocator = engine.MemoryAllocator as MemoryAllocator;
         EmitSnapshot(tickNumber, allocator, engine.MMF, engine.TransactionChain, engine.UowRegistry, engine.WalManager, engine.StagingBufferPool, 
-            engine.GetTransientBytesTotal(), ref firstSnapshotEmitted);
+            engine.GetTransientBytesTotal(), engine.GetSpatialGridOccupancy(), engine.LastFenceSpanMs, ref firstSnapshotEmitted);
     }
 }

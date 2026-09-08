@@ -677,7 +677,35 @@ internal sealed unsafe partial class ArchetypeClusterState
         // "this geometry re-packs to nothing" is not a conclusion this tick is entitled to draw.
         var unitHadExclusions = UnitHasExcludedSources(candidates, unitClusters);
 
-        var moved = ExecuteRepairPlan(cellKey, grid, ref accessor, candidates, unitClusters, population);
+        // ── #911 O1: the unit gets a span of its own ───────────────────────────────────────────────────────────────────
+        //
+        // Opened HERE, before the plan runs and before the queue entry is removed: the degradation is the term the cell was
+        // RANKED on and it lives on the queue candidate, so reading it after the Remove below would read zero. A unit that
+        // turns out to move nothing still gets its span — discovering a cell is already packed costs a gather and a sort,
+        // and that cost is invisible on the timeline without it. `MovedCount` is what separates the two cases.
+        var unitSpan = TyphonEvent.BeginSpatialRepairUnit((ushort)ArchetypeId, cellKey, unitClusters, population);
+
+        var moved = 0;
+        try
+        {
+            if (TelemetryConfig.SpatialClusterRepairActive)
+            {
+                // INSIDE the try, so a throw from the probe still reaches the finally that disposes the span rather than leaking its ring slot. Guarded
+                // rather than assigned unconditionally because the factory folds to `return default` when the gate is off while the ARGUMENT would still be
+                // evaluated, and DegradationOf is a dictionary probe. The gate is `static readonly`, so with the kind off this block disappears entirely.
+                unitSpan.Degradation = RepairQueue?.DegradationOf(cellKey) ?? 0f;
+            }
+
+            moved = ExecuteRepairPlan(cellKey, grid, ref accessor, candidates, unitClusters, population);
+        }
+        finally
+        {
+            // Written inside the finally because Dispose is what PUBLISHES the record — an outcome assigned after it is simply dropped.
+            unitSpan.MovedCount = moved;
+            unitSpan.ValveFired = valveFired ? (byte)1 : (byte)0;
+            unitSpan.Dispose();
+        }
+
         if (moved == 0)
         {
             if (unitHadExclusions)

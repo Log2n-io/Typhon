@@ -172,6 +172,44 @@ public enum GaugeId : ushort
 
     /// <summary>Cumulative count of transactions created since engine start. Viewer subtracts consecutive snapshots for per-tick "transactions started" throughput. Value kind: <see cref="GaugeValueKind.U64Bytes"/>.</summary>
     TxChainCreatedTotal = 0x0414,
+
+    // ── Spatial grid (VDB cell grid) ───────────────────────────────────── 0x0500
+
+    /// <summary>Blocks the sparse cell grid has materialised. Value kind: <see cref="GaugeValueKind.U32Count"/>.</summary>
+    SpatialGridBlockCount = 0x0500,
+
+    /// <summary>Cells that actually hold something — the population the 64-byte <c>CellState</c> pool is paid for. Value kind: <see cref="GaugeValueKind.U32Count"/>.</summary>
+    SpatialGridOccupiedCells = 0x0501,
+
+    /// <summary>
+    /// Occupied cells as hundredths of a percent of the blocks' addressable capacity. Value kind: <see cref="GaugeValueKind.U32PercentHundredths"/>.
+    /// </summary>
+    /// <remarks>A low fill argues for replacing the dense per-block <c>int[]</c> with a bitmask plus compaction; a high one says the dense array is right.</remarks>
+    SpatialGridIntraBlockFill = 0x0502,
+
+    /// <summary>Bytes the grid currently holds — block index arrays plus the occupied cells' pool. Value kind: <see cref="GaugeValueKind.U64Bytes"/>.</summary>
+    SpatialGridResidentBytes = 0x0503,
+
+    /// <summary>
+    /// Bytes a DENSE grid over the same world would have allocated, occupied or not. Value kind: <see cref="GaugeValueKind.U64Bytes"/>.
+    /// </summary>
+    /// <remarks>
+    /// Read against <see cref="SpatialGridResidentBytes"/>: that comparison is the sparse grid's whole argument, and it is also the guard on the one
+    /// discipline it depends on — a read path that resolves cells WITH creation makes resident climb toward dense with no other symptom (rule <c>VG-02</c>).
+    /// </remarks>
+    SpatialGridDenseEquivalentBytes = 0x0504,
+
+    /// <summary>
+    /// The previous tick's partitioning-fence SPAN in microseconds — Prep's start to the last phase that dispatched, so the six phase spans plus the
+    /// scheduler's gaps between them. Value kind: <see cref="GaugeValueKind.U32Count"/>, carrying microseconds (there is no duration kind; the name carries
+    /// the unit, as <see cref="PageCacheLRUAgeTicks"/> does).
+    /// </summary>
+    /// <remarks>
+    /// <b>The one figure that says what the fence cost the frame.</b> Every other spatial-maintenance timing on the wire is summed across workers, and a sum
+    /// cannot be compared to a frame budget: W workers busy for 1 ms report W. Read the summed ones against this — their ratio is the parallelism the work
+    /// achieved. Absent from a trace whose host drove the fence serially, because the phase-exec systems that time it never ran.
+    /// </remarks>
+    ClusterFenceSpanUs = 0x0505,
 }
 
 /// <summary>

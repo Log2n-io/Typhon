@@ -767,6 +767,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <summary>See <see cref="_lastFenceMigrationParallelism"/>. Exposed for tests and telemetry.</summary>
     internal double LastFenceMigrationParallelism => _lastFenceMigrationParallelism;
 
+    /// <summary>Stopwatch ticks of the previous fence's span, pushed by <c>TyphonRuntime</c>. Zero until it publishes one.</summary>
+    private long _lastFenceSpanTicks;
+
+    /// <summary>Published by <c>TyphonRuntime</c> after each parallel fence, from <c>LastFenceWallTicks</c>. See <see cref="LastFenceSpanMs"/>.</summary>
+    internal void SetLastFenceSpanTicks(long spanTicks) => _lastFenceSpanTicks = spanTicks > 0 ? spanTicks : 0;
+
     /// <summary>
     /// Sets the spatial grid configuration for this engine. Must be called before <see cref="InitializeArchetypes"/>. Only required when at least one
     /// cluster-eligible archetype has a spatial component — non-spatial engines never need this call.

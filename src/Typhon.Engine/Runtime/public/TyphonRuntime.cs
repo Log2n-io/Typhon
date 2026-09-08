@@ -2245,6 +2245,11 @@ public sealed partial class TyphonRuntime : IDisposable
             Engine.SetLastFenceMigrationParallelism(migrationCpuTicks / (double)migrationSpanTicks);
         }
 
+        // #911 — the fence's own span, published beside the ratio above because they are read together: the summed-CPU figures on the telemetry surface are
+        // uninterpretable without the span they were spent in. Pushed rather than pulled for the same reason the parallelism is — the engine has no handle
+        // on the runtime, and this is the one place that knows the phase timings.
+        Engine.SetLastFenceSpanTicks(LastFenceWallTicks);
+
         if (Options.AdaptiveFenceCost)
         {
             _liveFenceCost.UpdatePhase(FencePhase.Prep, _fencePrepExec.TotalWallTicks, _fencePrepExec.TotalUnitCount);

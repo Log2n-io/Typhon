@@ -4504,8 +4504,10 @@ internal sealed unsafe partial class ArchetypeClusterState
                 // below has nothing to do. Passing null is what selects that — see the divert in the slice.
                 RecomputeDirtyClusterAabbsSlice(0, totalWork, ref accessor, grid, null, outlierBuffer, repairNominationBuffer, out var aabbsChanged,
                     out var slotsScanned, out var outlierGuardFires, out var clustersScanned, out var driftersDetected, out var driftAbsorbed,
-                    out var driftersUnplaced, out var driftGatedClusters, out var driftSuppressedByDensity, out var driftersUnplacedNoCandidate, out var driftersSpilled);
+                    out var driftersUnplaced, out var driftGatedClusters, out var driftSuppressedByDensity, out var driftersUnplacedNoCandidate,
+                    out var driftersSpilled, out var tightness);
                 EnqueueMigrationsBulk(outlierBuffer);
+                FoldTightnessSample(in tightness);
                 Interlocked.Add(ref LastTickClustersScanned, clustersScanned);
                 Interlocked.Add(ref LastTickSlotsScanned, slotsScanned);
                 Interlocked.Add(ref LastTickDriftersDetected, driftersDetected);
@@ -4557,7 +4559,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal void RecomputeDirtyClusterAabbsSlice(int sliceStart, int sliceCount, ref ChunkAccessor<PersistentStore> accessor, SpatialGrid grid,
         List<PromotedAabbApply> promotedApplyBuffer, List<MigrationRequest> outlierBuffer, List<RepairNomination> repairNominationBuffer, out int aabbsChanged,
         out int slotsScanned, out int outlierGuardFires, out int clustersScanned, out int driftersDetected, out int driftAbsorbed, out int driftersUnplaced,
-        out int driftGatedClusters, out int driftSuppressedByDensity, out int driftersUnplacedNoCandidate, out int driftersSpilled)
+        out int driftGatedClusters, out int driftSuppressedByDensity, out int driftersUnplacedNoCandidate, out int driftersSpilled,
+        out ClusterTightnessSample tightness)
     {
         aabbsChanged = 0;
         slotsScanned = 0;
@@ -4570,6 +4573,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         driftSuppressedByDensity = 0;
         driftersUnplacedNoCandidate = 0;
         driftersSpilled = 0;
+        tightness = default;
 
         if (!SpatialSlot.HasSpatialIndex)
         {
@@ -4770,6 +4774,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                     var driftGated = (!repairGated || targets.ConstantMode) && targets.DriftExtent > 0f && maxAxisExtent > targets.DriftExtent;
 
                     clustersScanned++;
+                    tightness.Note(outlierGuardActive, maxAxisExtent, inverseCellSize, targets.PackingBound);
                     if (repairGated)
                     {
                         repairNominationBuffer.Add(new RepairNomination(cellKey, maxAxisExtent * inverseCellSize));
@@ -4981,6 +4986,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 var activeRepairGated = targets.RepairExtent > 0f && activeMaxAxisExtent > targets.RepairExtent;
                 var driftGated = (!activeRepairGated || targets.ConstantMode) && targets.DriftExtent > 0f && activeMaxAxisExtent > targets.DriftExtent;
                 clustersScanned++;
+                tightness.Note(outlierGuardActive, activeMaxAxisExtent, inverseCellSize, targets.PackingBound);
                 if (driftGated)
                 {
                     driftGatedClusters++;
@@ -5116,21 +5122,130 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <para>Roots rather than <c>MathF.Pow</c>: <c>Sqrt</c> and <c>Cbrt</c> are one instruction and one short polynomial respectively, and this resolves
     /// once per cell change, not per cluster.</para>
     /// </remarks>
-    internal static float DensityTargetRatio(int entitiesInCell, int slotsPerCluster, bool flat, float slack)
+    internal static float DensityTargetRatio(int entitiesInCell, int slotsPerCluster, bool flat, float slack) =>
+        slack <= 0f ? 0f : DensityTargetFromBound(PackingBoundRatio(entitiesInCell, slotsPerCluster, flat), slack);
+
+    /// <summary>
+    /// <see cref="DensityTargetRatio"/> for a caller that already holds the cell's <see cref="PackingBoundRatio"/> — the AABB refresh's per-cell memo, which
+    /// needs both readings and must not take the root twice (#911 O2).
+    /// </summary>
+    /// <remarks>
+    /// <c>packingBound >= 1</c> is exactly the old <c>entitiesInCell &lt;= slotsPerCluster</c> test, because that is the only input for which
+    /// <see cref="PackingBoundRatio"/> returns 1. It returns before the slack multiply, which matters when slack is below 1: a bound that is already the
+    /// whole cell must not be scaled under it.
+    /// </remarks>
+    internal static float DensityTargetFromBound(float packingBound, float slack)
     {
         if (slack <= 0f)
         {
             return 0f;
         }
 
+        if (packingBound >= 1f)
+        {
+            return 1f;
+        }
+
+        var ratio = slack * packingBound;
+        return ratio >= 1f ? 1f : ratio;
+    }
+
+    /// <summary>
+    /// The packing bound alone — <c>(slotsPerCluster / E)^(1/d)</c> as a fraction of the cell edge, with no slack and no floor. The tightest a full cluster
+    /// can be in a cell of <paramref name="entitiesInCell"/> entities without fragmenting into emptier ones.
+    /// </summary>
+    /// <remarks>
+    /// <para>Split out of <see cref="DensityTargetRatio"/> for #911 O2, which needs the bound itself rather than the target derived from it: measured extent
+    /// ÷ bound is the reading the whole subsystem is judged on, and it cannot be recovered from the target by dividing out the slack — the target is clamped
+    /// at 1 first, so every cell whose slack-scaled bound reaches the cell reports the same 1 regardless of how far under it the bound sits.</para>
+    /// <para>Geometry, not tuning: it is what a perfect Morton tiling reaches. <c>1</c> at or below <paramref name="slotsPerCluster"/> entities per cell —
+    /// one cluster IS the cell there, which is why intra-cell maintenance correctly switches itself off in that basin.</para>
+    /// </remarks>
+    internal static float PackingBoundRatio(int entitiesInCell, int slotsPerCluster, bool flat)
+    {
         if (entitiesInCell <= slotsPerCluster)
         {
             return 1f;
         }
 
         var fill = slotsPerCluster / (float)entitiesInCell;
-        var ratio = slack * (flat ? MathF.Sqrt(fill) : MathF.Cbrt(fill));
-        return ratio >= 1f ? 1f : ratio;
+        var bound = flat ? MathF.Sqrt(fill) : MathF.Cbrt(fill);
+        return bound >= 1f ? 1f : bound;
+    }
+
+    /// <summary>
+    /// One AABB-refresh slice's tightness accumulation (#911 O2): measured cluster extent against the cell's packing bound, summed so the archetype-wide
+    /// means can be folded from every worker's slice.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The population is clusters WRITTEN this tick, not clusters that exist.</b> This rides the AABB refresh because that is where the extent is
+    /// already in registers and the cell's <c>EntityCount</c> has already been read for the density target — an add and a divide on a path that has both
+    /// operands. The price is that a settled world contributes NO samples, which is why <see cref="Samples"/> is published: a mean of zero over zero samples
+    /// is "nothing moved", not "the clusters are points". <c>SpatialPartitionMatrix.MeasurePartition</c> takes the other reading — a full
+    /// <c>O(active clusters)</c> sweep — and the two are not interchangeable.</para>
+    /// <para>Doubles rather than floats for the sums: a slice can accumulate tens of thousands of ratios near 1, and f32 stops adding at ~16 M.</para>
+    /// </remarks>
+    internal struct ClusterTightnessSample
+    {
+        /// <summary>Clusters that contributed a reading — zero when the slice scanned nothing, or when the archetype has no cell size to normalise by.</summary>
+        internal int Samples;
+
+        /// <summary>Sum of each cluster's largest axis extent as a fraction of the cell edge.</summary>
+        internal double SumExtentRatio;
+
+        /// <summary>Sum of each cluster's cell's packing bound, as a fraction of the cell edge. The denominator tightness is judged against.</summary>
+        internal double SumPackingBound;
+
+        /// <summary>Fold one cluster in. <paramref name="active"/> is the slice's "there is a grid with a positive cell size" flag; false makes this a no-op.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal void Note(bool active, float maxAxisExtent, float inverseCellSize, float packingBound)
+        {
+            // A cluster whose bound is still the Empty sentinel yields a non-finite extent; counting it would poison the mean with an infinity. The gate is
+            // the same three-compare shape the callers already use, so a healthy cluster pays a compare and two adds.
+            if (!active || !float.IsFinite(maxAxisExtent) || maxAxisExtent < 0f)
+            {
+                return;
+            }
+
+            Samples++;
+            SumExtentRatio += maxAxisExtent * inverseCellSize;
+            SumPackingBound += packingBound;
+        }
+    }
+
+    /// <summary>Fold one AabbRefresh slice's tightness accumulation into the archetype-wide per-tick sums. One atomic trio per slice, not per cluster.</summary>
+    internal void FoldTightnessSample(in ClusterTightnessSample tightness)
+    {
+        if (tightness.Samples == 0)
+        {
+            return;
+        }
+
+        Interlocked.Add(ref LastTickTightnessSamples, tightness.Samples);
+        InterlockedAddDouble(ref LastTickTightnessExtentSum, tightness.SumExtentRatio);
+        InterlockedAddDouble(ref LastTickTightnessBoundSum, tightness.SumPackingBound);
+    }
+
+    /// <summary>
+    /// Add to a <see cref="double"/> field that parallel fence workers share. .NET has no <c>Interlocked.Add(ref double)</c>, so this is the same
+    /// compare-exchange-over-the-bit-pattern loop the Migrate phase uses for <see cref="LastTickMigrationExecuteMs"/>.
+    /// </summary>
+    /// <remarks>Called once per SLICE, not per cluster — the per-cluster accumulation happens in a worker-local <see cref="ClusterTightnessSample"/>.</remarks>
+    internal static void InterlockedAddDouble(ref double target, double addend)
+    {
+        SpinWait sw = default;
+        while (true)
+        {
+            var current = Volatile.Read(ref target);
+            var candidate = current + addend;
+            var currentBits = BitConverter.DoubleToInt64Bits(current);
+            if (Interlocked.CompareExchange(ref Unsafe.As<double, long>(ref target), BitConverter.DoubleToInt64Bits(candidate), currentBits) == currentBits)
+            {
+                return;
+            }
+
+            sw.SpinOnce();
+        }
     }
 
     /// <summary>
@@ -5161,6 +5276,16 @@ internal sealed unsafe partial class ArchetypeClusterState
         /// <summary>The repair-nomination gate, in world units; <c>0</c> when repair is off for this cell (or for the archetype).</summary>
         internal float RepairExtent;
 
+        /// <summary>
+        /// The cell's packing bound as a fraction of the cell edge (#911 O2) — the denominator of tightness-to-bound. <c>1</c> until the first cell resolves,
+        /// and for a slice with no grid, because a cell whose population fits one cluster IS bounded at the cell.
+        /// </summary>
+        /// <remarks>
+        /// Free here and nowhere else: <see cref="Resolve"/> already loads the cell's <c>EntityCount</c> and already takes the root, so publishing the bound
+        /// it computed costs one store per cell change. Computing it in the caller would repeat both.
+        /// </remarks>
+        internal float PackingBound;
+
         internal CellTargetResolver(SpatialGrid grid, float cellSize, float driftFloor, float repairFloor, int slotsPerCluster, bool flat, float boost)
         {
             _grid = grid;
@@ -5179,6 +5304,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             // The floors until the first cell resolves; a slice with no grid never resolves and keeps them, which for a grid-less archetype are 0.
             DriftExtent = driftFloor;
             RepairExtent = repairFloor;
+            PackingBound = 1f;
         }
 
         internal void Resolve(int cellKey)
@@ -5189,7 +5315,12 @@ internal sealed unsafe partial class ArchetypeClusterState
             }
 
             _cellKey = cellKey;
-            var density = DensityTargetRatio(_grid.GetCell(cellKey).EntityCount, _slotsPerCluster, _flat, _slack);
+
+            // One root per cell change, feeding both readings (#911 O2). The bound is pure geometry and is published even in constant mode, where the GATES
+            // ignore it — a tightness reading is not a tuning decision and has no reason to go dark because the targets were pinned to constants.
+            var bound = PackingBoundRatio(_grid.GetCell(cellKey).EntityCount, _slotsPerCluster, _flat);
+            PackingBound = bound;
+            var density = DensityTargetFromBound(bound, _slack);
             if (density <= 0f)
             {
                 // Constant mode: the configured floors, untouched by density and by the boost — the pre-step-14 behaviour, byte for byte.
@@ -5821,6 +5952,16 @@ internal sealed unsafe partial class ArchetypeClusterState
 
     /// <inheritdoc cref="LastTickCellTreePromotions"/>
     internal int LastTickCellTreeDemotions;
+
+    /// <summary>Clusters that contributed a tightness reading during the most recently completed tick's AABB refresh (#911 O2).</summary>
+    /// <remarks>Written by every AabbRefresh slice via <see cref="Interlocked.Add(ref int, int)"/>, reset once per tick in <c>PrepareArchetypeFence</c>.</remarks>
+    internal int LastTickTightnessSamples;
+
+    /// <summary>Sum of the measured extent ratios behind <see cref="LastTickTightnessSamples"/>. See <see cref="ClusterTightnessSample"/>.</summary>
+    internal double LastTickTightnessExtentSum;
+
+    /// <summary>Sum of the packing bounds behind <see cref="LastTickTightnessSamples"/>. See <see cref="ClusterTightnessSample"/>.</summary>
+    internal double LastTickTightnessBoundSum;
 
     /// <summary>Fall back to a linear index once a promoted cell half drops to <see cref="CellTreeDemoteThreshold"/>.</summary>
     private void DemoteCellHalf(PerCellSpatialSlot slot, bool isStatic)

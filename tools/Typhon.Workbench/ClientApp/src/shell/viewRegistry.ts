@@ -72,6 +72,10 @@ export const ZONE_D_VIEW_ACTIVE: Readonly<Record<string, boolean>> = {
   // Shipped in Release (#433); the panel probes `/api/fixtures/capability` and renders a "not available" cold
   // state only if the probe fails, so the activation flag stays unconditional here.
   DevFixture: true,
+  // #911 O3 — Spatial Maintenance: the write/fence half of spatial observability (relocation, repair, cell crossings).
+  // Attach-only in practice; the panel renders its own cold state elsewhere, so the scope map below carries 'profiler'
+  // and the panel does the finer gating.
+  SpatialMaintenance: true,
 };
 
 // Returns whether a view (or a view-bound command) is currently reachable. An undefined id means the caller
@@ -115,6 +119,7 @@ const VIEW_SESSION_SCOPE: Readonly<Record<string, ViewSessionScope>> = {
   // Profiler (trace/attach) views
   Profiler: 'profiler',
   TopSpans: 'profiler',
+  SpatialMaintenance: 'profiler',
   CallTree: 'profiler',
   SourcePreview: 'profiler',
   SystemDag: 'profiler',

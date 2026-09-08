@@ -204,6 +204,52 @@ export function toggleViewEngineLiveHealth(): void {
 }
 
 /**
+ * Add the Spatial Maintenance panel (#911 O3). Anchored `within` the Detail group like Engine Health, for the same
+ * reason: a no-position addPanel joins whatever group happens to be active.
+ */
+function addSpatialMaintenancePanel(api: DockviewApi): void {
+  const detail = api.getPanel('detail');
+  api.addPanel(
+    detail
+      ? { id: 'spatial-maintenance', component: 'SpatialMaintenance', title: 'Spatial', position: { referencePanel: detail.id, direction: 'within' } }
+      : { id: 'spatial-maintenance', component: 'SpatialMaintenance', title: 'Spatial' },
+  );
+}
+
+/**
+ * Spatial Maintenance needs a live engine (its counters are per-tick and reset every fence), but it is openable in any
+ * profiler session so the cold state is reachable — the panel gates itself, exactly like Engine Health.
+ */
+function canOpenSpatialMaintenance(): boolean {
+  return isViewActive('SpatialMaintenance') && sessionHasCapability(useSessionStore.getState(), 'profiler');
+}
+
+/** Open (or focus) the Spatial Maintenance panel. */
+export function openViewSpatialMaintenance(): void {
+  const api = registeredApi;
+  if (!api || !canOpenSpatialMaintenance()) return;
+  const existing = api.getPanel('spatial-maintenance');
+  if (existing) {
+    existing.focus();
+    return;
+  }
+  addSpatialMaintenancePanel(api);
+}
+
+/** Toggle (close-when-open) variant for the palette / View menu. */
+export function toggleViewSpatialMaintenance(): void {
+  const api = registeredApi;
+  if (!api) return;
+  const existing = api.getPanel('spatial-maintenance');
+  if (existing) {
+    api.removePanel(existing);
+    return;
+  }
+  if (!canOpenSpatialMaintenance()) return;
+  addSpatialMaintenancePanel(api);
+}
+
+/**
  * Reveal a specific query in the analyzer: open/focus the panel, focus the query in the unified store,
  * and write the bus `query` leaf (so the Inspector + nav history follow). The cross-panel entry point —
  * used by the Systems & Queries navigator and the Inspector's query card.
@@ -346,6 +392,7 @@ export function buildProfilerPaletteCommands(): CommandItem[] {
     { id: 'toggle-view-call-tree',    label: 'Toggle View Call Tree', keywords: 'call tree cpu samples folded stack callers callees sandwich bottom-up off-cpu profiler', action: toggleViewCallTree, viewId: 'CallTree' },
     { id: 'toggle-view-critical-path', label: 'Toggle View Critical Path', keywords: 'critical path tape timeline cp wall-clock tick', action: toggleViewCriticalPath, viewId: 'CriticalPath' },
     { id: 'toggle-view-query-analyzer', label: 'Toggle View Query Analyzer', keywords: 'query analyzer catalog plan executions profiler cost ranking selectivity workload', action: toggleViewQueryAnalyzer, viewId: 'QueryAnalyzer' },
+    { id: 'toggle-view-spatial-maintenance', label: 'Toggle View Spatial Maintenance', keywords: 'spatial maintenance cluster migration relocation repair drift tightness packing bound cell grid partition fence observe', action: toggleViewSpatialMaintenance, viewId: 'SpatialMaintenance' },
     { id: 'toggle-view-engine-health', label: 'Toggle View Engine Health', keywords: 'engine health live attach gauges anomaly tick rate jitter overload reconnect capture analyse observe', action: toggleViewEngineLiveHealth, viewId: 'EngineLiveHealth' },
     { id: 'toggle-view-top-spans',   label: 'Toggle View Top Spans', keywords: 'profiler top spans table slow expensive sortable', action: toggleViewTopSpans, viewId: 'TopSpans' },
     { id: 'profiler-save-replay',    label: 'Save Session as .typhon-replay…', keywords: 'save replay export attach session', action: openSaveReplayDialog },

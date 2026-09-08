@@ -594,7 +594,25 @@ public partial class DatabaseEngine
         // Total component instances moved this batch — surfaces in the profiler tooltip alongside the entity count
         // so users see the actual data-shuffling cost (a 3-component archetype migrating 1300 entities moves 3900
         // component slots' worth of data, not just 1300).
-        using var migrationScope = TyphonEvent.BeginClusterMigration(archetypeId, count, count * componentCount);
+        //
+        // Position is load-bearing: this brackets the three CreateChunkAccessor rentals below, any of which can block on page acquisition, exactly as it did
+        // before #911. Moving it past them shrinks kind 60's duration with no work getting faster, which silently breaks every timeline comparison against a
+        // pre-#911 trace. Not a `using var` — the per-kind fields are written after the loop and a using-variable is readonly — so it is disposed in the
+        // `finally` below, after those writes, because Dispose is what publishes the record.
+        //
+        // Residual, stated rather than papered over: an exception between here and that `try` leaks the ring slot. The statements in between are field reads
+        // and struct constructions, so this is the "the process is already failing" case, and the alternative (an outer try wrapping the whole method) buys
+        // that at the price of re-indenting 400 lines.
+        var migrationScope = TyphonEvent.BeginClusterMigration(archetypeId, count, count * componentCount);
+
+        // #911 O1. `ProfilerActive` is `static readonly`, so when the profiler is off the JIT folds this to `false` and deletes every counting block below —
+        // the same zero-cost-when-off guarantee the Begin* factories give. Counted over the whole slice rather than over the requests that survive the
+        // stale-source guard, because the span's own MigrationCount is the slice length: the three add up to it exactly, which makes the split checkable
+        // in a trace instead of merely plausible.
+        var kindCountsActive = TelemetryConfig.ProfilerActive;
+        var crossingCount = 0;
+        var relocationCount = 0;
+        var repairCount = 0;
 
         var grid = _spatialGrid;
         var transientMask = layout.TransientSlotMask;
@@ -637,6 +655,22 @@ public partial class DatabaseEngine
                 var srcChunkId = req.SourceClusterChunkId;
                 var srcSlot = req.SourceSlotIndex;
                 var destCellKey = req.DestCellKey;
+
+                if (kindCountsActive)
+                {
+                    switch (req.Kind)
+                    {
+                        case MigrationKind.Relocation:
+                            relocationCount++;
+                            break;
+                        case MigrationKind.Repair:
+                            repairCount++;
+                            break;
+                        default:
+                            crossingCount++;
+                            break;
+                    }
+                }
 
                 // 0. Stale-source guard: verify the source slot's occupancy bit is still set.
                 // The detection phase reads occupancy through a read-only accessor (no ChangeSet → DC not bumped). If
@@ -1008,6 +1042,11 @@ public partial class DatabaseEngine
         }
         finally
         {
+            migrationScope.CrossingCount = crossingCount;
+            migrationScope.RelocationCount = relocationCount;
+            migrationScope.RepairCount = repairCount;
+            migrationScope.Dispose();
+
             emAccessor.Dispose();
             if (hasTransientClusterAccessor)
             {

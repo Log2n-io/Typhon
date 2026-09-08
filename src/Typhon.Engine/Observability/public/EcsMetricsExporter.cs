@@ -73,6 +73,23 @@ public sealed class EcsMetricsExporter : IDisposable
             "Entities inside the intra-cell drift margin, and therefore left alone, in the last completed tick, per archetype");
         _meter.CreateObservableGauge("typhon.ecs.spatial.recluster_budget_ms", EnumerateReclusterBudgetMs, "ms",
             "Per-tick re-clustering budget consumed in the last completed tick, per archetype (zero until throttled re-clustering exists)");
+        // #911 O2. Tightness is the reading the whole subsystem is judged on, and until now it existed in no runtime surface at all. The sample count is
+        // exported beside the two means because they are a mean over WRITTEN clusters: a settled archetype reports zero samples, and a scrape that cannot
+        // see that would read "clusters are points" off a mean of nothing.
+        _meter.CreateObservableGauge("typhon.ecs.spatial.tightness_samples", EnumerateTightnessSamples, "{clusters}",
+            "Clusters that contributed a tightness reading in the last completed tick, per archetype — zero on a tick that wrote nothing");
+        _meter.CreateObservableGauge("typhon.ecs.spatial.cluster_extent_ratio", EnumerateMeanClusterExtentRatio, "1",
+            "Mean cluster max-axis extent as a fraction of the cell edge, over the clusters written in the last completed tick, per archetype");
+        _meter.CreateObservableGauge("typhon.ecs.spatial.packing_bound", EnumerateMeanPackingBound, "1",
+            "Mean packing bound (slots/entities)^(1/d) as a fraction of the cell edge, over the same clusters, per archetype");
+        _meter.CreateObservableGauge("typhon.ecs.spatial.tightness_to_bound", EnumerateMeanTightnessToBound, "1",
+            "Measured extent against what geometry allows: 1 is optimal packing, per archetype");
+        _meter.CreateObservableGauge("typhon.ecs.spatial.max_cluster_overhang", EnumerateMaxClusterOverhang, "1",
+            "Largest distance any cluster box reaches outside its own cell, in world units, per archetype — a running maximum, not a per-tick value");
+        _meter.CreateObservableGauge("typhon.ecs.spatial.cell_tree_promotions", EnumerateCellTreePromotions, "{cells}",
+            "Cell halves promoted to a per-cell R-Tree in the last completed tick, per archetype");
+        _meter.CreateObservableGauge("typhon.ecs.spatial.cell_tree_demotions", EnumerateCellTreeDemotions, "{cells}",
+            "Cell halves demoted back to the linear scan in the last completed tick, per archetype");
         _meter.CreateObservableCounter("typhon.ecs.spatial.migrations_total", EnumerateTotalMigrations, "{migrations}",
             "Cumulative cluster migrations since engine open, per archetype");
         _meter.CreateObservableCounter("typhon.ecs.spatial.hysteresis_absorbed_total", EnumerateTotalHysteresisAbsorbed, "{crossings}",
@@ -80,6 +97,10 @@ public sealed class EcsMetricsExporter : IDisposable
 
         // Engine-wide, set once at open and constant thereafter. The transient cell layer is rebuilt from entity positions on every open; these two say what
         // that costs, which is what decides whether it can stay transient.
+        // #911. Engine-wide and a SPAN: the per-archetype `migration_duration_ms` above is summed across workers, so it cannot be compared to a frame
+        // budget on its own. Their ratio is the parallelism the work achieved.
+        _meter.CreateObservableGauge("typhon.ecs.spatial.fence_span_ms", () => _dbe.LastFenceSpanMs, "ms",
+            "Span of the previous partitioning fence — what the host waited, not summed worker CPU; zero when the fence ran serially");
         _meter.CreateObservableGauge("typhon.ecs.open.cellstate_rebuild_ms", () => _dbe.OpenCellStateRebuildMs, "ms",
             "Milliseconds spent reconstructing cluster-to-cell mappings at open");
         _meter.CreateObservableGauge("typhon.ecs.open.cluster_aabb_rebuild_ms", () => _dbe.OpenClusterAabbRebuildMs, "ms",
@@ -105,6 +126,20 @@ public sealed class EcsMetricsExporter : IDisposable
     private IEnumerable<Measurement<double>> EnumerateMigrationExecuteMs() => EnumerateSpatialDouble(static t => t.MigrationExecuteMs);
 
     private IEnumerable<Measurement<double>> EnumerateReclusterBudgetMs() => EnumerateSpatialDouble(static t => t.ReclusterBudgetUsedMs);
+
+    private IEnumerable<Measurement<long>> EnumerateTightnessSamples() => EnumerateSpatialLong(static t => t.TightnessSampleCount);
+
+    private IEnumerable<Measurement<long>> EnumerateCellTreePromotions() => EnumerateSpatialLong(static t => t.CellTreePromotions);
+
+    private IEnumerable<Measurement<long>> EnumerateCellTreeDemotions() => EnumerateSpatialLong(static t => t.CellTreeDemotions);
+
+    private IEnumerable<Measurement<double>> EnumerateMeanClusterExtentRatio() => EnumerateSpatialDouble(static t => t.MeanClusterExtentRatio);
+
+    private IEnumerable<Measurement<double>> EnumerateMeanPackingBound() => EnumerateSpatialDouble(static t => t.MeanPackingBound);
+
+    private IEnumerable<Measurement<double>> EnumerateMeanTightnessToBound() => EnumerateSpatialDouble(static t => t.MeanTightnessToBound);
+
+    private IEnumerable<Measurement<double>> EnumerateMaxClusterOverhang() => EnumerateSpatialDouble(static t => t.MaxClusterOverhang);
 
     /// <summary>
     /// Walks every archetype that owns cluster state and projects one field of its <see cref="SpatialMigrationTelemetry"/> snapshot, tagged by archetype name.

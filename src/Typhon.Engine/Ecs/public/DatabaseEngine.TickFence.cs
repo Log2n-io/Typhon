@@ -732,7 +732,7 @@ public partial class DatabaseEngine
             clusterState.RecomputeDirtyClusterAabbsSlice(sliceStart, sliceCount, ref accessor, _spatialGrid, promotedBuffer, outlierBuffer, repairBuffer,
                 out var aabbsChanged, out var slotsScanned, out var outlierGuardFires, out var clustersScanned, out var driftersDetected,
                 out var driftAbsorbed, out var driftersUnplaced, out var driftGatedClusters, out var driftSuppressedByDensity,
-                out var driftersUnplacedNoCandidate, out var driftersSpilled);
+                out var driftersUnplacedNoCandidate, out var driftersSpilled, out var tightness);
             // Interlocked, not plain adds: every AabbRefresh slice of this archetype reaches here, and the three counters are archetype-wide. They are reset
             // once per tick in PrepareArchetypeFence, so a lost add would under-report for that tick only — which is exactly the kind of quiet inaccuracy that
             // makes a measurement useless for tuning P4.
@@ -745,6 +745,7 @@ public partial class DatabaseEngine
             Interlocked.Add(ref clusterState.LastTickDriftSuppressedByDensity, driftSuppressedByDensity);
             Interlocked.Add(ref clusterState.LastTickDriftersUnplacedNoCandidate, driftersUnplacedNoCandidate);
             Interlocked.Add(ref clusterState.LastTickDriftersSpilled, driftersSpilled);
+            clusterState.FoldTightnessSample(in tightness);
             clusterState.EnqueueMigrationsBulk(outlierBuffer);
             clusterState.EnqueuePromotedAppliesBulk(promotedBuffer);
             clusterState.EnqueueRepairNominationsBulk(repairBuffer);
@@ -864,6 +865,11 @@ public partial class DatabaseEngine
         clusterState.LastTickDriftSuppressedByDensity = 0;
         clusterState.LastTickCellTreePromotions = 0;
         clusterState.LastTickCellTreeDemotions = 0;
+        // #911 O2. Zeroed with the rest of the per-tick block for the same reason: the AabbRefresh slices that produce them run AFTER this, and a tick whose
+        // refresh scans nothing must report no samples rather than the previous tick's mean — which is the distinction the sample count exists to carry.
+        clusterState.LastTickTightnessSamples = 0;
+        clusterState.LastTickTightnessExtentSum = 0d;
+        clusterState.LastTickTightnessBoundSum = 0d;
 
         // LastTickHysteresisAbsorbedCount was NOT reset here until #872, and DetectClusterMigrations only ever ASSIGNED it (=, not +=). A tick in which
         // detection did not run therefore reported the PREVIOUS tick's absorbed count as if it were this tick's — a stale reading indistinguishable from a live
@@ -1713,6 +1719,59 @@ public partial class DatabaseEngine
     }
 
     /// <summary>
+    /// Publish this archetype's spatial-maintenance counters onto the trace stream, once per tick (#911 O1/O3): the throttle's relocation outcome split
+    /// (kind 65) and the counter snapshot the Workbench Spatial panel reads (kind 66).
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Here rather than at each producer, and that is the point.</b> The outcome terms are written by three different phases — the throttle resolves
+    /// admitted / throttled / superseded in Prep, drift detection resolves unplaced / spilled in AabbRefresh, the drain resolves pinsRejected in Migrate —
+    /// so any earlier site would emit a record whose terms came from different moments and whose identity therefore would not close. This runs after every
+    /// phase barrier and after the promote/demote pass, so every field is this tick's final value.</para>
+    /// <para><b>Costs nothing when the profiler is off.</b> Both factories open with the <c>static readonly</c> gate check, so the JIT folds the bodies away
+    /// and the reads below are the only thing left — which is why they are field loads and not an allocation of
+    /// <see cref="SpatialMigrationTelemetry"/>. The explicit gate keeps even those out.</para>
+    /// <para><b>The identity spans two ticks, not one.</b> <c>DriftersDetected</c> here is what THIS tick's AabbRefresh found; the outcomes beside it are what
+    /// this tick's Prep did with what the PREVIOUS tick found (rule <c>TH-02</c>). A consumer checking
+    /// <c>detected == admitted + throttled + superseded + unplaced</c> must pair tick N's detection with tick N+1's outcomes.</para>
+    /// </remarks>
+    private static void EmitSpatialArchetypeSnapshot(ArchetypeClusterState clusterState, ushort archetypeId)
+    {
+        if (!TelemetryConfig.ProfilerActive)
+        {
+            return;
+        }
+
+        TyphonEvent.EmitSpatialRelocationOutcome(
+            archetypeId,
+            clusterState.LastTickRelocationsAdmitted,
+            clusterState.LastTickRelocationsThrottled,
+            clusterState.LastTickRelocationsSuperseded,
+            clusterState.LastTickDriftersUnplaced,
+            clusterState.LastTickDriftersUnplacedNoCandidate,
+            clusterState.LastTickDriftersSpilled,
+            clusterState.LastTickPinsRejected,
+            clusterState.LastTickCrossingsQueued);
+
+        var samples = clusterState.LastTickTightnessSamples;
+        TyphonEvent.EmitSpatialArchetypeTelemetry(
+            archetypeId,
+            clusterState.ActiveClusterCount,
+            clusterState.LastTickMigrationCount,
+            (float)clusterState.LastTickMigrationTotalMs,
+            clusterState.LastTickHysteresisAbsorbedCount,
+            clusterState.LastTickDriftersDetected,
+            clusterState.LastTickRepairUnitCount,
+            clusterState.LastTickRepairUnitsRefused,
+            clusterState.RepairQueue?.Count ?? 0,
+            (float)clusterState.LastTickReclusterBudgetUsedMs,
+            samples,
+            samples > 0 ? (float)(clusterState.LastTickTightnessExtentSum / samples) : 0f,
+            samples > 0 ? (float)(clusterState.LastTickTightnessBoundSum / samples) : 0f,
+            clusterState.LastTickCellTreePromotions,
+            clusterState.LastTickCellTreeDemotions);
+    }
+
+    /// <summary>
     /// Everything Finalize does before the WAL emit, for one archetype: drop the executed migration prefix, free drained clusters, clear the AABB-refresh
     /// bookkeeping, apply and refit promoted cells, sweep dormancy, archive the dirty ring, publish the dirty snapshot and the ComponentTable flags, and
     /// narrow the emitted columns into <see cref="ArchetypeClusterState.FenceEmit"/>. Returns true when there is something to emit.
@@ -1766,6 +1825,8 @@ public partial class DatabaseEngine
         // After the refit, because a promotion built here would otherwise hand the refit a tree it has already walked past, and because the demote half
         // reads bounds the refit has just made honest (#872 step 16, D3).
         clusterState.EvaluateCellTreeTightnessTransitions();
+
+        EmitSpatialArchetypeSnapshot(clusterState, meta.ArchetypeId);
 
         // Clean-spatial-refresh branch (path 1) stops here — no dormancy sweep change (already swept clean), no WAL emit.
         if (clusterState.FenceBranchPath == 1)

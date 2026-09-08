@@ -34,6 +34,9 @@ const ZONE_D_GATED_OFF = [] as const;
 // session at all — the flag gates only its docked form, which is a plain zone-D panel like the rest.
 const ZONE_D_ACTIVE = [
   'DataBrowserEntities', 'DbMap', 'StorageHealth', 'Profiler', 'TopSpans', 'CallTree', 'SourcePreview', 'DataFlow', 'EntityLifecycle', 'SystemDag', 'CriticalPath', 'QueryAnalyzer', 'QueryConsole', 'EngineLiveHealth', 'DevFixture', 'Integrity',
+  // #911 O3 — Spatial Maintenance: the fence-side spatial counters. Profiler-scoped, attach-only in practice
+  // (the panel renders its own cold state in a trace session).
+  'SpatialMaintenance',
 ] as const;
 
 // The full registry key set = gated-off ∪ active. Used to assert the registry covers exactly the documented set.

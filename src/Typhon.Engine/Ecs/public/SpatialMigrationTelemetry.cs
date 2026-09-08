@@ -317,6 +317,75 @@ public readonly struct SpatialMigrationTelemetry
     public double RepairBudgetStarvedNs { get; init; }
 
     /// <summary>
+    /// The largest distance by which any of this archetype's cluster boxes reaches outside its own cell, in world units (#911 O2).
+    /// </summary>
+    /// <remarks>
+    /// <para><b>A third clock, and the only member with one.</b> It is neither per-tick nor a growing total: it is a running MAXIMUM that never falls, by
+    /// design — every kNN ring test widens by it, and too large merely widens a search while too small loses results. So it does not reset at the fence and
+    /// <see cref="DatabaseEngine.GetSpatialTelemetryTotal"/> takes the max across archetypes rather than the sum. Differentiating it yields nothing.</para>
+    /// <para>Non-zero only once a cluster has proved it: a world of point entities reports zero forever, which is correct rather than missing. Rises at the
+    /// fence following the write that produced it, not at the write.</para>
+    /// </remarks>
+    public float MaxClusterOverhang { get; init; }
+
+    /// <summary>Cell halves promoted from the linear scan to a per-cell R-Tree during the most recently completed tick.</summary>
+    /// <remarks>
+    /// <para><b>Published because "does a cell half ever actually promote in a real workload?" was unanswerable without a debugger.</b> Promotion needs a
+    /// half at or above <c>SpatialOptions.CellTreePromoteThreshold</c> clusters AND a mean extent at or below <c>CellTreePromoteTightness</c>, and the engine
+    /// measures 0.63-1.03 of the cell under motion — so a persistent zero here is the finding, not a broken counter.</para>
+    /// <para>Read against <see cref="CellTreeDemotions"/>: both non-zero and tracking each other means the promote/demote gap is too narrow and cells are
+    /// thrashing between two O(clusters) rebuilds.</para>
+    /// </remarks>
+    public int CellTreePromotions { get; init; }
+
+    /// <summary>Cell halves that fell back from a per-cell R-Tree to the linear scan during the most recently completed tick.</summary>
+    /// <remarks>See <see cref="CellTreePromotions"/> — the two are read together.</remarks>
+    public int CellTreeDemotions { get; init; }
+
+    /// <summary>
+    /// Clusters that contributed a tightness reading during the most recently completed tick — the denominator of <see cref="MeanClusterExtentRatio"/> and
+    /// <see cref="MeanPackingBound"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Clusters WRITTEN this tick, not clusters that exist.</b> The reading is folded into the AABB refresh, where the extent is already in
+    /// registers and the cell's population has already been read for the density target. A settled world therefore reports zero samples — and that is why
+    /// this member exists: without it a mean of zero over nothing is indistinguishable from clusters that are genuinely points, and "zero means zero, never
+    /// unknown" would be violated by the means rather than honoured.</para>
+    /// <para>A full-population reading is a different measurement — <c>SpatialPartitionMatrix.MeasurePartition</c> sweeps every active cluster for it — and
+    /// costs <c>O(active clusters)</c>, which is precisely what this path exists not to pay.</para>
+    /// </remarks>
+    public int TightnessSampleCount { get; init; }
+
+    /// <summary>
+    /// Mean measured tightness over <see cref="TightnessSampleCount"/> clusters: each cluster's largest axis extent as a fraction of its cell's edge.
+    /// </summary>
+    /// <remarks>Zero when <see cref="TightnessSampleCount"/> is zero. This is the quantity every table of the design's §5.8 reports.</remarks>
+    public double MeanClusterExtentRatio { get; init; }
+
+    /// <summary>
+    /// Mean packing bound over the same clusters: <c>(slotsPerCluster / entitiesInCell)^(1/d)</c> as a fraction of the cell edge — the tightest a full
+    /// cluster can be in that cell without fragmenting.
+    /// </summary>
+    /// <remarks>
+    /// Geometry, not tuning, and independent of <c>ClusterTargetPackingSlack</c>: it is published even in constant mode, where the gates ignore it. It is
+    /// <b>1</b> for any cell holding no more entities than one cluster's slots — the 16-64 per-cell basin the density guidance recommends — which is why
+    /// intra-cell maintenance correctly switches itself off there and why a tightness of 0.9 in that basin is not a defect.
+    /// </remarks>
+    public double MeanPackingBound { get; init; }
+
+    /// <summary>
+    /// <see cref="MeanClusterExtentRatio"/> divided by <see cref="MeanPackingBound"/> — measured extent against what geometry allows. <b>The</b> number the
+    /// spatial partitioning subsystem is judged on. <c>1</c> is optimal packing; the engine measured ~1.24 on a Morton-ordered bulk load and ~1.56 on a
+    /// random-order one.
+    /// </summary>
+    /// <remarks>
+    /// <b>A ratio of means, not a mean of ratios.</b> The two differ whenever the sampled clusters sit in cells of differing population, and the ratio of
+    /// means is what the design's tables quote — a mean extent read against a bound. Both operands are published so a consumer that wants the other
+    /// statistic can say so explicitly rather than inheriting one silently. Zero when <see cref="TightnessSampleCount"/> is zero.
+    /// </remarks>
+    public double MeanTightnessToBound => MeanPackingBound > 0d ? MeanClusterExtentRatio / MeanPackingBound : 0d;
+
+    /// <summary>
     /// Clusters currently live. The denominator for every ratio above — a migration count means nothing without the population it came from.
     /// </summary>
     public int ActiveClusterCount { get; }

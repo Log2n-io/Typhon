@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Threading;
 using JetBrains.Annotations;
 
 namespace Typhon.Engine;
@@ -36,6 +37,23 @@ public partial class DatabaseEngine
     /// <remarks>See <see cref="OpenCellStateRebuildMs"/> — the two are halves of the same startup sweep and are read together.</remarks>
     [PublicAPI]
     public double OpenClusterAabbRebuildMs => _openClusterAabbRebuildMs;
+
+    /// <summary>
+    /// How long the previous tick's partitioning fence took, in milliseconds — <b>the span, not summed CPU</b>. The interval runs from the start of Prep's
+    /// <c>Prepare</c> to the end of the last phase that dispatched a chunk, so it covers the six phase spans plus the scheduler's gaps between them.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>This is the number that answers "what did the fence cost the frame".</b> The sum of the six phase spans is what the partitioning COSTS;
+    /// this is what the host WAITS, and a frame budget is spent in the second. Read <see cref="SpatialMigrationTelemetry.MigrationTotalMs"/> against it:
+    /// that one is CPU-milliseconds summed across workers, so their ratio is roughly the parallelism the migration work actually achieved. Presenting the
+    /// summed figure as the fence's duration is the error that made an 8 ms budget buy one repair unit.</para>
+    /// <para><b>Engine-wide, deliberately not on <see cref="SpatialMigrationTelemetry"/>.</b> One fence serves every archetype, so hanging it off a
+    /// per-archetype snapshot would invite <see cref="GetSpatialTelemetryTotal"/> to sum one tick's fence once per archetype.</para>
+    /// <para><b>Zero on a host that drives <see cref="WriteTickFence(long, ChangeSet)"/> itself</b> rather than running the parallel fence: the phase-exec systems that
+    /// time it never run, so there is no span to report. That zero means "the parallel fence did not drive this tick", not "the fence was free".</para>
+    /// </remarks>
+    [PublicAPI]
+    public double LastFenceSpanMs => _lastFenceSpanTicks * 1000d / Stopwatch.Frequency;
 
     /// <summary>
     /// The spatial grid's occupancy and memory, or an all-zero snapshot when no grid is configured (#872 step 8, AC-8.5 and AC-8.7).
@@ -100,6 +118,12 @@ public partial class DatabaseEngine
             return default;
         }
 
+        // Read once rather than per-member: re-reading the count for each of the two means could divide two different sums by two different denominators.
+        // It does NOT make the trio atomic — the two sums are plain loads taken afterwards, so a concurrent FoldTightnessSample landing between them still
+        // yields a sum covering samples this denominator excludes, and the mean reads slightly high. That is the same torn-across-a-fence-boundary looseness
+        // the accessor's own remarks already claim for every other member; serialising against the fence would cost more than the inconsistency is worth.
+        var samples = Volatile.Read(ref clusterState.LastTickTightnessSamples);
+
         return new SpatialMigrationTelemetry(
             clusterState.LastTickMigrationCount,
             clusterState.LastTickHysteresisAbsorbedCount,
@@ -145,6 +169,12 @@ public partial class DatabaseEngine
             CrossingsQueued = clusterState.LastTickCrossingsQueued,
             RelocationSpendNs = clusterState.LastTickRelocationSpendNs,
             RepairBudgetStarvedNs = clusterState.LastTickRepairBudgetStarvedNs,
+            MaxClusterOverhang = Volatile.Read(ref clusterState.MaxClusterOverhang),
+            CellTreePromotions = clusterState.LastTickCellTreePromotions,
+            CellTreeDemotions = clusterState.LastTickCellTreeDemotions,
+            TightnessSampleCount = samples,
+            MeanClusterExtentRatio = samples > 0 ? clusterState.LastTickTightnessExtentSum / samples : 0d,
+            MeanPackingBound = samples > 0 ? clusterState.LastTickTightnessBoundSum / samples : 0d,
         };
     }
 
@@ -202,6 +232,12 @@ public partial class DatabaseEngine
         var crossingsQueued = 0;
         var relocationSpendNs = 0d;
         var repairStarvedNs = 0d;
+        var maxOverhang = 0f;
+        var treePromotions = 0;
+        var treeDemotions = 0;
+        var tightnessSamples = 0;
+        var tightnessExtentSum = 0d;
+        var tightnessBoundSum = 0d;
 
         for (var i = 0; i < states.Length; i++)
         {
@@ -242,6 +278,26 @@ public partial class DatabaseEngine
             crossingsQueued += clusterState.LastTickCrossingsQueued;
             relocationSpendNs += clusterState.LastTickRelocationSpendNs;
             repairStarvedNs += clusterState.LastTickRepairBudgetStarvedNs;
+            treePromotions += clusterState.LastTickCellTreePromotions;
+            treeDemotions += clusterState.LastTickCellTreeDemotions;
+
+            // MAXED, not summed — see SpatialMigrationTelemetry.MaxClusterOverhang. It is a bound every kNN ring widens by, and the engine-wide bound is the
+            // largest any archetype has proved, not the sum of what each proved separately.
+            var overhang = Volatile.Read(ref clusterState.MaxClusterOverhang);
+            if (overhang > maxOverhang)
+            {
+                maxOverhang = overhang;
+            }
+
+            // Summed as NUMERATORS, divided once at the end: a mean of the per-archetype means would weight a quiet archetype that scanned one cluster
+            // equally with a busy one that scanned ten thousand. Read the sample count once for the same reason the per-archetype accessor does.
+            var samples = Volatile.Read(ref clusterState.LastTickTightnessSamples);
+            if (samples > 0)
+            {
+                tightnessSamples += samples;
+                tightnessExtentSum += clusterState.LastTickTightnessExtentSum;
+                tightnessBoundSum += clusterState.LastTickTightnessBoundSum;
+            }
 
             // AVERAGED, not summed, and it is the one member here that is. Every other value is an extensive quantity — more archetypes, more of it — but
             // a cost per entity is intensive, and summing it would report an engine with four archetypes as four times as expensive per entity as each of
@@ -275,6 +331,12 @@ public partial class DatabaseEngine
             CrossingsQueued = crossingsQueued,
             RelocationSpendNs = relocationSpendNs,
             RepairBudgetStarvedNs = repairStarvedNs,
+            MaxClusterOverhang = maxOverhang,
+            CellTreePromotions = treePromotions,
+            CellTreeDemotions = treeDemotions,
+            TightnessSampleCount = tightnessSamples,
+            MeanClusterExtentRatio = tightnessSamples > 0 ? tightnessExtentSum / tightnessSamples : 0d,
+            MeanPackingBound = tightnessSamples > 0 ? tightnessBoundSum / tightnessSamples : 0d,
         };
     }
 }

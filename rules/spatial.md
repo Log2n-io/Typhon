@@ -1290,3 +1290,65 @@
   scope: SpatialGrid.SetCellTier, SpatialGrid.SetCellTierMin, TierClusterIndex.Rebuild
   on_violation: multi-bit tier stored → TZCNT at rebuild produces wrong index →
     cluster routed to wrong tier array → system processes wrong cluster set
+
+---
+
+## Module: Spatial maintenance telemetry (Issue #911)
+
+### SO-01: The telemetry surface has two clocks, and zero is a value `[silent]`
+  invariant the surface carries THREE kinds of member, and reading one as another is the failure mode:
+    RATES — the `...Count` / `...Ms` members produced by a tick's fence, reset at the top of every fence. A consumer
+      polling at its own rate reads one arbitrary tick out of hundreds, so a per-second figure must be differentiated
+      from the cumulative members, never read off one of these
+    CUMULATIVE — `Total...` and `RepairQueueEvicted`, which only grow; these are what a rate is differentiated FROM
+    LEVELS — `ActiveClusterCount`, `RepairQueueDepth`, `MaxClusterOverhang`, `MeasuredNsPerEntity`: a standing value,
+      neither reset per tick nor monotonically accumulating. Differentiating a level yields nonsense — "clusters per
+      second" off `ActiveClusterCount` is the concrete misuse this clause exists to name
+  invariant MaxClusterOverhang is the one LEVEL that is also monotonic: a running maximum that never falls and
+    never resets, because every kNN ring widens by it and too small loses results while too large only widens a
+    search. GetSpatialTelemetryTotal therefore MAXES it across archetypes; summing would widen every ring by the sum
+    of bounds no single archetype ever had
+  invariant zero means zero, never "unknown". An archetype with no cluster state, an out-of-range id and a quiet
+    tick all report zero, and no consumer may invent a distinction the API does not make
+  invariant the tightness triple is one reading, not three numbers. MeanClusterExtentRatio and MeanPackingBound are
+    means over TightnessSampleCount clusters — the clusters the fence WROTE this tick, not the clusters that exist —
+    so a settled world reports zero samples and both means read zero. Publishing the sample count is what keeps that
+    distinguishable from "the clusters are points", which is the whole reason it is on the surface
+  invariant GetSpatialTelemetryTotal folds by KIND, not uniformly: extensive counters sum, MaxClusterOverhang maxes,
+    and the two tightness means are re-derived from summed numerators over the summed sample count. Averaging the
+    per-archetype means would weight an archetype that scanned one cluster equally with one that scanned ten thousand
+  invariant MigrationTotalMs is CPU-milliseconds SUMMED ACROSS WORKERS, not a span: W workers each busy for 1 ms
+    report W. Any surface displaying it must label it as such — and must not present it as the cost of the fence
+  invariant the number that answers "how long did the fence block the engine" is a SPAN, and it is a different
+    member: `DatabaseEngine.LastFenceSpanMs`, published from the runtime's `TyphonRuntime.LastFenceWallTicks` —
+    Prep's start to the last phase that dispatched, so the six phase spans PLUS the scheduler's gaps between them.
+    The sum of the six is what the partitioning COSTS; the span is what the host WAITS, and a frame budget is spent
+    in the second. `MigrationTotalMs / LastFenceSpanMs` is roughly the parallelism the work achieved
+  invariant the naming actively misleads and the rule says so once rather than letting each reader rediscover it:
+    `FenceExecSystem.TotalWallTicks` says "wall" and is a SUM across chunks (a CPU-per-unit figure feeding
+    `LiveFenceCostModel`), while `PhaseSpanTicks` is the elapsed one. A sum cannot express a speed-up, so reading
+    `TotalWallTicks` as a latency is wrong in both directions — it falls with more chunks when memory-stall-bound
+    and rises with more once per-chunk setup dominates
+  invariant `LastFenceSpanMs` is ZERO on a host that drives `WriteTickFence` itself instead of running the parallel
+    fence, because the phase-exec systems that time it never run. Zero means "the parallel fence did not drive this
+    tick", which is the same zero-means-zero discipline as the rest of the surface and not a missing measurement
+  invariant reading is allocation-free and lock-free — plain field reads of live engine state, torn only across a
+    fence boundary. No accessor may take a lock or allocate to serialise against the fence
+  scope: SpatialMigrationTelemetry.MaxClusterOverhang, SpatialMigrationTelemetry.TightnessSampleCount,
+    SpatialMigrationTelemetry.MeanClusterExtentRatio, SpatialMigrationTelemetry.MeanPackingBound,
+    SpatialMigrationTelemetry.MeanTightnessToBound, SpatialMigrationTelemetry.CellTreePromotions,
+    SpatialMigrationTelemetry.CellTreeDemotions, DatabaseEngine.GetSpatialTelemetry,
+    DatabaseEngine.GetSpatialTelemetryTotal, DatabaseEngine.LastFenceSpanMs, TyphonRuntime.LastFenceWallTicks,
+    FenceExecSystem.PhaseSpanTicks, FenceExecSystem.TotalWallTicks, ArchetypeClusterState.ClusterTightnessSample
+  verified: SpatialMigrationTelemetryTests.Tightness_ReportsNoSamples_RatherThanAStaleMean_OnAQuietTick pins the
+    zero-samples case; MaxClusterOverhang_IsPublished_AndIsARunningMaximumRatherThanAPerTickValue pins the third
+    clock; Total_MaxesTheOverhang_AndWeightsTheTightnessMeansBySample pins the per-kind fold across two archetypes;
+    Accessor_AllocatesNothing pins the allocation-free read; FenceSpanMs_IsZero_WhenTheHostDrivesTheFenceItself pins
+    the serial-fence zero, so it cannot be read as a fence that cost nothing
+  on_violation:
+    a per-tick member read as a rate → a number sampled from one tick of hundreds, presented as throughput
+    the overhang summed rather than maxed → every kNN ring widens by a bound no archetype has
+    the sample count dropped → "nothing moved" becomes indistinguishable from "the clusters are points"
+    the tightness means averaged per archetype → a quiet archetype halves a busy one's reading
+    summed CPU shown where the span belongs → a frame budget compared against a number W times too large, which is
+      how an 8 ms budget bought one repair unit
