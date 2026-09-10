@@ -103,6 +103,12 @@ class Program
                 return;
             }
 
+            if (args.Contains("--cell-tree-crossover"))
+            {
+                CellTreeCrossoverProfile.Run(args);
+                return;
+            }
+
             if (args.Contains("--storage-model"))
             {
                 StorageModelProfile.Run(args);

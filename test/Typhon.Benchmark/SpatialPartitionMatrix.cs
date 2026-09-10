@@ -332,6 +332,13 @@ public static class SpatialPartitionMatrix
     private static float MovingFraction = 1f;
     private static bool AdaptiveCost;
     private static bool ForceBulkMap;
+    private static bool TraceTightness;
+
+    // The engine's defaults, overridable for #918 AC-17.3: the drift gate sits at slack × bound, so a mechanism driven by it cannot reach a tightness-to-bound
+    // below the slack, and the repair floor decides which band repair owns instead.
+    private static float PackingSlack = 1.5f;
+    private static float RepairRatio = 0.75f;
+    private static float RepairCriticalRatio = 1.0f;
 
     // ── Aging (#886 lead B) ──────────────────────────────────────────────────────────────────────────────────────────
     //
@@ -402,6 +409,19 @@ public static class SpatialPartitionMatrix
         GrowthCap = Array.IndexOf(args, "--growth-cap") >= 0;
         OpenCap = ArgInt(args, "--open-cap", 4);
         NoSpawnSort = Array.IndexOf(args, "--no-spawn-sort") >= 0;
+        // --trace-tightness prints one row per fence from the spawn's own onward: AC-17.3 is a trajectory ("within 20 ticks", "never rises"), which a
+        // run's mean cannot show.
+        TraceTightness = Array.IndexOf(args, "--trace-tightness") >= 0;
+        PackingSlack = ArgFloat(args, "--packing-slack", PackingSlack);
+        RepairRatio = ArgFloat(args, "--repair-ratio", RepairRatio);
+        // The validator wants the critical ratio at 0 or between the repair ratio and 1.2; a repair ratio raised past the default critical switches it off.
+        RepairCriticalRatio = RepairRatio >= RepairCriticalRatio ? 0f : RepairCriticalRatio;
+        if (Array.IndexOf(args, "--repair-ratio") >= 0 || Array.IndexOf(args, "--packing-slack") >= 0)
+        {
+            // Two variables move when the repair ratio passes the critical one, so the second is printed rather than left to be inferred.
+            Console.WriteLine($"  packing slack {PackingSlack:F2}, repair ratio {RepairRatio:F2}, critical valve "
+                + (RepairCriticalRatio > 0f ? $"at {RepairCriticalRatio:F2}" : "OFF (switched off because the repair ratio reached it)"));
+        }
         // --force-bulk-map stages every EntityMap patch for the bulk phase whatever the batch size, so its per-chunk sort is exercised on a world whose
         // migrations would otherwise take the inline path. (The --compare-sort / --compare-new-sorts A/B flags of #889 and #891 went with the comparison
         // sorts they selected, once the numbers in design 14 §5 were accepted.)
@@ -897,6 +917,9 @@ public static class SpatialPartitionMatrix
             new Vector3(WorldExtent, WorldExtent, dim == 3 ? WorldExtent : cellSize),
             cellSize,
             reclusterBudgetMs: budgetMs,
+            clusterTargetPackingSlack: PackingSlack,
+            clusterRepairExtentRatio: RepairRatio,
+            clusterRepairCriticalExtentRatio: RepairCriticalRatio,
             leastEnlargementPlacement: LeastEnlargement,
             growthCapPlacement: GrowthCap,
             maxOpenClustersPerCell: OpenCap,
@@ -1076,6 +1099,7 @@ public static class SpatialPartitionMatrix
             }
         }
 
+        var tightnessTrace = TraceTightness && matrix != "warmup" ? new List<string>() : null;
         TyphonRuntime runtime = null;
         runtime = TyphonRuntime.Create(dbe, schedule =>
         {
@@ -1084,6 +1108,13 @@ public static class SpatialPartitionMatrix
             dag.CallbackSystem("Sample", _ =>
             {
                 var n = Interlocked.Increment(ref observed);
+
+                // Before the discard below, which is about phase timings: the trajectory is wanted from the spawn's own fence onward. Callback n runs
+                // at the start of tick n and so sees fence n − 1 — the row is labelled with the fence it describes, and the first callback has none.
+                if (n > 1)
+                {
+                    tightnessTrace?.Add(TraceTightnessRow(dbe, archetypeId, n - 1));
+                }
 
                 // The first two ticks are discarded from the PHASE numbers: tick 1 has no previous fence to report, and
                 // tick 2 reports the first fence after spawn, which carries the page faults for every chunk it touches.
@@ -1286,6 +1317,13 @@ public static class SpatialPartitionMatrix
         r.ActiveListInversions = CountActiveListInversions(dbe, archetypeId);
         // Motion ticks only: the churn warm-up increments motionTick without accumulating move time.
         r.MoveMs = moveMsTotal / Math.Max(1, motionTick - churnTicks);
+        if (tightnessTrace != null)
+        {
+            foreach (var row in tightnessTrace)
+            {
+                Console.WriteLine(row);
+            }
+        }
 
         // A row that moved nothing is not a fast row, it is a broken one. Both nets report through Failure, which WriteCsv and Report already surface.
         if (moveFailure != null)
@@ -1820,6 +1858,47 @@ public static class SpatialPartitionMatrix
         r.ClustersPerCell = r.LiveCells > 0 ? (double)r.ActiveClusters / r.LiveCells : 0d;
         // Over the archetype's REAL slot count (49 for these components), not the 64-slot ceiling — the ceiling read every figure 23 % low.
         r.SlotOccupancyPct = r.ActiveClusters > 0 ? 100d * r.Entities / (r.ActiveClusters * (double)cs.Layout.ClusterSize) : 0d;
+    }
+
+    /// <summary>
+    /// One fence's tightness-to-bound (#918 AC-17.3), twice: as the engine sampled it, and over EVERY active cluster.
+    /// </summary>
+    /// <remarks>
+    /// The engine's figure averages only the clusters its AABB pass examined that fence, which is every moving cluster and none of the still ones. The
+    /// whole-archetype extent is divided by the SAMPLED mean bound, which is exact
+    /// for a uniform world (every cell carries the same population, so every cell the same bound) and an approximation otherwise; the row prints both so
+    /// the reader can see when they part.
+    /// </remarks>
+    private static string TraceTightnessRow(DatabaseEngine dbe, int archetypeId, int fence)
+    {
+        var t = dbe.GetSpatialTelemetry(archetypeId);
+        var cs = dbe._archetypeStates[archetypeId].ClusterState;
+        var cellSize = dbe.SpatialGrid.Config.CellSize;
+        var sum = 0d;
+        var count = 0;
+        for (var i = 0; i < cs.ActiveClusterCount; i++)
+        {
+            var id = cs.ActiveClusterIds[i];
+            if ((uint)id >= (uint)cs.ClusterAabbs.Length)
+            {
+                continue;
+            }
+
+            ref var b = ref cs.ClusterAabbs[id];
+            var ex = Math.Max(b.MaxX - b.MinX, Math.Max(b.MaxY - b.MinY, b.MaxZ - b.MinZ));
+            if (float.IsFinite(ex) && ex >= 0f)
+            {
+                sum += ex / cellSize;
+                count++;
+            }
+        }
+
+        var extentAll = count > 0 ? sum / count : 0d;
+        var toBoundAll = t.MeanPackingBound > 0d ? extentAll / t.MeanPackingBound : 0d;
+        return $"  fence {fence,4}  ttb(sampled) {t.MeanTightnessToBound,6:F3}  ttb(all) {toBoundAll,6:F3}  extent(all) {extentAll,6:F3}  "
+            + $"bound {t.MeanPackingBound,6:F3}  clusters {cs.ActiveClusterCount,6}  gated {t.DriftGatedClusters,5}  repairs {t.RepairsExecuted,6}  "
+            + $"boost {cs.DriftTargetBoost,5:F2}  budgetUsed {t.ReclusterBudgetUsedMs,6:F3}  relocAdmitted {t.RelocationsAdmitted,5}  "
+            + $"throttled {t.RelocationsThrottled,5}";
     }
 
     private static void MeasureQueries<TArch, TPos>(DatabaseEngine dbe, int dim, float cellSize, RunResult r,

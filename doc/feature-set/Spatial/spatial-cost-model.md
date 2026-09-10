@@ -79,9 +79,9 @@ boxes. Every cluster whose box overlaps is *opened*: its live entities are then 
 of a query is the number of clusters it opens, and opening a cluster is cheap only because iterating one is —
 0.576 ns per entity, against 46.5 ns to resolve one entity by id, a factor of 81.
 
-The broadphase is a linear scan until a cell gets dense enough to be worth a tree, at which point the engine
-promotes that cell on its own — at 1024 clusters in one cell half by default, tunable through
-`DatabaseEngineOptions.Spatial.CellTreePromoteThreshold`. The threshold is where it is because of this:
+The broadphase is a linear scan. A cell half can be promoted to a tree once it holds
+`DatabaseEngineOptions.Spatial.CellTreePromoteThreshold` clusters — `int.MaxValue`, never, by default since September
+2026 (see the note below the table). The case for a tree, on ideal tiling:
 
 Query cost, tree against linear scan, by how selective the query is (`sel` is the query edge as a fraction of the
 cell edge). Above 1.00× the tree wins:
@@ -100,8 +100,12 @@ cell edge). Above 1.00× the tree wins:
 > selective, 102 ns scanned against 247 ns through the tree; 2 048 selective, 403 ns against 246 ns. The tree's advantage
 > at extreme density is real but arrives later than these rows suggest.
 
-Two things fall out of that. The tree loses *every* column at 512 and first wins at 1 563, which is where the 1024
-default sits — on the conservative side of the boundary. And the tree never wins a broad query at any density: a
+> **Off by default since 2026-09-10 (#917).** On a game-shaped workload — #906's SWG Tatooine at 16× population, cells of
+> 1 024 to 16 384 m — a forced tree made the tick 1.43–1.75× slower at every density: its refit runs in the fence's serial
+> tail, and at 4 000+ clusters its 3–4× broadphase win is ~1.1× on the whole query, which the narrowphase dominates.
+
+Two things fall out of that. The tree loses *every* column at 512 and first wins at 1 563, which is where the old 1024
+default sat — on the conservative side of the boundary. And the tree never wins a broad query at any density: a
 query that returns most of the cell has nothing to prune, so it pays the descent for nothing. Promotion helps
 selective queries against dense cells, which is the case it exists for.
 

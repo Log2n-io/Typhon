@@ -5857,6 +5857,14 @@ internal sealed unsafe partial class ArchetypeClusterState
             return;
         }
 
+        PromoteCellHalf(slot, isStatic, cellKey, linear);
+    }
+
+    /// <summary>
+    /// Rebuild a cell half from its linear index into a <see cref="CellClusterTree"/> and publish it. The caller has ensured the tree segment.
+    /// </summary>
+    private void PromoteCellHalf(PerCellSpatialSlot slot, bool isStatic, int cellKey, CellSpatialIndex linear)
+    {
         var tree = new CellClusterTree(CellTreeSegment, ClusterSpatialIndexSlot);
 
         // Retire the LINEAR slot indices before re-issuing tree handles into the same array. The two representations share ClusterSpatialIndexSlot, and a
@@ -5898,6 +5906,70 @@ internal sealed unsafe partial class ArchetypeClusterState
         if (cellKey >= 0)
         {
             (_promotedCells ??= new List<int>()).Add(cellKey);
+        }
+    }
+
+    /// <summary>
+    /// Put one cell half on the tree or on the linear index, whatever the promotion gate would decide — the in-place structure A/B of
+    /// <c>CellTreeCrossoverProfile</c> (#917). False when the cell has no half to switch or no tree segment can be had.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>An instrument, not a gate.</b> Switching one engine's half in place is what makes the two structures answer over the SAME clusters. Two
+    /// engines fed one workload need not keep one layout: repair admission is priced from measured wall-clock costs, so the engine whose fences cost more
+    /// admits less repair.</para>
+    /// <para><b>Holds the archetype's finalize latch</b>, as the spawn path's <see cref="AddClusterToPerCellIndex"/> does: a commit opening or widening a
+    /// cluster in this cell mid-rebuild would otherwise add to the linear index being copied and dropped (the cluster lost from the cell, SQ-01) or
+    /// update a tree being released (PC-01). Call inside an epoch, with no fence and no query of this engine in flight.</para>
+    /// <para><b>A forced tree lasts until a cluster leaves the cell.</b> The archetype's gate should be off (<see cref="int.MaxValue"/>), or its next
+    /// evaluation may undo the switch — and with it off the fall-back threshold is <see cref="int.MaxValue"/> too, so the first cluster the cell loses (a
+    /// destroy, a migration out, a repair source emptied at a fence) falls the tree back to the linear index. A caller timing the tree across fences
+    /// re-checks the structure after the work.</para>
+    /// </remarks>
+    internal bool ForceCellHalfStructure(int cellKey, bool tree)
+    {
+        // Before the latch: the segment's creation takes _finalizeLock itself, and the latch is not re-entrant.
+        if (tree && !TryEnsureCellTreeSegment())
+        {
+            return false;
+        }
+
+        ref var forceCtx = ref Unsafe.NullRef<WaitContext>();
+        _finalizeLock.Enter(ref forceCtx);
+        try
+        {
+            var perCell = PerCellIndex;
+            if (perCell == null || (uint)cellKey >= (uint)perCell.Length || perCell[cellKey] is not { } slot)
+            {
+                return false;
+            }
+
+            var isStatic = SpatialSlot.FieldInfo.Mode == SpatialMode.Static;
+            if (tree == (slot.ReadTree(isStatic) != null))
+            {
+                return true;
+            }
+
+            // The promoted-cell list is pruned only by the gate's own fence pass, which returns at once when the gate is off — the state this method
+            // is called in. Without these two removals every forced promotion would leave an entry behind for the life of the engine.
+            _promotedCells?.Remove(cellKey);
+            if (!tree)
+            {
+                DemoteCellHalf(slot, isStatic);
+                return true;
+            }
+
+            var linear = slot.ReadIndex(isStatic);
+            if (linear == null)
+            {
+                return false;
+            }
+
+            PromoteCellHalf(slot, isStatic, cellKey, linear);
+            return true;
+        }
+        finally
+        {
+            _finalizeLock.Exit();
         }
     }
 

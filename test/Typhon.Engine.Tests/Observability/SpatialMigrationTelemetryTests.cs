@@ -701,8 +701,8 @@ class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
     [Test]
     public void CellTreeCounters_ArePublished_AndReadZeroWhenNoHalfPromotes()
     {
-        // The promotion gate is 1024 clusters in one cell half AND a mean extent at or below 0.10 of the cell. This workload
-        // reaches neither, so both counters are ZERO — and that zero is the finding the issue asks to make visible, not a
+        // Promotion is off by default, and even the count gate — 1024 clusters in one cell half AND a mean extent at or below 0.10 of the cell — would
+        // not fire on this workload, so both counters are ZERO — and that zero is the finding the issue asks to make visible, not a
         // missing producer. Before #911 there was no way to tell the two apart without a debugger.
         using var dbe = SetupEngineWithGrid();
         var id = Spawn(dbe, 50f, 50f);

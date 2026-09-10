@@ -44,7 +44,7 @@ class ClusterSpatial3DTests : TestBase<ClusterSpatial3DTests>
     /// that <c>ToCoords</c> writes for a 2D cluster. That is right only while every STORED box is on that slab. A 3D
     /// archetype stores its real Z, so a cell holding entities at z ≈ 125 was asked for clusters overlapping z ∈ [0, 1]
     /// and answered NOTHING — a silent <c>SQ-01</c> false negative on every open-axis query against a promoted cell,
-    /// with promotion on by default at 1 024 clusters per cell.</para>
+    /// with promotion on by default at 1 024 clusters per cell at the time (#905; off by default since #917).</para>
     /// <para><b>Why nothing caught it.</b> Every existing promoted-cell differential uses a 2D archetype, whose stored Z
     /// is already the ±∞ sentinel and therefore genuinely lives on the slab. The combination that fails is a 3D field
     /// plus an open axis, and it had no test. Found by the game-workload harness, not by this suite.</para>

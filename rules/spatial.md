@@ -522,9 +522,14 @@
     reallocate from inside a slice, and TryEnsureCellTreeSegment creates the shared segment under the same
     latch. A startup guard used to refuse promotion alongside a parallel fence instead; it is gone, because
     what it was protecting is now protected
+  invariant the tree build itself is PromoteCellHalf, reached from the gate (MaybePromoteCellHalf, under
+    _finalizeLock) and from ForceCellHalfStructure — the #917 benchmark's in-place switch — which takes
+    _finalizeLock itself, ensuring the tree segment BEFORE it (the latch is not re-entrant), and is called
+    with no fence and no query in flight
   scope: ArchetypeClusterState.ApplyOrDeferClusterUpdate, ArchetypeClusterState.EnqueuePromotedAppliesBulk,
     ArchetypeClusterState.DrainPromotedAabbApplies, ArchetypeClusterState.UpdateClusterInPerCellIndex,
-    ArchetypeClusterState.MaybePromoteCellHalf, ArchetypeClusterState.DemoteCellHalf
+    ArchetypeClusterState.MaybePromoteCellHalf, ArchetypeClusterState.PromoteCellHalf,
+    ArchetypeClusterState.ForceCellHalfStructure, ArchetypeClusterState.DemoteCellHalf
   verified: CellTreeParallelFenceTests (both slicing branches, 50 parallel-fence ticks with motion),
     CellTreeDensityTransitionTests (the switch in both directions, and promotion under a parallel fence with
     clusters migrating between cells). Ablated:
