@@ -857,6 +857,16 @@ public partial class DatabaseEngine
         // are reset from Prep, and what orders the reset against those publications is the fence phase barrier, not a release on the store. Giving one of
         // the pair a Volatile.Write and not the other would imply a distinction between them that does not exist.
         clusterState.LastTickMigrationApplyTicks = 0L;
+        // #912, zeroed the same plain way and for the same reason as the two above: the Migrate slices that publish them run after this, and what orders the
+        // reset against those publications is the fence phase barrier, not a release on the store.
+        clusterState.LastTickMigrationSliceCount = 0;
+        clusterState.LastTickZoneMapBatchOpens = 0;
+        clusterState.LastTickMigrationPrologueTicks = 0L;
+        clusterState.LastTickMigrationEpilogueTicks = 0L;
+        clusterState.LastTickCrossingsExecuted = 0;
+        clusterState.LastTickRelocationsExecuted = 0;
+        clusterState.LastTickRepairsExecuted = 0;
+        clusterState.ResetFinalizeLockAcquisitions();
         clusterState.LastTickClustersScanned = 0;
         clusterState.LastTickSlotsScanned = 0;
         clusterState.LastTickDriftersDetected = 0;
@@ -914,6 +924,12 @@ public partial class DatabaseEngine
         var cellUpperBound = _spatialGrid != null ? 2 * _spatialGrid.CellCount + 64 : 0;
         var preSizeStart = Stopwatch.GetTimestamp();
         clusterState.PreSizeMigrationBuffers(upperBound, cellUpperBound);
+
+        // #926. On the SAME bound as the arrays above, and for a stronger reason than theirs. A Migrate slice now holds one zone-map batch per indexed field
+        // for its whole run — one latch acquire instead of one per migrant — and a batch pins one Store generation, so a destination chunk id past that
+        // generation's capacity cannot be grown through: the slice holds shared access, and growing would abandon the store its siblings are writing into.
+        // Sizing to the bound the phase provably cannot exceed is what makes the batch cover every write it will make, which is the whole of AC-3.
+        clusterState.EnsureZoneMapCapacity(upperBound);
         clusterState.PrepPreSizeTicks += Stopwatch.GetTimestamp() - preSizeStart;
 
         // Memoize popcount of ClusterProcessBitmap so the AabbRefresh planner doesn't redo it on TickDriver (D-4).
@@ -1101,7 +1117,11 @@ public partial class DatabaseEngine
             }
 
             BeginZoneMapTick(clusterState);
-            clusterState.EnsureZoneMapCapacity(Math.Max(clusterState.PrimarySegmentCapacity, dirtyBits.Length));
+
+            // The zone-map pre-size moved to PreSizeArchetypeFence (#926). It used to sit here on
+            // `Math.Max(PrimarySegmentCapacity, dirtyBits.Length)`, which is the bound the PREP phase needs — Prep widens clusters that already exist. The
+            // Migrate phase allocates new ones, so its destination chunk ids run past that bound, and step ⑧'s `+ 2 * PendingMigrationCount + 64` is the
+            // slack that covers them. Sizing here also ran too early: PlanArchetypeRepairs had not yet allocated its destination clusters.
             clusterState.BuildShadowDrainPlans();
             clusterState.PrepSliceable = true;
         }

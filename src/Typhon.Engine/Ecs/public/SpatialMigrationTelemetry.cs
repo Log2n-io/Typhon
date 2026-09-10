@@ -159,6 +159,88 @@ public readonly struct SpatialMigrationTelemetry
     public double MigrationTotalMs { get; init; }
 
     /// <summary>
+    /// <c>ExecuteMigrations</c> slices that ran during the most recently completed tick — the number of spans summed into <see cref="MigrationExecuteMs"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Read it before dividing <see cref="MigrationExecuteMs"/> by <see cref="MigrationCount"/>.</b> That quotient is a per-entity cost only while
+    /// this is 1. The parallel fence sizes the Migrate phase's slices from the worker count, so raising W raises the number of spans summed into the
+    /// numerator while the workload fixes the denominator, and every per-slice fixed cost inside the bracket — three chunk-accessor rentals and the span
+    /// construction — is charged again to every entity in the tick.</para>
+    /// <para><b>This is what #912 was: 425 -&gt; 844 -&gt; 1 440 ns/entity at W = 2/4/8 was recorded as contention in the relocation drain for three steps,
+    /// and nothing published the quantity that would have told the two apart.</b> The decomposition is
+    /// <c>(Prologue + Epilogue) / MigrationCount</c> for the per-slice term and the remainder for the per-entity one.</para>
+    /// </remarks>
+    public int MigrationSliceCount { get; init; }
+
+    /// <summary>
+    /// Indexed-field slots covered by the tick's Migrate-slice zone-map batches — one per indexed field per slice (#926).
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Read it against <see cref="MigrationSliceCount"/>, never against <see cref="MigrationCount"/>.</b> The identity is
+    /// <c>ZoneMapBatchOpens == MigrationSliceCount x indexed fields</c>, and the point of publishing it is that the right-hand side does not mention the
+    /// migration count at all. Before #926 the Migrate loop took the zone map's archetype-wide grow latch once per migrant per field — two atomics on one
+    /// cache line, from every worker — and the fix was to hold one batch per field for the whole slice. A number that starts tracking the migration count
+    /// again is that fix regressing, and no timing is needed to see it.</para>
+    /// <para><b>Slots, not latches, and the two differ.</b> A String64 field is indexed but has no zone map (there is no numeric min/max to summarise), so
+    /// its slot is covered by the batch pass and holds no latch. Counting slots is what makes the identity above exact — the migrant loop's field id counts
+    /// fields, not maps — but it means an archetype indexed only on String64 reports a non-zero figure having acquired nothing.</para>
+    /// <para><b>Zero on the SERIAL fence, which deliberately opens no batches</b> — it has one writer and nothing to amortise, and holding a batch there
+    /// would strand a destination past the pinned generation with no growing fallback available. Also zero on a tick that migrated nothing, and for an
+    /// archetype with no indexed fields. All three mean what they say.</para>
+    /// </remarks>
+    public int ZoneMapBatchOpens { get; init; }
+
+    /// <summary>
+    /// Milliseconds the tick's Migrate slices spent before their first migrant — span construction and the three chunk-accessor rentals — summed across
+    /// slices. Part of <see cref="MigrationExecuteMs"/>, not additional to it.
+    /// </summary>
+    /// <remarks>
+    /// Grows with <see cref="MigrationSliceCount"/> rather than with <see cref="MigrationCount"/>, which is exactly what makes it worth publishing
+    /// separately: it is the term a per-entity reading mis-attributes.
+    /// </remarks>
+    public double MigrationPrologueMs { get; init; }
+
+    /// <summary>
+    /// Milliseconds the tick's Migrate slices spent after their last migrant — the three accessor disposals and the migration span's publish — summed
+    /// across slices. Part of <see cref="MigrationExecuteMs"/>, not additional to it.
+    /// </summary>
+    /// <inheritdoc cref="MigrationPrologueMs"/>
+    public double MigrationEpilogueMs { get; init; }
+
+    /// <summary>Cell-crossing migrations executed during the most recently completed tick.</summary>
+    /// <remarks>
+    /// <para>This, <see cref="RelocationsExecuted"/> and <see cref="RepairsExecuted"/> sum EXACTLY to <see cref="MigrationCount"/> — the split is checkable
+    /// rather than trusted, which is the property #911 gave the trace record and #912 brought to this surface.</para>
+    /// <para><b>Executed, not queued.</b> <see cref="CrossingsQueued"/> and <see cref="RelocationsAdmitted"/> are decisions taken a phase earlier and a
+    /// tick earlier respectively; these three are what the drain actually moved. The gap between a queued relocation and an executed one is
+    /// <see cref="RelocationsSuperseded"/> plus the stale-source guard.</para>
+    /// <para><b>Always counted, unlike the trace record's split.</b> A Migrate slice mixes all three kinds by construction, so attributing a per-entity cost
+    /// to one of them needs this; and needing the profiler on to get it would perturb the bracket the cost is measured in.</para>
+    /// </remarks>
+    public int CrossingsExecuted { get; init; }
+
+    /// <summary>Intra-cell relocations executed during the most recently completed tick.</summary>
+    /// <inheritdoc cref="CrossingsExecuted"/>
+    public int RelocationsExecuted { get; init; }
+
+    /// <summary>Repair moves executed during the most recently completed tick.</summary>
+    /// <inheritdoc cref="CrossingsExecuted"/>
+    public int RepairsExecuted { get; init; }
+
+    /// <summary>
+    /// Exclusive acquisitions of the archetype's finalize latch during the most recently completed tick.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The archetype-wide serialisation point, and the only one a fence worker can reach.</b> Twenty-one call sites take it: the three bulk
+    /// enqueues, the per-archetype array growths, the new-cluster slow paths and the cell-tree segment creation. A phase whose per-worker CPU rises with the
+    /// worker count is serialised here or it is not serialised at all — so this staying flat while per-entity cost rises ELIMINATES the latch, which is a
+    /// result worth as much as naming it.</para>
+    /// <para><b>A count, not a held time.</b> Timing it would cost two timestamps per acquisition against critical sections frequently shorter than that,
+    /// and would change what it measures. #912's method note says it: count operations, do not time a phase already known to be off.</para>
+    /// </remarks>
+    public long FinalizeLockAcquisitions { get; init; }
+
+    /// <summary>
     /// Intra-cell relocations the re-clustering budget refused during the most recently completed tick, and therefore dropped (#872 step 11).
     /// </summary>
     /// <remarks>

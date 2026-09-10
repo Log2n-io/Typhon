@@ -63,6 +63,29 @@ public sealed class EcsMetricsExporter : IDisposable
             "Cell-boundary crossings absorbed by the hysteresis margin in the last completed tick, per archetype");
         _meter.CreateObservableGauge("typhon.ecs.spatial.migration_duration_ms", EnumerateMigrationExecuteMs, "ms",
             "Wall-clock migration execution time in the last completed tick, summed across workers, per archetype");
+        // #912. The slice count is what makes migration_duration_ms divisible: that gauge is a sum of per-SLICE spans, and the parallel fence sizes slices
+        // from the worker count, so a dashboard dividing it by the migration count reads a per-slice fixed cost as a per-entity one and sees the number
+        // climb whenever the engine is given more workers. Exported beside it rather than in a doc comment for that reason.
+        _meter.CreateObservableGauge("typhon.ecs.spatial.migration_slices", EnumerateMigrationSliceCount, "{slices}",
+            "Migrate-phase slices in the last completed tick, per archetype — the number of spans summed into migration_duration_ms");
+
+        // #926. Exported beside the slice count because that is what it must be read against: one batch per indexed field per slice, so this tracks
+        // migration_slices and NOT migration_count. A deployment where it starts following the migration count has lost the batching and is taking an
+        // archetype-wide latch per migrated entity again.
+        _meter.CreateObservableGauge("typhon.ecs.spatial.zone_map_batch_opens", EnumerateZoneMapBatchOpens, "{batches}",
+            "Zone-map batches opened by the last tick's Migrate slices, per archetype — one per indexed field per slice");
+        _meter.CreateObservableGauge("typhon.ecs.spatial.migration_prologue_ms", EnumerateMigrationPrologueMs, "ms",
+            "Part of migration_duration_ms spent renting accessors before the first migrant, summed across slices, per archetype");
+        _meter.CreateObservableGauge("typhon.ecs.spatial.migration_epilogue_ms", EnumerateMigrationEpilogueMs, "ms",
+            "Part of migration_duration_ms spent releasing accessors after the last migrant, summed across slices, per archetype");
+        _meter.CreateObservableGauge("typhon.ecs.spatial.crossings_executed", EnumerateCrossingsExecuted, "{migrations}",
+            "Cell-crossing migrations executed in the last completed tick, per archetype");
+        _meter.CreateObservableGauge("typhon.ecs.spatial.relocations_executed", EnumerateRelocationsExecuted, "{migrations}",
+            "Intra-cell relocations executed in the last completed tick, per archetype");
+        _meter.CreateObservableGauge("typhon.ecs.spatial.repairs_executed", EnumerateRepairsExecuted, "{migrations}",
+            "Repair moves executed in the last completed tick, per archetype — the three sum exactly to migrations");
+        _meter.CreateObservableGauge("typhon.ecs.spatial.finalize_lock_acquisitions", EnumerateFinalizeLockAcquisitions, "{acquisitions}",
+            "Exclusive acquisitions of the archetype-wide finalize latch in the last completed tick — the fence's only archetype-wide serialisation point");
         _meter.CreateObservableGauge("typhon.ecs.spatial.active_clusters", EnumerateActiveClusterCount, "{clusters}",
             "Live clusters per archetype — the denominator for the migration and drifter rates");
         _meter.CreateObservableGauge("typhon.ecs.spatial.clusters_scanned", EnumerateClustersScanned, "{clusters}",
@@ -101,6 +124,18 @@ public sealed class EcsMetricsExporter : IDisposable
         // budget on its own. Their ratio is the parallelism the work achieved.
         _meter.CreateObservableGauge("typhon.ecs.spatial.fence_span_ms", () => _dbe.LastFenceSpanMs, "ms",
             "Span of the previous partitioning fence — what the host waited, not summed worker CPU; zero when the fence ran serially");
+
+        // Exported because migration_duration_ms and its siblings above are CPU SUMMED ACROSS WORKERS, and a summed figure rises with the worker count on
+        // unchanged work. Without this ratio beside them a dashboard cannot tell work being spread from work getting slower, and reads every added worker as
+        // a regression. Divide a summed-CPU figure by this to get the elapsed cost a frame budget is spent in — using migration_duration_ms, which covers the
+        // same three phases this ratio does. Below 1 is a real reading: dispatch overhead exceeding the work.
+        _meter.CreateObservableGauge("typhon.ecs.spatial.fence_migration_parallelism", () => _dbe.LastFenceMigrationParallelism, "{workers}",
+            "Summed worker CPU over elapsed span for the previous tick's migration phases — the divisor that makes the summed-CPU gauges readable");
+
+        // The span above starts at Prep's Prepare; this one brackets the whole fence call, so it also carries the serial prep no worker count shrinks.
+        // Their difference is the fence's Amdahl fraction, which is why both are exported rather than one standing in for the other.
+        _meter.CreateObservableGauge("typhon.ecs.spatial.fence_stall_ms", () => _dbe.LastFenceStallMs, "ms",
+            "Whole previous partitioning fence as the host felt it, serial prep included — the interruption to budget a frame against");
         _meter.CreateObservableGauge("typhon.ecs.open.cellstate_rebuild_ms", () => _dbe.OpenCellStateRebuildMs, "ms",
             "Milliseconds spent reconstructing cluster-to-cell mappings at open");
         _meter.CreateObservableGauge("typhon.ecs.open.cluster_aabb_rebuild_ms", () => _dbe.OpenClusterAabbRebuildMs, "ms",
@@ -126,6 +161,22 @@ public sealed class EcsMetricsExporter : IDisposable
     private IEnumerable<Measurement<double>> EnumerateMigrationExecuteMs() => EnumerateSpatialDouble(static t => t.MigrationExecuteMs);
 
     private IEnumerable<Measurement<double>> EnumerateReclusterBudgetMs() => EnumerateSpatialDouble(static t => t.ReclusterBudgetUsedMs);
+
+    private IEnumerable<Measurement<long>> EnumerateMigrationSliceCount() => EnumerateSpatialLong(static t => t.MigrationSliceCount);
+
+    private IEnumerable<Measurement<long>> EnumerateZoneMapBatchOpens() => EnumerateSpatialLong(static t => t.ZoneMapBatchOpens);
+
+    private IEnumerable<Measurement<double>> EnumerateMigrationPrologueMs() => EnumerateSpatialDouble(static t => t.MigrationPrologueMs);
+
+    private IEnumerable<Measurement<double>> EnumerateMigrationEpilogueMs() => EnumerateSpatialDouble(static t => t.MigrationEpilogueMs);
+
+    private IEnumerable<Measurement<long>> EnumerateCrossingsExecuted() => EnumerateSpatialLong(static t => t.CrossingsExecuted);
+
+    private IEnumerable<Measurement<long>> EnumerateRelocationsExecuted() => EnumerateSpatialLong(static t => t.RelocationsExecuted);
+
+    private IEnumerable<Measurement<long>> EnumerateRepairsExecuted() => EnumerateSpatialLong(static t => t.RepairsExecuted);
+
+    private IEnumerable<Measurement<long>> EnumerateFinalizeLockAcquisitions() => EnumerateSpatialLong(static t => t.FinalizeLockAcquisitions);
 
     private IEnumerable<Measurement<long>> EnumerateTightnessSamples() => EnumerateSpatialLong(static t => t.TightnessSampleCount);
 

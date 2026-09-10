@@ -77,13 +77,44 @@ internal sealed unsafe partial class ArchetypeClusterState
     // Note the asymmetry this leaves: AddToActiveList runs under the latch, RemoveFromActiveList never does — removal happens only from serial contexts
     // (Finalize, or a single-threaded Transaction.Destroy). No reader takes it either, so the latch orders writers against writers, not readers.
     // Padded to 64 bytes so the latch field owns a full cache line and uncontended acquisitions don't ping-pong with adjacent hot fields like
-    // ActiveClusterCount / MigrationHint / LastTickMigrationCount. See rule MD-03 in rules/spatial.md.
+    // ActiveClusterCount / MigrationHint / LastTickMigrationCount. See rule MD-03 in rules/spatial.md. The acquisition counter shares that line on purpose:
+    // it is written only by the thread already holding the latch, so it rides a line that thread owns exclusively and costs nothing (#912).
+    //
+    // EVERY acquisition goes through PaddedFinalizeLock.Enter/Exit rather than through .Lock directly, which is what makes FinalizeLockAcquisitions a
+    // complete count. A site added straight onto .Lock would be invisible to it, and an incomplete count is worse than none — it reads as evidence.
     // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
     [StructLayout(LayoutKind.Explicit, Size = 64)]
     private struct PaddedFinalizeLock
     {
         [FieldOffset(0)] public AccessControlSmall Lock;
+
+        /// <summary>Exclusive acquisitions of this latch since the last per-tick reset. See <see cref="Enter"/>.</summary>
+        [FieldOffset(8)] public long Acquisitions;
+
+        /// <summary>
+        /// Acquire the latch and count it. Every acquisition in the archetype goes through here rather than through <c>Lock</c> directly.
+        /// </summary>
+        /// <remarks>
+        /// <para><b>A count and not a duration, deliberately (#912).</b> This latch is the only archetype-wide serialisation point a Migrate or AabbRefresh
+        /// worker can reach, so "does it get taken more often as the worker count rises" is the question that separates a phase which is genuinely contended
+        /// from one whose per-worker cost merely looks worse because there are more workers. Timing it would need two <see cref="Stopwatch.GetTimestamp"/>
+        /// calls per acquisition — ~50 ns against a critical section that is frequently shorter than that — and would change the thing being measured. The
+        /// increment below costs nothing: it runs INSIDE the exclusive region, on a cache line this thread already owns exclusively, so it needs no
+        /// <c>Interlocked</c> and adds no coherence traffic that the acquisition has not already paid for.</para>
+        /// <para>Reset from Prep with the rest of the per-tick block, and ordered against these writes by the fence phase barrier — the same plain-store
+        /// discipline the migration counters beside it use, and for the same reason.</para>
+        /// </remarks>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal void Enter(ref WaitContext ctx)
+        {
+            Lock.EnterExclusiveAccess(ref ctx);
+            Acquisitions++;
+        }
+
+        /// <inheritdoc cref="Enter"/>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal void Exit() => Lock.ExitExclusiveAccess();
     }
 
     private PaddedFinalizeLock _finalizeLock;
@@ -238,14 +269,14 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal void RegisterPrepSliceCrossings(int sliceStart, List<MigrationRequest> requests)
     {
         ref var nullCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx);
+        _finalizeLock.Enter(ref nullCtx);
         try
         {
             PrepSliceCrossings.Add((sliceStart, requests));
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 
@@ -439,7 +470,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         ref var nullCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx);
+        _finalizeLock.Enter(ref nullCtx);
         try
         {
             // First pass: find the max chunkId referenced so we grow FenceDirtyBits once if needed.
@@ -489,11 +520,18 @@ internal sealed unsafe partial class ArchetypeClusterState
                 {
                     bits[d.DstChunkId] |= d.DstSetMask;
                 }
+
+                // #912. The source cluster's shrink axes and process bit, deferred out of the migrant loop into this drain. Plain writes: the latch above
+                // excludes every other worker from both arrays, so the Interlocked pair the per-migrant path needs is not merely cheaper here — it is gone.
+                if (DeferMigrateClusterFlags && d.SrcChunkId >= 0)
+                {
+                    FlagClusterForShrinkRefreshLocked(d.SrcChunkId);
+                }
             }
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 
@@ -511,7 +549,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         ref var nullCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx);
+        _finalizeLock.Enter(ref nullCtx);
         try
         {
             // Re-check under lock — another worker may have already grown past us.
@@ -533,7 +571,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 
@@ -777,7 +815,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         {
             // PreSizeMigrationBuffers should have covered this — fall back to a synchronized grow.
             ref var nullCtx = ref Unsafe.NullRef<WaitContext>();
-            _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx);
+            _finalizeLock.Enter(ref nullCtx);
             try
             {
                 if (_drainedClusterIds == null)
@@ -797,7 +835,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             }
             finally
             {
-                _finalizeLock.Lock.ExitExclusiveAccess();
+                _finalizeLock.Exit();
             }
         }
         _drainedClusterIds[idx] = clusterChunkId;
@@ -965,6 +1003,88 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// happens once, in <see cref="LastTickMigrationTotalMs"/>.</para>
     /// </remarks>
     public long LastTickMigrationApplyTicks;
+
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // #912 — what LastTickMigrationExecuteMs is a sum OVER.
+    //
+    // That field is a sum of per-SLICE spans divided, by every consumer, by a per-ENTITY count. The slice count is not a constant: FenceWorkPlan sizes the
+    // Migrate phase's slices from `2 x WorkerCount x FenceChunkOversubscription`, so raising W raises the number of spans summed into the numerator while the
+    // denominator is fixed by the workload. Every per-slice fixed cost inside the bracket — three CreateChunkAccessor rentals and the span construction — is
+    // therefore charged to every entity, once per slice.
+    //
+    // Without the three counters below, "CPU per entity rose 3.4x from W = 2 to W = 8" cannot be told apart from "the same work was cut into four times as
+    // many pieces". §5.8.1 recorded that ratio as an anomaly and left it unowned for three steps precisely because nothing published the denominator.
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>Telemetry counter: <c>ExecuteMigrations</c> slices that ran in the most recently completed tick — the number of spans summed into
+    /// <see cref="LastTickMigrationExecuteMs"/>. One on the serial fence; <c>FenceWorkPlan</c>'s slicing decides it on the parallel one.</summary>
+    /// <remarks>
+    /// <b>Read it as the denominator's denominator.</b> <c>MigrationExecuteMs / MigrationCount</c> is a per-entity figure only while this is 1; above that
+    /// it also carries <c>slices x per-slice fixed cost / entities</c>, which grows with the worker count on a workload of fixed size.
+    /// </remarks>
+    public int LastTickMigrationSliceCount;
+
+    /// <summary>Telemetry counter: zone-map batches a tick's Migrate slices opened — one per indexed field per slice (#926).</summary>
+    /// <remarks>
+    /// <para><b>The counter that proves the latch is no longer taken per migrant.</b> Before #926 the Migrate loop called <c>ZoneMapArray.Widen</c> once per
+    /// migrant per indexed field, and each call took the archetype-wide grow latch shared — two atomics on one cache line, from every worker, tens of
+    /// thousands of times a tick. It now opens one batch per field per slice instead, and the identity that pins it is
+    /// <c>ZoneMapBatchOpens == MigrationSliceCount x indexed fields</c>: a value INDEPENDENT of the migration count, which is exactly the property that
+    /// fails the moment a per-migrant acquire survives anywhere on the path.</para>
+    /// <para>Always counted, never <c>[Conditional("DEBUG")]</c>: the measurement it backs runs in Release, and a Debug-only counter used as proof is green
+    /// in Debug and absent where it matters.</para>
+    /// </remarks>
+    public int LastTickZoneMapBatchOpens;
+
+    /// <summary><see cref="Stopwatch"/> ticks the tick's Migrate slices spent BEFORE their first migrant — the span construction and the three chunk-accessor
+    /// rentals — summed across slices.</summary>
+    /// <remarks>
+    /// Inside <see cref="LastTickMigrationExecuteMs"/>, not beside it: the bracket has always covered the rentals, and #911 records why moving either end of
+    /// it silently breaks every timeline comparison against an older trace. This measures that prologue rather than relocating it, so the two can be
+    /// subtracted without changing what the span means. Two <see cref="Stopwatch.GetTimestamp"/> calls per SLICE — tens of them per tick, not thousands.
+    /// </remarks>
+    public long LastTickMigrationPrologueTicks;
+
+    /// <summary><see cref="Stopwatch"/> ticks the tick's Migrate slices spent AFTER their last migrant — the three accessor disposals and the span's own
+    /// publish — summed across slices.</summary>
+    /// <inheritdoc cref="LastTickMigrationPrologueTicks"/>
+    public long LastTickMigrationEpilogueTicks;
+
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // Executed migrations, split by kind. #911 gave the three-way split to the PROFILER SPAN, behind TelemetryConfig.ProfilerActive; these are the same three
+    // numbers on the always-on telemetry surface.
+    //
+    // The distinction matters because the profiler is the wrong instrument for this question. A Migrate slice mixes all three kinds by construction — the
+    // queue is sorted by destination cell key, not by kind — so attributing a cost to relocation rather than to crossing needs the split; and turning the
+    // profiler on to get it changes the measurement, because the ring emits from inside the bracket being measured. §5.8's per-kind findings were all reached
+    // with throwaway counters on a branch for exactly this reason.
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>Telemetry counter: cell-crossing migrations executed in the most recently completed tick.</summary>
+    /// <remarks>This and its two siblings sum EXACTLY to <see cref="LastTickMigrationCount"/>, which is what makes the split checkable rather than
+    /// trusted — the same property #911 gave the trace record.</remarks>
+    public int LastTickCrossingsExecuted;
+
+    /// <summary>Telemetry counter: intra-cell relocations executed in the most recently completed tick.</summary>
+    /// <inheritdoc cref="LastTickCrossingsExecuted"/>
+    public int LastTickRelocationsExecuted;
+
+    /// <summary>Telemetry counter: repair moves executed in the most recently completed tick.</summary>
+    /// <inheritdoc cref="LastTickCrossingsExecuted"/>
+    public int LastTickRepairsExecuted;
+
+    /// <summary>Telemetry counter: exclusive acquisitions of the archetype-wide finalize latch in the most recently completed tick.</summary>
+    /// <remarks>
+    /// <para><b>The one archetype-wide serialisation point a fence worker can reach.</b> Twenty-one call sites take it — the three bulk enqueues, the
+    /// per-archetype array growths, the new-cluster slow paths and the cell-tree segment creation — and a phase whose per-worker cost rises with W is
+    /// contended here or nowhere. A count rather than a held-time: see <c>PaddedFinalizeLock.Enter</c>.</para>
+    /// <para>The reading that answers #912: run the same workload at two worker counts. This staying flat while per-entity CPU rises eliminates the latch;
+    /// this rising with W names it.</para>
+    /// </remarks>
+    public long FinalizeLockAcquisitions => _finalizeLock.Acquisitions;
+
+    /// <summary>Zero <see cref="FinalizeLockAcquisitions"/> for the tick about to run. Called from Prep with the rest of the per-tick block.</summary>
+    internal void ResetFinalizeLockAcquisitions() => _finalizeLock.Acquisitions = 0L;
 
     /// <summary>
     /// <see cref="Stopwatch"/> ticks the last Finalize spent emitting this archetype's fence WAL records — the block loop and the collection-content walk —
@@ -1590,14 +1710,14 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         ref var growCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref growCtx);
+        _finalizeLock.Enter(ref growCtx);
         try
         {
             GrowClusterVisibilityCapacityLocked(requiredLength);
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 
@@ -1794,7 +1914,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         ref var nullCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx);
+        _finalizeLock.Enter(ref nullCtx);
         try
         {
             PendingPromotedApplies ??= new List<PromotedAabbApply>(buffer.Count);
@@ -1802,7 +1922,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 
@@ -2654,7 +2774,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // The tree segment's creation takes _finalizeLock, so it is ensured before the latch; the fresh cluster's index add under it then promotes
         // the cell if the count says so, and never re-enters.
         var treeSegmentReady = CellTreePromoteThreshold == int.MaxValue || TryEnsureCellTreeSegment();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx);
+        _finalizeLock.Enter(ref nullCtx);
         try
         {
             newChunkId = AllocateNewCluster(changeSet);
@@ -2675,7 +2795,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
 
         Interlocked.Increment(ref cell.ClusterCount);
@@ -2937,7 +3057,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // The tree segment's creation takes _finalizeLock, so it is ensured before the latch; the fresh cluster's index add under it then promotes
         // the cell if the count says so, and never re-enters.
         var treeSegmentReady = CellTreePromoteThreshold == int.MaxValue || TryEnsureCellTreeSegment();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx);
+        _finalizeLock.Enter(ref nullCtx);
         try
         {
             newChunkId = AllocateNewCluster(changeSet);
@@ -2959,7 +3079,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
 
         Interlocked.Increment(ref grid.GetCell(cellKey).ClusterCount);
@@ -3128,7 +3248,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // The tree segment's creation takes _finalizeLock, so it is ensured before the latch; the fresh cluster's index add under it then promotes
         // the cell if the count says so, and never re-enters.
         var treeSegmentReady = CellTreePromoteThreshold == int.MaxValue || TryEnsureCellTreeSegment();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx0);
+        _finalizeLock.Enter(ref nullCtx0);
         try
         {
             newChunkId = AllocateNewCluster(changeSet);
@@ -3153,7 +3273,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
 
         // Cell counters use Interlocked unconditionally (other archetypes sharing this grid may bump them too).
@@ -3237,7 +3357,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // The tree segment's creation takes _finalizeLock, so it is ensured before the latch; the fresh cluster's index add under it then promotes
         // the cell if the count says so, and never re-enters.
         var treeSegmentReady = CellTreePromoteThreshold == int.MaxValue || TryEnsureCellTreeSegment();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx1);
+        _finalizeLock.Enter(ref nullCtx1);
         try
         {
             newChunkId = AllocateNewCluster(null);
@@ -3261,7 +3381,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
 
         Interlocked.Increment(ref cell.ClusterCount);
@@ -3658,14 +3778,14 @@ internal sealed unsafe partial class ArchetypeClusterState
         ThrowIfGrowingInsideMigrateSlice(nameof(ClusterCellMap), requiredLength, ClusterCellMap?.Length ?? 0);
 
         ref var growCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref growCtx);
+        _finalizeLock.Enter(ref growCtx);
         try
         {
             EnsureClusterCellMapCapacityLocked(requiredLength);
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 
@@ -3739,14 +3859,14 @@ internal sealed unsafe partial class ArchetypeClusterState
         ThrowIfGrowingInsideMigrateSlice(nameof(ClusterAabbs), requiredLength, ClusterAabbs?.Length ?? 0);
 
         ref var growCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref growCtx);
+        _finalizeLock.Enter(ref growCtx);
         try
         {
             EnsureClusterAabbsCapacityLocked(requiredLength);
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 
@@ -3801,14 +3921,14 @@ internal sealed unsafe partial class ArchetypeClusterState
         ThrowIfGrowingInsideMigrateSlice(nameof(ClusterSpatialIndexSlot), requiredLength, ClusterSpatialIndexSlot?.Length ?? 0);
 
         ref var growCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref growCtx);
+        _finalizeLock.Enter(ref growCtx);
         try
         {
             EnsureClusterSpatialIndexSlotCapacityLocked(requiredLength);
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 
@@ -3868,14 +3988,14 @@ internal sealed unsafe partial class ArchetypeClusterState
             slotsShort ? ClusterMigrationPendingSlots?.Length ?? 0 : ClusterProcessBitmap?.Length ?? 0);
 
         ref var growCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref growCtx);
+        _finalizeLock.Enter(ref growCtx);
         try
         {
             EnsureClusterWriteBookkeepingCapacityLocked(requiredLength);
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 
@@ -3954,14 +4074,14 @@ internal sealed unsafe partial class ArchetypeClusterState
         ThrowIfGrowingInsideMigrateSlice(nameof(PerCellIndex), requiredLength, PerCellIndex?.Length ?? 0);
 
         ref var growCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref growCtx);
+        _finalizeLock.Enter(ref growCtx);
         try
         {
             EnsurePerCellIndexCapacityLocked(requiredLength);
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 
@@ -5623,14 +5743,14 @@ internal sealed unsafe partial class ArchetypeClusterState
         // ClusterPlacementTests.ConcurrentSpawnsAndBoundGrowthKeepClustersInTheirCell), and a write into an array a concurrent grower had just
         // replaced. One uncontended latch per fresh cluster is the whole cost; a fresh cluster is rare against the claims that fill it.
         ref var addCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref addCtx);
+        _finalizeLock.Enter(ref addCtx);
         try
         {
             AddClusterToPerCellIndexLocked(clusterChunkId, cellKey, in aabb, treeSegmentReady);
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 
@@ -6147,14 +6267,14 @@ internal sealed unsafe partial class ArchetypeClusterState
         if (tree != null)
         {
             ref var treeCtx = ref Unsafe.NullRef<WaitContext>();
-            _finalizeLock.Lock.EnterExclusiveAccess(ref treeCtx);
+            _finalizeLock.Enter(ref treeCtx);
             try
             {
                 tree.UpdateAt(clusterChunkId, in aabb, out _);
             }
             finally
             {
-                _finalizeLock.Lock.ExitExclusiveAccess();
+                _finalizeLock.Exit();
             }
 
             return;
@@ -6252,7 +6372,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         ref var createCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref createCtx);
+        _finalizeLock.Enter(ref createCtx);
         try
         {
             if (CellTreeSegment != null)
@@ -6269,7 +6389,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 
@@ -6465,7 +6585,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         ref var nullCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx);
+        _finalizeLock.Enter(ref nullCtx);
         try
         {
             var n = outlierBuffer.Count;
@@ -6497,7 +6617,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
         outlierBuffer.Clear();
     }
@@ -6542,14 +6662,14 @@ internal sealed unsafe partial class ArchetypeClusterState
     private int AllocateNewClusterLatched(ChangeSet changeSet)
     {
         ref var nullCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx);
+        _finalizeLock.Enter(ref nullCtx);
         try
         {
             return AllocateNewCluster(changeSet);
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 

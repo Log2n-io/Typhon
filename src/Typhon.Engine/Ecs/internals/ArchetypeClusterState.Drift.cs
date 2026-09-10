@@ -362,6 +362,64 @@ internal sealed unsafe partial class ArchetypeClusterState
     private const byte AllShrinkAxes = 0x3F;
 
     /// <summary>
+    /// A/B switch for #912: <c>true</c> defers a migration's source-cluster flag writes to the per-chunk drain instead of issuing them per migrant.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>What it moves, and why the per-migrant version is expensive out of all proportion to what it does.</b>
+    /// <see cref="FlagClusterForShrinkRefresh"/> issues two atomic read-modify-writes indexed by the SOURCE cluster's chunk id: a CAS into
+    /// <c>ClusterShrinkPendingAxes</c>, a <c>byte[]</c> that packs 64 clusters into a cache line, and an <c>Interlocked.Or</c> into
+    /// <c>ClusterProcessBitmap</c>, a bit-per-cluster <c>long[]</c> that packs 512. At the few-hundred-cluster scale a real workload runs at, the whole
+    /// bitmap is ONE cache line — so every worker's every migration takes the same line exclusive, and the cost is coherence traffic rather than work.
+    /// Rule MD-03 forbids exactly this shape ("bit-packed latch arrays ... adjacent latches share cache lines"), and its stated failure mode is the one
+    /// measured: parallel speedup collapses while the operation count is unchanged.</para>
+    /// <para><b>Deferring is free because the buffer already exists.</b> The Migrate slice already appends a <c>DirtyBitDelta</c> per migration carrying
+    /// the source chunk id, and <see cref="ArchetypeClusterState.ApplyDirtyBitDeltas"/> already drains it once per chunk under the finalize latch — where
+    /// the writes become PLAIN, because the latch excludes every other worker. The atomics are not made cheaper; they are removed.</para>
+    /// <para><b>Only the parallel path.</b> The serial fence passes no buffer and keeps the direct call, where there is no contention to avoid and the
+    /// deferral would only add a hop.</para>
+    /// <para>Static and mutable so a harness can flip it inside ONE binary and interleave the arms — a batch-versus-batch comparison across separate runs
+    /// drifts with whatever else the box is doing, which is how a 2.3x phantom was once measured.</para>
+    /// </remarks>
+    internal static bool DeferMigrateClusterFlags = true;
+
+    /// <summary>
+    /// #926. When true (the default) a Migrate slice holds ONE zone-map batch per indexed field for its whole run; when false it takes the grow latch per
+    /// migrant per field, which is the pre-#926 behaviour.
+    /// </summary>
+    /// <remarks>
+    /// <para>The per-write form takes <c>ZoneMapArray._growLatch</c> shared and releases it, so it is two locked read-modify-writes on ONE archetype-wide
+    /// word for every migrated entity. A shared acquire still takes the line exclusive, so eight workers draining ten thousand migrations bounce that word
+    /// between cores tens of thousands of times under no logical contention at all — the shape MD-03 forbids, and the same one #886 already measured and
+    /// fixed on the Prep path ("that word bounced between cores ~4 000 times a tick and the zone-map step's CPU tripled").</para>
+    /// <para>Static and mutable for the same reason as <see cref="DeferMigrateClusterFlags"/>: a harness flips it inside ONE binary and interleaves the
+    /// arms, because a batch-versus-batch comparison across separate runs drifts with whatever else the box is doing.</para>
+    /// </remarks>
+    internal static bool BatchMigrateZoneMaps = true;
+
+    /// <summary>
+    /// The deferred half of <see cref="FlagClusterForShrinkRefresh"/>: set one source cluster's shrink axes and process bit with PLAIN writes.
+    /// </summary>
+    /// <remarks>
+    /// Callable only with <c>_finalizeLock</c> held, which is what makes the plain writes correct — the latch excludes every other worker from these two
+    /// arrays, so the atomics the per-migrant path needs are not merely cheaper here, they are unnecessary.
+    /// </remarks>
+    internal void FlagClusterForShrinkRefreshLocked(int chunkId)
+    {
+        var shrink = ClusterShrinkPendingAxes;
+        if (shrink != null && (uint)chunkId < (uint)shrink.Length)
+        {
+            shrink[chunkId] |= AllShrinkAxes;
+        }
+
+        var bitmap = ClusterProcessBitmap;
+        var wordIdx = chunkId >> 6;
+        if (bitmap != null && (uint)wordIdx < (uint)bitmap.Length)
+        {
+            bitmap[wordIdx] |= 1L << (chunkId & 63);
+        }
+    }
+
+    /// <summary>
     /// Mark a cluster as needing a full AABB recompute at this tick's refresh — every axis, and visible to the pass.
     /// </summary>
     /// <remarks>

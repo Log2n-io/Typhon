@@ -546,9 +546,53 @@ internal sealed unsafe class ZoneMapArray
     /// a batch holds it — the unbatched writers keep their scan OUTSIDE the latch for the opposite situation. The returned <see cref="Store"/> is dead the
     /// moment <see cref="EndBatch"/> runs: a write through it after that is the lost widen the latch exists to prevent.
     /// </remarks>
-    internal Store BeginBatch(int maxIndexExclusive) => AcquireForWrite(Math.Max(0, maxIndexExclusive - 1));
+    internal Store BeginBatch(int maxIndexExclusive)
+    {
+        // Counted AFTER the acquire, never before: AcquireForWrite may grow, and it grows while holding no shared access at all (it exits shared, grows, then
+        // re-enters). Incrementing first would make this form refuse its own legitimate growth.
+        var store = AcquireForWrite(Math.Max(0, maxIndexExclusive - 1));
+        ThreadBatchDepth++;
+        return store;
+    }
 
-    internal void EndBatch() => ReleaseAfterWrite();
+    internal void EndBatch()
+    {
+        ThreadBatchDepth--;
+        ReleaseAfterWrite();
+    }
+
+    /// <summary>
+    /// Opens a batch over whatever the map currently covers, <b>without growing</b>. Pair with <see cref="EndBatch"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>The Migrate phase's form of <see cref="BeginBatch"/>, and the difference is the growth. <see cref="BeginBatch"/> takes the index the caller
+    /// intends to reach and grows to fit it, which is right for Prep — its head runs before any slice and growing there is free. A Migrate slice cannot: it
+    /// runs concurrently with siblings that hold their own batches, and replacing the store under them is the MD-02 abandonment <see cref="Grow"/> now
+    /// refuses outright.</para>
+    /// <para>So the coverage guarantee is moved off this call and onto two other things: <c>PreSizeArchetypeFence</c> sizes every zone map to a bound the
+    /// phase provably cannot exceed, and <see cref="WidenInto"/> returns a verdict rather than writing when an index falls past the batch anyway. This
+    /// method therefore cannot fail and cannot grow, which is exactly what a slice needs from it.</para>
+    /// </remarks>
+    internal Store BeginBatchAtCapacity()
+    {
+        _growLatch.Lock.EnterSharedAccess(ref WaitContext.Null);
+        ThreadBatchDepth++;
+        return _store;
+    }
+
+    /// <summary>How many zone-map batches this thread currently holds open, across all maps.</summary>
+    /// <remarks>
+    /// <para><b>This, and not <c>InMigrateSlice</c>, is the condition under which growth is unsafe</b>, and the distinction is load-bearing in both
+    /// directions. A thread that pins a <see cref="Store"/> and then grows waits — via <see cref="Grow"/>'s exclusive acquire — for a shared count IT holds,
+    /// and the shared counter is not per-thread, so that is a self-deadlock rather than a slow path. Conversely a Migrate slice that holds NO batch may grow
+    /// perfectly safely: it exits shared first and the exclusive acquire then excludes every sibling's shared window, which is exactly how the pre-batching
+    /// engine worked and how the batching-off A/B arm still has to work.</para>
+    /// <para>A depth COUNT rather than a flag, because the Migrate path opens one batch per indexed field and every caller — including the Prep path and
+    /// direct callers in tests — has to be able to pair its own open with its own close. A flag set by one opener and cleared by whoever happens to close
+    /// last leaks the moment two batches overlap, and a leaked "growth forbidden" state is silent: the next legitimate grow on that thread throws instead.</para>
+    /// </remarks>
+    [ThreadStatic]
+    internal static int ThreadBatchDepth;
 
     /// <summary>The batch form of <see cref="Recompute(int, byte*, byte*, ArchetypeClusterInfo, int, int)"/>: same result, written into a store the caller
     /// already holds the latch for.</summary>
@@ -585,6 +629,49 @@ internal sealed unsafe class ZoneMapArray
         store.Mins[clusterChunkId] = min;
         store.Maxs[clusterChunkId] = max;
         store.Valid[clusterChunkId] = true;
+    }
+
+    /// <summary>
+    /// The batch form of <see cref="Widen"/>: widens one cluster's bounds by one field value, into a store the caller already holds the latch for. Returns
+    /// <see langword="false"/>, having written nothing, when <paramref name="clusterChunkId"/> is past that store's capacity.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The verdict is the reason this returns a bool where the other batch forms return void.</b> A batch pins ONE <see cref="Store"/> generation
+    /// for its whole run, so an index past that generation's capacity is not a slow path to be grown through — it is either an out-of-range write or a write
+    /// into a generation a concurrent <see cref="Grow"/> has abandoned, and the second is exactly the lost widen the latch exists to prevent. Growing here
+    /// is not available either: the caller holds shared access, and taking exclusive while holding shared deadlocks against its own wait for the shared
+    /// count to drain.</para>
+    /// <para>The two callers answer the verdict differently, which is why it is returned rather than thrown here. The serial fence falls back to the
+    /// per-write <see cref="Widen"/>, which grows; a parallel Migrate slice treats it as the fence failure it is, because its pre-size was supposed to make
+    /// it unreachable.</para>
+    /// </remarks>
+    internal bool WidenInto(Store store, int clusterChunkId, byte* fieldPtr)
+    {
+        if ((uint)clusterChunkId >= (uint)store.Capacity)
+        {
+            return false;
+        }
+
+        long val = ReadFieldAsOrderedLong(fieldPtr);
+        if (!store.Valid[clusterChunkId])
+        {
+            store.Mins[clusterChunkId] = val;
+            store.Maxs[clusterChunkId] = val;
+            store.Valid[clusterChunkId] = true;
+            return true;
+        }
+
+        if (val < store.Mins[clusterChunkId])
+        {
+            store.Mins[clusterChunkId] = val;
+        }
+
+        if (val > store.Maxs[clusterChunkId])
+        {
+            store.Maxs[clusterChunkId] = val;
+        }
+
+        return true;
     }
 
     /// <summary>The batch form of <see cref="WidenMasked"/>.</summary>
@@ -651,6 +738,25 @@ internal sealed unsafe class ZoneMapArray
     private void Grow(int index)
     {
         Debug.Assert(!ArchetypeClusterState.InPrepSlice, "a Prep slice must never grow a zone map — the head pre-sizes every one of them (#886)");
+
+        // #926. A refusal rather than an assert, and NOT compiled out.
+        //
+        // Gated on THIS THREAD HOLDING A BATCH, not on being in a Migrate slice, because those are different conditions and only the first is unsafe. A
+        // thread that pins a Store and then grows waits below for a shared count it holds itself — the counter is not per-thread — which is a self-deadlock
+        // against an unbounded wait, not a slow path. A Migrate slice holding no batch (the batching-off arm) grows perfectly safely: it exits shared first,
+        // and the exclusive acquire then excludes every sibling's shared window, which is how this worked before batching existed.
+        //
+        // Growing while any batch is open would also hand its holder an abandoned generation, and their widens would land in an array nothing reads again —
+        // a silent false negative in a structure whose entire contract is that false negatives are impossible. PreSizeArchetypeFence sizes every zone map to
+        // a bound the phase cannot exceed, so reaching this means that bound is wrong, and a loud fence failure (#890) is the right answer.
+        if (ThreadBatchDepth > 0)
+        {
+            ThrowHelper.ThrowInvalidOp(
+                $"A zone map needs capacity for cluster {index} but holds {Volatile.Read(ref _store).Capacity}, and the caller is holding an open zone-map "
+                + "batch. Growing now would block forever on a shared count this thread holds itself, and would abandon the store its sibling workers are "
+                + "widening into, silently dropping their bounds (MD-02, MD-03). The fence pre-sizes every zone map in PreSizeArchetypeFence to a bound the "
+                + "Migrate phase cannot exceed, so reaching this means that bound is wrong.");
+        }
         _growLatch.Lock.EnterExclusiveAccess(ref WaitContext.Null);
         try
         {

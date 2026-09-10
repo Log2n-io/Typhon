@@ -56,6 +56,23 @@ public partial class DatabaseEngine
     public double LastFenceSpanMs => _lastFenceSpanTicks * 1000d / Stopwatch.Frequency;
 
     /// <summary>
+    /// How long the previous tick's partitioning fence blocked the host, in milliseconds — <b>the whole fence, measured on the tick thread</b>, from the
+    /// moment the fence window opens to the moment it closes. This is the interruption a host feels: no user system runs inside it at any worker count.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Read this, not <see cref="LastFenceSpanMs"/>, to answer "how long was user code stopped".</b> The span starts at Prep's <c>Prepare</c>, so it
+    /// omits the serial prep that runs first on the tick thread — the fence-context reset, the dormancy drain and <c>ProcessTableFence</c> over every
+    /// component table. That prep is single-threaded by construction, so no worker count shrinks it, and a sweep across worker counts that reads only the
+    /// span reports a speed-up the host never receives. <c>LastFenceStallMs - LastFenceSpanMs</c> is that serial remainder, and it is Amdahl's fraction for
+    /// the fence.</para>
+    /// <para><b>Engine-wide, for the same reason as the span:</b> one fence serves every archetype.</para>
+    /// <para><b>Zero on a host that drives <see cref="WriteTickFence(long, ChangeSet)"/> itself</b>, which is the same zero-means-zero discipline as the
+    /// span — such a host is holding its own stopwatch around the call and does not need this one.</para>
+    /// </remarks>
+    [PublicAPI]
+    public double LastFenceStallMs => _lastFenceStallTicks * 1000d / Stopwatch.Frequency;
+
+    /// <summary>
     /// The spatial grid's occupancy and memory, or an all-zero snapshot when no grid is configured (#872 step 8, AC-8.5 and AC-8.7).
     /// </summary>
     /// <remarks>
@@ -143,6 +160,14 @@ public partial class DatabaseEngine
             // limit of what a reader can check, and six more would make a mis-ordered pair of ints a silent telemetry bug rather than a compile error.
             SlotsScanned = clusterState.LastTickSlotsScanned,
             MigrationTotalMs = clusterState.LastTickMigrationTotalMs,
+            MigrationSliceCount = clusterState.LastTickMigrationSliceCount,
+            ZoneMapBatchOpens = clusterState.LastTickZoneMapBatchOpens,
+            MigrationPrologueMs = TicksToMs(clusterState.LastTickMigrationPrologueTicks),
+            MigrationEpilogueMs = TicksToMs(clusterState.LastTickMigrationEpilogueTicks),
+            CrossingsExecuted = clusterState.LastTickCrossingsExecuted,
+            RelocationsExecuted = clusterState.LastTickRelocationsExecuted,
+            RepairsExecuted = clusterState.LastTickRepairsExecuted,
+            FinalizeLockAcquisitions = clusterState.FinalizeLockAcquisitions,
             RelocationsThrottled = clusterState.LastTickRelocationsThrottled,
             RelocationsSuperseded = clusterState.LastTickRelocationsSuperseded,
             PrepSnapshotMs = TicksToMs(clusterState.PrepSnapshotTicks),
@@ -214,6 +239,14 @@ public partial class DatabaseEngine
         var repairUnits = 0;
         var repairRefused = 0;
         var migrationTotalMs = 0d;
+        var migrationSlices = 0;
+        var zoneMapBatchOpens = 0;
+        var prologueTicks = 0L;
+        var epilogueTicks = 0L;
+        var crossingsExecuted = 0;
+        var relocationsExecuted = 0;
+        var repairsExecuted = 0;
+        var finalizeLockAcquisitions = 0L;
         var relocationsThrottled = 0;
         var relocationsSuperseded = 0;
         var driftersUnplaced = 0;
@@ -262,6 +295,16 @@ public partial class DatabaseEngine
             repairUnits += clusterState.LastTickRepairUnitCount;
             repairRefused += clusterState.LastTickRepairUnitsRefused;
             migrationTotalMs += clusterState.LastTickMigrationTotalMs;
+            // Summed like every other extensive quantity here. The slice count is per archetype, so the engine-wide figure is how many Migrate spans the
+            // tick summed in total — which is the right denominator for the engine-wide MigrationExecuteMs beside it.
+            migrationSlices += clusterState.LastTickMigrationSliceCount;
+            zoneMapBatchOpens += clusterState.LastTickZoneMapBatchOpens;
+            prologueTicks += clusterState.LastTickMigrationPrologueTicks;
+            epilogueTicks += clusterState.LastTickMigrationEpilogueTicks;
+            crossingsExecuted += clusterState.LastTickCrossingsExecuted;
+            relocationsExecuted += clusterState.LastTickRelocationsExecuted;
+            repairsExecuted += clusterState.LastTickRepairsExecuted;
+            finalizeLockAcquisitions += clusterState.FinalizeLockAcquisitions;
             relocationsThrottled += clusterState.LastTickRelocationsThrottled;
             relocationsSuperseded += clusterState.LastTickRelocationsSuperseded;
             driftersUnplaced += clusterState.LastTickDriftersUnplaced;
@@ -314,6 +357,14 @@ public partial class DatabaseEngine
         {
             SlotsScanned = slotsScanned,
             MigrationTotalMs = migrationTotalMs,
+            MigrationSliceCount = migrationSlices,
+            ZoneMapBatchOpens = zoneMapBatchOpens,
+            MigrationPrologueMs = TicksToMs(prologueTicks),
+            MigrationEpilogueMs = TicksToMs(epilogueTicks),
+            CrossingsExecuted = crossingsExecuted,
+            RelocationsExecuted = relocationsExecuted,
+            RepairsExecuted = repairsExecuted,
+            FinalizeLockAcquisitions = finalizeLockAcquisitions,
             RelocationsThrottled = relocationsThrottled,
             RelocationsSuperseded = relocationsSuperseded,
             DriftersUnplaced = driftersUnplaced,

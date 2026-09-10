@@ -761,23 +761,55 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private SpatialGridConfig? _pendingGridConfig;
 
     /// <summary>
-    /// CPU-to-span ratio of the previous fence's migration phases (Migrate + IndexMassUpdate + EntityMapUpdate), ≥ 1. The per-entity migration cost the
-    /// repair budget is spent against is measured in summed CPU and the budget is a frame budget, so the sample is divided by this (step 14, D2).
-    /// <c>1</c> until the parallel runtime publishes a value, which is also the truth for the serial fence.
+    /// CPU-to-span ratio of the previous fence's migration phases (Migrate + IndexMassUpdate + EntityMapUpdate). <c>1</c> until the parallel runtime
+    /// publishes a value, which is also the truth for the serial fence. See <see cref="LastFenceMigrationParallelism"/>.
     /// </summary>
     private double _lastFenceMigrationParallelism = 1d;
 
-    /// <summary>Published by <c>TyphonRuntime</c> after each parallel fence. See <see cref="_lastFenceMigrationParallelism"/>.</summary>
-    internal void SetLastFenceMigrationParallelism(double parallelism) => _lastFenceMigrationParallelism = parallelism >= 1d ? parallelism : 1d;
+    /// <summary>Published by <c>TyphonRuntime</c> after each parallel fence, unclamped. See <see cref="LastFenceMigrationParallelism"/>.</summary>
+    /// <remarks>
+    /// <b>Stored as measured, including below 1.</b> The clamp that used to live here made the one reading worth having unrepresentable — a phase whose span
+    /// exceeded its own summed CPU is dispatch overhead swallowing the work, and it reported as a flat <c>1.00x</c> indistinguishable from a healthy serial
+    /// tick. The consumer that needs a floor applies its own: <c>ArchetypeClusterState.ObserveMigrationCost</c> divides the repair budget's cost sample by
+    /// <c>max(parallelism, 1)</c>, so guarding here as well only cost the telemetry surface its information.
+    /// </remarks>
+    internal void SetLastFenceMigrationParallelism(double parallelism) => _lastFenceMigrationParallelism = parallelism;
 
-    /// <summary>See <see cref="_lastFenceMigrationParallelism"/>. Exposed for tests and telemetry.</summary>
-    internal double LastFenceMigrationParallelism => _lastFenceMigrationParallelism;
+    /// <summary>
+    /// How many workers' worth of CPU one unit of span bought in the previous tick's migration phases — summed CPU over elapsed span across Migrate,
+    /// IndexMassUpdate and EntityMapUpdate.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>This is the number that makes the summed-CPU members readable, and it is why they must never be presented without it.</b>
+    /// <see cref="SpatialMigrationTelemetry.MigrationTotalMs"/> and its siblings are CPU-milliseconds summed across workers: W workers each busy for one
+    /// millisecond report W. Raising the worker count therefore RAISES them on unchanged work, and read alone that looks like contention. It is contention
+    /// only where the summed CPU rises FASTER than this ratio does; where the two rise together, the work was merely spread and the wall cost did not move.
+    /// Dividing a summed-CPU figure by this yields the elapsed cost — the thing a frame budget is actually spent in.</para>
+    /// <para><b>Divide only a numerator this ratio's denominator covers.</b> It spans three phases, so the matching numerator is
+    /// <see cref="SpatialMigrationTelemetry.MigrationTotalMs"/> — the whole migration. <see cref="SpatialMigrationTelemetry.MigrationExecuteMs"/> brackets
+    /// the migrant loop alone, roughly half a migration since the index and EntityMap applies moved into their own phases, and dividing it by this ratio
+    /// produces the elapsed time of nothing at all.</para>
+    /// <para><b>A LEVEL, and the one member that is deliberately STALE rather than reset.</b> A tick whose migration phases did no work leaves the previous
+    /// value standing rather than reporting zero, because a zero here would read as "infinitely parallel" wherever it is used as a divisor. That is the one
+    /// documented exception to the surface's zero-means-zero discipline, and it means this member alone can describe a tick other than the last one.</para>
+    /// <para><b>Below 1 is a real reading, not a fault.</b> It means the phases' elapsed span exceeded the CPU they spent — dispatch and barrier overhead
+    /// larger than the work, which is what a parallel fence looks like on a population too small to be worth splitting.</para>
+    /// <para><c>1</c> exactly on a host driving <see cref="WriteTickFence(long, ChangeSet)"/> itself: one thread, so summed CPU IS elapsed.</para>
+    /// </remarks>
+    [PublicAPI]
+    public double LastFenceMigrationParallelism => _lastFenceMigrationParallelism;
 
     /// <summary>Stopwatch ticks of the previous fence's span, pushed by <c>TyphonRuntime</c>. Zero until it publishes one.</summary>
     private long _lastFenceSpanTicks;
 
     /// <summary>Published by <c>TyphonRuntime</c> after each parallel fence, from <c>LastFenceWallTicks</c>. See <see cref="LastFenceSpanMs"/>.</summary>
     internal void SetLastFenceSpanTicks(long spanTicks) => _lastFenceSpanTicks = spanTicks > 0 ? spanTicks : 0;
+
+    /// <summary>Stopwatch ticks of the previous fence's whole host stall, pushed by <c>TyphonRuntime</c>. Zero until it publishes one.</summary>
+    private long _lastFenceStallTicks;
+
+    /// <summary>Published by <c>TyphonRuntime</c> around the whole fence call, serial prep included. See <see cref="LastFenceStallMs"/>.</summary>
+    internal void SetLastFenceStallTicks(long stallTicks) => _lastFenceStallTicks = stallTicks > 0 ? stallTicks : 0;
 
     /// <summary>
     /// Sets the spatial grid configuration for this engine. Must be called before <see cref="InitializeArchetypes"/>. Only required when at least one

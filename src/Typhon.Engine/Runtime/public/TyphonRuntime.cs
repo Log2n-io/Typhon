@@ -2088,9 +2088,22 @@ public sealed partial class TyphonRuntime : IDisposable
         {
             if (_parallelFenceEnabled)
             {
-                // RunParallelFence brackets its own serial-prep portion with the WriteTickFence phase marker and dispatches the Fence DAG *outside* it — the
-                // four Fence systems carry their own Engine-Post telemetry, so wrapping the dispatch would double-count them into `writeTickFenceUs`.
-                RunParallelFence(scheduler);
+                // Timed from OUT HERE rather than inside RunParallelFence, and that placement is the point: the stall a host feels is the whole call, which
+                // includes the serial prep before the DAG is dispatched and the epoch fence window's close after it. `LastFenceWallTicks` — what
+                // `LastFenceSpanMs` publishes — starts at Prep's Prepare, so it cannot see the serial prep, and a worker-count sweep reading only the span
+                // reports a speed-up on a fraction of the interruption. `finally` so a fence that throws still reports how long it blocked the host before
+                // it did: the tick is failed either way (#890), but a stall is a stall.
+                var stallStart = Stopwatch.GetTimestamp();
+                try
+                {
+                    // RunParallelFence brackets its own serial-prep portion with the WriteTickFence phase marker and dispatches the Fence DAG *outside* it —
+                    // the four Fence systems carry their own Engine-Post telemetry, so wrapping the dispatch would double-count them into `writeTickFenceUs`.
+                    RunParallelFence(scheduler);
+                }
+                finally
+                {
+                    Engine.SetLastFenceStallTicks(Stopwatch.GetTimestamp() - stallStart);
+                }
             }
             else
             {

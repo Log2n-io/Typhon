@@ -532,6 +532,137 @@ public partial class DatabaseEngine
         }
     }
 
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // #926 — the Migrate phase's zone-map batches.
+    //
+    // ZoneMapArray.Widen takes the archetype-wide grow latch shared and releases it, so the pre-#926 Migrate loop issued two locked read-modify-writes on ONE
+    // word per migrant per indexed field. A shared acquire still takes the line exclusive; eight workers draining ten thousand migrations bounced that word
+    // between cores tens of thousands of times under no logical contention. #886 measured and fixed exactly this on the Prep path and left the batched API
+    // behind; this is the Migrate path finally using it. Rule MD-03.
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// The stores this thread's open zone-map batches write into, indexed by the running field id the migrant loop computes.
+    /// </summary>
+    /// <remarks>
+    /// <b>Thread-static rather than pooled or passed:</b> a Migrate slice runs wholly on one worker thread, so there is nothing to share and nothing to
+    /// synchronise; the array is grown once per thread and reused for every slice that thread ever runs, which is what keeps the batching allocation-free on
+    /// the hot path. It is only ever read between <see cref="OpenZoneMapBatches"/> and <see cref="CloseZoneMapBatches"/> in the same call.
+    /// </remarks>
+    [ThreadStatic]
+    private static ZoneMapArray.Store[] _zoneBatchStores;
+
+    /// <summary>Opens one zone-map batch per indexed field and returns how many field slots <see cref="_zoneBatchStores"/> now describes.</summary>
+    /// <remarks>
+    /// Returns 0 — every write falling back to the per-write form — when the archetype has no indexed fields or when the A/B toggle is off. A field without
+    /// a zone map still consumes its slot, because the migrant loop's field id counts fields and not zone maps; that slot holds null and the call site reads
+    /// it as "no batch".
+    /// </remarks>
+    private static int OpenZoneMapBatches(ArchetypeClusterState clusterState)
+    {
+        var ixSlots = clusterState.IndexSlots;
+        if (ixSlots == null || !ArchetypeClusterState.BatchMigrateZoneMaps)
+        {
+            return 0;
+        }
+
+        // THE SERIAL FENCE DOES NOT BATCH, and this is a correctness gate rather than a tuning one.
+        //
+        // Batching exists to stop W workers taking one archetype-wide latch per migrant. A serial fence has one writer and no contention to amortise, so it
+        // gains nothing — and it LOSES: holding a batch means holding the grow latch shared, and a destination past the pinned store then has nowhere to go.
+        // The parallel path answers that with a fence failure, which it can afford because its pre-size makes it unreachable. The serial path cannot throw
+        // over something the pre-size concedes can happen (PreSizeArchetypeFence keeps a growth safety net for exactly this on the sibling arrays), so it
+        // must be able to fall back to the growing `Widen` — and that fallback deadlocks against the batch's own shared count if a batch is open, because
+        // the shared counter is not per-thread. Not opening one at all is the fix; AC-4's "serial unchanged" is then literally true.
+        if (!ArchetypeClusterState.InMigrateSlice)
+        {
+            return 0;
+        }
+
+
+        var fieldCount = 0;
+        for (var s = 0; s < ixSlots.Length; s++)
+        {
+            fieldCount += ixSlots[s].Fields.Length;
+        }
+
+        if (fieldCount == 0)
+        {
+            return 0;
+        }
+
+        var stores = _zoneBatchStores;
+        if (stores == null || stores.Length < fieldCount)
+        {
+            stores = new ZoneMapArray.Store[Math.Max(fieldCount, 8)];
+            _zoneBatchStores = stores;
+        }
+
+        // Unwinds its own partial work. A latch leaked here is worse than a leaked ring slot or accessor: it is not reclaimed at any later point, so every
+        // future grower on that map waits on it forever — a recoverable exception turned into a permanent hang.
+        var fieldId = 0;
+        try
+        {
+            for (var s = 0; s < ixSlots.Length; s++)
+            {
+                ref var ixSlot = ref ixSlots[s];
+                for (var f = 0; f < ixSlot.Fields.Length; f++, fieldId++)
+                {
+                    // BeginBatchAtCapacity, not BeginBatch: the growing form would replace the store under sibling workers that already hold batches on the
+                    // same field, which is the MD-02 abandonment ZoneMapArray.Grow refuses. Coverage comes from PreSizeArchetypeFence instead.
+                    stores[fieldId] = ixSlot.Fields[f].ZoneMap?.BeginBatchAtCapacity();
+                }
+            }
+        }
+        catch
+        {
+            CloseZoneMapBatches(clusterState, fieldId);
+            throw;
+        }
+
+        return fieldCount;
+    }
+
+    /// <summary>Releases every batch <see cref="OpenZoneMapBatches"/> opened, and drops the store references so a stale one cannot be written through.</summary>
+    private static void CloseZoneMapBatches(ArchetypeClusterState clusterState, int fieldCount)
+    {
+        if (fieldCount == 0)
+        {
+            return;
+        }
+
+        var ixSlots = clusterState.IndexSlots;
+        var stores = _zoneBatchStores;
+        var fieldId = 0;
+        for (var s = 0; s < ixSlots.Length; s++)
+        {
+            ref var ixSlot = ref ixSlots[s];
+            for (var f = 0; f < ixSlot.Fields.Length; f++, fieldId++)
+            {
+                if (stores[fieldId] == null)
+                {
+                    continue;
+                }
+
+                // Cleared as well as released. The Store is dead the moment the latch is dropped — that is BeginBatch's stated contract — and leaving the
+                // reference in a thread-static array is how a later slice on this thread would write through an abandoned generation and lose a widen
+                // silently. The clear costs one store per field per slice and removes the whole class of mistake.
+                stores[fieldId] = null;
+                ixSlot.Fields[f].ZoneMap.EndBatch();
+            }
+        }
+    }
+
+    /// <summary>The batch a Migrate slice opened does not cover a destination the slice reached — the pre-size bound was wrong. See #890 for the verdict.</summary>
+    private static void ThrowZoneMapBatchTooSmall(ushort archetypeId, int dstChunkId)
+    {
+        ThrowHelper.ThrowInvalidOp(
+            $"Archetype {archetypeId}'s Migrate slice reached destination cluster {dstChunkId}, which falls outside the zone-map batch it opened at slice "
+            + "start. Widening it would need the grow latch exclusively, which would abandon the store every sibling worker is writing into and silently "
+            + "drop their bounds (MD-02, MD-03). PreSizeArchetypeFence sizes every zone map to PrimarySegmentCapacity + 2 * PendingMigrationCount + 64, a "
+            + "bound the Migrate phase cannot exceed, so reaching this means that bound is wrong.");
+    }
+
     /// <summary>
     /// Execute all pending cell-crossing migrations queued by <see cref="DetectClusterMigrations"/>.
     /// Called at the cluster tick fence, AFTER detection, BEFORE the cluster tick fence WAL publish loop.
@@ -605,11 +736,15 @@ public partial class DatabaseEngine
         // that at the price of re-indenting 400 lines.
         var migrationScope = TyphonEvent.BeginClusterMigration(archetypeId, count, count * componentCount);
 
-        // #911 O1. `ProfilerActive` is `static readonly`, so when the profiler is off the JIT folds this to `false` and deletes every counting block below —
-        // the same zero-cost-when-off guarantee the Begin* factories give. Counted over the whole slice rather than over the requests that survive the
-        // stale-source guard, because the span's own MigrationCount is the slice length: the three add up to it exactly, which makes the split checkable
-        // in a trace instead of merely plausible.
-        var kindCountsActive = TelemetryConfig.ProfilerActive;
+        // #911 O1 counted these only when the profiler was on; #912 made them unconditional, and the reason is that the profiler is the wrong instrument for
+        // the question they answer. A Migrate slice mixes all three kinds by construction — the queue is sorted by destination cell key, not by kind — so
+        // attributing a cost to relocation rather than to crossing REQUIRES the split, and turning the profiler on to get it perturbs the very bracket being
+        // measured, because the ring emits from inside it. Every per-kind finding in the design's §5.8 was reached with throwaway counters on a branch for
+        // exactly that reason, and the point of a permanent surface is that the next campaign does not have to.
+        //
+        // The cost is one predictable branch per migration on a switch over a field the loop has already loaded. Counted over the whole slice rather than over
+        // the requests that survive the stale-source guard, because the span's own MigrationCount is the slice length: the three add up to it exactly, which
+        // makes the split checkable rather than merely plausible, in a trace AND on the telemetry snapshot.
         var crossingCount = 0;
         var relocationCount = 0;
         var repairCount = 0;
@@ -639,6 +774,20 @@ public partial class DatabaseEngine
 
         var emAccessor = engineState.EntityMap.Segment.CreateChunkAccessor(changeSet);
 
+        // #912. Closes the PROLOGUE — the span construction and the three rentals above, any of which can block on page acquisition. Inside the bracket, where
+        // it has always been; measured rather than moved, so subtracting it does not change what LastTickMigrationExecuteMs means. One extra timestamp per
+        // SLICE, of which a tick has tens.
+        // Declared out here, ASSIGNED inside the try below. The assignment is what the `finally` releases against, so opening the batches anywhere the
+        // `finally` does not yet cover would leak the grow latch on a throw in between — and a leaked latch is not reclaimed later by anything, so it turns
+        // a recoverable exception into a permanent hang for every future grower on that map.
+        var zoneBatchFieldCount = 0;
+        ZoneMapArray.Store[] zoneBatchStores = null;
+
+        var afterPrologue = 0L;
+        // Accumulated in the finally, published with the rest AFTER it. Publishing from inside would leave a slice that threw contributing an epilogue to a
+        // tick whose slice count and execute span it never contributed to — a telemetry surface reporting a part larger than the whole it belongs to.
+        var epilogueTicks = 0L;
+
         // Narrowphase scratch for the #230 Phase 1 per-cell index migration hook. Hoisted out of the
         // migration loop to avoid CA2014 stack-pressure accumulation — a batch of thousands of migrations
         // would otherwise allocate 32 bytes per iteration that can't be released until ExecuteMigrations
@@ -648,6 +797,12 @@ public partial class DatabaseEngine
 
         try
         {
+            // #926. One zone-map batch per indexed field, held for the whole slice. Inside the prologue bracket because that is what it is — per-SLICE fixed
+            // cost — and the telemetry that divides the execute span by entities has to be able to see it.
+            zoneBatchFieldCount = OpenZoneMapBatches(clusterState);
+            zoneBatchStores = _zoneBatchStores;
+            afterPrologue = Stopwatch.GetTimestamp();
+
             var pending = clusterState.PendingMigrations;
             for (var i = sliceStart; i < sliceEndExclusive; i++)
             {
@@ -656,20 +811,17 @@ public partial class DatabaseEngine
                 var srcSlot = req.SourceSlotIndex;
                 var destCellKey = req.DestCellKey;
 
-                if (kindCountsActive)
+                switch (req.Kind)
                 {
-                    switch (req.Kind)
-                    {
-                        case MigrationKind.Relocation:
-                            relocationCount++;
-                            break;
-                        case MigrationKind.Repair:
-                            repairCount++;
-                            break;
-                        default:
-                            crossingCount++;
-                            break;
-                    }
+                    case MigrationKind.Relocation:
+                        relocationCount++;
+                        break;
+                    case MigrationKind.Repair:
+                        repairCount++;
+                        break;
+                    default:
+                        crossingCount++;
+                        break;
                 }
 
                 // 0. Stale-source guard: verify the source slot's occupancy bit is still set.
@@ -866,7 +1018,27 @@ public partial class DatabaseEngine
                             }
 
                             // The zone map is not an index and has no ordering dependency on the tree, so it stays inline.
-                            field.ZoneMap?.Widen(dstChunkId, fieldPtr);
+                            //
+                            // #926. Written through the slice's open batch instead of through `Widen`, which would take the archetype-wide grow latch
+                            // shared and release it again for THIS ONE entity. The batch holds it once for the whole slice.
+                            var zoneMap = field.ZoneMap;
+                            if (zoneMap != null)
+                            {
+                                var zoneStore = fieldId < zoneBatchFieldCount ? zoneBatchStores[fieldId] : null;
+                                if (zoneStore == null)
+                                {
+                                    // No batch — the serial fence, or the A/B arm with batching off. The per-write form is correct on both; it is merely
+                                    // contended on a path that has no contention to suffer from.
+                                    zoneMap.Widen(dstChunkId, fieldPtr);
+                                }
+                                else if (!zoneMap.WidenInto(zoneStore, dstChunkId, fieldPtr))
+                                {
+                                    // A pinned store implies a Migrate slice (OpenZoneMapBatches refuses to batch anywhere else), so the destination falling
+                                    // past it means PreSizeArchetypeFence's bound was wrong. Growing out of it here would abandon the store every sibling
+                                    // worker is writing into, so this is a loud fence failure (#890) — the same answer the sibling per-cluster arrays give.
+                                    ThrowZoneMapBatchTooSmall(archetypeId, dstChunkId);
+                                }
+                            }
                         }
                     }
                 }
@@ -1008,7 +1180,14 @@ public partial class DatabaseEngine
                 // step 10, AC-10.9). Step 8 above notes the src AABB "stays conservative (not shrunk) — Phase 1 trade-off"; that trade is what an
                 // intra-cell relocation cannot accept, since tightening the source IS the point of the move. Cheap and unconditional: a cell-crossing
                 // migration wants it just as much, and the flag costs one CAS against a cluster the refresh is likely to visit anyway.
-                clusterState.FlagClusterForShrinkRefresh(srcChunkId);
+                // #912: on the parallel path this is DEFERRED to the per-chunk drain, which already carries srcChunkId and already runs under the finalize
+                // latch — see ArchetypeClusterState.DeferMigrateClusterFlags. The two atomics it saves are issued once per migration into arrays so densely
+                // packed that the whole process bitmap is a single cache line at realistic cluster counts, so every worker took the same line exclusive on
+                // every migrant. The serial path has no buffer and no contention, and keeps the direct call.
+                if (dirtyBuffer == null || !ArchetypeClusterState.DeferMigrateClusterFlags)
+                {
+                    clusterState.FlagClusterForShrinkRefresh(srcChunkId);
+                }
 
                 // 11. Record dirty-bit deltas to a worker-local buffer instead of writing FenceDirtyBits directly. False-sharing on adjacent chunkIds
                 //     (8 longs per 64B cache line) made concurrent Interlocked.Or/And ping-pong cache lines across workers — drained at chunk end under
@@ -1042,9 +1221,16 @@ public partial class DatabaseEngine
         }
         finally
         {
+            // #912. Opens the EPILOGUE — three accessor disposals and the span's own publish, which is what Dispose does.
+            var epilogueStart = Stopwatch.GetTimestamp();
+
             migrationScope.CrossingCount = crossingCount;
             migrationScope.RelocationCount = relocationCount;
             migrationScope.RepairCount = repairCount;
+
+            // Before the accessors, because this is a LATCH and they are page rentals: every other worker's batch on the same field waits behind nothing,
+            // but a grower waits behind all of them, so the shortest hold is the correct one.
+            CloseZoneMapBatches(clusterState, zoneBatchFieldCount);
 
             emAccessor.Dispose();
             if (hasTransientClusterAccessor)
@@ -1061,6 +1247,7 @@ public partial class DatabaseEngine
             // every timeline comparison against a pre-#911 trace — applies to the END in exactly the same way. Releasing three accessors is real work this
             // method does, and the span has always covered it.
             migrationScope.Dispose();
+            epilogueTicks = Stopwatch.GetTimestamp() - epilogueStart;
 
             // saveChanges and ReleaseDirtyMarks are deliberately NOT called here. ExecuteMigrations operates on the UoW's shared ChangeSet (passed
             // by the caller through WriteClusterTickFence → WriteTickFence). The UoW owns the commit lifecycle: in WAL mode SaveChanges is never called
@@ -1076,6 +1263,19 @@ public partial class DatabaseEngine
         var durationMs = (endTimestamp - startTimestamp) * 1000.0 / Stopwatch.Frequency;
         // Accumulate per-slice counters atomically — multiple workers may slice the same archetype's PendingMigrations.
         Interlocked.Add(ref clusterState.LastTickMigrationCount, count);
+        // #912. The number of spans summed into LastTickMigrationExecuteMs below, and the per-kind split of what they moved. Without the first, that sum
+        // divided by an entity count cannot be told apart from the same work cut into more pieces — which is what raising the worker count does to it.
+        Interlocked.Increment(ref clusterState.LastTickMigrationSliceCount);
+        // #926's proof, and it is a count rather than a timing on purpose: one batch per indexed field per slice makes this INDEPENDENT of the migration
+        // count, so a per-migrant acquire surviving anywhere on the path shows up as an identity failure rather than as a number someone has to interpret.
+        Interlocked.Add(ref clusterState.LastTickZoneMapBatchOpens, zoneBatchFieldCount);
+        // `afterPrologue` stays 0 when the batch open threw before it was stamped; publishing `0 - startTimestamp` would contribute a large NEGATIVE prologue
+        // to the tick, which is the "a part larger than the whole" failure SO-01 names, with the sign reversed.
+        Interlocked.Add(ref clusterState.LastTickMigrationPrologueTicks, afterPrologue > startTimestamp ? afterPrologue - startTimestamp : 0L);
+        Interlocked.Add(ref clusterState.LastTickMigrationEpilogueTicks, epilogueTicks);
+        Interlocked.Add(ref clusterState.LastTickCrossingsExecuted, crossingCount);
+        Interlocked.Add(ref clusterState.LastTickRelocationsExecuted, relocationCount);
+        Interlocked.Add(ref clusterState.LastTickRepairsExecuted, repairCount);
         // Cumulative twin of the above (#872 step 1). One Interlocked per SLICE, not per migration — the per-tick counter is reset every fence, so an
         // asynchronous scrape of it samples one arbitrary tick and cannot yield a rate.
         //

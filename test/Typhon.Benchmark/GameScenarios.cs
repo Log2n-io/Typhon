@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Numerics;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Typhon.Engine;
@@ -95,6 +96,49 @@ internal static class GameScenarios
         public double QueryUs;
         public double QueryHits;
         public double MigrationsPerTick;
+
+        /// <summary>Median per-tick WHOLE migration cost in ms — the migrant loop plus the bulk index descent and the bulk EntityMap patch.</summary>
+        /// <remarks>
+        /// <b>Not <c>MigrationExecuteMs</c>, which brackets the loop alone.</b> Since #872 step 6 the loop only STAGES the index update and the EntityMap
+        /// patch; both are applied in later phases, and the secondary index alone was measured at ~48 % of a migration's cost. A per-entity figure derived
+        /// from the loop bracket under-reports by roughly half, which is the mistake this column exists not to make.
+        /// </remarks>
+        public double MigrationMedianMs;
+
+        /// <summary>Whole migration cost per migrated entity, in nanoseconds — <see cref="MigrationMedianMs"/> over the migrations that tick.</summary>
+        /// <remarks>
+        /// Summed across workers on a parallel fence, so it is CPU and not latency; these scenarios drive the SERIAL fence, where the two coincide. Zero on
+        /// a scenario whose steady state migrates nothing, which is a real answer and not a missing measurement.
+        /// </remarks>
+        public double MigrationNsPerEntity;
+
+        /// <summary>Worker count the parallel arm ran at; 0 for a serial row.</summary>
+        public int Workers;
+
+        /// <summary>Median fence STALL in ms — the whole fence call on the tick thread, from <c>DatabaseEngine.LastFenceStallMs</c>.</summary>
+        /// <remarks>
+        /// <para><b>This is the interruption, and it is what the parallel sweep reports.</b> No user system runs inside it at any worker count. It is
+        /// deliberately NOT <c>LastFenceSpanMs</c>: that one starts at Prep's <c>Prepare</c> and so omits the serial prep the fence runs first on the tick
+        /// thread — the context reset, the dormancy drain and <c>ProcessTableFence</c> over every component table. That prep is single-threaded by
+        /// construction, so a sweep across worker counts reading only the span claims a speed-up on a fraction of the stall. <see cref="FenceDagSpanMs"/>
+        /// carries the span beside it precisely so the fraction is visible rather than assumed away.</para>
+        /// <para><b>A span, not a sum.</b> <see cref="MigrationMedianMs"/> beside it is CPU summed across workers, so W workers each busy for 1 ms report W
+        /// there and 1 here. Confusing them is how an 8 ms budget once bought one repair unit.</para>
+        /// </remarks>
+        public double FenceSpanMs;
+
+        /// <summary>Median parallel-DAG span in ms — the six phases plus the scheduler's gaps, from <c>DatabaseEngine.LastFenceSpanMs</c>.</summary>
+        /// <remarks>
+        /// Reported only so <see cref="FenceSpanMs"/> minus this one names the serial prep: the part of the stall no worker count shrinks, which is the
+        /// fence's Amdahl fraction. On its own it flatters the parallel arm.
+        /// </remarks>
+        public double FenceDagSpanMs;
+
+        /// <summary>CPU over span for the three migration phases — how many workers' worth of CPU one unit of span bought.</summary>
+        public double MigrationParallelism;
+
+        /// <summary>True when the median fence span exceeded the pacing interval, so ticks overlapped and the row describes an overrunning engine.</summary>
+        public bool Overran;
         public int Clusters;
         public int LiveCells;
         public double EntitiesPerCell;
@@ -126,13 +170,221 @@ internal static class GameScenarios
 
     private const int QueriesPerRound = 64;
 
+    /// <summary>
+    /// Independent sweeps of each (scenario, population, arm) point, reported as the per-field MEDIAN.
+    /// </summary>
+    /// <remarks>
+    /// <b>A single-shot figure from this harness cannot be compared against another run.</b> Three sweeps of the same point were measured spreading up to
+    /// 106 % on the fence and 54 % on the query on this desktop, so a report meant to be read against an earlier one has to take the median or it reports
+    /// the machine's mood. Anything under about 1.3x between two runs is noise. Settable with <c>--repeats</c>; 1 turns it off for a quick look.
+    /// </remarks>
+    private static int Repeats = 3;
+
+    /// <summary>
+    /// Runs one point <see cref="Repeats"/> times and returns a row whose every numeric field is the median of the sweeps.
+    /// </summary>
+    /// <remarks>
+    /// <b>Per FIELD, not per sweep.</b> Picking the sweep whose fence was median and reporting all of its other columns would let one noisy query time ride
+    /// in on an unrelated field's ranking. The layout columns (clusters, cells, tightness) are deterministic for a fixed seed, so their median is just their
+    /// value; taking it anyway costs nothing and means no column is special-cased.
+    /// </remarks>
+    private static Row MedianOfRepeats(Scenario s, int entities, int workerCount = 0)
+    {
+        var sweeps = new List<Row>(Repeats);
+        for (var i = 0; i < Math.Max(1, Repeats); i++)
+        {
+            var r = workerCount == 0 ? RunScenario(s, entities) : RunParallelScenario(s, entities, workerCount);
+            if (r.Failure.Length > 0)
+            {
+                return r;   // a failure is not a number to take the median of
+            }
+
+            sweeps.Add(r);
+        }
+
+        var first = sweeps[0];
+        var median = new Row
+        {
+            Scenario = first.Scenario,
+            Entities = first.Entities,
+            PromotedCells = first.PromotedCells,
+            Workers = first.Workers,
+            // NOT first.Overran. That is sweep 0's verdict on sweep 0's own stall, while the stall printed beside it is the MEDIAN across sweeps — so the
+            // flag and the number it annotates came from different runs, and a median row could print an unflagged figure over budget or a flagged one under
+            // it. Recomputed from the median below, after the medians exist.
+            Overran = false,
+            FenceSpanMs = Med(sweeps, static r => r.FenceSpanMs),
+            FenceDagSpanMs = Med(sweeps, static r => r.FenceDagSpanMs),
+            MigrationParallelism = Med(sweeps, static r => r.MigrationParallelism),
+            LiveCells = first.LiveCells,
+            Clusters = first.Clusters,
+            SpawnMs = Med(sweeps, static r => r.SpawnMs),
+            FirstFenceMs = Med(sweeps, static r => r.FirstFenceMs),
+            FenceMedianMs = Med(sweeps, static r => r.FenceMedianMs),
+            FenceP99Ms = Med(sweeps, static r => r.FenceP99Ms),
+            QueryUs = Med(sweeps, static r => r.QueryUs),
+            QueryHits = Med(sweeps, static r => r.QueryHits),
+            MigrationsPerTick = Med(sweeps, static r => r.MigrationsPerTick),
+            MigrationMedianMs = Med(sweeps, static r => r.MigrationMedianMs),
+            MigrationNsPerEntity = Med(sweeps, static r => r.MigrationNsPerEntity),
+            EntitiesPerCell = Med(sweeps, static r => r.EntitiesPerCell),
+            ClustersPerCell = Med(sweeps, static r => r.ClustersPerCell),
+            TightnessPct = Med(sweeps, static r => r.TightnessPct),
+            SlotOccupancyPct = Med(sweeps, static r => r.SlotOccupancyPct),
+        };
+
+        // Recomputed here, from the median, so the flag describes the row it is printed on. The parallel arm is the only one paced, so the serial arm keeps
+        // the `false` the initialiser gave it.
+        median.Overran = median.Workers != 0 && median.FenceSpanMs > 1000d / ParallelPacingHz;
+        return median;
+    }
+
+    /// <summary>Worker counts the parallel arm sweeps. 16 is this desktop's physical core count.</summary>
+    private static readonly int[] WorkerCounts = [1, 2, 4, 8, 16];
+
+    /// <summary>
+    /// Pacing rate for the parallel arm, in Hz — deliberately NOT the scenario's own tick rate.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The scenario's rate would make this arm take hours and measure the wrong thing.</b> EVE ticks at 1 Hz, so thirty measured ticks is thirty
+    /// SECONDS per point, times five worker counts times three populations. And pacing does not affect what is being measured: the fence span is however long
+    /// the fence takes, and the tick rate only decides how long the engine idles between fences.</para>
+    /// <para><b>What the rate must not do is let ticks overlap.</b> A rate the fence cannot keep up with makes the figures describe an overrunning engine
+    /// rather than the work. 50 Hz gives a 20 ms budget, comfortably above the heaviest serial fence measured here (12.5 ms), and
+    /// <see cref="Row.Overran"/> flags any row where the median span exceeded it anyway rather than letting it pass silently.</para>
+    /// </remarks>
+    private const int ParallelPacingHz = 50;
+
+    /// <summary>
+    /// The same world under the PARALLEL fence, at one worker count.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Why this arm has to exist.</b> Every other row in this report comes from <c>WriteTickFence</c>, which is the SERIAL fence — the report has
+    /// always said so and called itself an upper bound, carrying a "1.2–4x faster in parallel" figure inherited from a different campaign on a different
+    /// workload. An inherited range that wide cannot be checked against anything. This measures it.</para>
+    /// <para><b>Motion runs inside a callback system</b>, not on the harness thread, because the parallel fence is dispatched by the runtime at the end of
+    /// the tick the callback belongs to. Driving the world from outside would race the fence it is supposed to feed.</para>
+    /// </remarks>
+    private static Row RunParallelScenario(Scenario s, int entities, int workerCount)
+    {
+        var row = RunScenarioCore(s, entities, workerCount);
+        row.Workers = workerCount;
+        return row;
+    }
+
+    /// <summary>
+    /// Drives <see cref="WarmTicks"/> + <see cref="MeasuredTicks"/> ticks of the PARALLEL fence and samples each measured one.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The motion runs inside the tick, not around it.</b> A callback system on the public track moves the world, and the runtime dispatches the
+    /// fence DAG at the end of that same tick. Stepping the world from the harness thread instead would race the fence it is meant to feed, and the numbers
+    /// would describe the race.</para>
+    /// <para><b>The span comes from the engine, not from a stopwatch out here.</b> <c>DatabaseEngine.LastFenceSpanMs</c> is published by the runtime after
+    /// each parallel fence — Prep's start to the last phase that dispatched, plus the scheduler's gaps. There is nothing to time from outside: the fence
+    /// runs on the tick thread's own schedule, and a stopwatch around the callback would measure the callback.</para>
+    /// <para><b>Sampled one tick late, deliberately.</b> The callback runs BEFORE the fence its tick will dispatch, so what it reads is the previous tick's
+    /// completed fence — which is the same ordering the serial arm gets for free by reading after <c>WriteTickFence</c> returns.</para>
+    /// </remarks>
+    private static void RunParallelTicks(DatabaseEngine dbe, Scenario s, int workerCount, Row row, Action stepWorld, Action<double> sample)
+    {
+        var ticks = 0;
+        var parallelisms = new List<double>(MeasuredTicks);
+        var dagSpans = new List<double>(MeasuredTicks);
+        Exception unhandled = null;
+
+        using (var runtime = TyphonRuntime.Create(dbe, schedule =>
+               {
+                   schedule.PublicTrack.DeclareDag("Game").CallbackSystem("Move", _ =>
+                   {
+                       var n = Interlocked.Increment(ref ticks);
+
+                       // Stop doing work the moment the sweep has what it needs. SpinUntil below releases as soon as the counter passes the target, and the
+                       // runtime then shuts down while a tick may still be in flight — a callback that opens a transaction into a tearing-down engine throws
+                       // ObjectDisposedException on the scheduler's own wait handle, which is a harness bug that reads exactly like an engine defect.
+                       if (n > WarmTicks + MeasuredTicks + 1)
+                       {
+                           return;
+                       }
+
+                       if (n > WarmTicks + 1)
+                       {
+                           lock (parallelisms)
+                           {
+                               // The STALL, not the span: the sweep's question is how long user code was stopped, and the span starts only after the
+                               // fence's serial prep has already run on this thread. The span is collected beside it so the report can show the
+                               // difference, which is the part of the stall no worker count removes.
+                               sample(dbe.LastFenceStallMs);
+                               dagSpans.Add(dbe.LastFenceSpanMs);
+                               parallelisms.Add(dbe.LastFenceMigrationParallelism);
+                           }
+                       }
+
+                       stepWorld();
+                   });
+               }, new RuntimeOptions
+               {
+                   WorkerCount = workerCount,
+                   BaseTickRate = ParallelPacingHz,
+                   EnableParallelFence = true,
+               }))
+        {
+            // ObjectDisposedException is excluded rather than reported: it is what a tick still in flight sees when Shutdown races it, and recording it
+            // would fail the row for the harness's own teardown. Every other exception is a real finding and fails the row loudly.
+            runtime.Scheduler.UnhandledExceptionCallback = (_, _, ex) =>
+            {
+                if (ex is not ObjectDisposedException)
+                {
+                    Interlocked.CompareExchange(ref unhandled, ex, null);
+                }
+            };
+            runtime.Start();
+            SpinWait.SpinUntil(() => Volatile.Read(ref ticks) >= WarmTicks + MeasuredTicks + 1, TimeSpan.FromSeconds(120));
+            runtime.Shutdown();
+        }
+
+        if (unhandled != null)
+        {
+            row.Failure = $"parallel fence threw: {unhandled.GetType().Name}: {unhandled.Message}";
+            return;
+        }
+
+        lock (parallelisms)
+        {
+            var sum = 0d;
+            foreach (var p in parallelisms)
+            {
+                sum += p;
+            }
+
+            row.MigrationParallelism = parallelisms.Count == 0 ? 0 : sum / parallelisms.Count;
+
+            dagSpans.Sort();
+            row.FenceDagSpanMs = dagSpans.Count == 0 ? 0 : dagSpans[dagSpans.Count / 2];
+        }
+    }
+
+    private static double Med(List<Row> rows, Func<Row, double> select)
+    {
+        var vals = new double[rows.Count];
+        for (var i = 0; i < rows.Count; i++)
+        {
+            vals[i] = select(rows[i]);
+        }
+
+        Array.Sort(vals);
+        return vals[vals.Length / 2];
+    }
+
     internal static void Run(string[] args)
     {
         FiniteZ = Array.IndexOf(args, "--finite-z") >= 0;   // PROBE
         var only = ArgString(args, "--scenario", "");
         var scale = ArgFloat(args, "--scale", 1f);
+        Repeats = Math.Max(1, (int)ArgFloat(args, "--repeats", Repeats));
         var scenarios = Build();
         var rows = new List<Row>();
+        var parallelRows = new List<Row>();
+        var skipParallel = Array.IndexOf(args, "--no-parallel") >= 0;
 
         Console.WriteLine("── Game scenarios ──────────────────────────────────────────────────────");
         var sw = Stopwatch.StartNew();
@@ -152,13 +404,31 @@ internal static class GameScenarios
                 foreach (var (armName, threshold) in Arms)
                 {
                     PromoteThreshold = threshold;
-                    var row = RunScenario(s, scaled);
+                    var row = MedianOfRepeats(s, scaled, 0);
                     row.Arm = armName;
                     rows.Add(row);
                     Console.WriteLine(row.Failure.Length > 0
                         ? $"    n={scaled,-8} {armName,-6} FAILED: {row.Failure}"
                         : $"    n={scaled,-8} {armName,-6} fence {row.FenceMedianMs,7:F2} ms  query {row.QueryUs,8:F1} us ({row.QueryHits,6:F0} hits)  "
                           + $"clusters {row.Clusters,6} ({row.ClustersPerCell,6:F0}/cell)  tight {row.TightnessPct,5:F1}%  promoted {row.PromotedCells,5}");
+                }
+
+                if (!skipParallel)
+                {
+                    // Scan arm only. The promotion arm answers "what does the tree do here", which is orthogonal to how the fence spreads across workers,
+                    // and running both would double a sweep that is already the longest thing in this harness.
+                    PromoteThreshold = Arms[0].Threshold;
+                    foreach (var w in WorkerCounts)
+                    {
+                        var prow = MedianOfRepeats(s, scaled, w);
+                        prow.Arm = $"W={w}";
+                        parallelRows.Add(prow);
+                        Console.WriteLine(prow.Failure.Length > 0
+                            ? $"    n={scaled,-8} W={w,-4} FAILED: {prow.Failure}"
+                            : $"    n={scaled,-8} W={w,-4} stall {prow.FenceSpanMs,7:F2} ms (dag {prow.FenceDagSpanMs,6:F2})"
+                              + $"{(prow.Overran ? " !OVERRAN" : "        ")}  "
+                              + $"migCPU {prow.MigrationMedianMs,7:F3} ms  {prow.MigrationNsPerEntity,7:F0} ns/ent  par {prow.MigrationParallelism,5:F2}x");
+                    }
                 }
 
                 var scan = rows.FindLast(r => r.Entities == scaled && r.Arm == "scan" && r.Scenario == s.Name);
@@ -176,7 +446,7 @@ internal static class GameScenarios
         sw.Stop();
         Console.WriteLine();
         Console.WriteLine($"  {rows.Count} runs in {sw.Elapsed.TotalSeconds:F1}s");
-        var path = WriteReport(scenarios, rows, sw.Elapsed);
+        var path = WriteReport(scenarios, rows, parallelRows, sw.Elapsed);
         Console.WriteLine($"  report -> {path}");
     }
 
@@ -287,7 +557,12 @@ internal static class GameScenarios
         },
     ];
 
-    private static Row RunScenario(Scenario s, int entities)
+    private static Row RunScenario(Scenario s, int entities) => RunScenarioCore(s, entities, 0);
+
+    /// <param name="workerCount">0 drives the SERIAL fence through <c>WriteTickFence</c>; anything else builds a <c>TyphonRuntime</c> and drives the
+    /// parallel DAG at that width.</param>
+    /// <inheritdoc cref="RunScenario"/>
+    private static Row RunScenarioCore(Scenario s, int entities, int workerCount)
     {
         var row = new Row { Scenario = s.Name, Entities = entities };
         try
@@ -379,9 +654,14 @@ internal static class GameScenarios
             row.FirstFenceMs = sw.Elapsed.TotalMilliseconds;
 
             var fenceMs = new List<double>(MeasuredTicks);
-            for (var tick = 0; tick < WarmTicks + MeasuredTicks; tick++)
+            var migrationMs = new List<double>(MeasuredTicks);
+            var migrationCount = new List<double>(MeasuredTicks);
+
+            // Hoisted out of the tick loop so the serial and parallel arms move the world with the SAME code. Two copies of a bounce-and-integrate would
+            // diverge silently, and a difference between the arms would then be a difference in the workload rather than in the fence.
+            void StepWorld()
             {
-                using (var tx = dbe.CreateQuickTransaction())
+                using var tx = dbe.CreateQuickTransaction();
                 {
                     // Written through OpenMut rather than the ClusterRef spatial barrier: the barrier is AABB2F-only, and
                     // three of these four worlds are flat but one is not. OpenMut also routes Prep down the DIRTY-bitmap
@@ -409,22 +689,67 @@ internal static class GameScenarios
 
                     tx.Commit();
                 }
+            }
 
-                sw.Restart();
-                dbe.WriteTickFence(2 + tick);
-                sw.Stop();
-                if (tick >= WarmTicks)
+            // Read after a fence, never during one: every counter on the snapshot is per-tick and reset at the top of the next fence, so a sample taken
+            // once at the end describes one arbitrary tick out of thirty.
+            void SampleTick(double spanMs)
+            {
+                fenceMs.Add(spanMs);
+                var t = dbe.GetSpatialTelemetry(Archetype<GameEntity>.Metadata.ArchetypeId);
+                migrationMs.Add(t.MigrationTotalMs);
+                migrationCount.Add(t.MigrationCount);
+            }
+
+            if (workerCount == 0)
+            {
+                for (var tick = 0; tick < WarmTicks + MeasuredTicks; tick++)
                 {
-                    fenceMs.Add(sw.Elapsed.TotalMilliseconds);
+                    StepWorld();
+                    sw.Restart();
+                    dbe.WriteTickFence(2 + tick);
+                    sw.Stop();
+                    if (tick >= WarmTicks)
+                    {
+                        SampleTick(sw.Elapsed.TotalMilliseconds);
+                    }
                 }
+            }
+            else
+            {
+                RunParallelTicks(dbe, s, workerCount, row, StepWorld, SampleTick);
             }
 
             fenceMs.Sort();
             row.FenceMedianMs = fenceMs.Count == 0 ? 0 : fenceMs[fenceMs.Count / 2];
             row.FenceP99Ms = fenceMs.Count == 0 ? 0 : fenceMs[Math.Min(fenceMs.Count - 1, (int)(fenceMs.Count * 0.99))];
 
+            // Summed then divided, rather than a median of per-tick quotients: a tick that migrated two entities would otherwise weigh as much as one that
+            // migrated two thousand, and the quiet ticks are the majority in most of these worlds.
+            var totalMigrations = 0d;
+            var totalMigrationMs = 0d;
+            for (var i = 0; i < migrationMs.Count; i++)
+            {
+                totalMigrationMs += migrationMs[i];
+                totalMigrations += migrationCount[i];
+            }
+
+            migrationMs.Sort();
+            row.MigrationMedianMs = migrationMs.Count == 0 ? 0 : migrationMs[migrationMs.Count / 2];
+            row.MigrationNsPerEntity = totalMigrations > 0 ? totalMigrationMs * 1e6 / totalMigrations : 0;
+
             var telemetry = dbe.GetSpatialTelemetry(Archetype<GameEntity>.Metadata.ArchetypeId);
-            row.MigrationsPerTick = telemetry.MigrationCount;
+            row.MigrationsPerTick = migrationCount.Count == 0
+                ? telemetry.MigrationCount
+                : totalMigrations / migrationCount.Count;
+
+            if (workerCount != 0)
+            {
+                // The fence column IS the stall on this arm — there is no outer stopwatch — so the two are the same number under two names, and the second
+                // exists so the report can print it beside the pacing budget it has to fit inside.
+                row.FenceSpanMs = row.FenceMedianMs;
+                row.Overran = row.FenceSpanMs > 1000d / ParallelPacingHz;
+            }
 
             // A FRESH generator with a fixed seed, not the one the world was built from: both arms must ask the same
             // boxes, or a hit-count difference between them says nothing about the structures.
@@ -563,7 +888,114 @@ internal static class GameScenarios
         row.SlotOccupancyPct = row.Clusters > 0 ? 100d * row.Entities / (row.Clusters * (double)slots) : 0d;
     }
 
-    private static string WriteReport(List<Scenario> scenarios, List<Row> rows, TimeSpan elapsed)
+    /// <summary>
+    /// The parallel-fence sweep: what a real host sees, against the serial figure every other table in this report carries.
+    /// </summary>
+    /// <remarks>
+    /// <b>This section exists because the rest of the report could not answer the question it kept raising.</b> Every other table here is the SERIAL fence,
+    /// captioned "treat these as an upper bound" and carrying an inherited "1.2-4x faster in parallel" from a different campaign on a different workload. A
+    /// range that wide, measured elsewhere, is not a number a reader can use.
+    /// </remarks>
+
+    /// <summary>Emits one (world, population, width) row of the sweep table.</summary>
+    /// <remarks>
+    /// <paramref name="parallelism"/> is passed as 1 for the serial arm rather than read off the row: one thread means summed CPU and elapsed time are the
+    /// same number, and dividing by a parallelism the serial path never published would silently rescale it.
+    /// </remarks>
+    private static void WriteSweepRow(TextWriter w, string scenario, int entities, string width, double stallMs, double migrationsPerTick,
+        double migCpuNs, double parallelism, bool overran)
+    {
+        var nsPerEntity = entities > 0 ? stallMs * 1e6 / entities : 0d;
+        var migWallNs = parallelism > 0 ? migCpuNs / parallelism : migCpuNs;
+        var stall = $"{stallMs:N2}{(overran ? " ⚠" : "")}";
+        var mig = migrationsPerTick > 0 ? $"{migCpuNs:N0} | {migWallNs:N0}" : "— | —";
+
+        // Two decimals under ten, none above. A world that migrates 0.4 entities a tick was rounding to "0" while still printing a per-migration cost beside
+        // it, which reads as a division by zero rather than as the thin denominator it is — and a per-migration figure off a fraction of an event is noise
+        // the reader has to be able to SEE is noise.
+        var migrations = migrationsPerTick > 0 && migrationsPerTick < 10 ? $"{migrationsPerTick:N2}" : $"{migrationsPerTick:N0}";
+        w.WriteLine($"| {scenario} | {entities:N0} | {width} | **{stall}** | {nsPerEntity:N0} | {migrations} | {mig} | {parallelism:N2}x |");
+    }
+
+    private static void WriteParallelSection(TextWriter w, List<Scenario> scenarios, List<Row> rows, List<Row> parallelRows)
+    {
+        if (parallelRows.Count == 0)
+        {
+            return;
+        }
+
+        w.WriteLine("## The parallel fence, measured (W = 1/2/4/8/16)");
+        w.WriteLine();
+        w.WriteLine("Every other table in this report is the **serial** fence, and has always said so and called itself an upper bound while carrying an");
+        w.WriteLine("inherited \"1.2-4x faster in parallel\" from a different campaign on a different workload. This section measures it instead.");
+        w.WriteLine();
+        w.WriteLine("**One row per (world, population, worker count)**, because that is the shape of the question: at this size and this width, how long is");
+        w.WriteLine("the engine in the way, and what does one migration cost? A wide table with a column per W could not carry the second number.");
+        w.WriteLine();
+        w.WriteLine("### What each column is");
+        w.WriteLine();
+        w.WriteLine("| column | meaning |");
+        w.WriteLine("|---|---|");
+        w.WriteLine("| `W` | fence worker count. `serial` is the separate single-threaded path — `WriteTickFence` driven straight from the host with no scheduler and no DAG, so it has no worker count to vary. `W=1` is NOT the same thing: it is the parallel fence narrowed to one worker, still paying DAG dispatch, epoch scopes and per-chunk change sets. |");
+        w.WriteLine("| **`stall ms`** | **how long the engine stopped user code.** The whole fence call timed on the tick thread (`LastFenceStallMs`): the epoch fence window opens and no user system runs until it closes. This is the number to hold against a frame budget. |");
+        w.WriteLine("| `ns/ent` | `stall ms` divided by the population — what one entity PRESENT costs per tick. Multiply by a planned population to size a world. Not per migrant: the fence walks everything every tick and only a fraction moves. |");
+        w.WriteLine("| `migr/tick` | migrations that actually happened per tick, the denominator of the next two columns. Zero is a real answer — a settled world migrates nothing and the fence still costs what it costs. |");
+        w.WriteLine("| **`mig ns CPU`** | **average execution time of one migration, in CPU nanoseconds** — `MigrationTotalMs` over `migr/tick`. Summed across workers, so W workers each busy for one nanosecond report W. It is what a migration COSTS, and it is the figure that inflates with W. |");
+        w.WriteLine("| `mig ns wall` | the same migration in elapsed nanoseconds — `mig ns CPU` divided by `par`. This is what a migration adds to the stall, and it is the one that should fall as W rises. |");
+        w.WriteLine("| `par` | CPU over span across the three migration phases: how many workers’ worth of CPU one unit of span bought. |");
+        w.WriteLine();
+        w.WriteLine($"**Pacing is {ParallelPacingHz} Hz for every world here, NOT the game's own tick rate.** EVE ticks at 1 Hz, so its own rate would make");
+        w.WriteLine("this sweep take an hour and measure idling. Pacing does not change the stall; it only decides how long the engine waits between fences.");
+        w.WriteLine($"A row whose stall exceeded the {1000d / ParallelPacingHz:N0} ms pacing budget is flagged ⚠ — its ticks overlapped, so it describes an");
+        w.WriteLine("overrunning engine rather than the work.");
+        w.WriteLine();
+        w.WriteLine("The serial row's `mig ns CPU` and `mig ns wall` are the same number by construction: one thread, so summed CPU IS elapsed.");
+        w.WriteLine();
+        w.WriteLine("| scenario | entities | W | stall ms | ns/ent | migr/tick | mig ns CPU | mig ns wall | par |");
+        w.WriteLine("|---|---|---|---|---|---|---|---|---|");
+
+        foreach (var s in scenarios)
+        {
+            var pops = new List<int>();
+            foreach (var r in parallelRows)
+            {
+                if (r.Scenario == s.Name && !pops.Contains(r.Entities))
+                {
+                    pops.Add(r.Entities);
+                }
+            }
+
+            foreach (var n in pops)
+            {
+                // The serial baseline leads each block rather than sitting in its own table: the comparison a reader wants is one line away, and the row
+                // labels itself `serial` so it cannot be mistaken for a width.
+                var serial = rows.Find(r => r.Scenario == s.Name && r.Entities == n && r.Arm == "scan");
+                if (serial != null)
+                {
+                    WriteSweepRow(w, s.Name, n, "serial", serial.FenceMedianMs, serial.MigrationsPerTick, serial.MigrationNsPerEntity, 1d, false);
+                }
+
+                for (var i = 0; i < WorkerCounts.Length; i++)
+                {
+                    var r = parallelRows.Find(x => x.Scenario == s.Name && x.Entities == n && x.Workers == WorkerCounts[i]);
+                    if (r == null || r.Failure.Length > 0)
+                    {
+                        w.WriteLine($"| {s.Name} | {n:N0} | {WorkerCounts[i]} | — | — | — | — | — | — |");
+                        continue;
+                    }
+
+                    WriteSweepRow(w, s.Name, n, WorkerCounts[i].ToString(), r.FenceSpanMs, r.MigrationsPerTick, r.MigrationNsPerEntity,
+                        r.MigrationParallelism, r.Overran);
+                }
+            }
+        }
+
+        w.WriteLine();
+        w.WriteLine("⚠ = the span exceeded the pacing budget, so that row's ticks overlapped.");
+        w.WriteLine();
+    }
+
+    private static string WriteReport(List<Scenario> scenarios, List<Row> rows, List<Row> parallelRows, TimeSpan elapsed)
     {
         var dir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "claude", "scratch"));
         Directory.CreateDirectory(dir);
@@ -575,6 +1007,10 @@ internal static class GameScenarios
         w.WriteLine($"Generated {DateTime.Now:yyyy-MM-dd HH:mm} by `dotnet run -c Release -- --game` ({elapsed.TotalSeconds:F0} s).");
         w.WriteLine("Source: `test/Typhon.Benchmark/GameScenarios.cs`. Not a CI test — an instrument.");
         w.WriteLine();
+        w.WriteLine($"Every row is the **median of {Repeats} independent sweeps** of that point, per field. Three sweeps of the same point were");
+        w.WriteLine("measured spreading up to 106 % on the fence and 54 % on the query on this desktop, so a single-shot figure cannot be");
+        w.WriteLine("compared against an earlier report — anything under about 1.3x between two runs here is noise, not a change.");
+        w.WriteLine();
         w.WriteLine("## How to read this");
         w.WriteLine();
         w.WriteLine("Every world is in **metres** and **metres per second**, at the game's own tick rate, so a per-tick");
@@ -584,6 +1020,11 @@ internal static class GameScenarios
         w.WriteLine("  It is the **serial** fence (`WriteTickFence`). A host drives the parallel DAG through `TyphonRuntime`, which");
         w.WriteLine("  measured 1.2-4x faster depending on worker count, so treat these as an upper bound.");
         w.WriteLine("- **query** is one interest query at the scenario's own radius, against the cluster index, warmed by wall time.");
+        w.WriteLine("- **mig ms** is the WHOLE migration for one tick — the migrant loop plus the bulk index descent and the bulk EntityMap");
+        w.WriteLine("  patch — as a median over the measured ticks. It reads 0.000 wherever fewer than half the ticks migrate anything, which");
+        w.WriteLine("  is a true statement about the median and a useless one about the cost.");
+        w.WriteLine("- **mig ns/ent** is that cost divided by the migrations that produced it, SUMMED over the measured ticks rather than");
+        w.WriteLine("  taken as a median, so a busy tick is not outvoted by the quiet ones. This is the column to read where migration is rare.");
         w.WriteLine("- **tight** is the mean cluster bound as a percentage of the cell edge — the selectivity proxy. Lower prunes better.");
         w.WriteLine("- **occ** is slot occupancy over the archetype's real slots per cluster.");
         w.WriteLine("- **budget**: at the scenario's tick rate, one tick is " + "`1000 / Hz` ms — the fence has to fit inside it alongside everything else the game does.");
@@ -612,23 +1053,27 @@ internal static class GameScenarios
             w.WriteLine($"| Displacement per tick | {s.SpeedMPerS / s.TickHz:N2} m ({100d * s.SpeedMPerS / s.TickHz / s.CellSizeM:N2} % of a cell) |");
             w.WriteLine($"| Query radius | {s.QueryRadiusM:N0} m |");
             w.WriteLine();
-            w.WriteLine("| entities | spawn ms | fence ms | fence p99 | % of tick | query us | hits | live cells | ent/cell | clusters | tight % | occ % | mig/tick | promoted |");
-            w.WriteLine("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+            w.WriteLine("| entities | spawn ms | fence ms | fence p99 | % of tick | mig ms | mig ns/ent | query us | hits | live cells | ent/cell | clusters "
+                + "| tight % | occ % | mig/tick | promoted |");
+            w.WriteLine("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
             foreach (var r in mine)
             {
                 if (r.Failure.Length > 0)
                 {
-                    w.WriteLine($"| {r.Entities:N0} | ❌ {r.Failure} | | | | | | | | | | | | |");
+                    w.WriteLine($"| {r.Entities:N0} | ❌ {r.Failure} | | | | | | | | | | | | | | |");
                     continue;
                 }
 
                 w.WriteLine($"| {r.Entities:N0} | {r.SpawnMs:N0} | {r.FenceMedianMs:N2} | {r.FenceP99Ms:N2} | {100d * r.FenceMedianMs / tickBudgetMs:N1} % | "
+                    + $"{r.MigrationMedianMs:N3} | {r.MigrationNsPerEntity:N0} | "
                     + $"{r.QueryUs:N1} | {r.QueryHits:N0} | {r.LiveCells:N0} | {r.EntitiesPerCell:N1} | {r.Clusters:N0} | {r.TightnessPct:N1} | "
                     + $"{r.SlotOccupancyPct:N1} | {r.MigrationsPerTick:N0} | {r.PromotedCells} |");
             }
 
             w.WriteLine();
         }
+
+        WriteParallelSection(w, scenarios, rows, parallelRows);
 
         w.WriteLine("## Finding: a promoted cell returns NOTHING for a query with an infinite axis bound (SQ-01)");
         w.WriteLine();

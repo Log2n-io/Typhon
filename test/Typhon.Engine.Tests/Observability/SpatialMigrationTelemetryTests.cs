@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics.Metrics;
 using System.Numerics;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -795,6 +796,113 @@ class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
     }
 
     [Test]
+    [VerifiesRule("SO-01")]
+    public void FenceStallMs_CoversTheSerialPrep_ThatTheSpanExcludes()
+    {
+        // SO-01: the span and the stall are not two measurements of one thing, and this pins the containment that makes them
+        // readable together.
+        //
+        // `LastFenceSpanMs` starts at Prep's Prepare. The fence call runs a serial prep BEFORE that, on the tick thread and
+        // inside the same epoch fence window — context reset, dormancy drain, ProcessTableFence over every component table —
+        // so the span reports less than the host actually waited. `LastFenceStallMs` brackets the whole call.
+        //
+        // Why it matters enough to test: the serial prep is single-threaded by construction, so no worker count shrinks it. A
+        // sweep across worker counts that reads only the span reports a speed-up on a FRACTION of the interruption, and the
+        // fraction is invisible unless both numbers are on the surface. Containment is the checkable form of that — a stall
+        // that ever came out below its own span would mean one of the two is not measuring the fence.
+        using var dbe = SetupEngineWithGrid();
+        for (var i = 0; i < 64; i++)
+        {
+            Spawn(dbe, 50f + i % 8 * 100f, 50f + i / 8 * 100f);
+        }
+
+        var moved = 0;
+        var stall = 0d;
+        var span = 0d;
+
+        using (var runtime = TyphonRuntime.Create(dbe, schedule =>
+               {
+                   schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Move", _ =>
+                   {
+                       // Sampled on the tick BEFORE this tick's fence, so what is read is the previous fence's published pair —
+                       // never a half-written one from the fence running now.
+                       var s = dbe.LastFenceStallMs;
+                       if (s > 0d)
+                       {
+                           stall = s;
+                           span = dbe.LastFenceSpanMs;
+                       }
+
+                       Interlocked.Increment(ref moved);
+                   });
+               }, new RuntimeOptions { WorkerCount = 2, BaseTickRate = 100, EnableParallelFence = true }))
+        {
+            runtime.Start();
+            SpinWait.SpinUntil(() => Volatile.Read(ref moved) >= 5 && runtime.CurrentTickNumber >= 5, TimeSpan.FromSeconds(15));
+            runtime.Shutdown();
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(stall, Is.GreaterThan(0d), "the parallel fence ran, so the whole-call stall must have been timed");
+            Assert.That(span, Is.GreaterThan(0d),
+                "PRECONDITION: the span must be live too — a zero span would make the containment below trivially true");
+            Assert.That(stall, Is.GreaterThanOrEqualTo(span),
+                "the stall brackets the fence call and the span starts inside it, so the stall can never be the smaller of the two");
+        });
+
+        using var exporter = new EcsMetricsExporter(dbe);
+        var (_, doubles) = ScrapeSpatialInstruments(exporter);
+        Assert.That(doubles, Does.ContainKey("typhon.ecs.spatial.fence_stall_ms"),
+            "a consumer budgeting a frame reads the stall, so it must be exported beside the span rather than only readable in-process");
+    }
+
+    /// <summary>
+    /// The parallelism ratio must be exported beside the summed-CPU gauges, and must be able to report below 1.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>SO-01 binds the export, not only the accessor.</b> <c>migration_duration_ms</c> and its siblings are CPU summed across workers, so they RISE
+    /// with the worker count on unchanged work. The rule's remedy is to present the achieved parallelism beside them — but for most of this surface's life
+    /// that ratio was <c>internal</c> and ungauged, so an OTel consumer could read the summed figure and not the divisor, which is precisely the position the
+    /// rule was written to prevent. Asserting the instrument exists is what keeps the remedy real rather than documented.</para>
+    /// <para><b>The sub-unity half is the reading worth having.</b> A phase whose elapsed span exceeded its own summed CPU is dispatch overhead swallowing
+    /// the work — what a parallel fence looks like on a population too small to split. A floor at 1 renders that indistinguishable from a healthy serial
+    /// tick, so the store must not clamp; the consumer that needs a floor (<c>ObserveMigrationCost</c>) applies its own.</para>
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SO-01")]
+    public void MigrationParallelism_IsExportedBesideTheSummedCpuGauges_AndIsNotFlooredAtOne()
+    {
+        using var dbe = SetupEngineWithGrid();
+
+        using var exporter = new EcsMetricsExporter(dbe);
+        var (_, doubles) = ScrapeSpatialInstruments(exporter);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(doubles, Does.ContainKey("typhon.ecs.spatial.fence_migration_parallelism"),
+                "the divisor that makes the summed-CPU gauges readable must be on the same surface as they are");
+            Assert.That(doubles, Does.ContainKey("typhon.ecs.spatial.migration_duration_ms"),
+                "PRECONDITION: a summed-CPU gauge is exported, or there is nothing for the ratio to qualify");
+            Assert.That(dbe.LastFenceMigrationParallelism, Is.EqualTo(1d),
+                "a host driving the fence itself is one thread, so summed CPU IS elapsed");
+        });
+
+        // Sub-unity must survive the round trip. Pushed through the same setter the runtime uses rather than asserted against a live parallel fence: making a
+        // real fence's span exceed its own CPU needs a workload tuned to be too small to split, which would pin the tuning rather than the contract.
+        dbe.SetLastFenceMigrationParallelism(0.4d);
+        var (_, afterDoubles) = ScrapeSpatialInstruments(exporter);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(dbe.LastFenceMigrationParallelism, Is.EqualTo(0.4d).Within(1e-9),
+                "below 1 is dispatch overhead exceeding the work — a real reading, and a clamp here would hide the only case worth acting on");
+            Assert.That(afterDoubles["typhon.ecs.spatial.fence_migration_parallelism"], Is.EqualTo(0.4d).Within(1e-9),
+                "and the gauge must report it unclamped too, or the export re-introduces the floor the store dropped");
+        });
+    }
+
+    [Test]
     public void O2Counters_AreExportedAsMetrics_AndAgreeWithTheAccessor()
     {
         using var dbe = SetupEngineWithGrid();
@@ -819,6 +927,123 @@ class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
             Assert.That(doubles["typhon.ecs.spatial.max_cluster_overhang"], Is.EqualTo((double)expected.MaxClusterOverhang).Within(1e-6));
             Assert.That(longs["typhon.ecs.spatial.cell_tree_promotions"], Is.EqualTo(expected.CellTreePromotions));
             Assert.That(longs["typhon.ecs.spatial.cell_tree_demotions"], Is.EqualTo(expected.CellTreeDemotions));
+        });
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // #912 — the members that make MigrationExecuteMs divisible, and the split that makes a per-kind cost attributable.
+    //
+    // The anomaly these exist for: relocation CPU per entity was recorded as 425 -> 844 -> 1 440 ns at W = 2/4/8 and read as
+    // contention in the relocation drain. It is a sum of per-SLICE spans over a per-ENTITY count, and the parallel fence
+    // sizes slices from the worker count — so nothing published could tell "the same work in more pieces" from "the work got
+    // slower", and the anomaly stood unowned through three steps of the design.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    [VerifiesRule("SO-01")]
+    [Test]
+    public void ExecutedKinds_SumExactlyToTheMigrationCount()
+    {
+        using var dbe = SetupEngineWithGrid();
+        var a = Spawn(dbe, 50f, 50f);
+        var b = Spawn(dbe, 60f, 60f);
+        var c = Spawn(dbe, 70f, 70f);
+        dbe.WriteTickFence(1);
+
+        // Three cell crossings, each well past the 5-unit hysteresis margin. The KIND is what this pins; the count is the
+        // control that stops the identity holding vacuously at 0 == 0.
+        MoveTo(dbe, a, 150f, 250f);
+        MoveTo(dbe, b, 350f, 150f);
+        MoveTo(dbe, c, 250f, 350f);
+        dbe.WriteTickFence(2);
+
+        var t = dbe.GetSpatialTelemetry(ArchetypeId);
+        Assert.That(t.MigrationCount, Is.EqualTo(3), "precondition: three entities crossed, so there is a non-zero split to check");
+        Assert.Multiple(() =>
+        {
+            Assert.That(t.CrossingsExecuted + t.RelocationsExecuted + t.RepairsExecuted, Is.EqualTo(t.MigrationCount),
+                "the three kinds partition the executed migrations — the identity is what makes the split checkable rather than trusted");
+            Assert.That(t.CrossingsExecuted, Is.EqualTo(3), "every one of these moved to a different cell, so every one is a crossing");
+            Assert.That(t.RelocationsExecuted, Is.Zero, "nothing drifted within its cell");
+            Assert.That(t.RepairsExecuted, Is.Zero, "no repair budget was configured, so no repair unit can have been admitted");
+        });
+
+        var total = dbe.GetSpatialTelemetryTotal();
+        Assert.That(total.CrossingsExecuted + total.RelocationsExecuted + total.RepairsExecuted, Is.EqualTo(total.MigrationCount),
+            "the engine-wide fold sums each kind, so the identity has to survive it");
+    }
+
+    [VerifiesRule("SO-01")]
+    [Test]
+    public void MigrationSliceCount_IsPublished_AndBoundsThePrologueAndEpilogueWithinTheExecuteSpan()
+    {
+        using var dbe = SetupEngineWithGrid();
+        var id = Spawn(dbe, 50f, 50f);
+        MoveTo(dbe, id, 150f, 250f);
+        dbe.WriteTickFence(1);
+
+        var t = dbe.GetSpatialTelemetry(ArchetypeId);
+        Assert.That(t.MigrationCount, Is.EqualTo(1), "precondition: a slice must actually have run");
+        Assert.Multiple(() =>
+        {
+            // The serial fence takes the whole queue in one call, which is exactly the case where MigrationExecuteMs /
+            // MigrationCount IS a per-entity figure. Pinning it here is what gives the parallel reading something to differ FROM.
+            Assert.That(t.MigrationSliceCount, Is.EqualTo(1), "WriteTickFence drains the queue in one slice, so one span was summed");
+            Assert.That(t.MigrationPrologueMs, Is.GreaterThanOrEqualTo(0d).And.Not.NaN, "measured, not derived — it may round to zero");
+            Assert.That(t.MigrationEpilogueMs, Is.GreaterThanOrEqualTo(0d).And.Not.NaN);
+            // The containment is the invariant, not the magnitudes: both are PART of the execute span. A prologue larger than
+            // the span it is measured inside would mean the marks had been moved out of the bracket, which is the change #911
+            // spends a paragraph forbidding at the other end.
+            Assert.That(t.MigrationPrologueMs + t.MigrationEpilogueMs, Is.LessThanOrEqualTo(t.MigrationExecuteMs + 1e-9),
+                "prologue and epilogue are parts of MigrationExecuteMs, never additional to it");
+        });
+    }
+
+    [VerifiesRule("SO-01")]
+    [Test]
+    public void FinalizeLockAcquisitions_CountEveryAcquisition_AndResetPerTick()
+    {
+        using var dbe = SetupEngineWithGrid();
+        Spawn(dbe, 50f, 50f);
+        dbe.WriteTickFence(1);
+
+        // A spawn allocates the first cluster, which is the latch's new-cluster slow path — so this tick cannot have taken it
+        // zero times. Asserting > 0 rather than an exact number: the count is a diagnostic over a set of call sites that will
+        // grow, and pinning it exactly would make every new site a failing test rather than a counted one.
+        var busy = dbe.GetSpatialTelemetry(ArchetypeId);
+        Assert.That(busy.FinalizeLockAcquisitions, Is.GreaterThan(0L),
+            "a tick that allocated a cluster took the finalize latch, and every acquisition goes through the counting wrapper");
+
+        // The reset is the half that a plain accumulate would get wrong, and it is the half that matters: an un-reset counter
+        // grows without bound and reads as contention rising over the life of the process.
+        dbe.WriteTickFence(2);
+        var quiet = dbe.GetSpatialTelemetry(ArchetypeId);
+        Assert.That(quiet.FinalizeLockAcquisitions, Is.LessThan(busy.FinalizeLockAcquisitions),
+            "the counter is per-tick: a quiet tick reports its own acquisitions, not the previous tick's plus its own");
+    }
+
+    [Test]
+    public void MeterListener_ObservesTheMigrationDecompositionMembers()
+    {
+        using var dbe = SetupEngineWithGrid();
+        var id = Spawn(dbe, 50f, 50f);
+        MoveTo(dbe, id, 150f, 250f);
+        dbe.WriteTickFence(1);
+
+        var expected = dbe.GetSpatialTelemetry(ArchetypeId);
+        Assert.That(expected.MigrationCount, Is.EqualTo(1), "precondition: the accessor must have a non-zero value to agree ON");
+
+        using var exporter = new EcsMetricsExporter(dbe);
+        var (longs, doubles) = ScrapeSpatialInstruments(exporter);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(longs["typhon.ecs.spatial.migration_slices"], Is.EqualTo(expected.MigrationSliceCount));
+            Assert.That(longs["typhon.ecs.spatial.crossings_executed"], Is.EqualTo(expected.CrossingsExecuted));
+            Assert.That(longs["typhon.ecs.spatial.relocations_executed"], Is.EqualTo(expected.RelocationsExecuted));
+            Assert.That(longs["typhon.ecs.spatial.repairs_executed"], Is.EqualTo(expected.RepairsExecuted));
+            Assert.That(longs["typhon.ecs.spatial.finalize_lock_acquisitions"], Is.EqualTo(expected.FinalizeLockAcquisitions));
+            Assert.That(doubles["typhon.ecs.spatial.migration_prologue_ms"], Is.EqualTo(expected.MigrationPrologueMs).Within(1e-9));
+            Assert.That(doubles["typhon.ecs.spatial.migration_epilogue_ms"], Is.EqualTo(expected.MigrationEpilogueMs).Within(1e-9));
         });
     }
 }

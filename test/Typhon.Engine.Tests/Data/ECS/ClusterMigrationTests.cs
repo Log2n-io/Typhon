@@ -2099,4 +2099,269 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
             }
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // #926 — the Migrate phase's zone-map batching
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>Total indexed fields on the archetype — the multiplier the batch-open identity is stated against.</summary>
+    private static int IndexedFieldCount(ArchetypeClusterState cs)
+    {
+        var slots = cs.IndexSlots;
+        if (slots == null)
+        {
+            return 0;
+        }
+
+        var fields = 0;
+        for (var i = 0; i < slots.Length; i++)
+        {
+            fields += slots[i].Fields.Length;
+        }
+
+        return fields;
+    }
+
+    /// <summary>Moves an entity without touching its indexed Tag — the zone-map tests assert on that tag at the destination.</summary>
+    private static void MoveKeepingTag(DatabaseEngine dbe, EntityId id, float x, float y)
+    {
+        using var tx = dbe.CreateQuickTransaction();
+        var eref = tx.OpenMut(id);
+        ref var pos = ref eref.Write(ClMigUnit.Pos);
+        pos.Bounds = new AABB2F { MinX = x, MinY = y, MaxX = x, MaxY = y };
+        tx.Commit();
+    }
+
+    /// <summary>
+    /// The zone map's grow latch must be taken once per indexed field per Migrate SLICE, never once per migrant.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The assertion is an independence, not a threshold.</b> Two ticks on the same engine migrate wildly different numbers of entities through the
+    /// same one-slice serial fence; the batch-open count must come out identical, because it is <c>slices x indexed fields</c> and neither term mentions the
+    /// migration count. That is exactly the property that fails the moment a per-migrant acquire survives anywhere on the path — and it fails with no timing
+    /// and no threshold, which is what makes it a suite test rather than a benchmark.</para>
+    /// <para>Before #926 the Migrate loop called <c>ZoneMapArray.Widen</c> per migrant per field, and each call took an archetype-wide latch shared and
+    /// released it — two locked read-modify-writes on ONE cache line, from every worker. Rule MD-03 forbids that shape, and #886 had already measured it on
+    /// the Prep path ("that word bounced between cores ~4 000 times a tick and the zone-map step's CPU tripled").</para>
+    /// </remarks>
+    [Test]
+    [VerifiesRule("MD-03")]
+    public void ZoneMapBatchOpens_TrackTheSliceCountAndFields_NotTheMigrationCount()
+    {
+        using var dbe = SetupEngineWithGrid();
+        var meta = Archetype<ClMigUnit>.Metadata;
+        var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
+        var clusterSize = meta.ClusterLayout.ClusterSize;
+
+        var ids = new List<EntityId>();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < clusterSize * 2; i++)
+            {
+                ids.Add(tx.Spawn<ClMigUnit>(
+                    ClMigUnit.Pos.Set(PointAt(50f, 50f, i)),
+                    ClMigUnit.Scratch.Set(ScratchOf(i, i))));
+            }
+
+            tx.Commit();
+        }
+
+        // Sampled per tick from inside the runtime, and the tick's migration count is deliberately made to VARY: a fixed workload would let the identity
+        // hold by coincidence. What must hold is that the batch count follows slices x fields on every tick while the migration count moves underneath it.
+        var samples = new List<(int Batches, int Slices, long Migrations)>();
+        var ticks = 0;
+        var cursor = 0;
+        Exception unhandled = null;
+
+        using (var runtime = TyphonRuntime.Create(dbe, schedule =>
+               {
+                   schedule.PublicTrack.DeclareDag("Batch").CallbackSystem("Move", _ =>
+                   {
+                       var n = Interlocked.Increment(ref ticks);
+                       if (n > 8)
+                       {
+                           return;
+                       }
+
+                       // Read BEFORE this tick's fence, so it describes the previous tick's completed one.
+                       if (n > 1)
+                       {
+                           var t = dbe.GetSpatialTelemetry(meta.ArchetypeId);
+                           lock (samples)
+                           {
+                               samples.Add((t.ZoneMapBatchOpens, t.MigrationSliceCount, t.MigrationCount));
+                           }
+                       }
+
+                       // A different number of migrants every tick: 1, then 2, then 4, then 8...
+                       var batch = 1 << (n - 1);
+                       for (var k = 0; k < batch && cursor < ids.Count; k++, cursor++)
+                       {
+                           MoveKeepingTag(dbe, ids[cursor], 150f + 100f * (cursor % 5), 250f);
+                       }
+                   });
+               }, new RuntimeOptions { WorkerCount = 4, BaseTickRate = 200, EnableParallelFence = true }))
+        {
+            runtime.Scheduler.UnhandledExceptionCallback = (_, _, ex) =>
+            {
+                if (ex is not ObjectDisposedException)
+                {
+                    Interlocked.CompareExchange(ref unhandled, ex, null);
+                }
+            };
+            runtime.Start();
+            SpinWait.SpinUntil(() => Volatile.Read(ref ticks) >= 8 && runtime.CurrentTickNumber >= 8, TimeSpan.FromSeconds(15));
+            runtime.Shutdown();
+        }
+
+        var fields = IndexedFieldCount(cs);
+        var mismatches = new List<string>();
+        var migrating = 0;
+        var distinctMigrationCounts = new HashSet<long>();
+        lock (samples)
+        {
+            foreach (var (batches, slices, migrations) in samples)
+            {
+                if (batches != slices * fields)
+                {
+                    mismatches.Add($"batches={batches} but slices={slices} x fields={fields} = {slices * fields} (migrations={migrations})");
+                }
+
+                if (migrations > 0)
+                {
+                    migrating++;
+                    distinctMigrationCounts.Add(migrations);
+                }
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(unhandled, Is.Null, $"the parallel fence must not throw while batching zone maps. Got: {unhandled}");
+            Assert.That(fields, Is.GreaterThan(0), "PRECONDITION: the archetype must have an indexed field, or there is no batch to count");
+            Assert.That(migrating, Is.GreaterThan(1), "PRECONDITION: at least two sampled ticks must have migrated, or the identity is asserted against nothing");
+            Assert.That(distinctMigrationCounts, Has.Count.GreaterThan(1),
+                "PRECONDITION: the migration count must actually VARY across ticks, or independence from it is untested");
+            Assert.That(mismatches, Is.Empty, "one batch per indexed field per slice, whatever the slice moved");
+        });
+    }
+
+    /// <summary>
+    /// The serial fence opens no zone-map batches at all, and that is a correctness property rather than a tuning one.
+    /// </summary>
+    /// <remarks>
+    /// Batching exists to stop W workers taking one archetype-wide latch per migrant; a serial fence has one writer and nothing to amortise. It also cannot
+    /// safely hold one: a destination past the pinned generation has to fall back to the growing <c>Widen</c>, and growing while holding the batch's own
+    /// shared count waits for that count to drain to zero — from the thread that holds it, under an unbounded wait. Opening no batch is what keeps the serial
+    /// fallback available, so a non-zero count here would mean the deadlock has been reintroduced.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("MD-03")]
+    public void ZoneMapBatchOpens_AreZeroOnTheSerialFence_WhichMustKeepItsGrowingFallback()
+    {
+        using var dbe = SetupEngineWithGrid();
+        var meta = Archetype<ClMigUnit>.Metadata;
+
+        var ids = new List<EntityId>();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < 20; i++)
+            {
+                ids.Add(tx.Spawn<ClMigUnit>(
+                    ClMigUnit.Pos.Set(PointAt(50f, 50f, i)),
+                    ClMigUnit.Scratch.Set(ScratchOf(i, i))));
+            }
+
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(1);
+        for (var i = 0; i < ids.Count; i++)
+        {
+            MoveKeepingTag(dbe, ids[i], 250f, 50f);
+        }
+
+        dbe.WriteTickFence(2);
+        var telemetry = dbe.GetSpatialTelemetry(meta.ArchetypeId);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(telemetry.MigrationCount, Is.GreaterThan(0), "PRECONDITION: the serial fence really did migrate, or zero below is trivially true");
+            Assert.That(telemetry.ZoneMapBatchOpens, Is.Zero, "the serial fence must not batch — its growing fallback depends on holding no shared count");
+        });
+    }
+
+    /// <summary>
+    /// A migrant landing in a cluster the Migrate phase itself allocated must still be recorded in that cluster's zone map.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>This is the risk the batching introduces, so it is the thing to pin.</b> A batch pins one store generation for its whole slice, and the
+    /// destination clusters a slice allocates have chunk ids that did not exist when the batch opened. If the pre-size does not cover them the widen is
+    /// refused and the bound is never recorded — and a MISSING bound is not a wrong answer some other test would trip over, it is a silently narrowed one:
+    /// <c>MayContain</c> answers conservatively for an unrecorded cluster, so queries stay correct and only the pruning is lost.</para>
+    /// <para><c>TryGetBounds</c> is therefore the right instrument and <c>MayContain</c> is not: it is the only way to tell a recorded bound from an absent
+    /// one, which is exactly the distinction a lost widen turns on.</para>
+    /// </remarks>
+    [Test]
+    [VerifiesRule("MD-03")]
+    public void MigrantsLandingInFreshlyAllocatedClusters_AreStillRecordedInTheZoneMap()
+    {
+        using var dbe = SetupEngineWithGrid();
+        var meta = Archetype<ClMigUnit>.Metadata;
+        var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
+        var clusterSize = meta.ClusterLayout.ClusterSize;
+
+        // Several clusters' worth in one cell, so moving them into an EMPTY cell has to allocate fresh destination clusters rather than fill existing ones.
+        var ids = new List<EntityId>();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < clusterSize * 3; i++)
+            {
+                ids.Add(tx.Spawn<ClMigUnit>(
+                    ClMigUnit.Pos.Set(PointAt(50f, 50f, 1000 + i)),
+                    ClMigUnit.Scratch.Set(ScratchOf(i, i))));
+            }
+
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(1);
+        var clustersBefore = cs.ActiveClusterCount;
+
+        // HALF of them, not all. Moving the whole cell frees every source cluster as fast as the destination allocates, so the active count nets out
+        // unchanged and the test would be asserting against a scenario that allocated nothing. Leaving the sources occupied forces the destination cell to
+        // allocate clusters that did not exist when the slice opened its batch, which is the case AC-3 is about.
+        var moved = ids.Count / 2;
+        for (var i = 0; i < moved; i++)
+        {
+            MoveKeepingTag(dbe, ids[i], 550f, 550f);
+        }
+
+        dbe.WriteTickFence(2);
+
+        var zoneMap = cs.IndexSlots[0].Fields[0].ZoneMap;
+        Assert.That(zoneMap, Is.Not.Null, "PRECONDITION: the indexed Tag field must have a zone map");
+
+        var missing = new List<string>();
+        for (var i = 0; i < moved; i++)
+        {
+            var (chunkId, _) = ReadLocation(dbe, ids[i]);
+            long tag = 1000 + i;
+            if (!zoneMap.TryGetBounds(chunkId, out var min, out var max))
+            {
+                missing.Add($"entity {i} in cluster {chunkId}: no bounds recorded at all");
+            }
+            else if (tag < min || tag > max)
+            {
+                missing.Add($"entity {i} in cluster {chunkId}: tag {tag} outside recorded [{min}, {max}]");
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(cs.ActiveClusterCount, Is.GreaterThan(clustersBefore),
+                "PRECONDITION: the migration must actually have allocated fresh destination clusters, or nothing new was covered");
+            Assert.That(missing, Is.Empty, "every migrant's value must lie inside its destination cluster's recorded zone map");
+        });
+    }
 }

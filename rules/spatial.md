@@ -1301,8 +1301,48 @@
     40 bytes reserved tail) — Tier, Flags, EntityCount, ClusterCount, CellX/Y/Z all on one line per cell
   applies to: CellState array, ArchetypeClusterState._finalizeLock (PaddedFinalizeLock 64B
     struct), any future per-cell or per-cluster latch arrays
+  invariant ONE shared word taken per element of work is the same defect as one bit per latch, and the rule names it
+    because it does not look like false sharing at the call site. ZoneMapArray._growLatch is a single padded word per
+    archetype-and-field; a shared acquire still takes its line EXCLUSIVE, so a fence phase calling ZoneMapArray.Widen
+    once per migrated entity issues two locked read-modify-writes into one line from every worker, under no logical
+    contention at all. Padding cannot fix it — there is only one word — so the remedy is to stop taking it per element:
+    hold it once per slice through BeginBatch/BeginBatchAtCapacity and write through the pinned Store
+  forbid reaching ZoneMapArray's per-write path — Widen, WidenMasked, Invalidate — from inside a sliced fence phase.
+    Prep goes through BeginBatch (#886); Migrate goes through BeginBatchAtCapacity (#926); the commit-path writers
+    outside the fence window keep the per-write form, which is where it is correct
+  invariant a batch pins ONE Store generation for its whole run, so batching moves the coverage guarantee off the
+    write and onto the pre-size: PreSizeArchetypeFence sizes every zone map to the bound the Migrate phase cannot
+    exceed, ZoneMapArray.Grow REFUSES inside a Migrate slice rather than abandoning stores its siblings hold, and
+    WidenInto returns a verdict instead of writing when an index falls past the batch anyway. The failure this
+    triple-guards is a false negative, which is the one error a zone map may never produce
+  invariant the count that proves it is SpatialMigrationTelemetry.ZoneMapBatchOpens, and it is checkable rather than
+    trusted: ZoneMapBatchOpens == MigrationSliceCount x indexed fields, an identity that does not mention the
+    migration count. A number that starts tracking the migration count is the per-element acquire having come back,
+    and no timing is needed to see it
   scope: SpatialGrid.GetCell, ArchetypeClusterState._finalizeLock, any new per-element
-    Interlocked-mutated array
+    Interlocked-mutated array, ZoneMapArray.Widen, ZoneMapArray.WidenInto, ZoneMapArray.BeginBatchAtCapacity,
+    ZoneMapArray.Grow, ZoneMapArray.ThreadBatchDepth, SpatialMigrationTelemetry.ZoneMapBatchOpens,
+    ArchetypeClusterState.LastTickZoneMapBatchOpens
+  invariant the batch is a PARALLEL-path construct and the serial fence must open none. A batch holds the grow latch
+    shared, so a destination past the pinned generation has nowhere to go: the parallel path answers that with a fence
+    failure it can afford because its pre-size makes it unreachable, while the serial path has to keep the growing
+    `Widen` available — and growing while holding the batch's own shared count waits for that count to drain from the
+    thread that holds it, under an unbounded wait. That is a hang, not a slow path, so ZoneMapBatchOpens is ZERO on a
+    serial fence by construction
+  invariant the growth refusal is keyed on THIS THREAD HOLDING A BATCH (`ZoneMapArray.ThreadBatchDepth`), never on
+    being inside a Migrate slice. A slice holding no batch may grow safely — it exits shared first and the exclusive
+    acquire excludes every sibling's shared window, which is how the engine worked before batching and how the
+    batching-off comparison arm still has to work. Keying it on the phase instead of on the held resource breaks that
+    arm and proves nothing about the one that matters
+  verified: ClusterMigrationTests.ZoneMapBatchOpens_TrackTheSliceCountAndFields_NotTheMigrationCount pins the identity
+    across parallel ticks whose migration counts vary by design; ZoneMapBatchOpens_AreZeroOnTheSerialFence_WhichMustKeepItsGrowingFallback
+    pins the serial zero, so the deadlock cannot be reintroduced silently;
+    MigrantsLandingInFreshlyAllocatedClusters_AreStillRecordedInTheZoneMap pins that a cluster the slice itself
+    allocated is still covered;
+    ZoneMapConcurrentGrowthTests.WidenInto_RefusesAnIndexPastTheBatchStore_RatherThanWritingIntoAnAbandonedGeneration
+    and WidenInto_RefusesAnIndexTheMapHasGrownToCover_WhileTheBatchStillPinsTheOlderGeneration pin the refusal, the
+    second against a generation the map has since grown past — the only case that can actually lose a widen;
+    Grow_IsRefusedWhileThisThreadHoldsABatch_ButAllowedInAMigrateSliceThatHoldsNone pins both halves of the guard
   note the dense CellState[] became a CHUNKED pool in #872 step 8. The 64-byte layout is unchanged, and
     the chunking is what keeps the `ref CellState` a stable interior pointer while the pool grows — a
     resize would hand a concurrent worker a doomed array, which is MD-02's concern rather than this one
@@ -1310,6 +1350,11 @@
     bit-packed latches → 8× ping-pong amplification, parallel speedup collapses
     16-byte cell descriptors in flat array → 4-cell ping-pong per migration
     unpadded shared latch field → adjacent hot fields invalidate the line on every acquire
+    one shared word acquired per element of work → the zone-map step's CPU tripled under a sliced Prep (#886) and the
+      Migrate loop's per-entity cost carried a 44 % surcharge at W = 8 (#926); both read as "the parallel fence does
+      not scale" rather than as a latch, because the operation count is unchanged and only the coherence traffic moves
+    a fence slice growing a structure its siblings hold → their writes land in an abandoned generation and are lost
+      silently, which for a zone map is the false negative the type promises cannot happen
 
 ---
 
@@ -1428,6 +1473,13 @@
     Prep's start to the last phase that dispatched, so the six phase spans PLUS the scheduler's gaps between them.
     The sum of the six is what the partitioning COSTS; the span is what the host WAITS, and a frame budget is spent
     in the second. `MigrationTotalMs / LastFenceSpanMs` is roughly the parallelism the work achieved
+  invariant the span is not the whole interruption, and the surface carries BOTH because the difference is the part
+    no worker count removes. `LastFenceSpanMs` starts at Prep's Prepare; the fence call also runs a serial prep first
+    on the tick thread — context reset, dormancy drain, `ProcessTableFence` over every component table — inside the
+    same epoch fence window, with no user system running. `DatabaseEngine.LastFenceStallMs` times the whole call and
+    is what a host budgets a frame against; `LastFenceStallMs - LastFenceSpanMs` is the serial remainder, which is
+    Amdahl's fraction for the fence. A worker-count sweep reporting only the span claims a speed-up on part of the
+    stall, so the two are never alternative measurements of one thing and a surface showing one must name the other
   invariant the naming actively misleads and the rule says so once rather than letting each reader rediscover it:
     `FenceExecSystem.TotalWallTicks` says "wall" and is a SUM across chunks (a CPU-per-unit figure feeding
     `LiveFenceCostModel`), while `PhaseSpanTicks` is the elapsed one. A sum cannot express a speed-up, so reading
@@ -1436,19 +1488,68 @@
   invariant `LastFenceSpanMs` is ZERO on a host that drives `WriteTickFence` itself instead of running the parallel
     fence, because the phase-exec systems that time it never run. Zero means "the parallel fence did not drive this
     tick", which is the same zero-means-zero discipline as the rest of the surface and not a missing measurement
+  invariant MigrationExecuteMs is a sum over SLICES, and MigrationSliceCount is what makes it divisible. The parallel
+    fence sizes the Migrate phase's slices from the worker count, so the number of spans summed into it rises with W
+    while the workload fixes the entity count — every per-slice fixed cost inside the bracket is then charged again to
+    every entity. `MigrationExecuteMs / MigrationCount` is a per-entity cost only at MigrationSliceCount == 1;
+    otherwise it also carries `slices x per-slice fixed / entities`, and MigrationPrologueMs + MigrationEpilogueMs is
+    that term, measured. Both are PART of MigrationExecuteMs, never additional to it
+  invariant a summed-CPU member rising with the worker count is not, by itself, contention. The comparison that
+    decides it is against the achieved parallelism — CPU over span, which the engine already computes as
+    `DatabaseEngine.LastFenceMigrationParallelism` — because CPU per entity rising by the same factor the parallelism
+    rises is work being SPREAD at unchanged wall cost. Only the excess over that is contention, and a surface
+    presenting one without the other cannot express the difference
+  invariant "cannot express the difference" binds the EXPORT, not only the accessor: every surface carrying a
+    summed-CPU member must carry `LastFenceMigrationParallelism` too, which is why it is public and why
+    `typhon.ecs.spatial.fence_migration_parallelism` is exported beside `migration_duration_ms`. A consumer that can
+    read the summed figure and not the ratio is in exactly the position the clause above describes, and reads every
+    added worker as a regression
+  invariant the ratio is stored AS MEASURED, including below 1. A phase whose span exceeded its own summed CPU is
+    dispatch overhead swallowing the work — the single most useful reading the member has, and the one a floor at 1
+    makes indistinguishable from a healthy serial tick. The consumer needing a floor applies its own:
+    `ArchetypeClusterState.ObserveMigrationCost` divides by `max(parallelism, 1)`
+  invariant it divides only a numerator its own denominator covers. The ratio spans Migrate + IndexMassUpdate +
+    EntityMapUpdate, so the matching numerator is MigrationTotalMs. MigrationExecuteMs brackets the migrant loop
+    ALONE — roughly half a migration since the two applies moved into their own phases — and dividing it by this
+    ratio yields the elapsed time of nothing
+  invariant `LastFenceMigrationParallelism` is the one member that is deliberately STALE rather than reset: a tick
+    whose migration phases did no work leaves the previous value standing, because zero here would read as
+    "infinitely parallel" wherever it is used as a divisor. That is the single documented exception to zero-means-zero
+    on this surface, and it is why this member alone can describe a tick other than the last one
+  invariant CrossingsExecuted + RelocationsExecuted + RepairsExecuted == MigrationCount, exactly. A Migrate slice
+    mixes all three kinds by construction — the queue is sorted by destination cell key, not by kind — so a per-kind
+    cost is unattributable without the split, and the identity is what makes it checkable rather than trusted. These
+    are ALWAYS counted, unlike the same split on the trace record: needing the profiler on to attribute a cost would
+    perturb the bracket the cost is measured in
+  invariant FinalizeLockAcquisitions counts EVERY exclusive acquisition of the archetype-wide latch, which is why all
+    of them go through `PaddedFinalizeLock.Enter`/`Exit` rather than through the latch directly. A site added straight
+    onto `.Lock` would be invisible to the count, and a partial count is worse than none because it reads as evidence
+    of an uncontended latch
   invariant reading is allocation-free and lock-free — plain field reads of live engine state, torn only across a
     fence boundary. No accessor may take a lock or allocate to serialise against the fence
   scope: SpatialMigrationTelemetry.MaxClusterOverhang, SpatialMigrationTelemetry.TightnessSampleCount,
     SpatialMigrationTelemetry.MeanClusterExtentRatio, SpatialMigrationTelemetry.MeanPackingBound,
     SpatialMigrationTelemetry.MeanTightnessToBound, SpatialMigrationTelemetry.CellTreePromotions,
-    SpatialMigrationTelemetry.CellTreeDemotions, DatabaseEngine.GetSpatialTelemetry,
-    DatabaseEngine.GetSpatialTelemetryTotal, DatabaseEngine.LastFenceSpanMs, TyphonRuntime.LastFenceWallTicks,
+    SpatialMigrationTelemetry.CellTreeDemotions, SpatialMigrationTelemetry.MigrationSliceCount,
+    SpatialMigrationTelemetry.MigrationPrologueMs, SpatialMigrationTelemetry.MigrationEpilogueMs,
+    SpatialMigrationTelemetry.CrossingsExecuted, SpatialMigrationTelemetry.RelocationsExecuted,
+    SpatialMigrationTelemetry.RepairsExecuted, SpatialMigrationTelemetry.FinalizeLockAcquisitions,
+    ArchetypeClusterState.FinalizeLockAcquisitions, DatabaseEngine.LastFenceMigrationParallelism,
+    DatabaseEngine.GetSpatialTelemetry,
+    DatabaseEngine.GetSpatialTelemetryTotal, DatabaseEngine.LastFenceSpanMs, DatabaseEngine.LastFenceStallMs,
+    TyphonRuntime.LastFenceWallTicks,
     FenceExecSystem.PhaseSpanTicks, FenceExecSystem.TotalWallTicks, ArchetypeClusterState.ClusterTightnessSample
   verified: SpatialMigrationTelemetryTests.Tightness_ReportsNoSamples_RatherThanAStaleMean_OnAQuietTick pins the
     zero-samples case; MaxClusterOverhang_IsPublished_AndIsARunningMaximumRatherThanAPerTickValue pins the third
     clock; Total_MaxesTheOverhang_AndWeightsTheTightnessMeansBySample pins the per-kind fold across two archetypes;
     Accessor_AllocatesNothing pins the allocation-free read; FenceSpanMs_IsZero_WhenTheHostDrivesTheFenceItself pins
-    the serial-fence zero, so it cannot be read as a fence that cost nothing
+    the serial-fence zero, so it cannot be read as a fence that cost nothing;
+    ExecutedKinds_SumExactlyToTheMigrationCount pins the per-kind identity;
+    MigrationSliceCount_IsPublished_AndBoundsThePrologueAndEpilogueWithinTheExecuteSpan pins the divisibility of the
+    summed span; FinalizeLockAcquisitions_CountEveryAcquisition_AndResetPerTick pins the latch count;
+    FenceStallMs_CoversTheSerialPrep_ThatTheSpanExcludes pins the stall-against-span relation;
+    MigrationParallelism_IsExportedBesideTheSummedCpuGauges_AndIsNotFlooredAtOne pins both the export and the
+    unclamped storage, so neither can be dropped without a red test
   on_violation:
     a per-tick member read as a rate → a number sampled from one tick of hundreds, presented as throughput
     the overhang summed rather than maxed → every kNN ring widens by a bound no archetype has
@@ -1456,3 +1557,9 @@
     the tightness means averaged per archetype → a quiet archetype halves a busy one's reading
     summed CPU shown where the span belongs → a frame budget compared against a number W times too large, which is
       how an 8 ms budget bought one repair unit
+    the slice count dropped → a per-slice fixed cost divided by entities, read as per-entity contention that grows
+      with the worker count; this is #912, which stood as an unowned anomaly in the design for three steps
+    summed CPU compared across worker counts without the parallelism beside it → work being spread reads as work
+      getting slower, in the direction that condemns the parallel fence for scaling
+    an acquisition added straight onto `.Lock` → a latch that reads as uncontended because its busiest caller is
+      not counted

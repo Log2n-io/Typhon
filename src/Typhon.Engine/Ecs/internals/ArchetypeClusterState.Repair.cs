@@ -331,14 +331,14 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         ref var nullCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx);
+        _finalizeLock.Enter(ref nullCtx);
         try
         {
             RepairNominations.AddRange(nominations);
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
 
         // Cleared, matching EnqueueMigrationsBulk. Redundant today — every slice allocates its own list — and exactly the
