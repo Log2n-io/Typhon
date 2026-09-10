@@ -1478,13 +1478,18 @@ public sealed partial class TyphonRuntime : IDisposable
     private int ComputeChunkCount(int entityCount, int sysIdx)
     {
         var workerCount = Scheduler.WorkerCount;
-        var minChunkSize = Options.ParallelQueryMinChunkSize;
+        var sys = Scheduler.Systems[sysIdx];
+
+        // Per-system floor, falling back to the global one. The global value is a bet that per-entity work is roughly
+        // uniform across the schedule — it is the same entity count for every system — and a system whose per-entity
+        // cost is orders above its neighbours' is starved of workers by it: 320 entities against a 64 floor is five
+        // chunks no matter how high ChunksPerWorker goes, because the entity cap and not the worker cap is binding.
+        var minChunkSize = sys.MinChunkSize > 0 ? sys.MinChunkSize : Options.ParallelQueryMinChunkSize;
         var maxChunks = Math.Max(1, (entityCount + minChunkSize - 1) / minChunkSize);
 
         // Per-system oversubscription: lift the workerCount cap by ChunksPerWorker (default 1.0 = no change).
         // Round-to-nearest so 1.5 × 16 = 24 exactly; small bumps like 1.1 × 16 = 17.6 → 18.
-        var chunksPerWorker = Scheduler.Systems[sysIdx].ChunksPerWorker;
-        var workerCap = Math.Max(1, (int)MathF.Round(workerCount * chunksPerWorker));
+        var workerCap = Math.Max(1, (int)MathF.Round(workerCount * sys.ChunksPerWorker));
         return Math.Min(workerCap, maxChunks);
     }
 
