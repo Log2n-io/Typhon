@@ -31,6 +31,13 @@ using System.Runtime.CompilerServices;
 // ArchetypeClusterState is internal wholesale), and the whole point of the tool is to show the internal state
 // the public API deliberately hides. Genuine internal-implementation reuse; not refactorable to public.
 [assembly: InternalsVisibleTo("SpaceBattle")]
+// Added 2026-09-07 (#906): the SWG Tatooine simulation is a game-shaped spatial workload. Two needs, both genuine and
+// neither refactorable to today's public surface: (1) ClusterSpatialQuery is PUBLIC and its own XML doc states "the
+// caller must be inside an EpochGuard scope", but EpochGuard is internal — the documented precondition of a public API
+// cannot be satisfied from outside this assembly; (2) a ClusterSpatialQueryResult carries a raw entity id as a long and
+// EntityId.FromRaw is internal, so a caller cannot act on what a spatial query found. Both are public-API gaps rather
+// than internal-implementation reuse and are filed as such; this declaration should be removed when they close.
+[assembly: InternalsVisibleTo("SwgTatooine")]
 // Re-added 2026-05-25 (#376 Stage-3 4A): the `with-queries` trace fixture must emit QueryPlan + phase SPAN
 // records, whose typed `EncodeTo` encoders are internal source-generated `[TraceEvent]` ref structs
 // (QueryPlanEvent et al.) with NO public surface. Genuine internal-implementation reuse — the fixture drives

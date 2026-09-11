@@ -1,0 +1,204 @@
+using System;
+
+namespace SwgTatooine;
+
+/// <summary>
+/// Everything the simulation is parameterised by. Two axes are swept for the partitioning study — <see cref="WorldEdgeKm"/>
+/// and <see cref="PopulationScale"/> — and everything else is either a fact about Star Wars Galaxies or a knob the study
+/// tunes.
+/// </summary>
+/// <remarks>
+/// <para><b>The two axes are deliberately independent.</b> Growing the world at a fixed population makes the grid sparser
+/// without changing how much work the systems do; growing the population at a fixed world makes cells denser without
+/// changing how many of them exist. A single "make it bigger" axis would move both at once and no measurement taken on it
+/// could say which one the engine reacted to.</para>
+/// </remarks>
+public sealed class SimConfig
+{
+    // ── Axis 1: the world ───────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Edge of the square planet surface, in kilometres. <b>16.384 is the real Tatooine</b> — every SWG planet is
+    /// 16 384 m square, built from one-metre tiles, with coordinates running -8192..+8192 on X and Z (Core3's
+    /// <c>coordinateMin</c>/<c>coordinateMax</c>). 64 and 128 are inflations that keep the same content and spread it
+    /// further apart, which is how the study reaches a sparsity SWG itself never had.
+    /// </summary>
+    public float WorldEdgeKm = TatooineData.PlanetEdgeM / 1000f;
+
+    /// <summary>
+    /// How the world inflation is applied to content. <c>true</c> scales every coordinate, so cities stay in the same
+    /// relative places and simply get further apart; <c>false</c> keeps the original coordinates and leaves the extra
+    /// area empty.
+    /// </summary>
+    /// <remarks>
+    /// Scaling is the default because the alternative produces a world that is mostly void with all the content in one
+    /// corner — which is a legitimate shape but tests the grid's sparsity handling rather than the cell layer, and the
+    /// swarm scenario in <c>GameScenarios</c> already covers that.
+    /// </remarks>
+    public bool ScaleContentWithWorld = true;
+
+    // ── Axis 2: the population ──────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Multiplier on every agent population — creatures, NPCs, players, mission camps. <c>1</c> is the faithful baseline
+    /// drawn from what a live SWG galaxy actually held; higher values are volumetry, not fidelity, and the report says so.
+    /// </summary>
+    /// <remarks>
+    /// Static content (cities, buildings, points of interest) is NOT scaled by this: those are the planet, and multiplying
+    /// them would be inventing geography rather than adding load. Player structures ARE scaled, because how many houses a
+    /// planet carries is a function of how many players it has.
+    /// </remarks>
+    public float PopulationScale = 1f;
+
+    // ── The partitioning knobs under study ──────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Grid cell edge in metres. The headline tuning knob. <c>0</c> means "derive from the entity density" — see
+    /// <see cref="ResolveCellSize"/>.
+    /// </summary>
+    public float CellSizeM;
+
+    /// <summary>
+    /// Cluster count at which a cell half promotes to a per-cell R-Tree. The engine's default, <see cref="int.MaxValue"/>, never promotes; a positive
+    /// count forces the count-and-tightness gate.
+    /// </summary>
+    public int CellTreePromoteThreshold = SpatialOptions.DefaultCellTreePromoteThreshold;
+
+    /// <summary>Mean cluster extent, as a fraction of the cell edge, at or below which a cell may promote. Read by the count gate only.</summary>
+    public float CellTreePromoteTightness = SpatialOptions.DefaultCellTreePromoteTightness;
+
+    /// <summary>Per-tick repair budget in milliseconds. A cliff, not a dial — see the spatial tuning guide.</summary>
+    public float ReclusterBudgetMs = 1.0f;
+
+    /// <summary>Multiplier on the per-cell packing bound that derives the intra-cell target extent.</summary>
+    public float ClusterTargetPackingSlack = 1.5f;
+
+    /// <summary>Floor of the drift gate as a fraction of the cell edge — the engine's <c>ClusterTargetExtentRatio</c>.</summary>
+    public float ClusterTargetExtentRatio = 0.25f;
+
+    /// <summary>Floor of the repair-nomination gate as a fraction of the cell edge — the engine's <c>ClusterRepairExtentRatio</c>.</summary>
+    public float ClusterRepairExtentRatio = 0.75f;
+
+    /// <summary>Clusters per repair unit — the engine's <c>RepairWorstClustersPerUnit</c>; <c>0</c> re-sorts a whole cell as one unit.</summary>
+    public int RepairWorstClustersPerUnit = 8;
+
+    // ── Shuttles (#910) ─────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Players also travel between cities by shuttle. Off reproduces the pre-shuttle simulation exactly.</summary>
+    public bool Shuttles = true;
+
+    /// <summary>Share of in-city travel decisions taken by shuttle rather than on foot or mounted. [EST]</summary>
+    public float ShuttleShare = 0.5f;
+
+    /// <summary>Seconds between two landings of one port's shuttle. [EST]</summary>
+    public float ShuttleIntervalS = 120f;
+
+    /// <summary>Seconds a landed shuttle takes passengers. [EST]</summary>
+    public float BoardingWindowS = 30f;
+
+    /// <summary>
+    /// Board a port's whole queue on the landing tick. Off (the default), each queued passenger boards on its own tick inside the window — a
+    /// ticket used while the shuttle is down transports that player at once — so arrivals trickle rather than land together.
+    /// </summary>
+    public bool ShuttleBurst;
+
+    /// <summary>Time radius queries at shuttleports after arrivals against a steady port, and read those cells' tightness (#910's measurement).</summary>
+    public bool Probe;
+
+    /// <summary>Spawn count at which a transaction places its entities in per-cell Morton order.</summary>
+    public int BatchSpawnSortThreshold = 128;
+
+    // ── Runtime ─────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Simulation rate. SWG's server ran its main loop at roughly 10 Hz for AI and movement broadcast; this is the tick
+    /// the system DAG is driven at and what a per-tick cost is measured against.
+    /// </summary>
+    public int TickRateHz = 10;
+
+    /// <summary>Worker threads for the system DAG and the parallel fence. <c>0</c> means <see cref="Environment.ProcessorCount"/>.</summary>
+    public int WorkerCount;
+
+    /// <summary>Ticks to run before measurement starts, so JIT and the first checkpoint are not in the numbers.</summary>
+    public int WarmTicks = 40;
+
+    /// <summary>Measured ticks.</summary>
+    public int MeasuredTicks = 200;
+
+    /// <summary>Page cache size in MiB. The static world alone is large, so this is not the place to be frugal.</summary>
+    public int PageCacheMiB = 1024;
+
+    /// <summary>
+    /// Where the database file lives. The simulation runs on a REAL on-disk database with a real WAL — most archetypes
+    /// declare <c>ClusterDurability.Checkpoint</c> so their per-tick values ride the checkpoint rather than the WAL, but
+    /// the durability machinery is genuinely in the loop rather than stubbed out.
+    /// </summary>
+    public string DatabaseDirectory;
+
+    /// <summary>Run the tick fence on the worker pool rather than serially on the tick driver.</summary>
+    public bool ParallelFence = true;
+
+    /// <summary>
+    /// Smallest entity count the runtime will give a parallel chunk. The engine default is 64.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>This is what caps the awareness system's parallelism, and it is not obvious.</b> Chunk count is
+    /// <c>min(round(WorkerCount x ChunksPerWorker), ceil(entityCount / ParallelQueryMinChunkSize))</c>. With 320 players
+    /// the second term is <c>ceil(320 / 64) = 5</c>, so the system that is half the tick runs on five workers however
+    /// high <c>ChunksPerWorker</c> is set. Raising the oversubscription factor does nothing; this is the knob.</para>
+    /// <para>It is global rather than per-system, so lowering it splits every parallel system more finely — which is the
+    /// cost side of the trade and the reason to measure rather than assume.</para>
+    /// </remarks>
+    public int ParallelQueryMinChunkSize = 64;
+
+    /// <summary>
+    /// Split interest management into one system per queried archetype instead of one system running four queries.
+    /// </summary>
+    /// <remarks>
+    /// The other way at the same problem, and it needs no global setting: four systems over the same 320 players each
+    /// get their own five chunks, and since they share no write they run concurrently — twenty workers busy instead of
+    /// five, with the same total work.
+    /// </remarks>
+    public bool SplitAwareness;
+
+    /// <summary>
+    /// Per-system <c>MinChunkSize</c> for the awareness system only. <c>0</c> leaves it on the global floor.
+    /// </summary>
+    /// <remarks>
+    /// The scoped form of <see cref="ParallelQueryMinChunkSize"/>. Lowering the GLOBAL floor won 1.57x at 320 players and
+    /// lost 9 % at 5 120, because it split every system finer including the ones that did not need it; this setting is the
+    /// same lever aimed at the one system whose per-entity cost justifies it.
+    /// </remarks>
+    public int AwarenessMinChunk;
+
+    /// <summary>Seed for every random decision, so a run is reproducible and two arms see the same world.</summary>
+    public int Seed = 20260907;
+
+    // ── Derived ─────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Planet edge in metres.</summary>
+    public float WorldEdgeM => WorldEdgeKm * 1000f;
+
+    /// <summary>
+    /// Factor by which authentic Tatooine coordinates are stretched to fill this world. 1 at the real 16 km size.
+    /// </summary>
+    public float ContentScale => ScaleContentWithWorld ? WorldEdgeM / TatooineData.PlanetEdgeM : 1f;
+
+    /// <summary>
+    /// The cell size to configure the grid with. An explicit <see cref="CellSizeM"/> wins; otherwise 256 m scaled with
+    /// the world — a 64 x 64 grid over the real planet.
+    /// </summary>
+    /// <remarks>
+    /// The derivation is deliberately crude — it exists so that a run with no <c>--cell</c> argument is sane, not so that
+    /// it is optimal. Finding the optimum is the whole point of the sweep, and a clever default would bias it.
+    /// </remarks>
+    public float ResolveCellSize() => CellSizeM > 0f ? CellSizeM : 256f * ContentScale;
+
+    /// <summary>Worker count to actually use.</summary>
+    public int ResolveWorkerCount() => WorkerCount > 0 ? WorkerCount : Environment.ProcessorCount;
+
+    /// <summary>A short label identifying this configuration in a results table.</summary>
+    public string Label =>
+        $"{WorldEdgeKm:N0}km x{PopulationScale:N1} cell={ResolveCellSize():N0}m floors={ClusterTargetExtentRatio:G}/{ClusterRepairExtentRatio:G} "
+        + $"unit={RepairWorstClustersPerUnit} shuttles={(!Shuttles ? "off" : ShuttleBurst ? "burst" : "trickle")}";
+}
