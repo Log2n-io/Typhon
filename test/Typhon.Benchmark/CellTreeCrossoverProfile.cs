@@ -151,13 +151,24 @@ static class CellTreeCrossoverProfile
         var rounds = Math.Max(1, ArgInt(args, "--rounds", 7));
         var budgetMs = ArgFloat(args, "--budget-ms", NonBindingBudgetMs);
 
+        // The floors of the drift and repair gates (ClusterTargetExtentRatio, ClusterRepairExtentRatio): a dense cell's density-derived target sits
+        // below both, so at the defaults its clusters are never tightened past a quarter of the cell.
+        var targetRatio = ArgFloat(args, "--target-ratio", 0.25f);
+        var repairRatio = ArgFloat(args, "--repair-ratio", 0.75f);
+
+        // Clusters per repair unit (repairWorstClustersPerUnit): 8 re-sorts a cell's worst eight together; 0 re-sorts the whole cell as one unit.
+        var repairUnit = ArgInt(args, "--repair-unit", 8);
+
         Console.WriteLine($"#917 — cell tree vs linear scan on an engine-maintained layout; rounds {rounds}, {QueryBoxes} boxes per pass, "
-            + $"repair budget {budgetMs:G} ms{(broadphase ? ", broadphase alone and whole query" : "")}");
+            + $"repair budget {budgetMs:G} ms, floors {targetRatio:G}/{repairRatio:G}, repair unit {repairUnit}"
+            + $"{(broadphase ? ", broadphase alone and whole query" : "")}");
         foreach (var clusters in clusterCounts)
         {
             // One engine per cell size: the half is switched between the two structures in place, so both answer over the same clusters.
             using var arm = new Arm("cell");
-            arm.Do(() => Build(arm, clusters, budgetMs));
+            var build = Stopwatch.StartNew();
+            arm.Do(() => Build(arm, clusters, budgetMs, targetRatio, repairRatio, repairUnit));
+            Console.WriteLine($"  built and warmed in {build.Elapsed.TotalSeconds:F1} s");
             var slots = BitOperations.PopCount(arm.State.Layout.FullMask);
             var spawned = clusters * slots;
             if (broadphase)
@@ -519,7 +530,7 @@ static class CellTreeCrossoverProfile
         return frame;
     }
 
-    private static void Build(Arm arm, int clusters, float budgetMs)
+    private static void Build(Arm arm, int clusters, float budgetMs, float targetRatio, float repairRatio, int repairUnit)
     {
         var sc = new ServiceCollection();
         sc.AddLogging(b => b.SetMinimumLevel(LogLevel.Critical))
@@ -542,7 +553,8 @@ static class CellTreeCrossoverProfile
         var dbe = arm.Services.GetRequiredService<DatabaseEngine>();
         arm.Engine = dbe;
         dbe.RegisterComponentFromAccessor<CtxPos>();
-        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(new Vector2(0, 0), new Vector2(CellSize, CellSize), CellSize, reclusterBudgetMs: budgetMs));
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(new Vector2(0, 0), new Vector2(CellSize, CellSize), CellSize, clusterTargetExtentRatio: targetRatio,
+            clusterRepairExtentRatio: repairRatio, reclusterBudgetMs: budgetMs, repairWorstClustersPerUnit: repairUnit));
         dbe.ClusterCellTreePromoteThreshold = int.MaxValue;   // the half is switched by hand, never by the gate
         dbe.InitializeArchetypes();
         arm.State = dbe._archetypeStates[Archetype<CtxUnit>.Metadata.ArchetypeId].ClusterState;
@@ -568,12 +580,20 @@ static class CellTreeCrossoverProfile
         }
 
         dbe.WriteTickFence(arm.Tick++);
+
+        // The fences under motion are timed — the maintenance a layout costs to keep — the last half of them, past the first repairs of the birth layout.
+        var fenceNs = new double[WarmFences];
         for (var f = 0; f < WarmFences; f++)
         {
             Displace(xs, ys, rng);
             Write(arm, xs, ys);
+            var t0 = Stopwatch.GetTimestamp();
             dbe.WriteTickFence(arm.Tick++);
+            fenceNs[f] = (Stopwatch.GetTimestamp() - t0) * 1e9 / Stopwatch.Frequency;
         }
+
+        Console.WriteLine($"  serial fence under motion: median {Median(fenceNs[(WarmFences / 2)..]) / 1e6:F2} ms over the last {WarmFences / 2} "
+            + $"of {WarmFences}");
     }
 
     /// <summary>

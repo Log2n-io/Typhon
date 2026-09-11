@@ -19,7 +19,8 @@ namespace Typhon.Engine.Tests;
 /// <remarks>
 /// The membership of entities in clusters after Migrate is NOT compared across arms and must not be: the parallel Migrate phase places concurrently, so two
 /// worker counts can legitimately leave an entity in different slots. That is why the queue is snapshotted from inside the fence, by
-/// <see cref="ArchetypeClusterState.PrepQueueProbe"/>, on the tick whose input state is identical across arms — the first fence after the writes.
+/// <see cref="ArchetypeClusterState.PrepQueueProbe"/>, on the tick whose input state is identical across arms — the first fence after the writes. Since
+/// #910 the probe observes the prefix after the drain-order sort, so the order pinned is destination cell first and detector order inside one cell.
 /// </remarks>
 [TestFixture]
 [NonParallelizable]
@@ -138,11 +139,17 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
         return list;
     }
 
-    private static bool IsInSourceOrder(List<Request> queue)
+    /// <summary>
+    /// The order <see cref="ArchetypeClusterState.PrepQueueProbe"/> observes since #910: ascending destination cell — the drain-order sort runs before the
+    /// probe — and inside one cell ascending (cluster, slot), the order the detector appends in and the slices' crossings are concatenated in, which the
+    /// sort, being stable, keeps.
+    /// </summary>
+    private static bool IsInDrainOrder(List<Request> queue)
     {
         for (var i = 1; i < queue.Count; i++)
         {
-            if (queue[i].Chunk < queue[i - 1].Chunk || (queue[i].Chunk == queue[i - 1].Chunk && queue[i].Slot <= queue[i - 1].Slot))
+            var (a, b) = (queue[i - 1], queue[i]);
+            if (b.Cell < a.Cell || (b.Cell == a.Cell && (b.Chunk < a.Chunk || (b.Chunk == a.Chunk && b.Slot <= a.Slot))))
             {
                 return false;
             }
@@ -156,6 +163,7 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
         public List<Request> Queue = [];
         public int SlicesRun;
         public int MigrationsExecuted;
+        public (int Jumps, int Largest, int Cells) Arrivals;
         public List<(int Start, int Count)> PrepItems = [];
         public List<int> DirtyWords = [];
     }
@@ -225,7 +233,9 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
                 }
 
                 dbe.WriteTickFence(2);
-                outcome.MigrationsExecuted = dbe.GetSpatialTelemetry(ArchetypeId).MigrationCount;
+                var t = dbe.GetSpatialTelemetry(ArchetypeId);
+                outcome.MigrationsExecuted = t.MigrationCount;
+                outcome.Arrivals = (t.JumpCrossings, t.LargestArrivalRun, t.ArrivalCellsTouched);
             }
             else
             {
@@ -261,7 +271,9 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
                 if (n == 2)
                 {
                     // Tick 1's fence just ran: its Prep plan is still the one on the exec system, and its telemetry is the last tick's.
-                    outcome.MigrationsExecuted = dbe.GetSpatialTelemetry(ArchetypeId).MigrationCount;
+                    var t = dbe.GetSpatialTelemetry(ArchetypeId);
+                    outcome.MigrationsExecuted = t.MigrationCount;
+                    outcome.Arrivals = (t.JumpCrossings, t.LargestArrivalRun, t.ArrivalCellsTouched);
                     var plan = runtime.FencePrepExec.PlanForTest;
                     for (var i = 0; i < plan.ItemCount; i++)
                     {
@@ -361,11 +373,13 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
     [Test]
     [CancelAfter(120_000)]
     [Property("CacheSize", 64 * 1024 * 1024)]   // 16 384 spatial entities and their index pages do not fit the 8 MiB default
+    [VerifiesRule("CR-01")]
     public void ParallelFence_AtOneWorker_IsNotSliced_AndMatchesTheSerialFence() => AssertArmMatchesSerial(1, expectSlices: false);
 
     [Test]
     [CancelAfter(120_000)]
     [Property("CacheSize", 64 * 1024 * 1024)]
+    [VerifiesRule("CR-01")]
     public void SlicedPrep_BuildsTheSameQueueAsTheUnslicedPath_AtTwoWorkers() => AssertArmMatchesSerial(2);
 
     /// <summary>Four workers, ~20 slices. Quarantined against #887 from 2026-09-04 to 2026-09-05, when the drain that caused it left the slices; see the
@@ -373,6 +387,7 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
     [Test]
     [CancelAfter(120_000)]
     [Property("CacheSize", 64 * 1024 * 1024)]
+    [VerifiesRule("CR-01")]
     public void SlicedPrep_BuildsTheSameQueueAsTheUnslicedPath_AtFourWorkers() => AssertArmMatchesSerial(4);
 
     /// <summary>
@@ -393,6 +408,7 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
     [Test]
     [CancelAfter(120_000)]
     [Property("CacheSize", 64 * 1024 * 1024)]
+    [VerifiesRule("CR-01")]
     public void SlicedPrep_BuildsTheSameQueueAsTheUnslicedPath_AtEightWorkers()
         => AssertArmMatchesSerial(8);
 
@@ -436,7 +452,9 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
     {
         var serial = RunArmOn(SerialArm);
         Assert.That(serial.Queue, Is.Not.Empty, "the write set must cross cells, or the queue comparison is vacuous");
-        Assert.That(IsInSourceOrder(serial.Queue), Is.True, "sanity: the serial detector appends in ascending (cluster, slot) order");
+        Assert.That(IsInDrainOrder(serial.Queue), Is.True,
+            "the serial fence's prefix is in drain order: by destination cell, and in the detector's (cluster, slot) order inside one (#910)");
+        Assert.That(serial.Arrivals.Jumps, Is.GreaterThan(0), "precondition: uniformly re-scattered entities jump, so the classification is exercised");
         Assert.That(serial.SlicesRun, Is.EqualTo(0), "the serial fence never slices");
 
         var arm = RunArmOn(w);
@@ -458,10 +476,12 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
 
             Assert.That(Crossings(arm.Queue), Is.EquivalentTo(Crossings(serial.Queue)),
                 $"W={w}: the same entities must cross to the same cells whichever path detected them");
-            Assert.That(IsInSourceOrder(arm.Queue), Is.True,
-                $"W={w}: the queue the throttle sees must be in ascending (cluster, slot) order — the order the serial detector appends in and the order "
-                + "the slices' crossings are concatenated in (TH-01 admits the first N)");
+            Assert.That(IsInDrainOrder(arm.Queue), Is.True,
+                $"W={w}: the prefix Migrate slices must be in drain order — ascending destination cell (#910's sort, which the slice planner carves on), "
+                + "and inside one cell the order the detector appends in and the slices' crossings are concatenated in (TH-01 admits the first N)");
             Assert.That(arm.MigrationsExecuted, Is.EqualTo(serial.MigrationsExecuted), $"W={w}: same crossings, same migrations");
+            Assert.That(arm.Arrivals, Is.EqualTo(serial.Arrivals),
+                $"W={w}: the same crossings classify and group the same way whichever producer filed them — head drain, slice sink or serial scan");
             Assert.That(arm.PrepItems, expectSlices ? Is.Not.Empty : Is.Empty, $"W={w}: PrepSlice items emitted only when slicing is on");
         });
 

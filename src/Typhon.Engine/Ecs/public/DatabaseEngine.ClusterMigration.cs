@@ -239,11 +239,14 @@ public partial class DatabaseEngine
         var compSize = layout.ComponentSize(ss.Slot);
         var compOffset = layout.ComponentOffset(ss.Slot);
         var fieldType = ss.FieldInfo.FieldType;
+        var is3D = fieldType.Is3D();
         var grid = clusterState.Grid;
         ref readonly var cfg = ref grid.Config;
         var cellSize = cfg.CellSize;
         var hysteresisMargin = cellSize * cfg.MigrationHysteresisRatio;
         var staleDropped = 0;
+        var jumps = 0;
+        var clamped = 0;
 
         for (var wordIdx = 0; wordIdx < processBitmap.Length; wordIdx++)
         {
@@ -297,6 +300,9 @@ public partial class DatabaseEngine
                     }
 
                     migrationsQueuedCount++;
+                    var (dx, dy, dz) = grid.CellKeyToCoords(destCellKey);
+                    jumps += SpatialGrid.IsJump(cx, cy, cz, dx, dy, dz) ? 1 : 0;
+                    clamped += grid.IsClampedPoint(posX, posY, posZ, is3D) ? 1 : 0;
                     TyphonEvent.EmitSpatialClusterMigrationDetect(archetypeId, chunkId, currentCellKey, destCellKey);
                     clusterState.EnqueueMigration(chunkId, slotIndex, destCellKey);
                     TyphonEvent.EmitSpatialClusterMigrationQueue(archetypeId, chunkId,
@@ -306,6 +312,24 @@ public partial class DatabaseEngine
         }
 
         clusterState.LastTickStaleFlagsDropped = staleDropped;
+        AddCrossingClassification(clusterState, jumps, clamped);
+    }
+
+    /// <summary>
+    /// Publish one producer call's #910 T0 counts. One atomic per call rather than per crossing: Prep slices file crossings concurrently, and the reset at
+    /// the top of the fence is ordered against them by the phase barrier, the same arrangement as <c>PrepSliceHysteresisAbsorbed</c>.
+    /// </summary>
+    private static void AddCrossingClassification(ArchetypeClusterState clusterState, int jumps, int clamped)
+    {
+        if (jumps != 0)
+        {
+            Interlocked.Add(ref clusterState.LastTickJumpCrossings, jumps);
+        }
+
+        if (clamped != 0)
+        {
+            Interlocked.Add(ref clusterState.LastTickClampedDestinations, clamped);
+        }
     }
 
     /// <inheritdoc cref="DetectClusterMigrations"/>
@@ -341,6 +365,8 @@ public partial class DatabaseEngine
             var migrationsQueuedCount = 0;
             var hysteresisAbsorbedCount = 0;
             var clustersTouched = 0;
+            var jumps = 0;
+            var clamped = 0;
 
             // ─── Step (a): drain WriteSpatial-flagged migrations ───
             //
@@ -378,6 +404,7 @@ public partial class DatabaseEngine
             var grid = _spatialGrid;
             var clusterCellMap = clusterState.ClusterCellMap;
             var fieldType = ss.FieldInfo.FieldType;
+            var is3D = fieldType.Is3D();
             ref readonly var cfg = ref grid.Config;
             var cellSize = cfg.CellSize;
             var worldMinX = cfg.WorldMin.X;
@@ -445,6 +472,9 @@ public partial class DatabaseEngine
                         if (newCellKey != currentCellKey)
                         {
                             migrationsQueuedCount++;
+                            var (dx, dy, dz) = grid.CellKeyToCoords(newCellKey);
+                            jumps += SpatialGrid.IsJump(cx, cy, cz, dx, dy, dz) ? 1 : 0;
+                            clamped += grid.IsClampedPoint(posX, posY, posZ, is3D) ? 1 : 0;
                             TyphonEvent.EmitSpatialClusterMigrationDetect(archetypeId, clusterChunkId, currentCellKey, newCellKey);
                             if (sink != null)
                             {
@@ -488,6 +518,8 @@ public partial class DatabaseEngine
                 clusterState.LastTickHysteresisAbsorbedCount += hysteresisAbsorbedCount;
                 clusterState.TotalHysteresisAbsorbedCount += hysteresisAbsorbedCount;
             }
+
+            AddCrossingClassification(clusterState, jumps, clamped);
 
             detectScanSpan.MigrationsQueued = migrationsQueuedCount;
             detectScanSpan.HysteresisAbsorbed = sink != null ? hysteresisAbsorbedCount : clusterState.LastTickHysteresisAbsorbedCount;

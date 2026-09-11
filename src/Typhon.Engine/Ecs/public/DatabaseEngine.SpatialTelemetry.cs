@@ -1,3 +1,4 @@
+using System;
 using System.Diagnostics;
 using System.Threading;
 using JetBrains.Annotations;
@@ -177,6 +178,7 @@ public partial class DatabaseEngine
             PrepDetectMs = TicksToMs(clusterState.PrepDetectTicks),
             PrepThrottleMs = TicksToMs(clusterState.PrepThrottleTicks),
             PrepPlanMs = TicksToMs(clusterState.PrepPlanTicks),
+            PrepSortMs = TicksToMs(clusterState.PrepSortTicks),
             PrepPreSizeMs = TicksToMs(clusterState.PrepPreSizeTicks),
             PrepDirtyClusters = clusterState.PrepDirtyClusters,
             DriftersUnplaced = clusterState.LastTickDriftersUnplaced,
@@ -192,6 +194,10 @@ public partial class DatabaseEngine
             PinsRejected = clusterState.LastTickPinsRejected,
             RelocationsAdmitted = clusterState.LastTickRelocationsAdmitted,
             CrossingsQueued = clusterState.LastTickCrossingsQueued,
+            JumpCrossings = clusterState.LastTickJumpCrossings,
+            ClampedDestinations = clusterState.LastTickClampedDestinations,
+            LargestArrivalRun = clusterState.LastTickLargestArrivalRun,
+            ArrivalCellsTouched = clusterState.LastTickArrivalCellsTouched,
             RelocationSpendNs = clusterState.LastTickRelocationSpendNs,
             RepairBudgetStarvedNs = clusterState.LastTickRepairBudgetStarvedNs,
             MaxClusterOverhang = Volatile.Read(ref clusterState.MaxClusterOverhang),
@@ -263,6 +269,10 @@ public partial class DatabaseEngine
         var pinsRejected = 0;
         var relocationsAdmitted = 0;
         var crossingsQueued = 0;
+        var jumpCrossings = 0;
+        var clampedDestinations = 0;
+        var largestArrivalRun = 0;
+        var arrivalCellsTouched = 0;
         var relocationSpendNs = 0d;
         var repairStarvedNs = 0d;
         var maxOverhang = 0f;
@@ -319,6 +329,11 @@ public partial class DatabaseEngine
             pinsRejected += clusterState.LastTickPinsRejected;
             relocationsAdmitted += clusterState.LastTickRelocationsAdmitted;
             crossingsQueued += clusterState.LastTickCrossingsQueued;
+            jumpCrossings += clusterState.LastTickJumpCrossings;
+            clampedDestinations += clusterState.LastTickClampedDestinations;
+            // MAXED, not summed: the largest arrival is a property of one cell, and two archetypes' runs into different cells do not add.
+            largestArrivalRun = Math.Max(largestArrivalRun, clusterState.LastTickLargestArrivalRun);
+            arrivalCellsTouched += clusterState.LastTickArrivalCellsTouched;
             relocationSpendNs += clusterState.LastTickRelocationSpendNs;
             repairStarvedNs += clusterState.LastTickRepairBudgetStarvedNs;
             treePromotions += clusterState.LastTickCellTreePromotions;
@@ -380,6 +395,10 @@ public partial class DatabaseEngine
             PinsRejected = pinsRejected,
             RelocationsAdmitted = relocationsAdmitted,
             CrossingsQueued = crossingsQueued,
+            JumpCrossings = jumpCrossings,
+            ClampedDestinations = clampedDestinations,
+            LargestArrivalRun = largestArrivalRun,
+            ArrivalCellsTouched = arrivalCellsTouched,
             RelocationSpendNs = relocationSpendNs,
             RepairBudgetStarvedNs = repairStarvedNs,
             MaxClusterOverhang = maxOverhang,

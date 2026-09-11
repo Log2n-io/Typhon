@@ -864,6 +864,10 @@ public partial class DatabaseEngine
         clusterState.LastTickMigrationPrologueTicks = 0L;
         clusterState.LastTickMigrationEpilogueTicks = 0L;
         clusterState.LastTickCrossingsExecuted = 0;
+        clusterState.LastTickJumpCrossings = 0;
+        clusterState.LastTickClampedDestinations = 0;
+        clusterState.LastTickLargestArrivalRun = 0;
+        clusterState.LastTickArrivalCellsTouched = 0;
         clusterState.LastTickRelocationsExecuted = 0;
         clusterState.LastTickRepairsExecuted = 0;
         clusterState.ResetFinalizeLockAcquisitions();
@@ -947,6 +951,32 @@ public partial class DatabaseEngine
         }
     }
 
+    /// <summary>How often, at most, one archetype repeats the clamped-destination warning (#910 T0).</summary>
+    private const int ClampWarningIntervalSeconds = 10;
+
+    /// <summary>
+    /// A cell crossing clamped into an edge cell is a position written outside the configured world — a caller bug the engine used to absorb without a
+    /// trace (#910 T0, AC-T0.2). Warned at most once per <see cref="ClampWarningIntervalSeconds"/> per archetype; the count is on the telemetry surface
+    /// every tick regardless. Counts filed by the outlier guard, which runs later in the fence, reach the surface but not this warning.
+    /// </summary>
+    private void WarnIfDestinationsClamped(ArchetypeClusterState pending)
+    {
+        var clamped = pending.LastTickClampedDestinations;
+        if (clamped == 0)
+        {
+            return;
+        }
+
+        var now = Stopwatch.GetTimestamp();
+        if (pending.LastClampWarningTimestamp != 0 && now - pending.LastClampWarningTimestamp < ClampWarningIntervalSeconds * Stopwatch.Frequency)
+        {
+            return;
+        }
+
+        pending.LastClampWarningTimestamp = now;
+        SpatialMaintainer.LogClampedDestinations(Logger, clamped, (ushort)Math.Min(pending.ArchetypeId, ushort.MaxValue), ClampWarningIntervalSeconds);
+    }
+
     /// <summary>Steps ⑥ and ⑦ and the drain prefix: serial by TH-01 and RP-02, run once per archetype after the whole map — atomic item or tail.</summary>
     private void FinishArchetypeFencePrep(ArchetypeClusterState pending, bool hasWork, long tickNumber, ChangeSet changeSet)
     {
@@ -1021,6 +1051,13 @@ public partial class DatabaseEngine
         // Every producer has now filed: crossings and the outlier guard in the core above, relocations carried from last tick's AabbRefresh, and repair
         // units from the planner. CR-05 is checkable exactly here and nowhere earlier (#877).
         pending.AssertNoDuplicateMigrationSources(tickNumber);
+
+        // #910 T0: the drain order, established once for both fences, and the arrival measurements that ride on it. Timed as its own Prep sub-span: it
+        // was the Migrate phase's serial sort, and moving it must not take it out of the breakdown.
+        var sortStart = Stopwatch.GetTimestamp();
+        pending.OrderDrainAndMeasureArrivals();
+        pending.PrepSortTicks += Stopwatch.GetTimestamp() - sortStart;
+        WarnIfDestinationsClamped(pending);
 
         // ⑧ LAST, and here rather than at the core's branch-2 exit where it used to sit. Two things were wrong with that placement and both are the same
         // mistake — sizing against numbers that were not final yet:
@@ -1233,10 +1270,10 @@ public partial class DatabaseEngine
     }
 
     /// <summary>
-    /// Phase 1, serial tail (#886 lead D): for every archetype whose Prep ran as slices, the crossings in slice order, the buffer resets, ⑧, then ⑥ ⑦ and
-    /// the drain prefix exactly as the atomic path runs them. Called from <c>FenceMigrateExecSystem.Prepare</c>, which is single-threaded by construction
-    /// and precedes the destination-cell sort that needs the queue complete. It is timed inside the Migrate span: ⑥ ⑦ ⑧ are relocated there, not removed,
-    /// and any phase table read after this change has to say so.
+    /// Phase 1, serial tail (#886 lead D): for every archetype whose Prep ran as slices, the crossings in slice order and the buffer resets, then ⑥ ⑦, the
+    /// drain prefix, the destination-cell sort (#910) and ⑧ exactly as the atomic path runs them. Called from
+    /// <c>FenceMigrateExecSystem.Prepare</c>, which is single-threaded by construction. It is timed inside the Migrate span: ⑥ ⑦ ⑧ are relocated there,
+    /// not removed, and any phase table read after this change has to say so.
     /// </summary>
     internal void PrepareArchetypeFenceTails(long tickNumber, ChangeSet changeSet)
     {

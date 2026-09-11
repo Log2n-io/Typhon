@@ -150,6 +150,11 @@ internal static class GameScenarios
         public double QueryHitsMax;
         public double MigrationsPerTick;
 
+        /// <summary>
+        /// The most cell crossings into one cell in any measured tick (#910 <c>LargestArrivalRun</c>) — the size of the largest group arrival.
+        /// </summary>
+        public int LargestArrivalRun;
+
         /// <summary>Median per-tick WHOLE migration cost in ms — the migrant loop plus the bulk index descent and the bulk EntityMap patch.</summary>
         /// <remarks>
         /// <b>Not <c>MigrationExecuteMs</c>, which brackets the loop alone.</b> Since #872 step 6 the loop only STAGES the index update and the EntityMap
@@ -207,6 +212,18 @@ internal static class GameScenarios
     /// never promotes; <c>1</c> promotes every cell that holds anything.
     /// </summary>
     private static int PromoteThreshold = SpatialOptions.DefaultCellTreePromoteThreshold;
+
+    /// <summary>
+    /// The drift and repair gates' floors and the clusters per repair unit (<c>0</c> = the whole cell), for a tightness sweep. The engine's defaults
+    /// unless <c>--target-ratio</c>, <c>--repair-ratio</c> or <c>--repair-unit</c> is given.
+    /// </summary>
+    private static float TargetRatio = 0.25f;
+
+    /// <inheritdoc cref="TargetRatio"/>
+    private static float RepairRatio = 0.75f;
+
+    /// <inheritdoc cref="TargetRatio"/>
+    private static int RepairUnit = 8;
 
     /// <summary>
     /// The two arms: never promote (the engine's default), and promote every cell — the second answers "what does the tree do HERE", not "should this
@@ -282,6 +299,7 @@ internal static class GameScenarios
             QueryHitsMin = Lowest(sweeps, static r => r.QueryHits),
             QueryHitsMax = Highest(sweeps, static r => r.QueryHits),
             MigrationsPerTick = Med(sweeps, static r => r.MigrationsPerTick),
+            LargestArrivalRun = (int)Highest(sweeps, static r => r.LargestArrivalRun),   // a maximum over ticks, so the maximum over sweeps
             MigrationMedianMs = Med(sweeps, static r => r.MigrationMedianMs),
             MigrationNsPerEntity = Med(sweeps, static r => r.MigrationNsPerEntity),
             EntitiesPerCell = Med(sweeps, static r => r.EntitiesPerCell),
@@ -463,8 +481,14 @@ internal static class GameScenarios
         var rows = new List<Row>();
         var parallelRows = new List<Row>();
         var skipParallel = Array.IndexOf(args, "--no-parallel") >= 0;
+        var scanOnly = Array.IndexOf(args, "--scan-only") >= 0;
+        var noReport = Array.IndexOf(args, "--no-report") >= 0;
+        TargetRatio = ArgFloat(args, "--target-ratio", TargetRatio);
+        RepairRatio = ArgFloat(args, "--repair-ratio", RepairRatio);
+        RepairUnit = (int)ArgFloat(args, "--repair-unit", RepairUnit);
 
         Console.WriteLine("── Game scenarios ──────────────────────────────────────────────────────");
+        Console.WriteLine($"  floors {TargetRatio:G}/{RepairRatio:G}, repair unit {RepairUnit}{(scanOnly ? ", scan arm only" : "")}");
         var sw = Stopwatch.StartNew();
         foreach (var s in scenarios)
         {
@@ -497,6 +521,11 @@ internal static class GameScenarios
             {
                 foreach (var (armName, threshold) in Arms)
                 {
+                    if (scanOnly && armName != "scan")
+                    {
+                        continue;
+                    }
+
                     PromoteThreshold = threshold;
                     var row = MedianOfRepeats(s, scaled, swarms, shipsPerSwarm);
                     row.Arm = armName;
@@ -506,7 +535,8 @@ internal static class GameScenarios
                         ? $"    n={scaled,-8}{label} {armName,-6} FAILED: {row.Failure}"
                         : $"    n={scaled,-8}{label} {armName,-6} fence {row.FenceMedianMs,7:F2} ms  query {row.QueryUs,8:F1} us ({row.QueryHits,6:F0} hits)  "
                           + $"clusters {row.Clusters,6} ({row.ClustersPerCell,6:F0}/cell)  cells {row.LiveCells,6}  tight {row.TightnessPct,5:F2}%  "
-                          + $"promoted {row.PromotedCells,5}");
+                          + $"promoted {row.PromotedCells,5}  mig/t {row.MigrationsPerTick,7:F0}  occ {row.SlotOccupancyPct,5:F1}%"
+                          + $"  run {row.LargestArrivalRun,5}");
                 }
 
                 if (!skipParallel)
@@ -552,8 +582,11 @@ internal static class GameScenarios
         sw.Stop();
         Console.WriteLine();
         Console.WriteLine($"  {rows.Count} runs in {sw.Elapsed.TotalSeconds:F1}s");
-        var path = WriteReport(scenarios, rows, parallelRows, sw.Elapsed);
-        Console.WriteLine($"  report -> {path}");
+        if (!noReport)
+        {
+            var path = WriteReport(scenarios, rows, parallelRows, sw.Elapsed);
+            Console.WriteLine($"  report -> {path}");
+        }
     }
 
     /// <summary>
@@ -711,7 +744,10 @@ internal static class GameScenarios
             dbe.ConfigureSpatialGrid(new SpatialGridConfig(
                 new Vector3(0, 0, 0),
                 new Vector3(extent, extent, s.Flat ? cell : extent),
-                cell));
+                cell,
+                clusterTargetExtentRatio: TargetRatio,
+                clusterRepairExtentRatio: RepairRatio,
+                repairWorstClustersPerUnit: RepairUnit));
             dbe.ClusterCellTreePromoteThreshold = PromoteThreshold;
             if (PromoteThreshold == 1)
             {
@@ -939,6 +975,8 @@ internal static class GameScenarios
                 }
             }
 
+            var largestArrival = 0;
+
             // Read after a fence, never during one: every counter on the snapshot is per-tick and reset at the top of the next fence, so a sample taken
             // once at the end describes one arbitrary tick out of thirty.
             void SampleTick(double spanMs)
@@ -947,6 +985,7 @@ internal static class GameScenarios
                 var t = dbe.GetSpatialTelemetry(Archetype<GameEntity>.Metadata.ArchetypeId);
                 migrationMs.Add(t.MigrationTotalMs);
                 migrationCount.Add(t.MigrationCount);
+                largestArrival = Math.Max(largestArrival, t.LargestArrivalRun);
             }
 
             if (workerCount == 0)
@@ -990,6 +1029,7 @@ internal static class GameScenarios
             row.MigrationsPerTick = migrationCount.Count == 0
                 ? telemetry.MigrationCount
                 : totalMigrations / migrationCount.Count;
+            row.LargestArrivalRun = largestArrival;
 
             if (workerCount != 0)
             {

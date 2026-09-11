@@ -568,12 +568,26 @@
     prefix too SMALL → executed requests stay queued and re-execute against slots their entities have already
       left, and the queue grows without bound. Measured: 16 000 entities produced 17 234 migrations on the
       first tick and 224 854 on the twentieth, against ~10 900 genuine drifters per tick
+  invariant the prefix is put in DRAIN ORDER once, in the Prep tail, on BOTH fences (#910): a stable sort by
+    destination cell over PendingMigrations[0 .. PendingMigrationDrainCount), after every producer of this tick's
+    prefix has filed (the AabbRefresh producers file into the next one) and the throttle has cut it, before
+    PreSizeArchetypeFence. It sorts the PREFIX, never the queue — the throttle truncates, so the two are equal today,
+    and a sort past the prefix would carry a tail request into it the day they are not, which is "prefix too LARGE"
+    by another route. Stable, so each destination cell receives its requests in filing order; the parallel slice
+    planner carves its cell-disjoint slices on the resulting runs. Cells are NOT independent under first fit — a
+    migration claims before it releases, and a slot freed behind the cursor is reused — so moving the sort changed
+    the serial fence's placements to the parallel fence's queue order
   scope: DatabaseEngine.PrepareArchetypeFence, ArchetypeClusterState.CompactPendingMigrations,
-    ArchetypeClusterState.PendingMigrationDrainCount, DatabaseEngine.FinalizeArchetypeFence
+    ArchetypeClusterState.PendingMigrationDrainCount, DatabaseEngine.FinalizeArchetypeFence,
+    ArchetypeClusterState.OrderDrainAndMeasureArrivals
   verified: ClusterRelocationTests.PendingQueue_KeepsOnlyWhatTheCurrentTickFiled (nine ticks of continuous
     intra-cell motion, asserting per tick that what remains queued is at most what that tick detected).
     Ablated: forcing the prefix to zero reddens it, and also reddens
-    ClusterDriftParallelTests.DriftDetection_YieldsTheRulesDrifterSet_WhicheverFenceRunsIt
+    ClusterDriftParallelTests.DriftDetection_YieldsTheRulesDrifterSet_WhicheverFenceRunsIt.
+    SmartTeleportationTests.TheLargestArrivalIsTheLongestDestinationRunOfTheDrainPrefix pins the drain order on the
+    serial fence, which never sorted before #910; ablated, dropping the sort reddens it. PrepSliceEquivalenceTests
+    pins it on the parallel fence at W = 1, 2, 4 and 8 — the atomic Prep item and the sliced tail both — and
+    MigrationDestCellRadixSortTests.OrderDrainAndMeasureArrivals_SortsThePrefixAndLeavesTheTail pins the prefix bound
   on_violation:
     prefix too large → intra-cell drift is detected forever and repaired never; the ~24x selectivity win the
       issue exists for simply does not arrive, with every counter reporting healthy detection
@@ -785,10 +799,11 @@
     single-threaded by construction. The cluster ranking, the Morton sort and the destination assignment all live
     there; no slice plans
   invariant 🔴 a repair request pins the destination SLOT as well as the cluster, and the reason WAS the SORT, not
-    the slicing. Until #889, SortPendingMigrationsByDestCellKey ran an Array.Sort — introsort, UNSTABLE — over a
+    the slicing. Until #889 the destination-cell sort ran an Array.Sort — introsort, UNSTABLE — over a
     comparer reading DestCellKey alone, so every request a repair emits for one cell compared equal and the
-    planner's emission order within that cell was permuted arbitrarily. That sort runs only on the parallel path,
-    so first fit would have given the serial and parallel fences different packings from identical input. NOT
+    planner's emission order within that cell was permuted arbitrarily. Until #910 that sort ran only on the
+    parallel path, so first fit would have given the serial and parallel fences different packings from identical
+    input. NOT
     slicing: FenceWorkPlan.EmitMigrationApplyItems advances each boundary until DestCellKey changes, so one cell's
     run is never split and two workers can never claim into the same fresh cluster.
   invariant #889 made the sort STABLE (ArchetypeClusterState.RadixSortByDestCellKey — LSD radix by DestCellKey,
@@ -895,8 +910,8 @@
   invariant the throttle lowers PendingMigrationCount itself, so the drain prefix still equals the count. It must
     NOT shorten the prefix and leave the tail queued:
       the serial fence passes PendingMigrationCount, not the prefix, so it would execute the tail AND retain it
-      SortPendingMigrationsByDestCellKey sorts [0, PendingMigrationCount) by destination cell (stably since
-        #889, but the key is the cell, not the position), so it would move tail entries into the prefix
+      until #910 the destination-cell sort covered [0, PendingMigrationCount) and would have moved tail entries
+        into the prefix; OrderDrainAndMeasureArrivals sorts the prefix alone (CR-01), which closes that half only
       both land on CR-01's "prefix too SMALL" failure, measured at 224 854 migrations on the twentieth tick
   invariant a throttled relocation is DROPPED, not carried. Its DestClusterChunkId was the least-enlargement
     choice against the AABBs of the tick that DETECTED it; a tick later TryClaimPinnedSlot rejects the stale pin
@@ -1263,8 +1278,8 @@
     used to state — that one was observed to under-estimate under AntHill loads. It is a performance
     measure, not the safety argument: the parallel path never touches the array, and the on-demand grow in
     ApplyDirtyBitDeltas / GrowFenceDirtyBitsForChunkId is what actually makes an under-estimate survivable
-  invariant PendingMigrations is sorted by DestCellKey (SortPendingMigrationsByDestCellKey)
-    by TickDriver between Prep and Migrate dispatches, so each worker slice owns disjoint dst cells
+  invariant the drain prefix is sorted by DestCellKey (OrderDrainAndMeasureArrivals) in Prep's serial tail,
+    before Migrate dispatches, so each worker slice owns disjoint dst cells
   invariant PendingMigrationCount = 0 reset happens once per fence in FinalizeArchetypeFence
     AFTER all Migrate-phase slices complete, never inside ExecuteMigrationsSlice
   scope: DatabaseEngine.ExecuteMigrations, DatabaseEngine.FinalizeArchetypeFence,
@@ -1526,6 +1541,17 @@
     cost is unattributable without the split, and the identity is what makes it checkable rather than trusted. These
     are ALWAYS counted, unlike the same split on the trace record: needing the profiler on to attribute a cost would
     perturb the bracket the cost is measured in
+  invariant the arrival members (#910) are RATES and fold by kind like the rest: JumpCrossings, ClampedDestinations
+    and ArrivalCellsTouched sum, but LargestArrivalRun is a per-tick MAXIMUM — the most crossings into one cell — and
+    GetSpatialTelemetryTotal maxes it, because two archetypes' arrivals into two cells are not one arrival of their
+    combined size. ClampedDestinations counts CROSSINGS, not entities: an entity already in an edge cell and written
+    further outside the world stays in that cell and files nothing, so the member is the count of clamped arrivals,
+    never of out-of-world entities
+  invariant JumpCrossings and ClampedDestinations are counted when a crossing is FILED, LargestArrivalRun and
+    ArrivalCellsTouched when the prefix is DRAINED. The outlier guard files after Migrate, so its crossings are
+    counted in the tick that files them and drained, with the arrival pair, in the next. They sit inside the
+    hysteresis band, so they are steps whenever MigrationHysteresisRatio is below 1; the clamp warning, which runs
+    in Prep, never sees the guard's clamps — the count does
   invariant FinalizeLockAcquisitions counts EVERY exclusive acquisition of the archetype-wide latch, which is why all
     of them go through `PaddedFinalizeLock.Enter`/`Exit` rather than through the latch directly. A site added straight
     onto `.Lock` would be invisible to the count, and a partial count is worse than none because it reads as evidence
@@ -1539,6 +1565,8 @@
     SpatialMigrationTelemetry.MigrationPrologueMs, SpatialMigrationTelemetry.MigrationEpilogueMs,
     SpatialMigrationTelemetry.CrossingsExecuted, SpatialMigrationTelemetry.RelocationsExecuted,
     SpatialMigrationTelemetry.RepairsExecuted, SpatialMigrationTelemetry.FinalizeLockAcquisitions,
+    SpatialMigrationTelemetry.JumpCrossings, SpatialMigrationTelemetry.ClampedDestinations,
+    SpatialMigrationTelemetry.LargestArrivalRun, SpatialMigrationTelemetry.ArrivalCellsTouched,
     ArchetypeClusterState.FinalizeLockAcquisitions, DatabaseEngine.LastFenceMigrationParallelism,
     DatabaseEngine.GetSpatialTelemetry,
     DatabaseEngine.GetSpatialTelemetryTotal, DatabaseEngine.LastFenceSpanMs, DatabaseEngine.LastFenceStallMs,
@@ -1554,10 +1582,16 @@
     summed span; FinalizeLockAcquisitions_CountEveryAcquisition_AndResetPerTick pins the latch count;
     FenceStallMs_CoversTheSerialPrep_ThatTheSpanExcludes pins the stall-against-span relation;
     MigrationParallelism_IsExportedBesideTheSummedCpuGauges_AndIsNotFlooredAtOne pins both the export and the
-    unclamped storage, so neither can be dropped without a red test
+    unclamped storage, so neither can be dropped without a red test;
+    Total_MaxesTheLargestArrival_AndSumsTheArrivalCounts pins the arrival members' fold, and
+    SmartTeleportationTests.ACornerNeighbourIsAStepAndThreeCellsIsAJump,
+    AnOutOfWorldTeleportLandsInTheEdgeCellAndIsCountedAndWarnedOncePerWindow and
+    TheLargestArrivalIsTheLongestDestinationRunOfTheDrainPrefix pin their per-archetype values;
+    AGuardedCrossingIsCountedWhenFiledAndGroupedWhenDrained pins the filed-versus-drained timing
   on_violation:
     a per-tick member read as a rate → a number sampled from one tick of hundreds, presented as throughput
     the overhang summed rather than maxed → every kNN ring widens by a bound no archetype has
+    the largest arrival summed rather than maxed → an arrival no cell received
     the sample count dropped → "nothing moved" becomes indistinguishable from "the clusters are points"
     the tightness means averaged per archetype → a quiet archetype halves a busy one's reading
     summed CPU shown where the span belongs → a frame budget compared against a number W times too large, which is

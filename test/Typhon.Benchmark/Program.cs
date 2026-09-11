@@ -109,6 +109,12 @@ class Program
                 return;
             }
 
+            if (args.Contains("--mass-arrival"))
+            {
+                MassArrivalProfile.Run(args);
+                return;
+            }
+
             if (args.Contains("--storage-model"))
             {
                 StorageModelProfile.Run(args);

@@ -21,6 +21,9 @@ internal static unsafe partial class SpatialMaintainer
     [LoggerMessage(Level = LogLevel.Warning, Message = "Cluster migration storm: {MigrationCount} migrations in a single tick for archetype id {ArchetypeId} ({DurationMs:F3} ms) — possible viewport warp, teleport event, or unphysical speed")]
     internal static partial void LogHighMigrationRate(ILogger logger, int migrationCount, ushort archetypeId, double durationMs);
 
+    [LoggerMessage(Level = LogLevel.Warning, Message = "{Count} cell crossings for archetype id {ArchetypeId} lay outside the grid this tick and were clamped into an edge cell — a position was written outside WorldMin/WorldMax, rounded out to whole cells (repeated at most every {IntervalSeconds} s)")]
+    internal static partial void LogClampedDestinations(ILogger logger, int count, ushort archetypeId, int intervalSeconds);
+
     /// <summary>
     /// Read spatial bounds from a raw field pointer, convert BSphere to AABB if needed.
     /// Used by cluster path where fieldPtr points directly into cluster SoA data.

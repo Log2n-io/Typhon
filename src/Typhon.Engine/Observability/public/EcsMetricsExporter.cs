@@ -80,6 +80,17 @@ public sealed class EcsMetricsExporter : IDisposable
             "Part of migration_duration_ms spent releasing accessors after the last migrant, summed across slices, per archetype");
         _meter.CreateObservableGauge("typhon.ecs.spatial.crossings_executed", EnumerateCrossingsExecuted, "{migrations}",
             "Cell-crossing migrations executed in the last completed tick, per archetype");
+
+        // #910 T0. A jump is a crossing into a non-adjacent cell; the largest arrival is the group an arrival repack would act on; a clamped destination
+        // is a position written outside the configured world, which the engine used to absorb without a trace.
+        _meter.CreateObservableGauge("typhon.ecs.spatial.jump_crossings", EnumerateJumpCrossings, "{migrations}",
+            "Cell crossings into a non-adjacent cell in the last completed tick, per archetype");
+        _meter.CreateObservableGauge("typhon.ecs.spatial.clamped_destinations", EnumerateClampedDestinations, "{migrations}",
+            "Cell crossings whose position lay outside the configured world and were clamped into an edge cell, last completed tick, per archetype");
+        _meter.CreateObservableGauge("typhon.ecs.spatial.largest_arrival_run", EnumerateLargestArrivalRun, "{migrations}",
+            "Most cell crossings into one destination cell in the last completed tick, per archetype");
+        _meter.CreateObservableGauge("typhon.ecs.spatial.arrival_cells_touched", EnumerateArrivalCellsTouched, "{cells}",
+            "Distinct destination cells of the last completed tick's cell crossings, per archetype");
         _meter.CreateObservableGauge("typhon.ecs.spatial.relocations_executed", EnumerateRelocationsExecuted, "{migrations}",
             "Intra-cell relocations executed in the last completed tick, per archetype");
         _meter.CreateObservableGauge("typhon.ecs.spatial.repairs_executed", EnumerateRepairsExecuted, "{migrations}",
@@ -171,6 +182,14 @@ public sealed class EcsMetricsExporter : IDisposable
     private IEnumerable<Measurement<double>> EnumerateMigrationEpilogueMs() => EnumerateSpatialDouble(static t => t.MigrationEpilogueMs);
 
     private IEnumerable<Measurement<long>> EnumerateCrossingsExecuted() => EnumerateSpatialLong(static t => t.CrossingsExecuted);
+
+    private IEnumerable<Measurement<long>> EnumerateJumpCrossings() => EnumerateSpatialLong(static t => t.JumpCrossings);
+
+    private IEnumerable<Measurement<long>> EnumerateClampedDestinations() => EnumerateSpatialLong(static t => t.ClampedDestinations);
+
+    private IEnumerable<Measurement<long>> EnumerateLargestArrivalRun() => EnumerateSpatialLong(static t => t.LargestArrivalRun);
+
+    private IEnumerable<Measurement<long>> EnumerateArrivalCellsTouched() => EnumerateSpatialLong(static t => t.ArrivalCellsTouched);
 
     private IEnumerable<Measurement<long>> EnumerateRelocationsExecuted() => EnumerateSpatialLong(static t => t.RelocationsExecuted);
 

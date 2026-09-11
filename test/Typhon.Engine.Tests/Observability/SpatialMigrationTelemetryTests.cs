@@ -767,6 +767,72 @@ class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
         });
     }
 
+    /// <summary>
+    /// #910's arrival members fold by kind: the jump, clamp and cell counts sum across archetypes, and the largest arrival MAXES — two archetypes'
+    /// arrivals into two cells are not one arrival of their combined size.
+    /// </summary>
+    [VerifiesRule("SO-01")]
+    [Test]
+    public void Total_MaxesTheLargestArrival_AndSumsTheArrivalCounts()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<SpTelPos>();
+        dbe.RegisterComponentFromAccessor<SpTelPosB>();
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
+            worldMin: new Vector2(0, 0),
+            worldMax: new Vector2(WorldMax, WorldMax),
+            cellSize: CellSize));
+        dbe.InitializeArchetypes();
+
+        static SpTelPosB PointB(float x, float y) => new() { Bounds = new AABB2F { MinX = x, MinY = y, MaxX = x, MaxY = y } };
+
+        // A: three from (0,0) into (5,5), a jump each, and one clamped out of (5,9) into (0,9). B: two from (0,0) into (1,0), a step each, and one
+        // clamped out of (5,0) into (0,0). Every member then reads differently summed than maxed.
+        var a = new[] { Spawn(dbe, 10f, 10f), Spawn(dbe, 20f, 10f), Spawn(dbe, 30f, 10f), Spawn(dbe, 550f, 950f) };
+        var b = new EntityId[3];
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            b[0] = tx.Spawn<SpTelUnitB>(SpTelUnitB.Pos.Set(PointB(10f, 50f)));
+            b[1] = tx.Spawn<SpTelUnitB>(SpTelUnitB.Pos.Set(PointB(12f, 50f)));
+            b[2] = tx.Spawn<SpTelUnitB>(SpTelUnitB.Pos.Set(PointB(550f, 50f)));
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(1);
+
+        for (var i = 0; i < 3; i++)
+        {
+            MoveTo(dbe, a[i], 550f, 550f);
+        }
+
+        MoveTo(dbe, a[3], -300f, 950f);
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            foreach (var (id, x) in new[] { (b[0], 150f), (b[1], 150f), (b[2], -300f) })
+            {
+                var eref = tx.OpenMut(id);
+                eref.Write(SpTelUnitB.Pos).Bounds = PointB(x, 50f).Bounds;
+            }
+
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(2);
+
+        var ta = dbe.GetSpatialTelemetry(ArchetypeId);
+        var tb = dbe.GetSpatialTelemetry(Archetype<SpTelUnitB>.Metadata.ArchetypeId);
+        var total = dbe.GetSpatialTelemetryTotal();
+        Assert.Multiple(() =>
+        {
+            Assert.That((ta.JumpCrossings, ta.ClampedDestinations, ta.LargestArrivalRun, ta.ArrivalCellsTouched), Is.EqualTo((4, 1, 3, 2)), "precondition: A");
+            Assert.That((tb.JumpCrossings, tb.ClampedDestinations, tb.LargestArrivalRun, tb.ArrivalCellsTouched), Is.EqualTo((1, 1, 2, 2)), "precondition: B");
+            Assert.That(total.LargestArrivalRun, Is.EqualTo(3), "the largest arrival any cell received, never the sum — no cell received five");
+            Assert.That(total.JumpCrossings, Is.EqualTo(5), "summed");
+            Assert.That(total.ClampedDestinations, Is.EqualTo(2), "summed");
+            Assert.That(total.ArrivalCellsTouched, Is.EqualTo(4), "summed");
+        });
+    }
+
     [Test]
     public void FenceSpanMs_IsZero_WhenTheHostDrivesTheFenceItself()
     {

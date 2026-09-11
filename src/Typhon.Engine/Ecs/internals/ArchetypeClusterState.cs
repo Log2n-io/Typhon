@@ -634,23 +634,68 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
     }
 
-    // Ping-pong partner for the radix sort, the queue's capacity, grown with it. Only the Migrate phase's Prepare touches either.
+    // Ping-pong partner for the radix sort, the queue's capacity, grown with it. Only OrderDrainAndMeasureArrivals touches either — serially per
+    // archetype, from its atomic Prep item or the sliced tail.
     private MigrationRequest[] _migrationSortScratch;
     private int[] _radixCounts;
 
     /// <summary>
-    /// Sort <see cref="PendingMigrations"/> in place by destination cell key so the parallel Migrate phase can give each worker a contiguous slice and have all
-    /// of that worker's destination cells be disjoint from every other worker's destination cells. Called from <c>FenceMigrateExecSystem.Prepare</c>, between
-    /// Prep and Migrate. Stable since #889 (<see cref="RadixSortByDestCellKey"/>).
+    /// Put the drain prefix in execution order — by destination cell, stably — and measure the arrivals it holds (#910 T0). Called once per archetype
+    /// from the Prep tail on BOTH fences, after every producer of this tick's prefix has filed and the throttle has cut it, and before the pre-size.
     /// </summary>
-    internal void SortPendingMigrationsByDestCellKey()
+    /// <remarks>
+    /// <para><b>Why the parallel Migrate phase needs it.</b> The slice planner gives each worker a contiguous range of the prefix and advances every
+    /// boundary to a change of destination cell, so no two workers claim into one cell. Stable since #889 (<see cref="RadixSortByDestCellKey"/>).</para>
+    /// <para><b>Here, not in the parallel Migrate Prepare where the sort used to run.</b> The serial fence never sorted — <c>ProcessArchetypeFence</c>
+    /// drained the queue in enqueue order — and the arrival counters below are read off the sorted runs, so both fences need it; an arrival repack (T2,
+    /// not built) would also need its clusters allocated before <c>PreSizeArchetypeFence</c> sizes the arrays a Migrate slice may not grow.
+    /// <b>The move changed the serial fence's placements.</b> Each cell still receives its requests in filing order, but cells are not independent: a
+    /// migration claims its destination before it releases its source, and first fit reuses a slot freed behind its cursor, so whether a crossing into a
+    /// cell takes a slot another crossing just vacated depends on which ran first. The serial fence now executes in the parallel fence's queue order.</para>
+    /// <para><b>The prefix, not the queue.</b> The throttle truncates (TH-01), so the two are equal today; sorting past the prefix would carry a tail
+    /// request into it the day they are not (CR-01).</para>
+    /// </remarks>
+    internal void OrderDrainAndMeasureArrivals()
     {
-        if (PendingMigrations == null || PendingMigrationCount < 2)
+        // The two arrival counters were zeroed with the rest of the per-tick block at the top of the fence; an empty prefix leaves them there.
+        var count = PendingMigrationDrainCount;
+        if (PendingMigrations == null || count <= 0)
         {
             return;
         }
 
-        RadixSortByDestCellKey(PendingMigrations, PendingMigrationCount);
+        if (count >= 2)
+        {
+            RadixSortByDestCellKey(PendingMigrations, count);
+        }
+
+        // One pass over the sorted prefix, where a destination cell's crossings are one contiguous run (relocations and repairs of that cell may sit
+        // among them, and are skipped).
+        var largest = 0;
+        var cells = 0;
+        var run = 0;
+        var runCell = 0;
+        for (var i = 0; i < count; i++)
+        {
+            ref readonly var request = ref PendingMigrations[i];
+            if (request.Kind != MigrationKind.CellCrossing)
+            {
+                continue;
+            }
+
+            if (run == 0 || request.DestCellKey != runCell)
+            {
+                runCell = request.DestCellKey;
+                run = 0;
+                cells++;
+            }
+
+            run++;
+            largest = Math.Max(largest, run);
+        }
+
+        LastTickLargestArrivalRun = largest;
+        LastTickArrivalCellsTouched = cells;
     }
 
     /// <summary>
@@ -1064,6 +1109,31 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <remarks>This and its two siblings sum EXACTLY to <see cref="LastTickMigrationCount"/>, which is what makes the split checkable rather than
     /// trusted — the same property #911 gave the trace record.</remarks>
     public int LastTickCrossingsExecuted;
+
+    /// <summary>
+    /// Cell crossings whose destination cell is not adjacent to the source cell (#910 T0), counted where each crossing is FILED. Accumulated with
+    /// <see cref="Interlocked.Add(ref int, int)"/> once per producer call — Prep slices and AabbRefresh slices both file crossings — and zeroed plainly
+    /// at the top of the fence, which the phase barrier orders against them. The outlier guard files after Migrate, so its crossings count in the tick
+    /// that files them and drain in the next; they sit inside the hysteresis band, so they are steps whenever <c>MigrationHysteresisRatio</c> is below 1.
+    /// </summary>
+    public int LastTickJumpCrossings;
+
+    /// <summary>
+    /// Cell crossings whose position lay outside the grid and were clamped into an edge cell (#910 T0). Same discipline as
+    /// <see cref="LastTickJumpCrossings"/>.
+    /// </summary>
+    public int LastTickClampedDestinations;
+
+    /// <summary>
+    /// The most cell crossings into one destination cell in this tick's drain prefix (#910 T0). Set by <see cref="OrderDrainAndMeasureArrivals"/>.
+    /// </summary>
+    public int LastTickLargestArrivalRun;
+
+    /// <summary>Distinct destination cells of this tick's drained cell crossings (#910 T0). Set by <see cref="OrderDrainAndMeasureArrivals"/>.</summary>
+    public int LastTickArrivalCellsTouched;
+
+    /// <summary>When the clamped-destination warning last fired for this archetype, in <see cref="System.Diagnostics.Stopwatch"/> ticks; 0 = never.</summary>
+    internal long LastClampWarningTimestamp;
 
     /// <summary>Telemetry counter: intra-cell relocations executed in the most recently completed tick.</summary>
     /// <inheritdoc cref="LastTickCrossingsExecuted"/>
@@ -5682,6 +5752,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         var cellMaxZ = cellMinZ + cfg.CellSize;
 
         ulong claimed = 0;
+        var jumps = 0;
+        var clamped = 0;
         var bits = centres.ValidMask;
         while (bits != 0)
         {
@@ -5707,8 +5779,23 @@ internal sealed unsafe partial class ArchetypeClusterState
                     // For serial callers (RecomputeDirtyClusterAabbs whole-archetype wrapper), the buffer is appended without contention.
                     outlierBuffer.Add(new MigrationRequest(clusterChunkId, slotIndex, newCellKey));
                     claimed |= 1UL << slotIndex;
+                    var (toX, toY, toZ) = grid.CellKeyToCoords(newCellKey);
+                    jumps += SpatialGrid.IsJump(cellX, cellY, cellZ, toX, toY, toZ) ? 1 : 0;
+                    clamped += grid.IsClampedPoint(posX, posY, posZ, SpatialSlot.FieldInfo.FieldType.Is3D()) ? 1 : 0;
                 }
             }
+        }
+
+        // #910 T0, published per cluster rather than per crossing: AabbRefresh slices run this concurrently. A guarded crossing sits inside the hysteresis
+        // band, so it is a step whenever MigrationHysteresisRatio is below 1; at 1 or more it can jump, and is counted like any other (SO-01).
+        if (jumps != 0)
+        {
+            Interlocked.Add(ref LastTickJumpCrossings, jumps);
+        }
+
+        if (clamped != 0)
+        {
+            Interlocked.Add(ref LastTickClampedDestinations, clamped);
         }
 
         return claimed;

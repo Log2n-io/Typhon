@@ -20,9 +20,9 @@ namespace Typhon.Engine.Tests;
 /// it.</para>
 /// <para><b>What is asserted is the RULE at every W, not an identical packing — and the difference is not a weakening.</b> Cross-arm packing equality
 /// is what <c>ClusterRepairParallelTests</c> checks, and it can only check it because a repair PINS its destination slot. A step-10 relocation deliberately
-/// does not: it names a destination cluster and lets <c>ClaimSlotInCell</c> pick the slot. The parallel path then runs
-/// <c>SortPendingMigrationsByDestCellKey</c> — an <b>unstable</b> sort on a comparer that reads only the cell key — and the worker-local drifter buffers are
-/// merged in completion order, so which entity wins a contested slot legitimately varies with W. <c>MigrationRequest.DestSlotIndex</c> documents exactly this,
+/// does not: it names a destination cluster and lets <c>ClaimSlotInCell</c> pick the slot. The drain is then sorted on the cell key alone (unstable until
+/// #889; <c>ArchetypeClusterState.OrderDrainAndMeasureArrivals</c> since #910), and the worker-local drifter buffers are merged in completion order, so
+/// which entity wins a contested slot legitimately varies with W. <c>MigrationRequest.DestSlotIndex</c> documents exactly this,
 /// and it is why the repair path pins and the relocation path does not.</para>
 /// <para>So a fixture demanding identical packings across W would be asserting something the design explicitly declines to promise, and the first version of
 /// this one did — reporting a throttle bug for behaviour that belongs to the sort. What <c>AC-11.6</c> is actually about is whether the ADMISSION DECISION

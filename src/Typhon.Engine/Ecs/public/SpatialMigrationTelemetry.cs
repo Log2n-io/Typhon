@@ -297,6 +297,12 @@ public readonly struct SpatialMigrationTelemetry
     /// <inheritdoc cref="PrepSnapshotMs"/>
     public double PrepPlanMs { get; init; }
 
+    /// <summary>
+    /// Putting the drain prefix in destination-cell order (#910), between the repair plan and the pre-size — the sort the Migrate phase's Prepare ran
+    /// before #910 moved it into Prep, where the serial fence runs it too.
+    /// </summary>
+    public double PrepSortMs { get; init; }
+
     /// <inheritdoc cref="PrepSnapshotMs"/>
     public double PrepPreSizeMs { get; init; }
 
@@ -388,6 +394,28 @@ public readonly struct SpatialMigrationTelemetry
 
     /// <summary>Cell-crossing requests the throttle found queued and charged last tick. Wave-2 K6.</summary>
     public int CrossingsQueued { get; init; }
+
+    /// <summary>
+    /// Cell crossings whose destination cell was not adjacent to the source cell — more than one cell away on some axis (#910 T0). A teleport, a respawn,
+    /// a shuttle; ordinary motion crosses into a face, edge or corner neighbour and never counts here. A rate, counted when a crossing is filed (SO-01).
+    /// </summary>
+    public int JumpCrossings { get; init; }
+
+    /// <summary>
+    /// Cell crossings whose position lay outside the grid — <c>WorldMin</c> to <c>WorldMax</c>, rounded out to whole cells — and were clamped into an
+    /// edge cell (#910 T0). The entity still lands there, as it always did; the engine used to absorb this silently. It counts crossings, not entities:
+    /// one already in an edge cell and written further out files nothing. A rate.
+    /// </summary>
+    public int ClampedDestinations { get; init; }
+
+    /// <summary>
+    /// The most cell crossings into any one destination cell in this tick's drain — the size of the largest arrival (#910 T0). A per-tick maximum, so
+    /// <see cref="DatabaseEngine.GetSpatialTelemetryTotal"/> takes the maximum across archetypes rather than the sum.
+    /// </summary>
+    public int LargestArrivalRun { get; init; }
+
+    /// <summary>Distinct destination cells receiving at least one cell crossing in this tick's drain (#910 T0). A rate.</summary>
+    public int ArrivalCellsTouched { get; init; }
 
     /// <summary>Budget charged to admitted relocations last tick, in nanoseconds. Wave-2 K9.</summary>
     public double RelocationSpendNs { get; init; }

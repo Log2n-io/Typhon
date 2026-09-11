@@ -2368,17 +2368,18 @@ public sealed partial class TyphonRuntime : IDisposable
     }
 
     /// <summary>
-    /// Last tick's serial steps inside the phases, in <see cref="Stopwatch"/> ticks: the #886 Prep tails and the destination-cell sort (Migrate's
-    /// Prepare), the merge and leaf-snap (index Prepare), the merge and bucket partition (EntityMap Prepare), and the WAL emit summed over every archetype
-    /// Finalize handled. Each is a piece of a phase span that no worker count can shrink, which is why they are reported apart from the spans.
+    /// Last tick's serial steps inside the phases, in <see cref="Stopwatch"/> ticks: the #886 Prep tails (Migrate's Prepare — the sliced archetypes'
+    /// drain-order sort among them since #910; every archetype's sort is the <c>PrepSortMs</c> sub-span), the merge and leaf-snap (index Prepare), the
+    /// merge and bucket partition (EntityMap Prepare), and the WAL emit summed over every archetype Finalize handled. Each is a piece of a phase span that
+    /// no worker count can shrink, which is why they are reported apart from the spans.
     /// </summary>
-    internal (long MigrateTail, long MigrateSort, long IndexMerge, long EntityMapMerge, long FinalizeEmit, long FinalizeAppend) LastFenceSerialTicks
+    internal (long MigrateTail, long IndexMerge, long EntityMapMerge, long FinalizeEmit, long FinalizeAppend) LastFenceSerialTicks
     {
         get
         {
             if (_fenceMigrateExec == null)
             {
-                return (0, 0, 0, 0, 0, 0);
+                return (0, 0, 0, 0, 0);
             }
 
             long emit = 0;
@@ -2397,8 +2398,8 @@ public sealed partial class TyphonRuntime : IDisposable
                 }
             }
 
-            return (_fenceMigrateExec.LastTailTicks, _fenceMigrateExec.LastSortTicks, _fenceIndexMassUpdateExec.LastSerialPrepareTicks,
-                _fenceEntityMapUpdateExec.LastSerialPrepareTicks, emit, append);
+            return (_fenceMigrateExec.LastTailTicks, _fenceIndexMassUpdateExec.LastSerialPrepareTicks, _fenceEntityMapUpdateExec.LastSerialPrepareTicks,
+                emit, append);
         }
     }
 

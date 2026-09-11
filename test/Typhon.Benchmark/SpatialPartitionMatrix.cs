@@ -182,7 +182,7 @@ internal sealed class RunResult
     public double FenceWallUs;
 
     /// <summary>The serial steps inside the phases, µs/tick: what no worker count shrinks. See <c>TyphonRuntime.LastFenceSerialTicks</c>.</summary>
-    public double MigrateTailUs, MigrateSortUs, IndexMergeUs, EntityMapMergeUs, FinalizeEmitUs;
+    public double MigrateTailUs, IndexMergeUs, EntityMapMergeUs, FinalizeEmitUs;
 
     /// <summary>The WAL-append part of <see cref="FinalizeEmitUs"/>, and the commit-buffer swaps the tick caused.</summary>
     public double FinalizeAppendUs, WalSwapsPerTick;
@@ -206,7 +206,7 @@ internal sealed class RunResult
     public double SupersededPerTick;
 
     /// <summary>Prep's internal split, ms/tick, in phase order — the measurement that gates the design's ranking of which step to optimise.</summary>
-    public double PrepSnapshotMs, PrepMaskMs, PrepShadowMs, PrepZoneMapMs, PrepDetectMs, PrepThrottleMs, PrepPlanMs, PrepPreSizeMs;
+    public double PrepSnapshotMs, PrepMaskMs, PrepShadowMs, PrepZoneMapMs, PrepDetectMs, PrepThrottleMs, PrepPlanMs, PrepSortMs, PrepPreSizeMs;
 
     /// <summary>Clusters surviving the occupancy mask — the domain a sliced Prep would partition.</summary>
     public double PrepDirtyClustersPerTick;
@@ -1143,8 +1143,8 @@ public static class SpatialPartitionMatrix
                 var swapGen = dbe.WalManager?.CommitBuffer?.SwapGeneration ?? 0;
                 var swaps = lastSwapGen < 0 ? 0 : swapGen - lastSwapGen;
                 lastSwapGen = swapGen;
-                phase.AddSerial(runtime.LastFenceWallTicks * toUs, serial.MigrateTail * toUs, serial.MigrateSort * toUs, serial.IndexMerge * toUs,
-                    serial.EntityMapMerge * toUs, serial.FinalizeEmit * toUs, serial.FinalizeAppend * toUs, swaps);
+                phase.AddSerial(runtime.LastFenceWallTicks * toUs, serial.MigrateTail * toUs, serial.IndexMerge * toUs, serial.EntityMapMerge * toUs,
+                    serial.FinalizeEmit * toUs, serial.FinalizeAppend * toUs, swaps);
                 var chunkSort = runtime.LastFenceChunkSortTicks;
                 phase.AddChunkSorts(chunkSort.IndexSort * toUs, chunkSort.MapSort * toUs, chunkSort.DirtySort * toUs);
                 phase.AddWidths(runtime);
@@ -1586,7 +1586,7 @@ public static class SpatialPartitionMatrix
     {
         private double _prepSpan, _prepCpu, _migSpan, _migCpu, _idxSpan, _idxCpu;
         private double _mapSpan, _mapCpu, _aabbSpan, _aabbCpu, _finSpan, _finCpu;
-        private double _wall, _migTail, _migSort, _idxMerge, _mapMerge, _finEmit, _finAppend, _swaps;
+        private double _wall, _migTail, _idxMerge, _mapMerge, _finEmit, _finAppend, _swaps;
         private double _idxSortCpu, _mapSortCpu, _dirtySortCpu;
         private readonly double[] _phaseChunks = new double[5];
         private readonly double[] _phaseItems = new double[5];
@@ -1614,9 +1614,9 @@ public static class SpatialPartitionMatrix
             _fenceSpans.Add(prepSpan + migSpan + idxSpan + mapSpan + aabbSpan + finSpan);
         }
 
-        public void AddSerial(double wall, double migTail, double migSort, double idxMerge, double mapMerge, double finEmit, double finAppend, double swaps)
+        public void AddSerial(double wall, double migTail, double idxMerge, double mapMerge, double finEmit, double finAppend, double swaps)
         {
-            _wall += wall; _migTail += migTail; _migSort += migSort; _idxMerge += idxMerge; _mapMerge += mapMerge; _finEmit += finEmit;
+            _wall += wall; _migTail += migTail; _idxMerge += idxMerge; _mapMerge += mapMerge; _finEmit += finEmit;
             _finAppend += finAppend; _swaps += swaps;
         }
 
@@ -1658,7 +1658,7 @@ public static class SpatialPartitionMatrix
             r.FenceCpuUs = r.PrepCpuUs + r.MigrateCpuUs + r.IndexCpuUs + r.EntityMapCpuUs + r.AabbCpuUs + r.FinalizeCpuUs;
             r.FenceChunks = _chunks / n;
             r.FenceWallUs = _wall / n;
-            r.MigrateTailUs = _migTail / n; r.MigrateSortUs = _migSort / n; r.IndexMergeUs = _idxMerge / n;
+            r.MigrateTailUs = _migTail / n; r.IndexMergeUs = _idxMerge / n;
             r.EntityMapMergeUs = _mapMerge / n; r.FinalizeEmitUs = _finEmit / n;
             r.FinalizeAppendUs = _finAppend / n; r.WalSwapsPerTick = _swaps / n;
             r.IndexSortCpuUs = _idxSortCpu / n; r.MapSortCpuUs = _mapSortCpu / n; r.DirtySortCpuUs = _dirtySortCpu / n;
@@ -1692,7 +1692,7 @@ public static class SpatialPartitionMatrix
         private double _migrations, _migExecMs, _migTotalMs, _drifters, _driftAbsorbed, _hyst, _throttled, _superseded, _unplaced, _scanned, _slotsScanned;
         private double _repairEntities, _repairUnits, _repairRefused, _budgetUsed, _measuredNs, _queueDepth, _queueMaint;
         private long _queueEvicted, _valveFires;
-        private double _prepSnapshot, _prepMask, _prepShadow, _prepZoneMap, _prepDetect, _prepThrottle, _prepPlan, _prepPreSize;
+        private double _prepSnapshot, _prepMask, _prepShadow, _prepZoneMap, _prepDetect, _prepThrottle, _prepPlan, _prepSort, _prepPreSize;
         private double _prepDirtyClusters;
         private int _measuredSamples;
         private double _driftGated, _driftSuppressedByDensity, _driftersSpilled, _unplacedNoCandidate, _pinsRejected, _relocAdmitted, _crossingsQueued;
@@ -1715,6 +1715,7 @@ public static class SpatialPartitionMatrix
             _prepDetect += t.PrepDetectMs;
             _prepThrottle += t.PrepThrottleMs;
             _prepPlan += t.PrepPlanMs;
+            _prepSort += t.PrepSortMs;
             _prepPreSize += t.PrepPreSizeMs;
             _prepDirtyClusters += t.PrepDirtyClusters;
             _unplaced += t.DriftersUnplaced;
@@ -1758,6 +1759,7 @@ public static class SpatialPartitionMatrix
             r.PrepDetectMs = _prepDetect / ticks;
             r.PrepThrottleMs = _prepThrottle / ticks;
             r.PrepPlanMs = _prepPlan / ticks;
+            r.PrepSortMs = _prepSort / ticks;
             r.PrepPreSizeMs = _prepPreSize / ticks;
             r.PrepDirtyClustersPerTick = _prepDirtyClusters / ticks;
             r.MigrationExecuteMs = _migExecMs / ticks;
@@ -2102,7 +2104,7 @@ public static class SpatialPartitionMatrix
             + $"fence {r.TickMsMean,7:F3} ms wall (p99 {r.TickMsP99,7:F3}) cpu {r.FenceCpuUs / 1000d,8:F3} ms = {par,5:F2}x | "
             + $"prep {r.PrepSpanUs / 1000d,6:F2} mig {r.MigrateSpanUs / 1000d,6:F2} idx {r.IndexSpanUs / 1000d,6:F2} "
             + $"map {r.EntityMapSpanUs / 1000d,6:F2} aabb {r.AabbSpanUs / 1000d,6:F2} fin {r.FinalizeSpanUs / 1000d,6:F2} | "
-            + $"wall {r.FenceWallUs / 1000d,6:F2} serial tail {r.MigrateTailUs / 1000d:F2} sort {r.MigrateSortUs / 1000d:F2} "
+            + $"wall {r.FenceWallUs / 1000d,6:F2} serial tail {r.MigrateTailUs / 1000d:F2} "
             + $"idxMerge {r.IndexMergeUs / 1000d:F2} emit {r.FinalizeEmitUs / 1000d:F2} "
             + $"(append {r.FinalizeAppendUs / 1000d:F2}, swaps {r.WalSwapsPerTick:F2}) | "
             + $"chunks/items p {r.PrepChunks:F0}/{r.PrepItems:F0} m {r.MigrateChunks:F0}/{r.MigrateItems:F0} i {r.IndexChunks:F0}/{r.IndexItems:F0} "
@@ -2141,7 +2143,7 @@ public static class SpatialPartitionMatrix
             "prepSpanUs", "prepCpuUs", "migrateSpanUs", "migrateCpuUs", "indexSpanUs", "indexCpuUs",
             "entityMapSpanUs", "entityMapCpuUs", "aabbSpanUs", "aabbCpuUs", "finalizeSpanUs", "finalizeCpuUs",
             "migrationsPerTick", "migrationExecuteMs", "migrationTotalMs", "driftersPerTick", "driftAbsorbedPerTick",
-            "hysteresisAbsorbedPerTick", "throttledPerTick", "prepSnapshotMs", "prepMaskMs", "prepShadowMs", "prepZoneMapMs", "prepDetectMs", "prepThrottleMs", "prepPlanMs", "prepPreSizeMs",
+            "hysteresisAbsorbedPerTick", "throttledPerTick", "prepSnapshotMs", "prepMaskMs", "prepShadowMs", "prepZoneMapMs", "prepDetectMs", "prepThrottleMs", "prepPlanMs", "prepSortMs", "prepPreSizeMs",
             "prepDirtyClusters", "supersededPerTick", "unplacedPerTick", "clustersScannedPerTick", "slotsScannedPerTick",
             "repairEntitiesPerTick", "repairUnitsPerTick", "repairRefusedPerTick", "budgetUsedMs", "measuredNsPerEntity",
             "driftGatedPerTick", "driftSuppressedByDensityPerTick", "driftersSpilledPerTick", "unplacedNoCandidatePerTick", "pinsRejectedPerTick", "relocationsAdmittedPerTick",
@@ -2152,7 +2154,7 @@ public static class SpatialPartitionMatrix
             "aabbSmallNs", "aabbSmallHits", "aabbMediumNs", "aabbMediumHits", "aabbLargeNs", "aabbLargeHits",
             "radiusNs", "radiusHits", "rayNs", "rayHits", "frustumNs", "frustumHits", "bruteForceNs",
             "churnFraction", "churnTicks", "activeListInversions",
-            "fenceWallUs", "migrateTailUs", "migrateSortUs", "indexMergeUs", "entityMapMergeUs", "finalizeEmitUs", "finalizeAppendUs", "walSwapsPerTick",
+            "fenceWallUs", "migrateTailUs", "indexMergeUs", "entityMapMergeUs", "finalizeEmitUs", "finalizeAppendUs", "walSwapsPerTick",
             "prepChunks", "prepItems", "migrateChunks", "migrateItems", "indexChunks", "indexItems", "aabbChunks", "aabbItems", "finalizeChunks",
             "finalizeItems", "indexSortCpuUs", "mapSortCpuUs", "dirtySortCpuUs", "failure"));
 
@@ -2168,7 +2170,7 @@ public static class SpatialPartitionMatrix
                 F(r.EntityMapSpanUs), F(r.EntityMapCpuUs), F(r.AabbSpanUs), F(r.AabbCpuUs), F(r.FinalizeSpanUs), F(r.FinalizeCpuUs),
                 F(r.MigrationsPerTick), F(r.MigrationExecuteMs), F(r.MigrationTotalMs), F(r.DriftersPerTick), F(r.DriftAbsorbedPerTick),
                 F(r.HysteresisAbsorbedPerTick), F(r.ThrottledPerTick), F(r.PrepSnapshotMs), F(r.PrepMaskMs), F(r.PrepShadowMs), F(r.PrepZoneMapMs), F(r.PrepDetectMs), F(r.PrepThrottleMs),
-                F(r.PrepPlanMs), F(r.PrepPreSizeMs), F(r.PrepDirtyClustersPerTick), F(r.SupersededPerTick), F(r.UnplacedPerTick), F(r.ClustersScannedPerTick), F(r.SlotsScannedPerTick),
+                F(r.PrepPlanMs), F(r.PrepSortMs), F(r.PrepPreSizeMs), F(r.PrepDirtyClustersPerTick), F(r.SupersededPerTick), F(r.UnplacedPerTick), F(r.ClustersScannedPerTick), F(r.SlotsScannedPerTick),
                 F(r.RepairEntitiesPerTick), F(r.RepairUnitsPerTick), F(r.RepairRefusedPerTick), F(r.BudgetUsedMs), F(r.MeasuredNsPerEntity),
                 F(r.DriftGatedPerTick), F(r.DriftSuppressedByDensityPerTick), F(r.DriftersSpilledPerTick), F(r.UnplacedNoCandidatePerTick), F(r.PinsRejectedPerTick), F(r.RelocationsAdmittedPerTick),
                 F(r.CrossingsQueuedPerTick), F(r.RelocationSpendMs), F(r.RepairStarvedMs),
@@ -2179,7 +2181,7 @@ public static class SpatialPartitionMatrix
                 F(r.AabbSmallNs), F(r.AabbSmallHits), F(r.AabbMediumNs), F(r.AabbMediumHits), F(r.AabbLargeNs), F(r.AabbLargeHits),
                 F(r.RadiusNs), F(r.RadiusHits), F(r.RayNs), F(r.RayHits), F(r.FrustumNs), F(r.FrustumHits), F(r.BruteForceNs),
                 F(r.ChurnFraction), r.ChurnTicks, r.ActiveListInversions,
-                F(r.FenceWallUs), F(r.MigrateTailUs), F(r.MigrateSortUs), F(r.IndexMergeUs), F(r.EntityMapMergeUs), F(r.FinalizeEmitUs),
+                F(r.FenceWallUs), F(r.MigrateTailUs), F(r.IndexMergeUs), F(r.EntityMapMergeUs), F(r.FinalizeEmitUs),
                 F(r.FinalizeAppendUs), F(r.WalSwapsPerTick),
                 F(r.PrepChunks), F(r.PrepItems), F(r.MigrateChunks), F(r.MigrateItems), F(r.IndexChunks), F(r.IndexItems), F(r.AabbChunks), F(r.AabbItems),
                 F(r.FinalizeChunks), F(r.FinalizeItems), F(r.IndexSortCpuUs), F(r.MapSortCpuUs), F(r.DirtySortCpuUs), r.Failure));

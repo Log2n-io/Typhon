@@ -46,7 +46,7 @@ internal abstract class FencePhaseExecSystemBase : ChunkedCallbackSystem<FenceCo
     /// <see cref="Prepare"/>".
     /// </summary>
     /// <remarks>
-    /// Needed because a derived Prepare does its serial step FIRST and calls <c>base.Prepare</c> last — the Migrate phase sorts pending migrations, the
+    /// Needed because a derived Prepare does its serial step FIRST and calls <c>base.Prepare</c> last — the Migrate phase runs the sliced Prep tails, the
     /// IndexMassUpdate phase merges, sorts and leaf-snaps every staged batch. Starting the clock in the base would leave all of that outside the measurement,
     /// and for IndexMassUpdate that is the majority of the phase.
     /// </remarks>
@@ -75,8 +75,9 @@ internal abstract class FencePhaseExecSystemBase : ChunkedCallbackSystem<FenceCo
     internal long PhaseEndTicks => _phaseEndTicks;
 
     /// <summary>
-    /// The serial part of the last <see cref="Prepare"/> that is NOT plan building: the Migrate phase's Prep tails and its destination-cell sort, the index
-    /// phase's merge and leaf-snap, the EntityMap phase's merge and bucket partition. Zero for phases whose Prepare is the plan alone.
+    /// The serial part of the last <see cref="Prepare"/> that is NOT plan building: the Migrate phase's Prep tails (the sliced archetypes' drain-order
+    /// sort among them since #910), the index phase's merge and leaf-snap, the EntityMap phase's merge and bucket partition. Zero for phases whose Prepare
+    /// is the plan alone.
     /// </summary>
     /// <remarks>
     /// Exposed because a phase's span is Prepare plus dispatch, and only the dispatch scales with workers: at W = 8 the index phase's span was 0.69 ms
@@ -112,7 +113,7 @@ internal abstract class FencePhaseExecSystemBase : ChunkedCallbackSystem<FenceCo
         EnsureChunkArrays(_plan.ChunkCount);
         if (_plan.ChunkCount == 0)
         {
-            // No chunk will end this phase, so end it here: the serial work Prepare just did — Migrate's tails and sort, the index merge, Finalize's
+            // No chunk will end this phase, so end it here: the serial work Prepare just did — Migrate's tails, the index merge, Finalize's
             // heads for archetypes with nothing to emit — is fence time whether or not anything was dispatched after it, and PhaseSpanTicks and
             // TyphonRuntime.LastFenceWallTicks would otherwise read it as zero (#889 review).
             _phaseEndTicks = Stopwatch.GetTimestamp();
@@ -303,7 +304,7 @@ internal sealed class FencePrepExecSystem : FencePhaseExecSystemBase
 
     protected override int Prepare(FenceContext ctx)
     {
-        // The head is Prep work and is timed as such — the same way Migrate's Prepare claims its sort (#886 lead D).
+        // The head is Prep work and is timed as such — the same way Migrate's Prepare claims the sliced Prep tails (#886 lead D).
         PendingPhaseStart = Stopwatch.GetTimestamp();
         Engine.PrepareArchetypeFenceHeads(ctx.WorkerCount);
         var chunkCount = base.Prepare(ctx);
@@ -365,10 +366,8 @@ internal sealed class FenceMigrateExecSystem : FencePhaseExecSystemBase
 
     protected override ChangeSet CreateChunkChangeSet() => Engine.MMF.RentChangeSet();
 
-    /// <summary>Ticks the last Prepare spent in the #886 Prep tails, and in the destination-cell sort, separately.</summary>
+    /// <summary>Ticks the last Prepare spent in the #886 Prep tails — which since #910 include the sliced archetypes' drain-order sort.</summary>
     internal long LastTailTicks { get; private set; }
-
-    internal long LastSortTicks { get; private set; }
 
     // The three per-chunk sorts OnAfterChunk runs, in Stopwatch ticks, one padded slot of SortTicksStride longs per chunk: each worker writes its own
     // chunk's slot and no two slots share a cache line, so the timing costs no RMW on a line every worker contends (MD-03). Cleared and sized in
@@ -401,9 +400,9 @@ internal sealed class FenceMigrateExecSystem : FencePhaseExecSystemBase
     {
         PendingPhaseStart = Stopwatch.GetTimestamp();
 
-        // #886 lead D: the serial tail of every archetype whose Prep ran as slices — crossings concatenated in slice order, buffers reset, then ⑥ ⑦ ⑧
-        // exactly as the atomic path runs them. Before the sort below, which needs the queue complete. Single-threaded by construction, same as the
-        // sort; inside the fence window like a chunk, because the repair planner it runs opens cluster accessors and may allocate.
+        // #886 lead D: the serial tail of every archetype whose Prep ran as slices — crossings concatenated in slice order, buffers reset, then ⑥ ⑦,
+        // the drain-order sort (#910) and ⑧ exactly as the atomic path runs them. Single-threaded by construction; inside the fence window like a chunk,
+        // because the repair planner it runs opens cluster accessors and may allocate.
         var tailChangeSet = Engine.MMF.RentChangeSet();
         try
         {
@@ -419,28 +418,13 @@ internal sealed class FenceMigrateExecSystem : FencePhaseExecSystemBase
             Engine.MMF.ReturnChangeSet(tailChangeSet);
         }
 
-        var afterTails = Stopwatch.GetTimestamp();
-        LastTailTicks = afterTails - PendingPhaseStart;
+        LastTailTicks = Stopwatch.GetTimestamp() - PendingPhaseStart;
+        PendingSerialTicks = LastTailTicks;
 
-        // Inter-phase serial step (was in RunParallelFence): sort each archetype's pending migrations by destCellKey so the slice planner can carve
-        // cell-disjoint ranges. Runs single-threaded by construction (only one worker decrements the last predecessor dep to zero and reaches this Prepare).
+        // The queue arrives here already in drain order. The destination-cell sort the slice planner carves on used to run at this point; #910 moved it
+        // into the Prep tail (ArchetypeClusterState.OrderDrainAndMeasureArrivals), where it runs on the serial fence too and before the pre-size. Its cost
+        // is the PrepSortMs sub-span now.
         var states = Engine._archetypeStates;
-        if (states != null)
-        {
-            for (int aid = 0; aid < states.Length; aid++)
-            {
-                var st = states[aid]?.ClusterState;
-                if (st == null || st.PendingMigrationCount <= 0)
-                {
-                    continue;
-                }
-
-                st.SortPendingMigrationsByDestCellKey();
-            }
-        }
-
-        LastSortTicks = Stopwatch.GetTimestamp() - afterTails;
-        PendingSerialTicks = LastTailTicks + LastSortTicks;
 
         var chunkCount = base.Prepare(ctx);
         EnsureChunkDirtyBuffers(chunkCount);

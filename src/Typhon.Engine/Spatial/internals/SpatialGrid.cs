@@ -591,6 +591,33 @@ internal sealed unsafe class SpatialGrid
         Math.Clamp((int)Math.Floor((world - origin) * _config.InverseCellSize), 0, dim - 1);
 
     /// <summary>
+    /// Whether <see cref="WorldToCellCoords"/> clamps this point into an edge cell — it lies outside the grid's extent on some axis (#910 T0).
+    /// </summary>
+    /// <param name="worldX">World X of the point.</param>
+    /// <param name="worldY">World Y of the point.</param>
+    /// <param name="worldZ">World Z of the point.</param>
+    /// <param name="checkZ">False for a 2D field: its centre reports Z = 0 by convention and is filed in <see cref="FlatPlaneZ"/> whatever the grid's Z
+    /// extent, so a Z outside that extent is the convention, not a position written out of the world.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal bool IsClampedPoint(double worldX, double worldY, double worldZ, bool checkZ) =>
+        OutsideAxis(worldX, _config.WorldMin.X, _config.GridWidth)
+        || OutsideAxis(worldY, _config.WorldMin.Y, _config.GridHeight)
+        || (checkZ && OutsideAxis(worldZ, _config.WorldMin.Z, _config.GridDepth));
+
+    /// <summary>
+    /// Whether two cells are more than one cell apart on some axis — a jump. A step crosses into a face, edge or corner neighbour (#910 T0).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static bool IsJump(int fromX, int fromY, int fromZ, int toX, int toY, int toZ) =>
+        Math.Abs(toX - fromX) > 1 || Math.Abs(toY - fromY) > 1 || Math.Abs(toZ - fromZ) > 1;
+
+    // The half of ClampAxis that clamps: the floored index lies outside [0, dim). The cast saturates on an out-of-range double, and both saturated ends read
+    // as outside once taken as unsigned.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool OutsideAxis(double world, double origin, int dim) =>
+        (uint)(int)Math.Floor((world - origin) * _config.InverseCellSize) >= (uint)dim;
+
+    /// <summary>
     /// Extract a centre point from a spatial field pointer. Supports all eight tiers since #914; the 2D variants report <c>posZ = 0</c>, which places them
     /// in the grid's first Z plane — the plane a flat world consists entirely of.
     /// </summary>
