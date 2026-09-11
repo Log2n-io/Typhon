@@ -27,6 +27,7 @@ public sealed class SystemBuilder
     internal bool _parallel;
     internal bool _writesVersioned;
     internal float _chunksPerWorker = 1f;
+    internal int _minChunkSize;
     internal int _explicitChunkCount;       // > 0 → chunked-parallel CallbackSystem (no entity input)
     internal SimTier _tierFilter = SimTier.All;
     internal int _cellAmortize;
@@ -168,6 +169,24 @@ public sealed class SystemBuilder
     public SystemBuilder ChunksPerWorker(float factor)
     {
         _chunksPerWorker = factor;
+        return this;
+    }
+
+    /// <summary>
+    /// Override <see cref="RuntimeOptions.ParallelQueryMinChunkSize"/> for this system only — the smallest entity count
+    /// it will accept in a parallel chunk. Default <c>0</c> inherits the global value.
+    /// </summary>
+    /// <remarks>
+    /// <para>Set this when the system's cost PER ENTITY is far above the schedule's average, so that a chunk of the
+    /// global size is much more work than the dispatch it is sized against. The symptom is a system consuming a large
+    /// share of the tick while <c>SystemTelemetry.WorkersTouched</c> shows it running on a handful of workers, and
+    /// <see cref="ChunksPerWorker"/> having no effect — because the entity-count cap, not the worker cap, is binding.</para>
+    /// <para>Validated at <see cref="RuntimeSchedule.Build"/>: must be at least 1, and rejected on non-parallel systems
+    /// where it has no effect.</para>
+    /// </remarks>
+    public SystemBuilder MinChunkSize(int entities)
+    {
+        _minChunkSize = entities;
         return this;
     }
 
@@ -436,6 +455,9 @@ public sealed class SystemBuilder<TContext> where TContext : class
     public SystemBuilder<TContext> WritesVersioned() { _inner.WritesVersioned(); return this; }
     /// <summary>Sets the oversubscription factor for parallel chunk dispatch (worker cap becomes <c>round(WorkerCount × factor)</c>). Must be in <c>[1.0, 64.0]</c>.</summary>
     public SystemBuilder<TContext> ChunksPerWorker(float factor) { _inner.ChunksPerWorker(factor); return this; }
+
+    /// <inheritdoc cref="SystemBuilder.MinChunkSize(int)"/>
+    public SystemBuilder<TContext> MinChunkSize(int entities) { _inner.MinChunkSize(entities); return this; }
     /// <summary>Sets the simulation-tier dispatch filter (this system only processes clusters whose cell matches the tier).</summary>
     public SystemBuilder<TContext> Tier(SimTier tier) { _inner.Tier(tier); return this; }
     /// <summary>Sets the cell-level amortization denominator — the system processes <c>1/N</c> of the tier's clusters per tick. Requires a non-<see cref="SimTier.All"/> tier.</summary>

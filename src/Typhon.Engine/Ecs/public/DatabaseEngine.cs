@@ -409,12 +409,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal const string BK_SpatialGridConfig      = "spatial.GridConfig";
 
     /// <summary>
-    /// Values in the persisted <see cref="SpatialGridConfig"/> record: <c>WorldMin.xyz</c>, <c>WorldMax.xyz</c>, cell size, hysteresis ratio.
+    /// Values in the persisted <see cref="SpatialGridConfig"/> record: <c>WorldMin.xyz</c>, <c>WorldMax.xyz</c> and the cell size as doubles (two int slots
+    /// each), the f32 hysteresis ratio, and one reserved slot.
     /// </summary>
     /// <remarks>
-    /// Six before #872 step 8 gave the grid a Z axis. A record of any other width is from another format and is rejected, never reinterpreted.
+    /// Six before #872 step 8 gave the grid a Z axis, eight until #914 made the world frame f64. The eight-value shape is still READ — see
+    /// <see cref="TryLoadSpatialGridConfig"/>, where widening f32 to f64 reconstructs the identical world — and is rewritten in this shape on first open.
+    /// A record of any OTHER width is from another format and is rejected, never reinterpreted.
     /// </remarks>
-    internal const int SpatialGridConfigIntCount = 8;
+    internal const int SpatialGridConfigIntCount = 16;
+
+    /// <summary>The pre-#914 all-f32 record width, still accepted on read. See <see cref="SpatialGridConfigIntCount"/>.</summary>
+    internal const int LegacyF32SpatialGridConfigIntCount = 8;
     internal const string BK_NextFreeTSN            = "NextFreeTSN";
     internal const string BK_UowRegistrySPI         = "UowRegistrySPI";
     internal const string BK_CollectionFieldR1      = "collection.FieldR1";
@@ -755,17 +761,55 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private SpatialGridConfig? _pendingGridConfig;
 
     /// <summary>
-    /// CPU-to-span ratio of the previous fence's migration phases (Migrate + IndexMassUpdate + EntityMapUpdate), ≥ 1. The per-entity migration cost the
-    /// repair budget is spent against is measured in summed CPU and the budget is a frame budget, so the sample is divided by this (step 14, D2).
-    /// <c>1</c> until the parallel runtime publishes a value, which is also the truth for the serial fence.
+    /// CPU-to-span ratio of the previous fence's migration phases (Migrate + IndexMassUpdate + EntityMapUpdate). <c>1</c> until the parallel runtime
+    /// publishes a value, which is also the truth for the serial fence. See <see cref="LastFenceMigrationParallelism"/>.
     /// </summary>
     private double _lastFenceMigrationParallelism = 1d;
 
-    /// <summary>Published by <c>TyphonRuntime</c> after each parallel fence. See <see cref="_lastFenceMigrationParallelism"/>.</summary>
-    internal void SetLastFenceMigrationParallelism(double parallelism) => _lastFenceMigrationParallelism = parallelism >= 1d ? parallelism : 1d;
+    /// <summary>Published by <c>TyphonRuntime</c> after each parallel fence, unclamped. See <see cref="LastFenceMigrationParallelism"/>.</summary>
+    /// <remarks>
+    /// <b>Stored as measured, including below 1.</b> The clamp that used to live here made the one reading worth having unrepresentable — a phase whose span
+    /// exceeded its own summed CPU is dispatch overhead swallowing the work, and it reported as a flat <c>1.00x</c> indistinguishable from a healthy serial
+    /// tick. The consumer that needs a floor applies its own: <c>ArchetypeClusterState.ObserveMigrationCost</c> divides the repair budget's cost sample by
+    /// <c>max(parallelism, 1)</c>, so guarding here as well only cost the telemetry surface its information.
+    /// </remarks>
+    internal void SetLastFenceMigrationParallelism(double parallelism) => _lastFenceMigrationParallelism = parallelism;
 
-    /// <summary>See <see cref="_lastFenceMigrationParallelism"/>. Exposed for tests and telemetry.</summary>
-    internal double LastFenceMigrationParallelism => _lastFenceMigrationParallelism;
+    /// <summary>
+    /// How many workers' worth of CPU one unit of span bought in the previous tick's migration phases — summed CPU over elapsed span across Migrate,
+    /// IndexMassUpdate and EntityMapUpdate.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>This is the number that makes the summed-CPU members readable, and it is why they must never be presented without it.</b>
+    /// <see cref="SpatialMigrationTelemetry.MigrationTotalMs"/> and its siblings are CPU-milliseconds summed across workers: W workers each busy for one
+    /// millisecond report W. Raising the worker count therefore RAISES them on unchanged work, and read alone that looks like contention. It is contention
+    /// only where the summed CPU rises FASTER than this ratio does; where the two rise together, the work was merely spread and the wall cost did not move.
+    /// Dividing a summed-CPU figure by this yields the elapsed cost — the thing a frame budget is actually spent in.</para>
+    /// <para><b>Divide only a numerator this ratio's denominator covers.</b> It spans three phases, so the matching numerator is
+    /// <see cref="SpatialMigrationTelemetry.MigrationTotalMs"/> — the whole migration. <see cref="SpatialMigrationTelemetry.MigrationExecuteMs"/> brackets
+    /// the migrant loop alone, roughly half a migration since the index and EntityMap applies moved into their own phases, and dividing it by this ratio
+    /// produces the elapsed time of nothing at all.</para>
+    /// <para><b>A LEVEL, and the one member that is deliberately STALE rather than reset.</b> A tick whose migration phases did no work leaves the previous
+    /// value standing rather than reporting zero, because a zero here would read as "infinitely parallel" wherever it is used as a divisor. That is the one
+    /// documented exception to the surface's zero-means-zero discipline, and it means this member alone can describe a tick other than the last one.</para>
+    /// <para><b>Below 1 is a real reading, not a fault.</b> It means the phases' elapsed span exceeded the CPU they spent — dispatch and barrier overhead
+    /// larger than the work, which is what a parallel fence looks like on a population too small to be worth splitting.</para>
+    /// <para><c>1</c> exactly on a host driving <see cref="WriteTickFence(long, ChangeSet)"/> itself: one thread, so summed CPU IS elapsed.</para>
+    /// </remarks>
+    [PublicAPI]
+    public double LastFenceMigrationParallelism => _lastFenceMigrationParallelism;
+
+    /// <summary>Stopwatch ticks of the previous fence's span, pushed by <c>TyphonRuntime</c>. Zero until it publishes one.</summary>
+    private long _lastFenceSpanTicks;
+
+    /// <summary>Published by <c>TyphonRuntime</c> after each parallel fence, from <c>LastFenceWallTicks</c>. See <see cref="LastFenceSpanMs"/>.</summary>
+    internal void SetLastFenceSpanTicks(long spanTicks) => _lastFenceSpanTicks = spanTicks > 0 ? spanTicks : 0;
+
+    /// <summary>Stopwatch ticks of the previous fence's whole host stall, pushed by <c>TyphonRuntime</c>. Zero until it publishes one.</summary>
+    private long _lastFenceStallTicks;
+
+    /// <summary>Published by <c>TyphonRuntime</c> around the whole fence call, serial prep included. See <see cref="LastFenceStallMs"/>.</summary>
+    internal void SetLastFenceStallTicks(long stallTicks) => _lastFenceStallTicks = stallTicks > 0 ? stallTicks : 0;
 
     /// <summary>
     /// Sets the spatial grid configuration for this engine. Must be called before <see cref="InitializeArchetypes"/>. Only required when at least one
@@ -1511,17 +1555,19 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </remarks>
     private void SaveSpatialGridConfig(SpatialGridConfig config)
     {
-        Span<int> bits =
-        [
-            BitConverter.SingleToInt32Bits(config.WorldMin.X),
-            BitConverter.SingleToInt32Bits(config.WorldMin.Y),
-            BitConverter.SingleToInt32Bits(config.WorldMin.Z),
-            BitConverter.SingleToInt32Bits(config.WorldMax.X),
-            BitConverter.SingleToInt32Bits(config.WorldMax.Y),
-            BitConverter.SingleToInt32Bits(config.WorldMax.Z),
-            BitConverter.SingleToInt32Bits(config.CellSize),
-            BitConverter.SingleToInt32Bits(config.MigrationHysteresisRatio),
-        ];
+        // Sixteen ints since #914, because the world frame is f64: six bounds and a cell size at two ints each, the f32 hysteresis, and one reserved slot
+        // that pads to the Int16 value type rather than inventing an Int15 nobody else would use. Reading stays tolerant of the legacy 8-int f32 record —
+        // see TryLoadSpatialGridConfig, and note that widening f32 to f64 is exact, so an old database reopens as the identical world.
+        Span<int> bits = stackalloc int[SpatialGridConfigIntCount];
+        WriteDouble(bits, 0, config.WorldMin.X);
+        WriteDouble(bits, 2, config.WorldMin.Y);
+        WriteDouble(bits, 4, config.WorldMin.Z);
+        WriteDouble(bits, 6, config.WorldMax.X);
+        WriteDouble(bits, 8, config.WorldMax.Y);
+        WriteDouble(bits, 10, config.WorldMax.Z);
+        WriteDouble(bits, 12, config.CellSize);
+        bits[14] = BitConverter.SingleToInt32Bits(config.MigrationHysteresisRatio);
+        bits[15] = 0;
 
         // #872's tuning knobs — step 10's ClusterTargetExtentRatio and ClusterDriftMarginRatio, and step 12's ClusterRepairExtentRatio,
         // ReclusterBudgetMs, RepairNsPerEntity and RepairWorstClustersPerUnit — are deliberately NOT in this record, and the reason is worth stating
@@ -1553,27 +1599,56 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             return false;
         }
 
+        // The LEGACY f32 record is read, not rejected — unlike the pre-#872 six-float one below. Widening f32 to f64 is exact, so the reconstructed world is
+        // bit-for-bit the world that was written: there is no Z extent to invent and no cell to misplace, which is the whole reason C13's loud rejection
+        // applies to one case and not the other. A database written before #914 therefore opens unchanged, and is rewritten in the f64 shape on the next save.
+        if (v.IntCount == LegacyF32SpatialGridConfigIntCount)
+        {
+            config = new SpatialGridConfig(
+                new Vector3(
+                    BitConverter.Int32BitsToSingle(v.GetInt()),
+                    BitConverter.Int32BitsToSingle(v.GetInt(1)),
+                    BitConverter.Int32BitsToSingle(v.GetInt(2))),
+                new Vector3(
+                    BitConverter.Int32BitsToSingle(v.GetInt(3)),
+                    BitConverter.Int32BitsToSingle(v.GetInt(4)),
+                    BitConverter.Int32BitsToSingle(v.GetInt(5))),
+                BitConverter.Int32BitsToSingle(v.GetInt(6)),
+                BitConverter.Int32BitsToSingle(v.GetInt(7)));
+            return true;
+        }
+
         if (v.IntCount != SpatialGridConfigIntCount)
         {
             // A pre-#872 six-float record. Reconstructing it would mean inventing a Z extent, and the grid built from that invention would file every cluster
             // into a cell the writer never chose — a silent misplacement on reopen, which is exactly the failure C13 exists to prevent.
             throw new InvalidOperationException(
-                $"The persisted spatial grid configuration holds {v.IntCount} values, not the 8 a three-dimensional grid needs. " +
-                $"This database was written before the grid gained a Z axis (#872 step 8) and cannot be opened by this build.");
+                $"The persisted spatial grid configuration holds {v.IntCount} values, not the {SpatialGridConfigIntCount} an f64 three-dimensional grid "
+                + $"needs, nor the {LegacyF32SpatialGridConfigIntCount} of a pre-#914 f32 one. This database was written before the grid gained a Z axis "
+                + "(#872 step 8) and cannot be opened by this build.");
         }
 
         config = new SpatialGridConfig(
-            new Vector3(
-                BitConverter.Int32BitsToSingle(v.GetInt()),
-                BitConverter.Int32BitsToSingle(v.GetInt(1)),
-                BitConverter.Int32BitsToSingle(v.GetInt(2))),
-            new Vector3(
-                BitConverter.Int32BitsToSingle(v.GetInt(3)),
-                BitConverter.Int32BitsToSingle(v.GetInt(4)),
-                BitConverter.Int32BitsToSingle(v.GetInt(5))),
-            BitConverter.Int32BitsToSingle(v.GetInt(6)),
-            BitConverter.Int32BitsToSingle(v.GetInt(7)));
+            new Vector3D(ReadDouble(v, 0), ReadDouble(v, 2), ReadDouble(v, 4)),
+            new Vector3D(ReadDouble(v, 6), ReadDouble(v, 8), ReadDouble(v, 10)),
+            ReadDouble(v, 12),
+            BitConverter.Int32BitsToSingle(v.GetInt(14)));
         return true;
+    }
+
+    /// <summary>Split one <see cref="double"/> across two consecutive int slots of a bootstrap int-vector (#914).</summary>
+    private static void WriteDouble(Span<int> bits, int index, double value)
+    {
+        long raw = BitConverter.DoubleToInt64Bits(value);
+        bits[index] = (int)raw;
+        bits[index + 1] = (int)(raw >> 32);
+    }
+
+    /// <summary>Inverse of <see cref="WriteDouble"/>.</summary>
+    private static double ReadDouble(BootstrapDictionary.Value value, int index)
+    {
+        long raw = (uint)value.GetInt(index) | ((long)value.GetInt(index + 1) << 32);
+        return BitConverter.Int64BitsToDouble(raw);
     }
 
     private void ConstructComponentStore()
@@ -3575,8 +3650,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                             var spatialTable = slotToTable[slot];
                             if (spatialTable.SpatialIndex != null)
                             {
-                                SpatialGrid.ValidateSupportedFieldType(spatialTable.SpatialIndex.FieldInfo.FieldType,
-                                    meta.ArchetypeType?.Name ?? meta.ArchetypeId.ToString());
+                                var archName = meta.ArchetypeType?.Name ?? meta.ArchetypeId.ToString();
+                                SpatialGrid.ValidateSupportedFieldType(spatialTable.SpatialIndex.FieldInfo.FieldType, archName);
+
+                                // #919 AC-9. Separate from the type check above because it asks a different question: not "can the grid decode this
+                                // field?" but "can this field's own precision address the world the game configured?". It runs HERE rather than in
+                                // ConfigureSpatialGrid because it needs both halves — the grid is configured before any archetype is known.
+                                SpatialGrid.ValidateWorldExtentForFieldType(spatialTable.SpatialIndex.FieldInfo.FieldType, in _spatialGrid.Config, archName);
                             }
                         }
 

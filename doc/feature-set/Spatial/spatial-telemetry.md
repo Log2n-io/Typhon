@@ -80,6 +80,24 @@ alone, which merely *stages* the index and `EntityMap` updates; the descent that
 The secondary index was measured at roughly half of a migration's cost, so the exported field under-reports by about
 half — and it is the one your dashboard gets. Both are CPU-milliseconds summed across workers, not wall-clock span.
 
+### Arrivals — teleports, respawns, shuttles
+
+| Counter | Clock | Tunes | OTel |
+|---|---|---|---|
+| `JumpCrossings` | last tick | nothing — informational | `…spatial.jump_crossings` |
+| `LargestArrivalRun` | last tick | nothing — informational | `…spatial.largest_arrival_run` |
+| `ArrivalCellsTouched` | last tick | nothing — informational | `…spatial.arrival_cells_touched` |
+| `ClampedDestinations` | last tick | your code — see below | `…spatial.clamped_destinations` |
+
+A **jump** is a crossing into a cell that is not a neighbour of the one the entity left; ordinary motion never makes one.
+`LargestArrivalRun` is the most crossings into one cell in one tick — the size of the biggest group that landed
+together — and `GetSpatialTelemetryTotal()` takes the largest across archetypes rather than the sum.
+
+**`ClampedDestinations` should be zero.** It counts crossings whose position lay outside the grid (`WorldMin` to
+`WorldMax`, rounded out to whole cells). The entity still lands in the nearest edge cell, as it always has, and the
+engine logs a warning at most every 10 s per archetype — but a position outside the world is a bug in the code that
+wrote it. It counts crossings, not entities: one already in an edge cell and written further out files nothing.
+
 ### Intra-cell drift and relocation
 
 | Counter | Clock | Tunes | OTel |
@@ -122,8 +140,8 @@ band around the configured seed.
 ### Prep breakdown — profiling, not tuning
 
 `PrepSnapshotMs`, `PrepMaskMs`, `PrepShadowMs`, `PrepZoneMapMs`, `PrepDetectMs`, `PrepThrottleMs`, `PrepPlanMs`,
-`PrepPreSizeMs` and `PrepDirtyClusters` split the Prep phase in phase order: snapshot, occupancy mask, index replay,
-min/max refresh, crossing detection, budget, repair plan, pre-size. None of them is exported and none maps to a
+`PrepSortMs`, `PrepPreSizeMs` and `PrepDirtyClusters` split the Prep phase in phase order: snapshot, occupancy mask,
+index replay, min/max refresh, crossing detection, budget, repair plan, drain order, pre-size. None of them is exported and none maps to a
 parameter. They exist because Prep is the largest phase of the fence and the phase-level spans could not say which of
 its steps cost anything. Reach for them when you are optimising the engine, not when you are tuning a world.
 

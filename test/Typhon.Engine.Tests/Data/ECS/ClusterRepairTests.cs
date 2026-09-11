@@ -741,7 +741,7 @@ class ClusterRepairTests : TestBase<ClusterRepairTests>
         // Measured that way the answer was 22 000-29 700 ns/entity — an order of magnitude out, and it says almost nothing about
         // the re-sort. Scrambling the population and repairing again, on the same engine, is what isolates the steady
         // cost, and the spread across repeats is what says whether the first number was warm-up or real.
-        var samples = new List<(int moved, double ms)>();
+        var samples = new List<(int moved, double ms, int migrations, double loopMs, double totalMs)>();
         var tick = 2;
         for (var round = 0; round < Rounds; round++)
         {
@@ -751,10 +751,10 @@ class ClusterRepairTests : TestBase<ClusterRepairTests>
                 dbe.WriteTickFence(tick++);
                 sw.Stop();
 
-                var moved = dbe.GetSpatialTelemetry(ArchetypeId).RepairedEntityCount;
-                if (moved > 0)
+                var t = dbe.GetSpatialTelemetry(ArchetypeId);
+                if (t.RepairedEntityCount > 0)
                 {
-                    samples.Add((moved, sw.Elapsed.TotalMilliseconds));
+                    samples.Add((t.RepairedEntityCount, sw.Elapsed.TotalMilliseconds, t.MigrationCount, t.MigrationExecuteMs, t.MigrationTotalMs));
                     break;
                 }
             }
@@ -766,12 +766,21 @@ class ClusterRepairTests : TestBase<ClusterRepairTests>
 
         var report = new System.Text.StringBuilder();
         report.AppendLine($"AC-12.7 — {Population} entities, {samples.Count} repairs measured. FENCE ns per repaired entity, not re-sort cost:");
+        // #918 D6: the split the bulk repair loop has to be sized against. It can only ever shorten the LOOP — the per-entity copy/claim/fold/release
+        // pass — and never the index and EntityMap applies, which run in their own phases, nor the rest of the fence (Prep's Morton sort and plan,
+        // AabbRefresh, WAL). `migrations` is every kind that ran this tick, not repairs alone, so the loop and apply columns are per MIGRATED entity.
+        // The rest column subtracts MigrationTotalMs — summed CPU across workers — from the fence's WALL time. That is only sound because this fixture
+        // drives the serial fence, one thread, where the two coincide; on the parallel fence the column would be meaningless.
+        report.AppendLine("   repaired   fence ms   fence ns/repaired   migrations   loop ns/mig   applies ns/mig   rest-of-fence ns/repaired");
         var best = double.MaxValue;
-        foreach (var (moved, ms) in samples)
+        foreach (var (moved, ms, migrations, loopMs, totalMs) in samples)
         {
             var ns = ms * 1_000_000d / moved;
             best = Math.Min(best, ns);
-            report.AppendLine($"  {moved,6} entities in {ms,8:F3} ms = {ns,9:F1} ns/entity");
+            var loopNs = migrations > 0 ? loopMs * 1_000_000d / migrations : 0d;
+            var appliesNs = migrations > 0 ? (totalMs - loopMs) * 1_000_000d / migrations : 0d;
+            var restNs = (ms - totalMs) * 1_000_000d / moved;
+            report.AppendLine($"   {moved,8} {ms,10:F3} {ns,19:F1} {migrations,12} {loopNs,13:F1} {appliesNs,16:F1} {restNs,27:F1}");
         }
 
         report.AppendLine($"  best {best:F1} ns/entity => {best * 100_000 / 1_000_000d:F2} ms projected for a 100 K-entity cell");

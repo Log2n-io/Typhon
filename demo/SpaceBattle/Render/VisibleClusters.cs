@@ -59,11 +59,13 @@ internal sealed class VisibleClusters
         }
 
         var g = host.GridConfig;
-        var inv = 1f / g.CellSize;
-        var cx0 = Math.Clamp((int)MathF.Floor((rect.MinX - g.WorldMin.X) * inv), 0, g.GridWidth - 1);
-        var cy0 = Math.Clamp((int)MathF.Floor((rect.MinY - g.WorldMin.Y) * inv), 0, g.GridHeight - 1);
-        var cx1 = Math.Clamp((int)MathF.Floor((rect.MaxX - g.WorldMin.X) * inv), 0, g.GridWidth - 1);
-        var cy1 = Math.Clamp((int)MathF.Floor((rect.MaxY - g.WorldMin.Y) * inv), 0, g.GridHeight - 1);
+        var inv = (float)(1d / g.CellSize);
+        var worldMinX = (float)g.WorldMin.X;
+        var worldMinY = (float)g.WorldMin.Y;
+        var cx0 = Math.Clamp((int)MathF.Floor((rect.MinX - worldMinX) * inv), 0, g.GridWidth - 1);
+        var cy0 = Math.Clamp((int)MathF.Floor((rect.MinY - worldMinY) * inv), 0, g.GridHeight - 1);
+        var cx1 = Math.Clamp((int)MathF.Floor((rect.MaxX - worldMinX) * inv), 0, g.GridWidth - 1);
+        var cy1 = Math.Clamp((int)MathF.Floor((rect.MaxY - worldMinY) * inv), 0, g.GridHeight - 1);
 
         for (var cy = cy0; cy <= cy1; cy++)
         {

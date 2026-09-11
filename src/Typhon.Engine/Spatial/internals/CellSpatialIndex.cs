@@ -21,7 +21,9 @@ namespace Typhon.Engine.Internals;
 /// <para>
 /// <b>Tier support.</b> Stores 6 f32 axis-aligned bounds (XYZ min/max) per cluster. 2D archetypes leave <see cref="MinZ"/>/<see cref="MaxZ"/> at +inf/-inf
 /// sentinels and are queried with an infinite Z range; 3D archetypes populate all six. Issue #230 Phase 3 unified the 2D and 3D paths into a single
-/// cluster-index layout rather than maintaining two parallel index types. f64 variants are deferred to a follow-up.
+/// cluster-index layout rather than maintaining two parallel index types. The f64 tiers landed in #914 and did NOT change this: cluster bounds are stored
+/// CELL-RELATIVE (C15), so f32 spans one cell at ~6 x 10^-5 resolution however far out the cell sits, and widening this SoA would have halved the batch
+/// width for nothing. An f64 archetype's precision lives in its component field, its query box and its result — never here.
 /// </para>
 /// <para>
 /// <b>Phase 1 deviation from the design doc.</b> Design doc <c>02-cluster-rtree.md</c> proposes a fixed inline capacity (~24 clusters via <c>fixed float[]</c>

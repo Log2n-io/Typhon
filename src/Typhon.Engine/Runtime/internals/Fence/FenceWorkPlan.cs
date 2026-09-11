@@ -466,10 +466,11 @@ internal sealed class FenceWorkPlan
             var idealSliceSize = (pendingCount + maxSlicesPerArchetype - 1) / maxSlicesPerArchetype;
             var sliceSize = Math.Max(idealSliceSize, MinMigrationSliceSize);
 
-            // PendingMigrations was sorted by destCellKey (TickDriver step before Migrate dispatch). Slice on cell boundaries: each slice owns a contiguous
-            // range of destCellKeys and no two slices share a dest cell — this is what makes the dst-side ClusterClaim path "worker-exclusive" without per-cell
-            // locking (review C-2 fix). Starting from the ideal index split, advance until destCellKey changes; if a single cell's migration block exceeds
-            // sliceSize, the slice naturally grows to cover the whole block (one cell on one/ worker). The trailing partial slice gets whatever's left.
+            // The drain prefix is sorted by destCellKey (the Prep tail's OrderDrainAndMeasureArrivals, #910). Slice on cell boundaries: each slice
+            // owns a contiguous range of destCellKeys and no two slices share a dest cell — this is what makes the dst-side ClusterClaim path
+            // "worker-exclusive" without per-cell locking (review C-2 fix). Starting from the ideal index split, advance until destCellKey changes; if a
+            // single cell's migration block exceeds sliceSize, the slice naturally grows to cover the whole block (one cell on one/ worker). The trailing
+            // partial slice gets whatever's left.
             var pending = state.PendingMigrations;
             var cursor = 0;
             while (cursor < pendingCount)

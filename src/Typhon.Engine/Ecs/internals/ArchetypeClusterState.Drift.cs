@@ -31,8 +31,13 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// pointer — and each one re-derived the component offset and stride, re-read the occupancy word and chased the same pointers again. §5.2 budgets
     /// detection at 0.576 ns/entity on the grounds that it is "sequential in memory", which a walk repeated three times is not.</para>
     /// <para><b>SoA, not an array of triples</b>, because the two consumers scan one axis at a time against a scalar and the hot inner loops then read
-    /// three contiguous runs instead of striding a 12-byte record. 64 slots is the cluster capacity ceiling, so the whole thing is 768 bytes of stack —
-    /// one cache-line-aligned 12-line block that stays resident for both consumers.</para>
+    /// three contiguous runs instead of striding a 24-byte record. 64 slots is the cluster capacity ceiling, so the whole thing is 1 536 bytes of stack —
+    /// one 24-line block that stays resident for both consumers.</para>
+    /// <para><b>The centres are f64 since #914</b>, because a centre here is a WORLD coordinate and the world frame is f64. They were f32, which is exact
+    /// while a world fits in 24 mantissa bits and quantises to ~64-unit steps at 10⁹ — coarser than the target region this test measures against, so every
+    /// entity in a far-from-origin cluster would have read as sitting at the same point and drift detection would have gone quiet rather than wrong. Note
+    /// what stayed f32 and should: the destination CHOICE below (<c>ChooseRelocationTarget</c>, <c>GrowthToAdmit</c>) works in the <c>C15</c> cell-relative
+    /// frame, where f32 is the right width and widening it would be the mistake.</para>
     /// <para><b>The bound's walk is deliberately NOT folded in.</b> It reads through <c>SpatialMaintainer.ReadAndValidateBoundsFromPtr</c>, which returns
     /// doubles and applies the directed rounding C15 requires, whereas a centre is float midpoint arithmetic — and for a <c>BSphere</c> field the stored
     /// centre is not the midpoint of the derived bounds at all, only equal to it up to a rounding step. Deriving one from the other would shift drift
@@ -43,12 +48,12 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     internal readonly ref struct ClusterCentres
     {
-        private readonly Span<float> _xs;
-        private readonly Span<float> _ys;
-        private readonly Span<float> _zs;
+        private readonly Span<double> _xs;
+        private readonly Span<double> _ys;
+        private readonly Span<double> _zs;
 
-        internal ClusterCentres(Span<float> xs, Span<float> ys, Span<float> zs, ulong validMask, int count,
-            float centroidX, float centroidY, float centroidZ)
+        internal ClusterCentres(Span<double> xs, Span<double> ys, Span<double> zs, ulong validMask, int count,
+            double centroidX, double centroidY, double centroidZ)
         {
             _xs = xs;
             _ys = ys;
@@ -67,19 +72,19 @@ internal sealed unsafe partial class ArchetypeClusterState
         internal int Count { get; }
 
         /// <summary>Mean of the valid centres. The target region is centred here, never on the midpoint of the bound.</summary>
-        internal float CentroidX { get; }
+        internal double CentroidX { get; }
 
         /// <inheritdoc cref="CentroidX"/>
-        internal float CentroidY { get; }
+        internal double CentroidY { get; }
 
         /// <inheritdoc cref="CentroidX"/>
-        internal float CentroidZ { get; }
+        internal double CentroidZ { get; }
 
-        internal float X(int slot) => _xs[slot];
+        internal double X(int slot) => _xs[slot];
 
-        internal float Y(int slot) => _ys[slot];
+        internal double Y(int slot) => _ys[slot];
 
-        internal float Z(int slot) => _zs[slot];
+        internal double Z(int slot) => _zs[slot];
     }
 
     /// <summary>
@@ -113,22 +118,22 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <param name="clusterChunkId">The cluster to walk.</param>
     /// <param name="accessor">Chunk accessor for the cluster segment; must already be inside an epoch scope.</param>
     /// <param name="scratch">
-    /// At least <c>3 * <see cref="MaxSlotsPerCluster"/></c> floats, supplied by the caller so the allocation is hoisted out of the per-cluster loop.
+    /// At least <c>3 * <see cref="MaxSlotsPerCluster"/></c> doubles, supplied by the caller so the allocation is hoisted out of the per-cluster loop.
     /// Sliced into three SoA runs. </param>
-    internal ClusterCentres GatherClusterCentres(int clusterChunkId, ref ChunkAccessor<PersistentStore> accessor, Span<float> scratch)
+    internal ClusterCentres GatherClusterCentres(int clusterChunkId, ref ChunkAccessor<PersistentStore> accessor, Span<double> scratch)
     {
         var xs = scratch.Slice(0, MaxSlotsPerCluster);
         var ys = scratch.Slice(MaxSlotsPerCluster, MaxSlotsPerCluster);
         var zs = scratch.Slice(2 * MaxSlotsPerCluster, MaxSlotsPerCluster);
 
-        var ss = SpatialSlot;
+        ref readonly var ss = ref SpatialSlot;
         var clusterBase = accessor.GetChunkAddress(clusterChunkId);
         var occupancy = *(ulong*)clusterBase;
         var compOffset = Layout.ComponentOffset(ss.Slot);
         var compStride = Layout.ComponentSize(ss.Slot);
         var fieldType = ss.FieldInfo.FieldType;
 
-        float sumX = 0f, sumY = 0f, sumZ = 0f;
+        double sumX = 0d, sumY = 0d, sumZ = 0d;
         var counted = 0;
         ulong valid = 0;
 
@@ -141,7 +146,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             var fieldPtr = clusterBase + compOffset + slot * compStride + ss.FieldOffset;
             SpatialGrid.ReadSpatialCenter3D(fieldPtr, fieldType, out var posX, out var posY, out var posZ);
 
-            if (!float.IsFinite(posX) || !float.IsFinite(posY) || !float.IsFinite(posZ))
+            if (!double.IsFinite(posX) || !double.IsFinite(posY) || !double.IsFinite(posZ))
             {
                 continue; // defensive — non-finite positions are rejected upstream; excluded from BOTH consumers alike
             }
@@ -159,10 +164,10 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         if (counted == 0)
         {
-            return new ClusterCentres(xs, ys, zs, 0, 0, 0f, 0f, 0f);
+            return new ClusterCentres(xs, ys, zs, 0, 0, 0d, 0d, 0d);
         }
 
-        var inv = 1f / counted;
+        var inv = 1d / counted;
         return new ClusterCentres(xs, ys, zs, valid, counted, sumX * inv, sumY * inv, sumZ * inv);
     }
 
@@ -237,7 +242,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         var centreX = centres.CentroidX;
         var centreY = centres.CentroidY;
-        var centreZ = flat ? 0f : centres.CentroidZ;
+        var centreZ = flat ? 0d : centres.CentroidZ;
 
         // Slots the outlier guard has already queued for ANOTHER cell are excluded here rather than merely ordered after it. The guard force-migrates
         // entities whose cluster has sprawled past the cell — a correctness escape — while this relocates within the cell, a quality improvement; queueing
@@ -256,10 +261,10 @@ internal sealed unsafe partial class ArchetypeClusterState
 
             var outX = AxisOvershoot(posX, centreX, half);
             var outY = AxisOvershoot(posY, centreY, half);
-            var outZ = flat ? 0f : AxisOvershoot(posZ, centreZ, half);
-            var overshoot = MathF.Max(outX, MathF.Max(outY, outZ));
+            var outZ = flat ? 0d : AxisOvershoot(posZ, centreZ, half);
+            var overshoot = Math.Max(outX, Math.Max(outY, outZ));
 
-            if (overshoot <= 0f)
+            if (overshoot <= 0d)
             {
                 continue; // inside the target region — AC-10.2, and the common case in a cluster that is merely lopsided
             }
@@ -286,7 +291,14 @@ internal sealed unsafe partial class ArchetypeClusterState
                 candidatesBuilt = true;
             }
 
-            var destCluster = ChooseRelocationTarget(candidateScratch, posX - originX, posY - originY, flat ? 0f : posZ - originZ, flat);
+            // Narrowed to the C15 cell-relative frame here, and only here: the candidate boxes ChooseRelocationTarget scores are stored bounds, so the
+            // comparison belongs in their frame at their width. The centres above stay f64 because they are world coordinates.
+            var destCluster = ChooseRelocationTarget(
+                candidateScratch,
+                (float)(posX - originX),
+                (float)(posY - originY),
+                flat ? 0f : (float)(posZ - originZ),
+                flat);
 
             if (destCluster < 0)
             {
@@ -334,7 +346,76 @@ internal sealed unsafe partial class ArchetypeClusterState
         var shrink = ClusterShrinkPendingAxes;
         if (shrink != null && (uint)chunkId < (uint)shrink.Length)
         {
-            InterlockedOrShrinkAxes(shrink, chunkId, 0x0F);
+            InterlockedOrShrinkAxes(shrink, chunkId, AllShrinkAxes);
+        }
+    }
+
+    /// <summary>
+    /// Every axis bit of <c>ClusterShrinkPendingAxes</c>: MinX | MaxX | MinY | MaxY | MinZ | MaxZ.
+    /// </summary>
+    /// <remarks>
+    /// <b>0x3F since #914, and it was 0x0F for a reason that stopped being true.</b> The Z bits were declared in the mask's own documentation from the start
+    /// but nothing set them, because <c>WriteSpatial</c> handled AABB2F only and a 2D union leaves Z at the sentinel. With the 3D tiers live, a helper that
+    /// asks for "every axis" and omits Z would leave a cluster's Z bound un-recomputed after a migration or a vacated slot — the bound would stay
+    /// conservative on exactly the axis the entity left, and nothing would ever tighten it again.
+    /// </remarks>
+    private const byte AllShrinkAxes = 0x3F;
+
+    /// <summary>
+    /// A/B switch for #912: <c>true</c> defers a migration's source-cluster flag writes to the per-chunk drain instead of issuing them per migrant.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>What it moves, and why the per-migrant version is expensive out of all proportion to what it does.</b>
+    /// <see cref="FlagClusterForShrinkRefresh"/> issues two atomic read-modify-writes indexed by the SOURCE cluster's chunk id: a CAS into
+    /// <c>ClusterShrinkPendingAxes</c>, a <c>byte[]</c> that packs 64 clusters into a cache line, and an <c>Interlocked.Or</c> into
+    /// <c>ClusterProcessBitmap</c>, a bit-per-cluster <c>long[]</c> that packs 512. At the few-hundred-cluster scale a real workload runs at, the whole
+    /// bitmap is ONE cache line — so every worker's every migration takes the same line exclusive, and the cost is coherence traffic rather than work.
+    /// Rule MD-03 forbids exactly this shape ("bit-packed latch arrays ... adjacent latches share cache lines"), and its stated failure mode is the one
+    /// measured: parallel speedup collapses while the operation count is unchanged.</para>
+    /// <para><b>Deferring is free because the buffer already exists.</b> The Migrate slice already appends a <c>DirtyBitDelta</c> per migration carrying
+    /// the source chunk id, and <see cref="ArchetypeClusterState.ApplyDirtyBitDeltas"/> already drains it once per chunk under the finalize latch — where
+    /// the writes become PLAIN, because the latch excludes every other worker. The atomics are not made cheaper; they are removed.</para>
+    /// <para><b>Only the parallel path.</b> The serial fence passes no buffer and keeps the direct call, where there is no contention to avoid and the
+    /// deferral would only add a hop.</para>
+    /// <para>Static and mutable so a harness can flip it inside ONE binary and interleave the arms — a batch-versus-batch comparison across separate runs
+    /// drifts with whatever else the box is doing, which is how a 2.3x phantom was once measured.</para>
+    /// </remarks>
+    internal static bool DeferMigrateClusterFlags = true;
+
+    /// <summary>
+    /// #926. When true (the default) a Migrate slice holds ONE zone-map batch per indexed field for its whole run; when false it takes the grow latch per
+    /// migrant per field, which is the pre-#926 behaviour.
+    /// </summary>
+    /// <remarks>
+    /// <para>The per-write form takes <c>ZoneMapArray._growLatch</c> shared and releases it, so it is two locked read-modify-writes on ONE archetype-wide
+    /// word for every migrated entity. A shared acquire still takes the line exclusive, so eight workers draining ten thousand migrations bounce that word
+    /// between cores tens of thousands of times under no logical contention at all — the shape MD-03 forbids, and the same one #886 already measured and
+    /// fixed on the Prep path ("that word bounced between cores ~4 000 times a tick and the zone-map step's CPU tripled").</para>
+    /// <para>Static and mutable for the same reason as <see cref="DeferMigrateClusterFlags"/>: a harness flips it inside ONE binary and interleaves the
+    /// arms, because a batch-versus-batch comparison across separate runs drifts with whatever else the box is doing.</para>
+    /// </remarks>
+    internal static bool BatchMigrateZoneMaps = true;
+
+    /// <summary>
+    /// The deferred half of <see cref="FlagClusterForShrinkRefresh"/>: set one source cluster's shrink axes and process bit with PLAIN writes.
+    /// </summary>
+    /// <remarks>
+    /// Callable only with <c>_finalizeLock</c> held, which is what makes the plain writes correct — the latch excludes every other worker from these two
+    /// arrays, so the atomics the per-migrant path needs are not merely cheaper here, they are unnecessary.
+    /// </remarks>
+    internal void FlagClusterForShrinkRefreshLocked(int chunkId)
+    {
+        var shrink = ClusterShrinkPendingAxes;
+        if (shrink != null && (uint)chunkId < (uint)shrink.Length)
+        {
+            shrink[chunkId] |= AllShrinkAxes;
+        }
+
+        var bitmap = ClusterProcessBitmap;
+        var wordIdx = chunkId >> 6;
+        if (bitmap != null && (uint)wordIdx < (uint)bitmap.Length)
+        {
+            bitmap[wordIdx] |= 1L << (chunkId & 63);
         }
     }
 
@@ -351,7 +432,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// makes the refresh pass VISIT the cluster in the first place. Migration also clears the source slot's dirty bit, so a cluster whose last migrant
     /// just left can drop out of the pass entirely — the flag would then sit unread until something else happened to write that cluster, which on a
     /// settled cell may be never.</para>
-    /// <para><b>All four axes, not the one that moved.</b> The departing entity may have been the extreme on any axis, or on several; the refresh path
+    /// <para><b>All SIX axis bits, not the one that moved.</b> The departing entity may have been the extreme on any axis, or on several; the refresh path
     /// only re-derives an axis whose bit is set, and the cost is one scan of a cluster that is being scanned anyway.</para>
     /// <para>Ordering is what makes this work within one tick: Migrate runs before AabbRefresh, and <c>ClearAabbRefreshBookkeeping</c> runs after it in
     /// Finalize, so a bit set here is consumed by this tick's refresh and cleared before the next.</para>
@@ -361,8 +442,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         var shrink = ClusterShrinkPendingAxes;
         if (shrink != null && (uint)chunkId < (uint)shrink.Length)
         {
-            // All four axis bits (MinX | MaxX | MinY | MaxY) — the layout ClusterRef.MaybeGrowAndFlagShrink documents.
-            InterlockedOrShrinkAxes(shrink, chunkId, 0x0F);
+            // Every axis bit — the layout ClusterRef.MaybeGrowAndFlagShrink documents. Six since #914; see AllShrinkAxes.
+            InterlockedOrShrinkAxes(shrink, chunkId, AllShrinkAxes);
         }
 
         var bitmap = ClusterProcessBitmap;
@@ -411,10 +492,10 @@ internal sealed unsafe partial class ArchetypeClusterState
 
     /// <summary>How far <paramref name="p"/> lies outside <c>[centre - half, centre + half]</c>, or 0 when inside.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static float AxisOvershoot(float p, float centre, float half)
+    private static double AxisOvershoot(double p, double centre, double half)
     {
-        var d = MathF.Abs(p - centre) - half;
-        return d > 0f ? d : 0f;
+        var d = Math.Abs(p - centre) - half;
+        return d > 0d ? d : 0d;
     }
 
 

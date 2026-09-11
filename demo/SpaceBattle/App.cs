@@ -1762,7 +1762,7 @@ internal sealed class App : IDisposable
             {
                 t++;
                 var a2 = c.SpatialBounds;
-                if (!(a2.MinX <= a2.MaxX) || !float.IsFinite(a2.MinX)) { b++; be += c.LiveCount; }
+                if (!(a2.MinX <= a2.MaxX) || !double.IsFinite(a2.MinX)) { b++; be += c.LiveCount; }
             }
             return (t, b, be);
         }
@@ -1777,7 +1777,7 @@ internal sealed class App : IDisposable
             {
                 t++;
                 var a2 = c.SpatialBounds;
-                if (!(a2.MinX <= a2.MaxX) || !float.IsFinite(a2.MinX)) { b++; be += c.LiveCount; }
+                if (!(a2.MinX <= a2.MaxX) || !double.IsFinite(a2.MinX)) { b++; be += c.LiveCount; }
             }
             return (t, b, be);
         }
@@ -1792,7 +1792,7 @@ internal sealed class App : IDisposable
             {
                 t++;
                 var a2 = c.SpatialBounds;
-                if (!(a2.MinX <= a2.MaxX) || !float.IsFinite(a2.MinX)) { b++; be += c.LiveCount; }
+                if (!(a2.MinX <= a2.MaxX) || !double.IsFinite(a2.MinX)) { b++; be += c.LiveCount; }
             }
             return (t, b, be);
         }
@@ -1807,7 +1807,7 @@ internal sealed class App : IDisposable
             {
                 t++;
                 var a2 = c.SpatialBounds;
-                if (!(a2.MinX <= a2.MaxX) || !float.IsFinite(a2.MinX)) { b++; be += c.LiveCount; }
+                if (!(a2.MinX <= a2.MaxX) || !double.IsFinite(a2.MinX)) { b++; be += c.LiveCount; }
             }
             return (t, b, be);
         }
@@ -1843,7 +1843,7 @@ internal sealed class App : IDisposable
             {
                 oversized++;
             }
-            biggest = MathF.Max(biggest, MathF.Max(w, h));
+            biggest = MathF.Max(biggest, (float)Math.Max(w, h));
 
             var pos = c.GetReadOnlySpan(Ship.Position);
             while (bits != 0)
@@ -1853,8 +1853,8 @@ internal sealed class App : IDisposable
                 total++;
                 var x = pos[i].Bounds.MinX;
                 var y = pos[i].Bounds.MinY;
-                var dx = MathF.Max(box.MinX - x, x - box.MaxX);
-                var dy = MathF.Max(box.MinY - y, y - box.MaxY);
+                var dx = (float)Math.Max(box.MinX - x, x - box.MaxX);
+                var dy = (float)Math.Max(box.MinY - y, y - box.MaxY);
                 var d = MathF.Max(dx, dy);
                 if (d > 0.001f)
                 {

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -548,4 +549,186 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
         });
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // #916 O1 — the DFS traversal stack moved out of the enumerator and into a per-thread pool. These are the two properties that move with it.
+    // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// <c>AC-5</c>: two live enumerators on one thread, both traversing promoted cells, answer exactly what they answer alone.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>This is the test that fails if the pooled stack is shared naively.</b> Before #916 each enumerator embedded its own 1 KB stack, so nesting
+    /// was safe by construction and nothing had to assert it. A single <c>[ThreadStatic]</c> buffer would not crash here — the inner query would overwrite
+    /// the outer's traversal state and the outer would resume describing a different subtree, returning a SUBSET. Hence the outer set is compared against
+    /// the same query run alone, not against a count.</para>
+    /// <para>The inner query runs only on the first few outer iterations. Running it on all of them would multiply a 3 000-entity fixture by its own hit
+    /// count for no extra coverage: what has to be true is that the outer enumerator survives an inner traversal <b>begun while it is mid-descent</b>, and
+    /// three of those prove it as well as three hundred.</para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("SQ-01")]
+    public void NestedQueriesOverPromotedCells_AnswerAsTheyDoAlone()
+    {
+        const int EntityCount = 3_000;
+        const int NestedRuns = 3;
+
+        ServiceProvider.EnsureFileDeleted<ManagedPagedMMFOptions>();
+        using var scope = ServiceProvider.CreateScope();
+        using var dbe = SetupEngine(scope, PromoteAt);
+
+        var rng = new Random(20260908);
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (int i = 0; i < EntityCount; i++)
+            {
+                float x = 1f + ((float)rng.NextDouble() * (CellSize - 2f));
+                float y = 1f + ((float)rng.NextDouble() * (CellSize - 2f));
+                tx.Spawn<ClCohUnit>(ClCohUnit.Pos.Set(PointAt(x, y)));
+            }
+            tx.Commit();
+        }
+        dbe.WriteTickFence(1);
+
+        var cs = ClusterStateOf(dbe);
+        Assert.That(cs.PromotedCellCount, Is.GreaterThan(0), "the population must promote, or neither enumerator descends a tree and the test proves nothing");
+
+        // Two DIFFERENT boxes over the same promoted cell: identical boxes would let a clobbered outer stack still produce the right answer by accident.
+        var outerAlone = QueryHits(dbe, cs, 100f, 600f);
+        var innerAlone = QueryHits(dbe, cs, 400f, 900f);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(outerAlone, Is.Not.Empty, "the outer query must return something, or an empty-vs-empty comparison passes trivially");
+            Assert.That(innerAlone, Is.Not.Empty, "the inner query must return something");
+            Assert.That(outerAlone, Is.Not.EquivalentTo(innerAlone), "the two boxes must select different sets, or nesting cannot be distinguished");
+        });
+
+        var outerNested = new HashSet<long>();
+        var innerResults = new List<HashSet<long>>();
+
+        using (var epoch = EpochGuard.Enter(dbe.EpochManager))
+        {
+            foreach (var outerHit in cs.QueryAabb(dbe.SpatialGrid, 100f, 100f, float.NegativeInfinity, 600f, 600f, float.PositiveInfinity))
+            {
+                outerNested.Add(outerHit.EntityId);
+
+                if (innerResults.Count >= NestedRuns)
+                {
+                    continue;
+                }
+
+                // Begun and fully drained while the outer enumerator is suspended mid-descent — the whole point.
+                var inner = new HashSet<long>();
+                foreach (var innerHit in cs.QueryAabb(dbe.SpatialGrid, 400f, 400f, float.NegativeInfinity, 900f, 900f, float.PositiveInfinity))
+                {
+                    inner.Add(innerHit.EntityId);
+                }
+                innerResults.Add(inner);
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(outerNested, Is.EquivalentTo(outerAlone),
+                "the outer query returned a different set when an inner query ran inside it — the two enumerators shared a traversal stack");
+
+            for (int i = 0; i < innerResults.Count; i++)
+            {
+                Assert.That(innerResults[i], Is.EquivalentTo(innerAlone), $"nested run {i} returned a different set from the same query run alone");
+            }
+
+            Assert.That(innerResults, Has.Count.EqualTo(NestedRuns), "the outer query yielded fewer hits than the nested runs needed");
+        });
+    }
+
+    /// <summary>
+    /// <c>AC-2</c>: the query path allocates nothing once the pool is warm, and <c>AC-4</c>'s depth half — no promoted query overflows the 256-slot stack.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Asserted with a counter, not by inspection</b>, which is what #916 asks for. The FIRST query on a thread does allocate — that is the pooled
+    /// buffer being created — so the measurement is taken after a warm-up pass. Steady state is the property that matters: a game loop issuing one query per
+    /// agent per tick must not hand the GC a kilobyte each time, which is precisely what the enumerator's inline stack avoided by being on the stack and
+    /// what the pool has to keep avoiding now that it is not.</para>
+    /// <para>The overflow counter is process-wide and always on (#422). Reading it either side of the queries turns "the pooled stack is deep enough" into a
+    /// measurement rather than an assumption — an overflow would silently drop children, so it cannot be left to show up as a wrong answer somewhere else.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("SQ-05")]
+    public void WarmQueryPathAllocatesNothing_AndNeverOverflowsTheStack()
+    {
+        const int EntityCount = 3_000;
+        const int MeasuredQueries = 64;
+
+        ServiceProvider.EnsureFileDeleted<ManagedPagedMMFOptions>();
+        using var scope = ServiceProvider.CreateScope();
+        using var dbe = SetupEngine(scope, PromoteAt);
+
+        var rng = new Random(20260909);
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (int i = 0; i < EntityCount; i++)
+            {
+                float x = 1f + ((float)rng.NextDouble() * (CellSize - 2f));
+                float y = 1f + ((float)rng.NextDouble() * (CellSize - 2f));
+                tx.Spawn<ClCohUnit>(ClCohUnit.Pos.Set(PointAt(x, y)));
+            }
+            tx.Commit();
+        }
+        dbe.WriteTickFence(1);
+
+        var cs = ClusterStateOf(dbe);
+        Assert.That(cs.PromotedCellCount, Is.GreaterThan(0),
+            "without a promoted cell no query descends a tree, so neither the pool nor the depth is exercised");
+
+        long overflowsBefore = Interlocked.Read(ref SpatialRTreeDiagnostics.DfsStackOverflowCount);
+
+        using (var epoch = EpochGuard.Enter(dbe.EpochManager))
+        {
+            // Warm-up: creates the pooled buffer and settles every other first-touch cost on this thread.
+            long warmHits = 0;
+            for (int i = 0; i < 8; i++)
+            {
+                foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 200f, 200f, float.NegativeInfinity, 500f, 500f, float.PositiveInfinity))
+                {
+                    warmHits += r.EntityId;
+                }
+            }
+            Assert.That(warmHits, Is.Not.Zero, "the warm-up must actually hit entities, or the measured loop below walks a different path");
+
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            long hits = 0;
+            for (int i = 0; i < MeasuredQueries; i++)
+            {
+                foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 200f, 200f, float.NegativeInfinity, 500f, 500f, float.PositiveInfinity))
+                {
+                    hits += r.EntityId;
+                }
+            }
+            long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+            TestContext.Out.WriteLine($"{MeasuredQueries} warm queries over a promoted cell allocated {allocated} bytes ({hits} accumulated ids)");
+
+            Assert.That(allocated, Is.Zero,
+                $"{MeasuredQueries} warm spatial queries allocated {allocated} bytes. The pooled traversal stack must be reused, not reallocated — AC-2.");
+        }
+
+        Assert.That(Interlocked.Read(ref SpatialRTreeDiagnostics.DfsStackOverflowCount), Is.EqualTo(overflowsBefore),
+            "a promoted query overflowed the 256-slot traversal stack and silently dropped children — the pooled stack is shallower than the inline one was");
+    }
+
+    /// <summary>Drain one query into a hit set, inside its own epoch scope.</summary>
+    private static HashSet<long> QueryHits(DatabaseEngine dbe, ArchetypeClusterState cs, float qMin, float qMax)
+    {
+        var hits = new HashSet<long>();
+        using var epoch = EpochGuard.Enter(dbe.EpochManager);
+        foreach (var r in cs.QueryAabb(dbe.SpatialGrid, qMin, qMin, float.NegativeInfinity, qMax, qMax, float.PositiveInfinity))
+        {
+            hits.Add(r.EntityId);
+        }
+
+        return hits;
+    }
 }

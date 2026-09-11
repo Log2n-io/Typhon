@@ -328,7 +328,7 @@ public partial class DatabaseEngine
             if (isSpatial && _spatialGrid != null)
             {
                 ref readonly var cfg = ref _spatialGrid.Config;
-                cellSize = cfg.CellSize;
+                cellSize = (float)cfg.CellSize;
                 gridWidth = cfg.GridWidth;
                 gridHeight = cfg.GridHeight;
                 gridDepth = cfg.GridDepth;
@@ -350,8 +350,8 @@ public partial class DatabaseEngine
     /// transient spatial state.
     /// </summary>
     internal bool TryGetClusterChunkSpatialInfo(int clusterSegmentRootPage, int clusterChunkId, out int cellKey, out int cellX, out int cellY, out int cellZ,
-        out int entitiesInCell, out int clustersInCell, out float aabbMinX, out float aabbMinY, out float aabbMinZ, out float aabbMaxX, out float aabbMaxY, 
-        out float aabbMaxZ)
+        out int entitiesInCell, out int clustersInCell, out double aabbMinX, out double aabbMinY, out double aabbMinZ, out double aabbMaxX,
+        out double aabbMaxY, out double aabbMaxZ)
     {
         cellKey = -1;
         cellX = 0;
@@ -414,14 +414,18 @@ public partial class DatabaseEngine
                 // method — the Workbench storage detail panel, `typhon` CLI output — reads them as world coordinates. Handing the raw offsets outward
                 // would report a cluster at (10, 10) when it sits at (110, 10): not a correctness failure inside the engine, but a display that is
                 // confidently wrong, which is worse than one that is obviously broken.
-                grid.CellOrigin(cellKey, out float originX, out float originY, out float originZ);
+                //
+                // f64 out, and through ToWorldExact rather than ToWorld, since #914: the panel displays a world coordinate, and an f32 one is quantised to
+                // ~64-unit steps at 10^9 — so every cluster in a distant region of an f64 world would have been reported at the same place. The exact
+                // conversion also drops the half-ULP inward rounding ToWorld's own remarks apologise for.
+                grid.CellOrigin(cellKey, out double originX, out double originY, out double originZ);
                 ref var box = ref aabbs[clusterChunkId];
-                aabbMinX = ClusterSpatialAabb.ToWorld(box.MinX, originX);
-                aabbMinY = ClusterSpatialAabb.ToWorld(box.MinY, originY);
-                aabbMinZ = ClusterSpatialAabb.ToWorld(box.MinZ, originZ);
-                aabbMaxX = ClusterSpatialAabb.ToWorld(box.MaxX, originX);
-                aabbMaxY = ClusterSpatialAabb.ToWorld(box.MaxY, originY);
-                aabbMaxZ = ClusterSpatialAabb.ToWorld(box.MaxZ, originZ);
+                aabbMinX = ClusterSpatialAabb.ToWorldExact(box.MinX, originX);
+                aabbMinY = ClusterSpatialAabb.ToWorldExact(box.MinY, originY);
+                aabbMinZ = ClusterSpatialAabb.ToWorldExact(box.MinZ, originZ);
+                aabbMaxX = ClusterSpatialAabb.ToWorldExact(box.MaxX, originX);
+                aabbMaxY = ClusterSpatialAabb.ToWorldExact(box.MaxY, originY);
+                aabbMaxZ = ClusterSpatialAabb.ToWorldExact(box.MaxZ, originZ);
             }
             return true;
         }

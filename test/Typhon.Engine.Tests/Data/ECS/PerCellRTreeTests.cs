@@ -513,7 +513,7 @@ class PerCellRTreeTests : TestBase<PerCellRTreeTests>
                 while (en.MoveNext())
                 {
                     var c = en.Current;
-                    hits.Add((c.EntityId, c.MinX, c.MinY, c.MaxX, c.MaxY));
+                    hits.Add((c.EntityId, (float)c.MinX, (float)c.MinY, (float)c.MaxX, (float)c.MaxY));
                 }
             }
             finally { en.Dispose(); }
@@ -553,7 +553,7 @@ class PerCellRTreeTests : TestBase<PerCellRTreeTests>
                 while (en.MoveNext())
                 {
                     var c = en.Current;
-                    results.Add((c.EntityId, c.DistanceSq));
+                    results.Add((c.EntityId, (float)c.DistanceSq));
                 }
             }
             finally { en.Dispose(); }

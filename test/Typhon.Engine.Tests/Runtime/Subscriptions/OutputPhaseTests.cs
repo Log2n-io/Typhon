@@ -14,7 +14,6 @@ namespace Typhon.Engine.Tests.Runtime;
 [NonParallelizable]
 class OutputPhaseTests : TestBase<OutputPhaseTests>
 {
-    private const int TestPort = 19950;
 
     [OneTimeSetUp]
     public void OneTimeSetup()
@@ -34,6 +33,7 @@ class OutputPhaseTests : TestBase<OutputPhaseTests>
     [Test]
     public void OutputPhase_SpawnAfterSubscribe_ClientBufferReceivesData()
     {
+        var testPort = TestPortAllocator.NextFreePort();
         using var dbe = SetupEngine();
         using var viewTx = dbe.CreateQuickTransaction();
         var subsView = viewTx.Query<SvEcsUnit>().ToView();
@@ -64,7 +64,7 @@ class OutputPhaseTests : TestBase<OutputPhaseTests>
         {
             WorkerCount = 1,
             BaseTickRate = 30,
-            SubscriptionServer = new SubscriptionServerOptions { Port = TestPort }
+            SubscriptionServer = new SubscriptionServerOptions { Port = testPort }
         });
 
         var published = runtime.PublishView("test", subsView);
@@ -76,10 +76,14 @@ class OutputPhaseTests : TestBase<OutputPhaseTests>
 
             // Connect and subscribe
             using var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            client.Connect(new IPEndPoint(IPAddress.Loopback, TestPort));
+            client.Connect(new IPEndPoint(IPAddress.Loopback, testPort));
             client.NoDelay = true;
 
-            SpinWait.SpinUntil(() => runtime.ClientConnections.Count > 0, System.TimeSpan.FromSeconds(2));
+            // Asserted, not discarded. `Connect` succeeding proves only that SOMETHING is listening on that port — when it was a hard-coded constant, that
+            // something was as likely to be another process, and the test then died on First() over an empty list several lines later with a message about
+            // sequences rather than about connections.
+            Assert.That(SpinWait.SpinUntil(() => runtime.ClientConnections.Count > 0, System.TimeSpan.FromSeconds(2)), Is.True,
+                $"no client registered with the runtime within 2s on port {testPort} — the socket connected, so something else may own that port");
             var conn = System.Linq.Enumerable.First(runtime.ClientConnections.GetAll());
             runtime.SetSubscriptions(conn.Context, published);
 
@@ -144,6 +148,7 @@ class OutputPhaseTests : TestBase<OutputPhaseTests>
     [Test]
     public void OutputPhase_ContinuousSpawn_ClientReceivesMultipleDeltas()
     {
+        var testPort = TestPortAllocator.NextFreePort();
         using var dbe = SetupEngine();
         using var viewTx = dbe.CreateQuickTransaction();
         var subsView = viewTx.Query<SvEcsUnit>().ToView();
@@ -170,7 +175,7 @@ class OutputPhaseTests : TestBase<OutputPhaseTests>
         {
             WorkerCount = 1,
             BaseTickRate = 30,
-            SubscriptionServer = new SubscriptionServerOptions { Port = TestPort + 1 }
+            SubscriptionServer = new SubscriptionServerOptions { Port = testPort }
         });
 
         var published = runtime.PublishView("test", subsView);
@@ -181,10 +186,14 @@ class OutputPhaseTests : TestBase<OutputPhaseTests>
             Thread.Sleep(50);
 
             using var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            client.Connect(new IPEndPoint(IPAddress.Loopback, TestPort + 1));
+            client.Connect(new IPEndPoint(IPAddress.Loopback, testPort));
             client.NoDelay = true;
 
-            SpinWait.SpinUntil(() => runtime.ClientConnections.Count > 0, System.TimeSpan.FromSeconds(2));
+            // Asserted, not discarded. `Connect` succeeding proves only that SOMETHING is listening on that port — when it was a hard-coded constant, that
+            // something was as likely to be another process, and the test then died on First() over an empty list several lines later with a message about
+            // sequences rather than about connections.
+            Assert.That(SpinWait.SpinUntil(() => runtime.ClientConnections.Count > 0, System.TimeSpan.FromSeconds(2)), Is.True,
+                $"no client registered with the runtime within 2s on port {testPort} — the socket connected, so something else may own that port");
             var conn = System.Linq.Enumerable.First(runtime.ClientConnections.GetAll());
             runtime.SetSubscriptions(conn.Context, published);
 

@@ -68,6 +68,9 @@ export function isInstantKind(v: number): boolean {
   // EcsSpawnBatch (36, #620) — instant rollup for a whole batch spawn. Its neighbours EcsSpawn (30) / EcsDestroy (31) are
   // spans, hence a point carve-out rather than a range. Missing it rendered the record as a phantom span named `Kind[36]`.
   if (v === TraceEventKind.EcsSpawnBatch) return true;
+  // #911 — 65/66 are instants sitting among spans (60-64). Same shape as the EcsSpawnBatch carve-out above, and missing it
+  // would render both as phantom spans with a fabricated duration read out of their payload.
+  if (v === 65 || v === 66) return true;
   if (v >= 90 && v <= 116) return true;                                    // Concurrency tracing (Phase 2, #280)
   // Spatial tracing (Phase 3, #281) — mixed; instants are 127-135, 137, 140-142, 144, 145.
   if ((v >= 127 && v <= 135) || v === 137 || (v >= 140 && v <= 142) || v === 144 || v === 145) return true;
@@ -221,6 +224,42 @@ function decodeInstant(
 
     case TraceEventKind.PerTickSnapshot:
       return decodePerTickSnapshot(reader, pos, threadSlot, timestampUs);
+
+    // #911 — the two per-archetype spatial-maintenance rollups. Both are fixed-shape: an instant has no optional-mask
+    // byte (the generator's EmitInstant path ignores [Optional] entirely), so every field is always present.
+    case TraceEventKind.SpatialRelocationOutcome:
+      return {
+        kind, threadSlot, tickNumber, timestampUs,
+        archetypeId: reader.readU16(payloadOffset),
+        relocationsAdmitted: reader.readI32(payloadOffset + 2),
+        relocationsThrottled: reader.readI32(payloadOffset + 6),
+        relocationsSuperseded: reader.readI32(payloadOffset + 10),
+        driftersUnplaced: reader.readI32(payloadOffset + 14),
+        driftersUnplacedNoCandidate: reader.readI32(payloadOffset + 18),
+        driftersSpilled: reader.readI32(payloadOffset + 22),
+        pinsRejected: reader.readI32(payloadOffset + 26),
+        crossingsQueued: reader.readI32(payloadOffset + 30),
+      };
+
+    case TraceEventKind.SpatialArchetypeTelemetry:
+      return {
+        kind, threadSlot, tickNumber, timestampUs,
+        archetypeId: reader.readU16(payloadOffset),
+        activeClusters: reader.readI32(payloadOffset + 2),
+        migrationCount: reader.readI32(payloadOffset + 6),
+        migrationCpuMs: reader.readF32(payloadOffset + 10),
+        hysteresisAbsorbed: reader.readI32(payloadOffset + 14),
+        driftersDetected: reader.readI32(payloadOffset + 18),
+        repairUnits: reader.readI32(payloadOffset + 22),
+        repairUnitsRefused: reader.readI32(payloadOffset + 26),
+        repairQueueDepth: reader.readI32(payloadOffset + 30),
+        budgetUsedMs: reader.readF32(payloadOffset + 34),
+        tightnessSamples: reader.readI32(payloadOffset + 38),
+        extentRatio: reader.readF32(payloadOffset + 42),
+        packingBound: reader.readF32(payloadOffset + 46),
+        cellTreePromotions: reader.readI32(payloadOffset + 50),
+        cellTreeDemotions: reader.readI32(payloadOffset + 54),
+      };
 
     case TraceEventKind.GcStart:
       return decodeGcStart(reader, pos, threadSlot, tickNumber, timestampUs);
@@ -630,6 +669,10 @@ function decodeSpan(
     case 63 as TraceEventKind:
       return decodeWriteTickFenceClusterSpatial(reader, kind, threadSlot, tickNumber, timestampUs, header);
 
+    // SpatialRepairUnit (64) — one admitted repair unit, with the cell it names and the degradation it was ranked on.
+    case 64 as TraceEventKind:
+      return decodeSpatialRepairUnit(reader, kind, threadSlot, tickNumber, timestampUs, header);
+
     // SpatialClusterMigrationDetectScan (249) — fence-time scan span.
     case 249 as TraceEventKind:
       return decodeClusterMigrationDetectScan(reader, kind, threadSlot, tickNumber, timestampUs, header);
@@ -1026,6 +1069,10 @@ function decodeClusterMigration(
   if (o + 10 <= header.recordEnd) {
     evt.componentCount = reader.readI32(o + 6);
   }
+  // #911 O1 appended an optional-mask block after the required payload: the three migration kinds the slice mixed.
+  // Wire-additive in the strict sense — a pre-#911 record ends at o+10, `decodeOptionalMaskedFields` sees the mask
+  // offset at or past `recordEnd` and returns without reading, leaving the three fields undefined.
+  decodeOptionalMaskedFields(reader, evt, o + 10, header.recordEnd, CLUSTER_MIGRATION_KIND_FIELDS);
   return evt;
 }
 
@@ -1044,7 +1091,7 @@ type NumericTraceEventKey = {
 
 interface OptionalFieldSpec {
   bit: number;
-  type: 'i32' | 'u8';
+  type: 'i32' | 'u8' | 'f32';
   field: NumericTraceEventKey;
 }
 
@@ -1069,9 +1116,11 @@ function decodeOptionalMaskedFields(
   const sink = evt as Record<NumericTraceEventKey, number>;
   for (const f of spec) {
     if ((mask & f.bit) === 0) continue;
-    const size = f.type === 'i32' ? 4 : 1;
+    const size = f.type === 'u8' ? 1 : 4;
     if (cursor + size > recordEnd) break;   // truncated / stale-mask record — stop before the adjacent record
-    sink[f.field] = f.type === 'i32' ? reader.readI32(cursor) : reader.readU8(cursor);
+    sink[f.field] = f.type === 'i32' ? reader.readI32(cursor)
+      : f.type === 'f32' ? reader.readF32(cursor)
+        : reader.readU8(cursor);
     cursor += size;
   }
 }
@@ -1125,6 +1174,41 @@ function decodeClusterAabbRefresh(
     clusterScanned: reader.readI32(o + 2),
   };
   decodeOptionalMaskedFields(reader, evt, o + 6, header.recordEnd, FENCE_AABB_FIELDS);
+  return evt;
+}
+
+// ClusterMigration (kind 60) optional block, added by #911 O1. Wire order is mask-bit order.
+const CLUSTER_MIGRATION_KIND_FIELDS: readonly OptionalFieldSpec[] = [
+  { bit: 0x01, type: 'i32', field: 'crossingCount' },
+  { bit: 0x02, type: 'i32', field: 'relocationCount' },
+  { bit: 0x04, type: 'i32', field: 'repairCount' },
+];
+
+// SpatialRepairUnit (kind 64) — one admitted repair unit, SPAN-shaped. Wire layout:
+// BeginParams (14 bytes): u16 archetypeId, i32 cellKey, i32 clusterCount, i32 entityCount.
+// Then u8 optMask @ +14; then optional fields in mask-bit order:
+//   0x01: f32 _degradation
+//   0x02: u8  _valveFired
+//   0x04: i32 _movedCount
+const REPAIR_UNIT_FIELDS: readonly OptionalFieldSpec[] = [
+  { bit: 0x01, type: 'f32', field: 'degradation' },
+  { bit: 0x02, type: 'u8', field: 'valveFired' },
+  { bit: 0x04, type: 'i32', field: 'movedCount' },
+];
+
+function decodeSpatialRepairUnit(
+  reader: BinaryReader, kind: TraceEventKind,
+  threadSlot: number, tickNumber: number, timestampUs: number, header: SpanHeader,
+): TraceEvent {
+  const o = header.payloadOffset;
+  const evt: TraceEvent = {
+    ...baseSpanEvent(kind, threadSlot, tickNumber, timestampUs, header),
+    archetypeId: reader.readU16(o),
+    cellKey: reader.readI32(o + 2),
+    clusterCount: reader.readI32(o + 6),
+    entityCount: reader.readI32(o + 10),
+  };
+  decodeOptionalMaskedFields(reader, evt, o + 14, header.recordEnd, REPAIR_UNIT_FIELDS);
   return evt;
 }
 

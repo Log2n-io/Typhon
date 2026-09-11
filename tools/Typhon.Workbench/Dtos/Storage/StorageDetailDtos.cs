@@ -243,6 +243,11 @@ public record StorageChunkDto(
 /// The spatial-grid cell a cluster chunk is bucketed into, plus the cell's live totals and the cluster's tight AABB (Module 15 L5, file-map §10 Q4 override).
 /// The entity / cluster counts are global sums across every cluster-spatial archetype sharing the grid.
 /// </summary>
+/// <remarks>
+/// The AABB components are f64 since #914: they are WORLD coordinates, and the engine's world frame is f64. As floats they resolved to ~64-unit steps at
+/// 10⁹, so every cluster in a distant region of a large world showed the same box in the detail panel — a display that is confidently wrong rather than
+/// obviously broken. JSON carries them as numbers either way, so the client needed no change.
+/// </remarks>
 public record StorageClusterCellDto(
     int CellKey,
     int CellX,
@@ -250,12 +255,12 @@ public record StorageClusterCellDto(
     int CellZ,
     int EntitiesInCell,
     int ClustersInCell,
-    float AabbMinX,
-    float AabbMinY,
-    float AabbMinZ,
-    float AabbMaxX,
-    float AabbMaxY,
-    float AabbMaxZ);
+    double AabbMinX,
+    double AabbMinY,
+    double AabbMinZ,
+    double AabbMaxX,
+    double AabbMaxY,
+    double AabbMaxZ);
 
 /// <summary>
 /// One decoded content cell — a component field, a directory entry, or a generic byte run. <c>ColorKey</c> is a

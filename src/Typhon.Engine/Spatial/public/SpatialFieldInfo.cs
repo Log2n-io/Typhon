@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using JetBrains.Annotations;
 using System;
 using Typhon.Schema.Definition;
@@ -34,6 +35,31 @@ public enum SpatialFieldType : byte
 
     /// <summary>3D bounding sphere, double-precision (f64).</summary>
     BSphere3D = 7,
+}
+
+/// <summary>
+/// Dimensionality and precision predicates over <see cref="SpatialFieldType"/>.
+/// </summary>
+/// <remarks>
+/// <b>Why these are methods rather than inline comparisons.</b> Nine sites in the engine spelled "is this field 3D?" as
+/// <c>FieldType == AABB3F || FieldType == BSphere3F</c>, which was exactly right while the f64 tiers were rejected at
+/// <c>ConfigureSpatialGrid</c> and became a silent misclassification the moment #914 accepted them: an <see cref="SpatialFieldType.AABB3D"/> archetype
+/// would have read as 2D, collapsing every query to the grid's flat plane (<c>SpatialGrid.FlatPlaneZ</c>) and answering nothing for entities anywhere
+/// else on Z. That is <c>SQ-01</c>'s silent direction, and a predicate that has to be updated in nine places when a tier lands is the mechanism that
+/// produces it.
+/// </remarks>
+[PublicAPI]
+public static class SpatialFieldTypeExtensions
+{
+    /// <summary>True when the field carries a Z extent — the four 3D variants, at either precision.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool Is3D(this SpatialFieldType fieldType) =>
+        fieldType is SpatialFieldType.AABB3F or SpatialFieldType.BSphere3F or SpatialFieldType.AABB3D or SpatialFieldType.BSphere3D;
+
+    /// <summary>True when the field stores double-precision coordinates — the four <c>*D</c> variants.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool IsF64(this SpatialFieldType fieldType) =>
+        fieldType is SpatialFieldType.AABB2D or SpatialFieldType.AABB3D or SpatialFieldType.BSphere2D or SpatialFieldType.BSphere3D;
 }
 
 /// <summary>

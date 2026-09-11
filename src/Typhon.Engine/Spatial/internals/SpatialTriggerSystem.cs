@@ -63,7 +63,7 @@ internal sealed class RegionOccupantState
 /// mutation-version cache — populate an occupant bitmap indexed by component chunk id, and XOR it against the previous tick's. Every part of that
 /// disappeared with the tree it read: the bitmap, the dense chunk-id-to-entity lookup, the static cache and its invalidation hooks, and the
 /// <c>TargetTreeMode</c> selector that chose between the two trees. A cell's static and dynamic halves are both visited by
-/// <see cref="ArchetypeClusterState.QueryAabb(SpatialGrid, float, float, float, float, float, float, uint)"/>, so there is nothing left for a caller to
+/// <see cref="ArchetypeClusterState.QueryAabb(SpatialGrid, double, double, double, double, double, double, uint)"/>, so there is nothing left for a caller to
 /// select between.</para>
 /// </remarks>
 internal sealed class SpatialTriggerSystem
@@ -298,24 +298,27 @@ internal sealed class SpatialTriggerSystem
             return;
         }
 
-        float qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ;
+        // No narrowing: the region's coordinates arrive as doubles and QueryAabb takes doubles since #919. The (float) casts that used to sit here were a
+        // round trip through a width neither end asked for, and a trigger volume is exactly where it would have been noticed last — a region quantised to
+        // ~128-unit steps at 10^9 fires for entities outside it and stays silent for entities inside, with no error either way.
+        double qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ;
         if (coordCount == 4)
         {
-            qMinX = (float)queryCoords[0];
-            qMinY = (float)queryCoords[1];
-            qMinZ = float.NegativeInfinity;
-            qMaxX = (float)queryCoords[2];
-            qMaxY = (float)queryCoords[3];
-            qMaxZ = float.PositiveInfinity;
+            qMinX = queryCoords[0];
+            qMinY = queryCoords[1];
+            qMinZ = double.NegativeInfinity;
+            qMaxX = queryCoords[2];
+            qMaxY = queryCoords[3];
+            qMaxZ = double.PositiveInfinity;
         }
         else
         {
-            qMinX = (float)queryCoords[0];
-            qMinY = (float)queryCoords[1];
-            qMinZ = (float)queryCoords[2];
-            qMaxX = (float)queryCoords[3];
-            qMaxY = (float)queryCoords[4];
-            qMaxZ = (float)queryCoords[5];
+            qMinX = queryCoords[0];
+            qMinY = queryCoords[1];
+            qMinZ = queryCoords[2];
+            qMaxX = queryCoords[3];
+            qMaxY = queryCoords[4];
+            qMaxZ = queryCoords[5];
         }
 
         var grid = _table.DBE.SpatialGrid;

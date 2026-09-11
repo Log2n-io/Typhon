@@ -47,9 +47,11 @@ sealed class DenseSpatialGridReference
     /// </remarks>
     public (int x, int y, int z) CellOfPoint(float worldX, float worldY, float worldZ)
     {
-        int cx = (int)MathF.Floor((worldX - _config.WorldMin.X) * _config.InverseCellSize);
-        int cy = (int)MathF.Floor((worldY - _config.WorldMin.Y) * _config.InverseCellSize);
-        int cz = (int)MathF.Floor((worldZ - _config.WorldMin.Z) * _config.InverseCellSize);
+        // Math.Floor, not MathF: the oracle has to floor in the SAME precision the grid does, or it stops being an oracle at the magnitudes #914's f64
+        // world frame exists for — the two would disagree on a coordinate near a cell edge and the differential test would blame the grid.
+        int cx = (int)Math.Floor((worldX - _config.WorldMin.X) * _config.InverseCellSize);
+        int cy = (int)Math.Floor((worldY - _config.WorldMin.Y) * _config.InverseCellSize);
+        int cz = (int)Math.Floor((worldZ - _config.WorldMin.Z) * _config.InverseCellSize);
 
         if (cx < 0) { cx = 0; }
         if (cy < 0) { cy = 0; }

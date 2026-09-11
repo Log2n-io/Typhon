@@ -22,13 +22,23 @@ namespace Typhon.Engine;
 public readonly struct SpatialGridConfig
 {
     /// <summary>World-space minimum corner (inclusive).</summary>
-    public readonly Vector3 WorldMin;
+    /// <remarks>
+    /// <b>f64 since #914, and that is what makes the world big.</b> Stored bounds stay f32 and cell-relative (<c>C15</c>); it is the FRAME they are measured
+    /// from that has to carry the magnitude, because a cell origin at 10⁹ has more mantissa than f32 holds. Widening from <see cref="Vector3"/> is implicit
+    /// and exact, so an f32 world configures exactly as it did.
+    /// </remarks>
+    public readonly Vector3D WorldMin;
 
     /// <summary>World-space maximum corner (exclusive — the grid excludes the max edge).</summary>
-    public readonly Vector3 WorldMax;
+    /// <inheritdoc cref="WorldMin"/>
+    public readonly Vector3D WorldMax;
 
     /// <summary>Size of a single grid cell, in world units. Cells are cubic. Must be &gt; 0.</summary>
-    public readonly float CellSize;
+    /// <remarks>
+    /// f64 so that <c>origin = WorldMin + cellCoord × CellSize</c> is exact at world extent — the product is what overflows f32's mantissa, not the cell size
+    /// itself. A cell size that happens to be f32-exact is unaffected.
+    /// </remarks>
+    public readonly double CellSize;
 
     /// <summary>
     /// Fractional dead zone applied per axis during entity migration, as a fraction of cell size.
@@ -254,12 +264,12 @@ public readonly struct SpatialGridConfig
 
     /// <summary>
     /// Number of cells along the Z axis. <c>1</c> for a flat world built with
-    /// <see cref="Flat(Vector2,Vector2,float,float,float,float,float,float,float,int,float,float,int,float,bool,bool,float,int,int)"/>.
+    /// <see cref="Flat(Vector2,Vector2,double,float,float,float,float,float,float,int,float,float,int,float,bool,bool,float,int,int)"/>.
     /// </summary>
     public readonly int GridDepth;
 
     /// <summary>Precomputed 1 / <see cref="CellSize"/>.</summary>
-    public readonly float InverseCellSize;
+    public readonly double InverseCellSize;
 
     /// <summary>Total number of cell descriptor slots: <see cref="GridWidth"/> × <see cref="GridHeight"/> × <see cref="GridDepth"/>.</summary>
     public readonly int CellCount;
@@ -293,7 +303,7 @@ public readonly struct SpatialGridConfig
     /// <paramref name="cellSize"/> is not positive, or the derived cell count does not fit a 32-bit cell key.
     /// </exception>
     /// <exception cref="ArgumentException"><paramref name="worldMax"/> is not strictly greater than <paramref name="worldMin"/> on all three axes.</exception>
-    public SpatialGridConfig(Vector3 worldMin, Vector3 worldMax, float cellSize, float migrationHysteresisRatio = 0.05f,
+    public SpatialGridConfig(Vector3D worldMin, Vector3D worldMax, double cellSize, float migrationHysteresisRatio = 0.05f,
         float clusterTargetExtentRatio = 0.25f, float clusterDriftMarginRatio = 0.05f, float clusterRepairExtentRatio = 0.75f,
         float reclusterBudgetMs = 1.0f, float repairNsPerEntity = 1500f, int repairWorstClustersPerUnit = 8,
         float clusterRepairCriticalExtentRatio = 1.0f, float repairAgingRatePerTick = 0.05f, int repairQueueMaxCells = 4096,
@@ -366,11 +376,14 @@ public readonly struct SpatialGridConfig
         ClusterRepairCriticalExtentRatio = clusterRepairCriticalExtentRatio;
         RepairAgingRatePerTick = repairAgingRatePerTick;
         RepairQueueMaxCells = repairQueueMaxCells;
-        InverseCellSize = 1.0f / cellSize;
+        InverseCellSize = 1.0d / cellSize;
 
-        GridWidth  = (int)MathF.Ceiling((worldMax.X - worldMin.X) * InverseCellSize);
-        GridHeight = (int)MathF.Ceiling((worldMax.Y - worldMin.Y) * InverseCellSize);
-        GridDepth  = (int)MathF.Ceiling((worldMax.Z - worldMin.Z) * InverseCellSize);
+        // Ceiling in DOUBLE, not MathF. At an f64 world extent the f32 product loses whole cells: (worldMax.X - worldMin.X) at 2 x 10^9 rounds to the
+        // nearest representable f32 ~128 units away, so the derived width could be short by a cell and every entity in the last column would clamp into
+        // its neighbour.
+        GridWidth  = (int)Math.Ceiling((worldMax.X - worldMin.X) * InverseCellSize);
+        GridHeight = (int)Math.Ceiling((worldMax.Y - worldMin.Y) * InverseCellSize);
+        GridDepth  = (int)Math.Ceiling((worldMax.Z - worldMin.Z) * InverseCellSize);
 
         // Computed in long deliberately: three axes multiply, and a silent int overflow here would produce a negative CellCount, a negative-length descriptor
         // array and an exception a long way from the configuration that caused it. The bound is the cell-key type, not memory — a 32-bit key is what every
@@ -411,13 +424,13 @@ public readonly struct SpatialGridConfig
     /// <param name="growthCapSlack">Multiplier on the density target the cap allows (default 1.25).</param>
     /// <param name="maxOpenClustersPerCell">Open clusters the cap may hold per cell (default 4).</param>
     /// <param name="batchSpawnSortThreshold">Spawns per transaction above which the batch is placed in Morton order; 0 disables (default 128).</param>
-    public static SpatialGridConfig Flat(Vector2 worldMin, Vector2 worldMax, float cellSize, float migrationHysteresisRatio = 0.05f,
+    public static SpatialGridConfig Flat(Vector2 worldMin, Vector2 worldMax, double cellSize, float migrationHysteresisRatio = 0.05f,
         float clusterTargetExtentRatio = 0.25f, float clusterDriftMarginRatio = 0.05f, float clusterRepairExtentRatio = 0.75f,
         float reclusterBudgetMs = 1.0f, float repairNsPerEntity = 1500f, int repairWorstClustersPerUnit = 8,
         float clusterRepairCriticalExtentRatio = 1.0f, float repairAgingRatePerTick = 0.05f, int repairQueueMaxCells = 4096,
         float clusterTargetPackingSlack = 1.5f, bool leastEnlargementPlacement = false, bool growthCapPlacement = false, float growthCapSlack = 1.25f,
         int maxOpenClustersPerCell = 4, int batchSpawnSortThreshold = 128) =>
-        new(new Vector3(worldMin, 0f), new Vector3(worldMax, cellSize), cellSize, migrationHysteresisRatio, clusterTargetExtentRatio,
+        new(new Vector3D(worldMin, 0d), new Vector3D(worldMax, cellSize), cellSize, migrationHysteresisRatio, clusterTargetExtentRatio,
             clusterDriftMarginRatio, clusterRepairExtentRatio, reclusterBudgetMs, repairNsPerEntity, repairWorstClustersPerUnit,
             clusterRepairCriticalExtentRatio, repairAgingRatePerTick, repairQueueMaxCells, clusterTargetPackingSlack, leastEnlargementPlacement,
             growthCapPlacement, growthCapSlack, maxOpenClustersPerCell, batchSpawnSortThreshold);

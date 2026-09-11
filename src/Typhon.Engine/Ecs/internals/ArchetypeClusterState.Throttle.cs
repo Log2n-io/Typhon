@@ -200,6 +200,11 @@ internal sealed partial class ArchetypeClusterState
     /// <summary>⑦ ranking the repair queue and planning units. Includes queue maintenance; see <see cref="RecordPlannerCost"/>.</summary>
     internal long PrepPlanTicks;
 
+    /// <summary>
+    /// Putting the drain prefix in destination-cell order (#910), between ⑦ and ⑧ — the sort the Migrate phase's Prepare ran before it moved here.
+    /// </summary>
+    internal long PrepSortTicks;
+
     /// <summary>⑧ pre-sizing the fence buffers — an O(all clusters) resize every tick.</summary>
     internal long PrepPreSizeTicks;
 
@@ -216,6 +221,7 @@ internal sealed partial class ArchetypeClusterState
         PrepDetectTicks = 0;
         PrepThrottleTicks = 0;
         PrepPlanTicks = 0;
+        PrepSortTicks = 0;
         PrepPreSizeTicks = 0;
         PrepDirtyClusters = 0;
     }
@@ -516,8 +522,8 @@ internal sealed partial class ArchetypeClusterState
     /// states that Migrate executes exactly <c>PendingMigrations[0 .. P)</c> where <c>P</c> is the count at Prep's return, and records what happens when
     /// that prefix is too small: "executed requests stay queued and re-execute against slots their entities have left, and the queue grows without bound"
     /// — measured at 224 854 migrations on the twentieth tick. Deferring the tail would reopen it, and would also need the serial fence (which passes
-    /// <c>PendingMigrationCount</c>, not the prefix) and <c>SortPendingMigrationsByDestCellKey</c> (which sorts the whole array — stably since #889, but
-    /// still by destination cell, so a tail entry can land inside the prefix) both taught about the split. Lowering the COUNT leaves prefix == count, so
+    /// <c>PendingMigrationCount</c>, not the prefix) taught about the split — as the destination-cell sort needed to be until #910 narrowed it to the
+    /// prefix. Lowering the COUNT leaves prefix == count, so
     /// nothing downstream changes and <c>CR-01</c> stays true verbatim.</para>
     /// <para><b>A dropped relocation is not a lost one, and is arguably the better outcome.</b> Its <c>DestClusterChunkId</c> was the least-enlargement
     /// choice against the AABBs of the tick that detected it, which this tick's own migrations have since moved; <c>TryClaimPinnedSlot</c> would reject

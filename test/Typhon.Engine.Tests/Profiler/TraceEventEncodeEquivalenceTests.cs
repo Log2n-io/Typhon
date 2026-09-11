@@ -290,7 +290,10 @@ public class TraceEventEncodeEquivalenceTests
         Span<byte> bufStruct = stackalloc byte[256];
         ev.EncodeTo(bufStruct, EndTs, out var lenStruct);
 
-        var golden = Convert.FromHexString("3F003C0744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F00012CA0000002F010000");
+        // The trailing 00 is the optional-mask byte, which #911 O1 added along with the three per-kind outcome counts. It is APPENDED after the required
+        // payload, so a record written before the change is a strict prefix of one written after it: the header's own size field is what tells a reader
+        // whether the mask is there, and a decoder that checks it reads both. The size byte moves 3F -> 40 for the same reason.
+        var golden = Convert.FromHexString("40003C0744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F00012CA0000002F01000000");
         AssertSpanEqualsGolden(bufStruct, lenStruct, golden);
     }
 

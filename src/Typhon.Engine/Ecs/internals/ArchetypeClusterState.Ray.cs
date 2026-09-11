@@ -22,16 +22,16 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// visits will not be touched by the ray, and their clusters simply fail the slab test. A DDA traversal would visit fewer, and is the obvious follow-up if
     /// this ever shows up in a profile — but a broadphase that is merely wasteful is a different class of thing from one that is wrong.</para>
     /// </remarks>
-    public int QueryRay(SpatialGrid grid, float originX, float originY, float originZ, float dirX, float dirY, float dirZ, float maxDistance,
-        Span<(long entityId, float distance)> results, uint categoryMask = uint.MaxValue, bool ordered = true)
+    public int QueryRay(SpatialGrid grid, double originX, double originY, double originZ, double dirX, double dirY, double dirZ, double maxDistance,
+        Span<(long entityId, double distance)> results, uint categoryMask = uint.MaxValue, bool ordered = true)
     {
         if (results.Length == 0 || !SpatialSlot.HasSpatialIndex || PerCellIndex == null || ClusterSegment == null || ClusterAabbs == null)
         {
             return 0;
         }
 
-        float length = MathF.Sqrt((dirX * dirX) + (dirY * dirY) + (dirZ * dirZ));
-        if (length <= 0f || !float.IsFinite(maxDistance) || maxDistance <= 0f)
+        double length = Math.Sqrt((dirX * dirX) + (dirY * dirY) + (dirZ * dirZ));
+        if (length <= 0d || !double.IsFinite(maxDistance) || maxDistance <= 0d)
         {
             return 0;
         }
@@ -41,28 +41,27 @@ internal sealed unsafe partial class ArchetypeClusterState
         dirY /= length;
         dirZ /= length;
 
-        var ss = SpatialSlot;
-        bool is3D = ss.FieldInfo.FieldType == SpatialFieldType.AABB3F || ss.FieldInfo.FieldType == SpatialFieldType.BSphere3F;
+        ref readonly var ss = ref SpatialSlot;
+        bool is3D = ss.FieldInfo.FieldType.Is3D();
         if (!is3D)
         {
             // A 2D archetype lives in the plane containing world Z = 0. A ray with a Z component would otherwise select cell layers that hold nothing.
-            originZ = 0f;
-            dirZ = 0f;
+            originZ = 0d;
+            dirZ = 0d;
         }
 
-        float endX = originX + (dirX * maxDistance);
-        float endY = originY + (dirY * maxDistance);
-        float endZ = originZ + (dirZ * maxDistance);
+        double endX = originX + (dirX * maxDistance);
+        double endY = originY + (dirY * maxDistance);
+        double endZ = originZ + (dirZ * maxDistance);
 
-        grid.WorldToCellRange(MathF.Min(originX, endX), MathF.Min(originY, endY), is3D ? MathF.Min(originZ, endZ) : float.NegativeInfinity,
-            MathF.Max(originX, endX), MathF.Max(originY, endY), is3D ? MathF.Max(originZ, endZ) : float.PositiveInfinity,
+        grid.WorldToCellRange(Math.Min(originX, endX), Math.Min(originY, endY), is3D ? Math.Min(originZ, endZ) : double.NegativeInfinity,
+            Math.Max(originX, endX), Math.Max(originY, endY), is3D ? Math.Max(originZ, endZ) : double.PositiveInfinity,
             out int cellMinX, out int cellMinY, out int cellMinZ, out int cellMaxX, out int cellMaxY, out int cellMaxZ);
 
         if (!is3D)
         {
-            grid.WorldToCellCoords(0f, 0f, 0f, out _, out _, out int planeZ);
-            cellMinZ = planeZ;
-            cellMaxZ = planeZ;
+            cellMinZ = grid.FlatPlaneZ;   // computed once at grid construction — #916's O2
+            cellMaxZ = grid.FlatPlaneZ;
         }
 
         int count = 0;
@@ -97,7 +96,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                             continue;
                         }
 
-                        grid.CellOrigin(cellKey, out float cellOriginX, out float cellOriginY, out float cellOriginZ);
+                        grid.CellOrigin(cellKey, out double cellOriginX, out double cellOriginY, out double cellOriginZ);
                         RayScanHalf(slot, isStatic: false, ref accessor, cellOriginX, cellOriginY, cellOriginZ,
                             originX, originY, originZ, dirX, dirY, dirZ, maxDistance, is3D, categoryMask, aabbs, ref visited, results, ref count);
                         RayScanHalf(slot, isStatic: true, ref accessor, cellOriginX, cellOriginY, cellOriginZ,
@@ -126,9 +125,9 @@ internal sealed unsafe partial class ArchetypeClusterState
         return count;
     }
 
-    private void RayScanHalf(PerCellSpatialSlot slot, bool isStatic, ref ChunkAccessor<PersistentStore> accessor, float cellOriginX, float cellOriginY, 
-        float cellOriginZ, float originX, float originY, float originZ, float dirX, float dirY, float dirZ, float maxDistance, bool is3D, uint categoryMask,
-        ClusterSpatialAabb[] aabbs, ref ClusterVisitSet visited, Span<(long entityId, float distance)> results, ref int count)
+    private void RayScanHalf(PerCellSpatialSlot slot, bool isStatic, ref ChunkAccessor<PersistentStore> accessor, double cellOriginX, double cellOriginY,
+        double cellOriginZ, double originX, double originY, double originZ, double dirX, double dirY, double dirZ, double maxDistance, bool is3D,
+        uint categoryMask, ClusterSpatialAabb[] aabbs, ref ClusterVisitSet visited, Span<(long entityId, double distance)> results, ref int count)
     {
         var tree = slot.ReadTree(isStatic);   // acquire — see PerCellSpatialSlot.PublishDynamicTree
         if (tree != null)
@@ -159,18 +158,21 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         for (int i = 0; i < linear.ClusterCount; i++)
         {
-            // Directed OUTWARD: a box rounded inward rejects a ray grazing its face, which is an SQ-01 false negative on the linear path only — the tree
-            // path translates the ray into the cell frame instead, which is exact.
-            float minX = ClusterSpatialAabb.ToWorldMin(linear.MinX[i], cellOriginX);
-            float minY = ClusterSpatialAabb.ToWorldMin(linear.MinY[i], cellOriginY);
-            float maxX = ClusterSpatialAabb.ToWorldMax(linear.MaxX[i], cellOriginX);
-            float maxY = ClusterSpatialAabb.ToWorldMax(linear.MaxY[i], cellOriginY);
-            float minZ = float.NegativeInfinity;
-            float maxZ = float.PositiveInfinity;
+            // ToWorldExact, not the directed ToWorldMin/Max pair this replaced (#919 F2). The direction mattered because those RETURN an f32 and the
+            // narrowing could pull a face inward, rejecting a ray that grazes it — an SQ-01 false negative on the linear path only, since the tree path
+            // translates the ray into the cell frame instead. Keeping the sum in double does not make that impossible so much as negligible: the residual
+            // is at most half a double ULP (~4e-6 at 2^36) against a stored bound already rounded outward by up to one f32 ULP in the cell frame (~6e-5
+            // across a 1 000-unit cell). The face stays outside the cluster by an order of magnitude more than the conversion can move it.
+            double minX = ClusterSpatialAabb.ToWorldExact(linear.MinX[i], cellOriginX);
+            double minY = ClusterSpatialAabb.ToWorldExact(linear.MinY[i], cellOriginY);
+            double maxX = ClusterSpatialAabb.ToWorldExact(linear.MaxX[i], cellOriginX);
+            double maxY = ClusterSpatialAabb.ToWorldExact(linear.MaxY[i], cellOriginY);
+            double minZ = double.NegativeInfinity;
+            double maxZ = double.PositiveInfinity;
             if (is3D)
             {
-                minZ = ClusterSpatialAabb.ToWorldMin(linear.MinZ[i], cellOriginZ);
-                maxZ = ClusterSpatialAabb.ToWorldMax(linear.MaxZ[i], cellOriginZ);
+                minZ = ClusterSpatialAabb.ToWorldExact(linear.MinZ[i], cellOriginZ);
+                maxZ = ClusterSpatialAabb.ToWorldExact(linear.MaxZ[i], cellOriginZ);
             }
 
             if (!RayHitsBox(originX, originY, originZ, dirX, dirY, dirZ, maxDistance, minX, minY, minZ, maxX, maxY, maxZ, out _))
@@ -183,9 +185,9 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
     }
 
-    private void RayScanCluster(int clusterChunkId, ref ChunkAccessor<PersistentStore> accessor, float originX, float originY, float originZ, float dirX, 
-        float dirY, float dirZ, float maxDistance, bool is3D, uint categoryMask, ClusterSpatialAabb[] aabbs, ref ClusterVisitSet visited,
-        Span<(long entityId, float distance)> results, ref int count)
+    private void RayScanCluster(int clusterChunkId, ref ChunkAccessor<PersistentStore> accessor, double originX, double originY, double originZ,
+        double dirX, double dirY, double dirZ, double maxDistance, bool is3D, uint categoryMask, ClusterSpatialAabb[] aabbs, ref ClusterVisitSet visited,
+        Span<(long entityId, double distance)> results, ref int count)
     {
         if ((uint)clusterChunkId >= (uint)aabbs.Length)
         {
@@ -201,7 +203,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
 
-        var ss = SpatialSlot;
+        ref readonly var ss = ref SpatialSlot;
         int compOffset = Layout.ComponentOffset(ss.Slot);
         int compSize = Layout.ComponentSize(ss.Slot);
         int fieldOffset = ss.FieldOffset;
@@ -216,19 +218,19 @@ internal sealed unsafe partial class ArchetypeClusterState
             occupancy &= occupancy - 1;
 
             byte* fieldPtr = clusterBase + compOffset + (slot * compSize) + fieldOffset;
-            if (!SpatialMaintainer.ReadAndValidateBoundsFromPtr(fieldPtr, ss.FieldInfo, entityCoords, ss.Descriptor))
+            if (!SpatialMaintainer.ReadAndValidateBoundsFromPtr(fieldPtr, ss.FieldInfo, entityCoords))
             {
                 continue;
             }
 
-            float eMinX = (float)entityCoords[0];
-            float eMinY = (float)entityCoords[1];
-            float eMaxX = is3D ? (float)entityCoords[3] : (float)entityCoords[2];
-            float eMaxY = is3D ? (float)entityCoords[4] : (float)entityCoords[3];
-            float eMinZ = is3D ? (float)entityCoords[2] : float.NegativeInfinity;
-            float eMaxZ = is3D ? (float)entityCoords[5] : float.PositiveInfinity;
+            double eMinX = entityCoords[0];
+            double eMinY = entityCoords[1];
+            double eMaxX = is3D ? entityCoords[3] : entityCoords[2];
+            double eMaxY = is3D ? entityCoords[4] : entityCoords[3];
+            double eMinZ = is3D ? entityCoords[2] : double.NegativeInfinity;
+            double eMaxZ = is3D ? entityCoords[5] : double.PositiveInfinity;
 
-            if (!RayHitsBox(originX, originY, originZ, dirX, dirY, dirZ, maxDistance, eMinX, eMinY, eMinZ, eMaxX, eMaxY, eMaxZ, out float t))
+            if (!RayHitsBox(originX, originY, originZ, dirX, dirY, dirZ, maxDistance, eMinX, eMinY, eMinZ, eMaxX, eMaxY, eMaxZ, out double t))
             {
                 continue;
             }
@@ -252,17 +254,17 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// infinities the division produces — the comparisons below reject correctly when the origin is outside the slab on that axis and leave the interval
     /// untouched when it is inside, which is why there is no special case for it.
     /// </remarks>
-    private static bool RayHitsBox(float ox, float oy, float oz, float dx, float dy, float dz, float maxDistance, float minX, float minY, float minZ, 
-        float maxX, float maxY, float maxZ, out float tEntry)
+    private static bool RayHitsBox(double ox, double oy, double oz, double dx, double dy, double dz, double maxDistance, double minX, double minY,
+        double minZ, double maxX, double maxY, double maxZ, out double tEntry)
     {
-        float tMin = 0f;
-        float tMax = maxDistance;
+        double tMin = 0d;
+        double tMax = maxDistance;
 
         if (!SlabClip(ox, dx, minX, maxX, ref tMin, ref tMax)
             || !SlabClip(oy, dy, minY, maxY, ref tMin, ref tMax)
             || !SlabClip(oz, dz, minZ, maxZ, ref tMin, ref tMax))
         {
-            tEntry = 0f;
+            tEntry = 0d;
             return false;
         }
 
@@ -270,23 +272,23 @@ internal sealed unsafe partial class ArchetypeClusterState
         return true;
     }
 
-    private static bool SlabClip(float origin, float dir, float min, float max, ref float tMin, ref float tMax)
+    private static bool SlabClip(double origin, double dir, double min, double max, ref double tMin, ref double tMax)
     {
-        if (dir == 0f)
+        if (dir == 0d)
         {
             return origin >= min && origin <= max;
         }
 
-        float inv = 1f / dir;
-        float t1 = (min - origin) * inv;
-        float t2 = (max - origin) * inv;
+        double inv = 1d / dir;
+        double t1 = (min - origin) * inv;
+        double t2 = (max - origin) * inv;
         if (t1 > t2)
         {
             (t1, t2) = (t2, t1);
         }
 
-        tMin = MathF.Max(tMin, t1);
-        tMax = MathF.Min(tMax, t2);
+        tMin = Math.Max(tMin, t1);
+        tMax = Math.Min(tMax, t2);
         return tMin <= tMax;
     }
 }

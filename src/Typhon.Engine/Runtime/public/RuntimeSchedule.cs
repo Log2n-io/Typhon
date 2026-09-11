@@ -492,6 +492,7 @@ public sealed class RuntimeSchedule
             systems[sysIdx].CellAmortize = reg.CellAmortize;
             systems[sysIdx].IsCheckerboard = reg.Checkerboard;
             systems[sysIdx].ChunksPerWorker = reg.ChunksPerWorker;
+            systems[sysIdx].MinChunkSize = reg.MinChunkSize;
             systems[sysIdx].ExplicitChunkCount = reg.ExplicitChunkCount;
 
             if (reg.Access != null)
@@ -657,6 +658,18 @@ public sealed class RuntimeSchedule
         {
             throw new InvalidOperationException(
                 $"System '{reg.Name}': ChunksPerWorker must be finite and in [1.0, 64.0], got {reg.ChunksPerWorker}.");
+        }
+
+        if (reg.MinChunkSize < 0)
+        {
+            throw new InvalidOperationException(
+                $"System '{reg.Name}': MinChunkSize must be 0 (inherit the global ParallelQueryMinChunkSize) or at least 1, got {reg.MinChunkSize}.");
+        }
+
+        if (reg.MinChunkSize != 0 && !reg.Parallel)
+        {
+            throw new InvalidOperationException(
+                $"System '{reg.Name}': MinChunkSize is only meaningful for parallel QuerySystems. Add b.Parallel() or parallel: true.");
         }
 
         if (reg.ChunksPerWorker != 1f && !reg.Parallel)

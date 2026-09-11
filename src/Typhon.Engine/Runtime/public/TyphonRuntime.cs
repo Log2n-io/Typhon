@@ -1478,13 +1478,18 @@ public sealed partial class TyphonRuntime : IDisposable
     private int ComputeChunkCount(int entityCount, int sysIdx)
     {
         var workerCount = Scheduler.WorkerCount;
-        var minChunkSize = Options.ParallelQueryMinChunkSize;
+        var sys = Scheduler.Systems[sysIdx];
+
+        // Per-system floor, falling back to the global one. The global value is a bet that per-entity work is roughly
+        // uniform across the schedule — it is the same entity count for every system — and a system whose per-entity
+        // cost is orders above its neighbours' is starved of workers by it: 320 entities against a 64 floor is five
+        // chunks no matter how high ChunksPerWorker goes, because the entity cap and not the worker cap is binding.
+        var minChunkSize = sys.MinChunkSize > 0 ? sys.MinChunkSize : Options.ParallelQueryMinChunkSize;
         var maxChunks = Math.Max(1, (entityCount + minChunkSize - 1) / minChunkSize);
 
         // Per-system oversubscription: lift the workerCount cap by ChunksPerWorker (default 1.0 = no change).
         // Round-to-nearest so 1.5 × 16 = 24 exactly; small bumps like 1.1 × 16 = 17.6 → 18.
-        var chunksPerWorker = Scheduler.Systems[sysIdx].ChunksPerWorker;
-        var workerCap = Math.Max(1, (int)MathF.Round(workerCount * chunksPerWorker));
+        var workerCap = Math.Max(1, (int)MathF.Round(workerCount * sys.ChunksPerWorker));
         return Math.Min(workerCap, maxChunks);
     }
 
@@ -2088,9 +2093,22 @@ public sealed partial class TyphonRuntime : IDisposable
         {
             if (_parallelFenceEnabled)
             {
-                // RunParallelFence brackets its own serial-prep portion with the WriteTickFence phase marker and dispatches the Fence DAG *outside* it — the
-                // four Fence systems carry their own Engine-Post telemetry, so wrapping the dispatch would double-count them into `writeTickFenceUs`.
-                RunParallelFence(scheduler);
+                // Timed from OUT HERE rather than inside RunParallelFence, and that placement is the point: the stall a host feels is the whole call, which
+                // includes the serial prep before the DAG is dispatched and the epoch fence window's close after it. `LastFenceWallTicks` — what
+                // `LastFenceSpanMs` publishes — starts at Prep's Prepare, so it cannot see the serial prep, and a worker-count sweep reading only the span
+                // reports a speed-up on a fraction of the interruption. `finally` so a fence that throws still reports how long it blocked the host before
+                // it did: the tick is failed either way (#890), but a stall is a stall.
+                var stallStart = Stopwatch.GetTimestamp();
+                try
+                {
+                    // RunParallelFence brackets its own serial-prep portion with the WriteTickFence phase marker and dispatches the Fence DAG *outside* it —
+                    // the four Fence systems carry their own Engine-Post telemetry, so wrapping the dispatch would double-count them into `writeTickFenceUs`.
+                    RunParallelFence(scheduler);
+                }
+                finally
+                {
+                    Engine.SetLastFenceStallTicks(Stopwatch.GetTimestamp() - stallStart);
+                }
             }
             else
             {
@@ -2245,6 +2263,11 @@ public sealed partial class TyphonRuntime : IDisposable
             Engine.SetLastFenceMigrationParallelism(migrationCpuTicks / (double)migrationSpanTicks);
         }
 
+        // #911 — the fence's own span, published beside the ratio above because they are read together: the summed-CPU figures on the telemetry surface are
+        // uninterpretable without the span they were spent in. Pushed rather than pulled for the same reason the parallelism is — the engine has no handle
+        // on the runtime, and this is the one place that knows the phase timings.
+        Engine.SetLastFenceSpanTicks(LastFenceWallTicks);
+
         if (Options.AdaptiveFenceCost)
         {
             _liveFenceCost.UpdatePhase(FencePhase.Prep, _fencePrepExec.TotalWallTicks, _fencePrepExec.TotalUnitCount);
@@ -2345,17 +2368,18 @@ public sealed partial class TyphonRuntime : IDisposable
     }
 
     /// <summary>
-    /// Last tick's serial steps inside the phases, in <see cref="Stopwatch"/> ticks: the #886 Prep tails and the destination-cell sort (Migrate's
-    /// Prepare), the merge and leaf-snap (index Prepare), the merge and bucket partition (EntityMap Prepare), and the WAL emit summed over every archetype
-    /// Finalize handled. Each is a piece of a phase span that no worker count can shrink, which is why they are reported apart from the spans.
+    /// Last tick's serial steps inside the phases, in <see cref="Stopwatch"/> ticks: the #886 Prep tails (Migrate's Prepare — the sliced archetypes'
+    /// drain-order sort among them since #910; every archetype's sort is the <c>PrepSortMs</c> sub-span), the merge and leaf-snap (index Prepare), the
+    /// merge and bucket partition (EntityMap Prepare), and the WAL emit summed over every archetype Finalize handled. Each is a piece of a phase span that
+    /// no worker count can shrink, which is why they are reported apart from the spans.
     /// </summary>
-    internal (long MigrateTail, long MigrateSort, long IndexMerge, long EntityMapMerge, long FinalizeEmit, long FinalizeAppend) LastFenceSerialTicks
+    internal (long MigrateTail, long IndexMerge, long EntityMapMerge, long FinalizeEmit, long FinalizeAppend) LastFenceSerialTicks
     {
         get
         {
             if (_fenceMigrateExec == null)
             {
-                return (0, 0, 0, 0, 0, 0);
+                return (0, 0, 0, 0, 0);
             }
 
             long emit = 0;
@@ -2374,8 +2398,8 @@ public sealed partial class TyphonRuntime : IDisposable
                 }
             }
 
-            return (_fenceMigrateExec.LastTailTicks, _fenceMigrateExec.LastSortTicks, _fenceIndexMassUpdateExec.LastSerialPrepareTicks,
-                _fenceEntityMapUpdateExec.LastSerialPrepareTicks, emit, append);
+            return (_fenceMigrateExec.LastTailTicks, _fenceIndexMassUpdateExec.LastSerialPrepareTicks, _fenceEntityMapUpdateExec.LastSerialPrepareTicks,
+                emit, append);
         }
     }
 

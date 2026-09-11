@@ -17,9 +17,11 @@ namespace Typhon.Engine;
 /// inside one cell (<c>C13</c>), so that origin is unambiguous — and it is why a cluster's bounds must be REBASED when the cluster migrates to another cell.
 /// A bound left un-rebased is off by exactly one cell size, which is a silent <c>SQ-01</c> false negative rather than an error.</para>
 /// <para><b>Why not world space.</b> f32 across a ±10⁹ world resolves to ~64 units; measured against a cell the magnitude is bounded by the cell size, and
-/// the same 24 mantissa bits resolve ~6 × 10⁻⁵. Note the limit this does NOT lift: the entity's own spatial component is world-space f32 too, so at extreme
-/// magnitudes the source coordinate is already coarse and cell-relative storage cannot recover precision the input never carried. <c>C15</c> buys resolution
-/// for DERIVED bounds — this AABB and the R-Tree's node bounds — not for the component field they are computed from.</para>
+/// the same 24 mantissa bits resolve ~6 × 10⁻⁵. Note the limit this does NOT lift: an <b>f32 tier's</b> own spatial component is world-space f32, so at
+/// extreme magnitudes the source coordinate is already coarse and cell-relative storage cannot recover precision the input never carried. <c>C15</c> buys
+/// resolution for DERIVED bounds — this AABB and the R-Tree's node bounds — not for the component field they are computed from. The answer to that limit is
+/// not to widen this struct: it is to declare the archetype at an <b>f64 tier</b> (<c>AABB2D</c>/<c>AABB3D</c>), whose component carries the magnitude and
+/// whose query box and result carry it back out (#914). The stored bound stays exactly as wide as it is here either way.</para>
 /// <para>Conversion goes through <see cref="ToCellRelativeMin"/> / <see cref="ToCellRelativeMax"/>, never a bare subtraction: the narrowing to f32 rounds,
 /// and rounding the wrong way puts a bound inside the entity it must contain.</para>
 /// <para>
@@ -28,7 +30,8 @@ namespace Typhon.Engine;
 /// 2D queries use an infinite Z range which trivially passes the Z overlap test, so 2D clusters match
 /// correctly. 3D archetypes populate all six bounds. The unified 3D storage adds ~8 bytes per cluster
 /// versus a 2D-only design, in exchange for a single cluster-index code path that handles both tiers.
-/// f64 variants (AABB2D/AABB3D) are deferred to a follow-up sub-issue of #228.
+/// The f64 tiers (AABB2D/AABB3D and their BSphere forms) are supported since #914 and are stored here unchanged — as f32 CELL-RELATIVE bounds, which is
+/// the point of C15 rather than a compromise with it.
 /// </para>
 /// <para>
 /// The <see cref="CategoryMask"/> is the OR of all entity category masks in the cluster — it lets the
@@ -219,37 +222,26 @@ public struct ClusterSpatialAabb
         return narrowed < relative ? MathF.BitIncrement(narrowed) : narrowed;
     }
 
-    /// <summary>Convert a cell-relative bound back to world space. For DISPLAY and for callers that do not test containment.</summary>
-    /// <remarks>
-    /// <para><b>Not exact, and deliberately not corrected.</b> <c>float + float</c> rounds to nearest, and it can round INWARD — so the world value this
-    /// returns may be a hair tighter than the stored bound. Every caller today is display or diagnostics (<c>ClusterRef.SpatialBounds</c>,
-    /// <c>DatabaseEngine.StorageIntrospection</c>), where a half-ULP is invisible.</para>
-    /// <para>Directed rounding is withheld on purpose rather than forgotten: widening on every read would COMPOUND, so a bound read and re-stored across N
-    /// ticks would grow without limit and the tightness this design exists to buy would decay with nothing to show for it. A future caller that tests
-    /// containment in world space needs its own directed variant, not a change here.</para>
-    /// </remarks>
-    public static float ToWorld(float cellRelativeValue, float cellOrigin) => cellRelativeValue + cellOrigin;
-
     /// <summary>
-    /// Convert a stored lower bound to world space, rounding OUTWARD. For callers that test containment or intersection.
+    /// Convert a cell-relative bound to an <b>f64</b> world coordinate — the conversion the f64 world frame wants, and the one every world-space read-back
+    /// uses since #914.
     /// </summary>
     /// <remarks>
-    /// <b>The directed variant <see cref="ToWorld"/>'s remarks said a future caller would need.</b> That caller arrived with #872 step 9's cluster-level ray
-    /// and kNN queries, which compare a cluster's world box against a ray or a distance: a bound rounded inward there shrinks the box, so a ray grazing a face
-    /// is rejected and a kNN lower bound is OVERSTATED — which lets the early-termination test prune a cluster holding a closer entity. Both are silent
-    /// <c>SQ-01</c> false negatives. The compounding hazard that argument warns about does not apply, because these values are consumed and discarded rather
-    /// than re-stored.
+    /// <para><b>One method covers both min and max, and the reason is a size argument rather than a claim of perfection.</b> The f32-returning variants
+    /// this replaced needed a direction because the NARROWING is what rounds, and rounding the wrong way moves a bound INSIDE the entity it must contain
+    /// (<c>CA-01</c>). Here nothing narrows: the sum is formed and returned in double.</para>
+    /// <para><b>How exact, precisely.</b> The addition is exact whenever the result fits in 53 bits, and for a bound produced by this engine it does: the
+    /// offset is an f32 bounded by one cell (24 bits of mantissa) and the origin is <c>worldMin + cellIndex × cellSize</c> with the index bounded to 21 bits
+    /// by <c>VdbBlockKey</c> — 21 + 24 = 45, and the cell size cancels out of that sum, so it holds at any cell size. What is NOT covered is a
+    /// <c>worldMin</c> that itself spends the mantissa (an origin of 2³⁶ + 12345.678, say); there the sum rounds to nearest by up to half a double ULP.</para>
+    /// <para><b>Why that residual cannot break <c>CA-01</c> or <c>SQ-01</c>.</b> Half a double ULP at 2³⁶ is ~4 × 10⁻⁶, while the stored bound reaching this
+    /// method was already rounded OUTWARD by up to one f32 ULP in the cell frame — ~6 × 10⁻⁵ across a 1 000-unit cell, an order of magnitude larger. So a
+    /// converted bound stays outside the entity it contains even in the worst case, which is what the ray's face test and kNN's lower bound rely on.</para>
+    /// <para><b>This is the only conversion out of the stored frame.</b> Three f32-returning variants stood here until #919 — an undirected <c>ToWorld</c>
+    /// for display and a directed <c>ToWorldMin</c>/<c>ToWorldMax</c> pair for the ray and kNN paths. All three lost their last production caller when the
+    /// query shapes went f64, and leaving them would have left three ways to quantise a world coordinate to ~64-unit steps at 10⁹ on the public surface of
+    /// the type whose whole job is the opposite. The compounding hazard the old <c>ToWorld</c> warned about does not arise here either: these values are
+    /// consumed and discarded, never re-stored.</para>
     /// </remarks>
-    public static float ToWorldMin(float cellRelativeValue, float cellOrigin)
-    {
-        float world = cellRelativeValue + cellOrigin;
-        return world > cellRelativeValue + (double)cellOrigin ? MathF.BitDecrement(world) : world;
-    }
-
-    /// <summary>Convert a stored upper bound to world space, rounding OUTWARD. See <see cref="ToWorldMin"/>.</summary>
-    public static float ToWorldMax(float cellRelativeValue, float cellOrigin)
-    {
-        float world = cellRelativeValue + cellOrigin;
-        return world < cellRelativeValue + (double)cellOrigin ? MathF.BitIncrement(world) : world;
-    }
+    public static double ToWorldExact(float cellRelativeValue, double cellOrigin) => cellRelativeValue + cellOrigin;
 }

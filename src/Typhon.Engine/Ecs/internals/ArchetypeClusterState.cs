@@ -77,13 +77,44 @@ internal sealed unsafe partial class ArchetypeClusterState
     // Note the asymmetry this leaves: AddToActiveList runs under the latch, RemoveFromActiveList never does — removal happens only from serial contexts
     // (Finalize, or a single-threaded Transaction.Destroy). No reader takes it either, so the latch orders writers against writers, not readers.
     // Padded to 64 bytes so the latch field owns a full cache line and uncontended acquisitions don't ping-pong with adjacent hot fields like
-    // ActiveClusterCount / MigrationHint / LastTickMigrationCount. See rule MD-03 in rules/spatial.md.
+    // ActiveClusterCount / MigrationHint / LastTickMigrationCount. See rule MD-03 in rules/spatial.md. The acquisition counter shares that line on purpose:
+    // it is written only by the thread already holding the latch, so it rides a line that thread owns exclusively and costs nothing (#912).
+    //
+    // EVERY acquisition goes through PaddedFinalizeLock.Enter/Exit rather than through .Lock directly, which is what makes FinalizeLockAcquisitions a
+    // complete count. A site added straight onto .Lock would be invisible to it, and an incomplete count is worse than none — it reads as evidence.
     // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
     [StructLayout(LayoutKind.Explicit, Size = 64)]
     private struct PaddedFinalizeLock
     {
         [FieldOffset(0)] public AccessControlSmall Lock;
+
+        /// <summary>Exclusive acquisitions of this latch since the last per-tick reset. See <see cref="Enter"/>.</summary>
+        [FieldOffset(8)] public long Acquisitions;
+
+        /// <summary>
+        /// Acquire the latch and count it. Every acquisition in the archetype goes through here rather than through <c>Lock</c> directly.
+        /// </summary>
+        /// <remarks>
+        /// <para><b>A count and not a duration, deliberately (#912).</b> This latch is the only archetype-wide serialisation point a Migrate or AabbRefresh
+        /// worker can reach, so "does it get taken more often as the worker count rises" is the question that separates a phase which is genuinely contended
+        /// from one whose per-worker cost merely looks worse because there are more workers. Timing it would need two <see cref="Stopwatch.GetTimestamp"/>
+        /// calls per acquisition — ~50 ns against a critical section that is frequently shorter than that — and would change the thing being measured. The
+        /// increment below costs nothing: it runs INSIDE the exclusive region, on a cache line this thread already owns exclusively, so it needs no
+        /// <c>Interlocked</c> and adds no coherence traffic that the acquisition has not already paid for.</para>
+        /// <para>Reset from Prep with the rest of the per-tick block, and ordered against these writes by the fence phase barrier — the same plain-store
+        /// discipline the migration counters beside it use, and for the same reason.</para>
+        /// </remarks>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal void Enter(ref WaitContext ctx)
+        {
+            Lock.EnterExclusiveAccess(ref ctx);
+            Acquisitions++;
+        }
+
+        /// <inheritdoc cref="Enter"/>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal void Exit() => Lock.ExitExclusiveAccess();
     }
 
     private PaddedFinalizeLock _finalizeLock;
@@ -238,14 +269,14 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal void RegisterPrepSliceCrossings(int sliceStart, List<MigrationRequest> requests)
     {
         ref var nullCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx);
+        _finalizeLock.Enter(ref nullCtx);
         try
         {
             PrepSliceCrossings.Add((sliceStart, requests));
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 
@@ -439,7 +470,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         ref var nullCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx);
+        _finalizeLock.Enter(ref nullCtx);
         try
         {
             // First pass: find the max chunkId referenced so we grow FenceDirtyBits once if needed.
@@ -489,11 +520,18 @@ internal sealed unsafe partial class ArchetypeClusterState
                 {
                     bits[d.DstChunkId] |= d.DstSetMask;
                 }
+
+                // #912. The source cluster's shrink axes and process bit, deferred out of the migrant loop into this drain. Plain writes: the latch above
+                // excludes every other worker from both arrays, so the Interlocked pair the per-migrant path needs is not merely cheaper here — it is gone.
+                if (DeferMigrateClusterFlags && d.SrcChunkId >= 0)
+                {
+                    FlagClusterForShrinkRefreshLocked(d.SrcChunkId);
+                }
             }
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 
@@ -511,7 +549,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         ref var nullCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx);
+        _finalizeLock.Enter(ref nullCtx);
         try
         {
             // Re-check under lock — another worker may have already grown past us.
@@ -533,7 +571,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 
@@ -596,23 +634,68 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
     }
 
-    // Ping-pong partner for the radix sort, the queue's capacity, grown with it. Only the Migrate phase's Prepare touches either.
+    // Ping-pong partner for the radix sort, the queue's capacity, grown with it. Only OrderDrainAndMeasureArrivals touches either — serially per
+    // archetype, from its atomic Prep item or the sliced tail.
     private MigrationRequest[] _migrationSortScratch;
     private int[] _radixCounts;
 
     /// <summary>
-    /// Sort <see cref="PendingMigrations"/> in place by destination cell key so the parallel Migrate phase can give each worker a contiguous slice and have all
-    /// of that worker's destination cells be disjoint from every other worker's destination cells. Called from <c>FenceMigrateExecSystem.Prepare</c>, between
-    /// Prep and Migrate. Stable since #889 (<see cref="RadixSortByDestCellKey"/>).
+    /// Put the drain prefix in execution order — by destination cell, stably — and measure the arrivals it holds (#910 T0). Called once per archetype
+    /// from the Prep tail on BOTH fences, after every producer of this tick's prefix has filed and the throttle has cut it, and before the pre-size.
     /// </summary>
-    internal void SortPendingMigrationsByDestCellKey()
+    /// <remarks>
+    /// <para><b>Why the parallel Migrate phase needs it.</b> The slice planner gives each worker a contiguous range of the prefix and advances every
+    /// boundary to a change of destination cell, so no two workers claim into one cell. Stable since #889 (<see cref="RadixSortByDestCellKey"/>).</para>
+    /// <para><b>Here, not in the parallel Migrate Prepare where the sort used to run.</b> The serial fence never sorted — <c>ProcessArchetypeFence</c>
+    /// drained the queue in enqueue order — and the arrival counters below are read off the sorted runs, so both fences need it; an arrival repack (T2,
+    /// not built) would also need its clusters allocated before <c>PreSizeArchetypeFence</c> sizes the arrays a Migrate slice may not grow.
+    /// <b>The move changed the serial fence's placements.</b> Each cell still receives its requests in filing order, but cells are not independent: a
+    /// migration claims its destination before it releases its source, and first fit reuses a slot freed behind its cursor, so whether a crossing into a
+    /// cell takes a slot another crossing just vacated depends on which ran first. The serial fence now executes in the parallel fence's queue order.</para>
+    /// <para><b>The prefix, not the queue.</b> The throttle truncates (TH-01), so the two are equal today; sorting past the prefix would carry a tail
+    /// request into it the day they are not (CR-01).</para>
+    /// </remarks>
+    internal void OrderDrainAndMeasureArrivals()
     {
-        if (PendingMigrations == null || PendingMigrationCount < 2)
+        // The two arrival counters were zeroed with the rest of the per-tick block at the top of the fence; an empty prefix leaves them there.
+        var count = PendingMigrationDrainCount;
+        if (PendingMigrations == null || count <= 0)
         {
             return;
         }
 
-        RadixSortByDestCellKey(PendingMigrations, PendingMigrationCount);
+        if (count >= 2)
+        {
+            RadixSortByDestCellKey(PendingMigrations, count);
+        }
+
+        // One pass over the sorted prefix, where a destination cell's crossings are one contiguous run (relocations and repairs of that cell may sit
+        // among them, and are skipped).
+        var largest = 0;
+        var cells = 0;
+        var run = 0;
+        var runCell = 0;
+        for (var i = 0; i < count; i++)
+        {
+            ref readonly var request = ref PendingMigrations[i];
+            if (request.Kind != MigrationKind.CellCrossing)
+            {
+                continue;
+            }
+
+            if (run == 0 || request.DestCellKey != runCell)
+            {
+                runCell = request.DestCellKey;
+                run = 0;
+                cells++;
+            }
+
+            run++;
+            largest = Math.Max(largest, run);
+        }
+
+        LastTickLargestArrivalRun = largest;
+        LastTickArrivalCellsTouched = cells;
     }
 
     /// <summary>
@@ -777,7 +860,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         {
             // PreSizeMigrationBuffers should have covered this — fall back to a synchronized grow.
             ref var nullCtx = ref Unsafe.NullRef<WaitContext>();
-            _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx);
+            _finalizeLock.Enter(ref nullCtx);
             try
             {
                 if (_drainedClusterIds == null)
@@ -797,7 +880,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             }
             finally
             {
-                _finalizeLock.Lock.ExitExclusiveAccess();
+                _finalizeLock.Exit();
             }
         }
         _drainedClusterIds[idx] = clusterChunkId;
@@ -965,6 +1048,113 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// happens once, in <see cref="LastTickMigrationTotalMs"/>.</para>
     /// </remarks>
     public long LastTickMigrationApplyTicks;
+
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // #912 — what LastTickMigrationExecuteMs is a sum OVER.
+    //
+    // That field is a sum of per-SLICE spans divided, by every consumer, by a per-ENTITY count. The slice count is not a constant: FenceWorkPlan sizes the
+    // Migrate phase's slices from `2 x WorkerCount x FenceChunkOversubscription`, so raising W raises the number of spans summed into the numerator while the
+    // denominator is fixed by the workload. Every per-slice fixed cost inside the bracket — three CreateChunkAccessor rentals and the span construction — is
+    // therefore charged to every entity, once per slice.
+    //
+    // Without the three counters below, "CPU per entity rose 3.4x from W = 2 to W = 8" cannot be told apart from "the same work was cut into four times as
+    // many pieces". §5.8.1 recorded that ratio as an anomaly and left it unowned for three steps precisely because nothing published the denominator.
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>Telemetry counter: <c>ExecuteMigrations</c> slices that ran in the most recently completed tick — the number of spans summed into
+    /// <see cref="LastTickMigrationExecuteMs"/>. One on the serial fence; <c>FenceWorkPlan</c>'s slicing decides it on the parallel one.</summary>
+    /// <remarks>
+    /// <b>Read it as the denominator's denominator.</b> <c>MigrationExecuteMs / MigrationCount</c> is a per-entity figure only while this is 1; above that
+    /// it also carries <c>slices x per-slice fixed cost / entities</c>, which grows with the worker count on a workload of fixed size.
+    /// </remarks>
+    public int LastTickMigrationSliceCount;
+
+    /// <summary>Telemetry counter: zone-map batches a tick's Migrate slices opened — one per indexed field per slice (#926).</summary>
+    /// <remarks>
+    /// <para><b>The counter that proves the latch is no longer taken per migrant.</b> Before #926 the Migrate loop called <c>ZoneMapArray.Widen</c> once per
+    /// migrant per indexed field, and each call took the archetype-wide grow latch shared — two atomics on one cache line, from every worker, tens of
+    /// thousands of times a tick. It now opens one batch per field per slice instead, and the identity that pins it is
+    /// <c>ZoneMapBatchOpens == MigrationSliceCount x indexed fields</c>: a value INDEPENDENT of the migration count, which is exactly the property that
+    /// fails the moment a per-migrant acquire survives anywhere on the path.</para>
+    /// <para>Always counted, never <c>[Conditional("DEBUG")]</c>: the measurement it backs runs in Release, and a Debug-only counter used as proof is green
+    /// in Debug and absent where it matters.</para>
+    /// </remarks>
+    public int LastTickZoneMapBatchOpens;
+
+    /// <summary><see cref="Stopwatch"/> ticks the tick's Migrate slices spent BEFORE their first migrant — the span construction and the three chunk-accessor
+    /// rentals — summed across slices.</summary>
+    /// <remarks>
+    /// Inside <see cref="LastTickMigrationExecuteMs"/>, not beside it: the bracket has always covered the rentals, and #911 records why moving either end of
+    /// it silently breaks every timeline comparison against an older trace. This measures that prologue rather than relocating it, so the two can be
+    /// subtracted without changing what the span means. Two <see cref="Stopwatch.GetTimestamp"/> calls per SLICE — tens of them per tick, not thousands.
+    /// </remarks>
+    public long LastTickMigrationPrologueTicks;
+
+    /// <summary><see cref="Stopwatch"/> ticks the tick's Migrate slices spent AFTER their last migrant — the three accessor disposals and the span's own
+    /// publish — summed across slices.</summary>
+    /// <inheritdoc cref="LastTickMigrationPrologueTicks"/>
+    public long LastTickMigrationEpilogueTicks;
+
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // Executed migrations, split by kind. #911 gave the three-way split to the PROFILER SPAN, behind TelemetryConfig.ProfilerActive; these are the same three
+    // numbers on the always-on telemetry surface.
+    //
+    // The distinction matters because the profiler is the wrong instrument for this question. A Migrate slice mixes all three kinds by construction — the
+    // queue is sorted by destination cell key, not by kind — so attributing a cost to relocation rather than to crossing needs the split; and turning the
+    // profiler on to get it changes the measurement, because the ring emits from inside the bracket being measured. §5.8's per-kind findings were all reached
+    // with throwaway counters on a branch for exactly this reason.
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>Telemetry counter: cell-crossing migrations executed in the most recently completed tick.</summary>
+    /// <remarks>This and its two siblings sum EXACTLY to <see cref="LastTickMigrationCount"/>, which is what makes the split checkable rather than
+    /// trusted — the same property #911 gave the trace record.</remarks>
+    public int LastTickCrossingsExecuted;
+
+    /// <summary>
+    /// Cell crossings whose destination cell is not adjacent to the source cell (#910 T0), counted where each crossing is FILED. Accumulated with
+    /// <see cref="Interlocked.Add(ref int, int)"/> once per producer call — Prep slices and AabbRefresh slices both file crossings — and zeroed plainly
+    /// at the top of the fence, which the phase barrier orders against them. The outlier guard files after Migrate, so its crossings count in the tick
+    /// that files them and drain in the next; they sit inside the hysteresis band, so they are steps whenever <c>MigrationHysteresisRatio</c> is below 1.
+    /// </summary>
+    public int LastTickJumpCrossings;
+
+    /// <summary>
+    /// Cell crossings whose position lay outside the grid and were clamped into an edge cell (#910 T0). Same discipline as
+    /// <see cref="LastTickJumpCrossings"/>.
+    /// </summary>
+    public int LastTickClampedDestinations;
+
+    /// <summary>
+    /// The most cell crossings into one destination cell in this tick's drain prefix (#910 T0). Set by <see cref="OrderDrainAndMeasureArrivals"/>.
+    /// </summary>
+    public int LastTickLargestArrivalRun;
+
+    /// <summary>Distinct destination cells of this tick's drained cell crossings (#910 T0). Set by <see cref="OrderDrainAndMeasureArrivals"/>.</summary>
+    public int LastTickArrivalCellsTouched;
+
+    /// <summary>When the clamped-destination warning last fired for this archetype, in <see cref="System.Diagnostics.Stopwatch"/> ticks; 0 = never.</summary>
+    internal long LastClampWarningTimestamp;
+
+    /// <summary>Telemetry counter: intra-cell relocations executed in the most recently completed tick.</summary>
+    /// <inheritdoc cref="LastTickCrossingsExecuted"/>
+    public int LastTickRelocationsExecuted;
+
+    /// <summary>Telemetry counter: repair moves executed in the most recently completed tick.</summary>
+    /// <inheritdoc cref="LastTickCrossingsExecuted"/>
+    public int LastTickRepairsExecuted;
+
+    /// <summary>Telemetry counter: exclusive acquisitions of the archetype-wide finalize latch in the most recently completed tick.</summary>
+    /// <remarks>
+    /// <para><b>The one archetype-wide serialisation point a fence worker can reach.</b> Twenty-one call sites take it — the three bulk enqueues, the
+    /// per-archetype array growths, the new-cluster slow paths and the cell-tree segment creation — and a phase whose per-worker cost rises with W is
+    /// contended here or nowhere. A count rather than a held-time: see <c>PaddedFinalizeLock.Enter</c>.</para>
+    /// <para>The reading that answers #912: run the same workload at two worker counts. This staying flat while per-entity CPU rises eliminates the latch;
+    /// this rising with W names it.</para>
+    /// </remarks>
+    public long FinalizeLockAcquisitions => _finalizeLock.Acquisitions;
+
+    /// <summary>Zero <see cref="FinalizeLockAcquisitions"/> for the tick about to run. Called from Prep with the rest of the per-tick block.</summary>
+    internal void ResetFinalizeLockAcquisitions() => _finalizeLock.Acquisitions = 0L;
 
     /// <summary>
     /// <see cref="Stopwatch"/> ticks the last Finalize spent emitting this archetype's fence WAL records — the block loop and the collection-content walk —
@@ -1590,14 +1780,14 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         ref var growCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref growCtx);
+        _finalizeLock.Enter(ref growCtx);
         try
         {
             GrowClusterVisibilityCapacityLocked(requiredLength);
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 
@@ -1794,7 +1984,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         ref var nullCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx);
+        _finalizeLock.Enter(ref nullCtx);
         try
         {
             PendingPromotedApplies ??= new List<PromotedAabbApply>(buffer.Count);
@@ -1802,7 +1992,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 
@@ -2163,10 +2353,10 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// singleton and the state has no other reason to hold a reference to it.</param>
     /// <param name="minX">Query bounds min-X.</param>
     /// <param name="minY">Query bounds min-Y.</param>
-    /// <param name="minZ">Query bounds min-Z. For 2D queries against a 2D cluster archetype, pass <see cref="float.NegativeInfinity"/>.</param>
+    /// <param name="minZ">Query bounds min-Z. For 2D queries against a 2D cluster archetype, pass <see cref="double.NegativeInfinity"/>.</param>
     /// <param name="maxX">Query bounds max-X.</param>
     /// <param name="maxY">Query bounds max-Y.</param>
-    /// <param name="maxZ">Query bounds max-Z. For 2D queries against a 2D cluster archetype, pass <see cref="float.PositiveInfinity"/>.</param>
+    /// <param name="maxZ">Query bounds max-Z. For 2D queries against a 2D cluster archetype, pass <see cref="double.PositiveInfinity"/>.</param>
     /// <param name="categoryMask">Category bitmask; a cluster is skipped if its union mask does not intersect. Pass <see cref="uint.MaxValue"/> to accept all.</param>
     /// <remarks>
     /// This method does not validate <see cref="ClusterSpatialSlot.HasSpatialIndex"/> — the enumerator returns an empty result set naturally when the per-cell
@@ -2174,7 +2364,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// themselves first. This matches the ergonomics the existing cluster-archetype iteration loops in <c>SpatialTriggerSystem</c> and <c>SpatialInterestSystem</c>
     /// expect.
     /// </remarks>
-    public AabbClusterEnumerator QueryAabb(SpatialGrid grid, float minX, float minY, float minZ, float maxX, float maxY, float maxZ,
+    public AabbClusterEnumerator QueryAabb(SpatialGrid grid, double minX, double minY, double minZ, double maxX, double maxY, double maxZ,
         uint categoryMask = uint.MaxValue) => new(this, grid, minX, minY, minZ, maxX, maxY, maxZ, categoryMask);
 
     /// <summary>
@@ -2190,16 +2380,17 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// Z overlap test trivially passes against 2D entities.</param>
     /// <param name="radius">Sphere radius in world units.</param>
     /// <param name="categoryMask">Category bitmask; <c>0</c> means "no filter".</param>
-    public AabbClusterEnumerator QueryRadius(SpatialGrid grid, float centerX, float centerY, float centerZ, float radius, uint categoryMask = uint.MaxValue)
+    public AabbClusterEnumerator QueryRadius(SpatialGrid grid, double centerX, double centerY, double centerZ, double radius,
+        uint categoryMask = uint.MaxValue)
     {
         var minX = centerX - radius;
         var minY = centerY - radius;
         var maxX = centerX + radius;
         var maxY = centerY + radius;
-        var is3D = SpatialSlot.FieldInfo.FieldType == SpatialFieldType.AABB3F || SpatialSlot.FieldInfo.FieldType == SpatialFieldType.BSphere3F;
-        var minZ = is3D ? centerZ - radius : float.NegativeInfinity;
-        var maxZ = is3D ? centerZ + radius : float.PositiveInfinity;
-        var effectiveCenterZ = is3D ? centerZ : 0f;
+        var is3D = SpatialSlot.FieldInfo.FieldType.Is3D();
+        var minZ = is3D ? centerZ - radius : double.NegativeInfinity;
+        var maxZ = is3D ? centerZ + radius : double.PositiveInfinity;
+        var effectiveCenterZ = is3D ? centerZ : 0d;
         return new AabbClusterEnumerator(this, grid, minX, minY, minZ, maxX, maxY, maxZ, categoryMask, radius * radius, centerX, centerY, effectiveCenterZ);
     }
 
@@ -2653,7 +2844,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // The tree segment's creation takes _finalizeLock, so it is ensured before the latch; the fresh cluster's index add under it then promotes
         // the cell if the count says so, and never re-enters.
         var treeSegmentReady = CellTreePromoteThreshold == int.MaxValue || TryEnsureCellTreeSegment();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx);
+        _finalizeLock.Enter(ref nullCtx);
         try
         {
             newChunkId = AllocateNewCluster(changeSet);
@@ -2674,7 +2865,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
 
         Interlocked.Increment(ref cell.ClusterCount);
@@ -2936,7 +3127,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // The tree segment's creation takes _finalizeLock, so it is ensured before the latch; the fresh cluster's index add under it then promotes
         // the cell if the count says so, and never re-enters.
         var treeSegmentReady = CellTreePromoteThreshold == int.MaxValue || TryEnsureCellTreeSegment();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx);
+        _finalizeLock.Enter(ref nullCtx);
         try
         {
             newChunkId = AllocateNewCluster(changeSet);
@@ -2958,7 +3149,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
 
         Interlocked.Increment(ref grid.GetCell(cellKey).ClusterCount);
@@ -3127,7 +3318,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // The tree segment's creation takes _finalizeLock, so it is ensured before the latch; the fresh cluster's index add under it then promotes
         // the cell if the count says so, and never re-enters.
         var treeSegmentReady = CellTreePromoteThreshold == int.MaxValue || TryEnsureCellTreeSegment();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx0);
+        _finalizeLock.Enter(ref nullCtx0);
         try
         {
             newChunkId = AllocateNewCluster(changeSet);
@@ -3152,7 +3343,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
 
         // Cell counters use Interlocked unconditionally (other archetypes sharing this grid may bump them too).
@@ -3236,7 +3427,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // The tree segment's creation takes _finalizeLock, so it is ensured before the latch; the fresh cluster's index add under it then promotes
         // the cell if the count says so, and never re-enters.
         var treeSegmentReady = CellTreePromoteThreshold == int.MaxValue || TryEnsureCellTreeSegment();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx1);
+        _finalizeLock.Enter(ref nullCtx1);
         try
         {
             newChunkId = AllocateNewCluster(null);
@@ -3260,7 +3451,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
 
         Interlocked.Increment(ref cell.ClusterCount);
@@ -3303,7 +3494,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         EnsureClusterCellMapCapacity(PrimarySegmentCapacity);
         Array.Fill(ClusterCellMap, -1);
 
-        var ss = SpatialSlot;
+        ref readonly var ss = ref SpatialSlot;
         var componentOffset = Layout.ComponentOffset(ss.Slot);
         var compStride = Layout.ComponentSize(ss.Slot);
         var fieldType = ss.FieldInfo.FieldType;
@@ -3448,7 +3639,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             return result;
         }
 
-        var ss = SpatialSlot;
+        ref readonly var ss = ref SpatialSlot;
         var firstSlot = BitOperations.TrailingZeroCount(occupancy);
         var firstFieldPtr = clusterBase + Layout.ComponentOffset(ss.Slot) + firstSlot * Layout.ComponentSize(ss.Slot) + ss.FieldOffset;
         grid.ReadCellCoordsFromSpatialField(firstFieldPtr, ss.FieldInfo.FieldType, out result.CellX, out result.CellY, out result.CellZ);
@@ -3657,14 +3848,14 @@ internal sealed unsafe partial class ArchetypeClusterState
         ThrowIfGrowingInsideMigrateSlice(nameof(ClusterCellMap), requiredLength, ClusterCellMap?.Length ?? 0);
 
         ref var growCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref growCtx);
+        _finalizeLock.Enter(ref growCtx);
         try
         {
             EnsureClusterCellMapCapacityLocked(requiredLength);
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 
@@ -3738,14 +3929,14 @@ internal sealed unsafe partial class ArchetypeClusterState
         ThrowIfGrowingInsideMigrateSlice(nameof(ClusterAabbs), requiredLength, ClusterAabbs?.Length ?? 0);
 
         ref var growCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref growCtx);
+        _finalizeLock.Enter(ref growCtx);
         try
         {
             EnsureClusterAabbsCapacityLocked(requiredLength);
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 
@@ -3800,14 +3991,14 @@ internal sealed unsafe partial class ArchetypeClusterState
         ThrowIfGrowingInsideMigrateSlice(nameof(ClusterSpatialIndexSlot), requiredLength, ClusterSpatialIndexSlot?.Length ?? 0);
 
         ref var growCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref growCtx);
+        _finalizeLock.Enter(ref growCtx);
         try
         {
             EnsureClusterSpatialIndexSlotCapacityLocked(requiredLength);
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 
@@ -3867,14 +4058,14 @@ internal sealed unsafe partial class ArchetypeClusterState
             slotsShort ? ClusterMigrationPendingSlots?.Length ?? 0 : ClusterProcessBitmap?.Length ?? 0);
 
         ref var growCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref growCtx);
+        _finalizeLock.Enter(ref growCtx);
         try
         {
             EnsureClusterWriteBookkeepingCapacityLocked(requiredLength);
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 
@@ -3953,14 +4144,14 @@ internal sealed unsafe partial class ArchetypeClusterState
         ThrowIfGrowingInsideMigrateSlice(nameof(PerCellIndex), requiredLength, PerCellIndex?.Length ?? 0);
 
         ref var growCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref growCtx);
+        _finalizeLock.Enter(ref growCtx);
         try
         {
             EnsurePerCellIndexCapacityLocked(requiredLength);
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 
@@ -4141,7 +4332,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal ClusterSpatialAabb RecomputeClusterAabb(int clusterChunkId, ref ChunkAccessor<PersistentStore> accessor,
         double originX, double originY, double originZ, out int slotsScanned)
     {
-        var ss = SpatialSlot;
+        ref readonly var ss = ref SpatialSlot;
         var clusterBase = accessor.GetChunkAddress(clusterChunkId);
         var occupancy = *(ulong*)clusterBase;
         slotsScanned = BitOperations.PopCount(occupancy);
@@ -4186,7 +4377,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // 6 doubles covers both 2D ([minX, minY, maxX, maxY]) and 3D ([minX, minY, minZ, maxX, maxY, maxZ]) layouts produced by
         // SpatialMaintainer.ReadAndValidateBoundsFromPtr. The tail slots cost nothing for 2D reads.
         Span<double> coords = stackalloc double[6];
-        var is3D = ss.FieldInfo.FieldType == SpatialFieldType.AABB3F || ss.FieldInfo.FieldType == SpatialFieldType.BSphere3F;
+        var is3D = ss.FieldInfo.FieldType.Is3D();
 
         var bits = occupancy;
         while (bits != 0)
@@ -4195,7 +4386,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             bits &= bits - 1;
 
             var fieldPtr = clusterBase + componentOffset + slot * componentStride + ss.FieldOffset;
-            if (!SpatialMaintainer.ReadAndValidateBoundsFromPtr(fieldPtr, ss.FieldInfo, coords, ss.Descriptor))
+            if (!SpatialMaintainer.ReadAndValidateBoundsFromPtr(fieldPtr, ss.FieldInfo, coords))
             {
                 continue; // skip degenerate slot
             }
@@ -4504,8 +4695,10 @@ internal sealed unsafe partial class ArchetypeClusterState
                 // below has nothing to do. Passing null is what selects that — see the divert in the slice.
                 RecomputeDirtyClusterAabbsSlice(0, totalWork, ref accessor, grid, null, outlierBuffer, repairNominationBuffer, out var aabbsChanged,
                     out var slotsScanned, out var outlierGuardFires, out var clustersScanned, out var driftersDetected, out var driftAbsorbed,
-                    out var driftersUnplaced, out var driftGatedClusters, out var driftSuppressedByDensity, out var driftersUnplacedNoCandidate, out var driftersSpilled);
+                    out var driftersUnplaced, out var driftGatedClusters, out var driftSuppressedByDensity, out var driftersUnplacedNoCandidate,
+                    out var driftersSpilled, out var tightness);
                 EnqueueMigrationsBulk(outlierBuffer);
+                FoldTightnessSample(in tightness);
                 Interlocked.Add(ref LastTickClustersScanned, clustersScanned);
                 Interlocked.Add(ref LastTickSlotsScanned, slotsScanned);
                 Interlocked.Add(ref LastTickDriftersDetected, driftersDetected);
@@ -4557,7 +4750,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal void RecomputeDirtyClusterAabbsSlice(int sliceStart, int sliceCount, ref ChunkAccessor<PersistentStore> accessor, SpatialGrid grid,
         List<PromotedAabbApply> promotedApplyBuffer, List<MigrationRequest> outlierBuffer, List<RepairNomination> repairNominationBuffer, out int aabbsChanged,
         out int slotsScanned, out int outlierGuardFires, out int clustersScanned, out int driftersDetected, out int driftAbsorbed, out int driftersUnplaced,
-        out int driftGatedClusters, out int driftSuppressedByDensity, out int driftersUnplacedNoCandidate, out int driftersSpilled)
+        out int driftGatedClusters, out int driftSuppressedByDensity, out int driftersUnplacedNoCandidate, out int driftersSpilled,
+        out ClusterTightnessSample tightness)
     {
         aabbsChanged = 0;
         slotsScanned = 0;
@@ -4570,6 +4764,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         driftSuppressedByDensity = 0;
         driftersUnplacedNoCandidate = 0;
         driftersSpilled = 0;
+        tightness = default;
 
         if (!SpatialSlot.HasSpatialIndex)
         {
@@ -4599,7 +4794,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         var maxExtent = 0f;
         var cellSize = 0f;
         var inverseCellSize = 0f;
-        var outlierGuardActive = grid != null && (cellSize = grid.Config.CellSize) > 0f;
+        var outlierGuardActive = grid != null && (cellSize = (float)grid.Config.CellSize) > 0f;
         var driftTargetExtent = 0f;
         // #872 step 12 (P7). A THIRD threshold, deliberately not one of the two above. The design proposes reusing the outlier guard's cellSize x 1.2, but
         // that check exists to catch a cluster whose bound has escaped its own cell — which only happens when it holds entities that should have migrated
@@ -4628,7 +4823,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // Hoisted out of the per-cluster loop, which is the whole point of taking it as a parameter (D1). 64 slots is the cluster capacity ceiling and
         // three axes are cached, so this is 768 bytes on the slice worker's stack, reused for every cluster the slice touches. Allocating it per cluster
         // would put a stackalloc inside a loop.
-        Span<float> centreScratch = stackalloc float[3 * MaxSlotsPerCluster];
+        Span<double> centreScratch = stackalloc double[3 * MaxSlotsPerCluster];
 
         // Per-WORKER, not per-slice — see _candidateScratch. Reused across ticks, so the steady state allocates nothing.
         var candidateScratch = CandidateScratch ??= new List<RelocationCandidate>(64);
@@ -4740,10 +4935,10 @@ internal sealed unsafe partial class ArchetypeClusterState
                     TyphonEvent.EmitSpatialCellIndexUpdate(cellKey, indexSlot);
 
                     // The Z term matters because FlagOutliersForMigration tests all three axes: without it a cluster that drifts purely on Z never
-                    // reaches the check that would notice, and the Z half of that method is dead in exactly the case it was written for. It is
-                    // UNREACHABLE today — WriteSpatial supports AABB2F only, so no cluster AABB grows on Z at write time, and a 2D union leaves
-                    // MinZ/MaxZ at the ±Infinity sentinel whose difference is -Infinity. It goes in now rather than being discovered missing when 3D
-                    // write support lands (steps 9-10).
+                    // reaches the check that would notice, and the Z half of that method is dead in exactly the case it was written for.
+                    // LIVE since #914 — it was written speculatively while WriteSpatial handled AABB2F only, so no cluster AABB could grow on Z at write
+                    // time and a 2D union left MinZ/MaxZ at the ±Infinity sentinel whose difference is -Infinity. The 3D write tiers make it reachable,
+                    // and OutlierGuardZAxisTests covers it. A 2D archetype still produces -Infinity here, which fails the extent test as it always did.
                     // ── D1: ONE gather, then two cheap consumers ──────────────────────────────────────────────────
                     //
                     // Gated so a healthy cluster still costs nothing per entity. The guard's threshold is cellSize x 1.2 and
@@ -4770,6 +4965,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                     var driftGated = (!repairGated || targets.ConstantMode) && targets.DriftExtent > 0f && maxAxisExtent > targets.DriftExtent;
 
                     clustersScanned++;
+                    tightness.Note(outlierGuardActive, maxAxisExtent, inverseCellSize, targets.PackingBound);
                     if (repairGated)
                     {
                         repairNominationBuffer.Add(new RepairNomination(cellKey, maxAxisExtent * inverseCellSize));
@@ -4967,10 +5163,8 @@ internal sealed unsafe partial class ArchetypeClusterState
                 TyphonEvent.EmitSpatialCellIndexUpdate(cellKey, indexSlot);
 
                 // The Z term matters because FlagOutliersForMigration tests all three axes: without it a cluster that drifts purely on Z never
-                // reaches the check that would notice, and the Z half of that method is dead in exactly the case it was written for. It is
-                // UNREACHABLE today — WriteSpatial supports AABB2F only, so no cluster AABB grows on Z at write time, and a 2D union leaves
-                // MinZ/MaxZ at the ±Infinity sentinel whose difference is -Infinity. It goes in now rather than being discovered missing when 3D
-                // write support lands (steps 9-10).
+                // reaches the check that would notice, and the Z half of that method is dead in exactly the case it was written for.
+                // LIVE since #914 — see the identical note on the parallel arm above.
 
                 // See the bitmap branch above — one gather, same gating, same reason. The repair nomination for this branch sits before the
                 // process-bit skip above, so `targets` has already been resolved for this cell by the time this runs.
@@ -4981,6 +5175,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 var activeRepairGated = targets.RepairExtent > 0f && activeMaxAxisExtent > targets.RepairExtent;
                 var driftGated = (!activeRepairGated || targets.ConstantMode) && targets.DriftExtent > 0f && activeMaxAxisExtent > targets.DriftExtent;
                 clustersScanned++;
+                tightness.Note(outlierGuardActive, activeMaxAxisExtent, inverseCellSize, targets.PackingBound);
                 if (driftGated)
                 {
                     driftGatedClusters++;
@@ -5116,21 +5311,130 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <para>Roots rather than <c>MathF.Pow</c>: <c>Sqrt</c> and <c>Cbrt</c> are one instruction and one short polynomial respectively, and this resolves
     /// once per cell change, not per cluster.</para>
     /// </remarks>
-    internal static float DensityTargetRatio(int entitiesInCell, int slotsPerCluster, bool flat, float slack)
+    internal static float DensityTargetRatio(int entitiesInCell, int slotsPerCluster, bool flat, float slack) =>
+        slack <= 0f ? 0f : DensityTargetFromBound(PackingBoundRatio(entitiesInCell, slotsPerCluster, flat), slack);
+
+    /// <summary>
+    /// <see cref="DensityTargetRatio"/> for a caller that already holds the cell's <see cref="PackingBoundRatio"/> — the AABB refresh's per-cell memo, which
+    /// needs both readings and must not take the root twice (#911 O2).
+    /// </summary>
+    /// <remarks>
+    /// <c>packingBound >= 1</c> is exactly the old <c>entitiesInCell &lt;= slotsPerCluster</c> test, because that is the only input for which
+    /// <see cref="PackingBoundRatio"/> returns 1. It returns before the slack multiply, which matters when slack is below 1: a bound that is already the
+    /// whole cell must not be scaled under it.
+    /// </remarks>
+    internal static float DensityTargetFromBound(float packingBound, float slack)
     {
         if (slack <= 0f)
         {
             return 0f;
         }
 
+        if (packingBound >= 1f)
+        {
+            return 1f;
+        }
+
+        var ratio = slack * packingBound;
+        return ratio >= 1f ? 1f : ratio;
+    }
+
+    /// <summary>
+    /// The packing bound alone — <c>(slotsPerCluster / E)^(1/d)</c> as a fraction of the cell edge, with no slack and no floor. The tightest a full cluster
+    /// can be in a cell of <paramref name="entitiesInCell"/> entities without fragmenting into emptier ones.
+    /// </summary>
+    /// <remarks>
+    /// <para>Split out of <see cref="DensityTargetRatio"/> for #911 O2, which needs the bound itself rather than the target derived from it: measured extent
+    /// ÷ bound is the reading the whole subsystem is judged on, and it cannot be recovered from the target by dividing out the slack — the target is clamped
+    /// at 1 first, so every cell whose slack-scaled bound reaches the cell reports the same 1 regardless of how far under it the bound sits.</para>
+    /// <para>Geometry, not tuning: it is what a perfect Morton tiling reaches. <c>1</c> at or below <paramref name="slotsPerCluster"/> entities per cell —
+    /// one cluster IS the cell there, which is why intra-cell maintenance correctly switches itself off in that basin.</para>
+    /// </remarks>
+    internal static float PackingBoundRatio(int entitiesInCell, int slotsPerCluster, bool flat)
+    {
         if (entitiesInCell <= slotsPerCluster)
         {
             return 1f;
         }
 
         var fill = slotsPerCluster / (float)entitiesInCell;
-        var ratio = slack * (flat ? MathF.Sqrt(fill) : MathF.Cbrt(fill));
-        return ratio >= 1f ? 1f : ratio;
+        var bound = flat ? MathF.Sqrt(fill) : MathF.Cbrt(fill);
+        return bound >= 1f ? 1f : bound;
+    }
+
+    /// <summary>
+    /// One AABB-refresh slice's tightness accumulation (#911 O2): measured cluster extent against the cell's packing bound, summed so the archetype-wide
+    /// means can be folded from every worker's slice.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The population is clusters WRITTEN this tick, not clusters that exist.</b> This rides the AABB refresh because that is where the extent is
+    /// already in registers and the cell's <c>EntityCount</c> has already been read for the density target — an add and a divide on a path that has both
+    /// operands. The price is that a settled world contributes NO samples, which is why <see cref="Samples"/> is published: a mean of zero over zero samples
+    /// is "nothing moved", not "the clusters are points". <c>SpatialPartitionMatrix.MeasurePartition</c> takes the other reading — a full
+    /// <c>O(active clusters)</c> sweep — and the two are not interchangeable.</para>
+    /// <para>Doubles rather than floats for the sums: a slice can accumulate tens of thousands of ratios near 1, and f32 stops adding at ~16 M.</para>
+    /// </remarks>
+    internal struct ClusterTightnessSample
+    {
+        /// <summary>Clusters that contributed a reading — zero when the slice scanned nothing, or when the archetype has no cell size to normalise by.</summary>
+        internal int Samples;
+
+        /// <summary>Sum of each cluster's largest axis extent as a fraction of the cell edge.</summary>
+        internal double SumExtentRatio;
+
+        /// <summary>Sum of each cluster's cell's packing bound, as a fraction of the cell edge. The denominator tightness is judged against.</summary>
+        internal double SumPackingBound;
+
+        /// <summary>Fold one cluster in. <paramref name="active"/> is the slice's "there is a grid with a positive cell size" flag; false makes this a no-op.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal void Note(bool active, float maxAxisExtent, float inverseCellSize, float packingBound)
+        {
+            // A cluster whose bound is still the Empty sentinel yields a non-finite extent; counting it would poison the mean with an infinity. The gate is
+            // the same three-compare shape the callers already use, so a healthy cluster pays a compare and two adds.
+            if (!active || !float.IsFinite(maxAxisExtent) || maxAxisExtent < 0f)
+            {
+                return;
+            }
+
+            Samples++;
+            SumExtentRatio += maxAxisExtent * inverseCellSize;
+            SumPackingBound += packingBound;
+        }
+    }
+
+    /// <summary>Fold one AabbRefresh slice's tightness accumulation into the archetype-wide per-tick sums. One atomic trio per slice, not per cluster.</summary>
+    internal void FoldTightnessSample(in ClusterTightnessSample tightness)
+    {
+        if (tightness.Samples == 0)
+        {
+            return;
+        }
+
+        Interlocked.Add(ref LastTickTightnessSamples, tightness.Samples);
+        InterlockedAddDouble(ref LastTickTightnessExtentSum, tightness.SumExtentRatio);
+        InterlockedAddDouble(ref LastTickTightnessBoundSum, tightness.SumPackingBound);
+    }
+
+    /// <summary>
+    /// Add to a <see cref="double"/> field that parallel fence workers share. .NET has no <c>Interlocked.Add(ref double)</c>, so this is the same
+    /// compare-exchange-over-the-bit-pattern loop the Migrate phase uses for <see cref="LastTickMigrationExecuteMs"/>.
+    /// </summary>
+    /// <remarks>Called once per SLICE, not per cluster — the per-cluster accumulation happens in a worker-local <see cref="ClusterTightnessSample"/>.</remarks>
+    internal static void InterlockedAddDouble(ref double target, double addend)
+    {
+        SpinWait sw = default;
+        while (true)
+        {
+            var current = Volatile.Read(ref target);
+            var candidate = current + addend;
+            var currentBits = BitConverter.DoubleToInt64Bits(current);
+            if (Interlocked.CompareExchange(ref Unsafe.As<double, long>(ref target), BitConverter.DoubleToInt64Bits(candidate), currentBits) == currentBits)
+            {
+                return;
+            }
+
+            sw.SpinOnce();
+        }
     }
 
     /// <summary>
@@ -5161,6 +5465,16 @@ internal sealed unsafe partial class ArchetypeClusterState
         /// <summary>The repair-nomination gate, in world units; <c>0</c> when repair is off for this cell (or for the archetype).</summary>
         internal float RepairExtent;
 
+        /// <summary>
+        /// The cell's packing bound as a fraction of the cell edge (#911 O2) — the denominator of tightness-to-bound. <c>1</c> until the first cell resolves,
+        /// and for a slice with no grid, because a cell whose population fits one cluster IS bounded at the cell.
+        /// </summary>
+        /// <remarks>
+        /// Free here and nowhere else: <see cref="Resolve"/> already loads the cell's <c>EntityCount</c> and already takes the root, so publishing the bound
+        /// it computed costs one store per cell change. Computing it in the caller would repeat both.
+        /// </remarks>
+        internal float PackingBound;
+
         internal CellTargetResolver(SpatialGrid grid, float cellSize, float driftFloor, float repairFloor, int slotsPerCluster, bool flat, float boost)
         {
             _grid = grid;
@@ -5179,6 +5493,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             // The floors until the first cell resolves; a slice with no grid never resolves and keeps them, which for a grid-less archetype are 0.
             DriftExtent = driftFloor;
             RepairExtent = repairFloor;
+            PackingBound = 1f;
         }
 
         internal void Resolve(int cellKey)
@@ -5189,7 +5504,12 @@ internal sealed unsafe partial class ArchetypeClusterState
             }
 
             _cellKey = cellKey;
-            var density = DensityTargetRatio(_grid.GetCell(cellKey).EntityCount, _slotsPerCluster, _flat, _slack);
+
+            // One root per cell change, feeding both readings (#911 O2). The bound is pure geometry and is published even in constant mode, where the GATES
+            // ignore it — a tightness reading is not a tuning decision and has no reason to go dark because the targets were pinned to constants.
+            var bound = PackingBoundRatio(_grid.GetCell(cellKey).EntityCount, _slotsPerCluster, _flat);
+            PackingBound = bound;
+            var density = DensityTargetFromBound(bound, _slack);
             if (density <= 0f)
             {
                 // Constant mode: the configured floors, untouched by density and by the boost — the pre-step-14 behaviour, byte for byte.
@@ -5432,6 +5752,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         var cellMaxZ = cellMinZ + cfg.CellSize;
 
         ulong claimed = 0;
+        var jumps = 0;
+        var clamped = 0;
         var bits = centres.ValidMask;
         while (bits != 0)
         {
@@ -5444,6 +5766,10 @@ internal sealed unsafe partial class ArchetypeClusterState
 
             // Raw cell boundary (no hysteresis) — force migrate anything outside. A 2D field reports posZ = 0 and the grid is one cell deep there, so the Z
             // pair is always false for a flat world: the third axis costs two comparisons and changes no flat-world outcome.
+            //
+            // For a 3D archetype it is load-bearing, and only became reachable with #914's 3D write tiers: an entity that leaves its cell purely on Z passes
+            // both the X and the Y test, so deleting the Z pair would strand it in the wrong cell with every counter balancing. OutlierGuardZAxisTests is the
+            // test that reddens if it goes.
             if (posX < cellMinX || posX > cellMaxX || posY < cellMinY || posY > cellMaxY || posZ < cellMinZ || posZ > cellMaxZ)
             {
                 var newCellKey = grid.WorldToCellKey(posX, posY, posZ);
@@ -5453,8 +5779,23 @@ internal sealed unsafe partial class ArchetypeClusterState
                     // For serial callers (RecomputeDirtyClusterAabbs whole-archetype wrapper), the buffer is appended without contention.
                     outlierBuffer.Add(new MigrationRequest(clusterChunkId, slotIndex, newCellKey));
                     claimed |= 1UL << slotIndex;
+                    var (toX, toY, toZ) = grid.CellKeyToCoords(newCellKey);
+                    jumps += SpatialGrid.IsJump(cellX, cellY, cellZ, toX, toY, toZ) ? 1 : 0;
+                    clamped += grid.IsClampedPoint(posX, posY, posZ, SpatialSlot.FieldInfo.FieldType.Is3D()) ? 1 : 0;
                 }
             }
+        }
+
+        // #910 T0, published per cluster rather than per crossing: AabbRefresh slices run this concurrently. A guarded crossing sits inside the hysteresis
+        // band, so it is a step whenever MigrationHysteresisRatio is below 1; at 1 or more it can jump, and is counted like any other (SO-01).
+        if (jumps != 0)
+        {
+            Interlocked.Add(ref LastTickJumpCrossings, jumps);
+        }
+
+        if (clamped != 0)
+        {
+            Interlocked.Add(ref LastTickClampedDestinations, clamped);
         }
 
         return claimed;
@@ -5467,7 +5808,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </summary>
     internal void AddClusterToPerCellIndex(int clusterChunkId, int cellKey, in ClusterSpatialAabb aabb)
     {
-        NoteClusterOverhang(in aabb, Grid?.Config.CellSize ?? 0f);
+        NoteClusterOverhang(in aabb, (float)(Grid?.Config.CellSize ?? 0d));
 
         // The growers take _finalizeLock themselves (non-reentrant), so they run BEFORE the latch below; what they publish is monotonic, so the
         // references re-read under the latch are current and at least as long as what was just ensured.
@@ -5489,14 +5830,14 @@ internal sealed unsafe partial class ArchetypeClusterState
         // ClusterPlacementTests.ConcurrentSpawnsAndBoundGrowthKeepClustersInTheirCell), and a write into an array a concurrent grower had just
         // replaced. One uncontended latch per fresh cluster is the whole cost; a fresh cluster is rare against the claims that fill it.
         ref var addCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref addCtx);
+        _finalizeLock.Enter(ref addCtx);
         try
         {
             AddClusterToPerCellIndexLocked(clusterChunkId, cellKey, in aabb, treeSegmentReady);
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 
@@ -5603,6 +5944,14 @@ internal sealed unsafe partial class ArchetypeClusterState
             return;
         }
 
+        PromoteCellHalf(slot, isStatic, cellKey, linear);
+    }
+
+    /// <summary>
+    /// Rebuild a cell half from its linear index into a <see cref="CellClusterTree"/> and publish it. The caller has ensured the tree segment.
+    /// </summary>
+    private void PromoteCellHalf(PerCellSpatialSlot slot, bool isStatic, int cellKey, CellSpatialIndex linear)
+    {
         var tree = new CellClusterTree(CellTreeSegment, ClusterSpatialIndexSlot);
 
         // Retire the LINEAR slot indices before re-issuing tree handles into the same array. The two representations share ClusterSpatialIndexSlot, and a
@@ -5644,6 +5993,70 @@ internal sealed unsafe partial class ArchetypeClusterState
         if (cellKey >= 0)
         {
             (_promotedCells ??= new List<int>()).Add(cellKey);
+        }
+    }
+
+    /// <summary>
+    /// Put one cell half on the tree or on the linear index, whatever the promotion gate would decide — the in-place structure A/B of
+    /// <c>CellTreeCrossoverProfile</c> (#917). False when the cell has no half to switch or no tree segment can be had.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>An instrument, not a gate.</b> Switching one engine's half in place is what makes the two structures answer over the SAME clusters. Two
+    /// engines fed one workload need not keep one layout: repair admission is priced from measured wall-clock costs, so the engine whose fences cost more
+    /// admits less repair.</para>
+    /// <para><b>Holds the archetype's finalize latch</b>, as the spawn path's <see cref="AddClusterToPerCellIndex"/> does: a commit opening or widening a
+    /// cluster in this cell mid-rebuild would otherwise add to the linear index being copied and dropped (the cluster lost from the cell, SQ-01) or
+    /// update a tree being released (PC-01). Call inside an epoch, with no fence and no query of this engine in flight.</para>
+    /// <para><b>A forced tree lasts until a cluster leaves the cell.</b> The archetype's gate should be off (<see cref="int.MaxValue"/>), or its next
+    /// evaluation may undo the switch — and with it off the fall-back threshold is <see cref="int.MaxValue"/> too, so the first cluster the cell loses (a
+    /// destroy, a migration out, a repair source emptied at a fence) falls the tree back to the linear index. A caller timing the tree across fences
+    /// re-checks the structure after the work.</para>
+    /// </remarks>
+    internal bool ForceCellHalfStructure(int cellKey, bool tree)
+    {
+        // Before the latch: the segment's creation takes _finalizeLock itself, and the latch is not re-entrant.
+        if (tree && !TryEnsureCellTreeSegment())
+        {
+            return false;
+        }
+
+        ref var forceCtx = ref Unsafe.NullRef<WaitContext>();
+        _finalizeLock.Enter(ref forceCtx);
+        try
+        {
+            var perCell = PerCellIndex;
+            if (perCell == null || (uint)cellKey >= (uint)perCell.Length || perCell[cellKey] is not { } slot)
+            {
+                return false;
+            }
+
+            var isStatic = SpatialSlot.FieldInfo.Mode == SpatialMode.Static;
+            if (tree == (slot.ReadTree(isStatic) != null))
+            {
+                return true;
+            }
+
+            // The promoted-cell list is pruned only by the gate's own fence pass, which returns at once when the gate is off — the state this method
+            // is called in. Without these two removals every forced promotion would leave an entry behind for the life of the engine.
+            _promotedCells?.Remove(cellKey);
+            if (!tree)
+            {
+                DemoteCellHalf(slot, isStatic);
+                return true;
+            }
+
+            var linear = slot.ReadIndex(isStatic);
+            if (linear == null)
+            {
+                return false;
+            }
+
+            PromoteCellHalf(slot, isStatic, cellKey, linear);
+            return true;
+        }
+        finally
+        {
+            _finalizeLock.Exit();
         }
     }
 
@@ -5822,6 +6235,16 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <inheritdoc cref="LastTickCellTreePromotions"/>
     internal int LastTickCellTreeDemotions;
 
+    /// <summary>Clusters that contributed a tightness reading during the most recently completed tick's AABB refresh (#911 O2).</summary>
+    /// <remarks>Written by every AabbRefresh slice via <see cref="Interlocked.Add(ref int, int)"/>, reset once per tick in <c>PrepareArchetypeFence</c>.</remarks>
+    internal int LastTickTightnessSamples;
+
+    /// <summary>Sum of the measured extent ratios behind <see cref="LastTickTightnessSamples"/>. See <see cref="ClusterTightnessSample"/>.</summary>
+    internal double LastTickTightnessExtentSum;
+
+    /// <summary>Sum of the packing bounds behind <see cref="LastTickTightnessSamples"/>. See <see cref="ClusterTightnessSample"/>.</summary>
+    internal double LastTickTightnessBoundSum;
+
     /// <summary>Fall back to a linear index once a promoted cell half drops to <see cref="CellTreeDemoteThreshold"/>.</summary>
     private void DemoteCellHalf(PerCellSpatialSlot slot, bool isStatic)
     {
@@ -5983,7 +6406,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     internal void WidenClusterInPerCellIndex(int clusterChunkId, int cellKey, in ClusterSpatialAabb aabb)
     {
-        NoteClusterOverhang(in aabb, Grid?.Config.CellSize ?? 0f);   // a spawn straddling its cell's edge widens every KNN ring — noted here as the add did
+        // A spawn straddling its cell's edge widens every KNN ring — noted here as the add did.
+        NoteClusterOverhang(in aabb, (float)(Grid?.Config.CellSize ?? 0d));
 
         var perCell = Volatile.Read(ref PerCellIndex);
         if (perCell == null || (uint)cellKey >= (uint)perCell.Length)
@@ -6002,14 +6426,14 @@ internal sealed unsafe partial class ArchetypeClusterState
         if (tree != null)
         {
             ref var treeCtx = ref Unsafe.NullRef<WaitContext>();
-            _finalizeLock.Lock.EnterExclusiveAccess(ref treeCtx);
+            _finalizeLock.Enter(ref treeCtx);
             try
             {
                 tree.UpdateAt(clusterChunkId, in aabb, out _);
             }
             finally
             {
-                _finalizeLock.Lock.ExitExclusiveAccess();
+                _finalizeLock.Exit();
             }
 
             return;
@@ -6107,7 +6531,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         ref var createCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref createCtx);
+        _finalizeLock.Enter(ref createCtx);
         try
         {
             if (CellTreeSegment != null)
@@ -6124,7 +6548,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 
@@ -6320,7 +6744,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         ref var nullCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx);
+        _finalizeLock.Enter(ref nullCtx);
         try
         {
             var n = outlierBuffer.Count;
@@ -6352,7 +6776,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
         outlierBuffer.Clear();
     }
@@ -6397,14 +6821,14 @@ internal sealed unsafe partial class ArchetypeClusterState
     private int AllocateNewClusterLatched(ChangeSet changeSet)
     {
         ref var nullCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx);
+        _finalizeLock.Enter(ref nullCtx);
         try
         {
             return AllocateNewCluster(changeSet);
         }
         finally
         {
-            _finalizeLock.Lock.ExitExclusiveAccess();
+            _finalizeLock.Exit();
         }
     }
 

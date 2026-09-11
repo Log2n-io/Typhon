@@ -387,6 +387,18 @@
             // Combined gate for the Spatial:ClusterMigration:Hysteresis span (hysteresis suppression of a migration).
             "Enabled": false,
           },
+          "Repair": {
+            // Combined gate for the Spatial:ClusterMigration:Repair span (kind 64: one admitted repair unit, with its cell and degradation).
+            "Enabled": false,
+          },
+          "Relocation": {
+            // Combined gate for the Spatial:ClusterMigration:Relocation instant (kind 65: the per-tick throttle outcome split).
+            "Enabled": false,
+          },
+          "ArchetypeTelemetry": {
+            // Combined gate for the Spatial:ClusterMigration:ArchetypeTelemetry instant (kind 66: the per-archetype per-tick counter snapshot the Workbench Spatial panel reads).
+            "Enabled": false,
+          },
         },
         "TierIndex": {
           // Combined gate for the Spatial:TierIndex subtree (tier-index rebuild spans).

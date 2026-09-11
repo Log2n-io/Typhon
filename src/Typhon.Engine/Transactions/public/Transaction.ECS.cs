@@ -2031,9 +2031,9 @@ public unsafe partial class Transaction
                         {
                             SpatialGrid.ReadSpatialCenter3D(spatialFieldPtr, ctx.SpatialFieldTypeCached, out var worldX, out var worldY, out var worldZ);
                             ctx.SpatialGridCached.CellOrigin(computedCellKey, out var originX, out var originY, out var originZ);
-                            spawnPx = worldX - originX;
-                            spawnPy = worldY - originY;
-                            spawnPz = worldZ - originZ;
+                            spawnPx = (float)(worldX - originX);
+                            spawnPy = (float)(worldY - originY);
+                            spawnPz = (float)(worldZ - originZ);
                         }
                     }
 
@@ -2194,7 +2194,7 @@ public unsafe partial class Transaction
 
                         if (ctx.ClusterState.ClusterCellMap != null)
                         {
-                            if (SpatialMaintainer.ReadAndValidateBoundsFromPtr(spatialFieldPtr, ss.FieldInfo, spawnSpatialCoords, ss.Descriptor))
+                            if (SpatialMaintainer.ReadAndValidateBoundsFromPtr(spatialFieldPtr, ss.FieldInfo, spawnSpatialCoords))
                             {
                                 ctx.ClusterState.EnsureClusterAabbsCapacity(clusterChunkId + 1);
                                 ctx.ClusterState.EnsureClusterSpatialIndexSlotCapacity(clusterChunkId + 1);
@@ -2222,8 +2222,8 @@ public unsafe partial class Transaction
                                 int cellKey = ctx.ClusterState.ClusterCellMap[clusterChunkId];
                                 if (cellKey >= 0)
                                 {
-                                    ctx.ClusterState.Grid.CellOrigin(cellKey, out float cellOriginX, out float cellOriginY, out float cellOriginZ);
-                                    if (ss.FieldInfo.FieldType == SpatialFieldType.AABB3F || ss.FieldInfo.FieldType == SpatialFieldType.BSphere3F)
+                                    ctx.ClusterState.Grid.CellOrigin(cellKey, out double cellOriginX, out double cellOriginY, out double cellOriginZ);
+                                    if (ss.FieldInfo.FieldType.Is3D())
                                     {
                                         ClusterSpatialAabb.WidenCas3F(ref clusterAabb,
                                             ClusterSpatialAabb.ToCellRelativeMin(spawnSpatialCoords[0], cellOriginX),
@@ -2397,7 +2397,7 @@ public unsafe partial class Transaction
                         SpatialGrid.ReadSpatialCenter3D(fieldPtr, fieldType, out var x, out var y, out var z);
                         cellKey = grid.WorldToCellKey(x, y, z);
                         grid.CellOrigin(cellKey, out var ox, out var oy, out var oz);
-                        mortonKey = ArchetypeClusterState.EncodeIntraCellMorton(x - ox, y - oy, z - oz, inverseCellSize);
+                        mortonKey = ArchetypeClusterState.EncodeIntraCellMorton((float)(x - ox), (float)(y - oy), (float)(z - oz), (float)inverseCellSize);
                     }
                 }
 

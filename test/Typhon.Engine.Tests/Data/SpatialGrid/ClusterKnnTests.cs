@@ -107,7 +107,7 @@ class ClusterKnnTests : TestBase<ClusterKnnTests>
         Assert.That(nearCell, Is.Not.EqualTo(farCell), "the nearer entity must be filed one cell out, or the ring search never has to reach for it");
         Assert.That(cs.MaxClusterOverhang, Is.GreaterThan(0f), "the overhang bound must have been observed, or the corrected stopping rule is a no-op");
 
-        var buffer = new (long entityId, float distSq)[1];
+        var buffer = new (long entityId, double distSq)[1];
         int n;
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
@@ -126,15 +126,18 @@ class ClusterKnnTests : TestBase<ClusterKnnTests>
     }
 
     /// <summary>Brute force: every entity in the world, measured directly, sorted, truncated to k.</summary>
-    private static List<(long entityId, float distSq)> Oracle(DatabaseEngine dbe, ArchetypeClusterState cs, float px, float py, int k)
+    private static List<(long entityId, double distSq)> Oracle(DatabaseEngine dbe, ArchetypeClusterState cs, float px, float py, int k)
     {
-        var all = new List<(long entityId, float distSq)>();
+        var all = new List<(long entityId, double distSq)>();
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
             foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 0f, 0f, float.NegativeInfinity, WorldExtent, WorldExtent, float.PositiveInfinity))
             {
-                float dx = MathF.Max(MathF.Max(r.MinX - px, 0f), px - r.MaxX);
-                float dy = MathF.Max(MathF.Max(r.MinY - py, 0f), py - r.MaxY);
+                // Double, matching the engine since #919 F2. It matters that this MIRRORS the production arithmetic rather than approximating it: the
+                // oracle's job is to be an independent implementation of the same SEMANTICS, and a narrower one disagrees by more than the tolerance at
+                // 4 000 entities — which reads as a kNN bug and is not one.
+                double dx = Math.Max(Math.Max(r.MinX - px, 0d), px - r.MaxX);
+                double dy = Math.Max(Math.Max(r.MinY - py, 0d), py - r.MaxY);
                 all.Add((r.EntityId, (dx * dx) + (dy * dy)));
             }
         }
@@ -147,7 +150,7 @@ class ClusterKnnTests : TestBase<ClusterKnnTests>
         return all;
     }
 
-    private (List<(long entityId, float distSq)> knn, List<(long entityId, float distSq)> oracle, int promotedCells) Run(
+    private (List<(long entityId, double distSq)> knn, List<(long entityId, double distSq)> oracle, int promotedCells) Run(
         int promoteThreshold, int entityCount, float px, float py, int k, int seed, float cellSize)
     {
         // A fresh database per configuration — two engines under one fixture name otherwise share a file, and the second loads the first's population.
@@ -168,21 +171,20 @@ class ClusterKnnTests : TestBase<ClusterKnnTests>
         dbe.WriteTickFence(1);
 
         var cs = ClusterStateOf(dbe);
-        var buffer = new (long entityId, float distSq)[k];
+        var buffer = new (long entityId, double distSq)[k];
         int n;
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
             n = cs.QueryNearest(dbe.SpatialGrid, px, py, 0f, k, buffer, categoryMask: 0);
         }
 
-        var knn = new List<(long entityId, float distSq)>();
+        var knn = new List<(long entityId, double distSq)>();
         for (int i = 0; i < n; i++)
         {
             knn.Add(buffer[i]);
         }
 
-                // The oracle enumerates through QueryAabb — the SAME production path, in the same configuration. That is independent enough for the
-                // ray/kNN logic
+        // The oracle enumerates through QueryAabb — the SAME production path, in the same configuration. That is independent enough for the ray/kNN logic
         // itself, but NOT for the promotion layer underneath: an entity lost from a promoted tree vanishes from both sides and the comparison passes. Pinning
         // the total against the known spawn count is the check that does not share that blind spot.
         int reachable = 0;
@@ -195,10 +197,10 @@ class ClusterKnnTests : TestBase<ClusterKnnTests>
         }
         Assert.That(reachable, Is.EqualTo(entityCount), "the index lost entities — every comparison below would share that blind spot");
 
-return (knn, Oracle(dbe, cs, px, py, k), cs.PromotedCellCount);
+        return (knn, Oracle(dbe, cs, px, py, k), cs.PromotedCellCount);
     }
 
-    private static void AssertMatchesOracle(List<(long entityId, float distSq)> knn, List<(long entityId, float distSq)> oracle, string stage)
+    private static void AssertMatchesOracle(List<(long entityId, double distSq)> knn, List<(long entityId, double distSq)> oracle, string stage)
     {
         Assert.That(knn, Has.Count.EqualTo(oracle.Count), $"{stage}: wrong number of neighbours returned");
 
@@ -230,7 +232,7 @@ return (knn, Oracle(dbe, cs, px, py, k), cs.PromotedCellCount);
     public void Knn_MatchesBruteForce_OnTheLinearPath()
     {
         var r = Run(promoteThreshold: int.MaxValue, entityCount: 4_000, px: 913f, py: 471f, k: 20, seed: 12345, cellSize: SparseCellSize);
-        TestContext.Out.WriteLine($"KNN linear   returned={r.knn.Count} nearest={MathF.Sqrt(r.knn[0].distSq):F3} promotedCells={r.promotedCells}");
+        TestContext.Out.WriteLine($"KNN linear   returned={r.knn.Count} nearest={Math.Sqrt(r.knn[0].distSq):F3} promotedCells={r.promotedCells}");
 
         Assert.That(r.promotedCells, Is.Zero, "this configuration must not promote, or it is not testing the linear path");
         AssertMatchesOracle(r.knn, r.oracle, "linear");
@@ -241,7 +243,7 @@ return (knn, Oracle(dbe, cs, px, py, k), cs.PromotedCellCount);
     public void Knn_MatchesBruteForce_OnPromotedCells()
     {
         var r = Run(promoteThreshold: 4, entityCount: 4_000, px: 913f, py: 471f, k: 20, seed: 12345, cellSize: DenseCellSize);
-        TestContext.Out.WriteLine($"KNN promoted returned={r.knn.Count} nearest={MathF.Sqrt(r.knn[0].distSq):F3} promotedCells={r.promotedCells}");
+        TestContext.Out.WriteLine($"KNN promoted returned={r.knn.Count} nearest={Math.Sqrt(r.knn[0].distSq):F3} promotedCells={r.promotedCells}");
 
         Assert.That(r.promotedCells, Is.GreaterThan(0), "the population must cross the threshold, or the tree path never ran");
         AssertMatchesOracle(r.knn, r.oracle, "promoted");
@@ -260,7 +262,7 @@ return (knn, Oracle(dbe, cs, px, py, k), cs.PromotedCellCount);
     public void Knn_HandlesAFarPointAndAnOversizedK()
     {
         var far = Run(promoteThreshold: 4, entityCount: 500, px: WorldExtent - 1f, py: 1f, k: 10, seed: 777, cellSize: DenseCellSize);
-        TestContext.Out.WriteLine($"KNN far      returned={far.knn.Count} nearest={MathF.Sqrt(far.knn[0].distSq):F3}");
+        TestContext.Out.WriteLine($"KNN far      returned={far.knn.Count} nearest={Math.Sqrt(far.knn[0].distSq):F3}");
         AssertMatchesOracle(far.knn, far.oracle, "far point");
 
         var oversized = Run(promoteThreshold: 4, entityCount: 30, px: 1_000f, py: 1_000f, k: 100, seed: 99, cellSize: DenseCellSize);
@@ -300,7 +302,7 @@ return (knn, Oracle(dbe, cs, px, py, k), cs.PromotedCellCount);
         int totalClusters = cs.ActiveClusterCount;
 
         int scanned;
-        var buffer = new (long entityId, float distSq)[5];
+        var buffer = new (long entityId, double distSq)[5];
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
             cs.QueryNearest(dbe.SpatialGrid, 1_000f, 1_000f, 0f, 5, buffer, out scanned, categoryMask: 0);

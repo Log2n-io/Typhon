@@ -626,8 +626,57 @@ class CellTreeDensityTransitionTests : TestBase<CellTreeDensityTransitionTests>
         using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
 
         Assert.That(dbe.ClusterCellTreePromoteThreshold, Is.EqualTo(SpatialOptions.DefaultCellTreePromoteThreshold));
-        Assert.That(SpatialOptions.DefaultCellTreePromoteThreshold, Is.Not.EqualTo(int.MaxValue),
-            "a default of int.MaxValue means no database ever promotes, which is the state this work exists to end");
+        // Reversed on 2026-09-10 (#917): on #906's workload a forced tree made the tick 1.43-1.75x slower at every density measured, so no cell promotes
+        // unless the application sets a count. The rest of this fixture sets its own threshold and is untouched by that.
+        Assert.That(SpatialOptions.DefaultCellTreePromoteThreshold, Is.EqualTo(int.MaxValue),
+            "the default promotes nothing: the per-cell tree lost the tick on every workload measured");
+    }
+
+    /// <summary>
+    /// <c>ForceCellHalfStructure</c> — the in-place switch <c>CellTreeCrossoverProfile</c> (#917) times the two structures with — changes a cell half's
+    /// structure and never its answer, in both directions and repeatedly, on an archetype whose own gate is off.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void ForcingTheStructureChangesTheShapeNotTheAnswer()
+    {
+        ServiceProvider.EnsureFileDeleted<ManagedPagedMMFOptions>();
+        using var scope = ServiceProvider.CreateScope();
+        using var dbe = SetupEngine(scope, int.MaxValue);
+        var cs = ClusterStateOf(dbe);
+        var cellKey = dbe.SpatialGrid.WorldToCellKey(1f, 1f, 0f);
+
+        var rng = new Random(917);
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < DenseEntityCount; i++)
+            {
+                var x = 1f + ((float)rng.NextDouble() * (CellSize - 2f));
+                var y = 1f + ((float)rng.NextDouble() * (CellSize - 2f));
+                tx.Spawn<ClCohUnit>(ClCohUnit.Pos.Set(PointAt(x, y)));
+            }
+            tx.Commit();
+        }
+        dbe.WriteTickFence(1);
+        Assert.That(ObserveCell(dbe, cs, 1, 1f, 1f).IsTree, Is.False, "the gate is off, so the cell must start on the linear scan");
+
+        for (var round = 0; round < 3; round++)
+        {
+            foreach (var tree in new[] { true, false })
+            {
+                bool switched;
+                using (EpochGuard.Enter(dbe.EpochManager))
+                {
+                    switched = cs.ForceCellHalfStructure(cellKey, tree);
+                }
+
+                var stage = $"round {round}, forced onto the {(tree ? "tree" : "linear scan")}";
+                Assert.That(switched, Is.True, $"{stage}: the switch was refused");
+                Assert.That(ObserveCell(dbe, cs, round, 1f, 1f).IsTree, Is.EqualTo(tree), $"{stage}: the half is on the other structure");
+                Assert.That(cs.PromotedCellCount, Is.EqualTo(tree ? 1 : 0), $"{stage}: the promoted-cell count does not match the structure");
+                AssertQueryMatchesStorage(dbe, cs, stage);
+            }
+        }
     }
 
     // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════

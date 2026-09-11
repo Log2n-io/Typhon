@@ -8,7 +8,7 @@ using Typhon.Engine.Internals;
 namespace Typhon.Engine.Tests;
 
 /// <summary>
-/// The Migrate phase's destination-cell sort as a SITE of <see cref="RadixSort"/> (#889 lead F, made generic in #891): the queue's scratch that
+/// The drain's destination-cell sort (Prep's since #910) as a SITE of <see cref="RadixSort"/> (#889 lead F, made generic in #891): the queue's scratch that
 /// <see cref="ArchetypeClusterState.RadixSortByDestCellKey"/> owns and grows, the key struct's order, and the public entry point. The algorithm itself —
 /// stability, digit widths, skipped digits, signed keys — is pinned by <c>RadixSortTests</c> and is not repeated here.
 /// </summary>
@@ -90,32 +90,40 @@ class MigrationDestCellRadixSortTests : TestBase<MigrationDestCellRadixSortTests
         AssertSameSequence(large, expected, 20_000, "then, two hundred times larger");
     }
 
-    /// <summary>Through the public entry point: the queue itself, sorted in place over exactly <c>PendingMigrationCount</c> entries.</summary>
+    /// <summary>
+    /// Through the entry point the fence uses (#910): the drain PREFIX is sorted in place, and a request past it stays exactly where it was — a sort over
+    /// the whole queue would carry it into the drain (CR-01).
+    /// </summary>
     [Test]
-    public void SortPendingMigrationsByDestCellKey_OrdersTheQueue()
+    [VerifiesRule("CR-01")]
+    public void OrderDrainAndMeasureArrivals_SortsThePrefixAndLeavesTheTail()
     {
         var state = NewState();
         var rng = new Random(5);
         try
         {
             var items = Build(rng, 1_500, r => r.Next(1 << 18));
+            var tail = items.AsSpan(1_000, 500).ToArray();
             state.PendingMigrations = items;
             state.PendingMigrationCount = 1_500;
+            state.PendingMigrationDrainCount = 1_000;
 
-            state.SortPendingMigrationsByDestCellKey();
+            state.OrderDrainAndMeasureArrivals();
 
-            var keys = new List<int>(1_500);
-            for (var i = 0; i < 1_500; i++)
+            var keys = new List<int>(1_000);
+            for (var i = 0; i < 1_000; i++)
             {
                 keys.Add(state.PendingMigrations[i].DestCellKey);
             }
 
-            Assert.That(keys, Is.Ordered.Ascending, "the queue must be ascending by destination cell");
+            Assert.That(keys, Is.Ordered.Ascending, "the prefix must be ascending by destination cell");
+            Assert.That(state.PendingMigrations.AsSpan(1_000, 500).ToArray(), Is.EqualTo(tail), "a request past the prefix must not move");
         }
         finally
         {
             state.PendingMigrations = null;
             state.PendingMigrationCount = 0;
+            state.PendingMigrationDrainCount = 0;
         }
     }
 }

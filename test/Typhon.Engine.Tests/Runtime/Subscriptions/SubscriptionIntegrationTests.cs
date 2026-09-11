@@ -17,7 +17,6 @@ namespace Typhon.Engine.Tests.Runtime;
 [TestFixture]
 class SubscriptionIntegrationTests : TestBase<SubscriptionIntegrationTests>
 {
-    private const int TestPort = 19876; // High port to avoid conflicts
 
     [OneTimeSetUp]
     public void OneTimeSetup()
@@ -76,6 +75,7 @@ class SubscriptionIntegrationTests : TestBase<SubscriptionIntegrationTests>
     [Test]
     public void Client_Connects_And_ReceivesTickDelta_WithSpawnedEntity()
     {
+        var testPort = TestPortAllocator.NextFreePort();
         using var dbe = SetupEngine();
 
         // Create View for subscriptions
@@ -102,7 +102,7 @@ class SubscriptionIntegrationTests : TestBase<SubscriptionIntegrationTests>
         {
             WorkerCount = 1,
             BaseTickRate = 30, // Slower tick rate for test stability
-            SubscriptionServer = new SubscriptionServerOptions { Port = TestPort }
+            SubscriptionServer = new SubscriptionServerOptions { Port = testPort }
         });
 
         // Publish the View
@@ -117,7 +117,7 @@ class SubscriptionIntegrationTests : TestBase<SubscriptionIntegrationTests>
 
             // Connect TCP client
             using var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            client.Connect(new IPEndPoint(IPAddress.Loopback, TestPort));
+            client.Connect(new IPEndPoint(IPAddress.Loopback, testPort));
             client.NoDelay = true;
 
             // Wait for the connection to register
@@ -175,6 +175,7 @@ class SubscriptionIntegrationTests : TestBase<SubscriptionIntegrationTests>
     [Test]
     public void PublishView_WithNoClients_DoesNotThrow()
     {
+        var testPort = TestPortAllocator.NextFreePort();
         using var dbe = SetupEngine();
 
         using var viewTx = dbe.CreateQuickTransaction();
@@ -187,7 +188,7 @@ class SubscriptionIntegrationTests : TestBase<SubscriptionIntegrationTests>
         {
             WorkerCount = 1,
             BaseTickRate = 100,
-            SubscriptionServer = new SubscriptionServerOptions { Port = TestPort + 1 }
+            SubscriptionServer = new SubscriptionServerOptions { Port = testPort }
         });
 
         runtime.PublishView("test_units", subsView);

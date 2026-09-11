@@ -43,7 +43,7 @@ import {
   saveLayoutAsDefault,
   resetLayout,
 } from './commands/openSchemaBrowser';
-import { toggleViewCallTree, toggleViewCriticalPath, toggleViewProfiler, toggleViewTopSpans, toggleViewQueryAnalyzer, toggleViewEngineLiveHealth, registerOpenSaveReplay } from './commands/profilerCommands';
+import { toggleViewCallTree, toggleViewCriticalPath, toggleViewProfiler, toggleViewTopSpans, toggleViewQueryAnalyzer, toggleViewEngineLiveHealth, toggleViewSpatialMaintenance, registerOpenSaveReplay } from './commands/profilerCommands';
 import { toggleViewQueryConsole } from './commands/openQueryConsole';
 import { openIntegrity } from './commands/openIntegrity';
 import { registerOpenConnect } from './commands/baseCommands';
@@ -190,6 +190,9 @@ export default function MenuBar() {
  {isViewVisible('EngineLiveHealth', sessionScope) && (
  <MenubarItem onClick={toggleViewEngineLiveHealth}>Engine Health</MenubarItem>
  )}
+{isViewVisible('SpatialMaintenance', sessionScope) && (
+ <MenubarItem onClick={toggleViewSpatialMaintenance}>Spatial</MenubarItem>
+)}
  {/* Systems & Queries Navigator — the trace/attach-mode default left-edge navigator (the profiler-mode
      counterpart of Resource Tree). Shown only in a profiler session — the in-mode recovery path to reopen
      the navigator after closing its panel. */}

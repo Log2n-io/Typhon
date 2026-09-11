@@ -108,12 +108,12 @@ internal readonly struct MigrationRequest
     /// <remarks>
     /// <para><b>Only the repair path (#872 step 12) sets this.</b> A full cell re-sort computes the ENTIRE destination layout up front — sort order
     /// determines which cluster and which slot every entity lands in — so the placement is an output of the planner, not of the claim.</para>
-    /// <para><b>What would have broken it is the SORT, not the slicing.</b> Before the Migrate phase dispatches,
-    /// <c>ArchetypeClusterState.SortPendingMigrationsByDestCellKey</c> orders the queue by <c>DestCellKey</c> alone. Until #889 that was an
+    /// <para><b>What would have broken it is the SORT, not the slicing.</b> Before the Migrate phase dispatches, the drain prefix is ordered by
+    /// <c>DestCellKey</c> alone — today by <c>ArchetypeClusterState.OrderDrainAndMeasureArrivals</c>, on both fences. Until #889 that was an
     /// <c>Array.Sort</c> — introsort, <b>unstable</b> — so every request a repair emits for one cell compared equal and the planner's emission order
-    /// within that cell was permuted arbitrarily; first fit would then have assigned slots in the permuted order. That sort runs only on the parallel path
-    /// (<c>FenceExecSystem</c>), so the serial and parallel fences would have produced different packings from identical input — which is exactly what
-    /// <c>AC-12.4</c> forbids. Pinning the slot made the packing independent of it.</para>
+    /// within that cell was permuted arbitrarily; first fit would then have assigned slots in the permuted order. Until #910 that sort ran only on the
+    /// parallel path (<c>FenceExecSystem</c>), so the serial and parallel fences would have produced different packings from identical input — which is
+    /// exactly what <c>AC-12.4</c> forbids. Pinning the slot made the packing independent of it.</para>
     /// <para><i>Slicing is NOT the reason, and an earlier version of this comment said it was.</i>
     /// <c>FenceWorkPlan.EmitMigrationApplyItems</c> advances each slice boundary until <c>DestCellKey</c> changes, so one cell's run is never split across
     /// workers and two workers can never claim into the same fresh cluster.</para>

@@ -50,7 +50,8 @@ public readonly struct SpatialGridAccessor
     public int GridDepth { get { ThrowIfInvalid(); return _grid.Config.GridDepth; } }
 
     /// <summary>Cell size in world units.</summary>
-    public float CellSize { get { ThrowIfInvalid(); return _grid.Config.CellSize; } }
+    /// <remarks>f64 since #914, with the world frame it belongs to — an f64 world may configure a cell size no f32 can hold exactly.</remarks>
+    public double CellSize { get { ThrowIfInvalid(); return _grid.Config.CellSize; } }
 
     /// <summary>
     /// The cell key for the given cell coordinates, or <c>-1</c> when no cell exists there. Cell keys are pool slots handed out when a cell is first
@@ -109,7 +110,9 @@ public readonly struct SpatialGridAccessor
     public void ResetAllTiers(SimTier tier) { ThrowIfInvalid(); _grid.ResetAllTiers(tier); }
 
     /// <summary>Set tiers for all cells overlapping a world-space AABB, using min (promote-only) semantics.</summary>
-    public void SetTierInAABB(float minX, float minY, float minZ, float maxX, float maxY, float maxZ, SimTier tier)
+    /// <remarks>f64 since #914, with the world frame it addresses. An f32 call site is unchanged — widening is exact — but an observer box in a world
+    /// past ~1.7 × 10⁷ could not have been expressed at all before.</remarks>
+    public void SetTierInAABB(double minX, double minY, double minZ, double maxX, double maxY, double maxZ, SimTier tier)
     {
         ThrowIfInvalid();
         _grid.SetTierInAABB(minX, minY, minZ, maxX, maxY, maxZ, tier);
@@ -120,7 +123,8 @@ public readonly struct SpatialGridAccessor
     // ═══════════════════════════════════════════════════════════════
 
     /// <summary>Convert a world-space point to a grid cell key, or <c>-1</c> when no cell exists there. Points outside bounds are clamped.</summary>
-    public int WorldToCell(float worldX, float worldY, float worldZ)
+    /// <remarks>f64 since #914 — see <see cref="SetTierInAABB"/>.</remarks>
+    public int WorldToCell(double worldX, double worldY, double worldZ)
     {
         ThrowIfInvalid();
         return _grid.TryGetCellKeyAt(worldX, worldY, worldZ, out int cellKey) ? cellKey : -1;

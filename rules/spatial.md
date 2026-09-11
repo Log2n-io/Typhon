@@ -155,7 +155,34 @@
 ### SQ-05: Traversal buffer safety `[silent]`
   invariant stackTop < 256 for all DFS-based queries
   invariant RayEnumerator never drops a child that hits within maxDist while below MaxRayHeapCapacity
-  scope: AABBQueryEnumerator, FrustumEnumerator, CountInAABB, RayEnumerator
+  invariant 🔴 ∀ two enumerators live on one thread at once: their traversal stacks are DISTINCT arrays
+  scope: AABBQueryEnumerator, FrustumEnumerator, CountInAABB, RayEnumerator, QueryStackPool
+  pooled stack (added 2026-09-08, #916 O1): AABBQueryEnumerator's stack is no longer the inline
+    QueryStackBuffer. It is an int[256] rented from QueryStackPool, a per-thread FREE LIST, and returned in
+    Dispose. Capacity is unchanged, so the 256 bound above still reads against the same number — PushChild
+    tests QueryStackPool.Capacity.
+    The distinctness invariant is new and is the whole reason the pool is a list rather than one buffer.
+    Nested spatial queries are legal — query A, and for each hit query B — and were safe by CONSTRUCTION while
+    each enumerator embedded its own 1 KB array. A single [ThreadStatic] buffer does not crash: the inner query
+    overwrites the outer's stack, the outer resumes describing a different subtree, and it returns a SUBSET.
+    That is an SQ-01 false negative arriving through this rule, which is why it is 🔴 and not a note.
+    Two mechanisms hold it, and both are needed. (1) The enumerator rents LAZILY, on first descent rather than
+    in the constructor, because GetEnumerator() returns a COPY — a constructor-time rent would put one array on
+    both the copy and the discarded original. (2) Every buffer carries an ownership TOKEN past its DFS slots
+    (QueryStackPool.TokenSlot); a rent stamps a fresh value and hands the same value out, and Return is accepted
+    only while the two agree, zeroing the stamp on the way.
+    An identity scan of the free list is NOT sufficient and was the first attempt: it catches a double return
+    only while the buffer is still parked, and misses the case that matters — a copy that already rented returns
+    the buffer, another query rents it, then the original returns it again. At that moment the buffer is
+    legitimately on loan, so the scan finds nothing and parks a stack that is still being written. The token
+    fails that return on the stamp instead. No in-repo caller does this today, but AabbClusterEnumerator is
+    public and reaches game code through ClusterSpatialQuery, so "no caller does that" is not load-bearing.
+    Buffers are returned DIRTY and must stay that way. The DFS protocol writes a slot before reading it and
+    stackTop is the only liveness marker, so zeroing on rent or return would reintroduce the 1 KB memset the
+    change exists to remove (measured: query setup 75.45 -> 58.09 ns on an M4, medians of interleaved sets).
+    verified by: QueryStackPoolTests (incl. StaleReturnAfterReRentIsIgnored),
+    CellTreePromotionTests.NestedQueriesOverPromotedCells_AnswerAsTheyDoAlone,
+    CellTreePromotionTests.WarmQueryPathAllocatesNothing_AndNeverOverflowsTheStack
   note OccupantQueryEnumerator was a fifth DFS enumerator here until #872 step 13. It yielded the payload id AND
        the owning component's chunk id, which only the entity-level tree could supply; its last two callers were
        the interest and trigger systems' entity-tree paths, removed with that tree.
@@ -176,6 +203,83 @@
     depth-first (siblings get well-separated entry distances) and the frontier stays at 5-15 nodes, which is why
     the pre-existing 200-entity ray test never filled the heap. Partition PERPENDICULAR to the ray so every node
     shares an entry distance and siblings pile up unconsumed.
+
+### SQ-06: The cluster query answers at the tier's declared width, in both frames `[fatal][silent]`
+  invariant 🔴 an archetype's dimensionality is DERIVED from its SpatialFieldType, never enumerated:
+    SpatialFieldTypeExtensions.Is3D(fieldType), not `fieldType == AABB3F || fieldType == BSphere3F`
+    the enumerated form was correct only while ValidateSupportedFieldType rejected the f64 tiers. Opening that
+    gate (#914) turned all nine sites that spelled it that way into a silent misclassification: an AABB3D
+    archetype reads as 2D, AabbClusterEnumerator pins _cellMinZ = _cellMaxZ = grid.FlatPlaneZ, the walk sweeps
+    ONE Z plane of a deep grid, and every entity elsewhere on Z is never visited. SQ-01's own failure mode,
+    reached through a predicate rather than through the traversal.
+  invariant the query runs in TWO frames and each has its own width, deliberately:
+    broadphase — cluster bound vs query box, CELL-RELATIVE f32 (C15). SetCellQueryFrame converts once per cell;
+                 the ray and kNN paths convert the CLUSTER bound outward instead, through ToWorldExact.
+    narrowphase — entity bound vs query box, WORLD f64. Both sides come from the component and the caller
+                  unnarrowed; ReadAndValidateBoundsFromPtr has always produced doubles.
+    never narrow the world frame to f32 anywhere on the query path, in ANY of the four shapes — AABB, radius, ray,
+    frustum, kNN. At 2^36 one f32 step is 8 192 units — wider than a 1 000-unit cell — so an f32 narrowphase
+    compares two coordinates that are the SAME number and accepts every entity in the cell. That is a false
+    POSITIVE set containing the true one, so SQ-01 still holds and nothing throws; the query simply stops
+    discriminating, which is why this is [silent]. The frustum's failure is coarser and worth stating separately:
+    its planes were always f64, but its caller-supplied BOUNDING BOX resolves the cell range, so narrowing that
+    collapses the range and skips whole cells of the view — an SQ-01 false negative, not a loss of discrimination.
+  invariant an f32-TIER archetype may not be registered on a world f32 cannot address. The check is
+    SpatialGrid.ValidateWorldExtentForFieldType, at InitializeArchetypes, and it is a configuration error rather
+    than a runtime branch: the archetype's own component stores f32 WORLD coordinates, so once one f32 step at the
+    world's extreme EXCEEDS the cell size, two entities a cell apart round to the same value and the grid files them
+    together. Nothing downstream can repair that — the precision was gone before the engine saw the value. The
+    remedy the message names is the f64 tier, not a wider internal representation.
+    the line is `ulp_f32(extreme) < cellSize`, NOT "every cell origin is exactly representable in f32". The second
+    is stricter and wrong: a world spanning 0.1..1000.1 with 100-unit cells has no exactly-representable origin and
+    resolves ~1e-8, four orders finer than a cell. Failing startup for a world that works is the worse bug.
+    an accepted world may still be COARSE and that is deliberate — at 2^30 with 1 000-unit cells an f32 step is 128,
+    so the application's own component is quantised to 128 while the cell-relative stored bounds (C15) keep full
+    resolution. That is the trade an f32 tier is, not a defect the engine should refuse.
+  invariant a query box's tier must equal the archetype's storage tier — ClusterSpatialQuery.AABB<TBox> and the
+    four Radius overloads throw InvalidOperationException rather than converting. An f32 box would widen
+    implicitly and silently answer a different question at a precision the caller did not choose.
+  invariant ClusterSpatialQueryResult carries WORLD f64 bounds for every tier. For an f32 tier the widening is
+    exact, so an AABB2F archetype reads back precisely what it stored; for an f64 tier it is the only way the
+    caller sees the coordinate the component holds.
+  scope: SpatialFieldTypeExtensions.Is3D, AabbClusterEnumerator (constructor, MoveNext, SetCellQueryFrame),
+         ArchetypeClusterState.QueryAabb, ArchetypeClusterState.QueryRadius, ArchetypeClusterState.QueryRay,
+         ArchetypeClusterState.QueryFrustum, ArchetypeClusterState.QueryNearest,
+         ClusterSpatialQuery`1.AABB, ClusterSpatialQuery`1.Radius,
+         SpatialGrid.ReadSpatialCenter3D, SpatialGrid.ValidateSupportedFieldType,
+         SpatialGrid.ValidateWorldExtentForFieldType, SpatialGrid.AxisIsResolvableInF32,
+         ClusterSpatialAabb.ToWorldExact, ClusterWorldAabb, Vector3Like
+  verified: F64SpatialTierTests — NarrowQueryBoxAtExtent_SelectsOneOfTwoEntitiesInTheSameCell,
+    OneUnitQueryBoxAtExtent_ReturnsExactlyTheEntityInsideIt and ResultBoundsComeBackAtFullPrecision cover the
+    width invariant for AABB; RayAtExtent_HitsTheEntityInItsPathAndNotTheOneBesideIt,
+    FrustumAtExtent_SelectsTheHalfSpaceItNames_FromATightBoxSeveralCellsOut and
+    KnnAtExtent_OrdersNeighboursByAnF64Distance cover the other three shapes;
+    ZSeparatedEntities_AreBothFoundAndSeparatelySelectable covers the dimensionality one; and
+    QueryingAnF64ArchetypeWithAnF32Box_StillThrows covers the tier check. F64WorldLifecycleTests covers the
+    configuration gate (F32Archetype_OnAWorldF32CannotAddress_FailsAtStartup, and the two positive cases that keep
+    it from being a blanket ban, one of which — F32Archetype_OnASmallWorldWithFractionalBounds_IsAccepted — is the
+    regression guard for the over-strict first version) plus
+    TheResolutionCriterion_AgreesWithWhetherF32CanSeparateAdjacentCells, which pins the O(1) criterion against the
+    property it stands for, quantified over position rather than sampled at one point. Each precision case carries a PRECONDITION assertion
+    that f32 cannot represent it, so a fixture that drifted to a smaller magnitude fails loudly instead of passing
+    for the wrong reason.
+  note no [RuleMutant]: every mutant for this rule is an EDIT TO ENGINE CODE — narrow the narrowphase, the ray
+    origin, the kNN operands or the frustum's bounding box to f32; restore the two-way dimensionality test; make
+    the extent check always pass — not an input that can be driven through a verifier's assertion path.
+    All six were run by hand when the rule was written (2026-09-08) and each reddens exactly the cases above.
+    RuleMutants.AssertDetects deliberately requires the verifier's own failure marker, and there is no such helper
+    here to drive.
+  note (performance, not correctness) ClusterSpatialQuery`1.AABB carries [AggressiveInlining] because adding the
+    two f64 dispatch branches took its IL from 716 to 814 bytes. The JIT sizes an inlining candidate BEFORE folding
+    the typeof(TBox) tests, so the specialised body stayed small while the method stopped being inlined — and it
+    returns a 1.6 KB ref struct by value, so every query paid an extra full-struct copy. Measured interleaved
+    against the pre-#914 build: +44 ns fixed per query, a tenth of a 3x3-cell query. Adding a further box variant
+    spends more of that budget; re-measure if one is added.
+  on_violation:
+    dimensionality misread → a 3D f64 archetype answers only from one Z plane (SQ-01 false negative, silent)
+    world frame narrowed → the query stops discriminating inside a cell; every hit, no error
+    result narrowed → the caller reads a coordinate quantised to ~64-unit steps at 10^9 and cannot tell
+  requires: C15 (stored bounds are cell-relative f32 — this rule is why that is not a limitation), CA-01
 
 ---
 
@@ -418,9 +522,14 @@
     reallocate from inside a slice, and TryEnsureCellTreeSegment creates the shared segment under the same
     latch. A startup guard used to refuse promotion alongside a parallel fence instead; it is gone, because
     what it was protecting is now protected
+  invariant the tree build itself is PromoteCellHalf, reached from the gate (MaybePromoteCellHalf, under
+    _finalizeLock) and from ForceCellHalfStructure — the #917 benchmark's in-place switch — which takes
+    _finalizeLock itself, ensuring the tree segment BEFORE it (the latch is not re-entrant), and is called
+    with no fence and no query in flight
   scope: ArchetypeClusterState.ApplyOrDeferClusterUpdate, ArchetypeClusterState.EnqueuePromotedAppliesBulk,
     ArchetypeClusterState.DrainPromotedAabbApplies, ArchetypeClusterState.UpdateClusterInPerCellIndex,
-    ArchetypeClusterState.MaybePromoteCellHalf, ArchetypeClusterState.DemoteCellHalf
+    ArchetypeClusterState.MaybePromoteCellHalf, ArchetypeClusterState.PromoteCellHalf,
+    ArchetypeClusterState.ForceCellHalfStructure, ArchetypeClusterState.DemoteCellHalf
   verified: CellTreeParallelFenceTests (both slicing branches, 50 parallel-fence ticks with motion),
     CellTreeDensityTransitionTests (the switch in both directions, and promotion under a parallel fence with
     clusters migrating between cells). Ablated:
@@ -459,12 +568,26 @@
     prefix too SMALL → executed requests stay queued and re-execute against slots their entities have already
       left, and the queue grows without bound. Measured: 16 000 entities produced 17 234 migrations on the
       first tick and 224 854 on the twentieth, against ~10 900 genuine drifters per tick
+  invariant the prefix is put in DRAIN ORDER once, in the Prep tail, on BOTH fences (#910): a stable sort by
+    destination cell over PendingMigrations[0 .. PendingMigrationDrainCount), after every producer of this tick's
+    prefix has filed (the AabbRefresh producers file into the next one) and the throttle has cut it, before
+    PreSizeArchetypeFence. It sorts the PREFIX, never the queue — the throttle truncates, so the two are equal today,
+    and a sort past the prefix would carry a tail request into it the day they are not, which is "prefix too LARGE"
+    by another route. Stable, so each destination cell receives its requests in filing order; the parallel slice
+    planner carves its cell-disjoint slices on the resulting runs. Cells are NOT independent under first fit — a
+    migration claims before it releases, and a slot freed behind the cursor is reused — so moving the sort changed
+    the serial fence's placements to the parallel fence's queue order
   scope: DatabaseEngine.PrepareArchetypeFence, ArchetypeClusterState.CompactPendingMigrations,
-    ArchetypeClusterState.PendingMigrationDrainCount, DatabaseEngine.FinalizeArchetypeFence
+    ArchetypeClusterState.PendingMigrationDrainCount, DatabaseEngine.FinalizeArchetypeFence,
+    ArchetypeClusterState.OrderDrainAndMeasureArrivals
   verified: ClusterRelocationTests.PendingQueue_KeepsOnlyWhatTheCurrentTickFiled (nine ticks of continuous
     intra-cell motion, asserting per tick that what remains queued is at most what that tick detected).
     Ablated: forcing the prefix to zero reddens it, and also reddens
-    ClusterDriftParallelTests.DriftDetection_YieldsTheRulesDrifterSet_WhicheverFenceRunsIt
+    ClusterDriftParallelTests.DriftDetection_YieldsTheRulesDrifterSet_WhicheverFenceRunsIt.
+    SmartTeleportationTests.TheLargestArrivalIsTheLongestDestinationRunOfTheDrainPrefix pins the drain order on the
+    serial fence, which never sorted before #910; ablated, dropping the sort reddens it. PrepSliceEquivalenceTests
+    pins it on the parallel fence at W = 1, 2, 4 and 8 — the atomic Prep item and the sliced tail both — and
+    MigrationDestCellRadixSortTests.OrderDrainAndMeasureArrivals_SortsThePrefixAndLeavesTheTail pins the prefix bound
   on_violation:
     prefix too large → intra-cell drift is detected forever and repaired never; the ~24x selectivity win the
       issue exists for simply does not arrive, with every counter reporting healthy detection
@@ -676,10 +799,11 @@
     single-threaded by construction. The cluster ranking, the Morton sort and the destination assignment all live
     there; no slice plans
   invariant 🔴 a repair request pins the destination SLOT as well as the cluster, and the reason WAS the SORT, not
-    the slicing. Until #889, SortPendingMigrationsByDestCellKey ran an Array.Sort — introsort, UNSTABLE — over a
+    the slicing. Until #889 the destination-cell sort ran an Array.Sort — introsort, UNSTABLE — over a
     comparer reading DestCellKey alone, so every request a repair emits for one cell compared equal and the
-    planner's emission order within that cell was permuted arbitrarily. That sort runs only on the parallel path,
-    so first fit would have given the serial and parallel fences different packings from identical input. NOT
+    planner's emission order within that cell was permuted arbitrarily. Until #910 that sort ran only on the
+    parallel path, so first fit would have given the serial and parallel fences different packings from identical
+    input. NOT
     slicing: FenceWorkPlan.EmitMigrationApplyItems advances each boundary until DestCellKey changes, so one cell's
     run is never split and two workers can never claim into the same fresh cluster.
   invariant #889 made the sort STABLE (ArchetypeClusterState.RadixSortByDestCellKey — LSD radix by DestCellKey,
@@ -786,8 +910,8 @@
   invariant the throttle lowers PendingMigrationCount itself, so the drain prefix still equals the count. It must
     NOT shorten the prefix and leave the tail queued:
       the serial fence passes PendingMigrationCount, not the prefix, so it would execute the tail AND retain it
-      SortPendingMigrationsByDestCellKey sorts [0, PendingMigrationCount) by destination cell (stably since
-        #889, but the key is the cell, not the position), so it would move tail entries into the prefix
+      until #910 the destination-cell sort covered [0, PendingMigrationCount) and would have moved tail entries
+        into the prefix; OrderDrainAndMeasureArrivals sorts the prefix alone (CR-01), which closes that half only
       both land on CR-01's "prefix too SMALL" failure, measured at 224 854 migrations on the twentieth tick
   invariant a throttled relocation is DROPPED, not carried. Its DestClusterChunkId was the least-enlargement
     choice against the AABBs of the tick that DETECTED it; a tick later TryClaimPinnedSlot rejects the stale pin
@@ -1154,8 +1278,8 @@
     used to state — that one was observed to under-estimate under AntHill loads. It is a performance
     measure, not the safety argument: the parallel path never touches the array, and the on-demand grow in
     ApplyDirtyBitDeltas / GrowFenceDirtyBitsForChunkId is what actually makes an under-estimate survivable
-  invariant PendingMigrations is sorted by DestCellKey (SortPendingMigrationsByDestCellKey)
-    by TickDriver between Prep and Migrate dispatches, so each worker slice owns disjoint dst cells
+  invariant the drain prefix is sorted by DestCellKey (OrderDrainAndMeasureArrivals) in Prep's serial tail,
+    before Migrate dispatches, so each worker slice owns disjoint dst cells
   invariant PendingMigrationCount = 0 reset happens once per fence in FinalizeArchetypeFence
     AFTER all Migrate-phase slices complete, never inside ExecuteMigrationsSlice
   scope: DatabaseEngine.ExecuteMigrations, DatabaseEngine.FinalizeArchetypeFence,
@@ -1197,8 +1321,48 @@
     40 bytes reserved tail) — Tier, Flags, EntityCount, ClusterCount, CellX/Y/Z all on one line per cell
   applies to: CellState array, ArchetypeClusterState._finalizeLock (PaddedFinalizeLock 64B
     struct), any future per-cell or per-cluster latch arrays
+  invariant ONE shared word taken per element of work is the same defect as one bit per latch, and the rule names it
+    because it does not look like false sharing at the call site. ZoneMapArray._growLatch is a single padded word per
+    archetype-and-field; a shared acquire still takes its line EXCLUSIVE, so a fence phase calling ZoneMapArray.Widen
+    once per migrated entity issues two locked read-modify-writes into one line from every worker, under no logical
+    contention at all. Padding cannot fix it — there is only one word — so the remedy is to stop taking it per element:
+    hold it once per slice through BeginBatch/BeginBatchAtCapacity and write through the pinned Store
+  forbid reaching ZoneMapArray's per-write path — Widen, WidenMasked, Invalidate — from inside a sliced fence phase.
+    Prep goes through BeginBatch (#886); Migrate goes through BeginBatchAtCapacity (#926); the commit-path writers
+    outside the fence window keep the per-write form, which is where it is correct
+  invariant a batch pins ONE Store generation for its whole run, so batching moves the coverage guarantee off the
+    write and onto the pre-size: PreSizeArchetypeFence sizes every zone map to the bound the Migrate phase cannot
+    exceed, ZoneMapArray.Grow REFUSES inside a Migrate slice rather than abandoning stores its siblings hold, and
+    WidenInto returns a verdict instead of writing when an index falls past the batch anyway. The failure this
+    triple-guards is a false negative, which is the one error a zone map may never produce
+  invariant the count that proves it is SpatialMigrationTelemetry.ZoneMapBatchOpens, and it is checkable rather than
+    trusted: ZoneMapBatchOpens == MigrationSliceCount x indexed fields, an identity that does not mention the
+    migration count. A number that starts tracking the migration count is the per-element acquire having come back,
+    and no timing is needed to see it
   scope: SpatialGrid.GetCell, ArchetypeClusterState._finalizeLock, any new per-element
-    Interlocked-mutated array
+    Interlocked-mutated array, ZoneMapArray.Widen, ZoneMapArray.WidenInto, ZoneMapArray.BeginBatchAtCapacity,
+    ZoneMapArray.Grow, ZoneMapArray.ThreadBatchDepth, SpatialMigrationTelemetry.ZoneMapBatchOpens,
+    ArchetypeClusterState.LastTickZoneMapBatchOpens
+  invariant the batch is a PARALLEL-path construct and the serial fence must open none. A batch holds the grow latch
+    shared, so a destination past the pinned generation has nowhere to go: the parallel path answers that with a fence
+    failure it can afford because its pre-size makes it unreachable, while the serial path has to keep the growing
+    `Widen` available — and growing while holding the batch's own shared count waits for that count to drain from the
+    thread that holds it, under an unbounded wait. That is a hang, not a slow path, so ZoneMapBatchOpens is ZERO on a
+    serial fence by construction
+  invariant the growth refusal is keyed on THIS THREAD HOLDING A BATCH (`ZoneMapArray.ThreadBatchDepth`), never on
+    being inside a Migrate slice. A slice holding no batch may grow safely — it exits shared first and the exclusive
+    acquire excludes every sibling's shared window, which is how the engine worked before batching and how the
+    batching-off comparison arm still has to work. Keying it on the phase instead of on the held resource breaks that
+    arm and proves nothing about the one that matters
+  verified: ClusterMigrationTests.ZoneMapBatchOpens_TrackTheSliceCountAndFields_NotTheMigrationCount pins the identity
+    across parallel ticks whose migration counts vary by design; ZoneMapBatchOpens_AreZeroOnTheSerialFence_WhichMustKeepItsGrowingFallback
+    pins the serial zero, so the deadlock cannot be reintroduced silently;
+    MigrantsLandingInFreshlyAllocatedClusters_AreStillRecordedInTheZoneMap pins that a cluster the slice itself
+    allocated is still covered;
+    ZoneMapConcurrentGrowthTests.WidenInto_RefusesAnIndexPastTheBatchStore_RatherThanWritingIntoAnAbandonedGeneration
+    and WidenInto_RefusesAnIndexTheMapHasGrownToCover_WhileTheBatchStillPinsTheOlderGeneration pin the refusal, the
+    second against a generation the map has since grown past — the only case that can actually lose a widen;
+    Grow_IsRefusedWhileThisThreadHoldsABatch_ButAllowedInAMigrateSliceThatHoldsNone pins both halves of the guard
   note the dense CellState[] became a CHUNKED pool in #872 step 8. The 64-byte layout is unchanged, and
     the chunking is what keeps the `ref CellState` a stable interior pointer while the pool grows — a
     resize would hand a concurrent worker a doomed array, which is MD-02's concern rather than this one
@@ -1206,6 +1370,11 @@
     bit-packed latches → 8× ping-pong amplification, parallel speedup collapses
     16-byte cell descriptors in flat array → 4-cell ping-pong per migration
     unpadded shared latch field → adjacent hot fields invalidate the line on every acquire
+    one shared word acquired per element of work → the zone-map step's CPU tripled under a sliced Prep (#886) and the
+      Migrate loop's per-entity cost carried a 44 % surcharge at W = 8 (#926); both read as "the parallel fence does
+      not scale" rather than as a latch, because the operation count is unchanged and only the coherence traffic moves
+    a fence slice growing a structure its siblings hold → their writes land in an abandoned generation and are lost
+      silently, which for a zone map is the false negative the type promises cannot happen
 
 ---
 
@@ -1290,3 +1459,146 @@
   scope: SpatialGrid.SetCellTier, SpatialGrid.SetCellTierMin, TierClusterIndex.Rebuild
   on_violation: multi-bit tier stored → TZCNT at rebuild produces wrong index →
     cluster routed to wrong tier array → system processes wrong cluster set
+
+---
+
+## Module: Spatial maintenance telemetry (Issue #911)
+
+### SO-01: The telemetry surface has two clocks, and zero is a value `[silent]`
+  invariant the surface carries THREE kinds of member, and reading one as another is the failure mode:
+    RATES — the `...Count` / `...Ms` members produced by a tick's fence, reset at the top of every fence. A consumer
+      polling at its own rate reads one arbitrary tick out of hundreds, so a per-second figure must be differentiated
+      from the cumulative members, never read off one of these
+    CUMULATIVE — `Total...` and `RepairQueueEvicted`, which only grow; these are what a rate is differentiated FROM
+    LEVELS — `ActiveClusterCount`, `RepairQueueDepth`, `MaxClusterOverhang`, `MeasuredNsPerEntity`: a standing value,
+      neither reset per tick nor monotonically accumulating. Differentiating a level yields nonsense — "clusters per
+      second" off `ActiveClusterCount` is the concrete misuse this clause exists to name
+  invariant MaxClusterOverhang is the one LEVEL that is also monotonic: a running maximum that never falls and
+    never resets, because every kNN ring widens by it and too small loses results while too large only widens a
+    search. GetSpatialTelemetryTotal therefore MAXES it across archetypes; summing would widen every ring by the sum
+    of bounds no single archetype ever had
+  invariant zero means zero, never "unknown". An archetype with no cluster state, an out-of-range id and a quiet
+    tick all report zero, and no consumer may invent a distinction the API does not make
+  invariant the tightness triple is one reading, not three numbers. MeanClusterExtentRatio and MeanPackingBound are
+    means over TightnessSampleCount clusters — the clusters the fence WROTE this tick, not the clusters that exist —
+    so a settled world reports zero samples and both means read zero. Publishing the sample count is what keeps that
+    distinguishable from "the clusters are points", which is the whole reason it is on the surface
+  invariant GetSpatialTelemetryTotal folds by KIND, not uniformly: extensive counters sum, MaxClusterOverhang maxes,
+    and the two tightness means are re-derived from summed numerators over the summed sample count. Averaging the
+    per-archetype means would weight an archetype that scanned one cluster equally with one that scanned ten thousand
+  invariant MigrationTotalMs is CPU-milliseconds SUMMED ACROSS WORKERS, not a span: W workers each busy for 1 ms
+    report W. Any surface displaying it must label it as such — and must not present it as the cost of the fence
+  invariant the number that answers "how long did the fence block the engine" is a SPAN, and it is a different
+    member: `DatabaseEngine.LastFenceSpanMs`, published from the runtime's `TyphonRuntime.LastFenceWallTicks` —
+    Prep's start to the last phase that dispatched, so the six phase spans PLUS the scheduler's gaps between them.
+    The sum of the six is what the partitioning COSTS; the span is what the host WAITS, and a frame budget is spent
+    in the second. `MigrationTotalMs / LastFenceSpanMs` is roughly the parallelism the work achieved
+  invariant the span is not the whole interruption, and the surface carries BOTH because the difference is the part
+    no worker count removes. `LastFenceSpanMs` starts at Prep's Prepare; the fence call also runs a serial prep first
+    on the tick thread — context reset, dormancy drain, `ProcessTableFence` over every component table — inside the
+    same epoch fence window, with no user system running. `DatabaseEngine.LastFenceStallMs` times the whole call and
+    is what a host budgets a frame against; `LastFenceStallMs - LastFenceSpanMs` is the serial remainder, which is
+    Amdahl's fraction for the fence. A worker-count sweep reporting only the span claims a speed-up on part of the
+    stall, so the two are never alternative measurements of one thing and a surface showing one must name the other
+  invariant the naming actively misleads and the rule says so once rather than letting each reader rediscover it:
+    `FenceExecSystem.TotalWallTicks` says "wall" and is a SUM across chunks (a CPU-per-unit figure feeding
+    `LiveFenceCostModel`), while `PhaseSpanTicks` is the elapsed one. A sum cannot express a speed-up, so reading
+    `TotalWallTicks` as a latency is wrong in both directions — it falls with more chunks when memory-stall-bound
+    and rises with more once per-chunk setup dominates
+  invariant `LastFenceSpanMs` is ZERO on a host that drives `WriteTickFence` itself instead of running the parallel
+    fence, because the phase-exec systems that time it never run. Zero means "the parallel fence did not drive this
+    tick", which is the same zero-means-zero discipline as the rest of the surface and not a missing measurement
+  invariant MigrationExecuteMs is a sum over SLICES, and MigrationSliceCount is what makes it divisible. The parallel
+    fence sizes the Migrate phase's slices from the worker count, so the number of spans summed into it rises with W
+    while the workload fixes the entity count — every per-slice fixed cost inside the bracket is then charged again to
+    every entity. `MigrationExecuteMs / MigrationCount` is a per-entity cost only at MigrationSliceCount == 1;
+    otherwise it also carries `slices x per-slice fixed / entities`, and MigrationPrologueMs + MigrationEpilogueMs is
+    that term, measured. Both are PART of MigrationExecuteMs, never additional to it
+  invariant a summed-CPU member rising with the worker count is not, by itself, contention. The comparison that
+    decides it is against the achieved parallelism — CPU over span, which the engine already computes as
+    `DatabaseEngine.LastFenceMigrationParallelism` — because CPU per entity rising by the same factor the parallelism
+    rises is work being SPREAD at unchanged wall cost. Only the excess over that is contention, and a surface
+    presenting one without the other cannot express the difference
+  invariant "cannot express the difference" binds the EXPORT, not only the accessor: every surface carrying a
+    summed-CPU member must carry `LastFenceMigrationParallelism` too, which is why it is public and why
+    `typhon.ecs.spatial.fence_migration_parallelism` is exported beside `migration_duration_ms`. A consumer that can
+    read the summed figure and not the ratio is in exactly the position the clause above describes, and reads every
+    added worker as a regression
+  invariant the ratio is stored AS MEASURED, including below 1. A phase whose span exceeded its own summed CPU is
+    dispatch overhead swallowing the work — the single most useful reading the member has, and the one a floor at 1
+    makes indistinguishable from a healthy serial tick. The consumer needing a floor applies its own:
+    `ArchetypeClusterState.ObserveMigrationCost` divides by `max(parallelism, 1)`
+  invariant it divides only a numerator its own denominator covers. The ratio spans Migrate + IndexMassUpdate +
+    EntityMapUpdate, so the matching numerator is MigrationTotalMs. MigrationExecuteMs brackets the migrant loop
+    ALONE — roughly half a migration since the two applies moved into their own phases — and dividing it by this
+    ratio yields the elapsed time of nothing
+  invariant `LastFenceMigrationParallelism` is the one member that is deliberately STALE rather than reset: a tick
+    whose migration phases did no work leaves the previous value standing, because zero here would read as
+    "infinitely parallel" wherever it is used as a divisor. That is the single documented exception to zero-means-zero
+    on this surface, and it is why this member alone can describe a tick other than the last one
+  invariant CrossingsExecuted + RelocationsExecuted + RepairsExecuted == MigrationCount, exactly. A Migrate slice
+    mixes all three kinds by construction — the queue is sorted by destination cell key, not by kind — so a per-kind
+    cost is unattributable without the split, and the identity is what makes it checkable rather than trusted. These
+    are ALWAYS counted, unlike the same split on the trace record: needing the profiler on to attribute a cost would
+    perturb the bracket the cost is measured in
+  invariant the arrival members (#910) are RATES and fold by kind like the rest: JumpCrossings, ClampedDestinations
+    and ArrivalCellsTouched sum, but LargestArrivalRun is a per-tick MAXIMUM — the most crossings into one cell — and
+    GetSpatialTelemetryTotal maxes it, because two archetypes' arrivals into two cells are not one arrival of their
+    combined size. ClampedDestinations counts CROSSINGS, not entities: an entity already in an edge cell and written
+    further outside the world stays in that cell and files nothing, so the member is the count of clamped arrivals,
+    never of out-of-world entities
+  invariant JumpCrossings and ClampedDestinations are counted when a crossing is FILED, LargestArrivalRun and
+    ArrivalCellsTouched when the prefix is DRAINED. The outlier guard files after Migrate, so its crossings are
+    counted in the tick that files them and drained, with the arrival pair, in the next. They sit inside the
+    hysteresis band, so they are steps whenever MigrationHysteresisRatio is below 1; the clamp warning, which runs
+    in Prep, never sees the guard's clamps — the count does
+  invariant FinalizeLockAcquisitions counts EVERY exclusive acquisition of the archetype-wide latch, which is why all
+    of them go through `PaddedFinalizeLock.Enter`/`Exit` rather than through the latch directly. A site added straight
+    onto `.Lock` would be invisible to the count, and a partial count is worse than none because it reads as evidence
+    of an uncontended latch
+  invariant reading is allocation-free and lock-free — plain field reads of live engine state, torn only across a
+    fence boundary. No accessor may take a lock or allocate to serialise against the fence
+  scope: SpatialMigrationTelemetry.MaxClusterOverhang, SpatialMigrationTelemetry.TightnessSampleCount,
+    SpatialMigrationTelemetry.MeanClusterExtentRatio, SpatialMigrationTelemetry.MeanPackingBound,
+    SpatialMigrationTelemetry.MeanTightnessToBound, SpatialMigrationTelemetry.CellTreePromotions,
+    SpatialMigrationTelemetry.CellTreeDemotions, SpatialMigrationTelemetry.MigrationSliceCount,
+    SpatialMigrationTelemetry.MigrationPrologueMs, SpatialMigrationTelemetry.MigrationEpilogueMs,
+    SpatialMigrationTelemetry.CrossingsExecuted, SpatialMigrationTelemetry.RelocationsExecuted,
+    SpatialMigrationTelemetry.RepairsExecuted, SpatialMigrationTelemetry.FinalizeLockAcquisitions,
+    SpatialMigrationTelemetry.JumpCrossings, SpatialMigrationTelemetry.ClampedDestinations,
+    SpatialMigrationTelemetry.LargestArrivalRun, SpatialMigrationTelemetry.ArrivalCellsTouched,
+    ArchetypeClusterState.FinalizeLockAcquisitions, DatabaseEngine.LastFenceMigrationParallelism,
+    DatabaseEngine.GetSpatialTelemetry,
+    DatabaseEngine.GetSpatialTelemetryTotal, DatabaseEngine.LastFenceSpanMs, DatabaseEngine.LastFenceStallMs,
+    TyphonRuntime.LastFenceWallTicks,
+    FenceExecSystem.PhaseSpanTicks, FenceExecSystem.TotalWallTicks, ArchetypeClusterState.ClusterTightnessSample
+  verified: SpatialMigrationTelemetryTests.Tightness_ReportsNoSamples_RatherThanAStaleMean_OnAQuietTick pins the
+    zero-samples case; MaxClusterOverhang_IsPublished_AndIsARunningMaximumRatherThanAPerTickValue pins the third
+    clock; Total_MaxesTheOverhang_AndWeightsTheTightnessMeansBySample pins the per-kind fold across two archetypes;
+    Accessor_AllocatesNothing pins the allocation-free read; FenceSpanMs_IsZero_WhenTheHostDrivesTheFenceItself pins
+    the serial-fence zero, so it cannot be read as a fence that cost nothing;
+    ExecutedKinds_SumExactlyToTheMigrationCount pins the per-kind identity;
+    MigrationSliceCount_IsPublished_AndBoundsThePrologueAndEpilogueWithinTheExecuteSpan pins the divisibility of the
+    summed span; FinalizeLockAcquisitions_CountEveryAcquisition_AndResetPerTick pins the latch count;
+    FenceStallMs_CoversTheSerialPrep_ThatTheSpanExcludes pins the stall-against-span relation;
+    MigrationParallelism_IsExportedBesideTheSummedCpuGauges_AndIsNotFlooredAtOne pins both the export and the
+    unclamped storage, so neither can be dropped without a red test;
+    Total_MaxesTheLargestArrival_AndSumsTheArrivalCounts pins the arrival members' fold, and
+    SmartTeleportationTests.ACornerNeighbourIsAStepAndThreeCellsIsAJump,
+    AnOutOfWorldTeleportLandsInTheEdgeCellAndIsCountedAndWarnedOncePerWindow and
+    TheLargestArrivalIsTheLongestDestinationRunOfTheDrainPrefix pin their per-archetype values;
+    AGuardedCrossingIsCountedWhenFiledAndGroupedWhenDrained pins the filed-versus-drained timing
+  on_violation:
+    a per-tick member read as a rate → a number sampled from one tick of hundreds, presented as throughput
+    the overhang summed rather than maxed → every kNN ring widens by a bound no archetype has
+    the largest arrival summed rather than maxed → an arrival no cell received
+    the sample count dropped → "nothing moved" becomes indistinguishable from "the clusters are points"
+    the tightness means averaged per archetype → a quiet archetype halves a busy one's reading
+    summed CPU shown where the span belongs → a frame budget compared against a number W times too large, which is
+      how an 8 ms budget bought one repair unit
+    the slice count dropped → a per-slice fixed cost divided by entities, read as per-entity contention that grows
+      with the worker count; this is #912, which stood as an unowned anomaly in the design for three steps
+    summed CPU compared across worker counts without the parallelism beside it → work being spread reads as work
+      getting slower, in the direction that condemns the parallel fence for scaling
+    an acquisition added straight onto `.Lock` → a latch that reads as uncontended because its busiest caller is
+      not counted

@@ -109,11 +109,11 @@ class CellRelativeBoundsTests
             float z = -500f + ((float)rng.NextDouble() * 2000f);
 
             int key = grid.ComputeCellKey(
-                Math.Clamp((int)MathF.Floor((x - cfg.WorldMin.X) / cfg.CellSize), 0, cfg.GridWidth - 1),
-                Math.Clamp((int)MathF.Floor((y - cfg.WorldMin.Y) / cfg.CellSize), 0, cfg.GridHeight - 1),
-                Math.Clamp((int)MathF.Floor((z - cfg.WorldMin.Z) / cfg.CellSize), 0, cfg.GridDepth - 1));
+                Math.Clamp((int)Math.Floor((x - cfg.WorldMin.X) / cfg.CellSize), 0, cfg.GridWidth - 1),
+                Math.Clamp((int)Math.Floor((y - cfg.WorldMin.Y) / cfg.CellSize), 0, cfg.GridHeight - 1),
+                Math.Clamp((int)Math.Floor((z - cfg.WorldMin.Z) / cfg.CellSize), 0, cfg.GridDepth - 1));
 
-            grid.CellOrigin(key, out float ox, out float oy, out float oz);
+            grid.CellOrigin(key, out double ox, out double oy, out double oz);
             var (cx, cy, cz) = grid.CellKeyToCoords(key);
 
             Assert.Multiple(() =>

@@ -2455,15 +2455,18 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     // uses a 3D component, and because the Workbench's QuerySpecCompiler re-packed its arguments to compensate — a workaround at a call site
                     // three projects away, which is how a defect gets mistaken for a convention. Found by the #872 measurement harness, whose 2D rows all
                     // reported zero hits.
-                    var qMinX = (float)_spatialParams[0];
-                    var qMinY = (float)_spatialParams[1];
-                    var qMaxX = (float)_spatialParams[3];
-                    var qMaxY = (float)_spatialParams[4];
+                    // No narrowing: _spatialParams has always been doubles — WhereInAABB takes them — and QueryAabb takes doubles since #914, so the
+                    // (float) casts that used to sit here were a lossy round trip through a width neither end asked for. At a 10^9 world coordinate they
+                    // quantised the query box to ~128-unit steps, which is an SQ-01 false negative for any box narrower than that.
+                    var qMinX = _spatialParams[0];
+                    var qMinY = _spatialParams[1];
+                    var qMaxX = _spatialParams[3];
+                    var qMaxY = _spatialParams[4];
 
                     // A 2D archetype stores its clusters on a flat Z slab, so an unbounded Z accepts them whatever the caller passed.
                     var is3D = state.Descriptor.CoordCount == 6;
-                    var qMinZ = is3D ? (float)_spatialParams[2] : float.NegativeInfinity;
-                    var qMaxZ = is3D ? (float)_spatialParams[5] : float.PositiveInfinity;
+                    var qMinZ = is3D ? _spatialParams[2] : double.NegativeInfinity;
+                    var qMaxZ = is3D ? _spatialParams[5] : double.PositiveInfinity;
 
                     using var guard = EpochGuard.Enter(_tx.DBE.EpochManager);
                     foreach (var hit in cs.QueryAabb(grid, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ))
@@ -2480,10 +2483,10 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     // Per-cell cluster index Radius query (issue #230 Phase 3). Parameter layout matches QuerySingleTree's Radius case:
                     // _spatialParams[0..halfCoord] is the center, _spatialParams[3] is the radius (regardless of dimension — a quirk of the existing
                     // parameter packing for the per-entity tree).
-                    var cX = (float)_spatialParams[0];
-                    var cY = (float)_spatialParams[1];
-                    var cZ = state.Descriptor.CoordCount == 6 ? (float)_spatialParams[2] : 0f;
-                    var radius = (float)_spatialParams[3];
+                    var cX = _spatialParams[0];
+                    var cY = _spatialParams[1];
+                    var cZ = state.Descriptor.CoordCount == 6 ? _spatialParams[2] : 0d;
+                    var radius = _spatialParams[3];
 
                     using var guard = EpochGuard.Enter(_tx.DBE.EpochManager);
                     foreach (var hit in cs.QueryRadius(grid, cX, cY, cZ, radius))
@@ -2542,21 +2545,23 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// </remarks>
     private void CollectClusterRay(ArchetypeClusterState cs, SpatialGrid grid, HashSet<EntityId> result)
     {
-        var originX = (float)_spatialParams[0];
-        var originY = (float)_spatialParams[1];
-        var originZ = (float)_spatialParams[2];
-        var dirX = (float)_spatialParams[3];
-        var dirY = (float)_spatialParams[4];
-        var dirZ = (float)_spatialParams[5];
-        var maxDist = (float)_spatialParams[6];
+        // No narrowing: WhereRay takes doubles and QueryRay takes doubles since #919 F2. The casts that used to sit here quantised BOTH the origin and the
+        // direction — and a quantised direction is the worse of the two, because the error grows with distance along the ray rather than staying bounded.
+        var originX = _spatialParams[0];
+        var originY = _spatialParams[1];
+        var originZ = _spatialParams[2];
+        var dirX = _spatialParams[3];
+        var dirY = _spatialParams[4];
+        var dirZ = _spatialParams[5];
+        var maxDist = _spatialParams[6];
 
         var capacity = InitialClusterResultCapacity;
         while (true)
         {
             var pooled = capacity <= MaxPooledResultCapacity;
             var buffer = pooled
-                ? ArrayPool<(long entityId, float distance)>.Shared.Rent(capacity)
-                : new (long entityId, float distance)[capacity];
+                ? ArrayPool<(long entityId, double distance)>.Shared.Rent(capacity)
+                : new (long entityId, double distance)[capacity];
             try
             {
                 var span = buffer.AsSpan(0, capacity);
@@ -2595,7 +2600,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             {
                 if (pooled)
                 {
-                    ArrayPool<(long entityId, float distance)>.Shared.Return(buffer);
+                    ArrayPool<(long entityId, double distance)>.Shared.Return(buffer);
                 }
             }
         }
@@ -2616,8 +2621,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 + $"{_frustumPlanes?.Length ?? 0}.");
         }
 
-        var boundsMin = new Vector3Like((float)_spatialParams[0], (float)_spatialParams[1], (float)_spatialParams[2]);
-        var boundsMax = new Vector3Like((float)_spatialParams[3], (float)_spatialParams[4], (float)_spatialParams[5]);
+        // No narrowing: WhereFrustum takes doubles, the planes below are doubles, and the cell range they resolve to is computed in the f64 world frame
+        // (#919 F2). The (float) casts that used to sit here quantised the caller's bounding box to ~128-unit steps at 10^9 — which for a frustum shows up
+        // as the CELL RANGE being wrong, so entire cells of the view drop out rather than individual entities.
+        var boundsMin = new Vector3Like(_spatialParams[0], _spatialParams[1], _spatialParams[2]);
+        var boundsMax = new Vector3Like(_spatialParams[3], _spatialParams[4], _spatialParams[5]);
         var planes = _frustumPlanes.AsSpan(0, needed);
 
         var capacity = InitialClusterResultCapacity;

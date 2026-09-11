@@ -265,23 +265,57 @@ class SpatialGridTests
     }
 
     [Test]
-    public void ValidateSupportedFieldType_Throws_OnF64Tiers()
+    [VerifiesRule("SQ-06")]
+    public unsafe void ReadSpatialCenter3D_ComputesTheMidpointInDouble_SoItAgreesWithTheWriteBarrier()
     {
-        // Issue #230 Phase 3 extended the grid to support 3D f32; f64 tiers remain deferred to a follow-up sub-issue of #228.
-        Assert.Throws<System.NotSupportedException>(
-            () => SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.AABB2D, "MyArch"));
-        Assert.Throws<System.NotSupportedException>(
-            () => SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.AABB3D, "MyArch"));
+        // The centre of an entity is computed in TWO places and they must produce the same number: here (fence-time cell placement, spawn routing,
+        // migration detection) and ClusterRef.ApplySpatialWrite (write-time). Since #914 the write barrier takes f64 bounds, so this decoder does the
+        // addition in double too — for the f32 tiers as well, where it is exact.
+        //
+        // The values below are chosen so the two arithmetics DISAGREE if this one narrows: at 10^7 the f32 step is 1, so 10^7 and 10^7+1 are adjacent
+        // floats whose float-arithmetic midpoint rounds to one of them, while the true midpoint has a half in it. That half is what a cell boundary can
+        // fall on, and the failure it produces is trap 1 of #914 in miniature — write-time and fence-time placing one entity in two different cells,
+        // each self-consistent, no counter out of balance.
+        const float Min = 10_000_000f;
+        const float Max = 10_000_001f;
+
+        Assert.That(Max, Is.Not.EqualTo(Min), "PRECONDITION: the two bounds must be distinct floats at this magnitude.");
+        Assert.That((float)((Min + Max) * 0.5f), Is.Not.EqualTo(((double)Min + Max) * 0.5d),
+            "PRECONDITION: f32 and f64 midpoint arithmetic must actually differ here, or the assertion below proves nothing.");
+
+        float* fieldData = stackalloc float[4];
+        fieldData[0] = Min;   // MinX
+        fieldData[1] = Min;   // MinY
+        fieldData[2] = Max;   // MaxX
+        fieldData[3] = Max;   // MaxY
+
+        SpatialGrid.ReadSpatialCenter3D((byte*)fieldData, SpatialFieldType.AABB2F, out var posX, out var posY, out var posZ);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(posX, Is.EqualTo(((double)Min + Max) * 0.5d), "the X centre must be the exact f64 midpoint the write barrier computes");
+            Assert.That(posY, Is.EqualTo(((double)Min + Max) * 0.5d));
+            Assert.That(posZ, Is.EqualTo(0d), "a 2D tier reports the flat plane on Z");
+        });
     }
 
     [Test]
-    public void ValidateSupportedFieldType_Passes_OnF32Tiers()
+    public void ValidateSupportedFieldType_Passes_OnEveryDeclaredTier()
     {
-        // Issue #230 Phase 3 extended the supported set from 2D-only to all f32 tiers (2D and 3D).
-        SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.AABB2F, "MyArch");
-        SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.BSphere2F, "MyArch");
-        SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.AABB3F, "MyArch");
-        SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.BSphere3F, "MyArch");
+        // #230 Phase 3 extended the supported set from 2D-only to all f32 tiers; #914 opened the remaining four. Asserting the WHOLE enum rather than a list
+        // is the point: a variant added later without a decode case in ReadSpatialCenter3D fails here rather than at a customer's spawn.
+        foreach (SpatialFieldType fieldType in System.Enum.GetValues<SpatialFieldType>())
+        {
+            Assert.DoesNotThrow(() => SpatialGrid.ValidateSupportedFieldType(fieldType, "MyArch"), $"tier {fieldType}");
+        }
+    }
+
+    [Test]
+    public void ValidateSupportedFieldType_Throws_OnAnUndeclaredValue()
+    {
+        // The guard that remains after #914: a byte that is not a SpatialFieldType at all, which is what a corrupted or hand-rolled schema produces.
+        Assert.Throws<System.NotSupportedException>(
+            () => SpatialGrid.ValidateSupportedFieldType((SpatialFieldType)200, "MyArch"));
     }
 
     // ═══════════════════════════════════════════════════════════════════════

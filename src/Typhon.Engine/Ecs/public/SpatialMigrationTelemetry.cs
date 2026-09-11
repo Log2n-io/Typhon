@@ -159,6 +159,88 @@ public readonly struct SpatialMigrationTelemetry
     public double MigrationTotalMs { get; init; }
 
     /// <summary>
+    /// <c>ExecuteMigrations</c> slices that ran during the most recently completed tick — the number of spans summed into <see cref="MigrationExecuteMs"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Read it before dividing <see cref="MigrationExecuteMs"/> by <see cref="MigrationCount"/>.</b> That quotient is a per-entity cost only while
+    /// this is 1. The parallel fence sizes the Migrate phase's slices from the worker count, so raising W raises the number of spans summed into the
+    /// numerator while the workload fixes the denominator, and every per-slice fixed cost inside the bracket — three chunk-accessor rentals and the span
+    /// construction — is charged again to every entity in the tick.</para>
+    /// <para><b>This is what #912 was: 425 -&gt; 844 -&gt; 1 440 ns/entity at W = 2/4/8 was recorded as contention in the relocation drain for three steps,
+    /// and nothing published the quantity that would have told the two apart.</b> The decomposition is
+    /// <c>(Prologue + Epilogue) / MigrationCount</c> for the per-slice term and the remainder for the per-entity one.</para>
+    /// </remarks>
+    public int MigrationSliceCount { get; init; }
+
+    /// <summary>
+    /// Indexed-field slots covered by the tick's Migrate-slice zone-map batches — one per indexed field per slice (#926).
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Read it against <see cref="MigrationSliceCount"/>, never against <see cref="MigrationCount"/>.</b> The identity is
+    /// <c>ZoneMapBatchOpens == MigrationSliceCount x indexed fields</c>, and the point of publishing it is that the right-hand side does not mention the
+    /// migration count at all. Before #926 the Migrate loop took the zone map's archetype-wide grow latch once per migrant per field — two atomics on one
+    /// cache line, from every worker — and the fix was to hold one batch per field for the whole slice. A number that starts tracking the migration count
+    /// again is that fix regressing, and no timing is needed to see it.</para>
+    /// <para><b>Slots, not latches, and the two differ.</b> A String64 field is indexed but has no zone map (there is no numeric min/max to summarise), so
+    /// its slot is covered by the batch pass and holds no latch. Counting slots is what makes the identity above exact — the migrant loop's field id counts
+    /// fields, not maps — but it means an archetype indexed only on String64 reports a non-zero figure having acquired nothing.</para>
+    /// <para><b>Zero on the SERIAL fence, which deliberately opens no batches</b> — it has one writer and nothing to amortise, and holding a batch there
+    /// would strand a destination past the pinned generation with no growing fallback available. Also zero on a tick that migrated nothing, and for an
+    /// archetype with no indexed fields. All three mean what they say.</para>
+    /// </remarks>
+    public int ZoneMapBatchOpens { get; init; }
+
+    /// <summary>
+    /// Milliseconds the tick's Migrate slices spent before their first migrant — span construction and the three chunk-accessor rentals — summed across
+    /// slices. Part of <see cref="MigrationExecuteMs"/>, not additional to it.
+    /// </summary>
+    /// <remarks>
+    /// Grows with <see cref="MigrationSliceCount"/> rather than with <see cref="MigrationCount"/>, which is exactly what makes it worth publishing
+    /// separately: it is the term a per-entity reading mis-attributes.
+    /// </remarks>
+    public double MigrationPrologueMs { get; init; }
+
+    /// <summary>
+    /// Milliseconds the tick's Migrate slices spent after their last migrant — the three accessor disposals and the migration span's publish — summed
+    /// across slices. Part of <see cref="MigrationExecuteMs"/>, not additional to it.
+    /// </summary>
+    /// <inheritdoc cref="MigrationPrologueMs"/>
+    public double MigrationEpilogueMs { get; init; }
+
+    /// <summary>Cell-crossing migrations executed during the most recently completed tick.</summary>
+    /// <remarks>
+    /// <para>This, <see cref="RelocationsExecuted"/> and <see cref="RepairsExecuted"/> sum EXACTLY to <see cref="MigrationCount"/> — the split is checkable
+    /// rather than trusted, which is the property #911 gave the trace record and #912 brought to this surface.</para>
+    /// <para><b>Executed, not queued.</b> <see cref="CrossingsQueued"/> and <see cref="RelocationsAdmitted"/> are decisions taken a phase earlier and a
+    /// tick earlier respectively; these three are what the drain actually moved. The gap between a queued relocation and an executed one is
+    /// <see cref="RelocationsSuperseded"/> plus the stale-source guard.</para>
+    /// <para><b>Always counted, unlike the trace record's split.</b> A Migrate slice mixes all three kinds by construction, so attributing a per-entity cost
+    /// to one of them needs this; and needing the profiler on to get it would perturb the bracket the cost is measured in.</para>
+    /// </remarks>
+    public int CrossingsExecuted { get; init; }
+
+    /// <summary>Intra-cell relocations executed during the most recently completed tick.</summary>
+    /// <inheritdoc cref="CrossingsExecuted"/>
+    public int RelocationsExecuted { get; init; }
+
+    /// <summary>Repair moves executed during the most recently completed tick.</summary>
+    /// <inheritdoc cref="CrossingsExecuted"/>
+    public int RepairsExecuted { get; init; }
+
+    /// <summary>
+    /// Exclusive acquisitions of the archetype's finalize latch during the most recently completed tick.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The archetype-wide serialisation point, and the only one a fence worker can reach.</b> Twenty-one call sites take it: the three bulk
+    /// enqueues, the per-archetype array growths, the new-cluster slow paths and the cell-tree segment creation. A phase whose per-worker CPU rises with the
+    /// worker count is serialised here or it is not serialised at all — so this staying flat while per-entity cost rises ELIMINATES the latch, which is a
+    /// result worth as much as naming it.</para>
+    /// <para><b>A count, not a held time.</b> Timing it would cost two timestamps per acquisition against critical sections frequently shorter than that,
+    /// and would change what it measures. #912's method note says it: count operations, do not time a phase already known to be off.</para>
+    /// </remarks>
+    public long FinalizeLockAcquisitions { get; init; }
+
+    /// <summary>
     /// Intra-cell relocations the re-clustering budget refused during the most recently completed tick, and therefore dropped (#872 step 11).
     /// </summary>
     /// <remarks>
@@ -214,6 +296,12 @@ public readonly struct SpatialMigrationTelemetry
 
     /// <inheritdoc cref="PrepSnapshotMs"/>
     public double PrepPlanMs { get; init; }
+
+    /// <summary>
+    /// Putting the drain prefix in destination-cell order (#910), between the repair plan and the pre-size — the sort the Migrate phase's Prepare ran
+    /// before #910 moved it into Prep, where the serial fence runs it too.
+    /// </summary>
+    public double PrepSortMs { get; init; }
 
     /// <inheritdoc cref="PrepSnapshotMs"/>
     public double PrepPreSizeMs { get; init; }
@@ -307,6 +395,28 @@ public readonly struct SpatialMigrationTelemetry
     /// <summary>Cell-crossing requests the throttle found queued and charged last tick. Wave-2 K6.</summary>
     public int CrossingsQueued { get; init; }
 
+    /// <summary>
+    /// Cell crossings whose destination cell was not adjacent to the source cell — more than one cell away on some axis (#910 T0). A teleport, a respawn,
+    /// a shuttle; ordinary motion crosses into a face, edge or corner neighbour and never counts here. A rate, counted when a crossing is filed (SO-01).
+    /// </summary>
+    public int JumpCrossings { get; init; }
+
+    /// <summary>
+    /// Cell crossings whose position lay outside the grid — <c>WorldMin</c> to <c>WorldMax</c>, rounded out to whole cells — and were clamped into an
+    /// edge cell (#910 T0). The entity still lands there, as it always did; the engine used to absorb this silently. It counts crossings, not entities:
+    /// one already in an edge cell and written further out files nothing. A rate.
+    /// </summary>
+    public int ClampedDestinations { get; init; }
+
+    /// <summary>
+    /// The most cell crossings into any one destination cell in this tick's drain — the size of the largest arrival (#910 T0). A per-tick maximum, so
+    /// <see cref="DatabaseEngine.GetSpatialTelemetryTotal"/> takes the maximum across archetypes rather than the sum.
+    /// </summary>
+    public int LargestArrivalRun { get; init; }
+
+    /// <summary>Distinct destination cells receiving at least one cell crossing in this tick's drain (#910 T0). A rate.</summary>
+    public int ArrivalCellsTouched { get; init; }
+
     /// <summary>Budget charged to admitted relocations last tick, in nanoseconds. Wave-2 K9.</summary>
     public double RelocationSpendNs { get; init; }
 
@@ -315,6 +425,75 @@ public readonly struct SpatialMigrationTelemetry
     /// repair was turned away. Wave-2 K9.
     /// </summary>
     public double RepairBudgetStarvedNs { get; init; }
+
+    /// <summary>
+    /// The largest distance by which any of this archetype's cluster boxes reaches outside its own cell, in world units (#911 O2).
+    /// </summary>
+    /// <remarks>
+    /// <para><b>A third clock, and the only member with one.</b> It is neither per-tick nor a growing total: it is a running MAXIMUM that never falls, by
+    /// design — every kNN ring test widens by it, and too large merely widens a search while too small loses results. So it does not reset at the fence and
+    /// <see cref="DatabaseEngine.GetSpatialTelemetryTotal"/> takes the max across archetypes rather than the sum. Differentiating it yields nothing.</para>
+    /// <para>Non-zero only once a cluster has proved it: a world of point entities reports zero forever, which is correct rather than missing. Rises at the
+    /// fence following the write that produced it, not at the write.</para>
+    /// </remarks>
+    public float MaxClusterOverhang { get; init; }
+
+    /// <summary>Cell halves promoted from the linear scan to a per-cell R-Tree during the most recently completed tick.</summary>
+    /// <remarks>
+    /// <para><b>Published because "does a cell half ever actually promote in a real workload?" was unanswerable without a debugger.</b> Promotion needs a
+    /// half at or above <c>SpatialOptions.CellTreePromoteThreshold</c> clusters AND a mean extent at or below <c>CellTreePromoteTightness</c>, and the engine
+    /// measures 0.63-1.03 of the cell under motion — so a persistent zero here is the finding, not a broken counter.</para>
+    /// <para>Read against <see cref="CellTreeDemotions"/>: both non-zero and tracking each other means the promote/demote gap is too narrow and cells are
+    /// thrashing between two O(clusters) rebuilds.</para>
+    /// </remarks>
+    public int CellTreePromotions { get; init; }
+
+    /// <summary>Cell halves that fell back from a per-cell R-Tree to the linear scan during the most recently completed tick.</summary>
+    /// <remarks>See <see cref="CellTreePromotions"/> — the two are read together.</remarks>
+    public int CellTreeDemotions { get; init; }
+
+    /// <summary>
+    /// Clusters that contributed a tightness reading during the most recently completed tick — the denominator of <see cref="MeanClusterExtentRatio"/> and
+    /// <see cref="MeanPackingBound"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Clusters WRITTEN this tick, not clusters that exist.</b> The reading is folded into the AABB refresh, where the extent is already in
+    /// registers and the cell's population has already been read for the density target. A settled world therefore reports zero samples — and that is why
+    /// this member exists: without it a mean of zero over nothing is indistinguishable from clusters that are genuinely points, and "zero means zero, never
+    /// unknown" would be violated by the means rather than honoured.</para>
+    /// <para>A full-population reading is a different measurement — <c>SpatialPartitionMatrix.MeasurePartition</c> sweeps every active cluster for it — and
+    /// costs <c>O(active clusters)</c>, which is precisely what this path exists not to pay.</para>
+    /// </remarks>
+    public int TightnessSampleCount { get; init; }
+
+    /// <summary>
+    /// Mean measured tightness over <see cref="TightnessSampleCount"/> clusters: each cluster's largest axis extent as a fraction of its cell's edge.
+    /// </summary>
+    /// <remarks>Zero when <see cref="TightnessSampleCount"/> is zero. This is the quantity every table of the design's §5.8 reports.</remarks>
+    public double MeanClusterExtentRatio { get; init; }
+
+    /// <summary>
+    /// Mean packing bound over the same clusters: <c>(slotsPerCluster / entitiesInCell)^(1/d)</c> as a fraction of the cell edge — the tightest a full
+    /// cluster can be in that cell without fragmenting.
+    /// </summary>
+    /// <remarks>
+    /// Geometry, not tuning, and independent of <c>ClusterTargetPackingSlack</c>: it is published even in constant mode, where the gates ignore it. It is
+    /// <b>1</b> for any cell holding no more entities than one cluster's slots — the 16-64 per-cell basin the density guidance recommends — which is why
+    /// intra-cell maintenance correctly switches itself off there and why a tightness of 0.9 in that basin is not a defect.
+    /// </remarks>
+    public double MeanPackingBound { get; init; }
+
+    /// <summary>
+    /// <see cref="MeanClusterExtentRatio"/> divided by <see cref="MeanPackingBound"/> — measured extent against what geometry allows. <b>The</b> number the
+    /// spatial partitioning subsystem is judged on. <c>1</c> is optimal packing; the engine measured ~1.24 on a Morton-ordered bulk load and ~1.56 on a
+    /// random-order one.
+    /// </summary>
+    /// <remarks>
+    /// <b>A ratio of means, not a mean of ratios.</b> The two differ whenever the sampled clusters sit in cells of differing population, and the ratio of
+    /// means is what the design's tables quote — a mean extent read against a bound. Both operands are published so a consumer that wants the other
+    /// statistic can say so explicitly rather than inheriting one silently. Zero when <see cref="TightnessSampleCount"/> is zero.
+    /// </remarks>
+    public double MeanTightnessToBound => MeanPackingBound > 0d ? MeanClusterExtentRatio / MeanPackingBound : 0d;
 
     /// <summary>
     /// Clusters currently live. The denominator for every ratio above — a migration count means nothing without the population it came from.

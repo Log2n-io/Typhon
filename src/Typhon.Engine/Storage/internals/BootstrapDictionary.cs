@@ -51,6 +51,10 @@ public class BootstrapDictionary
         Int7     = 0x0B,  // 28 bytes (7 × int)
         Int8     = 0x0C,  // 32 bytes (8 × int)
 
+        // Added by #914 for the same reason Int7/Int8 were added by #872 step 8: the persisted SpatialGridConfig outgrew the previous cap. Its world frame
+        // is f64 now — six bounds and a cell size at 8 bytes each is 14 ints, plus the f32 hysteresis — so 8 int slots no longer hold it.
+        Int16    = 0x0D,  // 64 bytes (16 × int)
+
         End      = 0xFF,  // sentinel — end of stream
     }
 
@@ -63,6 +67,7 @@ public class BootstrapDictionary
         >= ValueType.Int1 and <= ValueType.Int6 => (byte)type - (byte)ValueType.Int1 + 1,
         ValueType.Int7 => 7,
         ValueType.Int8 => 8,
+        ValueType.Int16 => 16,
         _ => 0,
     };
 
@@ -72,12 +77,15 @@ public class BootstrapDictionary
         >= 1 and <= 6 => (ValueType)((byte)ValueType.Int1 + count - 1),
         7 => ValueType.Int7,
         8 => ValueType.Int8,
-        _ => throw new ArgumentOutOfRangeException(nameof(count), count, "Bootstrap int-vector values hold 1 to 8 ints."),
+        16 => ValueType.Int16,
+        _ => throw new ArgumentOutOfRangeException(nameof(count), count,
+            "Bootstrap int-vector values hold 1 to 8 ints, or exactly 16. There is no 9-15 encoding: the sizes exist to fit specific records, not as a "
+            + "general vector type, and adding one costs an on-disk type byte that every future reader must understand."),
     };
 
     /// <summary>
     /// A dynamically-typed value stored in the bootstrap dictionary.
-    /// Wraps a small array of ints (1-8), a long, a bool, a DateTime, or a string.
+    /// Wraps a small array of ints (1-8, or 16), a long, a bool, a DateTime, or a string.
     /// </summary>
     [PublicAPI]
     public readonly struct Value
@@ -384,6 +392,7 @@ public class BootstrapDictionary
             case >= ValueType.Int1 and <= ValueType.Int6:
             case ValueType.Int7:
             case ValueType.Int8:
+            case ValueType.Int16:
                 // IntCountOf(Type), not value.IntCount: GetValueSize reserves the record from the TYPE, so writing from the array length would let the two
                 // disagree and overrun — or under-fill — the reserved bytes, corrupting every entry after this one in the stream.
                 for (int i = 0; i < IntCountOf(value.Type); i++)
@@ -424,6 +433,7 @@ public class BootstrapDictionary
             case >= ValueType.Int1 and <= ValueType.Int6:
             case ValueType.Int7:
             case ValueType.Int8:
+            case ValueType.Int16:
                 int count = IntCountOf(type);
                 if (src + count * 4 > limit) { return default; }
                 var ints = new int[count];

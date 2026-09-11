@@ -334,9 +334,9 @@ class CellTreeParallelFenceTests : TestBase<CellTreeParallelFenceTests>
                     continue;
                 }
 
-                grid.CellOrigin(cellKey, out float originX, out float originY, out _);
-                float centreX = originX + (CellSize * 0.5f);
-                float centreY = originY + (CellSize * 0.5f);
+                grid.CellOrigin(cellKey, out double originX, out double originY, out _);
+                float centreX = (float)(originX + (CellSize * 0.5f));
+                float centreY = (float)(originY + (CellSize * 0.5f));
 
                 // TYPHON009 flags un-barriered spatial mutation through a span. This span is READ only — every write below goes through WriteSpatial, which is
                 // what keeps ClusterProcessBitmap and ClusterAabbs correct.
@@ -554,7 +554,7 @@ class CellTreeParallelFenceTests : TestBase<CellTreeParallelFenceTests>
             int cellKey = cs.ClusterCellMap[chunkId];
             var b = byKey[key];
             ref readonly var stored = ref cs.ClusterAabbs[chunkId];
-            dbe.SpatialGrid.CellOrigin(cellKey, out float ox, out float oy, out _);
+            dbe.SpatialGrid.CellOrigin(cellKey, out double ox, out double oy, out _);
 
             TestContext.Out.WriteLine($"q{queryIndex} box=({minX:F3},{minY:F3})-({maxX:F3},{maxY:F3}) missing chunk={chunkId} slot={key & 255} "
                 + $"entity=({b.minX:F3},{b.minY:F3})-({b.maxX:F3},{b.maxY:F3})");

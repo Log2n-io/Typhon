@@ -93,7 +93,7 @@ class VdbSpatialGridTests
         {
             foreach (float delta in offsets)
             {
-                float w = (cellIndex * cfg.CellSize) + delta;
+                float w = (float)((cellIndex * cfg.CellSize) + delta);
                 int key = vdb.WorldToCellKey(w, w, w);
                 var expected = dense.CellOfPoint(w, w, w);
                 Assert.That(vdb.CellKeyToCoords(key), Is.EqualTo(expected), $"world {w} (cell index {cellIndex}, delta {delta})");
@@ -347,7 +347,7 @@ class VdbSpatialGridTests
         Assert.That(outside, Is.Not.Empty);
 
         vdb.ResetAllTiers(SimTier.Tier3);
-        float box = cfg.CellSize;
+        float box = (float)cfg.CellSize;
         vdb.SetTierInAABB(0f, 0f, 0f, ((2 * bx) + 5) * box, ((2 * by) + 5) * box, ((2 * bz) + 5) * box, SimTier.Tier0);
 
         foreach (int key in inside)

@@ -2096,16 +2096,16 @@ public sealed class TyphonBridge : IDisposable
                                     // Phase 6 polish — Fight alarm phero (3×3 stamp) at the victim
                                     // position so the colony "hears the scream". Drives workers to flee
                                     // and soldiers to converge on the spider's neighbourhood.
-                                    PheromoneGrid.DepositArea(_pheromones.Fight, hit.MinX, hit.MinY, FightDeposit);
+                                    PheromoneGrid.DepositArea(_pheromones.Fight, (float)hit.MinX, (float)hit.MinY, FightDeposit);
                                     killsLeft--;
                                     killsDone++;
                                     continue;
                                 }
                                 if (d2 < bestD2)
                                 {
-                                    bestD2 = d2;
-                                    bestX = ax;
-                                    bestY = ay;
+                                    bestD2 = (float)d2;
+                                    bestX = (float)ax;
+                                    bestY = (float)ay;
                                     foundTarget = true;
                                 }
                             }
