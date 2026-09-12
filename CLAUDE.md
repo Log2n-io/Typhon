@@ -240,8 +240,21 @@ dotnet project convert poc.cs   # generates poc.csproj from directives
 ### Unsafe Code & Performance
 - Project uses `<AllowUnsafeBlocks>true` extensively
 - Heavy use of pointers, stackalloc, and unmanaged memory for performance
-- GCHandle pins page cache to avoid GC moves
+- The page cache is native memory (`IMemoryAllocator.AllocatePinned` → `PinnedMemoryBlock` → `NativeMemory`), never a GC array
 - Blittable struct requirements for components ensure zero-copy operations
+- **🔴 Raw pointers address only memory the engine owns — NEVER GC-allocated data.** A `byte*` / `T*` may point into:
+  page-cache memory, memory from the engine's own allocator (`AllocatePinned` / `PinnedMemoryBlock`, i.e. `NativeMemory`),
+  or the stack (`stackalloc`, locals). It must never point into a managed object. That rules out:
+  - `GC.AllocateArray(…, pinned: true)` / `GC.AllocateUninitializedArray(…, true)` +
+    `Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(…))` — the pinned object heap stops the GC *moving* an
+    array, not *freeing* it. A buffer referenced only through such a pointer was freed mid-scan while the scan kept
+    writing into it: the SWG Tatooine x64 `Internal CLR error (0x80131506)` crash.
+  - `GCHandle.Alloc(…, GCHandleType.Pinned)` + `AddrOfPinnedObject()`, and `fixed` over managed arrays, strings, or fields
+    of a struct held in a class.
+  - `Unsafe.AsPointer(ref x)` where `x` can live on the heap — an `out`/`ref` parameter, an array element, a field.
+
+  For managed memory use `ref` / `Span<T>` (`MemoryMarshal.CreateSpan`, `Vector256.LoadUnsafe(ref …)`), which the GC
+  tracks. For a buffer that must be addressed by pointer, allocate it natively and free it deterministically.
 
 ### Coding Standards
 - **Follow `.editorconfig`**: All C# code must follow the formatting rules in `/.editorconfig`. Key rules include:

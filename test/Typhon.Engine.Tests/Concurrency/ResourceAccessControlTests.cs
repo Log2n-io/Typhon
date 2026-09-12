@@ -850,6 +850,45 @@ public class ResourceAccessControlTests
         Assert.That(control.ModifyHolderThreadId, Is.EqualTo(0));
     }
 
+    private sealed class ControlHolder
+    {
+        public ResourceAccessControl Control;
+    }
+
+    /// <summary>
+    /// A control held in a class field, moved by a compacting collection while a guard is open: the guard must release the state where it now lives.
+    /// </summary>
+    /// <remarks>
+    /// The guards used to capture an <c>int*</c> taken under <c>fixed</c> and keep it past the pin; after a move they released the old address.
+    /// </remarks>
+    [Test]
+    [CancelAfter(1000)]
+    public void ScopedGuards_ControlMovedByACompactingGc_ReleaseTheMovedState()
+    {
+        // Garbage allocated just before the holder leaves a gap below it for the compaction to close, so the holder moves.
+        var garbage = new byte[4096][];
+        for (int i = 0; i < garbage.Length; i++)
+        {
+            garbage[i] = new byte[64];
+        }
+        var holder = new ControlHolder();
+        garbage = null;
+
+        using (holder.Control.EnterAccessingScoped(ref WaitContext.Null))
+        {
+            GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+            Assert.That(holder.Control.AccessingCount, Is.EqualTo(1));
+        }
+        Assert.That(holder.Control.AccessingCount, Is.Zero);
+
+        using (holder.Control.EnterModifyScoped(ref WaitContext.Null))
+        {
+            GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+            Assert.That(holder.Control.IsModifyHeldByCurrentThread, Is.True);
+        }
+        Assert.That(holder.Control.ModifyHolderThreadId, Is.Zero);
+    }
+
     [Test]
     [CancelAfter(1000)]
     public void EnterAccessingScoped_OnTimeout_ThrowsLockTimeoutException()

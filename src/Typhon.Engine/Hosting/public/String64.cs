@@ -73,11 +73,8 @@ public static class StringExtensions
             return false;
         }
 
-        fixed (char* c = str)
-        {
-            Encoding.UTF8.GetBytes(c, str.Length, dest, destMaxSize);
-            dest[l] = 0;            // Null terminator
-        }
+        Encoding.UTF8.GetBytes(str, new Span<byte>(dest, destMaxSize));   // the string as a span, never pinned for a pointer
+        dest[l] = 0;            // Null terminator
 
         return true;
     }

@@ -49,7 +49,7 @@ public class PagedMMFOptions
 
     /// <summary>
     /// Page-cache size, in bytes. Must be a multiple of <see cref="PageSizeBytes"/>, at least <see cref="MinimumCacheSizeBytes"/>,
-    /// and at most 4 GiB. Default: <see cref="DefaultCacheSizeBytes"/> (256 MiB). The cache is a GCHandle-pinned byte array, so
+    /// and at most 4 GiB. Default: <see cref="DefaultCacheSizeBytes"/> (256 MiB). The cache is one native allocation, so
     /// size it for one primary engine per process; a workload whose transaction working set exceeds the cache hits
     /// <see cref="PageCacheBackpressureTimeoutException"/>. Prefer the fluent <c>TyphonOptions.PageCacheSize(...)</c> to set it.
     /// </summary>

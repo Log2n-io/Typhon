@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using System;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace Typhon.Engine.Internals;
@@ -525,10 +526,7 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
 
         // Patch the entire batch's CRC chain in one pass before any byte reaches disk (see remarks). `data` aliases the pinned commit buffer, so a writable view over the
         // same memory is sound — the bytes are mutable; the ReadOnlySpan is only an access restriction on this seam.
-        fixed (byte* dataPtr = data)
-        {
-            PatchChunkCrcs(new Span<byte>(dataPtr, data.Length), data.Length);
-        }
+        PatchChunkCrcs(MemoryMarshal.CreateSpan(ref MemoryMarshal.GetReference(data), data.Length), data.Length);
 
         int offset = 0;
         while (offset < data.Length)

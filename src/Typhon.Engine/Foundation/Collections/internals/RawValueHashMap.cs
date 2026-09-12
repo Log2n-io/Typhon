@@ -933,39 +933,33 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
 
         int entrySize = sizeof(TKey) + _valueSize;
         // StackEntryThreshold bounds the stackalloc fast path: at 72 entries × typical 12-16 B/entry × 2 buffers = ~2 KB. Safe
-        // on every call stack we'd realistically see. Chains beyond this spill to ArrayPool rental (pinned) — rare enough that
-        // the pool-rent overhead doesn't matter.
-        const int StackEntryThreshold = 72;
+        // on every call stack we'd realistically see. Chains beyond this spill to native memory freed in the finally — never to a
+        // pinned managed array: pointers here address only stack or engine-owned native memory (CLAUDE.md, Unsafe Code).
+        const int stackEntryThreshold = 72;
 
-        byte* keepBuf;
-        byte* moveBuf;
-        int bufCapacity;   // entries per buffer — determines the keys/values offset split
-        byte[] rentedKeep = null;
-        byte[] rentedMove = null;
-        GCHandle keepHandle = default;
-        GCHandle moveHandle = default;
+        byte* nativeKeep = null;
+        byte* nativeMove = null;
         try
         {
-            if (totalEntries <= StackEntryThreshold)
+            byte* keepBuf;
+            byte* moveBuf;
+            int bufCapacity;   // entries per buffer — determines the keys/values offset split
+            if (totalEntries <= stackEntryThreshold)
             {
-                bufCapacity = StackEntryThreshold;
-                byte* k = stackalloc byte[StackEntryThreshold * entrySize];
-                byte* m = stackalloc byte[StackEntryThreshold * entrySize];
+                bufCapacity = stackEntryThreshold;
+                byte* k = stackalloc byte[stackEntryThreshold * entrySize];
+                byte* m = stackalloc byte[stackEntryThreshold * entrySize];
                 keepBuf = k;
                 moveBuf = m;
             }
             else
             {
                 bufCapacity = totalEntries;
-                int bufBytes = totalEntries * entrySize;
-                rentedKeep = ArrayPool<byte>.Shared.Rent(bufBytes);
-                rentedMove = ArrayPool<byte>.Shared.Rent(bufBytes);
-                // Pin the rented arrays so the byte* pointers stay valid across the classify loop. GCHandle.Free in finally
-                // releases the pinning; the arrays return to the pool in the same finally.
-                keepHandle = GCHandle.Alloc(rentedKeep, GCHandleType.Pinned);
-                moveHandle = GCHandle.Alloc(rentedMove, GCHandleType.Pinned);
-                keepBuf = (byte*)keepHandle.AddrOfPinnedObject();
-                moveBuf = (byte*)moveHandle.AddrOfPinnedObject();
+                var bufBytes = (nuint)totalEntries * (nuint)entrySize;
+                nativeKeep = (byte*)NativeMemory.Alloc(bufBytes);
+                nativeMove = (byte*)NativeMemory.Alloc(bufBytes);
+                keepBuf = nativeKeep;
+                moveBuf = nativeMove;
             }
 
             TKey* keepKeys = (TKey*)keepBuf;
@@ -1065,10 +1059,8 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
         }
         finally
         {
-            if (keepHandle.IsAllocated) keepHandle.Free();
-            if (moveHandle.IsAllocated) moveHandle.Free();
-            if (rentedKeep != null) ArrayPool<byte>.Shared.Return(rentedKeep);
-            if (rentedMove != null) ArrayPool<byte>.Shared.Return(rentedMove);
+            NativeMemory.Free(nativeKeep);   // Free(null) is a no-op: the stack path allocated nothing
+            NativeMemory.Free(nativeMove);
         }
     }
 
@@ -1237,104 +1229,119 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
         int visited = 0;
         var (_, _, bucketCount) = ReadMeta();
 
-        // Per-bucket optimistic snapshot buffers. The value buffer lives on the pinned object heap so the byte* handed to
-        // action.Process stays valid without a fixed region spanning the (retryable) read. Both grow on demand to the largest
-        // bucket seen — a single small allocation amortised across the whole O(n) scan.
+        // Per-bucket optimistic snapshot buffers, addressed by pointer because action.Process takes the value as a byte*. So they live on the
+        // stack or in native memory — never in a managed array (CLAUDE.md, Unsafe Code). This buffer used to be a pinned-heap array reached only
+        // through its pointer; pinned stops the GC moving an array, not freeing it, and a gen2 collection during the scan (action.Process is where
+        // callers allocate) freed it while the copies below kept writing into it — the SWG Tatooine x64 crash, "Internal CLR error" in the next
+        // scan's pinned allocation.
+        //
+        // Two chunks' worth of entries is under ~1.2 KB for every value size RecommendedStride accepts, so the stack takes the common case. A
+        // bucket whose overflow chain outgrows it moves the scan to a native block, freed in the finally however the scan ends.
         int bufCap = _bucketCapacity * 2;
-        var keyBuf = new TKey[bufCap];
-        var valBuf = GC.AllocateUninitializedArray<byte>(bufCap * _valueSize, true);
-        byte* valPtr = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(valBuf));
+        TKey* keyBuf = stackalloc TKey[bufCap];
+        byte* valBuf = stackalloc byte[bufCap * _valueSize];
+        byte* spilled = null;
 
-        for (int b = 0; b < bucketCount; b++)
+        try
         {
-            while (true)   // OLC retry for this bucket
+            for (int b = 0; b < bucketCount; b++)
             {
-                // Re-read fresh each attempt: a concurrent writer can grow the segment (raising the capacity) mid-scan, so a
-                // legitimately-valid head/overflow chunk id may exceed a stale snapshot — caching it would livelock the retry.
-                int chunkCapacity = Segment.ChunkCapacity;
-                long packed = PackedMeta;
-                int headId = GetBucketChunkId(b, ref accessor);
-                if (headId < 0)
+                while (true)   // OLC retry for this bucket
                 {
-                    break;   // empty bucket
-                }
-                if ((uint)headId >= (uint)chunkCapacity)
-                {
-                    continue;   // torn directory read — retry
-                }
-
-                byte* headAddr = accessor.GetChunkAddress(headId);
-                var latch = new OlcLatch(ref GetHeader(headAddr).OlcVersion);
-                int version = latch.ReadVersion();
-                if (version == 0)
-                {
-                    continue;   // bucket write-locked — retry
-                }
-
-                // Optimistically buffer the whole chain. Counts are clamped to _bucketCapacity and chunk ids are range-checked,
-                // so a torn read can never index past a chunk (ValueAt assert) or follow a wild OverflowChunkId; the version
-                // validation below discards any inconsistent snapshot before it reaches the callback.
-                int n = 0;
-                bool retry = false;
-                int chunkId = headId;
-                for (int walk = 0; chunkId >= 0; walk++)
-                {
-                    if ((uint)chunkId >= (uint)chunkCapacity || walk > chunkCapacity)
+                    // Re-read fresh each attempt: a concurrent writer can grow the segment (raising the capacity) mid-scan, so a
+                    // legitimately-valid head/overflow chunk id may exceed a stale snapshot — caching it would livelock the retry.
+                    int chunkCapacity = Segment.ChunkCapacity;
+                    long packed = PackedMeta;
+                    int headId = GetBucketChunkId(b, ref accessor);
+                    if (headId < 0)
                     {
-                        retry = true;   // torn OverflowChunkId or cycle from a repurposed chunk
-                        break;
+                        break;   // empty bucket
+                    }
+                    if ((uint)headId >= (uint)chunkCapacity)
+                    {
+                        continue;   // torn directory read — retry
                     }
 
-                    byte* addr = accessor.GetChunkAddress(chunkId);
-                    ref readonly var header = ref GetHeader(addr);
-                    int rawCount = header.EntryCount;
-                    int count = rawCount <= _bucketCapacity ? rawCount : _bucketCapacity;
-                    int nextId = header.OverflowChunkId;
-
-                    if (n + count > bufCap)
+                    byte* headAddr = accessor.GetChunkAddress(headId);
+                    var latch = new OlcLatch(ref GetHeader(headAddr).OlcVersion);
+                    int version = latch.ReadVersion();
+                    if (version == 0)
                     {
-                        bufCap = Math.Max(bufCap * 2, n + count);
-                        keyBuf = new TKey[bufCap];
-                        valBuf = GC.AllocateUninitializedArray<byte>(bufCap * _valueSize, true);
-                        valPtr = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(valBuf));
-                        retry = true;   // restart the bucket with the larger buffer
-                        break;
+                        continue;   // bucket write-locked — retry
                     }
 
-                    TKey* keys = KeysPtr(addr);
-                    for (int i = 0; i < count; i++)
+                    // Optimistically buffer the whole chain. Counts are clamped to _bucketCapacity and chunk ids are range-checked,
+                    // so a torn read can never index past a chunk (ValueAt assert) or follow a wild OverflowChunkId; the version
+                    // validation below discards any inconsistent snapshot before it reaches the callback.
+                    int n = 0;
+                    bool retry = false;
+                    int chunkId = headId;
+                    for (int walk = 0; chunkId >= 0; walk++)
                     {
-                        keyBuf[n] = keys[i];
-                        Unsafe.CopyBlock(valPtr + n * _valueSize, ValueAt(addr, i), (uint)_valueSize);
-                        n++;
+                        if ((uint)chunkId >= (uint)chunkCapacity || walk > chunkCapacity)
+                        {
+                            retry = true;   // torn OverflowChunkId or cycle from a repurposed chunk
+                            break;
+                        }
+
+                        byte* addr = accessor.GetChunkAddress(chunkId);
+                        ref readonly var header = ref GetHeader(addr);
+                        int rawCount = header.EntryCount;
+                        int count = rawCount <= _bucketCapacity ? rawCount : _bucketCapacity;
+                        int nextId = header.OverflowChunkId;
+
+                        if (n + count > bufCap)
+                        {
+                            bufCap = Math.Max(bufCap * 2, n + count);
+                            // Allocate before freeing: if Alloc throws, spilled still holds a live block for the finally, never a freed one.
+                            var grown = (byte*)NativeMemory.Alloc((nuint)bufCap * (nuint)(sizeof(TKey) + _valueSize));
+                            NativeMemory.Free(spilled);
+                            spilled = grown;
+                            keyBuf = (TKey*)spilled;
+                            valBuf = spilled + (nint)bufCap * sizeof(TKey);
+                            retry = true;   // restart the bucket with the larger buffer
+                            break;
+                        }
+
+                        TKey* keys = KeysPtr(addr);
+                        for (int i = 0; i < count; i++)
+                        {
+                            keyBuf[n] = keys[i];
+                            Unsafe.CopyBlock(valBuf + n * _valueSize, ValueAt(addr, i), (uint)_valueSize);
+                            n++;
+                        }
+
+                        chunkId = nextId;
                     }
 
-                    chunkId = nextId;
-                }
-
-                if (retry)
-                {
-                    continue;
-                }
-
-                // Validate the bucket stayed quiescent for the whole read: no writer bumped the head version, no split changed
-                // the directory. On failure, re-read the bucket from the head.
-                if (!latch.ValidateVersion(version) || PackedMeta != packed)
-                {
-                    continue;
-                }
-
-                for (int i = 0; i < n; i++)
-                {
-                    if (!action.Process(keyBuf[i], valPtr + i * _valueSize))
+                    if (retry)
                     {
-                        return visited;
+                        continue;
                     }
-                    visited++;
-                }
 
-                break;   // bucket complete
+                    // Validate the bucket stayed quiescent for the whole read: no writer bumped the head version, no split changed
+                    // the directory. On failure, re-read the bucket from the head.
+                    if (!latch.ValidateVersion(version) || PackedMeta != packed)
+                    {
+                        continue;
+                    }
+
+                    for (int i = 0; i < n; i++)
+                    {
+                        if (!action.Process(keyBuf[i], valBuf + i * _valueSize))
+                        {
+                            return visited;
+                        }
+                        visited++;
+                    }
+
+                    break;   // bucket complete
+                }
             }
+        }
+        finally
+        {
+            NativeMemory.Free(spilled);   // Free(null) is a no-op: most scans never spill
         }
 
         return visited;

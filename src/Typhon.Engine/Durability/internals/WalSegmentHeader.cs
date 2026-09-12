@@ -1,4 +1,4 @@
-using System;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace Typhon.Engine.Internals;
@@ -74,11 +74,9 @@ internal unsafe struct WalSegmentHeader
     public void ComputeAndSetCrc()
     {
         HeaderCRC = 0;
-        fixed (WalSegmentHeader* self = &this)
-        {
-            var span = new ReadOnlySpan<byte>(self, SizeInBytes);
-            HeaderCRC = Crc32CUtil.ComputeSkipping(span, HeaderCrcOffset, sizeof(uint));
-        }
+        // A span over this header, not a pointer to it: a header can live inside a class.
+        var span = MemoryMarshal.CreateReadOnlySpan(ref Unsafe.As<WalSegmentHeader, byte>(ref this), SizeInBytes);
+        HeaderCRC = Crc32CUtil.ComputeSkipping(span, HeaderCrcOffset, sizeof(uint));
     }
 
     /// <summary>
@@ -98,11 +96,8 @@ internal unsafe struct WalSegmentHeader
         }
 
         var storedCrc = HeaderCRC;
-        fixed (WalSegmentHeader* self = &this)
-        {
-            var span = new ReadOnlySpan<byte>(self, SizeInBytes);
-            var computedCrc = Crc32CUtil.ComputeSkipping(span, HeaderCrcOffset, sizeof(uint));
-            return computedCrc == storedCrc;
-        }
+        var span = MemoryMarshal.CreateReadOnlySpan(ref Unsafe.As<WalSegmentHeader, byte>(ref this), SizeInBytes);
+        var computedCrc = Crc32CUtil.ComputeSkipping(span, HeaderCrcOffset, sizeof(uint));
+        return computedCrc == storedCrc;
     }
 }

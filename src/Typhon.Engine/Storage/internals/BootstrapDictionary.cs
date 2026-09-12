@@ -265,10 +265,7 @@ public class BootstrapDictionary
             {
                 ThrowStreamOverflow();
             }
-            fixed (char* keyChars = kvp.Key)
-            {
-                Encoding.UTF8.GetBytes(keyChars, kvp.Key.Length, dest, keyBytes);
-            }
+            Encoding.UTF8.GetBytes(kvp.Key, new Span<byte>(dest, keyBytes));   // the key as a span, never pinned for a pointer
             dest += keyBytes;
             *dest++ = 0; // NUL terminator
 
@@ -412,10 +409,7 @@ public class BootstrapDictionary
             case ValueType.String:
                 var str = value.AsString;
                 int len = Encoding.UTF8.GetByteCount(str);
-                fixed (char* chars = str)
-                {
-                    Encoding.UTF8.GetBytes(chars, str.Length, dest, len);
-                }
+                Encoding.UTF8.GetBytes(str, new Span<byte>(dest, len));   // the string as a span, never pinned for a pointer
                 dest[len] = 0; // NUL
                 break;
         }

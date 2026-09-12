@@ -1234,9 +1234,11 @@ public unsafe partial class Transaction : EntityAccessor
         // If there is a valid component, copy its content to the destination.
         // No shared lock needed: deferred chunk freeing guarantees content chunks remain valid for the transaction's lifetime.
         t = default;
-        int size = info.ComponentTable.ComponentStorageSize;
+        // A span over t, not a pointer: t is the caller's variable and can be a field or an array element on the GC heap. Clamped to sizeof(T), so a
+        // storage size larger than T cannot write past it.
+        int size = Math.Min(info.ComponentTable.ComponentStorageSize, Unsafe.SizeOf<T>());
         var src = info.CompContentAccessor.GetChunkAsReadOnlySpan(compRevInfo.CurCompContentChunkId);
-        src.Slice(info.ComponentTable.ComponentOverhead).CopyTo(new Span<byte>(Unsafe.AsPointer(ref t), size));
+        src.Slice(info.ComponentTable.ComponentOverhead, size).CopyTo(MemoryMarshal.AsBytes(new Span<T>(ref t)));
 
         return true;
     }

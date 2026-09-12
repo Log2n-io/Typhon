@@ -90,7 +90,7 @@ public unsafe partial class Transaction
         var chunkId = AllocateVersionedSlotContent(meta, table, slot, id, out _);
 
         var dst = info.CompContentAccessor.GetChunkAsSpan(chunkId, true);
-        Unsafe.AsRef<T>((byte*)Unsafe.AsPointer(ref dst.GetPinnableReference()) + table.ComponentOverhead) = value;
+        Unsafe.WriteUnaligned(ref dst[table.ComponentOverhead], value);
         return chunkId;
     }
 
@@ -472,7 +472,9 @@ public unsafe partial class Transaction
                         dst = new Span<byte>(SpawnArena.Resolve(stage), overhead + table.ComponentStorageSize);
                     }
                     int copySize = Math.Min(sharedValues[sharedIndex].DataSize, dst.Length - overhead);
-                    new ReadOnlySpan<byte>((byte*)Unsafe.AsPointer(ref Unsafe.AsRef(in sharedValues[sharedIndex])) + 12, copySize)
+                    // A span, not a pointer: sharedValues is a managed array. The payload starts 12 bytes into a ComponentValue.
+                    MemoryMarshal.CreateReadOnlySpan(
+                            ref Unsafe.Add(ref Unsafe.As<ComponentValue, byte>(ref sharedValues[sharedIndex]), 12), copySize)
                         .CopyTo(dst.Slice(overhead));
                     entry.EnabledBits |= (ushort)(1 << slot);
                 }
@@ -702,7 +704,9 @@ public unsafe partial class Transaction
                     dst = new Span<byte>(SpawnArena.Resolve(stage), overhead + table.ComponentStorageSize);
                 }
                 int copySize = Math.Min(values[vi].DataSize, dst.Length - overhead);
-                new ReadOnlySpan<byte>((byte*)Unsafe.AsPointer(ref Unsafe.AsRef(in values[vi])) + 12, copySize)
+                // A span, not a pointer: values can be backed by a managed array. The payload starts 12 bytes into a ComponentValue.
+                MemoryMarshal.CreateReadOnlySpan(
+                        ref Unsafe.Add(ref Unsafe.As<ComponentValue, byte>(ref Unsafe.AsRef(in values[vi])), 12), copySize)
                     .CopyTo(dst.Slice(overhead));
                 entry.EnabledBits |= (ushort)(1 << slot);
             }

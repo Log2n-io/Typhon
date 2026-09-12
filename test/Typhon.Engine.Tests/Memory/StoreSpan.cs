@@ -2,6 +2,9 @@ using System;
 
 namespace Typhon.Engine.Internals;
 
+/// <summary>A span stored as a raw address, so it can sit in an array. Test-only, and only over engine-allocated (native) memory.</summary>
+/// <remarks>The pointer leaves the <c>fixed</c> that took it: over a managed span it would dangle as soon as the GC moved or freed the array. Moved
+/// out of the engine for that reason.</remarks>
 internal readonly unsafe struct StoreSpan
 {
     public StoreSpan(Span<byte> span)
