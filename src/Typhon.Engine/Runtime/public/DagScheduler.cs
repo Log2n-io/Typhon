@@ -25,7 +25,7 @@ namespace Typhon.Engine;
 /// All dispatch decisions happen on workers (POC decision D2: any-worker dispatch, no scheduler thread).
 /// </para>
 /// <para>
-/// Between ticks, workers block on <c>_tickStartSignal</c> — a <see cref="ManualResetEventSlim"/> constructed with <c>spinCount: 0</c> — inside a loop that
+/// Between ticks, each worker blocks on its own wake event — a <see cref="ManualResetEventSlim"/> constructed with <c>spinCount: 0</c> — inside a loop that
 /// re-checks <c>_tickGeneration</c>, with a 50 ms timeout as a shutdown-liveness backstop. The three-phase wait (Sleep → Yield → Spin) belongs to the timer
 /// thread's metronome in <see cref="HighResolutionTimerServiceBase"/>, not to the workers; <c>_nextTickTimestamp</c> is likewise metronome state, read by
 /// <c>GetNextTick</c> and never by a worker.
@@ -366,6 +366,12 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     // ═══════════════════════════════════════════════════════════════
 
     private int _tickGeneration;
+
+    /// <summary>
+    /// <see cref="_tickGeneration"/> as <see cref="Start"/> found it, before any dispatch: every worker starts from it, so a worker whose thread first runs
+    /// after the first bump still sees that dispatch as new. Published to the workers by <see cref="Thread.Start()"/>.
+    /// </summary>
+    private int _generationAtStart;
     private int _tickInProgress;
     /// <summary>
     /// Set once to stop the worker pool. Every access goes through <see cref="Volatile"/> — this is the stop signal two SPIN loops key on (the worker's
@@ -389,10 +395,29 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     private long _nextTickTimestamp;       // Used by GetNextTick for metronome advancement
     private long _currentTickNumber;
 
-    // Between-tick wake signal. Workers block on this (kernel wait = zero CPU).
-    // Timer thread sets it when bumping the generation counter.
-    // SpinCount=0: go straight to kernel wait (no user-mode spinning — the tick interval is ms-scale, so spinning would waste CPU for no benefit).
-    private readonly ManualResetEventSlim _tickStartSignal = new(false, 0);
+    // Between-tick wake: one event per worker. The dispatcher Sets every worker's event after bumping _tickGeneration (WakeWorkers); each worker Resets its
+    // own (WorkerLoop). SpinCount 0: straight to a kernel wait — the gap after a tick is ms-scale, and spinning through it would burn CPU for nothing.
+    //
+    // Not one event for the pool: its Set released every parked worker at once, and each had to re-take the event's lock to leave Wait, so they queued on
+    // it. Measured with 32 parked workers: the median worker ran 293 µs after the Set and the last 5.9 ms; with an event each, 85 µs and 146 µs. In the
+    // SWG demo that queue was ~4 ms of thread time per tick in Monitor.Enter_Slowpath under Wait, at x1 and x64 alike; the tick gained 8-12 % at x1 / x2
+    // and nothing measurable from x4 up, where the first workers to wake already carried each dispatch.
+    private readonly ManualResetEventSlim[] _workerWake;
+
+    /// <summary>
+    /// Test seam: how long a parked worker waits before re-checking the generation by itself. 50 ms, a shutdown-liveness backstop; a test raises it so a
+    /// worker the dispatcher failed to wake stalls the tick instead of arriving 50 ms late.
+    /// </summary>
+    internal TimeSpan BetweenTickWaitBackstop = TimeSpan.FromMilliseconds(50);
+
+    /// <summary>Test seam: called with the worker's id when it has found the generation unchanged and is about to park. Null outside tests.</summary>
+    internal Action<int> BetweenTickWaitProbe;
+
+    /// <summary>Test seam: called with the worker's id as its thread starts, before it reads any scheduler state. Null outside tests.</summary>
+    internal Action<int> WorkerStartProbe;
+
+    /// <summary>Test seam: a worker's own wake event.</summary>
+    internal ManualResetEventSlim WorkerWakeEvent(int workerId) => _workerWake[workerId];
 
     // Tick interval in Stopwatch ticks
     private readonly long _tickIntervalTicks;
@@ -732,13 +757,15 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         _workerActiveTicks = new long[_workerCount];
         _workerIdleTicks = new long[_workerCount];
 
-        // Create worker threads (not started yet)
+        // Create worker threads (not started yet), each with its own wake event
         if (_workerCount > 1)
         {
             _workers = new Thread[_workerCount];
+            _workerWake = new ManualResetEventSlim[_workerCount];
             for (var i = 0; i < _workerCount; i++)
             {
                 var workerId = i;
+                _workerWake[i] = new ManualResetEventSlim(false, 0);
                 _workers[i] = new Thread(() => WorkerLoop(workerId))
                 {
                     IsBackground = true,
@@ -749,6 +776,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         else
         {
             _workers = [];
+            _workerWake = [];
         }
 
         // Initialize next tick timestamp to now (first GetNextTick call will advance it)
@@ -768,7 +796,8 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         _started = true;
         LogStarted(AllSystemCount, _workerCount, _options.BaseTickRate);
 
-        // Start worker threads
+        // Start worker threads, each from the generation before the first dispatch
+        _generationAtStart = Volatile.Read(ref _tickGeneration);
         for (var i = 0; i < _workers.Length; i++)
         {
             _workers[i].Start();
@@ -863,7 +892,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         // Signal workers to exit
         Volatile.Write(ref _workerShutdown, 1);
         Interlocked.Increment(ref _tickGeneration);
-        _tickStartSignal.Set(); // Wake any blocked workers
+        WakeWorkers(); // Wake any blocked workers
 
         // Join worker threads (guard against unstarted threads)
         JoinWorkers();
@@ -882,22 +911,25 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             // Ensure workers are signaled to stop
             Volatile.Write(ref _workerShutdown, 1);
             Interlocked.Increment(ref _tickGeneration);
-            _tickStartSignal.Set();
+            WakeWorkers();
             JoinWorkers();
         }
 
-        // Base class stops the timer thread and disposes the resource node — BEFORE the signal is disposed. A tick already past ExecuteCallbacks'
-        // shutdown check keeps dispatching its tracks on the timer thread, and every one ends with _tickStartSignal.Reset(), which throws
-        // ObjectDisposedException on a disposed event. Disposed first, that surfaced as a FenceFailure in '<tick fence>' on the last tick: about one SWG
-        // demo run in ten, and FencePhaseFailureTests' "healthy fence" reporting an unhandled exception under load.
+        // Base class stops the timer thread and disposes the resource node — BEFORE the wake events are disposed. A tick already past ExecuteCallbacks'
+        // shutdown check keeps dispatching its tracks on the timer thread. When the pool shared one event, each track ended with its Reset, which throws
+        // ObjectDisposedException on a disposed event: disposed first, that surfaced as a FenceFailure in '<tick fence>' on the last tick, about one SWG
+        // demo run in ten. The dispatcher now only Sets, which a disposed event tolerates, but a worker Resets and Waits on its own, so the order stays.
         base.Dispose(disposing);
 
-        // Only once nothing can touch it. Both joins are bounded (timer 2 s, workers 5 s), and a Dispose issued on the timer thread cannot join itself;
-        // in those cases the event is left to the GC, which costs nothing here — a ManualResetEventSlim only owns a kernel handle once its WaitHandle has
-        // been read, and nothing reads it.
+        // Only once nothing can touch them. Both joins are bounded (timer 2 s, workers 5 s), and a Dispose issued on the timer thread cannot join itself;
+        // in those cases the events are left to the GC, which costs nothing here — a ManualResetEventSlim only owns a kernel handle once its WaitHandle
+        // has been read, and nothing reads it.
         if (disposing && !IsRunning && Array.TrueForAll(_workers, static w => !w.IsAlive))
         {
-            _tickStartSignal.Dispose();
+            foreach (var wake in _workerWake)
+            {
+                wake.Dispose();
+            }
         }
     }
 
@@ -940,7 +972,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     /// translates it to this slot so system code can index per-worker state on every path that runs system code.
     /// <para>
     /// <b>Why a dedicated slot is safe: disjointness, not quiescence.</b> It is tempting to argue that the inline execution happens before
-    /// <c>_tickStartSignal.Set()</c> wakes the pool and is therefore serialized against every worker. That is NOT true across tracks:
+    /// <c>WakeWorkers()</c> wakes the pool and is therefore serialized against every worker. That is NOT true across tracks:
     /// <see cref="DispatchTrackMultiThreaded"/> clears <c>_tickInProgress</c> only after its completion barrier, so a worker that has already evaluated
     /// its <c>while (_tickInProgress == 1 &amp;&amp; _systemsRemaining.Value &gt; 0)</c> loop condition can still be inside <c>FindReadySystem</c> while
     /// the timer thread has advanced into the next track's <see cref="MarkTrackRootsReady"/>. The slot is safe because the dispatcher never writes a
@@ -1354,16 +1386,20 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         // the AsyncLocal read (~5–9 ns saved per span on the dominant producer).
         TyphonEvent.SuppressActivityContextOnThisThread();
 
-        var lastGen = _tickGeneration;
+        WorkerStartProbe?.Invoke(workerId);
+        var wake = _workerWake[workerId];
+        // Not _tickGeneration as this thread first reads it: a thread that starts after the first bump would take that dispatch for one it had already seen
+        // and sit it out.
+        var lastGen = _generationAtStart;
 
         while (Volatile.Read(ref _workerShutdown) == 0)
         {
-            // ═══ Between-tick: kernel wait on signal ═══
-            // Workers block here with zero CPU cost. The timer thread signals _tickStartSignal when the next tick fires. Wake latency is ~1-5µs
-            // (kernel transition) — negligible against a 16ms tick gap.
+            // ═══ Between-tick: kernel wait on this worker's own event ═══
+            // Zero CPU while parked. The event is this worker's alone, so the dispatcher's Set wakes one waiter and nothing queues behind it (see
+            // _workerWake).
             var betweenTickSpan = TyphonEvent.BeginSchedulerWorkerBetweenTick((byte)workerId);
             var btStart = Stopwatch.GetTimestamp();
-            while (_tickGeneration == lastGen)
+            while (Volatile.Read(ref _tickGeneration) == lastGen)
             {
                 if (Volatile.Read(ref _workerShutdown) != 0)
                 {
@@ -1375,7 +1411,15 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                     return;
                 }
 
-                _tickStartSignal.Wait(TimeSpan.FromMilliseconds(50));
+                BetweenTickWaitProbe?.Invoke(workerId);
+                wake.Wait(BetweenTickWaitBackstop);
+
+                // Reset after every return, before the loop re-checks the generation — never between the check and the wait, where it would swallow a Set
+                // that landed in between. Without it, a Set whose generation this worker had already seen (one that landed after the worker left this loop
+                // without parking) would keep the event set, and the loop would spin on it until the next dispatch. Reset is an interlocked update, a full
+                // fence, so the re-check is not read ahead of it; and the dispatcher bumps the generation before it Sets, so any Set the Reset clears
+                // belongs to a generation the re-check sees.
+                wake.Reset();
             }
             {
                 var btEnd = Stopwatch.GetTimestamp();
@@ -1391,7 +1435,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                 return;
             }
 
-            lastGen = _tickGeneration;
+            lastGen = Volatile.Read(ref _tickGeneration);
 
             // Publish the current scheduler tick number to this worker's TLS so every TyphonEvent emit below (ChunkStart/ChunkEnd and any
             // BeginSpan calls from inside a system body) tags its TraceEvent with the right TickNumber. Without this, worker-emitted events land
@@ -2355,10 +2399,10 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         _systemsRemaining.Value = track.MemberCount;
         MarkTrackRootsReady(track.Roots);
 
-        // Activate — bump generation + signal workers.
+        // Activate — bump the generation, then wake the workers.
         _tickInProgress = 1;
         Interlocked.Increment(ref _tickGeneration);
-        _tickStartSignal.Set();
+        WakeWorkers();
 
         // Wait for the track's systems to complete. The timer thread must spin — Thread.Yield() on Windows can stall up to 15.6 ms, cascading into every
         // subsequent tick.
@@ -2399,7 +2443,18 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         // Always cleared, including on the abandoned path above — this is the escape hatch the workers' within-tick dispatch loop keys on, so leaving it set
         // would strand every worker still inside the tick.
         _tickInProgress = 0;
-        _tickStartSignal.Reset();
+    }
+
+    /// <summary>
+    /// Wakes the pool: a <see cref="ManualResetEventSlim.Set"/> on every worker's own event. Called after the generation bump, so a worker it wakes finds
+    /// the generation changed. Each worker Resets its own event (<see cref="WorkerLoop"/>), so nothing here is undone after the track.
+    /// </summary>
+    private void WakeWorkers()
+    {
+        foreach (var wake in _workerWake)
+        {
+            wake.Set();
+        }
     }
 
     /// <summary>

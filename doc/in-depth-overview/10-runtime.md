@@ -196,12 +196,11 @@ The `-4` leaves headroom for the TickDriver, the WAL writer ([11-durability](11-
 
 ### Between-tick wait — kernel wait only, *not* 3-phase
 
-This is a deliberate difference from the TickDriver. The scheduler holds a single signal:
+This is a deliberate difference from the TickDriver. Each worker owns one signal:
 
 ```csharp
-// _tickStartSignal = ManualResetEventSlim(initialState: false, spinCount: 0)
-// "SpinCount=0: go straight to kernel wait" — DagScheduler.cs:135
-private readonly ManualResetEventSlim _tickStartSignal = new(false, 0);
+// One ManualResetEventSlim(initialState: false, spinCount: 0) per worker — straight to a kernel wait
+private readonly ManualResetEventSlim[] _workerWake;
 ```
 
 In `WorkerLoop`, between ticks:
@@ -209,11 +208,12 @@ In `WorkerLoop`, between ticks:
 ```csharp
 while (_tickGeneration == lastGen) {
     if (_workerShutdown != 0) return;
-    _tickStartSignal.Wait(TimeSpan.FromMilliseconds(50));
+    wake.Wait(TimeSpan.FromMilliseconds(50));
+    wake.Reset();   // consume the Set before re-checking the generation
 }
 ```
 
-That's it — a pure 50 ms kernel wait, no user-mode spinning, no yield phase. The TickDriver sets the signal when it bumps `_tickGeneration` to start a new tick. Wake latency is the kernel-transition cost (~1–5 µs), which is negligible against a 16 ms tick at 60 Hz. **Do not confuse this with the TickDriver's 3-phase Sleep/Yield/Spin** — that strategy is for the metronome only, because the *driver* needs sub-microsecond accuracy at the wake point. Workers need only "wake somewhere in the next millisecond"; spinning here would waste a core for no benefit.
+That's it — a 50 ms kernel wait, no user-mode spinning, no yield phase. The TickDriver bumps `_tickGeneration`, then Sets every worker's event. The events are per worker because one shared event made the woken workers queue on its lock to leave `Wait`: with 32 workers the last one ran ~6 ms after the Set. With an event each, the median worker runs ~85 µs after it and the last ~150 µs. In the SWG Tatooine demo that shortened the tick by 8–12 % at its two smallest populations and by nothing measurable above them. **Do not confuse this with the TickDriver's 3-phase Sleep/Yield/Spin** — that strategy is for the metronome only, because the *driver* needs sub-microsecond accuracy at the wake point. Workers need only "wake somewhere in the next millisecond"; spinning here would waste a core for no benefit.
 
 ### Within-tick dispatch
 
