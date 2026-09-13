@@ -22,6 +22,10 @@ namespace SwgTatooine;
 public sealed partial class TatooineSim : IDisposable
 {
     private readonly SimConfig _config;
+
+    // The process-wide narrowphase switch as it was before this simulation set it, put back on Dispose: a later engine in the same process must not inherit
+    // this run's A/B arm.
+    private readonly bool _simdNarrowphaseBefore;
     private ServiceProvider _serviceProvider;
     private IServiceScope _scope;
     private TyphonRuntime _runtime;
@@ -42,6 +46,7 @@ public sealed partial class TatooineSim : IDisposable
     {
         ArgumentNullException.ThrowIfNull(config);
         _config = config;
+        _simdNarrowphaseBefore = Typhon.Engine.Internals.SpatialQueryTuning.SimdNarrowphase;
     }
 
     /// <summary>The configuration this simulation was built from.</summary>
@@ -121,6 +126,9 @@ public sealed partial class TatooineSim : IDisposable
 
         Dbe.InitializeArchetypes();
 
+        // Process-wide and read when each query is built, so setting it here covers every query the run makes.
+        Typhon.Engine.Internals.SpatialQueryTuning.SimdNarrowphase = _config.SimdNarrowphase;
+
         // Buildings, terminals, houses, factories and harvesters never move. Telling the fence so is the difference
         // between a per-tick scan of the largest population in the world and nothing at all — and this population is
         // large precisely because a planet is mostly scenery.
@@ -150,5 +158,6 @@ public sealed partial class TatooineSim : IDisposable
         _viewTx?.Dispose();
         _scope?.Dispose();
         _serviceProvider?.Dispose();
+        Typhon.Engine.Internals.SpatialQueryTuning.SimdNarrowphase = _simdNarrowphaseBefore;
     }
 }

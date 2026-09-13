@@ -2,12 +2,41 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Engine.Internals;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests;
+
+[Component("Typhon.Test.ClTail.Pos", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+struct ClTailPos
+{
+    [Field]
+    [SpatialIndex]
+    public AABB2F Bounds;
+}
+
+/// <summary>Twenty bytes of nothing, sized so the archetype's cluster holds 59 slots — a size that is not a multiple of the kernel's block.</summary>
+[Component("Typhon.Test.ClTail.Filler", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+struct ClTailFiller
+{
+    [Field] public int A;
+    [Field] public int B;
+    [Field] public int C;
+    [Field] public int D;
+    [Field] public int E;
+}
+
+[Archetype]
+partial class ClTailUnit : Archetype<ClTailUnit>
+{
+    public static readonly Comp<ClTailPos> Pos = Register<ClTailPos>();
+    public static readonly Comp<ClTailFiller> Filler = Register<ClTailFiller>();
+}
 
 /// <summary>
 /// <see cref="AabbClusterEnumerator.Count"/>, <see cref="AabbClusterEnumerator.Fill"/> and <see cref="AabbClusterEnumerator.MoveNext"/>: the three drains must
@@ -394,6 +423,229 @@ unsafe class AabbClusterEnumeratorDrainTests : TestBase<AabbClusterEnumeratorDra
 
         Assert.That(AssertDrains(dbe, cs, population, Q.Box2D(700d, 700d, 900d, 900d), "empty box"), Is.Zero);
         Assert.That(AssertDrains(dbe, cs, population, Q.Sphere2D(800d, 800d, 50d), "empty sphere"), Is.Zero);
+    }
+
+    // ── The AABB2F block kernel (NarrowphaseAabb2F): an AABB2F-only component, the only layout it takes ──────────────────────────────────────────────
+
+    private DatabaseEngine SetupBlockEngine(float cellSize, float worldMax, int promoteThreshold = 0)
+    {
+        var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<ClReachPos>();
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(new Vector2(0, 0), new Vector2(worldMax, worldMax), cellSize));
+        if (promoteThreshold > 0)
+        {
+            dbe.ClusterCellTreePromoteThreshold = promoteThreshold;
+            dbe.ClusterCellTreePromoteTightness = 1f;
+        }
+
+        dbe.InitializeArchetypes();
+        return dbe;
+    }
+
+    /// <summary><see cref="Spawn"/>'s population on <see cref="ClReachUnit"/>, whose component is nothing but its AABB2F.</summary>
+    private static List<Spawned> SpawnBlock(DatabaseEngine dbe, int count, float extent, int seed)
+    {
+        var rng = new Random(seed);
+        var population = new List<Spawned>(count);
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (int i = 0; i < count; i++)
+            {
+                float x = 5f + ((float)rng.NextDouble() * (extent - 10f));
+                float y = 5f + ((float)rng.NextDouble() * (extent - 10f));
+                float half = i % 3 == 0 ? 0f : (float)rng.NextDouble() * 5f;
+                var b = new AABB2F { MinX = x - half, MinY = y - half, MaxX = x + half, MaxY = y + half };
+                var id = tx.Spawn<ClReachUnit>(ClReachUnit.Pos.Set(new ClReachPos { Bounds = b }));
+                population.Add(new Spawned((long)id.RawValue, b.MinX, b.MinY, 0d, b.MaxX, b.MaxY, 0d));
+            }
+
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(1);
+        return population;
+    }
+
+    /// <summary>
+    /// The oracle, with the kernel on and with it off: scattered clusters (a few entities per cell) and full ones (4 800 entities in one cell). Both paths
+    /// must return the oracle's set with the same bounds and squared distances bit for bit, and Count and Fill must agree with MoveNext — so the kernel and
+    /// the loop answer identically without either being compared to the other directly.
+    /// </summary>
+    [TestCase(100f, 1_000f, 3_000, 0, TestName = "Drains_MatchTheOracle_WithTheAabb2FBlockKernel_AndWithout(scattered)")]
+    [TestCase(1_000f, 4_000f, 4_800, 0, TestName = "Drains_MatchTheOracle_WithTheAabb2FBlockKernel_AndWithout(fullClusters)")]
+    [TestCase(1_000f, 4_000f, 3_000, 24, TestName = "Drains_MatchTheOracle_WithTheAabb2FBlockKernel_AndWithout(promotedCell)")]
+    [VerifiesRule("SQ-03")]
+    // It flips the process-wide switch, and a query another fixture builds meanwhile would silently take the scalar path.
+    [NonParallelizable]
+    public void Drains_MatchTheOracle_WithTheAabb2FBlockKernel_AndWithout(float cellSize, float worldMax, int count, int promoteThreshold)
+    {
+        Assume.That(NarrowphaseAabb2F.Best, Is.Not.EqualTo(NarrowphaseAabb2F.Kernel.None), "no block kernel on this machine");
+        using var dbe = SetupBlockEngine(cellSize, worldMax, promoteThreshold);
+        var population = SpawnBlock(dbe, count, 1_000f, seed: 40);
+        var cs = dbe._archetypeStates[Archetype<ClReachUnit>.Metadata.ArchetypeId].ClusterState;
+        if (promoteThreshold > 0)
+        {
+            Assert.That(cs.PromotedCellCount, Is.GreaterThan(0), "precondition: the cell must promote, or the tree path never runs");
+        }
+        var queries = RandomQueries2D(1_000d, seed: 41, count: 20).ToList();
+        var saved = SpatialQueryTuning.SimdNarrowphase;
+        try
+        {
+            foreach (var kernel in new[] { true, false })
+            {
+                SpatialQueryTuning.SimdNarrowphase = kernel;
+                using (EpochGuard.Enter(dbe.EpochManager))
+                {
+                    var probe = Open(dbe, cs, queries[0]);
+                    try
+                    {
+                        Assert.That(probe.UsesAabb2FBlocks, Is.EqualTo(kernel), "precondition: the switch must decide the path");
+                    }
+                    finally
+                    {
+                        probe.Dispose();
+                    }
+                }
+
+                var what = $"{(kernel ? "block kernel" : "scalar loop")}, {count} in {cellSize} m cells";
+                var total = queries.Sum(q => AssertDrains(dbe, cs, population, q, what));
+                Assert.That(total, Is.GreaterThan(1_000), $"{what}: the queries must hit something, or identical empty answers pass trivially");
+            }
+        }
+        finally
+        {
+            SpatialQueryTuning.SimdNarrowphase = saved;
+        }
+    }
+
+    /// <summary>
+    /// A cluster size that is not a multiple of 16: the kernel takes the whole blocks and the loop the slots past the last one. The filler component makes
+    /// the cluster 59 slots (<c>ArchetypeClusterInfo.SelectClusterSize</c>), three blocks and an 11-slot tail.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SQ-03")]
+    public void Drains_MatchTheOracle_WhenTheClusterEndsInAPartialBlock()
+    {
+        Assume.That(NarrowphaseAabb2F.Best, Is.Not.EqualTo(NarrowphaseAabb2F.Kernel.None), "no block kernel on this machine");
+        var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        using var disposeDbe = dbe;
+        dbe.RegisterComponentFromAccessor<ClTailPos>();
+        dbe.RegisterComponentFromAccessor<ClTailFiller>();
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(new Vector2(0, 0), new Vector2(4_000f, 4_000f), 1_000f));
+        dbe.InitializeArchetypes();
+
+        var rng = new Random(43);
+        var population = new List<Spawned>();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (int i = 0; i < 2_000; i++)
+            {
+                float x = 5f + ((float)rng.NextDouble() * 990f);
+                float y = 5f + ((float)rng.NextDouble() * 990f);
+                float half = i % 3 == 0 ? 0f : (float)rng.NextDouble() * 5f;
+                var b = new AABB2F { MinX = x - half, MinY = y - half, MaxX = x + half, MaxY = y + half };
+                var id = tx.Spawn<ClTailUnit>(ClTailUnit.Pos.Set(new ClTailPos { Bounds = b }), ClTailUnit.Filler.Set(new ClTailFiller()));
+                population.Add(new Spawned((long)id.RawValue, b.MinX, b.MinY, 0d, b.MaxX, b.MaxY, 0d));
+            }
+
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(1);
+        var cs = dbe._archetypeStates[Archetype<ClTailUnit>.Metadata.ArchetypeId].ClusterState;
+        var clusterSize = cs.Layout.ClusterSize;
+        Assert.That(clusterSize % NarrowphaseAabb2F.BlockSize != 0 && clusterSize > NarrowphaseAabb2F.BlockSize, Is.True,
+            $"precondition: the cluster must end in a partial block, and hold at least one whole one; it holds {clusterSize}");
+
+        var queries = RandomQueries2D(1_000d, seed: 44, count: 20).ToList();
+        using (EpochGuard.Enter(dbe.EpochManager))
+        {
+            var probe = Open(dbe, cs, queries[0]);
+            try
+            {
+                Assert.That(probe.UsesAabb2FBlocks, Is.True, "precondition: the kernel must be the path under test");
+            }
+            finally
+            {
+                probe.Dispose();
+            }
+        }
+
+        var total = queries.Sum(q => AssertDrains(dbe, cs, population, q, $"{clusterSize}-slot clusters"));
+        Assert.That(total, Is.GreaterThan(1_000), "the queries must hit something, or identical empty answers pass trivially");
+    }
+
+    /// <summary>
+    /// The two resume contracts through the kernel: Count after MoveNext counts the rest, and MoveNext / Fill interleaved yield MoveNext's sequence.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SQ-03")]
+    public void Resume_AfterMoveNext_ThroughTheAabb2FBlockKernel()
+    {
+        Assume.That(NarrowphaseAabb2F.Best, Is.Not.EqualTo(NarrowphaseAabb2F.Kernel.None), "no block kernel on this machine");
+        using var dbe = SetupBlockEngine(cellSize: 100f, worldMax: 1_000f);
+        SpawnBlock(dbe, 500, 1_000f, seed: 42);
+        var cs = dbe._archetypeStates[Archetype<ClReachUnit>.Metadata.ArchetypeId].ClusterState;
+        var all = Q.Box2D(0d, 0d, 1_000d, 1_000d);
+
+        using var epoch = EpochGuard.Enter(dbe.EpochManager);
+        var reference = new List<ClusterSpatialQueryResult>();
+        var e = Open(dbe, cs, all);
+        try
+        {
+            Assert.That(e.UsesAabb2FBlocks, Is.True, "precondition: the kernel must be the path under test");
+            while (e.MoveNext())
+            {
+                reference.Add(e.Current);
+            }
+        }
+        finally
+        {
+            e.Dispose();
+        }
+
+        e = Open(dbe, cs, all);
+        try
+        {
+            for (int i = 0; i < 123; i++)
+            {
+                Assert.That(e.MoveNext(), Is.True);
+            }
+
+            Assert.That(e.Count(), Is.EqualTo(500 - 123), "Count() must continue from where MoveNext stopped");
+            Assert.That(e.MoveNext(), Is.False, "Count() leaves the enumerator exhausted");
+        }
+        finally
+        {
+            e.Dispose();
+        }
+
+        var mixed = new List<ClusterSpatialQueryResult>();
+        var buffer = new ClusterSpatialQueryResult[13];
+        e = Open(dbe, cs, all);
+        try
+        {
+            for (int i = 0; i < 77 && e.MoveNext(); i++)
+            {
+                mixed.Add(e.Current);
+            }
+
+            int n;
+            while ((n = e.Fill(buffer)) > 0)
+            {
+                mixed.AddRange(buffer.AsSpan(0, n).ToArray());
+                if (e.MoveNext())
+                {
+                    mixed.Add(e.Current);
+                }
+            }
+        }
+        finally
+        {
+            e.Dispose();
+        }
+
+        Assert.That(mixed, Is.EqualTo(reference), "MoveNext and Fill interleaved must yield the same sequence as MoveNext alone");
     }
 
     // ── Lifetime of the rented window, through the public API ────────────────────────────────────────────────────────────────────────────────────────

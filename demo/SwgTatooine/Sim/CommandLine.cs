@@ -32,6 +32,7 @@ public static class CommandLine
         c.Probe = Array.IndexOf(args, "--probe") >= 0;
         c.WorkProbe = Array.IndexOf(args, "--work-probe") >= 0;
         c.ChunkStats = Array.IndexOf(args, "--chunk-stats") >= 0;
+        c.SimdNarrowphase = Array.IndexOf(args, "--scalar-narrowphase") < 0;
         c.BatchSpawnSortThreshold = Int(args, "--batch-sort", c.BatchSpawnSortThreshold);
         c.TickRateHz = Int(args, "--hz", c.TickRateHz);
         c.WorkerCount = Int(args, "--workers", c.WorkerCount);

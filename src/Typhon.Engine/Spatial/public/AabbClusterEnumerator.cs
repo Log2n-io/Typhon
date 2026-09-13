@@ -44,19 +44,10 @@ public unsafe ref struct AabbClusterEnumerator
     private readonly ArchetypeClusterState _state;
     private readonly SpatialGrid _grid;
 
-    // Query bounds in world units, f64 since #914. For 2D queries, the Z components are set to +/- infinity by the caller so the Z overlap test trivially
-    // passes against 2D cluster storage (which leaves Z bounds at the ClusterSpatialAabb.Empty sentinel values).
-    //
-    // f64 and not f32 because this is a WORLD coordinate and the world frame is f64. The width is paid exactly twice per query and once per cell: the
-    // narrowphase compares against it directly — in double, matching the doubles the tier readers widen entity bounds to, so the six per-entity
-    // narrowing conversions this loop used to do are gone rather than widened — and SetCellQueryFrame narrows it into the cell frame once per cell, where
-    // the broadphase's f32 SoA scan meets it. The hot inner loops did not change width; the query box did.
-    private readonly double _queryMinX;
-    private readonly double _queryMinY;
-    private readonly double _queryMinZ;
-    private readonly double _queryMaxX;
-    private readonly double _queryMaxY;
-    private readonly double _queryMaxZ;
+    // The query's box, and its sphere for a radius query, in WORLD f64 (#914, SQ-06) — see QueryGeometry. For a 2D query the caller passes ±Infinity on Z,
+    // so the Z overlap test trivially passes against 2D cluster storage. The caller builds a radius query's box as the sphere's enclosing box, so the cell
+    // expansion and the cluster overlap cover every candidate; RadiusSq 0 means a pure box query.
+    private readonly QueryGeometry _query;
 
     // The query box expressed in the CURRENT cell's frame. Cluster bounds are C15 cell-relative (#872 step 9), so the broadphase compare needs both sides in
     // the same frame. Converted once per CELL rather than once per cluster: the origin is constant across every cluster in a cell, so this is six
@@ -78,26 +69,16 @@ public unsafe ref struct AabbClusterEnumerator
     private readonly int _cellMaxY;
     private readonly int _cellMaxZ;
 
-    // Cluster-SoA field offset for the spatial field within each cluster, precomputed.
-    private readonly int _spatialCompOffset;
-    private readonly int _spatialCompSize;
-    private readonly int _spatialFieldOffset;
-    private readonly SpatialFieldInfo _fieldInfo;
-    private readonly int _entityIdsOffset;
+    // Where the spatial field sits in a cluster and how the narrowphase reads it, including whether the AABB2F block kernel applies — see ClusterFieldLayout.
+    private readonly ClusterFieldLayout _layout;
+
+    // The current cluster's block decision (DecideBlocks): whether the kernel has run for it, and which slots of _currentOccupancyBits it approved.
+    private bool _blocksDecided;
+    private ulong _decidedHits;
 
     // Is the cluster's spatial field 3D? Decides the cell walk's Z range; the narrowphase takes its dimensionality from its tier reader.
     // ReSharper disable once PrivateFieldCanBeConvertedToLocalVariable
     private readonly bool _is3D;
-
-    // Optional radius filter (issue #230 Phase 3 — Radius query support). When <see cref="_radiusSq"/> is positive, the narrowphase applies a distance
-    // check after the AABB overlap check: the entity passes only if the closest point on its tight AABB to (_radiusCenterX, _radiusCenterY, _radiusCenterZ)
-    // is within sqrt(_radiusSq). The broadphase still uses the enclosing AABB — the caller is responsible for constructing an enumerator whose
-    // _queryMin*/_queryMax* bounds match the sphere's enclosing AABB, so the cell expansion and cluster AABB overlap cover every candidate. When
-    // <see cref="_radiusSq"/> is zero, the narrowphase runs the pure AABB check only (legacy AabbClusterEnumerator behavior).
-    private readonly double _radiusSq;
-    private readonly double _radiusCenterX;
-    private readonly double _radiusCenterY;
-    private readonly double _radiusCenterZ;
 
     // Narrowphase accessor: this thread's warm window over the cluster segment, rented from SpatialQueryAccessorCache on the first cluster open (or first
     // tree hit) and handed back on exhaustion or Dispose. _warmEntry is null while none is held; _warmToken is what the rent stamped — a copy's second
@@ -162,6 +143,10 @@ public unsafe ref struct AabbClusterEnumerator
     /// </remarks>
     private readonly bool HasStartedHalf => _currentCellIndex != null || _treeActive;
 
+    /// <summary>True when this query's narrowphase runs <see cref="NarrowphaseAabb2F"/>'s block kernel. Tests assert it, so a green run is known to have
+    /// exercised the kernel rather than the scalar loop.</summary>
+    internal readonly bool UsesAabb2FBlocks => _layout.Aabb2FBlocks != 0;
+
     // Last-yielded result.
     private ClusterSpatialQueryResult _current;
 
@@ -170,17 +155,8 @@ public unsafe ref struct AabbClusterEnumerator
     {
         _state = state;
         _grid = grid;
-        _queryMinX = minX;
-        _queryMinY = minY;
-        _queryMinZ = minZ;
-        _queryMaxX = maxX;
-        _queryMaxY = maxY;
-        _queryMaxZ = maxZ;
+        _query = new QueryGeometry(minX, minY, minZ, maxX, maxY, maxZ, radiusSq, radiusCenterX, radiusCenterY, radiusCenterZ);
         _categoryMask = categoryMask;
-        _radiusSq = radiusSq;
-        _radiusCenterX = radiusCenterX;
-        _radiusCenterY = radiusCenterY;
-        _radiusCenterZ = radiusCenterZ;
 
         // Expand the query AABB to the overlapping cell range. Each overlapping cell's per-archetype spatial slot may or may not exist — the iteration
         // handles null slots gracefully. The Z range is narrowed again below for a 2D archetype.
@@ -198,15 +174,8 @@ public unsafe ref struct AabbClusterEnumerator
             maxX + overhang, maxY + overhang, maxZ + overhang,
             out _cellMinX, out _cellMinY, out _cellMinZ, out _cellMaxX, out _cellMaxY, out _cellMaxZ);
 
-        // ref readonly, not a copy: ClusterSpatialSlot is ~104 bytes, 72 of them the descriptor, and copying it here to read five fields was 104 bytes of
-        // memcpy on every query construction (#916 O3). The rest of the codebase already reads it this way.
-        ref readonly var ss = ref state.SpatialSlot;
-        _spatialCompOffset = state.Layout.ComponentOffset(ss.Slot);
-        _spatialCompSize = state.Layout.ComponentSize(ss.Slot);
-        _spatialFieldOffset = ss.FieldOffset;
-        _fieldInfo = ss.FieldInfo;
-        _entityIdsOffset = state.Layout.EntityIdsOffset;
-        _is3D = ss.FieldInfo.FieldType.Is3D();
+        _layout = new ClusterFieldLayout(state);
+        _is3D = _layout.FieldType.Is3D();
 
         // A 2D archetype's query carries ±Infinity on Z, meaning "every Z", which WorldToCellRange saturates to the full depth. Left alone that makes every
         // such query sweep every Z plane of a deep grid, of which exactly one can ever hold a cell: ReadSpatialCenter3D reports posZ = 0 for both 2D field
@@ -230,6 +199,8 @@ public unsafe ref struct AabbClusterEnumerator
         _currentBroadphaseSlot = 0;
         _useSimdScan = false;
         _currentOccupancyBits = 0UL;
+        _blocksDecided = false;
+        _decidedHits = 0UL;
         _currentClusterChunkId = 0;
         _currentClusterBase = null;
         _currentCellStaticPass = false;
@@ -256,12 +227,12 @@ public unsafe ref struct AabbClusterEnumerator
     private void SetCellQueryFrame(int cellKey)
     {
         _grid.CellOrigin(cellKey, out double originX, out double originY, out double originZ);
-        _cellQueryMinX = ClusterSpatialAabb.ToCellRelativeMin(_queryMinX, originX);
-        _cellQueryMinY = ClusterSpatialAabb.ToCellRelativeMin(_queryMinY, originY);
-        _cellQueryMinZ = ClusterSpatialAabb.ToCellRelativeMin(_queryMinZ, originZ);
-        _cellQueryMaxX = ClusterSpatialAabb.ToCellRelativeMax(_queryMaxX, originX);
-        _cellQueryMaxY = ClusterSpatialAabb.ToCellRelativeMax(_queryMaxY, originY);
-        _cellQueryMaxZ = ClusterSpatialAabb.ToCellRelativeMax(_queryMaxZ, originZ);
+        _cellQueryMinX = ClusterSpatialAabb.ToCellRelativeMin(_query.MinX, originX);
+        _cellQueryMinY = ClusterSpatialAabb.ToCellRelativeMin(_query.MinY, originY);
+        _cellQueryMinZ = ClusterSpatialAabb.ToCellRelativeMin(_query.MinZ, originZ);
+        _cellQueryMaxX = ClusterSpatialAabb.ToCellRelativeMax(_query.MaxX, originX);
+        _cellQueryMaxY = ClusterSpatialAabb.ToCellRelativeMax(_query.MaxY, originY);
+        _cellQueryMaxZ = ClusterSpatialAabb.ToCellRelativeMax(_query.MaxZ, originZ);
     }
 
     /// <summary>
@@ -363,7 +334,9 @@ public unsafe ref struct AabbClusterEnumerator
             //    _currentClusterBase.
             if (_currentOccupancyBits != 0UL)
             {
+                DecideBlocks(3);
                 _currentOccupancyBits = DrainTier(_currentOccupancyBits, ref sink);
+                _decidedHits &= _currentOccupancyBits;
                 if (sink.Found)
                 {
                     _current = sink.Result;
@@ -395,7 +368,12 @@ public unsafe ref struct AabbClusterEnumerator
         {
             if (_currentOccupancyBits != 0UL)
             {
-                _currentOccupancyBits = DrainTier(_currentOccupancyBits, ref sink);
+                // The slots the kernel approved need no bounds here, so they are counted rather than walked; the loop takes the rest.
+                DecideBlocks(2);
+                sink.Count += BitOperations.PopCount(_decidedHits);
+                var undecided = _currentOccupancyBits & ~_decidedHits;
+                _currentOccupancyBits = undecided == 0UL ? 0UL : DrainTier(undecided, ref sink);
+                _decidedHits = 0UL;
             }
 
             if (!NextCluster())
@@ -425,7 +403,9 @@ public unsafe ref struct AabbClusterEnumerator
         {
             if (_currentOccupancyBits != 0UL)
             {
+                DecideBlocks(3);
                 _currentOccupancyBits = DrainTier(_currentOccupancyBits, ref sink);
+                _decidedHits &= _currentOccupancyBits;
                 if (sink.Written == destination.Length)
                 {
                     return sink.Written;
@@ -565,14 +545,14 @@ public unsafe ref struct AabbClusterEnumerator
     }
 
     /// <summary>What a drain does with each match; returning false stops the drain after it.</summary>
-    private interface IHitSink
+    internal interface IHitSink
     {
         bool Hit(byte* clusterBase, int chunkId, int slot, int idsOffset, double minX, double minY, double minZ, double maxX, double maxY, double maxZ,
             double distSq);
     }
 
     /// <summary><see cref="Count"/>'s sink: tallies, never stops, and reads nothing past the test.</summary>
-    private struct CountSink : IHitSink
+    internal struct CountSink : IHitSink
     {
         public int Count;
 
@@ -619,26 +599,109 @@ public unsafe ref struct AabbClusterEnumerator
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static ClusterSpatialQueryResult ResultAt(byte* clusterBase, int chunkId, int slot, int idsOffset, double minX, double minY, double minZ,
+    internal static ClusterSpatialQueryResult ResultAt(byte* clusterBase, int chunkId, int slot, int idsOffset, double minX, double minY, double minZ,
         double maxX, double maxY, double maxZ, double distSq) =>
         new(*(long*)(clusterBase + idsOffset + (slot * 8)), chunkId, slot, minX, minY, minZ, maxX, maxY, maxZ, distSq);
 
     /// <summary>Drain the current cluster's slots in <paramref name="bits"/> into <paramref name="sink"/> through this archetype's tier reader.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private readonly ulong DrainTier<TSink>(ulong bits, scoped ref TSink sink) where TSink : struct, IHitSink, allows ref struct =>
-        _fieldInfo.FieldType switch
+        DrainCluster(in _layout, in _query, _currentClusterBase, _currentClusterChunkId, bits, ref sink);
+
+    /// <summary>
+    /// Drain one cluster's slots in <paramref name="bits"/> into <paramref name="sink"/>, through the tier reader for <paramref name="layout"/>'s field type.
+    /// The narrowphase every cluster query runs — this enumerator's three drains and <c>ClusterRadiusBatch</c>'s members alike (SQ-03).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static ulong DrainCluster<TSink>(in ClusterFieldLayout layout, in QueryGeometry query, byte* clusterBase, int chunkId, ulong bits,
+        scoped ref TSink sink) where TSink : struct, IHitSink, allows ref struct =>
+        layout.FieldType switch
         {
-            SpatialFieldType.AABB2F => Drain<Aabb2FReader, TSink>(bits, ref sink),
-            SpatialFieldType.AABB3F => Drain<Aabb3FReader, TSink>(bits, ref sink),
-            SpatialFieldType.BSphere2F => Drain<BSphere2FReader, TSink>(bits, ref sink),
-            SpatialFieldType.BSphere3F => Drain<BSphere3FReader, TSink>(bits, ref sink),
-            SpatialFieldType.AABB2D => Drain<Aabb2DReader, TSink>(bits, ref sink),
-            SpatialFieldType.AABB3D => Drain<Aabb3DReader, TSink>(bits, ref sink),
-            SpatialFieldType.BSphere2D => Drain<BSphere2DReader, TSink>(bits, ref sink),
-            SpatialFieldType.BSphere3D => Drain<BSphere3DReader, TSink>(bits, ref sink),
+            SpatialFieldType.AABB2F => Drain<Aabb2FReader, TSink>(in layout, in query, clusterBase, chunkId, bits, ref sink),
+            SpatialFieldType.AABB3F => Drain<Aabb3FReader, TSink>(in layout, in query, clusterBase, chunkId, bits, ref sink),
+            SpatialFieldType.BSphere2F => Drain<BSphere2FReader, TSink>(in layout, in query, clusterBase, chunkId, bits, ref sink),
+            SpatialFieldType.BSphere3F => Drain<BSphere3FReader, TSink>(in layout, in query, clusterBase, chunkId, bits, ref sink),
+            SpatialFieldType.AABB2D => Drain<Aabb2DReader, TSink>(in layout, in query, clusterBase, chunkId, bits, ref sink),
+            SpatialFieldType.AABB3D => Drain<Aabb3DReader, TSink>(in layout, in query, clusterBase, chunkId, bits, ref sink),
+            SpatialFieldType.BSphere2D => Drain<BSphere2DReader, TSink>(in layout, in query, clusterBase, chunkId, bits, ref sink),
+            SpatialFieldType.BSphere3D => Drain<BSphere3DReader, TSink>(in layout, in query, clusterBase, chunkId, bits, ref sink),
             // Nothing decodes an unknown field type (ReadAndValidateBoundsFromPtr's default case), so none of its slots can match.
             _ => 0UL,
         };
+
+    /// <summary>
+    /// Run the AABB2F block kernel (<see cref="NarrowphaseAabb2F"/>) over the current cluster once: drop the slots it rejects from
+    /// <see cref="_currentOccupancyBits"/> and record the ones it approves in <see cref="_decidedHits"/>. A no-op when the kernel does not apply or has
+    /// already run for this cluster.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Once per cluster, not once per drain call.</b> MoveNext drains one hit per call, and re-running the kernel over the remaining slots on every
+    /// call cost 2.3–2.9× the scalar loop (P1 micro-bench). Decided once, the approved slots are all the loop walks afterwards.</para>
+    /// <para><b>MoveNext and Fill still take each approved slot through the loop</b>, which tests it again: the result's bounds then come from the read that
+    /// tested them, the single-read rule <see cref="IBoundsReader"/> states. Count needs no bounds and takes a popcount.</para>
+    /// <para><b>A block with fewer than <paramref name="minSlots"/> occupied slots is left to the loop.</b> A kernel pass costs about 11 ns per block and
+    /// the loop about 7 ns per entity (P1 micro-bench), so Count, which only counts what the kernel approves, gains from two slots up; MoveNext and Fill,
+    /// which then walk each approved slot through the loop again, only from three. Whichever drain opens a cluster decides it for the others.</para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void DecideBlocks(int minSlots)
+    {
+        if (_layout.Aabb2FBlocks != 0 && !_blocksDecided)
+        {
+            DecideBlocksCore(minSlots);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void DecideBlocksCore(int minSlots)
+    {
+        _blocksDecided = true;
+        _currentOccupancyBits = ApplyBlockKernel(in _layout, in _query, _currentClusterBase, _currentOccupancyBits, minSlots, out _decidedHits);
+    }
+
+    /// <summary>
+    /// The AABB2F block kernel's decision over one cluster: <paramref name="bits"/> with the slots it rejects dropped, and the slots it approves in
+    /// <paramref name="approved"/>. Only blocks holding at least <paramref name="minSlots"/> of <paramref name="bits"/> are decided; the rest stay in the
+    /// result, undecided, for the loop. The caller has checked that the kernel applies (<see cref="ClusterFieldLayout.Aabb2FBlocks"/>).
+    /// </summary>
+    internal static ulong ApplyBlockKernel(in ClusterFieldLayout layout, in QueryGeometry query, byte* clusterBase, ulong bits, int minSlots,
+        out ulong approved)
+    {
+        approved = 0UL;
+
+        // Drain's early-out on an inverted Z range is the loop's to take; the kernel does not repeat it, so everything stays undecided.
+        if (query.MaxZ < query.MinZ)
+        {
+            return bits;
+        }
+
+        var dense = 0UL;
+        for (var g = 0; g < layout.Aabb2FBlocks; g++)
+        {
+            var block = (bits >> (g * NarrowphaseAabb2F.BlockSize)) & 0xFFFFUL;
+            if (BitOperations.PopCount(block) >= minSlots)
+            {
+                dense |= block << (g * NarrowphaseAabb2F.BlockSize);
+            }
+        }
+
+        if (dense == 0UL)
+        {
+            return bits;
+        }
+
+        approved = NarrowphaseAabb2F.Match((float*)(clusterBase + layout.FieldsOffset), dense, layout.Aabb2FBlocks, in query);
+        return (bits & ~dense) | approved;
+    }
+
+    /// <summary>Make <paramref name="occupancy"/> the current cluster's slots to drain, none of them decided yet.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void OpenOccupancy(ulong occupancy)
+    {
+        _currentOccupancyBits = occupancy;
+        _blocksDecided = false;
+        _decidedHits = 0UL;
+    }
 
     /// <summary>
     /// Test the current cluster's occupied slots in <paramref name="bits"/> against the query and hand each match to <paramref name="sink"/>. Returns the
@@ -648,17 +711,16 @@ public unsafe ref struct AabbClusterEnumerator
     /// Everything the loop reads is copied to locals first: the sink stores through a reference, and a store the JIT cannot prove disjoint from this
     /// enumerator would otherwise force every field it reads to be reloaded for each entity.
     /// </remarks>
-    private readonly ulong Drain<TReader, TSink>(ulong bits, scoped ref TSink sink)
+    internal static ulong Drain<TReader, TSink>(in ClusterFieldLayout layout, in QueryGeometry query, byte* clusterBase, int chunkId, ulong bits,
+        scoped ref TSink sink)
         where TReader : struct, IBoundsReader
         where TSink : struct, IHitSink, allows ref struct
     {
-        byte* clusterBase = _currentClusterBase;
-        byte* fields = clusterBase + _spatialCompOffset + _spatialFieldOffset;
-        int stride = _spatialCompSize;
-        int chunkId = _currentClusterChunkId;
-        int idsOffset = _entityIdsOffset;
-        double qMinX = _queryMinX, qMinY = _queryMinY, qMinZ = _queryMinZ, qMaxX = _queryMaxX, qMaxY = _queryMaxY, qMaxZ = _queryMaxZ;
-        double radiusSq = _radiusSq, cx = _radiusCenterX, cy = _radiusCenterY, cz = _radiusCenterZ;
+        byte* fields = clusterBase + layout.FieldsOffset;
+        int stride = layout.Stride;
+        int idsOffset = layout.IdsOffset;
+        double qMinX = query.MinX, qMinY = query.MinY, qMinZ = query.MinZ, qMaxX = query.MaxX, qMaxY = query.MaxY, qMaxZ = query.MaxZ;
+        double radiusSq = query.RadiusSq, cx = query.CenterX, cy = query.CenterY, cz = query.CenterZ;
         bool radius = radiusSq > 0d;
 
         // A 2D entity takes the query's Z range as its own, so its Z test can only fail on an inverted range — which then rejects the whole cluster. Every
@@ -761,7 +823,7 @@ public unsafe ref struct AabbClusterEnumerator
                     EnsureAccessor();
                     _currentClusterBase = _warm.GetChunkAddress(treeChunkId);
                     _currentClusterChunkId = treeChunkId;
-                    _currentOccupancyBits = *(ulong*)_currentClusterBase;
+                    OpenOccupancy(*(ulong*)_currentClusterBase);
                     return true;
                 }
 
@@ -781,7 +843,7 @@ public unsafe ref struct AabbClusterEnumerator
                 EnsureAccessor();
                 _currentClusterBase = _warm.GetChunkAddress(batchedChunkId);
                 _currentClusterChunkId = batchedChunkId;
-                _currentOccupancyBits = *(ulong*)_currentClusterBase;
+                OpenOccupancy(*(ulong*)_currentClusterBase);
                 return true;
             }
 
@@ -832,7 +894,7 @@ public unsafe ref struct AabbClusterEnumerator
                 EnsureAccessor();
                 _currentClusterBase = _warm.GetChunkAddress(chunkId);
                 _currentClusterChunkId = chunkId;
-                _currentOccupancyBits = *(ulong*)_currentClusterBase;
+                OpenOccupancy(*(ulong*)_currentClusterBase);
                 return true;
             }
 
@@ -951,7 +1013,7 @@ public unsafe ref struct AabbClusterEnumerator
             int i = _escapedNext++;
 
             // Cheapest rejection first: most named clusters are nowhere near a given query.
-            if (!escaped.Overlaps(i, _queryMinX, _queryMinY, _queryMinZ, _queryMaxX, _queryMaxY, _queryMaxZ)
+            if (!escaped.Overlaps(i, _query.MinX, _query.MinY, _query.MinZ, _query.MaxX, _query.MaxY, _query.MaxZ)
                 || (_categoryMask != 0 && (escaped.CategoryMasks[i] & _categoryMask) == 0)
                 || escaped.HomeCellIn(i, _cellMinX, _cellMinY, _cellMinZ, _cellMaxX, _cellMaxY, _cellMaxZ)
                 || !escaped.IsCurrent(i, _state.ClusterCellMap))
@@ -963,7 +1025,7 @@ public unsafe ref struct AabbClusterEnumerator
             EnsureAccessor();
             _currentClusterBase = _warm.GetChunkAddress(chunkId);
             _currentClusterChunkId = chunkId;
-            _currentOccupancyBits = *(ulong*)_currentClusterBase;
+            OpenOccupancy(*(ulong*)_currentClusterBase);
             return true;
         }
 
@@ -984,6 +1046,7 @@ public unsafe ref struct AabbClusterEnumerator
         // Leave the enumerator exhausted. Its current cluster's address was valid only while the window pinned it, so a MoveNext after Dispose must find
         // nothing left to drain and no cell left to walk.
         _currentOccupancyBits = 0UL;
+        _decidedHits = 0UL;
         _currentClusterBase = null;
         _treeActive = false;
         _currentCellIndex = null;

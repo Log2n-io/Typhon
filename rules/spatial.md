@@ -195,10 +195,26 @@
     further MoveNext() hits, and Fill() yields MoveNext()'s results in MoveNext()'s order, whatever the buffer size. They share one
     narrowphase (DrainTier → Drain, one loop per storage tier, differing only in the sink) and one cluster walk (NextCluster), which is what
     holds this; a drain with its own copy of either is the violation waiting to happen.
-  scope: SpatialRTree.CountInAABB, AABBQueryEnumerator, AabbClusterEnumerator.Count, AabbClusterEnumerator.Fill, AabbClusterEnumerator.DrainTier
+  invariant the AABB2F tier's block kernel is that one narrowphase, not a second copy: NarrowphaseAabb2F decides each entity of a 16-entity block
+    with the loop's own predicates — SpatialGeometry.IsDegenerate on the stored floats, then the four skip conditions and the MaxNative clamp
+    distance in f64, written as skips because the positive form differs on a NaN query bound — so kernel and loop answer identically, entity for
+    entity. It runs once per cluster (DecideBlocks), for all three drains alike: it drops the slots it rejects and Count adds the ones it approves
+    as a popcount, while MoveNext and Fill walk the approved slots through the loop, which tests each again, so a result's bounds come from the read
+    that tested them. Blocks too sparse to pay for a kernel pass (under two occupied slots for Count, under three for MoveNext and Fill), and the
+    slots past the last whole block, go straight to the loop.
+  scope: SpatialRTree.CountInAABB, AABBQueryEnumerator, AabbClusterEnumerator.Count, AabbClusterEnumerator.Fill, AabbClusterEnumerator.DrainTier,
+    AabbClusterEnumerator.DrainCluster, AabbClusterEnumerator.Drain, AabbClusterEnumerator.DecideBlocks, AabbClusterEnumerator.DecideBlocksCore,
+    AabbClusterEnumerator.ApplyBlockKernel, NarrowphaseAabb2F.MatchAvx512, NarrowphaseAabb2F.MatchAvx2
   verified by: AabbClusterEnumeratorDrainTests — MoveNext against an oracle computed from the spawned bounds (set, bounds and DistanceSq bit for
     bit), Count and Fill against MoveNext, on the scalar scan, the batched scan past one 64-slot batch, a promoted cell and every storage tier;
-    resume after MoveNext for both; and each tier's bounds reader against ReadAndValidateBoundsFromPtr on valid, NaN, inverted and infinite input
+    resume after MoveNext for both; and each tier's bounds reader against ReadAndValidateBoundsFromPtr on valid, NaN, inverted and infinite input.
+    The block kernel: Drains_MatchTheOracle_WithTheAabb2FBlockKernel_AndWithout (scattered clusters, full clusters and a promoted cell, kernel on
+    and off, both against the oracle), Drains_MatchTheOracle_WhenTheClusterEndsInAPartialBlock (59-slot clusters: three blocks and an 11-slot tail
+    through the loop) and Resume_AfterMoveNext_ThroughTheAabb2FBlockKernel; NarrowphaseAabb2FTests holds each kernel (AVX-512, AVX2) to the loop ITSELF
+    — AabbClusterEnumerator.Drain run over the same column, not a transcription of it — over 40 000 random cases seeded with NaN, infinite, inverted,
+    touching, denormal and 2^36 inputs and NaN / infinite query bounds, which the enumerator cannot be driven with (it rejects a non-finite query box);
+    its mutants APositiveFormPredicate_IsCaughtByTheComparison and AQueryNarrowedToF32_IsCaughtByTheComparison show the comparison rejects the positive
+    form and an f32 query
   on_violation: count disagrees with materialized query — game logic makes wrong density decisions
 
 ### SQ-04: Subtree counting shortcut correctness `[fatal]`
@@ -294,7 +310,9 @@
                  the ray and kNN paths convert the CLUSTER bound outward instead, through ToWorldExact.
     narrowphase — entity bound vs query box, WORLD f64. Both sides come from the component and the caller
                   unnarrowed; ReadAndValidateBoundsFromPtr has always produced doubles, and so do the per-tier
-                  readers AabbClusterEnumerator drains through (#906 step 3) — widening an f32 bound is exact.
+                  readers AabbClusterEnumerator drains through (#906 step 3) — widening an f32 bound is exact. The AABB2F block
+                  kernel (NarrowphaseAabb2F) widens each transposed lane to f64 before its overlap and radius tests; its only f32 step is
+                  the degenerate test, which the scalar reader also runs on the stored floats.
     never narrow the world frame to f32 anywhere on the query path, in ANY of the four shapes — AABB, radius, ray,
     frustum, kNN. At 2^36 one f32 step is 8 192 units — wider than a 1 000-unit cell — so an f32 narrowphase
     compares two coordinates that are the SAME number and accepts every entity in the cell. That is a false
@@ -326,7 +344,7 @@
          ClusterSpatialQuery`1.AABB, ClusterSpatialQuery`1.Radius,
          SpatialGrid.ReadSpatialCenter3D, SpatialGrid.ValidateSupportedFieldType,
          SpatialGrid.ValidateWorldExtentForFieldType, SpatialGrid.AxisIsResolvableInF32,
-         ClusterSpatialAabb.ToWorldExact, ClusterWorldAabb, Vector3Like
+         ClusterSpatialAabb.ToWorldExact, ClusterWorldAabb, Vector3Like, NarrowphaseAabb2F
   verified: F64SpatialTierTests — NarrowQueryBoxAtExtent_SelectsOneOfTwoEntitiesInTheSameCell,
     OneUnitQueryBoxAtExtent_ReturnsExactlyTheEntityInsideIt and ResultBoundsComeBackAtFullPrecision cover the
     width invariant for AABB; RayAtExtent_HitsTheEntityInItsPathAndNotTheOneBesideIt,
@@ -341,7 +359,9 @@
     property it stands for, quantified over position rather than sampled at one point. Each precision case carries a PRECONDITION assertion
     that f32 cannot represent it, so a fixture that drifted to a smaller magnitude fails loudly instead of passing
     for the wrong reason.
-  note no [RuleMutant]: every mutant for this rule is an EDIT TO ENGINE CODE — narrow the narrowphase, the ray
+  note one [RuleMutant] only, for the AABB2F block kernel: NarrowphaseAabb2FTests.AQueryNarrowedToF32_IsCaughtByTheComparison
+    runs a predicate that narrows the query to f32 through the comparison that holds each kernel to the loop, and the
+    comparison catches it. Every other mutant for this rule is an EDIT TO ENGINE CODE — narrow the loop, the ray
     origin, the kNN operands or the frustum's bounding box to f32; restore the two-way dimensionality test; make
     the extent check always pass — not an input that can be driven through a verifier's assertion path.
     All six were run by hand when the rule was written (2026-09-08) and each reddens exactly the cases above.

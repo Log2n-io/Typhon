@@ -117,6 +117,12 @@ public sealed class SimConfig
     /// <summary>Spawn count at which a transaction places its entities in per-cell Morton order.</summary>
     public int BatchSpawnSortThreshold = 128;
 
+    /// <summary>
+    /// Run the AABB2F narrowphase sixteen entities at a time with SIMD (the engine default). <c>--scalar-narrowphase</c> turns it off, so one binary
+    /// is both arms of an A/B.
+    /// </summary>
+    public bool SimdNarrowphase = true;
+
     // ── Runtime ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -212,7 +218,8 @@ public sealed class SimConfig
     public int ResolveWorkerCount() => WorkerCount > 0 ? WorkerCount : Environment.ProcessorCount;
 
     /// <summary>A short label identifying this configuration in a results table.</summary>
-    /// <remarks>Deliberately omits <see cref="AwarenessApi"/>: the drain does not change the workload, and the label keys sweep results.</remarks>
+    /// <remarks>Deliberately omits <see cref="AwarenessApi"/> and <see cref="SimdNarrowphase"/>: neither changes the workload, and the label keys sweep
+    /// results.</remarks>
     public string Label =>
         $"{WorldEdgeKm:N0}km x{PopulationScale:N1} cell={ResolveCellSize():N0}m floors={ClusterTargetExtentRatio:G}/{ClusterRepairExtentRatio:G} "
         + $"unit={RepairWorstClustersPerUnit} shuttles={(!Shuttles ? "off" : ShuttleBurst ? "burst" : "trickle")}";
