@@ -23,7 +23,7 @@ If you've used Unity DOTS, Bevy, or any modern ECS scheduler, the shape will fee
 | **Tick** | One simulation frame. Driven by `TickDriver`, target rate set by `RuntimeOptions.BaseTickRate` (default 60 Hz). |
 | **Track** | An ordered, tagged container of DAGs. Tracks run sequentially: every DAG of track *N* completes before any DAG of track *N+1* starts. |
 | **DAG** | A dependency graph of systems. DAGs within one track are independent. |
-| **Phase** | DAG-local ordering bucket. Systems in phase *N* finish before any system in phase *N+1* of the same DAG. |
+| **Phase** | DAG-local ordering bucket, not a barrier: a system in phase *N+1* runs after a system in phase *N* only when a declared access conflict or an explicit edge connects them, directly or through other systems; otherwise they may overlap ([§4](#4-the-dag)). |
 | **System** | The unit of work. One of `CallbackSystem`, `QuerySystem`, `PipelineSystem` ([§5](#5-systems)). |
 | **Worker** | A `Typhon.Worker-{i}` thread that picks ready systems off the DAG and runs them. |
 
@@ -93,7 +93,7 @@ schedule.PublicTrack
 var scheduler = schedule.Build(parent: registry.Runtime, logger);
 ```
 
-`DeclareDag` is mandatory — there is no default-DAG convenience. Within a DAG, phase order is a hard barrier; within a phase, edges come from explicit `.After()` / `.Before()` declarations and from access-derived dependencies ([§4](#4-the-dag)).
+`DeclareDag` is mandatory — there is no default-DAG convenience. Within a DAG, phase order is not a barrier: within and across phases, edges come from explicit `.After()` / `.Before()` declarations and from access-derived dependencies ([§4](#4-the-dag)).
 
 ---
 

@@ -55,7 +55,8 @@ public sealed class Dag
 
     /// <summary>
     /// The DAG's ordered phase sequence. When <see cref="Phases"/> was never called this is a single implicit phase (<see cref="ImplicitPhaseName"/>).
-    /// Phases form a DAG-local total order — every system in phase <c>N</c> completes before any system in phase <c>N+1</c> of the same DAG.
+    /// Phases form a DAG-local total order, and it binds through declared access only: a system in phase <c>N+1</c> starts after a system in phase
+    /// <c>N</c> when their declarations conflict (rule ED-05), and may run alongside it otherwise.
     /// </summary>
     public Phase[] ResolvedPhases => _phases ?? [new Phase(ImplicitPhaseName)];
 

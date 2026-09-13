@@ -187,7 +187,7 @@ Beyond components, you can declare **resources** (`ReadsResource`/`WritesResourc
 
 Access declarations handle *data* ordering. For *structural* ordering you have two tools:
 
-- **Phases** — a DAG-local total order. Everything in `Input` finishes before anything in `Simulation` starts. Typhon ships `Input`, `Simulation`, `Output`, `Cleanup`; you can define your own. Use phases for coarse "all input before all simulation before all rendering" structure.
+- **Phases** — a DAG-local total order, enforced through access: a `Simulation` system waits for an `Input` system when a declared conflict or an explicit edge connects them, directly or through other systems; otherwise the two may run at the same time. So declare every component a system reads, spatial queries included; a read you don't declare is ordered by nothing. Typhon ships `Input`, `Simulation`, `Output`, `Cleanup`; you can define your own. Use phases for the coarse causal order (input, then simulation, then rendering); the access declarations are what enforce it.
 - **`After` / `Before` / `AfterAll`** — an explicit edge between two named systems in the same DAG. Use it to disambiguate two writers, or to force a specific order the access model can't infer.
 
 You declare the phase list when you create the DAG, and the engine slots each system into its phase:

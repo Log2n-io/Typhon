@@ -7,9 +7,10 @@ namespace SwgTatooine;
 // component access that lets the auto-DAG order two systems without either naming the other. The behaviour is in
 // SimBridge.
 //
-// The access declarations are load-bearing rather than documentation: Think writes Locomotion and AiState and reads
-// WorldBounds; Move writes WorldBounds and reads Locomotion. That single inversion is what puts them in the right order
-// and what lets everything inside a phase run concurrently.
+// The access declarations are load-bearing rather than documentation: Think writes the motion and brain components and
+// reads the placements; Move writes the placements and reads the motion. That inversion is what puts them in order, and
+// what lets everything inside a phase run concurrently. Phases order nothing by themselves (cross-phase edges are
+// conflict-driven), so a system whose spatial queries read another archetype's positions declares that placement too.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 /// <summary>Creature AI: mode transitions, wander destinations and the aggro query.</summary>
@@ -26,6 +27,9 @@ internal sealed class CreatureThinkSystem : QuerySystem
         .ChunksPerWorker(2f)
         .Reads<CreaturePlacement>()
         .Reads<CreatureVitals>()
+
+        // The aggro query reads player positions; declared, so Shuttle's and PlayerMove's writes are ordered around it (rule ED-05).
+        .Reads<PlayerPlacement>()
         .Writes<CreatureBrain>()
         .Writes<CreatureMotion>()
         .Input(() => _bridge.CreatureView);
@@ -115,7 +119,7 @@ internal sealed class NpcMoveSystem : QuerySystem
 }
 
 /// <summary>
-/// Interest management. Runs in its own phase after <see cref="SimPhases.Move"/> so it sees this tick's positions.
+/// Interest management over this tick's positions: it declares every placement its queries read, which is what orders it after the systems that move them.
 /// </summary>
 internal sealed class AwarenessSystem : QuerySystem
 {
@@ -123,20 +127,30 @@ internal sealed class AwarenessSystem : QuerySystem
 
     public AwarenessSystem(SimBridge bridge) => _bridge = bridge;
 
-    protected override void Configure(SystemBuilder b) => b
-        .Name("Awareness")
-        .Phase(SimPhases.Awareness)
-        .Parallel()
-        .ChunksPerWorker(2f)
+    protected override void Configure(SystemBuilder b)
+    {
+        b
+            .Name("Awareness")
+            .Phase(SimPhases.Awareness)
+            .Parallel()
+            .ChunksPerWorker(2f)
 
-        // Interest management costs ~3.5 us per player against ~9 ns per creature in CreatureThink — a 375x spread in
-        // per-entity work inside one DAG. The global 64-entity floor is sized for the cheap end, so with a few hundred
-        // players this system gets ceil(320 / 64) = 5 chunks and ChunksPerWorker above cannot lift that. 0 leaves it on
-        // the global floor.
-        .MinChunkSize(_bridge.AwarenessMinChunk)
-        .Reads<PlayerPlacement>()
-        .WritesResource("AwarenessStats")
-        .Input(() => _bridge.PlayerView);
+            // Interest management costs ~3.5 us per player against ~9 ns per creature in CreatureThink — a 375x spread in
+            // per-entity work inside one DAG. The global 64-entity floor is sized for the cheap end, so with a few hundred
+            // players this system gets ceil(320 / 64) = 5 chunks and ChunksPerWorker above cannot lift that. 0 leaves it on
+            // the global floor.
+            .MinChunkSize(_bridge.AwarenessMinChunk)
+            .Reads<PlayerPlacement>()
+
+            // The creature, NPC and structure queries read these. Declaring them is what makes Awareness wait for CreatureMove and NpcMove: cross-phase
+            // edges are conflict-driven (rule ED-05), and without them it ran while those systems wrote the positions it queried. StructurePlacement has
+            // no writer today; it is declared because the queries read it.
+            .Reads<CreaturePlacement>()
+            .Reads<NpcPlacement>()
+            .Reads<StructurePlacement>()
+            .WritesResource("AwarenessStats")
+            .Input(() => _bridge.PlayerView);
+    }
 
     protected override void Execute(TickContext ctx) => _bridge.AwarenessTick(ctx);
 }
@@ -187,6 +201,9 @@ internal sealed class CreatureCombatSystem : QuerySystem
         .Parallel()
         .ChunksPerWorker(2f)
         .Reads<CreaturePlacement>()
+
+        // The line-of-fire query reads player positions (rule ED-05: undeclared, PlayerMove would be free to write them while it runs).
+        .Reads<PlayerPlacement>()
         .Writes<CreatureVitals>()
         .Writes<CreatureBrain>()
         .Input(() => _bridge.CreatureView);
@@ -216,6 +233,11 @@ internal sealed class MissionSystem : QuerySystem
         .Writes<Lair>()
         .Writes<LairVitals>()
         .Writes<LairPlacement>()
+
+        // The seek query reads player positions, which Shuttle writes in this same phase: Fresh orders it after Shuttle, so it never reads a position
+        // mid-write (a plain Reads with a same-phase writer is a Build error, and Snapshot needs a Versioned component). A cell-walking query still finds
+        // an arrival in its new cell only after this tick's fence.
+        .ReadsFresh<PlayerPlacement>()
         .Input(() => _bridge.LairView);
 
     protected override void Execute(TickContext ctx) => _bridge.MissionTick(ctx);
@@ -225,8 +247,8 @@ internal sealed class MissionSystem : QuerySystem
 /// Shuttle travel (#910's workload): boards queued players while their port's shuttle is down and transports them to the destination port.
 /// </summary>
 /// <remarks>
-/// In the Spawn phase because that is the one phase where writing <see cref="PlayerPlacement"/> collides with nothing — Think reads it, Move writes
-/// it — and because everything downstream should see this tick's arrivals where they landed.
+/// In the Spawn phase, ahead of everything that reads <see cref="PlayerPlacement"/> — Think's queries, and <see cref="MissionSystem"/>, which reads it
+/// fresh and so runs after it — and of Move, which writes it. A cell-walking query still finds an arrival in its new cell only after this tick's fence.
 /// </remarks>
 internal sealed class ShuttleSystem : QuerySystem
 {
@@ -247,8 +269,8 @@ internal sealed class ShuttleSystem : QuerySystem
     protected override void Execute(TickContext ctx) => _bridge.ShuttleTick(ctx);
 }
 
-/// <summary>Per-tick shuttle bookkeeping and, with <c>--probe</c>, the arrival-cell query probe. A resource marker only: a CallbackSystem that declares
-/// component access is pruned from the schedule.</summary>
+/// <summary>Per-tick shuttle bookkeeping and, with <c>--probe</c>, the arrival-cell query probe. It declares the player positions its queries read, like
+/// any system; a CallbackSystem that declares component access still runs (measured: it did here, every tick).</summary>
 internal sealed class ShuttleProbeSystem : CallbackSystem
 {
     private readonly SimBridge _bridge;
@@ -258,7 +280,10 @@ internal sealed class ShuttleProbeSystem : CallbackSystem
     protected override void Configure(SystemBuilder b) => b
         .Name("ShuttleProbe")
         .Phase(SimPhases.Report)
-        .WritesResource("ShuttleProbe");
+        .WritesResource("ShuttleProbe")
+
+        // With --probe it queries player positions.
+        .Reads<PlayerPlacement>();
 
     protected override void Execute(TickContext ctx) => _bridge.ShuttleProbeTick(ctx);
 }
@@ -310,14 +335,31 @@ internal sealed class AwarenessSplitSystem : QuerySystem
         _target = target;
     }
 
-    protected override void Configure(SystemBuilder b) => b
-        .Name($"Awareness{_target}")
-        .Phase(SimPhases.Awareness)
-        .Parallel()
-        .ChunksPerWorker(2f)
-        .Reads<PlayerPlacement>()
-        .WritesResource($"AwarenessStats{_target}")
-        .Input(() => _bridge.PlayerView);
+    protected override void Configure(SystemBuilder b)
+    {
+        b
+            .Name($"Awareness{_target}")
+            .Phase(SimPhases.Awareness)
+            .Parallel()
+            .ChunksPerWorker(2f)
+            .Reads<PlayerPlacement>()
+            .WritesResource($"AwarenessStats{_target}")
+            .Input(() => _bridge.PlayerView);
+
+        // The placement this split's query reads, as AwarenessSystem declares it.
+        switch (_target)
+        {
+            case AwarenessTarget.Structures:
+                b.Reads<StructurePlacement>();
+                break;
+            case AwarenessTarget.Creatures:
+                b.Reads<CreaturePlacement>();
+                break;
+            case AwarenessTarget.Npcs:
+                b.Reads<NpcPlacement>();
+                break;
+        }
+    }
 
     protected override void Execute(TickContext ctx) => _bridge.AwarenessTick(ctx, _target);
 }

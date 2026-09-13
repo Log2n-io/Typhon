@@ -1,8 +1,10 @@
 namespace SwgTatooine;
 
 /// <summary>
-/// The DAG-local phases the simulation runs in. Every system in phase N completes before any system in phase N+1, so
-/// the phase list is the coarse ordering and the per-system access declarations refine it inside a phase.
+/// The DAG-local phases the simulation runs in. The phase list is the causal order, but it binds only through the access
+/// declarations and explicit edges: a system in phase N+1 waits for a phase-N system when a declared conflict or an explicit
+/// edge connects them, directly or through other systems, and may run alongside it otherwise. So each system declares every
+/// placement its spatial queries read — that, not the phase, is what makes Awareness wait for the movers.
 /// </summary>
 /// <remarks>
 /// <para>The order is the causal one a server actually needs: decide, then move, then observe what moved, then resolve
@@ -27,9 +29,9 @@ public static class SimPhases
     public static readonly Phase Think = new("Think");
 
     /// <summary>
-    /// Integration. The one phase that writes <see cref="WorldBounds"/>, and therefore the one the spatial fence cares
-    /// about. Separated from <see cref="Think"/> so the decision writers and the position writer do not collide on a
-    /// component and get serialised for it.
+    /// Integration: where creatures, NPCs and players move, and so the phase the spatial fence cares about most (Spawn
+    /// also writes placements: shuttle arrivals and mission teleports). Separated from <see cref="Think"/> so the decision
+    /// writers and the position writers do not collide on a component and get serialised for it.
     /// </summary>
     public static readonly Phase Move = new("Move");
 

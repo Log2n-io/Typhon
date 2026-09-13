@@ -472,9 +472,10 @@ public sealed class TyphonBridge : IDisposable
         FoodPickedUpQueue   = schedule.CreateEventQueue<FoodPickedUpEvent>("FoodPickedUp", capacity: 4096);
         FoodDeliveredQueue  = schedule.CreateEventQueue<FoodDeliveredEvent>("FoodDelivered", capacity: 4096);
 
-        // The whole simulation is one DAG on the Public track. Its four DAG-local phases form a total order — every
-        // system in phase N completes before any system in phase N+1. The Workbench's System DAG view uses this skeleton
-        // as the swim-lane structure.
+        // The whole simulation is one DAG on the Public track. Its four DAG-local phases form a total order that binds
+        // through the access declarations and explicit edges, not as a barrier: a system in phase N+1 waits for a phase-N
+        // system only when a declared conflict or an explicit edge connects them, directly or through other systems. The
+        // Workbench's System DAG view uses this skeleton as the swim-lane structure.
         var dag = schedule.PublicTrack.DeclareDag("AntHill")
             .Phases(Phase.Input, AntPhases.Simulation, AntPhases.Trail, AntPhases.Render)
             .DefaultPhase(AntPhases.Render);

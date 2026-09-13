@@ -3,8 +3,9 @@ namespace AntHill.Core;
 /// <summary>
 /// AntHill custom phases — reuses the engine-shipped <see cref="Phase.Input"/> token and adds three
 /// of its own. The four phases form the DAG-local total order of the "AntHill" DAG (declared via
-/// <see cref="Dag.Phases"/> in <c>TyphonBridge.BuildSchedule</c>); every system in phase N completes
-/// before any system in phase N+1.
+/// <see cref="Dag.Phases"/> in <c>TyphonBridge.BuildSchedule</c>). The order binds through the access
+/// declarations and explicit edges: a system in phase N+1 waits for a phase-N system only when a declared
+/// conflict or an explicit edge connects them, directly or through other systems.
 ///
 /// Pipeline (top → bottom):
 /// <list type="bullet">

@@ -8,8 +8,9 @@ namespace AntHill.Core;
 ///
 /// All sim-state arrays (<c>_foodCache</c>, <c>_rockPositions</c>, etc.) are mutated here on a
 /// single worker thread, satisfying Typhon's per-tick transaction affinity (see CLAUDE.md).
-/// The phase barrier ensures any subsequent system in <see cref="AntPhases.Simulation"/>
-/// captures the new array references at the top of its body.
+/// Phase order alone does not make a later system in <see cref="AntPhases.Simulation"/> see the new
+/// array references: phases are not barriers (rule ED-05), and only a declared access conflict or an
+/// explicit edge orders another system after this one.
 /// </summary>
 internal sealed class ToolCommandSystem : CallbackSystem
 {

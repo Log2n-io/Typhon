@@ -4,8 +4,9 @@ using System;
 namespace Typhon.Engine;
 
 /// <summary>
-/// A phase token in the system scheduler. Phases form a DAG-local total order (see RFC 07 / Q3) — every system belongs to a phase of its DAG, and all systems
-/// in phase N complete before any system in phase N+1 of the same DAG.
+/// A phase token in the system scheduler. Phases form a DAG-local total order (see RFC 07 / Q3), and every system belongs to a phase of its DAG. The order
+/// binds through declared access only: a system in phase N+1 starts after a system in phase N when their declarations conflict (rule ED-05), and may run
+/// alongside it otherwise. A read the system does not declare — including one made through a spatial query — is ordered by nothing.
 /// </summary>
 /// <remarks>
 /// <para>
