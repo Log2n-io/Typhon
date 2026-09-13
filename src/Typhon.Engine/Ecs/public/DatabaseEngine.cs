@@ -898,6 +898,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <summary>Registry of the component and archetype schema definitions registered on this engine instance.</summary>
     public DatabaseDefinitions DBD { get; }
 
+    /// <summary>
+    /// Test hook: invoked by <c>InitializeArchetypes</c> right after an archetype's cluster layout is computed and published to its process-wide
+    /// <see cref="ArchetypeMetadata"/>. Lets a test stand in for another engine publishing a different layout at that moment. Per engine; null in
+    /// production.
+    /// </summary>
+    internal Action<ArchetypeMetadata> AfterClusterLayoutPublishedForTest;
+
     /// <summary>Backing paged memory-mapped file store holding all persisted segments of this database.</summary>
     public ManagedPagedMMF MMF { get; }
 
@@ -3297,9 +3304,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             meta.TransientSlotCount = isClusterEligible ? (byte)BitOperations.PopCount(transientSlotMask) : (byte)0;
             // Every declared slot that is not Versioned — i.e. SingleVersion and Transient. Bounded to ComponentCount rather than left as ~mask so the spare
             // high bits cannot make an absent slot look fence-maintained (#711).
-            meta.FenceMaintainedSlotMask = isClusterEligible
-                ? (ushort)(((1 << meta.ComponentCount) - 1) & ~versionedSlotMask)
-                : (ushort)0;
+            meta.FenceMaintainedSlotMask = isClusterEligible ? (ushort)(((1 << meta.ComponentCount) - 1) & ~versionedSlotMask) : (ushort)0;
+
+            ArchetypeClusterInfo clusterLayout = default;
 
             if (isClusterEligible)
             {
@@ -3324,8 +3331,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         }
                     }
                 }
-                meta.ClusterLayout = ArchetypeClusterInfo.Compute(meta.ComponentCount, componentSizes, multipleIndexedFieldCount,
-                    versionedSlotMask, transientSlotMask);
+                clusterLayout = ArchetypeClusterInfo.Compute(meta.ComponentCount, componentSizes, multipleIndexedFieldCount, versionedSlotMask, transientSlotMask);
+
+                // Published for the readers that take it from the metadata, and never read back from there below. ArchetypeMetadata is ONE object
+                // per archetype for the whole process and every engine's InitializeArchetypes writes it: an engine opening another schema version of
+                // the same archetype in between (SchemaEvolutionMatrixTests beside SchemaEvolutionStorageModeTests) left this one building its cluster
+                // segment and state from THAT version's layout — each SingleVersion value stored at the wrong offset, read back as zeros on reopen.
+                meta.ClusterLayout = clusterLayout;
+                AfterClusterLayoutPublishedForTest?.Invoke(meta);
 
                 // Override entity record size: base 19 bytes + 4 bytes per Versioned component slot
                 meta._entityRecordSize = ClusterEntityRecordAccessor.RecordSize(meta.VersionedSlotCount);
@@ -3418,12 +3431,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     ChunkBasedSegment<PersistentStore> clusterSegment = null;
                     if (!isPureTransient)
                     {
-                        clusterSegment = MMF.AllocateChunkBasedSegment(PageBlockType.None, 4, meta.ClusterLayout.ClusterStride, null, 
+                        clusterSegment = MMF.AllocateChunkBasedSegment(PageBlockType.None, 4, clusterLayout.ClusterStride, null, 
                             StorageSegmentKind.Cluster);
                         if (clusterSegment == null)
                         {
                             throw new InvalidOperationException(
-                                $"Failed to allocate cluster segment for archetype {meta.ArchetypeType?.Name} (Id={meta.ArchetypeId}, Stride={meta.ClusterLayout.ClusterStride})");
+                                $"Failed to allocate cluster segment for archetype {meta.ArchetypeType?.Name} (Id={meta.ArchetypeId}, Stride={clusterLayout.ClusterStride})");
                         }
                     }
 
@@ -3432,11 +3445,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     TransientStore? transientClusterStore = null;
                     if (transientSlotMask != 0)
                     {
-                        CreateTransientClusterSegment(meta.ClusterLayout.ClusterStride, out transientClusterStore, out transientClusterSegment);
+                        CreateTransientClusterSegment(clusterLayout.ClusterStride, out transientClusterStore, out transientClusterSegment);
                     }
 
                     _archetypeStates[meta.ArchetypeId].ClusterState =
-                        AttachCellTreeFactory(ArchetypeClusterState.Create(meta.ClusterLayout, clusterSegment, transientClusterSegment, transientClusterStore));
+                        AttachCellTreeFactory(ArchetypeClusterState.Create(clusterLayout, clusterSegment, transientClusterSegment, transientClusterStore));
                 }
                 else if (TryGetPersistedArchetype(meta, out var clusterPersisted) && clusterPersisted.Arch.ClusterSegmentSPI > 0)
                 {
@@ -3447,20 +3460,20 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     // is worse than starting empty because it looks like data. Fall through to a fresh allocation; RebuildClusterFromChains re-places the
                     // entities and RebuildVersionedHeadFromChain refills the slots (#671).
                     var loaded = !isPureTransient && !hasMigratedSlot && MMF.TryLoadChunkBasedSegment(
-                        clusterPersisted.Arch.ClusterSegmentSPI, meta.ClusterLayout.ClusterStride, out loadedCluster, WalFilesPresentAtOpen);
+                        clusterPersisted.Arch.ClusterSegmentSPI, clusterLayout.ClusterStride, out loadedCluster, WalFilesPresentAtOpen);
 
                     // TransientStore segment always created fresh on reopen (Transient data doesn't survive restart)
                     ChunkBasedSegment<TransientStore> transientClusterSegment = default;
                     TransientStore? transientClusterStore = null;
                     if (transientSlotMask != 0)
                     {
-                        CreateTransientClusterSegment(meta.ClusterLayout.ClusterStride, out transientClusterStore, out transientClusterSegment);
+                        CreateTransientClusterSegment(clusterLayout.ClusterStride, out transientClusterStore, out transientClusterSegment);
                     }
 
                     if (loaded)
                     {
                         using var clusterEpoch = EpochGuard.Enter(EpochManager);
-                        var clusterState = AttachCellTreeFactory(ArchetypeClusterState.CreateFromExisting(meta.ClusterLayout, loadedCluster, transientClusterSegment, transientClusterStore));
+                        var clusterState = AttachCellTreeFactory(ArchetypeClusterState.CreateFromExisting(clusterLayout, loadedCluster, transientClusterSegment, transientClusterStore));
                         _archetypeStates[meta.ArchetypeId].ClusterState = clusterState;
 
                         // Sync TransientSegment chunk IDs with PersistentStore's active clusters
@@ -3471,16 +3484,16 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     }
                     else if (!isPureTransient)
                     {
-                        var fallbackSegment = MMF.AllocateChunkBasedSegment(PageBlockType.None, 20, meta.ClusterLayout.ClusterStride, null, 
+                        var fallbackSegment = MMF.AllocateChunkBasedSegment(PageBlockType.None, 20, clusterLayout.ClusterStride, null, 
                             StorageSegmentKind.Cluster);
                         _archetypeStates[meta.ArchetypeId].ClusterState =
-                            AttachCellTreeFactory(ArchetypeClusterState.Create(meta.ClusterLayout, fallbackSegment, transientClusterSegment, transientClusterStore));
+                            AttachCellTreeFactory(ArchetypeClusterState.Create(clusterLayout, fallbackSegment, transientClusterSegment, transientClusterStore));
                     }
                     else
                     {
                         // Pure-Transient reopen: no persisted data, create fresh
                         _archetypeStates[meta.ArchetypeId].ClusterState =
-                            AttachCellTreeFactory(ArchetypeClusterState.Create(meta.ClusterLayout, null, transientClusterSegment, transientClusterStore));
+                            AttachCellTreeFactory(ArchetypeClusterState.Create(clusterLayout, null, transientClusterSegment, transientClusterStore));
                     }
                 }
 
