@@ -4,6 +4,7 @@ using NUnit.Framework;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -737,7 +738,66 @@ public class ChunkBasedSegmentBitmapL3Tests
         // The allocated count should be at least the reserved chunk (0) 
         Assert.That(segment.AllocatedChunkCount, Is.GreaterThanOrEqualTo(1));
         Assert.That(segment.FreeChunkCount, Is.GreaterThanOrEqualTo(0));
-        Assert.That(segment.AllocatedChunkCount + segment.FreeChunkCount, Is.EqualTo(segment.ChunkCapacity));
+
+        // Exact, not merely non-negative: `Allocated + Free == Capacity` holds by definition (Free IS Capacity - Allocated), so it could never fail.
+        Assert.That(segment.AllocatedChunkCount, Is.EqualTo(CountAllocatedChunks(segment)), "the allocated count drifted from the bitmap");
+    }
+
+    /// <summary>
+    /// A free that lands while <c>RebuildFreeList</c> is running must still reach the allocated count. The rebuild used to overwrite the count with its
+    /// own popcount; a free on a page the scan had already passed was then lost, the count stayed one too high for good, and under load
+    /// <see cref="ChunkBasedSegment{TStore}.FreeChunkCount"/> went negative. Deterministic: the probe frees inside the rebuild, after the scan.
+    /// </summary>
+    [Test]
+    public void AFreeDuringTheFreeListRebuild_StillReachesTheAllocatedCount()
+    {
+        var segment = _pmmf.AllocateChunkBasedSegment(PageBlockType.None, 3, 64);
+        var ids = new List<int>();
+        while (segment.FreeChunkCount > 0)
+        {
+            ids.Add(segment.AllocateChunk(false));
+        }
+
+        int onFirstPage = ids[0];
+        int onLastPage = ids[^1];
+        Assert.That(segment.GetChunkLocation(onFirstPage).segmentIndex, Is.LessThan(segment.GetChunkLocation(onLastPage).segmentIndex),
+            "precondition: the two chunks must sit on different pages, the first one scanned before the other");
+
+        // One free chunk, and a free list that has lost track of it — what the lost race RebuildFreeList exists for leaves behind. The next allocation
+        // walks an empty list with the count below capacity, so it rebuilds.
+        segment.FreeChunk(onLastPage);
+        segment.GetType().GetField("_freeHead", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(segment, -1);
+
+        var fired = 0;
+        segment.RebuildFreeListProbe = () =>
+        {
+            if (Interlocked.Exchange(ref fired, 1) == 0)
+            {
+                segment.FreeChunk(onFirstPage);   // page 0: the scan has already counted this chunk as allocated
+            }
+        };
+        segment.AllocateChunk(false);
+        segment.RebuildFreeListProbe = null;
+
+        Assert.That(fired, Is.EqualTo(1), "precondition: the allocation must have rebuilt the free list");
+        Assert.That(segment.AllocatedChunkCount, Is.EqualTo(CountAllocatedChunks(segment)),
+            "the free made during the rebuild was overwritten by the scan's snapshot");
+        Assert.That(segment.FreeChunkCount, Is.EqualTo(1));
+    }
+
+    /// <summary>Chunks whose bitmap bit is set: the ground truth the allocated count must equal.</summary>
+    private static int CountAllocatedChunks(ChunkBasedSegment<PersistentStore> segment)
+    {
+        var set = 0;
+        for (var id = 0; id < segment.ChunkCapacity; id++)
+        {
+            if (segment.IsChunkAllocated(id))
+            {
+                set++;
+            }
+        }
+
+        return set;
     }
 
     #endregion

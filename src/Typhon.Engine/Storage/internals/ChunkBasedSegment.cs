@@ -83,6 +83,13 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     // Total chunk capacity (updated on Grow under _growLock)
     private int _capacity;
 
+    /// <summary>
+    /// Test hook: runs inside <see cref="RebuildFreeList"/> after the bitmap scan and before the rebuilt list is published — the window in which
+    /// allocations and frees on other threads keep moving bits the scan has already read. Per segment, so a test using it stays parallel-safe. Null in
+    /// production, and the rebuild is a rare recovery path, so the check costs nothing that matters.
+    /// </summary>
+    internal Action RebuildFreeListProbe;
+
     /// <summary>This segment's engine-scoped <c>EW-01</c> tick-fence guard, cached by the structures built over it.</summary>
     internal ExclusiveWindow FenceWindow => Store.EpochManager?.FenceWindow;
 
@@ -861,7 +868,6 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
             var epoch = _store.EpochManager.GlobalEpoch;
             var length = Length;
             var nextPage = _nextPage;
-            var totalAllocated = 0;
 
             // Phase 1: Reset all pages to NOT_IN_LIST and _freeHead to EMPTY_PAGE.
             // Concurrent traversers will see NOT_IN_LIST and fall through to pass++/rebuild.
@@ -884,10 +890,7 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
                 var page = GetPage(i, epoch, out _);
                 var metadata = page.MetadataReadOnly<long>();
 
-                var popcount = CountAllocatedBits(metadata, bitmapLongs, maxChunks);
-                totalAllocated += popcount;
-
-                if (popcount < maxChunks)
+                if (CountAllocatedBits(metadata, bitmapLongs, maxChunks) < maxChunks)
                 {
                     nextPage[i] = EMPTY_PAGE; // mark as in-list, tail
                     if (firstFree == EMPTY_PAGE)
@@ -902,9 +905,17 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
                 }
             }
 
+            RebuildFreeListProbe?.Invoke();
+
             // Publish the chain head last — makes the entire chain visible atomically.
+            //
+            // _allocatedCount is NOT resynchronised from this scan. Allocate and free move it outside _growLock, each by exactly one and only for
+            // the bit transition it won (Or 0→1, And 1→0), so it is exact by construction. A popcount taken while they run is not: an allocation
+            // that has set its bit but not yet counted it, or a free on a page the scan has already passed, is lost when a snapshot is stored —
+            // and an overcount sticks, because a count at capacity grows the segment instead of rebuilding. FreeChunkCount went negative that way
+            // in ConcurrentAllocateAndFree_MaintainsConsistency under parallel load; entity counts and the AllocatedChunkCount == 0 early exits
+            // read the same field.
             Interlocked.Exchange(ref _freeHead, firstFree);
-            Interlocked.Exchange(ref _allocatedCount, totalAllocated);
         }
     }
 
