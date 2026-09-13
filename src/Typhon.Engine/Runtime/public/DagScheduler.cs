@@ -362,6 +362,9 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     /// </summary>
     private int _workerShutdown;
 
+    /// <summary>Whether <see cref="Shutdown"/> or <see cref="Dispose(bool)"/> has asked the workers to stop. For tests that must hold a tick open across it.</summary>
+    internal bool IsShutdownRequested => Volatile.Read(ref _workerShutdown) != 0;
+
     /// <summary>
     /// How long the tick-completion barrier tolerates a STALL — no system completing at all — after shutdown has been requested, before abandoning the tick.
     /// Not a cap on tick duration: the timer resets on every completion, so an actively-progressing tick is never cut short however slow its systems are.
@@ -868,11 +871,21 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             Interlocked.Increment(ref _tickGeneration);
             _tickStartSignal.Set();
             JoinWorkers();
-            _tickStartSignal.Dispose();
         }
 
-        // Base class stops the timer thread and disposes the resource node
+        // Base class stops the timer thread and disposes the resource node — BEFORE the signal is disposed. A tick already past ExecuteCallbacks'
+        // shutdown check keeps dispatching its tracks on the timer thread, and every one ends with _tickStartSignal.Reset(), which throws
+        // ObjectDisposedException on a disposed event. Disposed first, that surfaced as a FenceFailure in '<tick fence>' on the last tick: about one SWG
+        // demo run in ten, and FencePhaseFailureTests' "healthy fence" reporting an unhandled exception under load.
         base.Dispose(disposing);
+
+        // Only once nothing can touch it. Both joins are bounded (timer 2 s, workers 5 s), and a Dispose issued on the timer thread cannot join itself;
+        // in those cases the event is left to the GC, which costs nothing here — a ManualResetEventSlim only owns a kernel handle once its WaitHandle has
+        // been read, and nothing reads it.
+        if (disposing && !IsRunning && Array.TrueForAll(_workers, static w => !w.IsAlive))
+        {
+            _tickStartSignal.Dispose();
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════
