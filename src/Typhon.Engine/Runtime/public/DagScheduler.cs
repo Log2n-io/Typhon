@@ -419,6 +419,26 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     /// <summary>Test seam: a worker's own wake event.</summary>
     internal ManualResetEventSlim WorkerWakeEvent(int workerId) => _workerWake[workerId];
 
+    /// <summary>Test seam: called by <see cref="WakeWorkers"/> with each worker's id just before its Set. Null outside tests.</summary>
+    internal Action<int> WakeProbe;
+
+    /// <summary>Test seam: called with the worker's id when its between-tick wait times out, before the lost-wake check. Null outside tests.</summary>
+    internal Action<int> BackstopProbe;
+
+    /// <summary>
+    /// The generation whose wake round is complete: stored by <see cref="DispatchTrackMultiThreaded"/> once <see cref="WakeWorkers"/> has Set every worker's
+    /// event for it. A worker whose backstop fires while this is newer than the generation it last joined, with its own event still clear, missed that
+    /// round's Set — nothing but the worker itself Resets its event. Stored after the round, never before, so a backstop firing between a bump and this
+    /// worker's Set, with its Set still on the way, finds it older.
+    /// </summary>
+    private int _wokenGeneration;
+
+    // Lost wakes since the scheduler was built (LostWakeCount); the timer thread's tick-end snapshot of it, for TickTelemetry.LostWakes; and the latch of the
+    // one-shot warning.
+    private long _lostWakes;
+    private long _lostWakesAtLastTick;
+    private int _lostWakeLogged;
+
     // Tick interval in Stopwatch ticks
     private readonly long _tickIntervalTicks;
 
@@ -960,6 +980,14 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     /// <summary>Current overload response level.</summary>
     public OverloadLevel CurrentOverloadLevel => _overloadDetector.CurrentLevel;
 
+    /// <summary>
+    /// Lost wakes that cost a worker its between-tick backstop (50 ms), since the scheduler was built: the backstop fired after a dispatch whose Set never
+    /// reached the worker. Non-zero means the wake protocol is broken. Zero does not prove it is not: a lost wake that the next dispatch's Set rescues before
+    /// the backstop fires leaves nothing to count, so at tick rates faster than the backstop most would go unseen. Per tick:
+    /// <see cref="TickTelemetry.LostWakes"/>.
+    /// </summary>
+    public long LostWakeCount => Volatile.Read(ref _lostWakes);
+
     /// <summary>Number of worker threads.</summary>
     public int WorkerCount => _workerCount;
 
@@ -1399,6 +1427,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             // _workerWake).
             var betweenTickSpan = TyphonEvent.BeginSchedulerWorkerBetweenTick((byte)workerId);
             var btStart = Stopwatch.GetTimestamp();
+            byte wakeReason = 0; // woken: by the signal, or by the backstop with no wake lost
             while (Volatile.Read(ref _tickGeneration) == lastGen)
             {
                 if (Volatile.Read(ref _workerShutdown) != 0)
@@ -1412,7 +1441,18 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                 }
 
                 BetweenTickWaitProbe?.Invoke(workerId);
-                wake.Wait(BetweenTickWaitBackstop);
+                if (!wake.Wait(BetweenTickWaitBackstop))
+                {
+                    BackstopProbe?.Invoke(workerId);
+
+                    // The backstop fired after a wake round this worker belonged to had completed, and its event is clear: that round's Set never
+                    // reached it. The round is read first, with acquire, so a Set of it is visible to the IsSet read that follows.
+                    if (unchecked(Volatile.Read(ref _wokenGeneration) - lastGen) > 0 && !wake.IsSet)
+                    {
+                        wakeReason = 2; // resumed by the backstop after a lost wake
+                        OnLostWake(workerId, unchecked(lastGen + 1));
+                    }
+                }
 
                 // Reset after every return, before the loop re-checks the generation — never between the check and the wait, where it would swallow a Set
                 // that landed in between. Without it, a Set whose generation this worker had already seen (one that landed after the worker left this loop
@@ -1424,7 +1464,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             {
                 var btEnd = Stopwatch.GetTimestamp();
                 var btUs2 = (btEnd - btStart) * 1_000_000L / Stopwatch.Frequency;
-                betweenTickSpan.WakeReason = 0; // signal
+                betweenTickSpan.WakeReason = wakeReason;
                 betweenTickSpan.WaitUs = (uint)Math.Min(btUs2, uint.MaxValue);
                 betweenTickSpan.Dispose();
                 TyphonEvent.EmitSchedulerWorkerWake((byte)workerId, (uint)Math.Min(btUs2, uint.MaxValue));
@@ -2399,10 +2439,11 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         _systemsRemaining.Value = track.MemberCount;
         MarkTrackRootsReady(track.Roots);
 
-        // Activate — bump the generation, then wake the workers.
+        // Activate — bump the generation, wake the workers, then publish the round as complete (the lost-wake check in WorkerLoop keys on it).
         _tickInProgress = 1;
-        Interlocked.Increment(ref _tickGeneration);
+        var generation = Interlocked.Increment(ref _tickGeneration);
         WakeWorkers();
+        Volatile.Write(ref _wokenGeneration, generation);
 
         // Wait for the track's systems to complete. The timer thread must spin — Thread.Yield() on Windows can stall up to 15.6 ms, cascading into every
         // subsequent tick.
@@ -2451,9 +2492,25 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     /// </summary>
     private void WakeWorkers()
     {
-        foreach (var wake in _workerWake)
+        var probe = WakeProbe;
+        for (var i = 0; i < _workerWake.Length; i++)
         {
-            wake.Set();
+            probe?.Invoke(i);
+            _workerWake[i].Set();
+        }
+    }
+
+    /// <summary>
+    /// Counts a wake the pool lost (<see cref="LostWakeCount"/>) and warns about the first one, naming the first generation the worker missed. Cold: only
+    /// a backstop that caught one calls it.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void OnLostWake(int workerId, int lostGeneration)
+    {
+        Interlocked.Increment(ref _lostWakes);
+        if (Interlocked.CompareExchange(ref _lostWakeLogged, 1, 0) == 0)
+        {
+            LogLostWake(workerId, lostGeneration, BetweenTickWaitBackstop.TotalMilliseconds);
         }
     }
 

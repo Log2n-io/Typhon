@@ -9,7 +9,8 @@ namespace Typhon.Engine.Tests.Runtime;
 /// Every dispatch wakes every parked worker, each through its own event: no wake is lost to a worker's Reset or left to the 50 ms backstop.
 /// </summary>
 /// <remarks>
-/// <para>Each test raises the backstop to 30 s, so a worker the scheduler fails to wake stays parked instead of joining 50 ms late. Three run on
+/// <para>The wake tests raise the backstop to 30 s, so a worker the scheduler fails to wake stays parked instead of joining 50 ms late; the lost-wake
+/// tests shorten it instead, to make it fire. Three run on
 /// <see cref="BuildAllHands"/>, whose chunks each wait until every worker of the pool is inside one: a dispatch that leaves a worker parked makes its
 /// chunk-mates' waits time out.</para>
 /// <para>Every wait is bounded and every probe returns on its own, so a regression fails the test instead of wedging the suite.</para>
@@ -201,6 +202,190 @@ public class WorkerWakeTests
         Assert.That(reached, Is.True, "precondition: the scheduler did not reach tick 3");
     }
 
+    /// <summary>
+    /// A wake the dispatcher sent but the worker never got — its Set taken away before it parked — is counted once, in total and in a tick's telemetry, and the
+    /// worker is resumed by its backstop.
+    /// </summary>
+    [Test]
+    public void ALostWake_IsCountedOnce()
+    {
+        var victim = -1;
+        var stolenAtTick = -1L;
+        using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = Workers, BaseTickRate = 50, TelemetryRingCapacity = 64 })
+            .PublicTrack.DeclareDag("Idle")
+            .CallbackSystem("A", _ => { })
+            .Build(_registry.Runtime);
+
+        scheduler.BetweenTickWaitBackstop = TimeSpan.FromMilliseconds(5);
+        scheduler.BetweenTickWaitProbe = workerId =>
+        {
+            // Only a worker whose event is clear as it parks: a Set still there from a dispatch it ran without parking is stale, and taking it loses nothing.
+            if (scheduler.CurrentTickNumber < 3 || scheduler.WorkerWakeEvent(workerId).IsSet
+                || Interlocked.CompareExchange(ref victim, workerId, -1) != -1)
+            {
+                return;
+            }
+
+            // Held until the next dispatch has Set this worker's event, which is then taken away at once: the wake is lost. A tight spin, because
+            // SpinWait.SpinUntil sleeps up to a timer slice (15.6 ms on Windows) between checks — long enough for the worker's 5 ms wait to reach the
+            // following dispatch, whose Set would then wake it as usual.
+            var wake = scheduler.WorkerWakeEvent(workerId);
+            if (SpinFor(() => wake.IsSet, Wait))
+            {
+                wake.Reset();
+                Volatile.Write(ref stolenAtTick, scheduler.CurrentTickNumber);
+            }
+        };
+
+        // The victim's next Set is held back until the backstop has caught the lost wake: on Windows a 5 ms wait can end up to a timer slice (15.6 ms)
+        // late, past the next dispatch, whose Set would then wake the worker and leave nothing to count.
+        scheduler.WakeProbe = workerId =>
+        {
+            if (workerId == Volatile.Read(ref victim) && Volatile.Read(ref stolenAtTick) >= 0 && scheduler.LostWakeCount == 0)
+            {
+                SpinFor(() => scheduler.LostWakeCount > 0, Wait);
+            }
+        };
+
+        bool reached;
+        try
+        {
+            scheduler.Start();
+            reached = SpinWait.SpinUntil(() =>
+            {
+                var at = Volatile.Read(ref stolenAtTick);
+                return at >= 0 && scheduler.CurrentTickNumber >= at + 3;
+            }, TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            scheduler.Shutdown();
+        }
+
+        var ring = scheduler.Telemetry;
+        var perTick = 0L;
+        for (var t = ring.OldestAvailableTick; t <= ring.NewestTick; t++)
+        {
+            perTick += ring.GetTick(t).LostWakes;
+        }
+
+        Assert.That(reached, Is.True, "precondition: no worker's wake was taken away, or the scheduler stalled after it");
+        Assert.That(scheduler.LostWakeCount, Is.EqualTo(1), "the lost wake was not counted exactly once");
+        Assert.That(perTick, Is.EqualTo(1), "the tick telemetry does not carry the lost wake exactly once");
+    }
+
+    /// <summary>
+    /// A backstop that fires between a dispatch's generation bump and the worker's own Set is not a lost wake: that Set is on its way. The dispatcher is held
+    /// just before the last worker's Set until that worker, resumed by its backstop past the bump, has come back to its wait; nothing may be counted.
+    /// </summary>
+    [Test]
+    public void ABackstopFiringBeforeItsSetArrives_IsNotALostWake()
+    {
+        const int victim = Workers - 1; // the dispatcher Sets it last
+        var holding = 0;
+        var parkedBeforeBump = 0;
+        var cameBack = 0;
+        var held = 0;
+        using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = Workers, BaseTickRate = 50 })
+            .PublicTrack.DeclareDag("Idle")
+            .CallbackSystem("A", _ => { })
+            .Build(_registry.Runtime);
+        scheduler.BetweenTickWaitBackstop = TimeSpan.FromMilliseconds(2);
+        scheduler.BetweenTickWaitProbe = workerId =>
+        {
+            if (workerId != victim || scheduler.CurrentTickNumber < 3)
+            {
+                return;
+            }
+
+            if (Volatile.Read(ref holding) == 0)
+            {
+                // About to park while nothing is held: the next bump lands while this worker waits.
+                Volatile.Write(ref parkedBeforeBump, 1);
+            }
+            else
+            {
+                // Back at its wait while the dispatcher still holds its Set: its backstop resumed it past the bump.
+                Volatile.Write(ref cameBack, 1);
+            }
+        };
+        scheduler.WakeProbe = workerId =>
+        {
+            if (workerId == victim && Volatile.Read(ref parkedBeforeBump) == 1 && Interlocked.CompareExchange(ref held, 1, 0) == 0)
+            {
+                Volatile.Write(ref holding, 1);
+                SpinWait.SpinUntil(() => Volatile.Read(ref cameBack) == 1, Wait);
+                Volatile.Write(ref holding, 0);
+            }
+        };
+
+        bool reached;
+        try
+        {
+            scheduler.Start();
+            reached = SpinWait.SpinUntil(() => Volatile.Read(ref cameBack) == 1, TimeSpan.FromSeconds(10));
+            var tick = scheduler.CurrentTickNumber;
+            reached &= SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= tick + 2, TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            scheduler.Shutdown();
+        }
+
+        Assert.That(held, Is.EqualTo(1), "precondition: the dispatcher was never held before the last worker's Set");
+        Assert.That(reached, Is.True, "precondition: the held worker's backstop never resumed it past the bump, or the scheduler stalled after");
+        Assert.That(scheduler.LostWakeCount, Is.Zero, "a backstop that fired before its worker's Set arrived was counted as a lost wake");
+    }
+
+    /// <summary>
+    /// A Set landing after the backstop fired, before the lost-wake check, is not a lost wake. The worker is held between its timed-out wait and the check
+    /// until a later dispatch has Set its event and its tick has ended, so the check finds a completed round newer than the worker's, with its event set.
+    /// </summary>
+    [Test]
+    public void ASetLandingAfterTheBackstop_IsNotALostWake()
+    {
+        var victim = -1;
+        var observed = 0;
+        using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = Workers, BaseTickRate = 50 })
+            .PublicTrack.DeclareDag("Idle")
+            .CallbackSystem("A", _ => { })
+            .Build(_registry.Runtime);
+        scheduler.BetweenTickWaitBackstop = TimeSpan.FromMilliseconds(2);
+        scheduler.BackstopProbe = workerId =>
+        {
+            if (scheduler.CurrentTickNumber < 3 || Interlocked.CompareExchange(ref victim, workerId, -1) != -1)
+            {
+                return;
+            }
+
+            var wake = scheduler.WorkerWakeEvent(workerId);
+            if (SpinFor(() => wake.IsSet, Wait))
+            {
+                var tick = scheduler.CurrentTickNumber;
+                if (SpinFor(() => scheduler.CurrentTickNumber > tick, Wait))
+                {
+                    Volatile.Write(ref observed, 1);
+                }
+            }
+        };
+
+        bool reached;
+        try
+        {
+            scheduler.Start();
+            reached = SpinWait.SpinUntil(() => Volatile.Read(ref observed) == 1, TimeSpan.FromSeconds(10));
+            var tick = scheduler.CurrentTickNumber;
+            reached &= SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= tick + 2, TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            scheduler.Shutdown();
+        }
+
+        Assert.That(reached, Is.True, "precondition: no dispatch Set the held worker's event and completed, or the scheduler stalled after");
+        Assert.That(scheduler.LostWakeCount, Is.Zero, "a Set that landed after the backstop fired was counted as a lost wake");
+    }
+
     /// <summary>Shutdown wakes the parked workers itself; with the backstop out of reach, a worker it missed would hold <c>JoinWorkers</c> for 5 s.</summary>
     /// <remarks>Sensitive: the assertion is a wall-clock bound, so it belongs in the gate's serial pass.</remarks>
     [Test]
@@ -243,14 +428,9 @@ public class WorkerWakeTests
         scheduler.ParallelQueryChunkCallback = (_, _, _, _) =>
         {
             // A dispatch still in flight when the test shuts the scheduler down loses its workers to the shutdown exit: not a stall, and not worth waiting on.
-            // A plain spin, not SpinWait.SpinUntil: its back-off sleeps 1-15 ms at a time, once per dispatch, which put this fixture over a second.
+            // SpinFor, not SpinWait.SpinUntil: its back-off sleeps 1-15 ms at a time, once per dispatch, which put this fixture over a second.
             Interlocked.Increment(ref arrived);
-            var deadline = Stopwatch.GetTimestamp() + (long)(Wait.TotalSeconds * Stopwatch.Frequency);
-            while (Volatile.Read(ref arrived) < Workers && !scheduler.IsShutdownRequested && Stopwatch.GetTimestamp() < deadline)
-            {
-                Thread.SpinWait(20);
-            }
-
+            SpinFor(() => Volatile.Read(ref arrived) >= Workers || scheduler.IsShutdownRequested, Wait);
             if (Volatile.Read(ref arrived) < Workers && !scheduler.IsShutdownRequested)
             {
                 onStall(scheduler.CurrentTickNumber);
@@ -258,5 +438,22 @@ public class WorkerWakeTests
         };
         scheduler.ParallelQueryCleanupCallback = _ => false;
         return scheduler;
+    }
+
+    /// <summary>Spins until <paramref name="condition"/> holds or <paramref name="timeout"/> passes, never sleeping; false on timeout.</summary>
+    private static bool SpinFor(Func<bool> condition, TimeSpan timeout)
+    {
+        var deadline = Stopwatch.GetTimestamp() + (long)(timeout.TotalSeconds * Stopwatch.Frequency);
+        while (!condition())
+        {
+            if (Stopwatch.GetTimestamp() >= deadline)
+            {
+                return false;
+            }
+
+            Thread.SpinWait(20);
+        }
+
+        return true;
     }
 }

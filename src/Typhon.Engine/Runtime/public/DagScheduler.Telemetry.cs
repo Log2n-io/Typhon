@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Threading;
 
 namespace Typhon.Engine;
 
@@ -127,6 +128,12 @@ public sealed partial class DagScheduler
             (byte)_overloadDetector.CurrentLevel,
             (byte)Math.Min(_tickMultiplier, byte.MaxValue));
 
+        // Lost wakes the workers caught since the previous tick end. The snapshot is the timer thread's alone; a wake lost late in one tick is caught in the
+        // next, when the worker's backstop fires.
+        var lostWakes = Volatile.Read(ref _lostWakes);
+        var lostWakesThisTick = (int)Math.Min(lostWakes - _lostWakesAtLastTick, int.MaxValue);
+        _lostWakesAtLastTick = lostWakes;
+
         var tickTelemetry = new TickTelemetry
         {
             TickNumber = _currentTickNumber,
@@ -139,7 +146,8 @@ public sealed partial class DagScheduler
             TotalEntitiesProcessed = totalEntitiesProcessed,
             CurrentLevel = _overloadDetector.CurrentLevel,
             TickMultiplier = _tickMultiplier,
-            EventQueueDepth = queueDepth
+            EventQueueDepth = queueDepth,
+            LostWakes = lostWakesThisTick
         };
 
         // Enrich with subscription metrics (Output phase duration, deltas pushed, overflows)

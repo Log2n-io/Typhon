@@ -603,7 +603,8 @@ public enum TraceEventKind : byte
     /// <summary>Worker wake from kernel signal. Payload: <c>workerId: u8</c>, <c>delayUs: u32</c>.</summary>
     SchedulerWorkerWake = 151,
 
-    /// <summary>Worker between-tick wait (kernel wait span). Payload: <c>workerId: u8</c>, <c>waitUs: u32</c>, <c>wakeReason: u8</c> (0=signal, 1=shutdown).</summary>
+    /// <summary>Worker between-tick wait (kernel wait span). Payload: <c>workerId: u8</c>, <c>waitUs: u32</c>, <c>wakeReason: u8</c> (0=woken, by the
+    /// signal or by the backstop with no wake lost; 1=shutdown; 2=resumed by the backstop after a lost wake).</summary>
     SchedulerWorkerBetweenTick = 152,
 
     // ── Scheduler:Dispense (instant) ──
