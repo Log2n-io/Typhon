@@ -2,7 +2,6 @@ using System;
 using System.Numerics;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
-using Typhon.Engine.Internals;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests;
@@ -75,7 +74,7 @@ class ClusterCostEstimatorTests : TestBase<ClusterCostEstimatorTests>
         dbe.WriteTickFence(1);
     }
 
-    private static unsafe void MoveAll(DatabaseEngine dbe, Random rng)
+    private static void MoveAll(DatabaseEngine dbe, Random rng)
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
@@ -86,7 +85,7 @@ class ClusterCostEstimatorTests : TestBase<ClusterCostEstimatorTests>
                 var bits = cluster.OccupancyBits;
                 while (bits != 0)
                 {
-                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    var slot = BitOperations.TrailingZeroCount(bits);
                     bits &= bits - 1;
                     cluster.WriteSpatial(ClMigUnit.Pos, slot,
                         PointAt(3f + (float)rng.NextDouble() * 94f, 3f + (float)rng.NextDouble() * 94f));
@@ -160,40 +159,37 @@ class ClusterCostEstimatorTests : TestBase<ClusterCostEstimatorTests>
     [VerifiesRule("RP-01")]
     public void TheEstimateSettlesUnderSustainedLoad()
     {
-        // The SHIPPED seed, not one chosen to be far from the truth, and the clamp band is why. Blend bounds the estimate to [seed/10, seed*20]; at a
-        // seed of 190 the ceiling is 3 800 ns, well under the ~24 000 ns/entity a Debug build actually costs — so the estimate would pin at the clamp on
-        // every tick and the settling assertion below would be measuring the clamp rather than the filter, letting alpha = 1.0 (no filtering at all)
-        // through in Debug. At 1 500 the band is [150, 30 000], which contains both Debug's cost and Release's, so what settles is the EWMA itself.
-        var samples = SampleEstimate(seedNsPerEntity: 1500f, ticks: 16, seed: 5150);
+        // CONTROLLED samples, not a fence's measured cost. The property is the FILTER's — a first-order EWMA settles where an unfiltered or ringing one
+        // does not — and feeding it wall-clock fences made the assertion a question about the machine's scheduler instead. In Release one entity costs
+        // ~1.5 us, so a single preempted fence is a sample up to 20x the mean, and at alpha = 0.25 one 2.2x sample moves the estimate ~30 %: this failed
+        // at a 29.6 % spread in parallel suites, while alone it always passed. The fence-to-estimator wiring stays covered by the tests here that drive
+        // WriteTickFence (the clamp band, the quiet-tick hold).
+        using var dbe = SetupEngine(seedNsPerEntity: 1500f);
+        Spawn(dbe);
+        var cs = dbe._archetypeStates[ArchetypeId].ClusterState;
+        ref readonly var cfg = ref dbe.SpatialGrid.Config;
 
-        // BOTH windows are after the seeded transient, and that is the whole point of the choice.
-        //
-        // The first version compared samples [0,5) against [11,16). The early window spans the 8x step away from the seed, so its spread is dominated by
-        // the step rather than by the filter — and ANY filter whose steady-state noise is smaller than that step passes, including alpha = 1.0, which is
-        // no filtering at all. Starting at index 4 puts both windows in the settled regime, where the only thing that can widen the later one is the
-        // filter itself continuing to move or beginning to oscillate.
-        var early = RelativeSpread(samples, 4, 5);
+        var samples = new double[40];
+        for (var i = 0; i < samples.Length; i++)
+        {
+            // ±30 % alternating noise around 3 000 ns/entity — the worst input a first-order filter gets — and one 1 ms/entity outlier, which the
+            // [seed/10, seed*20] clamp must absorb rather than let dominate the next ten ticks.
+            var nsPerEntity = i == 10 ? 1e6 : 3000d * (i % 2 == 0 ? 0.7d : 1.3d);
+            cs.LastTickMigrationCount = 100;
+            cs.LastTickMigrationExecuteMs = nsPerEntity * 100d / 1e6;
+            cs.LastTickMigrationApplyTicks = 0;
+            cs.ObserveMigrationCost(in cfg);
+            samples[i] = cs.LastTickMeasuredNsPerEntity;
+        }
+
+        // At alpha = 0.25 the settled swing is about 9 %; alpha = 1.0 (no filtering) swings 60 % and a ringing filter does not decay — both fail.
         var late = RelativeSpread(samples, samples.Length - 5, 5);
-
         Assert.Multiple(() =>
         {
             Assert.That(samples[0], Is.GreaterThan(0d), "the estimator never produced a reading, so nothing below is about convergence");
-
-            // No "the estimate moved away from its seed" assertion, deliberately. How far it moves is the distance between the shipped seed and THIS
-            // machine's cost — about 16x in Debug, near zero in Release, where that seed was measured — so any threshold holding in one configuration is
-            // either vacuous or red in the other. Both were tried. The property asserted instead is the one that separates a converged filter from a
-            // ringing one and holds on any hardware: by the end of the run the estimate is stable in absolute terms.
-
-            // An ABSOLUTE ceiling, and no relative comparison between the two windows. Ordering `late` against `early` looks stricter and is in fact
-            // unusable: once both windows are past the seeded transient, each is measuring the same steady-state noise, and noise is not monotone — the
-            // arrangement failed 2 runs in 3. (Leaving the early window ON the transient makes it pass for the wrong reason, which is the version this
-            // replaced: an 8x step dominates the comparison, so any filter passes, including alpha = 1.0, which is no filtering at all.)
-            //
-            // What survives is the property that actually distinguishes a converged filter: the estimate is STABLE in absolute terms at the end of the
-            // run. A ringing filter's amplitude does not decay, so it fails this however its windows are placed.
             Assert.That(late, Is.LessThan(0.25d),
-                $"the settled estimate still swings {late:P1} across five consecutive ticks (spread was {early:P1} mid-run), which is too wide for a "
-                + "budget to be spent against — a converged first-order filter does not do that");
+                $"the settled estimate still swings {late:P1} across five consecutive ticks, which is too wide for a budget to be spent against — a "
+                + "converged first-order filter does not do that");
         });
     }
 
