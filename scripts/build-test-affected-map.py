@@ -38,8 +38,11 @@ PER_FIXTURE_DIR = REPO_ROOT / "coverage/per_fixture"
 MAP_PATH = REPO_ROOT / "coverage/test-affected-map.json"
 FIXTURES_LIST = REPO_ROOT / "coverage/fixtures.txt"
 
+# Any sequence of modifiers. The fixed shape this replaced — one optional access modifier, then one of static/sealed/abstract — never matched
+# `unsafe class`, `sealed partial class` or `public unsafe class`, so those fixtures were never discovered, never collected, and never selected by
+# test-affected.py: AabbClusterEnumeratorDrainTests (`unsafe class`) was invisible to the map on the day it was written.
 FIXTURE_CLASS_RE = re.compile(
-    r"^\s*(?:public\s+|internal\s+)?(?:static\s+|sealed\s+|abstract\s+)?class\s+(\w+(?:Tests?|Spec))\b",
+    r"^\s*(?:(?:public|internal|private|protected|static|sealed|abstract|unsafe|partial|file)\s+)*class\s+(\w+(?:Tests?|Spec))\b",
     re.M,
 )
 
@@ -81,7 +84,20 @@ def collect_fixture(fixture: str, output_xml: Path) -> bool:
         "--filter", f"FullyQualifiedName~{fixture}.",
     ]
     proc = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
-    return proc.returncode == 0 and output_xml.exists()
+    ok = proc.returncode == 0 and output_xml.exists()
+    if not ok and output_xml.exists():
+        # dotnet-coverage writes its report even when the test run failed or timed out — then a bare 181-byte <coverage> element with no class in it.
+        # Left on disk, every later incremental run found it newer than the test source, called it fresh and mapped the fixture to NOTHING; --only too,
+        # since a listed fixture still goes through the freshness check. Nine fixtures sat unmapped that way. A failed run that did record coverage
+        # (a failing test, not a dead one) keeps it.
+        try:
+            empty = "<class " not in output_xml.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            empty = True
+        if empty:
+            for stale in (output_xml, output_xml.with_suffix(".parsed.json")):
+                stale.unlink(missing_ok=True)
+    return ok
 
 
 def parse_per_file_coverage(cobertura_xml: Path) -> dict[str, int]:

@@ -22,15 +22,21 @@
 #     name is the only thing that distinguishes "known flake" from "the regression you just wrote", and it is exactly
 #     what scrolls away if nobody captured it.
 #
-# NOT reproduced: the 8-way sharding and the serial Sensitive pass. Those change CONTENTION, which is a real source of
-# gate-only failures, and reproducing them faithfully means reproducing the box. This script is the cheap 90%; when a
-# test fails only on the gate and passes here, contention is the first suspect and `bench/aws/shard.py run` is the
-# tool for it.
+# THE ENGINE SUITE RUNS THE WAY THE GATE RUNS IT (2026-09-12): `bench/aws/shard.py run` — the gate's 8 shards as 8
+# concurrent single-worker processes, then the serial Category=Sensitive quiet pass, then up to two retries of whatever
+# failed, alone. Measured the old way — one process at LevelOfParallelism 4 — the suite spent 42 s four-wide and then
+# 46 s ONE test at a time, because 120 [NonParallelizable] fixtures (33.7 s of test time) can only run alone in a
+# process. Separate processes cannot share statics, so the shards run those side by side. It is also the gate's own
+# shape: the Sensitive tests stop failing under a load the gate never puts them under, and a timing flake that clears
+# on retry is reported as FLAKED (non-blocking) instead of reddening the run — exactly the gate's verdict.
+# `--single-process` keeps the old path (one dotnet test, the gate's category filter) for a box too small for 8 processes;
+# SHARD_CONCURRENCY caps the shards run at once without changing which tests run.
 #
 # USAGE
-#   scripts/pre-push.sh              # policy checks + both suites (Release)
-#   scripts/pre-push.sh --policy     # policy checks only (seconds — the nine free failures)
-#   scripts/pre-push.sh --no-build   # skip the Release builds (suites must already be built)
+#   scripts/pre-push.sh                   # policy checks + both suites (Release), engine suite sharded like the gate
+#   scripts/pre-push.sh --policy          # policy checks only (seconds — the nine free failures)
+#   scripts/pre-push.sh --no-build        # skip the Release builds (suites must already be built)
+#   scripts/pre-push.sh --single-process  # engine suite as one dotnet test process instead of the gate's shards
 #
 # Install as a real hook if you want it automatic (opt-in — it is not wired up by default):
 #   ln -s ../../scripts/pre-push.sh .git/hooks/pre-push
@@ -40,11 +46,13 @@ cd "$(git rev-parse --show-toplevel)" || exit 1
 
 POLICY_ONLY=0
 BUILD=1
+SHARDED=1
 for arg in "$@"; do
   case "$arg" in
     --policy) POLICY_ONLY=1 ;;
     --no-build) BUILD=0 ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    --single-process) SHARDED=0 ;;
+    -h|--help) sed -n '2,41p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -137,14 +145,24 @@ if [ "$BUILD" -eq 1 ]; then
   step "build workbench tests (Release)" dotnet build "$WORKBENCH" -c Release -p:SkipClientBuild=true
 fi
 
-suite_step "engine suite (Release)"    "$ENGINE"    pre-push-engine.trx
+if [ "$SHARDED" -eq 1 ]; then
+  # shard.py prints its own per-shard table, the FLAKED list and the STILL FAILING list, and its exit code is the gate's
+  # verdict. Results (one trx per shard) land beside the other pre-push trx files.
+  step "engine suite (Release, gate shards)" \
+    env SHARD_REPO="$PWD" SHARD_CONFIG=Release \
+    python3 bench/aws/shard.py run --results-dir "$(dirname "$ENGINE")/TestResults/pre-push-shards"
+else
+  suite_step "engine suite (Release)"    "$ENGINE"    pre-push-engine.trx
+fi
 suite_step "workbench suite (Release)" "$WORKBENCH" pre-push-workbench.trx
 
 echo ""
 if [ "$RC" -eq 0 ]; then
   printf '\033[32mAll gate-equivalent checks passed.\033[0m\n'
-  echo "Not covered locally: shard contention + the serial Sensitive pass. If the gate still reddens on a test that"
-  echo "passes here, that difference is the first thing to suspect — see bench/aws/shard.py run."
+  if [ "$SHARDED" -eq 0 ]; then
+    echo "Not covered with --single-process: shard contention + the serial Sensitive pass. If the gate still reddens"
+    echo "on a test that passes here, run without --single-process."
+  fi
 else
   printf '\033[31mFAILED:\033[0m %s\n' "${FAILED[*]}"
   echo "Each line names the gate job it corresponds to, so a failure here is the same failure CI would have reported."

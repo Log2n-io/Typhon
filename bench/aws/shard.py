@@ -100,6 +100,11 @@ def trx_universe(trx_path):
         cls = id2cls.get(tid)
         if not cls:
             continue
+        # A test the run listed but never executed — [Explicit], or a Nightly/Manual tier the filter excludes — must not put its class in the plan.
+        # A NAMED class that runs nothing is exactly what cmd_run's PLAN INTEGRITY check refuses: a plan regenerated from per-shard trx named ten
+        # such classes and failed its first run. Left out, a class like that falls to the catch-all, where it runs what it would have run anyway.
+        if r.get("outcome") == "NotExecuted":
+            continue
         pairs.append((cls + "." + (id2name.get(tid) or ""), cls))
         s, e = r.get("startTime"), r.get("endTime")
         if s and e:
@@ -241,6 +246,14 @@ def cmd_run(results_dir):
                 for i, s in enumerate(shards)]
         for f in futs:
             results.append(f.result())
+
+    # Infrastructure retry, once per shard. A shard whose run produced NO results tested nothing, and its outcome says nothing about the code: seen
+    # locally on 2026-09-12, every shard AND the quiet pass aborted with "vstest.console process failed to connect to testhost process after 90
+    # seconds" while the box was busy, and an identical rerun minutes later was green in 47 s. Without this the plan-integrity check (correctly) fails
+    # the run on dozens of "classes that ran zero tests", and the only remedy is to rerun everything. A shard that is genuinely broken aborts again.
+    for label, _, _, trx in [r for r in results if parse_trx(r[3])[0] == 0]:
+        print(f"\nshard {label} produced no results (testhost never connected, or the host died) — running it once more...", flush=True)
+        results = [r for r in results if r[0] != label] + [run_one(label, shards[int(label)]["filter"], results_dir)]
     par = time.time() - t0
     results.sort(key=lambda x: int(x[0]))
     tot = pas = fail = 0
