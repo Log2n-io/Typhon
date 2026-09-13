@@ -37,6 +37,9 @@ internal static class Program
         Console.WriteLine($"  combat: {s.PlayersEngaged} attacks, {s.CreaturesKilled} creatures killed, "
             + $"{s.CreaturesRespawned} revived over {result.TicksMeasured} ticks");
         Console.WriteLine($"  missions: {s.MissionsIssued} issued, {s.MissionsCompleted} completed");
+        var gc = sim.LastGc;
+        Console.WriteLine($"  gc while ticking: {gc.Gen0} gen0, {gc.Gen1} gen1, {gc.Gen2} gen2 collections, {gc.PauseMs:F1} ms paused "
+            + $"({100 * gc.PauseMs / Math.Max(1d, gc.ElapsedMs):F2} % of {gc.ElapsedMs / 1000:F1} s), {gc.AllocatedBytes / 1048576.0:F1} MB allocated");
 
         Console.WriteLine();
         Console.WriteLine($"  {"system",-16} {"phase",-10} {"median us",10} {"share",7} {"entities",10} {"workers",8}");
@@ -52,6 +55,8 @@ internal static class Program
 
         sim.PrintShuttleReport();
         sim.PrintSpatialTelemetry();
+        sim.PrintWorkProbe();
+        sim.PrintChunkStats();
         SpatialCensus.Print(sim.Dbe);
         return 0;
     }

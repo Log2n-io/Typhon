@@ -105,6 +105,15 @@ public sealed class SimConfig
     /// <summary>Time radius queries at shuttleports after arrivals against a steady port, and read those cells' tightness (#910's measurement).</summary>
     public bool Probe;
 
+    /// <summary>
+    /// Count the work of a sample of interest queries — cell halves, clusters scanned and opened, entities tested, hits, distinct pages — per queried
+    /// archetype. The counting runs inside <c>Awareness</c>, so a run with it on is a count, not a timing.
+    /// </summary>
+    public bool WorkProbe;
+
+    /// <summary>Time every chunk of the awareness system and report how evenly the chunks shared the work and the pool.</summary>
+    public bool ChunkStats;
+
     /// <summary>Spawn count at which a transaction places its entities in per-cell Morton order.</summary>
     public int BatchSpawnSortThreshold = 128;
 
@@ -171,6 +180,11 @@ public sealed class SimConfig
     /// </remarks>
     public int AwarenessMinChunk;
 
+    /// <summary>
+    /// How the awareness system drains each interest query. <see cref="AwarenessApi.MoveNext"/> is one call per hit; <c>Count()</c> is one per query.
+    /// </summary>
+    public AwarenessApi AwarenessApi = AwarenessApi.Count;
+
     /// <summary>Seed for every random decision, so a run is reproducible and two arms see the same world.</summary>
     public int Seed = 20260907;
 
@@ -198,7 +212,21 @@ public sealed class SimConfig
     public int ResolveWorkerCount() => WorkerCount > 0 ? WorkerCount : Environment.ProcessorCount;
 
     /// <summary>A short label identifying this configuration in a results table.</summary>
+    /// <remarks>Deliberately omits <see cref="AwarenessApi"/>: the drain does not change the workload, and the label keys sweep results.</remarks>
     public string Label =>
         $"{WorldEdgeKm:N0}km x{PopulationScale:N1} cell={ResolveCellSize():N0}m floors={ClusterTargetExtentRatio:G}/{ClusterRepairExtentRatio:G} "
         + $"unit={RepairWorstClustersPerUnit} shuttles={(!Shuttles ? "off" : ShuttleBurst ? "burst" : "trickle")}";
+}
+
+/// <summary>How the awareness system drains its interest queries.</summary>
+public enum AwarenessApi
+{
+    /// <summary>One <c>MoveNext</c> per hit.</summary>
+    MoveNext,
+
+    /// <summary>One <c>Count()</c> per query.</summary>
+    Count,
+
+    /// <summary><c>Fill(Span)</c> into a per-thread 64-result buffer until the query is exhausted.</summary>
+    Fill,
 }

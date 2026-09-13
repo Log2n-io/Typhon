@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 
 namespace SwgTatooine;
@@ -17,6 +18,12 @@ public sealed partial class TatooineSim
 
     /// <summary>Per-tick behavioural totals, drained by the telemetry system.</summary>
     public TickStats LastStats { get; private set; }
+
+    /// <summary>GC activity from the runtime's start to its shutdown — the ticking part of the run, not the world build.</summary>
+    public GcSnapshot LastGc { get; private set; }
+
+    /// <summary>With <c>--chunk-stats</c>, how evenly the awareness system's chunks shared its work and the pool.</summary>
+    public void PrintChunkStats() => _bridge?.PrintChunkStats();
 
     /// <summary>
     /// Build the views, wire the schedule and run the configured number of ticks.
@@ -64,12 +71,13 @@ public sealed partial class TatooineSim
         {
             if (aborts++ < 3)
             {
-                Console.WriteLine($"  !! tick {outcome.TickNumber} aborted: {outcome.Reason} in '{outcome.FailedSystemName}': "
-                    + $"{outcome.FailedSystemException?.GetType().Name}: {outcome.FailedSystemException?.Message}");
+                // The whole exception, stack included: a type and a message name a symptom, not the line that raised it.
+                Console.WriteLine($"  !! tick {outcome.TickNumber} aborted: {outcome.Reason} in '{outcome.FailedSystemName}': {outcome.FailedSystemException}");
             }
         };
 
         var total = _config.WarmTicks + _config.MeasuredTicks;
+        var gcBefore = GcSnapshot.Take();
         _runtime.Start();
 
         // Poll rather than sleep for a computed duration: a tick that overruns would make a duration-based wait stop
@@ -82,6 +90,7 @@ public sealed partial class TatooineSim
 
         var reached = _runtime.CurrentTickNumber;
         _runtime.Shutdown();
+        LastGc = GcSnapshot.Take() - gcBefore;
 
         if (reached < total)
         {
@@ -98,6 +107,9 @@ public sealed partial class TatooineSim
 
     /// <summary>The fence's per-archetype drift and repair counters, as per-tick means over the measured window.</summary>
     public void PrintSpatialTelemetry() => _bridge?.PrintSpatialTelemetry();
+
+    /// <summary>With <c>--work-probe</c>, what a sample of interest queries did, per queried archetype.</summary>
+    public void PrintWorkProbe() => _bridge?.PrintWorkProbe();
 
     /// <summary>
     /// Read the telemetry ring and reduce the measured window to medians, a p99, and a per-system breakdown.
@@ -247,6 +259,19 @@ public sealed partial class TatooineSim
 
         dag.Add(new EconomySystem(_bridge));
     }
+}
+
+/// <summary>GC counters at one point in time, and the difference between two.</summary>
+public readonly record struct GcSnapshot(int Gen0, int Gen1, int Gen2, double PauseMs, long AllocatedBytes, long Timestamp)
+{
+    public static GcSnapshot Take() => new(GC.CollectionCount(0), GC.CollectionCount(1), GC.CollectionCount(2),
+        GC.GetTotalPauseDuration().TotalMilliseconds, GC.GetTotalAllocatedBytes(), Stopwatch.GetTimestamp());
+
+    public static GcSnapshot operator -(GcSnapshot a, GcSnapshot b) => new(a.Gen0 - b.Gen0, a.Gen1 - b.Gen1, a.Gen2 - b.Gen2, a.PauseMs - b.PauseMs,
+        a.AllocatedBytes - b.AllocatedBytes, a.Timestamp - b.Timestamp);
+
+    /// <summary>Wall time between the two snapshots of a difference.</summary>
+    public double ElapsedMs => Timestamp * 1000.0 / Stopwatch.Frequency;
 }
 
 /// <summary>What one configuration cost.</summary>

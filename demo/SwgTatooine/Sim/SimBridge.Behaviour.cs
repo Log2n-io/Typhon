@@ -1,5 +1,6 @@
 using System;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using Typhon.Schema.Definition;
 
@@ -592,8 +593,12 @@ public sealed partial class SimBridge
     /// </summary>
     public void AwarenessTick(TickContext ctx, AwarenessTarget? only)
     {
+        var chunkStart = _config.ChunkStats ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
         long queries = 0;
         long hits = 0;
+        var probe = _config.WorkProbe && ctx.TickNumber >= _config.WarmTicks;
+        Span<long> work = stackalloc long[WorkProbeCounters * 4];
+        work.Clear();
 
         using var clusters = ctx.ClusterIds != null
             ? ctx.Accessor.GetClusterEnumerator<Player>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
@@ -615,29 +620,50 @@ public sealed partial class SimBridge
                 bits &= bits - 1;
 
                 var sphere = new BSphere2F { CenterX = places[idx].X, CenterY = places[idx].Z, Radius = AwarenessRadius };
+                var sample = probe && ((cluster.ChunkId * 64) + idx) % WorkProbeSampleEvery == 0;
                 using var epoch = EpochGuard.Enter(Dbe.EpochManager);
                 if (only is null or AwarenessTarget.Structures)
                 {
-                    hits += CountInRadius<WorldObject>(in sphere);
+                    var n = CountInRadius<WorldObject>(in sphere);
+                    hits += n;
                     queries++;
+                    if (sample)
+                    {
+                        ProbeWork(0, StateOf<WorldObject>(), in sphere, n, work);
+                    }
                 }
 
                 if (only is null or AwarenessTarget.Creatures)
                 {
-                    hits += CountInRadius<Creature>(in sphere);
+                    var n = CountInRadius<Creature>(in sphere);
+                    hits += n;
                     queries++;
+                    if (sample)
+                    {
+                        ProbeWork(1, StateOf<Creature>(), in sphere, n, work);
+                    }
                 }
 
                 if (only is null or AwarenessTarget.Npcs)
                 {
-                    hits += CountInRadius<CityNpc>(in sphere);
+                    var n = CountInRadius<CityNpc>(in sphere);
+                    hits += n;
                     queries++;
+                    if (sample)
+                    {
+                        ProbeWork(2, StateOf<CityNpc>(), in sphere, n, work);
+                    }
                 }
 
                 if (only is null or AwarenessTarget.Players)
                 {
-                    hits += CountInRadius<Player>(in sphere);
+                    var n = CountInRadius<Player>(in sphere);
+                    hits += n;
                     queries++;
+                    if (sample)
+                    {
+                        ProbeWork(3, StateOf<Player>(), in sphere, n, work);
+                    }
                 }
             }
         }
@@ -647,9 +673,69 @@ public sealed partial class SimBridge
             Interlocked.Add(ref _awarenessQueries, queries);
             Interlocked.Add(ref _awarenessHits, hits);
         }
+
+        if (probe)
+        {
+            FoldWork(work);
+        }
+
+        if (_config.ChunkStats && ctx.TickNumber >= _config.WarmTicks)
+        {
+            RecordChunk(ctx.TickNumber, chunkStart, System.Diagnostics.Stopwatch.GetTimestamp(), hits, queries);
+        }
     }
 
-    private long CountInRadius<TArch>(in BSphere2F sphere) where TArch : Archetype<TArch>, new()
+    // Each drain is its own NoInlining method, so a run never JIT-compiles the drains it does not use. That lets an A/B run an engine build that lacks
+    // the newer query API under the same host binary.
+    private long CountInRadius<TArch>(in BSphere2F sphere) where TArch : Archetype<TArch>, new() => _config.AwarenessApi switch
+    {
+        AwarenessApi.MoveNext => CountByMoveNext<TArch>(in sphere),
+        AwarenessApi.Count => CountByCount<TArch>(in sphere),
+        _ => CountByFill<TArch>(in sphere),
+    };
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private long CountByCount<TArch>(in BSphere2F sphere) where TArch : Archetype<TArch>, new()
+    {
+        var e = Dbe.ClusterSpatialQuery<TArch>().Radius(in sphere);
+        try
+        {
+            return e.Count();
+        }
+        finally
+        {
+            e.Dispose();
+        }
+    }
+
+    /// <summary>One per worker thread, allocated once: a stackalloc here would zero 4.6 KB on every query and bill it to Fill.</summary>
+    [ThreadStatic]
+    private static ClusterSpatialQueryResult[] _fillBuffer;
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private long CountByFill<TArch>(in BSphere2F sphere) where TArch : Archetype<TArch>, new()
+    {
+        var buffer = _fillBuffer ??= new ClusterSpatialQueryResult[64];
+        var e = Dbe.ClusterSpatialQuery<TArch>().Radius(in sphere);
+        try
+        {
+            long n = 0;
+            int got;
+            while ((got = e.Fill(buffer)) > 0)
+            {
+                n += got;
+            }
+
+            return n;
+        }
+        finally
+        {
+            e.Dispose();
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private long CountByMoveNext<TArch>(in BSphere2F sphere) where TArch : Archetype<TArch>, new()
     {
         var e = Dbe.ClusterSpatialQuery<TArch>().Radius(in sphere);
         try

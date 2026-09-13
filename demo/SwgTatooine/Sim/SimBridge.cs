@@ -47,6 +47,7 @@ public sealed partial class SimBridge
         AwarenessMinChunk = config.AwarenessMinChunk;
         _rngState = (uint)config.Seed | 1u;
         InitShuttles();
+        InitChunkStats();
     }
 
     /// <summary>Per-system chunk floor for the awareness system; 0 inherits the global one.</summary>

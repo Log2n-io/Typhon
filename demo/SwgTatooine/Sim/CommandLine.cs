@@ -30,6 +30,8 @@ public static class CommandLine
         c.Shuttles = Array.IndexOf(args, "--no-shuttles") < 0;
         c.ShuttleBurst = Array.IndexOf(args, "--shuttle-burst") >= 0;
         c.Probe = Array.IndexOf(args, "--probe") >= 0;
+        c.WorkProbe = Array.IndexOf(args, "--work-probe") >= 0;
+        c.ChunkStats = Array.IndexOf(args, "--chunk-stats") >= 0;
         c.BatchSpawnSortThreshold = Int(args, "--batch-sort", c.BatchSpawnSortThreshold);
         c.TickRateHz = Int(args, "--hz", c.TickRateHz);
         c.WorkerCount = Int(args, "--workers", c.WorkerCount);
@@ -39,6 +41,13 @@ public static class CommandLine
         c.Seed = Int(args, "--seed", c.Seed);
         c.ParallelQueryMinChunkSize = Int(args, "--min-chunk", c.ParallelQueryMinChunkSize);
         c.AwarenessMinChunk = Int(args, "--awareness-min-chunk", c.AwarenessMinChunk);
+        c.AwarenessApi = Str(args, "--awareness-api", "count") switch
+        {
+            "movenext" => AwarenessApi.MoveNext,
+            "count" => AwarenessApi.Count,
+            "fill" => AwarenessApi.Fill,
+            var other => throw new ArgumentException($"--awareness-api takes movenext, count or fill, not '{other}'"),
+        };
         if (Array.IndexOf(args, "--split-awareness") >= 0)
         {
             c.SplitAwareness = true;
