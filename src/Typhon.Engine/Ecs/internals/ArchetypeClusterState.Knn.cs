@@ -76,13 +76,37 @@ internal sealed unsafe partial class ArchetypeClusterState
         int resultCount = 0;
         var heap = default(KnnCandidateHeap);
 
+        // The named outliers go on the heap first (SQ-01): their boxes reach further past their cells than the stopping rule's ClusterReach allows for, so
+        // the rings cannot be trusted to collect them in time. Skipped when a ring reaches their home cell. Only CURRENT entries are named: one whose chunk
+        // id was freed and reused elsewhere is left to the rings, which see it like any other. Reach and set are read once, so the whole search uses
+        // one consistent pair.
+        double reach = Volatile.Read(ref ClusterReach);
+        var escaped = Volatile.Read(ref EscapedClusters);
+        Span<int> named = stackalloc int[EscapedClusterSet.Capacity];
+        int namedCount = 0;
+        for (int e = 0; e < escaped.Count; e++)
+        {
+            if (!escaped.IsCurrent(e, ClusterCellMap))
+            {
+                continue;
+            }
+
+            named[namedCount++] = escaped.ChunkIds[e];
+
+            // Keyed by the LIVE box, exactly as a ring would key it — not the set's fence-time copy. A spawn into this cluster since the fence has widened
+            // ClusterAabbs, and a bound taken from the old box would overstate the distance, so the stopping rule could end the search before the
+            // cluster was ever opened: a nearer entity lost.
+            grid.CellOrigin(escaped.HomeCellKeys[e], out double homeX, out double homeY, out double homeZ);
+            PushCandidate(escaped.ChunkIds[e], homeX, homeY, homeZ, centerX, centerY, queryZ, categoryMask, ReadOnlySpan<int>.Empty, ref heap);
+        }
+
+        ReadOnlySpan<int> skip = named[..namedCount];
         var accessor = ClusterSegment.CreateChunkAccessor();
         try
         {
             for (int ring = 0; ring <= maxRing; ring++)
             {
-                CollectRingCandidates(grid, ring, originCellX, originCellY, originCellZ, is3D,
-                    centerX, centerY, queryZ, categoryMask, ref heap);
+                CollectRingCandidates(grid, ring, originCellX, originCellY, originCellZ, is3D, centerX, centerY, queryZ, categoryMask, skip, ref heap);
 
                 // Drain every candidate that could still beat the current k-th best. A candidate whose LOWER BOUND is already worse cannot contain anything
                 // better, so it stays on the heap — and if the ring test below ends the search, it is never opened at all.
@@ -99,7 +123,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                     ScanClusterForNearest(clusterChunkId, ref accessor, centerX, centerY, queryZ, is3D, target, results, ref resultCount, ref clustersOpened);
                 }
 
-                if (resultCount == target && CoveredRadiusSq(grid, ring, originCellX, originCellY, originCellZ, is3D, centerX, centerY, queryZ)
+                if (resultCount == target && CoveredRadiusSq(grid, ring, originCellX, originCellY, originCellZ, is3D, centerX, centerY, queryZ, reach)
                     >= results[0].distSq)
                 {
                     break;
@@ -122,8 +146,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>Push every cluster in the cells of one shell onto the candidate heap, keyed by the lower bound its box implies.</summary>
-    private void CollectRingCandidates(SpatialGrid grid, int ring, int originCellX, int originCellY, int originCellZ, bool is3D,
-        double px, double py, double pz, uint categoryMask, ref KnnCandidateHeap heap)
+    private void CollectRingCandidates(SpatialGrid grid, int ring, int originCellX, int originCellY, int originCellZ, bool is3D, double px, double py, 
+        double pz, uint categoryMask, scoped ReadOnlySpan<int> skip, ref KnnCandidateHeap heap)
     {
         int zLo = is3D ? originCellZ - ring : originCellZ;
         int zHi = is3D ? originCellZ + ring : originCellZ;
@@ -159,8 +183,8 @@ internal sealed unsafe partial class ArchetypeClusterState
                     }
 
                     grid.CellOrigin(cellKey, out double originX, out double originY, out double originZ);
-                    PushCellClusters(slot, isStatic: false, originX, originY, originZ, px, py, pz, categoryMask, ref heap);
-                    PushCellClusters(slot, isStatic: true, originX, originY, originZ, px, py, pz, categoryMask, ref heap);
+                    PushCellClusters(slot, isStatic: false, originX, originY, originZ, px, py, pz, categoryMask, skip, ref heap);
+                    PushCellClusters(slot, isStatic: true, originX, originY, originZ, px, py, pz, categoryMask, skip, ref heap);
                 }
             }
         }
@@ -170,14 +194,14 @@ internal sealed unsafe partial class ArchetypeClusterState
 
     /// <summary>Push one half of a cell — whichever structure serves it — onto the candidate heap.</summary>
     private void PushCellClusters(PerCellSpatialSlot slot, bool isStatic, double originX, double originY, double originZ,
-        double px, double py, double pz, uint categoryMask, ref KnnCandidateHeap heap)
+        double px, double py, double pz, uint categoryMask, scoped ReadOnlySpan<int> skip, ref KnnCandidateHeap heap)
     {
         var tree = slot.ReadTree(isStatic);   // acquire — see PerCellSpatialSlot.PublishDynamicTree
         if (tree != null)
         {
             foreach (int clusterChunkId in tree.EnumerateClusterIds())
             {
-                PushCandidate(clusterChunkId, originX, originY, originZ, px, py, pz, categoryMask, ref heap);
+                PushCandidate(clusterChunkId, originX, originY, originZ, px, py, pz, categoryMask, skip, ref heap);
             }
             return;
         }
@@ -190,15 +214,21 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         for (int i = 0; i < linear.ClusterCount; i++)
         {
-            PushCandidate(linear.ClusterIds[i], originX, originY, originZ, px, py, pz, categoryMask, ref heap);
+            PushCandidate(linear.ClusterIds[i], originX, originY, originZ, px, py, pz, categoryMask, skip, ref heap);
         }
         return;
     }
 
     private void PushCandidate(int clusterChunkId, double originX, double originY, double originZ, double px, double py, double pz,
-        uint categoryMask, ref KnnCandidateHeap heap)
+        uint categoryMask, scoped ReadOnlySpan<int> skip, ref KnnCandidateHeap heap)
     {
         if ((uint)clusterChunkId >= (uint)ClusterAabbs.Length)
+        {
+            return;
+        }
+
+        // A named outlier is already on the heap from the start of the search; pushing it again would open it twice and report its entities twice.
+        if (!skip.IsEmpty && skip.Contains(clusterChunkId))
         {
             return;
         }
@@ -239,6 +269,12 @@ internal sealed unsafe partial class ArchetypeClusterState
             bound += dz * dz;
         }
 
+        PushBound(clusterChunkId, bound, ref heap);
+    }
+
+    /// <summary>Push one cluster onto the candidate min-heap under an already-computed lower bound.</summary>
+    private static void PushBound(int clusterChunkId, double bound, ref KnnCandidateHeap heap)
+    {
         if (heap.Chunk == null)
         {
             heap.Chunk = new int[64];
@@ -407,13 +443,14 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// out, so the loop may only stop once the k-th distance fits inside the covered region. A face that coincides with the world bound is treated as
     /// unbounded — there is nothing beyond it to find.</para>
     /// <para><b>The shell of cells is NOT the region those cells cover.</b> A cluster is filed by its entities' CENTRES, so its box reaches up to
-    /// <see cref="MaxClusterOverhang"/> outside its own cell — and a cluster one shell out can therefore hold an entity nearer than the face distance. Taking
+    /// <see cref="ClusterReach"/> outside its own cell — the few that reach further are named and put on the heap before the first ring — and a cluster
+    /// one shell out can therefore hold an entity nearer than the face distance. Taking
     /// the face distance as covered is what dropped true nearest neighbours: with 100-unit cells, a query at (150,150), a point at (190,150) and a 50-wide box
     /// centred at (205,150) reaching x=180, ring 0 declared 50 units covered, 50^2 beat the point's 40^2, and the nearer box was never opened. Subtracting the
     /// overhang is what makes the stopping rule true again; it costs breadth, and only where extended entities actually exist.</para>
     /// </remarks>
-    private double CoveredRadiusSq(SpatialGrid grid, int ring, int originCellX, int originCellY, int originCellZ, bool is3D,
-        double px, double py, double pz)
+    private static double CoveredRadiusSq(SpatialGrid grid, int ring, int originCellX, int originCellY, int originCellZ, bool is3D,
+        double px, double py, double pz, double reach)
     {
         ref readonly var config = ref grid.Config;
         double cell = config.CellSize;
@@ -430,7 +467,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             return double.PositiveInfinity;
         }
 
-        safe -= Volatile.Read(ref MaxClusterOverhang);
+        safe -= reach;
         return safe <= 0d ? 0d : safe * safe;
     }
 

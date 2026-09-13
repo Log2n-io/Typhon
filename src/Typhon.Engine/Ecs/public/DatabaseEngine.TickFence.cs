@@ -1901,6 +1901,10 @@ public partial class DatabaseEngine
         // reads bounds the refit has just made honest (#872 step 16, D3).
         clusterState.EvaluateCellTreeTightnessTransitions();
 
+        // The per-cell index is final for this tick from here: every AABB slice, migration, drain, refit and tree transition has run. Recompute how far
+        // the coming tick's queries must reach past a cell, and which outliers they visit by name instead (SQ-01). It may FALL — the reason it exists.
+        clusterState.RefreshClusterReach();
+
         EmitSpatialArchetypeSnapshot(clusterState, meta.ArchetypeId);
 
         // Clean-spatial-refresh branch (path 1) stops here — no dormancy sweep change (already swept clean), no WAL emit.

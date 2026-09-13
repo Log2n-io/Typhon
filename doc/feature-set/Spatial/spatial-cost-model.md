@@ -248,16 +248,17 @@ Worked, for 100 000 entities spread over a 1 000 × 1 000 flat region at a targe
 cells, 1 000 000 square units of world, 320 square units per cell, so a cell side of about 18 units. Round to
 something legible — 16 or 20 — and confirm it against the occupancy counter rather than against the arithmetic.
 
-Two sanity checks before you accept a number. Your typical **query box plus your largest entity extent should not
-exceed one cell side**, or the query may miss an entity that overhangs its cell (see the limits below). And your
-entity **speed per tick should be small against the cell side**, or every entity migrates most ticks.
+Two sanity checks before you accept a number. Your **largest entity extent should be small against the cell side**,
+because every query walks the cells its region can reach — its own extent grown by the archetype's cluster reach —
+so entities large against the cell widen every query's walk (see the limits below). And your entity **speed per
+tick should be small against the cell side**, or every entity migrates most ticks.
 
 ## ⚠️ Guarantees & limits
 
 - **A 3D world cannot use the spatial write barrier today** — `ClusterRef.WriteSpatial` supports `AABB2F` only and throws `NotSupportedException` for the other seven field shapes. Enabling the barrier on a 3D archetype succeeds at registration and fails at the first write. Measured over 32 000 entities at eight workers, the 2D arm reports 25 366 drifters and 4 725 migrations per tick while the 3D arm reports zero of each, because every write threw. This is the largest gap between the name "3D partitioning" and what currently runs.
 - **Repair costs roughly a microsecond per entity** — about 1 300 ns of tick fence per repaired entity warm, projecting a 100 000-entity cell at ~130 ms for one full re-sort. It is the only cost on this page large enough to miss a frame by itself, so size `ReclusterBudgetMs` against it, and read `MeasuredNsPerEntity` for the live figure on your own workload rather than tuning against this one.
 - **The world is bounded, and leaving it is silent** — a position outside the configured world bounds is *clamped* into the nearest edge cell rather than rejected, so an entity that escapes the world piles into the boundary cell and still answers queries there. `NaN` and infinite coordinates do throw. The block packing could support a far larger world; the clamp has not been lifted.
-- **A box query can miss an entity that overhangs its cell** — membership is by centre, so a cluster's box can protrude past its cell by up to an entity's half-extent, and the query walks exactly the cells its box overlaps with no expansion. The precondition is *query extent + largest entity extent ≤ cell size*; it is documented but not asserted, and violating it produces silent false negatives. Only k-nearest consults the recorded maximum overhang.
+- **Overhang widens queries, but only the ordinary overhang** — membership is by centre, so a cluster's box can protrude past its cell by an entity's half-extent, plus the migration hysteresis band for an entity drifting toward the next cell. Box, radius, ray and frustum queries grow their cell range by the archetype's cluster reach (`ClusterReach`, published in spatial telemetry), which is also what k-nearest widens its stopping rule by. It is recomputed at every tick fence, from the in-world part of each box, and falls again when the cluster that raised it is fixed. Outliers beyond it — up to 16 per archetype, `EscapedClusterCount` — are tested by name on every query instead of widening every walk; each costs a box test per query.
 - **Cells are never destroyed** — cell creation is lazy and concurrent, but nothing reclaims a cell. A world that sweeps a region and moves on retains every cell it ever touched, so cell count and resident bytes only grow within a session.
 - **The promotion threshold is one number for the whole database** — there is no per-archetype or per-cell override, and it is read once while archetypes initialise, so it cannot be changed on a running engine. A world whose archetypes want different boundaries has to pick one.
 - **The 24× is derived, the 90% is measured** — the cluster-coverage mean comes from a spatial lab measurement; the 24× swing in clusters opened is arithmetic on top of it and has never been measured end to end.

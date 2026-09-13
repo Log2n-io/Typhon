@@ -1190,15 +1190,26 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
         var segmentLength = Length;
         if (resultPageIndex >= segmentLength)
         {
-            var msg = $"ChunkBasedSegment.GetChunkLocation: Computed page index {resultPageIndex} >= segment length {segmentLength}. " +
-                $"ChunkId={index}, rootChunkCount={_rootChunkCount}, otherChunkCount={_otherChunkCount}, " +
-                $"Capacity={ChunkCapacity}. This may indicate accessing a chunk ID that was never allocated or segment corruption.";
-            // Issue #297: let tests capture the descent trace that produced this bogus chunk-id BEFORE we throw.
-            OlcDescentTrace.OnInvalidChunkId?.Invoke(index, msg);
-            throw new InvalidOperationException(msg);
+            ThrowPageIndexOutOfSegment(index, resultPageIndex, segmentLength);
         }
 
         return (resultPageIndex, offset);
+    }
+
+    /// <summary>
+    /// The out-of-range report of <see cref="GetChunkLocation"/>, kept out of line. That method is inlined under every <c>GetChunkAddress</c>, and
+    /// inlined with it this message builder left a 40-byte interpolated-string handler — a managed reference — in each caller's frame, which a fully
+    /// interruptible caller zeroes in its prologue on every call.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void ThrowPageIndexOutOfSegment(int index, int resultPageIndex, int segmentLength)
+    {
+        var msg = $"ChunkBasedSegment.GetChunkLocation: Computed page index {resultPageIndex} >= segment length {segmentLength}. " +
+            $"ChunkId={index}, rootChunkCount={_rootChunkCount}, otherChunkCount={_otherChunkCount}, " +
+            $"Capacity={ChunkCapacity}. This may indicate accessing a chunk ID that was never allocated or segment corruption.";
+        // Issue #297: let tests capture the descent trace that produced this bogus chunk-id BEFORE we throw.
+        OlcDescentTrace.OnInvalidChunkId?.Invoke(index, msg);
+        throw new InvalidOperationException(msg);
     }
 
     // ═══════════════════════════════════════════════════════════════════════

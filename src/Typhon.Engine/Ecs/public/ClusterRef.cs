@@ -551,17 +551,31 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         var aabbChanged = false;
         if (haveOrigin)
         {
-            ref var stored = ref _state.ClusterAabbs[_chunkId];
-            aabbChanged = MaybeGrowAndFlagShrink(ref stored,
-                ClusterSpatialAabb.ToCellRelativeMin(oldMinX, originX), ClusterSpatialAabb.ToCellRelativeMin(oldMinY, originY),
-                ClusterSpatialAabb.ToCellRelativeMin(oldMinZ, originZ),
-                ClusterSpatialAabb.ToCellRelativeMax(oldMaxX, originX), ClusterSpatialAabb.ToCellRelativeMax(oldMaxY, originY),
-                ClusterSpatialAabb.ToCellRelativeMax(oldMaxZ, originZ),
-                ClusterSpatialAabb.ToCellRelativeMin(newMinX, originX), ClusterSpatialAabb.ToCellRelativeMin(newMinY, originY),
-                ClusterSpatialAabb.ToCellRelativeMin(newMinZ, originZ),
-                ClusterSpatialAabb.ToCellRelativeMax(newMaxX, originX), ClusterSpatialAabb.ToCellRelativeMax(newMaxY, originY),
-                ClusterSpatialAabb.ToCellRelativeMax(newMaxZ, originZ),
-                is3D);
+            var relOldMinX = ClusterSpatialAabb.ToCellRelativeMin(oldMinX, originX);
+            var relOldMinY = ClusterSpatialAabb.ToCellRelativeMin(oldMinY, originY);
+            var relOldMinZ = ClusterSpatialAabb.ToCellRelativeMin(oldMinZ, originZ);
+            var relOldMaxX = ClusterSpatialAabb.ToCellRelativeMax(oldMaxX, originX);
+            var relOldMaxY = ClusterSpatialAabb.ToCellRelativeMax(oldMaxY, originY);
+            var relOldMaxZ = ClusterSpatialAabb.ToCellRelativeMax(oldMaxZ, originZ);
+            var relNewMinX = ClusterSpatialAabb.ToCellRelativeMin(newMinX, originX);
+            var relNewMinY = ClusterSpatialAabb.ToCellRelativeMin(newMinY, originY);
+            var relNewMinZ = ClusterSpatialAabb.ToCellRelativeMin(newMinZ, originZ);
+            var relNewMaxX = ClusterSpatialAabb.ToCellRelativeMax(newMaxX, originX);
+            var relNewMaxY = ClusterSpatialAabb.ToCellRelativeMax(newMaxY, originY);
+            var relNewMaxZ = ClusterSpatialAabb.ToCellRelativeMax(newMaxZ, originZ);
+
+            // Stamped: a spawn on another thread can grow ClusterAabbs, and a CAS into the array it copied after the copy read this entry would be lost —
+            // see ArchetypeClusterState._clusterAabbsGrowth. The grow and the shrink flag are both idempotent, so the redo just repeats them in the copy.
+            int stamp;
+            do
+            {
+                stamp = _state.BeginClusterAabbsWrite();
+                aabbChanged |= MaybeGrowAndFlagShrink(ref Volatile.Read(ref _state.ClusterAabbs)[_chunkId],
+                    relOldMinX, relOldMinY, relOldMinZ, relOldMaxX, relOldMaxY, relOldMaxZ,
+                    relNewMinX, relNewMinY, relNewMinZ, relNewMaxX, relNewMaxY, relNewMaxZ,
+                    is3D);
+            }
+            while (!_state.ClusterAabbsWriteLanded(stamp));
         }
 
         // The REAL Z centre, which is what trap 1 of #914 was about: this used to be a hard-coded 0f, so a 3D entity would have been placed in the z = 0

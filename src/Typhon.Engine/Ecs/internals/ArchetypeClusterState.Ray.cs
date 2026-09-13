@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 
 namespace Typhon.Engine.Internals;
 
@@ -54,8 +55,15 @@ internal sealed unsafe partial class ArchetypeClusterState
         double endY = originY + (dirY * maxDistance);
         double endZ = originZ + (dirZ * maxDistance);
 
-        grid.WorldToCellRange(Math.Min(originX, endX), Math.Min(originY, endY), is3D ? Math.Min(originZ, endZ) : double.NegativeInfinity,
-            Math.Max(originX, endX), Math.Max(originY, endY), is3D ? Math.Max(originZ, endZ) : double.PositiveInfinity,
+        // Widened by ClusterReach: a cluster box can reach that far past the cell it is filed in, so a box crossing the ray from a cell outside the
+        // segment's bounding box would otherwise never be examined (SQ-01). The slab test still runs against the cluster and entity boxes themselves. The
+        // outliers that reach further are named in EscapedClusters and tested after the walk.
+        double overhang = Volatile.Read(ref ClusterReach);
+        var escaped = Volatile.Read(ref EscapedClusters);
+        // The low side stepped one double down: a box ending exactly on a cell boundary still touches a segment starting there (see AabbClusterEnumerator).
+        grid.WorldToCellRange(Math.BitDecrement(Math.Min(originX, endX) - overhang), Math.BitDecrement(Math.Min(originY, endY) - overhang),
+            is3D ? Math.BitDecrement(Math.Min(originZ, endZ) - overhang) : double.NegativeInfinity,
+            Math.Max(originX, endX) + overhang, Math.Max(originY, endY) + overhang, is3D ? Math.Max(originZ, endZ) + overhang : double.PositiveInfinity,
             out int cellMinX, out int cellMinY, out int cellMinZ, out int cellMaxX, out int cellMaxY, out int cellMaxZ);
 
         if (!is3D)
@@ -103,6 +111,24 @@ internal sealed unsafe partial class ArchetypeClusterState
                             originX, originY, originZ, dirX, dirY, dirZ, maxDistance, is3D, categoryMask, aabbs, ref visited, results, ref count);
                     }
                 }
+            }
+
+            // The named outliers the walk did not reach. The walk rejects no cell and slab-tests every cluster's full index box, so one whose home cell it
+            // covered was already tested there; the visit set would refuse it anyway — the home-cell test only spares the slab test. A 2D archetype lives
+            // in the plane containing Z = 0, which the slab test sees as an infinite Z slab, as RayScanHalf does.
+            for (int e = 0; e < escaped.Count && count < results.Length; e++)
+            {
+                if (escaped.HomeCellIn(e, cellMinX, cellMinY, cellMinZ, cellMaxX, cellMaxY, cellMaxZ)
+                    || !RayHitsBox(originX, originY, originZ, dirX, dirY, dirZ, maxDistance, escaped.MinX[e], escaped.MinY[e],
+                        is3D ? escaped.MinZ[e] : double.NegativeInfinity, escaped.MaxX[e], escaped.MaxY[e],
+                        is3D ? escaped.MaxZ[e] : double.PositiveInfinity, out _)
+                    || !escaped.IsCurrent(e, ClusterCellMap))
+                {
+                    continue;
+                }
+
+                RayScanCluster(escaped.ChunkIds[e], ref accessor, originX, originY, originZ, dirX, dirY, dirZ, maxDistance, is3D, categoryMask, aabbs,
+                    ref visited, results, ref count);
             }
         }
         finally

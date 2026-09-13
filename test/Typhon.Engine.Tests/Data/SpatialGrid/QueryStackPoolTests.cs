@@ -195,9 +195,10 @@ class QueryStackPoolTests
     /// <see cref="Unsafe.SizeOf{T}"/> call on this machine — not derived from adding up field widths, because the padding between them is the JIT's business
     /// and guessing it is how a "recorded number" becomes a wrong one. Of the 1 080 removed, 1 016 is the tree's inline DFS stack (O1) and 72 the duplicated
     /// <c>SpatialNodeDescriptor</c> (O3).</para>
-    /// <para><b>What is left, and why it is not this issue's subject.</b> Two <c>ChunkAccessor</c> copies are ~896 of the remainder — 448 each, one for the
-    /// cluster segment and one inside the tree enumerator. #916 does not name them and they are not touched here; they are the obvious next question, and
-    /// the ceiling is set so that removing them later still passes.</para>
+    /// <para><b>What was left, and where it went.</b> Two <c>ChunkAccessor</c> copies were ~896 of the remainder — 448 each, one for the cluster segment and
+    /// one inside the tree enumerator. #906 removed both, from <c>1 608</c> bytes (#914 had added fields since) to <c>368</c>: the cluster segment's
+    /// accessor is a per-thread warm window rented from <see cref="SpatialQueryAccessorCache"/>, and the tree enumerator left with its accessor — a promoted
+    /// half's hits are collected in a frame of their own. The ceiling now sits just above 368, so putting either accessor back fails here.</para>
     /// <para><see cref="Unsafe.SizeOf{T}"/> accepts a <c>ref struct</c> on .NET 10 (the <c>allows ref struct</c> anti-constraint), which is what makes this a
     /// real assertion rather than a comment.</para>
     /// </remarks>
@@ -205,7 +206,7 @@ class QueryStackPoolTests
     public void EnumeratorSizeIsRecorded()
     {
         const int SizeBefore916 = 2_624;
-        const int Ceiling = 1_700;
+        const int Ceiling = 400;
 
         var size = Unsafe.SizeOf<AabbClusterEnumerator>();
         TestContext.Out.WriteLine($"AabbClusterEnumerator = {size} bytes (was {SizeBefore916} before #916)");

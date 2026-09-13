@@ -1286,6 +1286,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 throw new InvalidOperationException("Simulated teardown-step failure (ThrowInDisposeCoreForTest).");
             }
 
+            // Warm spatial-query windows pin this engine's pages on every thread that queried it. Unpin them while this page cache is still alive, and
+            // before the final checkpoint and persistence steps need pages.
+            SpatialQueryAccessorCache.Release(MMF);
+
             // Statistics worker must stop before checkpoint (it holds epoch guards during scans)
             StatisticsWorker?.Dispose();
             StatisticsWorker = null;
@@ -1439,7 +1443,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // Wire demand-driven flush: when page cache backpressure fires, immediately wake
         // the checkpoint thread instead of waiting for the 30s timer interval.
-        MMF.OnBackpressure = () => CheckpointManager?.ForceCheckpoint();
+        MMF.OnBackpressure = () =>
+        {
+            // Warm spatial-query windows keep this cache's clean pages pinned between queries; under back-pressure they must become evictable again.
+            SpatialQueryAccessorCache.Release(MMF);
+            CheckpointManager?.ForceCheckpoint();
+        };
     }
 
     private void InitializeStatisticsWorker()

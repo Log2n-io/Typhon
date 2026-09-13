@@ -128,7 +128,57 @@
   invariant ∀ query Q, ∀ entity E:
     E geometrically matches Q ∧ (Q.categoryMask == 0 ∨ (E.CategoryMask & Q.categoryMask) == Q.categoryMask)
     → E ∈ result set
-  scope: SpatialRTree.Query.cs (all enumerators), CountInAABB
+  invariant a cell-walking cluster query examines every cluster whose box can REACH its region, not only those filed in the cells the region
+    covers: a cluster is filed by its entities' centres, so its box can leave its own cell. Two mechanisms, complete together:
+      ClusterReach — the cell range is the query's extent grown by it (AabbClusterEnumerator, QueryRay, QueryFrustum), a whole-cell rejection
+        tests the cell grown the same way (QueryFrustum), and kNN's stopping rule subtracts it (QueryNearest)
+      EscapedClusters — every cluster whose in-world overhang exceeds ClusterReach is NAMED, at most EscapedClusterSet.Capacity of them, and
+        each query tests the named clusters its walk did not reach; kNN pushes them onto its heap before the first ring
+  invariant an EDGE cell's outward side is not counted: nothing lies beyond it, and every query's cell range is clamped into the grid, so a
+    query reaching past the world bound lands in that same edge cell. An INNER cell's box that crosses the bound counts IN FULL — the query past
+    the bound walks the edge cell and the reach's worth of cells inward of it, and must get from there to the box's home cell
+    (CellReachFrame; clipping every cell at the world bound lost exactly those entities)
+  invariant the low side of every widened cell range is stepped one double down: a box is a closed interval, so a box ending exactly on a cell
+    boundary touches a query starting there, and the floor would otherwise map that boundary to the next cell up
+  invariant ClusterReach is recomputed at the end of every fenced tick's Finalize head and of every rebuild (RefreshClusterReach), and
+    may FALL; between fences only a spawn raises it, by the spawned entity's own in-world
+    overhang, before the entity is queryable (RaiseClusterReachForSpawn). A move reaches the index at the fence — or earlier only widened,
+    through a spawn's widen or a tree demotion — so a moved entity is reachable from the fence after its write. An archetype the fence
+    skips (FenceBranchPath 0: Static with a clean bitmap, pure-Transient) is not recomputed: its index gains only spawns, each raised for,
+    and loses only removals, so its reach still covers; it cannot fall until the archetype's next fenced tick
+  invariant the recompute reads ClusterAabbs, not the index, and is complete because at the fence's end every index box lies inside its
+    cluster's ClusterAabbs entry: every index write stores that entry's value at the time (a promotion copies an earlier one), between
+    writes the entry only grows, and the one pass that shrinks it — the AABB refresh — republishes the box to the index in the same pass.
+    A write that stores anything else into the index breaks SQ-01 silently. So does a grow of the ClusterAabbs ARRAY that drops a
+    concurrent write: its two lock-free writers, a spawn's widen and WriteSpatial's grow, redo any write a copy may have missed
+    (BeginClusterAabbsWrite / ClusterAabbsWriteLanded). ReachCoversIndex catches a violation in a linear half, whose stored boxes it
+    walks; a promoted half's boxes cannot be read back out of its tree, so there it checks nothing about this bound.
+    The fast reject's float bounds are rounded inward (RejectBounds), so it never drops a box the exact test would keep
+  invariant kNN keys a named cluster by its LIVE box (ClusterAabbs), never the set's fence-time copy: a spawn into it since the fence widens the
+    box, and a stale lower bound lets the stopping rule end the search before the cluster is opened
+  never widen every query by a bound that cannot fall. MaxClusterOverhang did (2026-09-12): one transient outlier — an entity teleported and
+    not yet migrated — then cost every later query of the archetype ~50x its cells for the rest of the process, SWG Tatooine's whole-run slow
+    mode and its x128 multi-second ticks; and the out-of-world half of edge-cell boxes widened every Creature query by ~930 m from tick 0
+  invariant a named cluster whose chunk id was freed and reused in another cell is skipped (EscapedClusterSet.IsCurrent) — opened, it would
+    report the reused cluster's entities a second time
+  scope: SpatialRTree.Query.cs (all enumerators), CountInAABB, AabbClusterEnumerator, ArchetypeClusterState.QueryRay,
+    ArchetypeClusterState.QueryFrustum, ArchetypeClusterState.QueryNearest, ArchetypeClusterState.CoveredRadiusSq,
+    ArchetypeClusterState.ClusterReach, ArchetypeClusterState.EscapedClusters, ArchetypeClusterState.RefreshClusterReach,
+    ArchetypeClusterState.RaiseClusterReachForSpawn, ArchetypeClusterState.CellReachFrame, ArchetypeClusterState.FoldReach,
+    ArchetypeClusterState.RejectBounds, ArchetypeClusterState.BeginClusterAabbsWrite, ArchetypeClusterState.ClusterAabbsWriteLanded,
+    ClusterRef.ApplySpatialWrite,
+    ArchetypeClusterState.ReachCoversIndex, ArchetypeClusterState.RebuildClusterAabbs, ArchetypeClusterState.RebuildSpatialStateFromData,
+    DatabaseEngine.FinalizeArchetypeFenceHead, Transaction.FinalizeSpawns, EscapedClusterSet, EscapedClusterSet.IsCurrent
+  verified: ClusterOverhangTests — one entity filed a row below each query and reaching 0.1 into it, found by AABB (all three drains),
+    radius, ray and frustum; AabbClusterEnumeratorDrainTests' oracle on a scattered population (added 2026-09-12, #906 — before it every
+    one of those four missed the entity); ClusterReachTests — an edge cell's out-of-world overhang widens nothing, an inner cell's box
+    crossing the bound is reached from beyond it, a box ending on a cell boundary is found by a query starting there, a named outlier is
+    found by every query shape (and by a frustum with a generous bounding box) without widening, kNN finds an entity spawned into a named
+    cluster before the fence, the reach falls at the next fence once the outlier is gone, more outliers than the capacity stay exact
+    against an oracle (AABB all drains, radius, kNN), a spawn is reachable before any fence, FoldReach's table, RejectBounds inward and
+    tight, a grow of ClusterAabbs sending a writer round again, spawns widening clusters while the array grows losing no widen, and IsCurrent
+    rejecting a freed or reused id (EscapedClusterSet_IsCurrent_RejectsAFreedOrReusedChunkId); ReachCoversIndex is asserted after every
+    fence and spawn
   on_violation: spatial query misses entities — game logic sees incomplete world state
   requires: ST-01 (MBR correctness), ST-02 (union mask not under-representing)
 
@@ -141,7 +191,14 @@
 
 ### SQ-03: Count query consistency `[fatal]`
   invariant CountInAABB(region, mask) == |{ E : E ∈ QueryAABB(region, mask) }|
-  scope: SpatialRTree.CountInAABB, AABBQueryEnumerator
+  invariant the cluster query's three drains answer the same question: from any point of an enumeration, Count() returns the number of
+    further MoveNext() hits, and Fill() yields MoveNext()'s results in MoveNext()'s order, whatever the buffer size. They share one
+    narrowphase (DrainTier → Drain, one loop per storage tier, differing only in the sink) and one cluster walk (NextCluster), which is what
+    holds this; a drain with its own copy of either is the violation waiting to happen.
+  scope: SpatialRTree.CountInAABB, AABBQueryEnumerator, AabbClusterEnumerator.Count, AabbClusterEnumerator.Fill, AabbClusterEnumerator.DrainTier
+  verified by: AabbClusterEnumeratorDrainTests — MoveNext against an oracle computed from the spawned bounds (set, bounds and DistanceSq bit for
+    bit), Count and Fill against MoveNext, on the scalar scan, the batched scan past one 64-slot batch, a promoted cell and every storage tier;
+    resume after MoveNext for both; and each tier's bounds reader against ReadAndValidateBoundsFromPtr on valid, NaN, inverted and infinite input
   on_violation: count disagrees with materialized query — game logic makes wrong density decisions
 
 ### SQ-04: Subtree counting shortcut correctness `[fatal]`
@@ -156,7 +213,27 @@
   invariant stackTop < 256 for all DFS-based queries
   invariant RayEnumerator never drops a child that hits within maxDist while below MaxRayHeapCapacity
   invariant 🔴 ∀ two enumerators live on one thread at once: their traversal stacks are DISTINCT arrays
-  scope: AABBQueryEnumerator, FrustumEnumerator, CountInAABB, RayEnumerator, QueryStackPool
+  invariant 🔴 ∀ two AabbClusterEnumerators live on one thread at once: their narrowphase page windows are DISTINCT
+    SpatialQueryAccessorCache entries, and a return is honoured only under the token its rent stamped
+  scope: AABBQueryEnumerator, FrustumEnumerator, CountInAABB, RayEnumerator, QueryStackPool, SpatialQueryAccessorCache
+  warm window (added 2026-09-12, #906): the cluster query no longer builds a ChunkAccessor per query. It rents this thread's warm window
+    over the cluster segment from SpatialQueryAccessorCache on its first cluster open (or a promoted half's first tree hit) and hands it back
+    — WITHOUT disposing it — when the query is exhausted or disposed, so the next query on the thread finds its pages resident. Same two
+    hazards as the pooled stack below, same defences: a rented entry is never given to a second rent (a nested query takes another entry,
+    and past TrimAbove an overflow entry that is not kept), and since GetEnumerator() returns a copy that carries the rent too, a return is
+    honoured only under its rent's token — and bumps it, so a copy that carries on after the return throws instead of reading a window
+    another query may hold.
+    An entry is NOT tied to the epoch it was filled in, unlike the B+Tree's warm accessor: its slots pin their pages through SlotRefCount
+    and eviction requires SlotRefCount == 0. Tying it to the epoch would make it useless — the global epoch advances on every outermost scope
+    exit. But an address from a warm window is valid only until the next GetChunkAddress on that window, not for the enclosing EpochGuard:
+    a slot evicted from the window drops its pin at once, and a page an earlier query loaded carries an old AccessEpoch.
+    Pins are released by SpatialQueryAccessorCache.Release(mmf) — an engine's call on its page cache's back-pressure and at its dispose,
+    reaching every thread's free entries over THAT cache and no other — by an entry's finalizer when its thread dies, and by recycling past
+    TrimAbove. An entry a release emptied is refilled by its thread's next query rather than replaced, so re-warming allocates nothing; a
+    process-wide release made one engine's dispose cost every other engine's next query a new entry.
+    verified by: SpatialQueryAccessorCacheTests (incl. Release_UnpinsFreeWindows_AndTheNextQueryRefillsTheSameEntryWithoutAllocating,
+    ReleasingAnotherPageCache_LeavesThisEnginesWindowWarm), AabbClusterEnumeratorDrainTests (stale copy throws; a query drained without
+    Dispose hands its window back)
   pooled stack (added 2026-09-08, #916 O1): AABBQueryEnumerator's stack is no longer the inline
     QueryStackBuffer. It is an int[256] rented from QueryStackPool, a per-thread FREE LIST, and returned in
     Dispose. Capacity is unchanged, so the 256 bound above still reads against the same number — PushChild
@@ -216,7 +293,8 @@
     broadphase — cluster bound vs query box, CELL-RELATIVE f32 (C15). SetCellQueryFrame converts once per cell;
                  the ray and kNN paths convert the CLUSTER bound outward instead, through ToWorldExact.
     narrowphase — entity bound vs query box, WORLD f64. Both sides come from the component and the caller
-                  unnarrowed; ReadAndValidateBoundsFromPtr has always produced doubles.
+                  unnarrowed; ReadAndValidateBoundsFromPtr has always produced doubles, and so do the per-tier
+                  readers AabbClusterEnumerator drains through (#906 step 3) — widening an f32 bound is exact.
     never narrow the world frame to f32 anywhere on the query path, in ANY of the four shapes — AABB, radius, ray,
     frustum, kNN. At 2^36 one f32 step is 8 192 units — wider than a 1 000-unit cell — so an f32 narrowphase
     compares two coordinates that are the SAME number and accepts every entity in the cell. That is a false
@@ -1474,20 +1552,21 @@
       polling at its own rate reads one arbitrary tick out of hundreds, so a per-second figure must be differentiated
       from the cumulative members, never read off one of these
     CUMULATIVE — `Total...` and `RepairQueueEvicted`, which only grow; these are what a rate is differentiated FROM
-    LEVELS — `ActiveClusterCount`, `RepairQueueDepth`, `MaxClusterOverhang`, `MeasuredNsPerEntity`: a standing value,
+    LEVELS — `ActiveClusterCount`, `RepairQueueDepth`, `ClusterReach`, `EscapedClusterCount`, `MeasuredNsPerEntity`: a standing value,
       neither reset per tick nor monotonically accumulating. Differentiating a level yields nonsense — "clusters per
       second" off `ActiveClusterCount` is the concrete misuse this clause exists to name
-  invariant MaxClusterOverhang is the one LEVEL that is also monotonic: a running maximum that never falls and
-    never resets, because every kNN ring widens by it and too small loses results while too large only widens a
-    search. GetSpatialTelemetryTotal therefore MAXES it across archetypes; summing would widen every ring by the sum
-    of bounds no single archetype ever had
+  invariant ClusterReach is a LEVEL recomputed at the fence whenever the index changed, and it may FALL — it was a
+    running maximum until 2026-09-13, and SQ-01 records why it stopped being one. Between fences a spawn may RAISE
+    it, never lower it; only the fence lowers it. GetSpatialTelemetryTotal MAXES it across archetypes; summing would
+    widen every walk by the sum of bounds no single archetype has. EscapedClusterCount counts distinct clusters and is
+    SUMMED
   invariant zero means zero, never "unknown". An archetype with no cluster state, an out-of-range id and a quiet
     tick all report zero, and no consumer may invent a distinction the API does not make
   invariant the tightness triple is one reading, not three numbers. MeanClusterExtentRatio and MeanPackingBound are
     means over TightnessSampleCount clusters — the clusters the fence WROTE this tick, not the clusters that exist —
     so a settled world reports zero samples and both means read zero. Publishing the sample count is what keeps that
     distinguishable from "the clusters are points", which is the whole reason it is on the surface
-  invariant GetSpatialTelemetryTotal folds by KIND, not uniformly: extensive counters sum, MaxClusterOverhang maxes,
+  invariant GetSpatialTelemetryTotal folds by KIND, not uniformly: extensive counters sum, ClusterReach maxes,
     and the two tightness means are re-derived from summed numerators over the summed sample count. Averaging the
     per-archetype means would weight an archetype that scanned one cluster equally with one that scanned ten thousand
   invariant MigrationTotalMs is CPU-milliseconds SUMMED ACROSS WORKERS, not a span: W workers each busy for 1 ms
@@ -1562,7 +1641,7 @@
     of an uncontended latch
   invariant reading is allocation-free and lock-free — plain field reads of live engine state, torn only across a
     fence boundary. No accessor may take a lock or allocate to serialise against the fence
-  scope: SpatialMigrationTelemetry.MaxClusterOverhang, SpatialMigrationTelemetry.TightnessSampleCount,
+  scope: SpatialMigrationTelemetry.ClusterReach, SpatialMigrationTelemetry.EscapedClusterCount, SpatialMigrationTelemetry.TightnessSampleCount,
     SpatialMigrationTelemetry.MeanClusterExtentRatio, SpatialMigrationTelemetry.MeanPackingBound,
     SpatialMigrationTelemetry.MeanTightnessToBound, SpatialMigrationTelemetry.CellTreePromotions,
     SpatialMigrationTelemetry.CellTreeDemotions, SpatialMigrationTelemetry.MigrationSliceCount,
@@ -1577,8 +1656,8 @@
     TyphonRuntime.LastFenceWallTicks,
     FenceExecSystem.PhaseSpanTicks, FenceExecSystem.TotalWallTicks, ArchetypeClusterState.ClusterTightnessSample
   verified: SpatialMigrationTelemetryTests.Tightness_ReportsNoSamples_RatherThanAStaleMean_OnAQuietTick pins the
-    zero-samples case; MaxClusterOverhang_IsPublished_AndIsARunningMaximumRatherThanAPerTickValue pins the third
-    clock; Total_MaxesTheOverhang_AndWeightsTheTightnessMeansBySample pins the per-kind fold across two archetypes;
+    zero-samples case; ClusterReach_IsPublished_AndFallsOnceTheOutlierIsGone pins the reach as a level;
+    Total_MaxesTheReach_AndWeightsTheTightnessMeansBySample pins the per-kind fold across two archetypes;
     Accessor_AllocatesNothing pins the allocation-free read; FenceSpanMs_IsZero_WhenTheHostDrivesTheFenceItself pins
     the serial-fence zero, so it cannot be read as a fence that cost nothing;
     ExecutedKinds_SumExactlyToTheMigrationCount pins the per-kind identity;

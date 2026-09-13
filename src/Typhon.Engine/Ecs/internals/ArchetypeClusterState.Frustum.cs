@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 
 namespace Typhon.Engine.Internals;
 
@@ -60,8 +61,15 @@ internal sealed unsafe partial class ArchetypeClusterState
             ThrowHelper.ThrowInvalidOp($"Frustum query needs {planeCount * stride} doubles for {planeCount} planes in {dim}D, got {planes.Length}.");
         }
 
-        grid.WorldToCellRange(boundsMin.X, boundsMin.Y, is3D ? boundsMin.Z : double.NegativeInfinity,
-            boundsMax.X, boundsMax.Y, is3D ? boundsMax.Z : double.PositiveInfinity,
+        // Widened by ClusterReach: a cluster box can reach that far past the cell it is filed in, so a box entering the region from a cell outside the
+        // caller's bounding box would otherwise never be classified (SQ-01). The planes still decide what is inside. The outliers that reach further are
+        // named in EscapedClusters and classified after the walk.
+        double overhang = Volatile.Read(ref ClusterReach);
+        var escaped = Volatile.Read(ref EscapedClusters);
+        // The low side stepped one double down: a box ending exactly on a cell boundary still touches a region starting there (see AabbClusterEnumerator).
+        grid.WorldToCellRange(Math.BitDecrement(boundsMin.X - overhang), Math.BitDecrement(boundsMin.Y - overhang),
+            is3D ? Math.BitDecrement(boundsMin.Z - overhang) : double.NegativeInfinity,
+            boundsMax.X + overhang, boundsMax.Y + overhang, is3D ? boundsMax.Z + overhang : double.PositiveInfinity,
             out int cellMinX, out int cellMinY, out int cellMinZ, out int cellMaxX, out int cellMaxY, out int cellMaxZ);
 
         if (!is3D)
@@ -106,15 +114,17 @@ internal sealed unsafe partial class ArchetypeClusterState
                         grid.CellOrigin(cellKey, out double originX, out double originY, out double originZ);
 
                         // Reject the whole cell before touching its clusters. The cell's own box is exactly one classification, against up to a few thousand.
+                        // It is the box its clusters can REACH — the cell grown by the overhang — not the cell itself: a cluster whose box leaves a cell lying
+                        // entirely outside the planes can still hold an entity inside them.
                         double cellSize = grid.Config.CellSize;
-                        box[0] = originX;
-                        box[1] = originY;
-                        box[dim] = originX + cellSize;
-                        box[dim + 1] = originY + cellSize;
+                        box[0] = originX - overhang;
+                        box[1] = originY - overhang;
+                        box[dim] = originX + cellSize + overhang;
+                        box[dim + 1] = originY + cellSize + overhang;
                         if (is3D)
                         {
-                            box[2] = originZ;
-                            box[5] = originZ + cellSize;
+                            box[2] = originZ - overhang;
+                            box[5] = originZ + cellSize + overhang;
                         }
                         if (SpatialGeometry.ClassifyAABBAgainstPlanes(box, planes, planeCount, dim) == SpatialGeometry.FrustumOutside)
                         {
@@ -129,6 +139,30 @@ internal sealed unsafe partial class ArchetypeClusterState
                             ref visited, results, ref count);
                     }
                 }
+            }
+
+            // The named outliers, classified in WORLD space against the caller's own planes. EVERY one, not only those whose home cell the walk skipped:
+            // the walk rejects a whole cell when the cell grown by ClusterReach lies outside the planes, and a named cluster reaches further than that by
+            // definition — its home cell can be rejected while its box enters the frustum. The visit set refuses the ones the walk did open.
+            for (int e = 0; e < escaped.Count && count < results.Length; e++)
+            {
+                box[0] = escaped.MinX[e];
+                box[1] = escaped.MinY[e];
+                box[dim] = escaped.MaxX[e];
+                box[dim + 1] = escaped.MaxY[e];
+                if (is3D)
+                {
+                    box[2] = escaped.MinZ[e];
+                    box[5] = escaped.MaxZ[e];
+                }
+
+                if (SpatialGeometry.ClassifyAABBAgainstPlanes(box, planes, planeCount, dim) == SpatialGeometry.FrustumOutside
+                    || !escaped.IsCurrent(e, ClusterCellMap))
+                {
+                    continue;
+                }
+
+                FrustumScanCluster(escaped.ChunkIds[e], ref accessor, planes, planeCount, dim, is3D, categoryMask, aabbs, ref visited, results, ref count);
             }
         }
         finally

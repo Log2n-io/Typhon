@@ -680,22 +680,34 @@ class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
 
     [VerifiesRule("SO-01")]
     [Test]
-    public void MaxClusterOverhang_IsPublished_AndIsARunningMaximumRatherThanAPerTickValue()
+    public void ClusterReach_IsPublished_AndFallsOnceTheOutlierIsGone()
     {
         using var dbe = SetupEngineWithGrid();
 
         // Centre at (150,150) — cell (1,1) — with a box reaching 10 units past the cell on every side. Membership is decided by
         // the CENTRE, so the entity belongs to cell (1,1) while its geometry does not fit inside it.
-        SpawnBox(dbe, 90f, 90f, 210f, 210f);
+        var outlier = SpawnBox(dbe, 90f, 90f, 210f, 210f);
+        Assert.That(dbe.GetSpatialTelemetry(ArchetypeId).ClusterReach, Is.EqualTo(10f).Within(1e-3f),
+            "a spawn raises the reach by its own overhang at once, so the entity is reachable before any fence");
+
         dbe.WriteTickFence(1);
+        var named = dbe.GetSpatialTelemetry(ArchetypeId);
+        Assert.Multiple(() =>
+        {
+            Assert.That(named.EscapedClusterCount, Is.EqualTo(1),
+                "the only cluster reaching past its cell, and by more than one hysteresis margin (5): named rather than widened for");
+            Assert.That(named.ClusterReach, Is.Zero, "with the outlier named, nothing else reaches past a cell, so the walks widen by nothing");
+        });
 
-        var afterSpawn = dbe.GetSpatialTelemetry(ArchetypeId).MaxClusterOverhang;
-        Assert.That(afterSpawn, Is.EqualTo(10f).Within(1e-3f), "the box reaches 10 world units outside its own cell on each axis");
-
-        dbe.WriteTickFence(2);   // quiet
-
-        Assert.That(dbe.GetSpatialTelemetry(ArchetypeId).MaxClusterOverhang, Is.EqualTo(afterSpawn),
-            "it is neither per-tick nor cumulative: every kNN ring widens by it, so it never falls and never resets");
+        // A point back at the centre: the cluster's box shrinks at the fence, and the reach is recomputed from the index rather than remembered.
+        WriteSpatialTo(dbe, outlier, 150f, 150f);
+        dbe.WriteTickFence(2);
+        var fixedUp = dbe.GetSpatialTelemetry(ArchetypeId);
+        Assert.Multiple(() =>
+        {
+            Assert.That(fixedUp.EscapedClusterCount, Is.Zero, "a level recomputed at every fence, not a running maximum: the outlier is gone");
+            Assert.That(fixedUp.ClusterReach, Is.Zero);
+        });
     }
 
     [Test]
@@ -719,7 +731,7 @@ class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
 
     [VerifiesRule("SO-01")]
     [Test]
-    public void Total_MaxesTheOverhang_AndWeightsTheTightnessMeansBySample()
+    public void Total_MaxesTheReach_AndWeightsTheTightnessMeansBySample()
     {
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<SpTelPos>();
@@ -730,17 +742,24 @@ class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
             cellSize: CellSize));
         dbe.InitializeArchetypes();
 
-        // Archetype A: a box overhanging its cell by 10, plus a wide cluster in cell (0,0).
+        // Archetype A: a box 10 past cell (1,1), which is named; a box 3 past cell (5,5), within one hysteresis margin (5) and so folded into A's reach;
+        // and a wide cluster in cell (0,0).
         SpawnBox(dbe, 90f, 90f, 210f, 210f);
+        SpawnBox(dbe, 497f, 497f, 603f, 603f);
         var a = Spawn(dbe, 10f, 10f);
         Spawn(dbe, 20f, 10f);
 
-        // Archetype B: a box overhanging by 2 only.
+        // Archetype B: a box 10 past cell (7,7), named, and one 2 past cell (3,3), folded. Reaches 3 and 2, one outlier each: a total that SUMMED the
+        // reaches would read 5, and one that MAXED the named counts would read 1.
         using (var tx = dbe.CreateQuickTransaction())
         {
             tx.Spawn<SpTelUnitB>(SpTelUnitB.Pos.Set(new SpTelPosB
             {
                 Bounds = new AABB2F { MinX = 298f, MinY = 298f, MaxX = 402f, MaxY = 402f },
+            }));
+            tx.Spawn<SpTelUnitB>(SpTelUnitB.Pos.Set(new SpTelPosB
+            {
+                Bounds = new AABB2F { MinX = 690f, MinY = 690f, MaxX = 810f, MaxY = 810f },
             }));
             tx.Commit();
         }
@@ -754,9 +773,14 @@ class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
 
         Assert.Multiple(() =>
         {
-            Assert.That(perArchetype.MaxClusterOverhang, Is.EqualTo(10f).Within(1e-3f), "precondition: archetype A owns the larger overhang");
-            Assert.That(total.MaxClusterOverhang, Is.EqualTo(10f).Within(1e-3f),
-                "engine-wide overhang is the largest any archetype proved, never the sum — summing would widen every kNN ring by 12");
+            Assert.That(perArchetype.ClusterReach, Is.EqualTo(3f).Within(1e-3f), "precondition: A folds its 3-unit box and names its 10-unit one");
+            Assert.That(perArchetype.EscapedClusterCount, Is.EqualTo(1));
+            var b = dbe.GetSpatialTelemetry(Archetype<SpTelUnitB>.Metadata.ArchetypeId);
+            Assert.That(b.ClusterReach, Is.EqualTo(2f).Within(1e-3f), "precondition: B folds its 2-unit box");
+            Assert.That(b.EscapedClusterCount, Is.EqualTo(1), "precondition: and names its 10-unit one");
+            Assert.That(total.ClusterReach, Is.EqualTo(3f).Within(1e-3f),
+                "engine-wide reach is the largest any archetype needs, never the sum (5) — summing would widen every walk by bounds no archetype has");
+            Assert.That(total.EscapedClusterCount, Is.EqualTo(2), "named outliers are distinct clusters, so they add rather than max");
 
             // B wrote nothing on tick 2, so it contributes no samples and the weighted mean is A's alone. Summing the two archetypes'
             // MEANS instead of their numerators would divide A's sum by two and halve the reading.
@@ -974,12 +998,19 @@ class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
         using var dbe = SetupEngineWithGrid();
         var a = Spawn(dbe, 10f, 10f);
         Spawn(dbe, 30f, 10f);
+
+        // A reach and a named outlier that are not zero, so the two gauges below agree on a VALUE: 10 past cell (1, 1) is named, 3 past cell (5, 5)
+        // lies within one hysteresis margin and is folded into the reach.
+        SpawnBox(dbe, 90f, 90f, 210f, 210f);
+        SpawnBox(dbe, 497f, 497f, 603f, 603f);
         dbe.WriteTickFence(1);
         WriteSpatialTo(dbe, a, 60f, 10f);
         dbe.WriteTickFence(2);
 
         var expected = dbe.GetSpatialTelemetry(ArchetypeId);
         Assert.That(expected.TightnessSampleCount, Is.GreaterThan(0), "precondition: there is a non-zero reading to agree ON");
+        Assert.That(expected.ClusterReach, Is.EqualTo(3f).Within(1e-3f), "precondition: a non-zero reach to agree on");
+        Assert.That(expected.EscapedClusterCount, Is.EqualTo(1), "precondition: a named outlier to agree on");
 
         using var exporter = new EcsMetricsExporter(dbe);
         var (longs, doubles) = ScrapeSpatialInstruments(exporter);
@@ -990,7 +1021,8 @@ class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
             Assert.That(doubles["typhon.ecs.spatial.cluster_extent_ratio"], Is.EqualTo(expected.MeanClusterExtentRatio).Within(1e-9));
             Assert.That(doubles["typhon.ecs.spatial.packing_bound"], Is.EqualTo(expected.MeanPackingBound).Within(1e-9));
             Assert.That(doubles["typhon.ecs.spatial.tightness_to_bound"], Is.EqualTo(expected.MeanTightnessToBound).Within(1e-9));
-            Assert.That(doubles["typhon.ecs.spatial.max_cluster_overhang"], Is.EqualTo((double)expected.MaxClusterOverhang).Within(1e-6));
+            Assert.That(doubles["typhon.ecs.spatial.cluster_reach"], Is.EqualTo((double)expected.ClusterReach).Within(1e-6));
+            Assert.That(longs["typhon.ecs.spatial.escaped_clusters"], Is.EqualTo(expected.EscapedClusterCount));
             Assert.That(longs["typhon.ecs.spatial.cell_tree_promotions"], Is.EqualTo(expected.CellTreePromotions));
             Assert.That(longs["typhon.ecs.spatial.cell_tree_demotions"], Is.EqualTo(expected.CellTreeDemotions));
         });

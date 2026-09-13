@@ -82,7 +82,7 @@ cellSize = 4 000 / 19.8   ≈ 202       → round to 200
 
 That gives a 20 × 20 × 20 grid, 8 000 cell slots, comfortably inside the 32-bit cell-key limit the constructor enforces. Size for *occupied* density and ignore empty volume: the grid is sparse and materialises a cell only once something occupies it, measured at 3.9 MiB dense against 1.2 MiB resident at 20 % occupancy. Matching cell size to your typical query radius is a plausible second rule and is **unmeasured**; where the two disagree, follow density.
 
-One constraint that is not a tuning preference: cell membership is decided by an entity's **centre**, so a query box can miss an entity that overhangs its cell. Keep *query extent + largest entity extent ≤ cell size*. No assertion enforces this.
+One cost that is not a tuning preference: cell membership is decided by an entity's **centre**, so a cluster's box can overhang its cell. Every box, radius, ray and frustum query grows its cell range by the archetype's **cluster reach** (`ClusterReach` in spatial telemetry): the largest overhang among ordinary clusters, recomputed at every tick fence, so it falls again once the cluster that raised it is fixed. The few clusters that reach much further — an entity teleported and not yet migrated, an oversized entity — are not widened for; they are named (up to 16, `EscapedClusterCount`) and every query tests them directly. Past 16 the reach widens to cover the rest. Only the part of a box inside the world counts. Keep your largest entities small against the cell size all the same: a reach of a large fraction of a cell makes every query walk the neighbouring cells.
 
 ## 💻 Usage
 

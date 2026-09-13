@@ -200,7 +200,8 @@ public partial class DatabaseEngine
             ArrivalCellsTouched = clusterState.LastTickArrivalCellsTouched,
             RelocationSpendNs = clusterState.LastTickRelocationSpendNs,
             RepairBudgetStarvedNs = clusterState.LastTickRepairBudgetStarvedNs,
-            MaxClusterOverhang = Volatile.Read(ref clusterState.MaxClusterOverhang),
+            ClusterReach = Volatile.Read(ref clusterState.ClusterReach),
+            EscapedClusterCount = Volatile.Read(ref clusterState.EscapedClusters).Count,
             CellTreePromotions = clusterState.LastTickCellTreePromotions,
             CellTreeDemotions = clusterState.LastTickCellTreeDemotions,
             TightnessSampleCount = samples,
@@ -275,7 +276,8 @@ public partial class DatabaseEngine
         var arrivalCellsTouched = 0;
         var relocationSpendNs = 0d;
         var repairStarvedNs = 0d;
-        var maxOverhang = 0f;
+        var maxReach = 0f;
+        var escapedClusters = 0;
         var treePromotions = 0;
         var treeDemotions = 0;
         var tightnessSamples = 0;
@@ -339,13 +341,15 @@ public partial class DatabaseEngine
             treePromotions += clusterState.LastTickCellTreePromotions;
             treeDemotions += clusterState.LastTickCellTreeDemotions;
 
-            // MAXED, not summed — see SpatialMigrationTelemetry.MaxClusterOverhang. It is a bound every kNN ring widens by, and the engine-wide bound is the
-            // largest any archetype has proved, not the sum of what each proved separately.
-            var overhang = Volatile.Read(ref clusterState.MaxClusterOverhang);
-            if (overhang > maxOverhang)
+            // MAXED, not summed — see SpatialMigrationTelemetry.ClusterReach. It is a bound every walk widens by, and the engine-wide bound is the largest
+            // any archetype needs, not the sum of what each needs separately. The named outliers, by contrast, are distinct clusters and do add.
+            var reach = Volatile.Read(ref clusterState.ClusterReach);
+            if (reach > maxReach)
             {
-                maxOverhang = overhang;
+                maxReach = reach;
             }
+
+            escapedClusters += Volatile.Read(ref clusterState.EscapedClusters).Count;
 
             // Summed as NUMERATORS, divided once at the end: a mean of the per-archetype means would weight a quiet archetype that scanned one cluster
             // equally with a busy one that scanned ten thousand. Read the sample count once for the same reason the per-archetype accessor does.
@@ -401,7 +405,8 @@ public partial class DatabaseEngine
             ArrivalCellsTouched = arrivalCellsTouched,
             RelocationSpendNs = relocationSpendNs,
             RepairBudgetStarvedNs = repairStarvedNs,
-            MaxClusterOverhang = maxOverhang,
+            ClusterReach = maxReach,
+            EscapedClusterCount = escapedClusters,
             CellTreePromotions = treePromotions,
             CellTreeDemotions = treeDemotions,
             TightnessSampleCount = tightnessSamples,

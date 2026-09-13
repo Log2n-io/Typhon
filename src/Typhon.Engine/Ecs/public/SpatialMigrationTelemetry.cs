@@ -427,16 +427,24 @@ public readonly struct SpatialMigrationTelemetry
     public double RepairBudgetStarvedNs { get; init; }
 
     /// <summary>
-    /// The largest distance by which any of this archetype's cluster boxes reaches outside its own cell, in world units (#911 O2).
+    /// How far past its own cell every cell-walking query reaches for this archetype's clusters, in world units: the largest in-world overhang of any cluster
+    /// the queries do not visit by name (#911 O2; bounded 2026-09-13). The named ones are counted in <see cref="EscapedClusterCount"/>.
     /// </summary>
     /// <remarks>
-    /// <para><b>A third clock, and the only member with one.</b> It is neither per-tick nor a growing total: it is a running MAXIMUM that never falls, by
-    /// design — every kNN ring test widens by it, and too large merely widens a search while too small loses results. So it does not reset at the fence and
-    /// <see cref="DatabaseEngine.GetSpatialTelemetryTotal"/> takes the max across archetypes rather than the sum. Differentiating it yields nothing.</para>
-    /// <para>Non-zero only once a cluster has proved it: a world of point entities reports zero forever, which is correct rather than missing. Rises at the
-    /// fence following the write that produced it, not at the write.</para>
+    /// <para><b>A LEVEL, recomputed at every fence.</b> It was a running maximum that never fell, and one transient outlier — an entity teleported and not
+    /// yet migrated — then widened every later query of the archetype for the rest of the process. It now describes the boxes the coming tick's queries
+    /// read, so it falls once the cluster that raised it is fixed. <see cref="DatabaseEngine.GetSpatialTelemetryTotal"/> takes the max across
+    /// archetypes, never the sum: summing would widen every walk by bounds no single archetype has.</para>
+    /// <para>Only the part of a box inside the grid counts — an edge cell's outward side faces no cell, and every query range is clamped into the grid.
+    /// Between fences only a spawn raises it.</para>
     /// </remarks>
-    public float MaxClusterOverhang { get; init; }
+    public float ClusterReach { get; init; }
+
+    /// <summary>
+    /// Clusters whose in-world overhang exceeds <see cref="ClusterReach"/>, which every query therefore tests by name — at most 16; past that the reach
+    /// widens to cover the rest. A level, recomputed at every fence; the total sums it.
+    /// </summary>
+    public int EscapedClusterCount { get; init; }
 
     /// <summary>Cell halves promoted from the linear scan to a per-cell R-Tree during the most recently completed tick.</summary>
     /// <remarks>
