@@ -220,7 +220,7 @@ That's it — a pure 50 ms kernel wait, no user-mode spinning, no yield phase. T
 Once awake, each worker loops `FindReadySystem` → `ProcessSystem` until `_systemsRemaining == 0`:
 
 - `FindReadySystem` does a linear scan of `_isReady[]` returning a system whose predecessors all completed.
-- `ProcessSystem` claims the system (CAS on `_isReady` for single-shot systems, `Interlocked.Increment(_nextChunk)` for multi-chunk).
+- `ProcessSystem` claims the system: a CAS on `_isReady` for a single-shot system; for a multi-chunk one, `Interlocked.Increment` on its claim word, which packs the live dispatch's chunk count with the next index, so a claim can only name a chunk of the dispatch it came from (rule CD-01).
 - Idle workers (no ready work) spin briefly with PAUSE for the first ~100 iterations, then `Thread.Yield` until work appears or the tick ends.
 
 Failure isolation (the default, `SystemExceptionPolicy.Isolate`): if a system throws, the worker marks `_systemFailed[sysIdx] = true`, propagates failure to its successors, and emits a `SkipReason.DependencyFailed` for them; independent DAG branches keep running. An outer safety-net `try/catch` in `WorkerLoop` ensures even a bug inside a catch handler can't kill the worker — the simulation would otherwise freeze with `_systemsRemaining > 0` forever.
