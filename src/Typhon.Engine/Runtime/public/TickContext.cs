@@ -225,7 +225,9 @@ public struct TickContext
 
     /// <summary>
     /// Total number of chunks for chunked-parallel systems. For non-chunked systems, always 1.
-    /// Equal to the value passed to <see cref="SystemBuilder.ChunkedParallel"/>.
+    /// For a <see cref="ChunkedCallbackSystem"/>, the value passed to <see cref="SystemBuilder.ChunkedParallel"/> (or its Prepare's). For a parallel
+    /// QuerySystem, the live dispatch's count, which <see cref="RuntimeOptions.CostBasedChunking"/> sets from measured cost: it can change from one tick
+    /// to the next and reach twice <c>round(WorkerCount × ChunksPerWorker)</c>, so size nothing by that ceiling.
     /// </summary>
     public int ChunkCount { get; init; }
 

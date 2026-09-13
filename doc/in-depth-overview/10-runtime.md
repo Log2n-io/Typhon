@@ -108,9 +108,9 @@ A DAG is built once at `RuntimeSchedule.Build()` time and never mutates. Each sy
 | `Name`, `Type`, `Index` | Identity. `Index` is the canonical slot in `DagScheduler.Systems`. |
 | `DagId`, `Phase`, `PhaseIndex` | Owning DAG, resolved phase, DAG-local phase index. |
 | `Successors`, `PredecessorCount` | Graph topology computed by `DagBuilder.Build`. |
-| `TotalChunks` | Static chunk count for pipeline/parallel systems. |
+| `TotalChunks` | Chunk count: static for a pipeline, the live dispatch's for a parallel `QuerySystem`. |
 | **`RuntimeChunkCount`** | Per-tick override set by `OnPrepare` for chunked-callback systems (fence work-planner uses this to size `FenceExec`). |
-| **`ExplicitChunkCount`** | Static chunk count from `SystemBuilder.ChunkedParallel(N)`. Zero = "derive from entity count". |
+| **`ExplicitChunkCount`** | Static chunk count from `SystemBuilder.ChunkedParallel(N)`. Zero = "derive it per dispatch, from measured cost or entity count" (`CostBasedChunking`). |
 | `Access` | The `SystemAccessDescriptor` populated from `b.Reads<T>()` / `b.Writes<T>()` declarations. |
 
 ### `AccessDagDeriver` — derive edges from declared access
@@ -328,7 +328,8 @@ Every tick, on advance, the driver emits a **`Scheduler.Overload.TickMultiplier`
 | `BaseTickRate` | 60 | Target tick rate in Hz. |
 | `WorkerCount` | -1 (auto) | `Math.Max(1, ProcessorCount - 4)`; `1` for serial debug. |
 | `TelemetryRingCapacity` | 1024 | Per-scheduler tick telemetry buffer (must be power of 2). |
-| **`ParallelQueryMinChunkSize`** | **64** | Floor on entities per chunk for parallel `QuerySystem` dispatch. Smaller entity sets still use the parallel path with `totalChunks = 1`. |
+| `CostBasedChunking` | `true` | Size parallel `QuerySystem` chunks from the previous dispatch's measured worker time: spread over `round(WorkerCount × ChunksPerWorker)` chunks while each carries 25–100 µs, fewer below that, up to twice as many above it, so a slow last chunk no longer holds the pool. |
+| **`ParallelQueryMinChunkSize`** | **64** | Floor on entities per chunk for the entity rule — a parallel `QuerySystem`'s first dispatch, a checkerboard system, and every dispatch when `CostBasedChunking` is off. Smaller entity sets still use the parallel path with `totalChunks = 1`. |
 | `EnableParallelFence` | `true` | Off switch for [§7](#7-parallel-fence) — falls back to serial `WriteTickFence`. |
 | `FenceChunkOversubscription` | 2 | Fence chunk cap = `factor × WorkerCount`. Smooths preemption jitter. |
 | `SystemExceptionPolicy` | `Isolate` | What an unhandled system exception costs. `Isolate` skips only the failing branch; `AbortTickAndStop` cancels the rest of the tick and makes the runtime terminal — see [§6](#6-workers). |

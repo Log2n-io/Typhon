@@ -127,7 +127,11 @@ class EventQueueConcurrencyTests : TestBase<EventQueueConcurrencyTests>
 
             dag.Produces("ParallelProducer", queue);
             dag.Consumes("Consumer", queue);
-        }, new RuntimeOptions { WorkerCount = WorkerCount, BaseTickRate = 1000, ParallelQueryMinChunkSize = MinChunkSize });
+
+            // The entity rule, so every tick runs the same chunks: the expected set is built from the chunk indices pushed in any tick, and only the
+            // first tick is drained. Under the cost rule the first tick's rendezvous wait is measured as cost, a later tick gets more chunks, and their
+            // events — never drained — would read as lost.
+        }, new RuntimeOptions { WorkerCount = WorkerCount, BaseTickRate = 1000, ParallelQueryMinChunkSize = MinChunkSize, CostBasedChunking = false });
 
         try
         {

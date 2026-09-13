@@ -167,6 +167,14 @@ public sealed class SimConfig
     public int ParallelQueryMinChunkSize = 64;
 
     /// <summary>
+    /// <c>RuntimeOptions.CostBasedChunking</c>: parallel systems split by their measured cost (the default) or by entity count (<c>--entity-chunking</c>).
+    /// </summary>
+    public bool CostBasedChunking = true;
+
+    /// <summary><c>--tick-log</c>: a file to write every measured tick's duration to, in ms, one per line in tick order. Null writes nothing.</summary>
+    public string TickLogPath;
+
+    /// <summary>
     /// Split interest management into one system per queried archetype instead of one system running four queries.
     /// </summary>
     /// <remarks>

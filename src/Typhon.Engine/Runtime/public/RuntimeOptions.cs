@@ -89,6 +89,19 @@ public class RuntimeOptions
     public int ParallelQueryMinChunkSize { get; set; } = 64;
 
     /// <summary>
+    /// Size parallel <see cref="QuerySystem"/> chunks by their measured cost rather than their entity count. Default: true.
+    /// </summary>
+    /// <remarks>
+    /// <para>From its second dispatch on, a system's chunk count comes from its previous dispatch's worker time per entity. Its chunks spread over the
+    /// width, <c>round(WorkerCount × ChunksPerWorker)</c>, as long as each carries 25–100 µs of work; below that band it gets fewer chunks of 25 µs, above it
+    /// more chunks than the width, of 100 µs, up to twice the width, which the workers claim as they come free, so the pool no longer waits on one long last
+    /// chunk. At most one entity per chunk, and beyond the width at most one cluster per chunk.</para>
+    /// <para>A system's first dispatch, a checkerboard system and a system with its own <see cref="SystemDefinition.MinChunkSize"/> keep the entity
+    /// rule: <c>min(round(WorkerCount × ChunksPerWorker), ceil(entities / ParallelQueryMinChunkSize))</c>.</para>
+    /// </remarks>
+    public bool CostBasedChunking { get; set; } = true;
+
+    /// <summary>
     /// When true (default), <c>WriteTickFence</c> is parallelized across the worker pool via the internal sub-DAG (<c>FenceExec</c>).
     /// When false, the runtime falls back to the legacy single-threaded serial fence — useful for diagnostics and as a safety
     /// fallback if a regression is suspected. Enabling adds <c>FenceExec</c> to the scheduler's full system array, but

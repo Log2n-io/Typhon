@@ -233,8 +233,9 @@ b.Input(() => _characters).Parallel().WritesVersioned()
 
 Two knobs worth knowing (both in `RuntimeOptions`):
 
-- **`ParallelQueryMinChunkSize`** (default 64) — the floor on entities per chunk. Small sets still run the parallel path, just as one chunk. Stops tiny populations from spawning a chunk per worker for no gain.
-- **`ChunksPerWorker`** (per-system, via `b.ChunksPerWorker(f)`) — oversubscription. Above 1.0, fast workers can steal extra chunks while a slow one finishes — smooths out an uneven workload.
+- **`CostBasedChunking`** (default true) — from a system's second tick on, its chunks are sized by what it measurably costs rather than by how many entities it has: spread over the workers while each chunk carries 25–100 µs of work, fewer chunks below that, up to twice as many above it. A slow last chunk then no longer holds the whole pool.
+- **`ParallelQueryMinChunkSize`** (default 64) — the floor on entities per chunk when chunks are counted by entities: a system's first tick, or every tick with `CostBasedChunking` off. Small sets still run the parallel path, just as one chunk. Stops tiny populations from spawning a chunk per worker for no gain.
+- **`ChunksPerWorker`** (per-system, via `b.ChunksPerWorker(f)`) — oversubscription: the chunk count aims at `round(WorkerCount × f)`. Above 1.0, fast workers can steal extra chunks while a slow one finishes — smooths out an uneven workload.
 
 ---
 

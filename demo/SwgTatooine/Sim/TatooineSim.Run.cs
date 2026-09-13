@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Numerics;
 using System.Threading;
 
 namespace SwgTatooine;
@@ -59,9 +60,13 @@ public sealed partial class TatooineSim
             BaseTickRate = _config.TickRateHz,
             WorkerCount = _config.ResolveWorkerCount(),
             ParallelQueryMinChunkSize = _config.ParallelQueryMinChunkSize,
+            CostBasedChunking = _config.CostBasedChunking,
 
             // The fence is the thing under study, so it runs on the worker pool rather than serially on the tick driver.
             EnableParallelFence = _config.ParallelFence,
+
+            // Every measured tick must still be in the ring when the run is summarised, or a long run's tail loses its oldest ticks.
+            TelemetryRingCapacity = (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(1024, _config.WarmTicks + _config.MeasuredTicks + 16)),
         });
 
         // A tick that aborts leaves the measurement meaningless, so surface it rather than reporting a median over
@@ -138,11 +143,20 @@ public sealed partial class TatooineSim
         var entities = new long[defs.Length];
         var workers = new long[defs.Length];
         var ranTicks = new int[defs.Length];
+
+        // Per chunked system and tick, its worker time, and how long the pool waited on it beyond a perfect split of that time over the whole pool.
+        var work = new List<float>[defs.Length];
+        var waits = new List<float>[defs.Length];
+        var pool = _config.ResolveWorkerCount();
         for (var i = 0; i < defs.Length; i++)
         {
             perSystem[i] = new List<float>(_config.MeasuredTicks);
+            work[i] = [];
+            waits[i] = [];
         }
 
+        // Each tick's own system durations (NaN when skipped), kept in tick order for the spike attribution below.
+        var tickSystems = new List<float[]>(_config.MeasuredTicks);
         for (var t = oldest; t <= ring.NewestTick && t < reached; t++)
         {
             ref readonly var tick = ref ring.GetTick(t);
@@ -153,6 +167,8 @@ public sealed partial class TatooineSim
 
             samples.Add(tick.ActualDurationMs);
             var metrics = ring.GetSystemMetrics(t);
+            var row = new float[defs.Length];
+            Array.Fill(row, float.NaN);
             for (var i = 0; i < metrics.Length && i < defs.Length; i++)
             {
                 if (metrics[i].WasSkipped)
@@ -160,16 +176,36 @@ public sealed partial class TatooineSim
                     continue;
                 }
 
+                row[i] = metrics[i].DurationUs;
                 perSystem[i].Add(metrics[i].DurationUs);
+                if (metrics[i].WorkUs > 0f)
+                {
+                    work[i].Add(metrics[i].WorkUs);
+                    if (metrics[i].WorkersTouched > 1)
+                    {
+                        waits[i].Add(metrics[i].DurationUs - (metrics[i].WorkUs / pool));
+                    }
+                }
                 entities[i] += metrics[i].EntitiesProcessed;
                 workers[i] += metrics[i].WorkersTouched;
                 ranTicks[i]++;
             }
+
+            tickSystems.Add(row);
+        }
+
+        var ordered = samples.ToArray();
+        if (!string.IsNullOrEmpty(_config.TickLogPath))
+        {
+            // Raw ticks, so two runs' spikes can be counted against one threshold instead of each against its own median.
+            System.IO.File.WriteAllText(_config.TickLogPath,
+                string.Join('\n', Array.ConvertAll(ordered, t => t.ToString("F4", System.Globalization.CultureInfo.InvariantCulture))));
         }
 
         samples.Sort();
         var budgetMs = 1000f / _config.TickRateHz;
         var median = samples.Count == 0 ? 0f : samples[samples.Count / 2];
+        var spikes = Spikes(ordered, tickSystems, perSystem, defs, median);
 
         var breakdown = new List<SystemCost>();
         var systemsUs = 0f;
@@ -181,6 +217,8 @@ public sealed partial class TatooineSim
             }
 
             perSystem[i].Sort();
+            work[i].Sort();
+            waits[i].Sort();
             var us = perSystem[i][perSystem[i].Count / 2];
             systemsUs += us;
             breakdown.Add(new SystemCost
@@ -188,6 +226,9 @@ public sealed partial class TatooineSim
                 Name = defs[i].Name,
                 Phase = defs[i].Phase.Name ?? "",
                 MedianUs = us,
+                WorkMedianUs = work[i].Count == 0 ? float.NaN : Percentile(work[i], 0.5),
+                WaitP50Us = waits[i].Count == 0 ? float.NaN : Percentile(waits[i], 0.5),
+                WaitP99Us = waits[i].Count == 0 ? float.NaN : Percentile(waits[i], 0.99),
                 EntitiesPerTick = ranTicks[i] == 0 ? 0d : (double)entities[i] / ranTicks[i],
                 WorkersPerTick = ranTicks[i] == 0 ? 0d : (double)workers[i] / ranTicks[i],
                 TicksRun = ranTicks[i],
@@ -202,8 +243,14 @@ public sealed partial class TatooineSim
             Census = Census,
             TicksMeasured = samples.Count,
             TickMedianMs = median,
-            TickP99Ms = samples.Count == 0 ? 0f : samples[Math.Min(samples.Count - 1, (int)(samples.Count * 0.99f))],
+            TickP90Ms = Percentile(samples, 0.90),
+            TickP99Ms = Percentile(samples, 0.99),
+            TickP999Ms = Percentile(samples, 0.999),
             TickMaxMs = samples.Count == 0 ? 0f : samples[^1],
+            TicksOver125 = Count(ordered, median * 1.25f),
+            TicksOver150 = Count(ordered, median * 1.5f),
+            TicksOver200 = Count(ordered, median * 2f),
+            Spikes = spikes,
             BudgetMs = budgetMs,
             Systems = breakdown,
             SystemsUs = systemsUs,
@@ -213,6 +260,74 @@ public sealed partial class TatooineSim
             // — their durations are per-system wall-clock and add up to more than the tick if they ran concurrently.
             ResidualUs = (median * 1000f) - systemsUs,
         };
+    }
+
+    /// <summary>Nearest rank: the p99.9 of 1000 ticks is the 999th, not the slowest.</summary>
+    private static float Percentile(List<float> sorted, double p) =>
+        sorted.Count == 0 ? 0f : sorted[Math.Clamp((int)Math.Ceiling(sorted.Count * p) - 1, 0, sorted.Count - 1)];
+
+    private static int Count(float[] ticks, float over)
+    {
+        var n = 0;
+        foreach (var t in ticks)
+        {
+            if (t > over)
+            {
+                n++;
+            }
+        }
+
+        return n;
+    }
+
+    /// <summary>
+    /// Where the spikes came from: on every tick over 1.25x the median, each system's time over its OWN median, summed across those ticks.
+    /// </summary>
+    /// <remarks>
+    /// A median cannot see a spike and a p99 names its size, not its cause. Systems that share the pool in one phase each charge their own excess, so the
+    /// shares of the ticks' total excess need not add up to 100 %.
+    /// </remarks>
+    private static SpikeReport Spikes(float[] ticks, List<float[]> tickSystems, List<float>[] perSystem, SystemDefinition[] defs, float medianMs)
+    {
+        var medians = new float[defs.Length];
+        for (var i = 0; i < defs.Length; i++)
+        {
+            var sorted = new List<float>(perSystem[i]);
+            sorted.Sort();
+            medians[i] = sorted.Count == 0 ? float.NaN : sorted[sorted.Count / 2];
+        }
+
+        var report = new SpikeReport();
+        var excessUs = new double[defs.Length];
+        for (var t = 0; t < ticks.Length; t++)
+        {
+            if (ticks[t] <= medianMs * 1.25f)
+            {
+                continue;
+            }
+
+            report.Ticks++;
+            report.TickExcessMs += ticks[t] - medianMs;
+            var row = tickSystems[t];
+            for (var i = 0; i < defs.Length; i++)
+            {
+                if (!float.IsNaN(row[i]) && !float.IsNaN(medians[i]) && row[i] > medians[i])
+                {
+                    excessUs[i] += row[i] - medians[i];
+                }
+            }
+        }
+
+        for (var i = 0; i < defs.Length; i++)
+        {
+            if (excessUs[i] > 0)
+            {
+                report.Systems.Add((defs[i].Name, excessUs[i] / 1000));
+            }
+        }
+
+        report.Systems.Sort((a, b) => b.ExcessMs.CompareTo(a.ExcessMs));
+        return report;
     }
 
     /// <summary>
@@ -284,10 +399,24 @@ public sealed class RunResult
     /// <summary>Median wall-clock tick, in milliseconds. The headline.</summary>
     public float TickMedianMs;
 
+    public float TickP90Ms;
+
     /// <summary>99th percentile tick — the hitch column.</summary>
     public float TickP99Ms;
 
+    /// <summary>99.9th percentile tick: with a thousand ticks, the second slowest.</summary>
+    public float TickP999Ms;
+
     public float TickMaxMs;
+
+    /// <summary>Ticks over 1.25x, 1.5x and 2x the median: how often a frame spikes, which no percentile of the whole window says.</summary>
+    public int TicksOver125;
+
+    public int TicksOver150;
+    public int TicksOver200;
+
+    /// <summary>Which systems the ticks over 1.25x the median spent their excess in.</summary>
+    public SpikeReport Spikes;
 
     /// <summary>The tick budget at the simulation's rate, which is what the median has to fit inside.</summary>
     public float BudgetMs;
@@ -313,6 +442,14 @@ public sealed class RunResult
     public float BudgetPct => BudgetMs <= 0f ? 0f : 100f * TickMedianMs / BudgetMs;
 }
 
+/// <summary>The ticks over 1.25x the median, and each system's summed time over its own median on them.</summary>
+public sealed class SpikeReport
+{
+    public int Ticks;
+    public double TickExcessMs;
+    public List<(string Name, double ExcessMs)> Systems = [];
+}
+
 /// <summary>What one system cost, over the measured window.</summary>
 public sealed class SystemCost
 {
@@ -321,6 +458,17 @@ public sealed class SystemCost
 
     /// <summary>Median of this system's per-tick wall-clock span, in microseconds.</summary>
     public float MedianUs;
+
+    /// <summary>Median of a parallel system's per-tick worker time (summed chunk durations), in microseconds. NaN for other systems.</summary>
+    public float WorkMedianUs;
+
+    /// <summary>
+    /// A chunked system's span beyond a perfect split of its worker time over the whole pool, p50 and p99 across ticks: the pool waiting on its last
+    /// chunks, or busy with a concurrent system's. NaN for a system that never ran in more than one chunk.
+    /// </summary>
+    public float WaitP50Us;
+
+    public float WaitP99Us;
 
     /// <summary>Mean entities this system was dispatched over per tick.</summary>
     public double EntitiesPerTick;

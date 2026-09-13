@@ -31,7 +31,9 @@ public sealed partial class SimBridge
             return;
         }
 
-        var capacity = (_config.WarmTicks + _config.MeasuredTicks + 16) * 256;
+        // Measured ticks only (RecordChunk skips the warm-up). Awareness's ChunksPerWorker is 2, and the cost rule goes to twice that width: 4 chunks per
+        // worker at most.
+        var capacity = (_config.MeasuredTicks + 16) * ((4 * _config.ResolveWorkerCount()) + 16);
         _chunkStart = new long[capacity];
         _chunkEnd = new long[capacity];
         _chunkTick = new long[capacity];
@@ -82,6 +84,7 @@ public sealed partial class SimBridge
         var heaviestOverMean = new List<double>();
         var chunks = new List<double>();
         var busyUs = new List<double>();
+        var straggleUs = new List<double>();
         long busyAll = 0, hitsAll = 0, queriesAll = 0;
         foreach (var list in byTick.Values)
         {
@@ -114,16 +117,27 @@ public sealed partial class SimBridge
             slowestOverSpan.Add(100.0 * slowest / span);
             heaviestOverMean.Add(hitsTotal == 0 ? 0 : heaviest / (hitsTotal / (double)list.Count));
             chunks.Add(list.Count);
+
+            // The span a perfect split of the same work over the whole pool would have taken, and what the pool waited beyond it: too few chunks, or
+            // the last one running long.
+            straggleUs.Add((span - (busy / (double)workers)) * 1e6 / Stopwatch.Frequency);
         }
 
         Console.WriteLine();
         Console.WriteLine($"  awareness chunks, median over {spanUs.Count} ticks: {Median(chunks):F0} chunks, span {Median(spanUs):F0} us, "
             + $"pool busy {Median(poolBusy):F1} % of {workers} workers, slowest chunk {Median(slowestOverMean):F2}x the mean and "
             + $"{Median(slowestOverSpan):F0} % of the span, heaviest chunk {Median(heaviestOverMean):F2}x the mean hits");
+        spanUs.Sort();
+        straggleUs.Sort();
+        Console.WriteLine($"  awareness tail: span p99 {At(spanUs, 0.99):F0}, max {At(spanUs, 1):F0} us; "
+            + $"wait past a perfect split p50 {At(straggleUs, 0.5):F0}, p99 {At(straggleUs, 0.99):F0}, max {At(straggleUs, 1):F0} us");
 
         // Worker time, not wall time: the sum of every chunk's duration, divided by the queries and hits those chunks served.
         var busyNs = busyAll * 1e9 / Stopwatch.Frequency;
         Console.WriteLine($"  awareness work: {busyNs / Math.Max(1, queriesAll):F1} ns per query, {busyNs / Math.Max(1, hitsAll):F2} ns per hit, "
             + $"{Median(busyUs):F0} us of worker time per tick (median), {hitsAll / (double)Math.Max(1, queriesAll):F1} hits per query");
     }
+
+    private static double At(List<double> sorted, double p) =>
+        sorted.Count == 0 ? double.NaN : sorted[Math.Clamp((int)Math.Ceiling(sorted.Count * p) - 1, 0, sorted.Count - 1)];
 }

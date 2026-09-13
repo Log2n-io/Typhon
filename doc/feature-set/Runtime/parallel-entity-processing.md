@@ -37,6 +37,8 @@ perform copy-on-write.
 | 3 — Full, Versioned | no `ChangeFilter`, `WritesVersioned()` | O(entity count) | `ctx.Transaction`, pooled slice |
 | 4 — Filtered, Versioned | `ChangeFilter` set, `WritesVersioned()` | O(dirty count) | `ctx.Transaction`, pooled slice |
 
+**Chunk count.** A system's first dispatch is split by entity count: `min(round(WorkerCount × ChunksPerWorker), ceil(entities / ParallelQueryMinChunkSize))`. From the second dispatch on (`RuntimeOptions.CostBasedChunking`, on by default), the split follows what the system measurably cost the time before. Its chunks spread over `round(WorkerCount × ChunksPerWorker)` while each carries 25–100 µs of work; below that it gets fewer chunks, above it up to twice as many. Workers claim the extra chunks as they come free, so the pool no longer waits on one slow last chunk.
+
 ## 💻 Usage
 
 ```csharp
@@ -77,6 +79,8 @@ public class MovementSystem : QuerySystem
   `WritesVersioned()` instead.
 - `ctx.Accessor` cannot Spawn, Destroy, Commit, or Rollback — structural changes need an upstream
   non-parallel system.
+- A parallel system's `ctx.ChunkCount` can change from one tick to the next and reach twice
+  `round(WorkerCount × ChunksPerWorker)`. Never size per-chunk state by it; index per worker (`ctx.WorkerId`).
 - Path 1 vs. a per-chunk `Transaction`: ~2.2x lower per-chunk overhead (PTA ~380µs/chunk vs.
   Transaction ~850µs/chunk) — only declare `WritesVersioned()` when actually needed.
 - All workers in a tick see the same frozen MVCC snapshot (one TSN per `Attach()`); the PTA is reused
@@ -91,6 +95,7 @@ public class MovementSystem : QuerySystem
 
 - [ParallelQueryTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ParallelQueryTests.cs) — all four dispatch paths (`ParallelQuery_NonVersioned_ChunkReceivesAccessor`, `ParallelQuery_WritesVersioned_ChunkReceivesTransaction`), chunk partitioning, chunk-throw isolation
 - [ChunksPerWorkerTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ChunksPerWorkerTests.cs) — `ChunksPerWorker` oversubscription factor vs. worker-count cap and entity-count cap
+- [CostChunkingTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/CostChunkingTests.cs) — `RuntimeOptions.CostBasedChunking`: the cost rule's grain, an expensive system split past the worker count, the entity rule kept when it is off or when a system sets `MinChunkSize`
 
 ## 🔗 Related
 

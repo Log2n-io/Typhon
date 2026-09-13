@@ -31,6 +31,15 @@ internal static class Program
         var s = sim.LastStats;
         Console.WriteLine($"  tick {result.TickMedianMs:F2} ms median, {result.TickP99Ms:F2} p99, {result.TickMaxMs:F2} max "
             + $"of a {result.BudgetMs:F0} ms budget = {result.BudgetPct:F1} % ({result.TicksMeasured} ticks)");
+        Console.WriteLine($"  tail: p90 {result.TickP90Ms:F2}, p99.9 {result.TickP999Ms:F2} ms; ticks over 1.25x / 1.5x / 2x the median: "
+            + $"{result.TicksOver125} / {result.TicksOver150} / {result.TicksOver200}");
+        var sp = result.Spikes;
+        if (sp.Ticks > 0)
+        {
+            var top = string.Join(", ", sp.Systems.GetRange(0, Math.Min(4, sp.Systems.Count))
+                .ConvertAll(x => $"{x.Name} {x.ExcessMs:F1} ms ({100 * x.ExcessMs / sp.TickExcessMs:F0} %)"));
+            Console.WriteLine($"  spike excess ({sp.Ticks} ticks over 1.25x, {sp.TickExcessMs:F1} ms over the median in all): {top}");
+        }
         Console.WriteLine($"  per tick: {s.AwarenessQueries / (double)Math.Max(1, result.TicksMeasured):F0} awareness queries "
             + $"({s.HitsPerAwarenessQuery:F1} hits each), {s.AggroQueries / (double)Math.Max(1, result.TicksMeasured):F0} aggro queries, "
             + $"{s.EconomyTicks / (double)Math.Max(1, result.TicksMeasured):F1} economy updates");
@@ -42,11 +51,15 @@ internal static class Program
             + $"({100 * gc.PauseMs / Math.Max(1d, gc.ElapsedMs):F2} % of {gc.ElapsedMs / 1000:F1} s), {gc.AllocatedBytes / 1048576.0:F1} MB allocated");
 
         Console.WriteLine();
-        Console.WriteLine($"  {"system",-16} {"phase",-10} {"median us",10} {"share",7} {"entities",10} {"workers",8}");
+        Console.WriteLine($"  {"system",-16} {"phase",-10} {"median us",10} {"share",7} {"entities",10} {"workers",8} {"work us",9} {"wait p50",9} {"p99",7}");
         foreach (var sys in result.Systems)
         {
             var share = result.TickMedianMs <= 0f ? 0f : 100f * sys.MedianUs / (result.TickMedianMs * 1000f);
-            Console.WriteLine($"  {sys.Name,-16} {sys.Phase,-10} {sys.MedianUs,10:F1} {share,6:F1} % {sys.EntitiesPerTick,10:N0} {sys.WorkersPerTick,8:F1}");
+            var workUs = float.IsNaN(sys.WorkMedianUs) ? "-" : sys.WorkMedianUs.ToString("F0");
+            var p50 = float.IsNaN(sys.WaitP50Us) ? "-" : sys.WaitP50Us.ToString("F0");
+            var p99 = float.IsNaN(sys.WaitP99Us) ? "-" : sys.WaitP99Us.ToString("F0");
+            Console.WriteLine($"  {sys.Name,-16} {sys.Phase,-10} {sys.MedianUs,10:F1} {share,6:F1} % {sys.EntitiesPerTick,10:N0} {sys.WorkersPerTick,8:F1} "
+                + $"{workUs,9} {p50,9} {p99,7}");
         }
 
         var residualShare = result.TickMedianMs <= 0f ? 0f : 100f * result.ResidualUs / (result.TickMedianMs * 1000f);

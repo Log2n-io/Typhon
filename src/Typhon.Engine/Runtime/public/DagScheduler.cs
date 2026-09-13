@@ -1301,6 +1301,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                     var chunkFailed = false;
                     for (var chunk = 0; chunk < totalChunks; chunk++)
                     {
+                        var chunkStartTs = Stopwatch.GetTimestamp();
                         SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
                         try
                         {
@@ -1320,6 +1321,9 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                         finally
                         {
                             SystemAccessValidator.LeaveSystem();
+
+                            // WorkUs, as the multi-worker path sums it; one thread, so a plain add.
+                            _currentTickSystemMetrics[sysIdx].WorkTicks += Stopwatch.GetTimestamp() - chunkStartTs;
                         }
                     }
 
@@ -1952,6 +1956,9 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
             var workEnd = Stopwatch.GetTimestamp();
             InspectorChunkEnd(sysIdx, chunk, workEnd, _currentTickSystemMetrics[sysIdx].EntitiesProcessed);
+
+            // The system's worker time: WorkUs, and the cost per entity that sizes its next dispatch (TyphonRuntime.ComputeChunkCount).
+            Interlocked.Add(ref _currentTickSystemMetrics[sysIdx].WorkTicks, workEnd - workStart);
 
             if (trackUtilization)
             {

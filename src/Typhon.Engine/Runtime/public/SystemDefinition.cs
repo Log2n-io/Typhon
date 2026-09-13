@@ -184,7 +184,8 @@ public sealed class SystemDefinition
 
     /// <summary>
     /// Oversubscription factor for parallel chunk dispatch. The effective worker-cap on chunk count becomes
-    /// <c>round(WorkerCount × ChunksPerWorker)</c> instead of <c>WorkerCount</c>. Default <c>1.0f</c> preserves the
+    /// <c>round(WorkerCount × ChunksPerWorker)</c> instead of <c>WorkerCount</c>; the cost rule
+    /// (<see cref="RuntimeOptions.CostBasedChunking"/>) can go to twice that. Default <c>1.0f</c> preserves the
     /// pre-knob behaviour (one chunk per worker).
     /// <para>
     /// Use values above 1.0 (e.g. 1.5, 2.0) on parallel systems where worker efficiency suffers because a single slow chunk
@@ -199,10 +200,12 @@ public sealed class SystemDefinition
     /// Versioned path also creates an extra <c>Transaction</c> per chunk.
     /// </para>
     /// <para>
-    /// <b>That second cap is frequently the binding one, and this knob cannot lift it.</b> A system walking 320 entities
-    /// against the default 64-entity floor gets <c>ceil(320 / 64) = 5</c> chunks however high this factor is set — which
-    /// makes this knob inert on exactly the small-population systems its guidance above describes. When that is the
-    /// situation, set <see cref="MinChunkSize"/>; this factor then governs again.
+    /// <b>Under the entity rule that second cap is frequently the binding one, and this knob cannot lift it.</b> A system
+    /// walking 320 entities against the default 64-entity floor gets <c>ceil(320 / 64) = 5</c> chunks however high this
+    /// factor is set — which makes this knob inert on exactly the small-population systems its guidance above describes.
+    /// The cost rule (<see cref="RuntimeOptions.CostBasedChunking"/>, the default from a system's second dispatch) has no
+    /// entity floor: it spreads the measured cost over <c>round(WorkerCount × ChunksPerWorker)</c> chunks, and up to twice
+    /// that when each would carry more than 100 µs.
     /// </para>
     /// Set by <see cref="RuntimeSchedule"/> from <see cref="SystemBuilder.ChunksPerWorker"/>.
     /// </summary>
@@ -220,8 +223,10 @@ public sealed class SystemDefinition
     /// serve both: at 64 it starves the expensive system of workers, and lowered globally it splits the cheap ones into
     /// chunks whose dispatch costs more than their work.</para>
     /// <para><b>How to choose one.</b> It is a physical quantity, so it is checkable rather than felt: divide a system's
-    /// <c>SystemTelemetry.DurationUs</c> by its <c>EntitiesProcessed</c> and pick a chunk that holds enough work to be
+    /// <c>SystemTelemetry.WorkUs</c> by its <c>EntitiesProcessed</c> and pick a chunk that holds enough work to be
     /// worth a dispatch. Setting it because a system "feels heavy" is how this becomes a number nobody can justify.</para>
+    /// <para><b>Setting it opts the system out of the cost rule</b> (<see cref="RuntimeOptions.CostBasedChunking"/>),
+    /// which does that division itself every tick and needs no floor.</para>
     /// </remarks>
     public int MinChunkSize { get; internal set; }
 

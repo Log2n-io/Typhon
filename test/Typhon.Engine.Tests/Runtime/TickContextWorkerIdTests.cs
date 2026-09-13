@@ -52,7 +52,11 @@ class TickContextWorkerIdTests : TestBase<TickContextWorkerIdTests>
     {
         WorkerCount = WorkerCount,
         BaseTickRate = 1000,
-        ParallelQueryMinChunkSize = MinChunkSize
+        ParallelQueryMinChunkSize = MinChunkSize,
+
+        // The entity rule: one chunk count for every tick, whatever the bodies cost. The cost rule would fold these empty bodies into one chunk from
+        // the second dispatch on, and the tests below compare chunks across ticks.
+        CostBasedChunking = false
     };
 
     /// <summary>One observation of a context as it reached user system code.</summary>
