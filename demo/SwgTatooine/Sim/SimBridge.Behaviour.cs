@@ -599,6 +599,9 @@ public sealed partial class SimBridge
         var probe = _config.WorkProbe && ctx.TickNumber >= _config.WarmTicks;
         Span<long> work = stackalloc long[WorkProbeCounters * 4];
         work.Clear();
+        var batch = _config.AwarenessApi == AwarenessApi.Batch;
+        Span<BSphere2F> members = stackalloc BSphere2F[64];
+        Span<int> counts = stackalloc int[64];
 
         using var clusters = ctx.ClusterIds != null
             ? ctx.Accessor.GetClusterEnumerator<Player>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
@@ -613,6 +616,27 @@ public sealed partial class SimBridge
             }
 
             var places = cluster.GetReadOnlySpan(Player.Bounds);
+            if (batch)
+            {
+                // The cluster's players as one batch per target archetype: the same spheres, the same counts, one walk over the cells they share.
+                var m = 0;
+                var sampled = 0UL;
+                for (var b = bits0; b != 0; b &= b - 1)
+                {
+                    var idx = BitOperations.TrailingZeroCount(b);
+                    members[m] = new BSphere2F { CenterX = places[idx].X, CenterY = places[idx].Z, Radius = AwarenessRadius };
+                    if (probe && ((cluster.ChunkId * 64) + idx) % WorkProbeSampleEvery == 0)
+                    {
+                        sampled |= 1UL << m;
+                    }
+
+                    m++;
+                }
+
+                AwarenessBatch(members[..m], counts[..m], only, sampled, work, ref queries, ref hits);
+                continue;
+            }
+
             var bits = bits0;
             while (bits != 0)
             {
@@ -690,8 +714,11 @@ public sealed partial class SimBridge
     private long CountInRadius<TArch>(in BSphere2F sphere) where TArch : Archetype<TArch>, new() => _config.AwarenessApi switch
     {
         AwarenessApi.MoveNext => CountByMoveNext<TArch>(in sphere),
-        AwarenessApi.Count => CountByCount<TArch>(in sphere),
-        _ => CountByFill<TArch>(in sphere),
+        AwarenessApi.Fill => CountByFill<TArch>(in sphere),
+        // A lone query — the shuttle port probe — has no batch to join: the batch arm counts it as the count arm does, so the two arms differ in the
+        // awareness drain and nowhere else.
+        AwarenessApi.Count or AwarenessApi.Batch => CountByCount<TArch>(in sphere),
+        _ => throw new ArgumentOutOfRangeException(nameof(_config.AwarenessApi), _config.AwarenessApi, "no drain for this awareness API"),
     };
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -732,6 +759,65 @@ public sealed partial class SimBridge
         {
             e.Dispose();
         }
+    }
+
+    /// <summary>
+    /// <see cref="AwarenessApi.Batch"/>: one <c>CountRadius</c> per target archetype for a source cluster's players, under one epoch scope. Each player's
+    /// count is exactly its own query's, so the statistics are those of the per-player path.
+    /// </summary>
+    private void AwarenessBatch(
+        ReadOnlySpan<BSphere2F> members,
+        Span<int> counts,
+        AwarenessTarget? only,
+        ulong sampled,
+        Span<long> work,
+        ref long queries,
+        ref long hits)
+    {
+        using var epoch = EpochGuard.Enter(Dbe.EpochManager);
+        if (only is null or AwarenessTarget.Structures)
+        {
+            hits += CountBatch<WorldObject>(members, counts, 0, sampled, work);
+            queries += members.Length;
+        }
+
+        if (only is null or AwarenessTarget.Creatures)
+        {
+            hits += CountBatch<Creature>(members, counts, 1, sampled, work);
+            queries += members.Length;
+        }
+
+        if (only is null or AwarenessTarget.Npcs)
+        {
+            hits += CountBatch<CityNpc>(members, counts, 2, sampled, work);
+            queries += members.Length;
+        }
+
+        if (only is null or AwarenessTarget.Players)
+        {
+            hits += CountBatch<Player>(members, counts, 3, sampled, work);
+            queries += members.Length;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private long CountBatch<TArch>(ReadOnlySpan<BSphere2F> members, Span<int> counts, int target, ulong sampled, Span<long> work)
+        where TArch : Archetype<TArch>, new()
+    {
+        Dbe.ClusterSpatialQuery<TArch>().CountRadius(members, counts);
+        long n = 0;
+        for (var j = 0; j < members.Length; j++)
+        {
+            n += counts[j];
+        }
+
+        for (var s = sampled; s != 0; s &= s - 1)
+        {
+            var j = BitOperations.TrailingZeroCount(s);
+            ProbeWork(target, StateOf<TArch>(), in members[j], counts[j], work);
+        }
+
+        return n;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]

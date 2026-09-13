@@ -168,7 +168,7 @@
     ArchetypeClusterState.RejectBounds, ArchetypeClusterState.BeginClusterAabbsWrite, ArchetypeClusterState.ClusterAabbsWriteLanded,
     ClusterRef.ApplySpatialWrite,
     ArchetypeClusterState.ReachCoversIndex, ArchetypeClusterState.RebuildClusterAabbs, ArchetypeClusterState.RebuildSpatialStateFromData,
-    DatabaseEngine.FinalizeArchetypeFenceHead, Transaction.FinalizeSpawns, EscapedClusterSet, EscapedClusterSet.IsCurrent
+    DatabaseEngine.FinalizeArchetypeFenceHead, Transaction.FinalizeSpawns, EscapedClusterSet, EscapedClusterSet.IsCurrent, ClusterRadiusBatch
   verified: ClusterOverhangTests — one entity filed a row below each query and reaching 0.1 into it, found by AABB (all three drains),
     radius, ray and frustum; AabbClusterEnumeratorDrainTests' oracle on a scattered population (added 2026-09-12, #906 — before it every
     one of those four missed the entity); ClusterReachTests — an edge cell's out-of-world overhang widens nothing, an inner cell's box
@@ -178,7 +178,8 @@
     against an oracle (AABB all drains, radius, kNN), a spawn is reachable before any fence, FoldReach's table, RejectBounds inward and
     tight, a grow of ClusterAabbs sending a writer round again, spawns widening clusters while the array grows losing no widen, and IsCurrent
     rejecting a freed or reused id (EscapedClusterSet_IsCurrent_RejectsAFreedOrReusedChunkId); ReachCoversIndex is asserted after every
-    fence and spawn
+    fence and spawn; ClusterRadiusBatchTests.ANamedOutlier_IsFoundByEachMemberAsByItsOwnQuery — a batch member finds a named outlier as its own
+    query does, and once when its own walk reaches the outlier's home cell
   on_violation: spatial query misses entities — game logic sees incomplete world state
   requires: ST-01 (MBR correctness), ST-02 (union mask not under-representing)
 
@@ -202,9 +203,19 @@
     as a popcount, while MoveNext and Fill walk the approved slots through the loop, which tests each again, so a result's bounds come from the read
     that tested them. Blocks too sparse to pay for a kernel pass (under two occupied slots for Count, under three for MoveNext and Fill), and the
     slots past the last whole block, go straight to the loop.
+  invariant the batched radius query (ClusterSpatialQuery.CountRadius / ForEachInRadius, ClusterRadiusBatch) answers each member exactly as that
+    member's own Radius query: counts[j] == Radius(members[j]).Count(), and the sink receives member j's hits in its MoveNext order with the same
+    bounds and DistanceSq. It shares the narrowphase (DrainCluster, ApplyBlockKernel at Count's and MoveNext's thresholds) and has its own walk,
+    held to each member's single walk three ways: a cell is visited for the members whose OWN reach-widened range holds it, and only those; a
+    cluster is opened for the members whose own cell-frame box overlaps its index box, by the single query's predicate, and not at all when none
+    does; the named outliers come after the walk, per member, with the single query's tests (EscapedClusterSet.Reaches and
+    AabbClusterEnumerator.CategoryAdmits, shared with the single query). Cells are visited in the single walk's order, so a member's hits keep
+    theirs; a promoted half is queried per member. The equality is with a single query run over the SAME index: a sink's own writes (a spawn
+    reachable before the fence) may land between two members' walks, as they would between two single queries
   scope: SpatialRTree.CountInAABB, AABBQueryEnumerator, AabbClusterEnumerator.Count, AabbClusterEnumerator.Fill, AabbClusterEnumerator.DrainTier,
     AabbClusterEnumerator.DrainCluster, AabbClusterEnumerator.Drain, AabbClusterEnumerator.DecideBlocks, AabbClusterEnumerator.DecideBlocksCore,
-    AabbClusterEnumerator.ApplyBlockKernel, NarrowphaseAabb2F.MatchAvx512, NarrowphaseAabb2F.MatchAvx2
+    AabbClusterEnumerator.ApplyBlockKernel, NarrowphaseAabb2F.MatchAvx512, NarrowphaseAabb2F.MatchAvx2, ClusterRadiusBatch,
+    ClusterSpatialQuery`1.CountRadius, ClusterSpatialQuery`1.ForEachInRadius
   verified by: AabbClusterEnumeratorDrainTests — MoveNext against an oracle computed from the spawned bounds (set, bounds and DistanceSq bit for
     bit), Count and Fill against MoveNext, on the scalar scan, the batched scan past one 64-slot batch, a promoted cell and every storage tier;
     resume after MoveNext for both; and each tier's bounds reader against ReadAndValidateBoundsFromPtr on valid, NaN, inverted and infinite input.
@@ -214,7 +225,12 @@
     — AabbClusterEnumerator.Drain run over the same column, not a transcription of it — over 40 000 random cases seeded with NaN, infinite, inverted,
     touching, denormal and 2^36 inputs and NaN / infinite query bounds, which the enumerator cannot be driven with (it rejects a non-finite query box);
     its mutants APositiveFormPredicate_IsCaughtByTheComparison and AQueryNarrowedToF32_IsCaughtByTheComparison show the comparison rejects the positive
-    form and an f32 query
+    form and an f32 query. The batch: ClusterRadiusBatchTests.EachMember_IsAnsweredAsItsOwnRadiusQuery holds every member's count and hit
+    sequence to its own query's, bit for bit, on scattered, full and promoted cells, kernel on and off, on AABB2F, a wide AABB2F component and
+    BSphere2F, with a member diagonally far from the others, two at opposite ends of a row, a negative radius and members at one point; under a
+    category mask that admits the archetype and one that rejects it; and with members retiring after 1-4 hits.
+    ANamedOutlier_IsFoundByEachMemberAsByItsOwnQuery adds members in the outlier's home row and column. Run by hand when written (2026-09-13):
+    dropping the named-outlier pass and reversing the batched scan's order each redden them
   on_violation: count disagrees with materialized query — game logic makes wrong density decisions
 
 ### SQ-04: Subtree counting shortcut correctness `[fatal]`
@@ -231,7 +247,10 @@
   invariant 🔴 ∀ two enumerators live on one thread at once: their traversal stacks are DISTINCT arrays
   invariant 🔴 ∀ two AabbClusterEnumerators live on one thread at once: their narrowphase page windows are DISTINCT
     SpatialQueryAccessorCache entries, and a return is honoured only under the token its rent stamped
-  scope: AABBQueryEnumerator, FrustumEnumerator, CountInAABB, RayEnumerator, QueryStackPool, SpatialQueryAccessorCache
+  invariant a radius batch (ClusterRadiusBatch) holds ONE window for the whole batch, rented on its first cluster and handed back in a finally:
+    a sink that throws does not keep it, and a sink's own queries rent windows of their own. verified by ClusterRadiusBatchTests
+    (ASinkThatRunsItsOwnQuery_GetsItsOwnWindow; ASinkThatThrows_HandsTheWindowBack, which a batch without the finally reddens)
+  scope: AABBQueryEnumerator, FrustumEnumerator, CountInAABB, RayEnumerator, QueryStackPool, SpatialQueryAccessorCache, ClusterRadiusBatch
   warm window (added 2026-09-12, #906): the cluster query no longer builds a ChunkAccessor per query. It rents this thread's warm window
     over the cluster segment from SpatialQueryAccessorCache on its first cluster open (or a promoted half's first tree hit) and hands it back
     — WITHOUT disposing it — when the query is exhausted or disposed, so the next query on the thread finds its pages resident. Same two

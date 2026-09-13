@@ -191,6 +191,11 @@ public sealed class SimConfig
     /// </summary>
     public AwarenessApi AwarenessApi = AwarenessApi.Count;
 
+    /// <summary>
+    /// How the creature-combat system asks which players are in range: one query per creature, or one batch per creature cluster.
+    /// </summary>
+    public CombatApi CombatApi = CombatApi.MoveNext;
+
     /// <summary>Seed for every random decision, so a run is reproducible and two arms see the same world.</summary>
     public int Seed = 20260907;
 
@@ -218,8 +223,8 @@ public sealed class SimConfig
     public int ResolveWorkerCount() => WorkerCount > 0 ? WorkerCount : Environment.ProcessorCount;
 
     /// <summary>A short label identifying this configuration in a results table.</summary>
-    /// <remarks>Deliberately omits <see cref="AwarenessApi"/> and <see cref="SimdNarrowphase"/>: neither changes the workload, and the label keys sweep
-    /// results.</remarks>
+    /// <remarks>Deliberately omits <see cref="AwarenessApi"/>, <see cref="CombatApi"/> and <see cref="SimdNarrowphase"/>: none changes the workload, and
+    /// the label keys sweep results.</remarks>
     public string Label =>
         $"{WorldEdgeKm:N0}km x{PopulationScale:N1} cell={ResolveCellSize():N0}m floors={ClusterTargetExtentRatio:G}/{ClusterRepairExtentRatio:G} "
         + $"unit={RepairWorstClustersPerUnit} shuttles={(!Shuttles ? "off" : ShuttleBurst ? "burst" : "trickle")}";
@@ -236,4 +241,20 @@ public enum AwarenessApi
 
     /// <summary><c>Fill(Span)</c> into a per-thread 64-result buffer until the query is exhausted.</summary>
     Fill,
+
+    /// <summary>
+    /// One <c>CountRadius</c> per source cluster and target archetype: the cluster's players share one cell walk. <c>--work-probe</c> still replays each
+    /// player's single query, so it reports per-query work, not what the batch saved.
+    /// </summary>
+    Batch,
+}
+
+/// <summary>How the creature-combat system asks which players are in range.</summary>
+public enum CombatApi
+{
+    /// <summary>One radius query per creature, drained with <c>MoveNext</c> up to four hits.</summary>
+    MoveNext,
+
+    /// <summary>One <c>ForEachInRadius</c> per creature cluster, each creature retiring at four hits.</summary>
+    Batch,
 }

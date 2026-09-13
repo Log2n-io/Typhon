@@ -815,7 +815,7 @@ public unsafe ref struct AabbClusterEnumerator
                     // therefore make a promoted cell answer a different question from an unpromoted one — an SQ-01 false negative that only appears above the
                     // promotion threshold, which is the hardest possible place to notice it. The mask comes from ClusterAabbs, which is the same value the
                     // linear index would have read.
-                    if (_categoryMask != 0 && (_state.ClusterAabbs[treeChunkId].CategoryMask & _categoryMask) == 0)
+                    if (!CategoryAdmits(_state.ClusterAabbs[treeChunkId].CategoryMask, _categoryMask))
                     {
                         continue;
                     }
@@ -834,7 +834,7 @@ public unsafe ref struct AabbClusterEnumerator
             // 2a. Batched broadphase: the AABB test already happened for a whole batch, so this only pops set bits.
             if (_currentCellIndex != null && _useSimdScan && TryNextBatchedSlot(out int batchedIdx))
             {
-                if (_categoryMask != 0 && (_currentCellIndex.CategoryMasks[batchedIdx] & _categoryMask) == 0)
+                if (!CategoryAdmits(_currentCellIndex.CategoryMasks[batchedIdx], _categoryMask))
                 {
                     continue;   // category miss — same "any bit overlap" rule as the scalar branch below
                 }
@@ -857,13 +857,9 @@ public unsafe ref struct AabbClusterEnumerator
                 // filter is exact — no per-entity narrowphase re-filter is needed. Phase 1/2 pre-migration code had this same "any overlap" rule but failed to
                 // special-case categoryMask=0 as "no filter"; Phase 3 restores the legacy-compatible zero semantic so callers that pass 0 (e.g. the default
                 // SpatialTriggerSystem CategoryMask) accept all clusters.
-                if (_categoryMask != 0)
+                if (!CategoryAdmits(_currentCellIndex.CategoryMasks[idx], _categoryMask))
                 {
-                    uint clusterMask = _currentCellIndex.CategoryMasks[idx];
-                    if ((clusterMask & _categoryMask) == 0)
-                    {
-                        continue; // category miss
-                    }
+                    continue; // category miss
                 }
 
                 // AABB overlap against the cluster's stored bounds. The broadphase always runs in 3D — 2D clusters have Z bounds left at the Empty sentinel
@@ -1013,10 +1009,8 @@ public unsafe ref struct AabbClusterEnumerator
             int i = _escapedNext++;
 
             // Cheapest rejection first: most named clusters are nowhere near a given query.
-            if (!escaped.Overlaps(i, _query.MinX, _query.MinY, _query.MinZ, _query.MaxX, _query.MaxY, _query.MaxZ)
-                || (_categoryMask != 0 && (escaped.CategoryMasks[i] & _categoryMask) == 0)
-                || escaped.HomeCellIn(i, _cellMinX, _cellMinY, _cellMinZ, _cellMaxX, _cellMaxY, _cellMaxZ)
-                || !escaped.IsCurrent(i, _state.ClusterCellMap))
+            if (!escaped.Reaches(i, in _query, _cellMinX, _cellMinY, _cellMinZ, _cellMaxX, _cellMaxY, _cellMaxZ)
+                || !CategoryAdmits(escaped.CategoryMasks[i], _categoryMask) || !escaped.IsCurrent(i, _state.ClusterCellMap))
             {
                 continue;
             }
@@ -1055,6 +1049,13 @@ public unsafe ref struct AabbClusterEnumerator
         _currentCellZ = _cellMaxZ + 1;
         _escapedNext = int.MaxValue;
     }
+
+    /// <summary>
+    /// The cluster query's category rule, for every structure it scans and for <c>ClusterRadiusBatch</c> alike: a zero query mask accepts everything,
+    /// otherwise any overlapping bit does. Per archetype, so exact at the cluster level.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static bool CategoryAdmits(uint clusterMask, uint queryMask) => queryMask == 0 || (clusterMask & queryMask) != 0;
 
     /// <summary>Enumerator pattern: a ref struct enumerator is its own source.</summary>
     public AabbClusterEnumerator GetEnumerator() => this;

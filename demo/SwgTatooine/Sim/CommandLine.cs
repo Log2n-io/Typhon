@@ -47,7 +47,14 @@ public static class CommandLine
             "movenext" => AwarenessApi.MoveNext,
             "count" => AwarenessApi.Count,
             "fill" => AwarenessApi.Fill,
-            var other => throw new ArgumentException($"--awareness-api takes movenext, count or fill, not '{other}'"),
+            "batch" => AwarenessApi.Batch,
+            var other => throw new ArgumentException($"--awareness-api takes movenext, count, fill or batch, not '{other}'"),
+        };
+        c.CombatApi = Str(args, "--combat-api", "movenext") switch
+        {
+            "movenext" => CombatApi.MoveNext,
+            "batch" => CombatApi.Batch,
+            var other => throw new ArgumentException($"--combat-api takes movenext or batch, not '{other}'"),
         };
         if (Array.IndexOf(args, "--split-awareness") >= 0)
         {

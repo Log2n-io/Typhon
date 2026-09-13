@@ -1,5 +1,6 @@
 using System;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using Typhon.Schema.Definition;
 
@@ -36,6 +37,9 @@ public sealed partial class SimBridge
     /// </remarks>
     private const int RespawnTicks = 1800;
 
+    /// <summary>Shooters counted per creature before it stops asking: four players is as much fire as the damage model applies.</summary>
+    private const int MaxShooters = 4;
+
     /// <summary>
     /// A creature in a player's line of fire takes damage; at zero health it dies; after the interval it revives at its lair.
     /// </summary>
@@ -46,6 +50,10 @@ public sealed partial class SimBridge
         long revived = 0;
         var minDelay = (int)(TatooineData.MinAttackDelaySec * _config.TickRateHz);
         var delaySpan = Math.Max(1, (int)((TatooineData.MaxAttackDelaySec - TatooineData.MinAttackDelaySec) * _config.TickRateHz));
+        var batch = _config.CombatApi == CombatApi.Batch;
+        Span<BSphere2F> members = stackalloc BSphere2F[64];
+        Span<int> slots = stackalloc int[64];
+        Span<int> shooters = stackalloc int[64];
 
         using var clusters = ctx.ClusterIds != null
             ? ctx.Accessor.GetClusterEnumerator<Creature>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
@@ -64,6 +72,26 @@ public sealed partial class SimBridge
             var brains = cluster.GetSpan(Creature.Ai);
             var chunk = cluster.ChunkId;
 
+            if (batch)
+            {
+                CombatBatch(
+                    ctx.TickNumber,
+                    chunk,
+                    bits0,
+                    places,
+                    vitals,
+                    brains,
+                    members,
+                    slots,
+                    shooters,
+                    minDelay,
+                    delaySpan,
+                    ref engaged,
+                    ref killed,
+                    ref revived);
+                continue;
+            }
+
             var bits = bits0;
             while (bits != 0)
             {
@@ -72,43 +100,21 @@ public sealed partial class SimBridge
 
                 ref var ai = ref brains[idx];
                 ref var v = ref vitals[idx];
-
-                if (ai.Mode == AiMode.Dead)
+                if (!ReadyToTakeFire(ref v, ref ai, ref revived))
                 {
-                    if (--ai.ThinkCooldown > 0)
-                    {
-                        continue;
-                    }
-
-                    // Revive at the lair with full health. The teleport is the point: it is the biggest position jump
-                    // this simulation makes, and it forces a cell change plus a cluster-bound recomputation.
-                    v.Health = v.MaxHealth;
-                    ai.Mode = AiMode.Wander;
-                    ai.ThinkCooldown = 1;
-                    revived++;
                     continue;
                 }
 
-                // Only a creature that is already engaged, or one a player has walked up to, is under fire. The cooldown
-                // is the weapon's, not the creature's: 1-3 s at 10 Hz is 10-30 ticks.
-                if (v.AttackCooldown > 0)
-                {
-                    v.AttackCooldown--;
-                    continue;
-                }
-
-                var x = places[idx].X;
-                var z = places[idx].Z;
-                var sphere = new BSphere2F { CenterX = x, CenterY = z, Radius = RangedRange };
+                var sphere = new BSphere2F { CenterX = places[idx].X, CenterY = places[idx].Z, Radius = RangedRange };
                 using var epoch = EpochGuard.Enter(Dbe.EpochManager);
                 var e = Dbe.ClusterSpatialQuery<Player>().Radius(in sphere);
-                var shooters = 0;
+                var count = 0;
                 try
                 {
                     while (e.MoveNext())
                     {
-                        shooters++;
-                        if (shooters >= 4)
+                        count++;
+                        if (count >= MaxShooters)
                         {
                             break;
                         }
@@ -119,30 +125,7 @@ public sealed partial class SimBridge
                     e.Dispose();
                 }
 
-                if (shooters == 0)
-                {
-                    continue;
-                }
-
-                engaged++;
-                v.AttackCooldown = minDelay + (int)(Hash01(Salt(ctx.TickNumber, chunk, idx, 0x27220A95u)) * delaySpan);
-                v.Health -= PlayerDamagePerHit * shooters;
-                if (v.Health > 0)
-                {
-                    // Wounded and now angry: the creature turns on whoever is shooting, which is what pulls a lair.
-                    if (ai.Mode == AiMode.Wander)
-                    {
-                        ai.Mode = AiMode.Pursue;
-                        ai.ThinkCooldown = 0;
-                    }
-
-                    continue;
-                }
-
-                v.Health = 0;
-                ai.Mode = AiMode.Dead;
-                ai.ThinkCooldown = RespawnTicks;
-                killed++;
+                TakeFire(ref v, ref ai, count, ctx.TickNumber, chunk, idx, minDelay, delaySpan, ref engaged, ref killed);
             }
         }
 
@@ -160,6 +143,141 @@ public sealed partial class SimBridge
         {
             Interlocked.Add(ref _creaturesRespawned, revived);
         }
+    }
+
+    /// <summary>
+    /// The part of a creature's turn that needs no query: a dead one counts down to its revival, and one whose attacker's weapon is still cycling waits.
+    /// True when the creature can be fired on this tick.
+    /// </summary>
+    private static bool ReadyToTakeFire(ref CreatureVitals v, ref CreatureBrain ai, ref long revived)
+    {
+        if (ai.Mode == AiMode.Dead)
+        {
+            if (--ai.ThinkCooldown > 0)
+            {
+                return false;
+            }
+
+            // Revive at the lair with full health. The teleport is the point: it is the biggest position jump
+            // this simulation makes, and it forces a cell change plus a cluster-bound recomputation.
+            v.Health = v.MaxHealth;
+            ai.Mode = AiMode.Wander;
+            ai.ThinkCooldown = 1;
+            revived++;
+            return false;
+        }
+
+        // Only a creature that is already engaged, or one a player has walked up to, is under fire. The cooldown
+        // is the weapon's, not the creature's: 1-3 s at 10 Hz is 10-30 ticks.
+        if (v.AttackCooldown > 0)
+        {
+            v.AttackCooldown--;
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// <see cref="CombatApi.Batch"/>: the cluster's creatures under fire as one batch. Each still asks exactly its own question, and still stops at four
+    /// shooters.
+    /// </summary>
+    /// <remarks>Its own NoInlining method, like the awareness drains: <see cref="CreatureCombatTick"/> must JIT against an engine build that lacks the
+    /// batch API, so a DLL-swap A/B can run the per-query arm.</remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void CombatBatch(
+        long tick,
+        int chunk,
+        ulong bits,
+        ReadOnlySpan<CreaturePlacement> places,
+        Span<CreatureVitals> vitals,
+        Span<CreatureBrain> brains,
+        Span<BSphere2F> members,
+        Span<int> slots,
+        Span<int> shooters,
+        int minDelay,
+        int delaySpan,
+        ref long engaged,
+        ref long killed,
+        ref long revived)
+    {
+        var m = 0;
+        for (var b = bits; b != 0; b &= b - 1)
+        {
+            var idx = BitOperations.TrailingZeroCount(b);
+            if (ReadyToTakeFire(ref vitals[idx], ref brains[idx], ref revived))
+            {
+                members[m] = new BSphere2F { CenterX = places[idx].X, CenterY = places[idx].Z, Radius = RangedRange };
+                slots[m++] = idx;
+            }
+        }
+
+        if (m == 0)
+        {
+            return;
+        }
+
+        shooters[..m].Clear();
+        var sink = new ShooterSink(shooters);
+        using (EpochGuard.Enter(Dbe.EpochManager))
+        {
+            Dbe.ClusterSpatialQuery<Player>().ForEachInRadius(members[..m], ref sink);
+        }
+
+        for (var j = 0; j < m; j++)
+        {
+            var idx = slots[j];
+            TakeFire(ref vitals[idx], ref brains[idx], shooters[j], tick, chunk, idx, minDelay, delaySpan, ref engaged, ref killed);
+        }
+    }
+
+    /// <summary>The damage from <paramref name="shooters"/> players in range, and what it does to the creature.</summary>
+    private static void TakeFire(
+        ref CreatureVitals v,
+        ref CreatureBrain ai,
+        int shooters,
+        long tick,
+        int chunk,
+        int idx,
+        int minDelay,
+        int delaySpan,
+        ref long engaged,
+        ref long killed)
+    {
+        if (shooters == 0)
+        {
+            return;
+        }
+
+        engaged++;
+        v.AttackCooldown = minDelay + (int)(Hash01(Salt(tick, chunk, idx, 0x27220A95u)) * delaySpan);
+        v.Health -= PlayerDamagePerHit * shooters;
+        if (v.Health > 0)
+        {
+            // Wounded and now angry: the creature turns on whoever is shooting, which is what pulls a lair.
+            if (ai.Mode == AiMode.Wander)
+            {
+                ai.Mode = AiMode.Pursue;
+                ai.ThinkCooldown = 0;
+            }
+
+            return;
+        }
+
+        v.Health = 0;
+        ai.Mode = AiMode.Dead;
+        ai.ThinkCooldown = RespawnTicks;
+        killed++;
+    }
+
+    /// <summary><see cref="CombatApi.Batch"/>'s sink: counts each creature's shooters and retires it at <see cref="MaxShooters"/>.</summary>
+    private ref struct ShooterSink : IRadiusBatchSink
+    {
+        private readonly Span<int> _shooters;
+
+        public ShooterSink(Span<int> shooters) => _shooters = shooters;
+
+        public bool Hit(int member, in ClusterSpatialQueryResult hit) => ++_shooters[member] < MaxShooters;
     }
 
     /// <summary>[EST] Damage one player lands per weapon cycle. Kills a womp rat in two hits and a bantha in ten.</summary>

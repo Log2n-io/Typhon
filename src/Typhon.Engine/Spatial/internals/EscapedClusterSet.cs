@@ -66,6 +66,15 @@ internal sealed class EscapedClusterSet
     public bool Overlaps(int i, double minX, double minY, double minZ, double maxX, double maxY, double maxZ) =>
         MaxX[i] >= minX && MinX[i] <= maxX && MaxY[i] >= minY && MinY[i] <= maxY && MaxZ[i] >= minZ && MinZ[i] <= maxZ;
 
+    /// <summary>
+    /// Does a query need entry <paramref name="i"/> by name — its world box overlaps the query's, and its home cell is outside the range the query's own
+    /// cell walk covers? The single query and each member of a radius batch ask exactly this.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool Reaches(int i, in QueryGeometry query, int cellMinX, int cellMinY, int cellMinZ, int cellMaxX, int cellMaxY, int cellMaxZ) =>
+        Overlaps(i, query.MinX, query.MinY, query.MinZ, query.MaxX, query.MaxY, query.MaxZ)
+        && !HomeCellIn(i, cellMinX, cellMinY, cellMinZ, cellMaxX, cellMaxY, cellMaxZ);
+
     /// <summary>Is entry <paramref name="i"/> still the cluster it named — same chunk id, still filed under the same cell?</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool IsCurrent(int i, int[] clusterCellMap)
