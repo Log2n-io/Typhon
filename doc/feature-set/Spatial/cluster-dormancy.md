@@ -88,7 +88,7 @@ schedule.QuerySystem("IdleDrift", ctx =>
 ## 🔗 Related
 
 - Source: [src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs) (`DormancySweep`, `ProcessWakeRequest`, `TransitionWakePendingToActive`, `SetDirty`)
-- Source: [src/Typhon.Engine/Runtime/internals/DormancyReporter.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/internals/DormancyReporter.cs) (thread-local deferred wake requests)
+- Source: [src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs) (`PendingWakeRequests`: per-archetype deferred wake requests, applied at the fence by `DatabaseEngine.DrainDormancyWakeRequests`)
 - Source: [src/Typhon.Engine/Runtime/public/TyphonRuntime.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/TyphonRuntime.cs) (`OnParallelQueryPrepare` dormancy filter, `BuildTierIndexesAtTickStart` wake transition)
 - Source: [src/Typhon.Engine/Ecs/public/ClusterSleepState.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/ClusterSleepState.cs)
 - Related catalog entry: [Tiered Simulation Dispatch](./tiered-simulation-dispatch.md) (the tier filter dormancy composes with)

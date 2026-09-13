@@ -112,7 +112,7 @@ public sealed class EventQueue<T> : EventQueueBase
     private int _initialSegmentCapacity;
 
     // O(1) "anything pushed this tick?" gate for the reactive-skip path, which polls IsEmpty once per consumed queue per system per tick and would
-    // otherwise touch every slot's (cold, padded) cache line. Same trick as DormancyReporter.HasAnyRequest. Every writer stores the same value, so the
+    // otherwise touch every slot's (cold, padded) cache line. A single "anything here?" flag. Every writer stores the same value, so the
     // race is benign; it is monotonic within a tick and cleared by Reset.
     private int _anyProduced;
 

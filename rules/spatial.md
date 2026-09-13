@@ -1382,15 +1382,19 @@
 
 ### DM-01: Wake guarantee — max one-tick latency `[fatal]`
   invariant ∀ cluster C in Sleeping state:
-    SetDirty(C.chunkId, _) → DormancyReporter.RequestWake(archetypeId, C.chunkId)
-  invariant DormancyReporter.DrainAll runs single-threaded at tick fence (WriteClusterTickFence),
-    processes all thread-local wake requests, calls ProcessWakeRequest per entry
+    SetDirty(C.chunkId, _) → C's own archetype state enqueues C.chunkId on its PendingWakeRequests
+  invariant each engine drains ONLY its own archetypes' queues (DatabaseEngine.DrainDormancyWakeRequests, over its
+    routing table), single-threaded at its tick fence (WriteClusterTickFence, RunParallelFence's serial prep),
+    calling ProcessWakeRequest per entry
+  never a process-wide wake queue: the DormancyReporter this replaced (2026-09-12) drained every engine's thread-static
+    lists into whichever engine fenced first, routed by archetype id into ITS states — waking its own cluster of that
+    id, losing the other engine's wake — while other engines' workers were still appending to the lists it read
   invariant ProcessWakeRequest: Sleeping → WakePending (no-op if already WakePending)
   invariant TransitionWakePendingToActive: WakePending → Active at next tick start
     (BuildTierIndexesAtTickStart, before tier index rebuild)
   post maximum latency: dirty write at tick T → WakePending at tick T fence → Active at tick T+1 start
-  scope: ArchetypeClusterState.SetDirty, DormancyReporter.RequestWake, DrainAll,
-    ArchetypeClusterState.ProcessWakeRequest, TransitionWakePendingToActive
+  scope: ArchetypeClusterState.SetDirty, ArchetypeClusterState.PendingWakeRequests, ArchetypeClusterState.DrainWakeRequests,
+    DatabaseEngine.DrainDormancyWakeRequests, ArchetypeClusterState.ProcessWakeRequest, TransitionWakePendingToActive
   on_violation: sleeping cluster with dirty writes never wakes → entity changes never dispatched to systems
 
 ### DM-02: SleepingClusterCount consistency `[fatal]`

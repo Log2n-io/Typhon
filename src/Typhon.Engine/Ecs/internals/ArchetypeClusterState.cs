@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
@@ -2243,9 +2244,29 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// in <c>OnParallelQueryPrepare</c> is skipped (zero overhead). Issue #233.</summary>
     public int SleepingClusterCount;
 
-    /// <summary>Archetype ID for this cluster state. Set during <see cref="InitializeSpatial"/>. Used by
-    /// <see cref="MarkEntityDirty"/> to tag wake requests via <see cref="DormancyReporter"/>. Issue #233.</summary>
+    /// <summary>Archetype ID for this cluster state. Set during <see cref="InitializeSpatial"/>. Issue #233.</summary>
     internal int ArchetypeId;
+
+    /// <summary>
+    /// Wake requests for this archetype's sleeping clusters, queued by <see cref="MarkEntityDirty"/> from any worker and applied at the next fence by
+    /// <see cref="DrainWakeRequests"/>, which only this archetype's own engine calls (#233).
+    /// </summary>
+    /// <remarks>
+    /// Per archetype state, and so per engine, on purpose. The requests used to go through one process-wide <c>DormancyReporter</c> of thread-static
+    /// lists: whichever engine fenced first drained EVERY engine's requests, routed by archetype id into its own states — waking its own cluster of the
+    /// same id and losing the other engine's wake — while reading lists other engines' workers were still appending to. A parallel fixture's fence could
+    /// consume <c>DormancyTests.SetDirty_WakesSleepingCluster</c>'s request between its write and its assert.
+    /// </remarks>
+    internal readonly ConcurrentQueue<int> PendingWakeRequests = new();
+
+    /// <summary>Apply every queued wake request (#233). Single-threaded, from the fence that owns this archetype.</summary>
+    internal void DrainWakeRequests()
+    {
+        while (PendingWakeRequests.TryDequeue(out var chunkId))
+        {
+            ProcessWakeRequest(chunkId);
+        }
+    }
 
     /// <summary>Back-reference to the engine's <see cref="SpatialGrid"/>. Set during <see cref="InitializeSpatial"/>. Used by <c>ClusterRef.WriteSpatial</c> to
     /// evaluate cell-boundary crossings at the write site without plumbing the grid through every call layer. <c>null</c> for non-spatial archetypes.</summary>
@@ -2337,7 +2358,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // means one extra tick of sleep (dirty bit still records the writes); false positive is a harmless duplicate request.
         if (SleepStates != null && clusterChunkId < SleepStates.Length && SleepStates[clusterChunkId] == ClusterSleepState.Sleeping)
         {
-            DormancyReporter.RequestWake(ArchetypeId, clusterChunkId);
+            PendingWakeRequests.Enqueue(clusterChunkId);
         }
     }
 
@@ -4269,8 +4290,8 @@ internal sealed unsafe partial class ArchetypeClusterState
 
     /// <summary>
     /// Process a single wake request: if the cluster is <see cref="ClusterSleepState.Sleeping"/>, transition to <see cref="ClusterSleepState.WakePending"/>.
-    /// Deduplication is implicit: calling on an already-WakePending cluster is a no-op. Called single-threaded from <c>WriteClusterTickFence</c> after
-    /// draining <see cref="DormancyReporter"/>. Issue #233.
+    /// Deduplication is implicit: calling on an already-WakePending cluster is a no-op. Called single-threaded by <see cref="DrainWakeRequests"/> at the
+    /// fence. Issue #233.
     /// </summary>
     internal void ProcessWakeRequest(int chunkId)
     {

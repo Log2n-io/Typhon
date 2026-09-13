@@ -466,12 +466,30 @@ public partial class DatabaseEngine
         }
     }
 
+    /// <summary>
+    /// Apply the wake requests THIS engine's archetypes queued since the last fence (#233), one archetype at a time over its own routing table — never
+    /// another engine's, which a process-wide drain used to take along with ours.
+    /// </summary>
+    internal void DrainDormancyWakeRequests()
+    {
+        var states = _stateByRouting;
+        if (states == null)
+        {
+            return;
+        }
+
+        for (var r = 1; r < _nextRoutingId && r < states.Length; r++)
+        {
+            states[r]?.ClusterState?.DrainWakeRequests();
+        }
+    }
+
     private void WriteClusterTickFence(long tickNumber, ref long highestLSN, ChangeSet changeSet)
     {
-        // Issue #233: drain all deferred wake requests collected during parallel system execution. Must run once BEFORE the per-archetype loop so each
+        // Issue #233: drain the wake requests collected during parallel system execution. Must run once BEFORE the per-archetype loop so each
         // archetype's DormancySweep (below) sees up-to-date WakePending states and skips those clusters instead of re-sleeping them. The fence parallel
-        // path runs this drain in FencePrep (TickDriver) so per-archetype work can be split across workers without coordinating on this global state.
-        DormancyReporter.DrainAll(_archetypeStates);
+        // path runs this drain in FencePrep (TickDriver) so per-archetype work can be split across workers.
+        DrainDormancyWakeRequests();
 
         foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
         {

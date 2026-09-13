@@ -2214,8 +2214,8 @@ public sealed partial class TyphonRuntime : IDisposable
             ctx.Reset(scheduler.CurrentTickNumber, _currentUow?.ChangeSet, scheduler.WorkerCount, Options.FenceChunkOversubscription, _liveFenceCost,
                 Options.EntityMapBulkMinEntriesPerBucket);
 
-            // Drain dormancy wake requests globally on TickDriver (single-threaded contract from issue #233).
-            DormancyReporter.DrainAll(Engine._archetypeStates);
+            // Drain this engine's dormancy wake requests on TickDriver (single-threaded contract from issue #233).
+            Engine.DrainDormancyWakeRequests();
 
             // Serial table fences on TickDriver. Uses the UoW's ChangeSet (single-thread context).
             //
