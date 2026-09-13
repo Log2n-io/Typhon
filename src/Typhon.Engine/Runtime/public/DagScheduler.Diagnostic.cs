@@ -42,28 +42,31 @@ public sealed partial class DagScheduler
           .AppendLine();
 
         sb.AppendLine();
-        sb.AppendLine("Idx Phase                Name                            Pred  Deps  Ready  Chunks       Skip");
-        sb.AppendLine("─── ──────────────────── ─────────────────────────────── ───── ───── ────── ──────────── ────");
+        sb.AppendLine("Idx Phase                Name                            Pred  Deps  Ready  Claimed/Of  Left  Skip");
+        sb.AppendLine("─── ──────────────────── ─────────────────────────────── ───── ───── ────── ────────── ───── ────");
 
         for (var i = 0; i < AllSystemCount; i++)
         {
             var sys = Systems[i];
             var deps = _remainingDeps[i].Value;
             var ready = _isReady[i].Value;
-            var nextChunk = _nextChunk[i].Value;
-            var totalChunks = sys.TotalChunks;
+            var word = _claims[i].Value;
+            var nextChunk = (uint)word;
+            var totalChunks = (uint)(word >> 32);
             var skip = _currentTickSystemMetrics[i].SkipReason;
             var phase = sys.Phase.Name;
 
-            sb.AppendFormat("{0,3} {1,-20} {2,-31} {3,5} {4,5} {5,6} {6,4}/{7,-5}    {8}",
+            // Claimed/Of is the live dispatch's claim word (0/0 while closed); Left is _remainingChunks, the chunks not yet counted down.
+            sb.AppendFormat("{0,3} {1,-20} {2,-31} {3,5} {4,5} {5,6} {6,4}/{7,-5} {8,5}  {9}",
                 i,
                 phase.Length > 20 ? phase[..20] : phase,
                 sys.Name.Length > 31 ? sys.Name[..31] : sys.Name,
                 sys.PredecessorCount,
                 deps,
                 ready == 1 ? "yes" : "no",
-                nextChunk,
-                totalChunks > 0 ? totalChunks.ToString() : "-",
+                Math.Min(nextChunk, totalChunks),
+                totalChunks,
+                _remainingChunks[i].Value,
                 skip == SkipReason.NotSkipped ? "" : skip.ToString());
             sb.AppendLine();
         }
@@ -71,15 +74,21 @@ public sealed partial class DagScheduler
         // List the stuck-systems' predecessor chains — most useful when one system fails to
         // decrement deps for some reason.
         sb.AppendLine();
-        sb.AppendLine("Stuck systems (deps>0 OR ready==1 with chunks remaining):");
+        sb.AppendLine("Stuck systems (deps>0, ready==1 with chunks to claim, or every chunk claimed and some never counted down):");
         var anyStuck = false;
         for (var i = 0; i < AllSystemCount; i++)
         {
             var deps = _remainingDeps[i].Value;
             var ready = _isReady[i].Value;
-            var nextChunk = _nextChunk[i].Value;
-            var totalChunks = Systems[i].TotalChunks;
-            var stuck = deps > 0 || (ready == 1 && nextChunk < totalChunks);
+            var word = _claims[i].Value;
+            var nextChunk = (uint)word;
+            var totalChunks = (uint)(word >> 32);
+
+            // The second multi-chunk case is the one hang the claim word still allows: a claim whose chunk never reached its decrement — an exception that
+            // escaped into WorkerLoop's safety net — leaves the word exhausted and _remainingChunks above zero, so nobody completes the system.
+            var claimsLeft = nextChunk < totalChunks;
+            var countdownLeft = totalChunks > 0 && !claimsLeft && _remainingChunks[i].Value > 0;
+            var stuck = deps > 0 || (ready == 1 && (claimsLeft || countdownLeft));
             if (!stuck) continue;
             anyStuck = true;
             sb.Append("  ").Append(Systems[i].Name).Append("  pred=[");

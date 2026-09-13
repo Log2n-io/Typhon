@@ -1900,6 +1900,10 @@ public sealed partial class TyphonRuntime : IDisposable
         _currentDeltaTime = _previousTickTimestamp > 0 ? (float)((now - _previousTickTimestamp) / (double)Stopwatch.Frequency) : 0f;
         _previousTickTimestamp = now;
 
+        // Every checkerboard system starts the tick at phase 0 (CB-02). A system that failed in its Red phase starts no Black phase, and its cleanup has left
+        // phase 1 behind; kept, it would make this tick's first prepare serve the previous tick's Black list and skip Red.
+        Array.Clear(_checkerboardPhase);
+
         // Create UoW for this tick (Deferred — batch all system commits, single WAL flush at end)
         _currentUow = Engine.CreateUnitOfWork();
         TyphonEvent.EmitRuntimePhaseUoWCreate(scheduler.CurrentTickNumber);

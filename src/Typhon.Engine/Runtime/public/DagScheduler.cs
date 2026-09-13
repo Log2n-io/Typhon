@@ -106,7 +106,29 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     // Per-system mutable state (reset each tick)
     // ═══════════════════════════════════════════════════════════════
 
-    private readonly CacheLinePaddedInt[] _nextChunk;
+    /// <summary>
+    /// Per-system claim word: the live dispatch's chunk count in the high 32 bits, the next chunk to hand out in the low 32. A worker claims with ONE
+    /// <c>Interlocked.Increment</c> and gets back both halves of the same dispatch, so whether a chunk is its to run is decided by the claim itself (CD-01).
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Why one word.</b> Workers are not fenced out between dispatches: a parallel system's ready flag stays set once it completes, and a worker can
+    /// be preempted anywhere in its claim loop and resume one or more dispatches later. With the count and the next index held apart, three windows let such a
+    /// worker run a chunk of a dispatch it was never part of — each reproduced in <c>ChunkClaimStragglerTests</c>:</para>
+    /// <list type="bullet">
+    ///   <item>the ready flag read in one tick and a counter reset to 0 read in the next: the SWG x64/w16 aborts on <c>CellClusterPool</c>'s single-writer
+    ///         detector, a stale fence chunk allocating or freeing a cluster under the next tick's systems;</item>
+    ///   <item>an increment past the end of one dispatch judged against the NEXT dispatch's larger count: a chunk run twice, and the system completed one
+    ///         chunk early;</item>
+    ///   <item>a drainer that cached a failed dispatch's count swallowing chunks of the next dispatch.</item>
+    /// </list>
+    /// <para>With one word a claim either names a chunk of the dispatch whose word it incremented — a legitimate claim, whatever the worker did before — or
+    /// answers "nothing left".</para>
+    /// <para><b>Open and closed.</b> <see cref="ResetTickState"/> stores 0, a count of 0: closed. A dispatch publishes its word as its LAST store
+    /// (<see cref="OpenChunkClaims"/>, a release after <c>_remainingChunks</c> and the prepared state). Nothing needs to close the word between two dispatches
+    /// in one tick: a dispatch completes only after every chunk has been claimed, so the word it leaves behind is exhausted and refuses every claim.</para>
+    /// </remarks>
+    private readonly CacheLinePaddedLong[] _claims;
+
     private readonly CacheLinePaddedInt[] _remainingChunks;
     private readonly CacheLinePaddedInt[] _remainingDeps;
     private readonly CacheLinePaddedInt[] _isReady;
@@ -307,28 +329,19 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     /// and it is atomic — the counter hands 0 to exactly one worker — so the abort is decided once per system (rule D1: granularity is the system, never the chunk).
     /// </summary>
     /// <remarks>
-    /// <c>_systemFailed</c> is set first so peers still ahead of their own top-of-loop check divert into the drain instead of claiming fresh chunks. A peer that
-    /// already claimed a chunk runs it — that is in-flight work, which finishes by design. The tick is partially applied by construction anyway (systems that
-    /// ran before the failure committed), so a stray chunk is inside the envelope the policy already accepts, not a new failure mode.
+    /// <c>_systemFailed</c> is set first so a peer whose claim comes back after it diverts into the drain instead of running the chunk. A peer that read the
+    /// flag before it was set runs its chunk — that is in-flight work, which finishes by design. The tick is partially applied by construction anyway (systems
+    /// that ran before the failure committed), so a stray chunk is inside the envelope the policy already accepts, not a new failure mode.
     /// </remarks>
-    private void AbortSystemFromChunkZero(int sysIdx, int workerId, bool trackUtilization)
+    private bool AbortSystemFromChunkZero(int sysIdx, int workerId, bool trackUtilization, int totalChunks)
     {
         _systemFailed[sysIdx] = true;
         _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.TickAborted;
         InspectorSystemSkipped(sysIdx, SkipReason.TickAborted, Stopwatch.GetTimestamp());
 
-        // Account for the chunk 0 we claimed but will not run. If it was the only chunk this completes the system.
-        if (Interlocked.Decrement(ref _remainingChunks[sysIdx].Value) == 0)
-        {
-            RecordSystemDone(sysIdx, Stopwatch.GetTimestamp());
-            SystemEndCallback?.Invoke(sysIdx, false);
-            OnSystemComplete(sysIdx, workerId, trackUtilization);
-            return;
-        }
-
-        // Chunks 1..N-1 go through the same drain the per-system failure path uses (correction C2): a not-yet-started system must still drive its counter to
-        // zero, and the drain's claim/decrement protocol is already race-safe across the several workers that can enter it at once.
-        DrainFailedSystemChunks(sysIdx, workerId, trackUtilization);
+        // Account for the chunk 0 we claimed but will not run; true when it was the only chunk. Chunks 1..N-1 then drain through the claim loop's
+        // failed-system path (correction C2): a not-yet-started system must still drive its counter to zero, one claim at a time like any failed system.
+        return DrainClaimedChunk(sysIdx, workerId, trackUtilization, totalChunks);
     }
 
     /// <summary>The outcome describing the abort. Only meaningful once <see cref="IsTickAborted"/> is true.</summary>
@@ -686,7 +699,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         SystemCount = userSystemCount;
 
         // Allocate per-system state arrays
-        _nextChunk = new CacheLinePaddedInt[AllSystemCount];
+        _claims = new CacheLinePaddedLong[AllSystemCount];
         _remainingChunks = new CacheLinePaddedInt[AllSystemCount];
         _remainingDeps = new CacheLinePaddedInt[AllSystemCount];
         _isReady = new CacheLinePaddedInt[AllSystemCount];
@@ -1502,6 +1515,17 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     // ═══════════════════════════════════════════════════════════════
 
     /// <summary>
+    /// Test seam: called with <c>-1</c> as each <see cref="FindReadySystem"/> scan begins, and with a multi-chunk system's index between reading its ready
+    /// flag and its claim counter. Null outside tests, so the cost is one field load per scan.
+    /// </summary>
+    internal Action<int> FindReadySystemProbe;
+
+    /// <summary>
+    /// Test seam: called in every chunk-claim loop with the system's index and <c>0</c> just before a claim, <c>1</c> just after it. Null outside tests.
+    /// </summary>
+    internal Action<int, int> ClaimProbe;
+
+    /// <summary>
     /// Linear scan of ready systems. Returns the index of a system that can be processed, or -1 if no work is available.
     /// </summary>
     /// <remarks>
@@ -1511,9 +1535,12 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int FindReadySystem()
     {
+        var probe = FindReadySystemProbe;
+        probe?.Invoke(-1);
         for (var i = 0; i < AllSystemCount; i++)
         {
-            // Acquire load: pairs with the release in MarkSystemReady, so observing ready==1 guarantees this worker also sees TotalChunks/_remainingChunks for system i.
+            // Acquire load, paired with MarkSystemReady's release. For a multi-chunk system it is only a filter: what orders a claim after the dispatch's
+            // stores is the claim word itself (OpenChunkClaims' release, the claim's interlocked increment).
             if (Volatile.Read(ref _isReady[i].Value) != 1)
             {
                 continue;
@@ -1521,8 +1548,12 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
             if (Systems[i].Type == SystemType.PipelineSystem || Systems[i].IsParallelQuery)
             {
-                // Multi-chunk system: only return if chunks remain
-                if (_nextChunk[i].Value < Systems[i].TotalChunks)
+                probe?.Invoke(i);
+
+                // Multi-chunk system: only return if its live dispatch has chunks left. One load reads both halves of one dispatch's word; compared
+                // unsigned, like every claim, so no count of increments can make an exhausted word read as open.
+                var word = Volatile.Read(ref _claims[i].Value);
+                if ((uint)word < (uint)(word >> 32))
                 {
                     return i;
                 }
@@ -1622,28 +1653,32 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     {
         // ShouldRun was already evaluated at dispatch time. If we're here, the system should execute.
         var sys = Systems[sysIdx];
+        var probe = ClaimProbe;
 
         while (true)
         {
-            // Failure-drain: a prior chunk threw. We must NOT just break — `FindReadySystem`
-            // still returns this sysIdx as long as `_nextChunk < TotalChunks` (chunks unclaimed),
-            // so workers would loop into `ProcessPipeline`, hit this branch, break, and spin —
-            // a full-CPU wedge that never fires `OnSystemComplete` and never dispatches successors.
-            // Instead, claim the remaining chunks via `_nextChunk` (advancing it past TotalChunks
-            // closes the FindReadySystem gate) and decrement `_remainingChunks` for each so the
-            // last decrementer can fire `OnSystemComplete`. The chunks themselves stay unrun —
-            // remaining work is discarded as before.
-            if (_systemFailed[sysIdx])
-            {
-                DrainFailedSystemChunks(sysIdx, workerId, trackUtilization);
-                return;
-            }
-
-            var chunk = Interlocked.Increment(ref _nextChunk[sysIdx].Value) - 1;
-            if (chunk >= sys.TotalChunks)
+            probe?.Invoke(sysIdx, 0);
+            var claim = Interlocked.Increment(ref _claims[sysIdx].Value) - 1;
+            probe?.Invoke(sysIdx, 1);
+            var chunk = (int)claim;
+            var totalChunks = (int)(claim >> 32);
+            if ((uint)chunk >= (uint)totalChunks)
             {
                 break;
             }
+
+            // A failed system's chunks are claimed and counted down without running (DrainClaimedChunk). Tested after the claim, so the flag read belongs to
+            // the dispatch the claim came from.
+            if (_systemFailed[sysIdx])
+            {
+                if (DrainClaimedChunk(sysIdx, workerId, trackUtilization, totalChunks))
+                {
+                    break;
+                }
+
+                continue;
+            }
+
             TyphonEvent.EmitSchedulerDispense((ushort)sysIdx, chunk, (byte)workerId);
 
             if (chunk == 0)
@@ -1651,18 +1686,22 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                 // Strict tick-abort start gate — see the identical gate in ProcessParallelQuery.
                 if (IsTickAborted && !_systemIsEngine[sysIdx])
                 {
-                    AbortSystemFromChunkZero(sysIdx, workerId, trackUtilization);
-                    return;
+                    if (AbortSystemFromChunkZero(sysIdx, workerId, trackUtilization, totalChunks))
+                    {
+                        break;
+                    }
+
+                    continue;
                 }
                 RecordFirstChunkGrab(sysIdx, Stopwatch.GetTimestamp());
             }
 
             var workStart = Stopwatch.GetTimestamp();
-            InspectorChunkStart(sysIdx, chunk, workStart, sys.TotalChunks);
+            InspectorChunkStart(sysIdx, chunk, workStart, totalChunks);
             SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
             try
             {
-                sys.PipelineChunkAction(chunk, sys.TotalChunks);
+                sys.PipelineChunkAction(chunk, totalChunks);
             }
             catch (Exception ex)
             {
@@ -1695,48 +1734,64 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     }
 
     /// <summary>
-    /// Drain mode for a failed multi-chunk system. Claims every chunk that was never grabbed
-    /// (advances <c>_nextChunk</c> past <c>TotalChunks</c> via repeated <c>Increment</c>), and
-    /// decrements <c>_remainingChunks</c> once per claim — without running the chunk body. The
-    /// last decrementer (whichever worker happens to drive remaining to zero, possibly the same
-    /// worker that hit the original exception) fires <see cref="OnSystemComplete"/> so successors
-    /// get dispatched and the tick can finish.
+    /// Count one claimed chunk of a failed system down without running it; true when that completed the system.
     /// </summary>
     /// <remarks>
-    /// Why drain instead of break-and-bail: <see cref="FindReadySystem"/> uses
-    /// <c>_nextChunk[i].Value &lt; TotalChunks</c> as the "still has work" signal. Without
-    /// advancing <c>_nextChunk</c>, every worker that picks this sysIdx after the failure walks
-    /// into <see cref="ProcessPipeline"/> / <see cref="ProcessParallelQuery"/>, sees
-    /// <c>_systemFailed</c>, breaks, and immediately re-enters the worker loop — a tight
-    /// full-CPU spin that never fires <c>OnSystemComplete</c>. Multiple workers can race here
-    /// concurrently; <c>Interlocked.Increment</c> + <c>Interlocked.Decrement</c> give us a clean
-    /// claim/decrement protocol where exactly one worker observes <c>remaining == 0</c>.
+    /// Why count down instead of bailing out: <see cref="FindReadySystem"/> keeps offering a system while its claim word has chunks left, so a worker that
+    /// broke out on seeing the failure would come straight back — a full-CPU spin that never fires <see cref="OnSystemComplete"/> and never dispatches the
+    /// successors. Claiming each chunk and counting it down exhausts the word, and whichever worker takes <c>_remainingChunks</c> to zero completes the system.
+    /// One claim at a time from the ordinary claim loop, not a loop of its own: a drain loop that cached the failed dispatch's size swallowed chunks of the
+    /// NEXT dispatch when its worker was preempted across the tick boundary (CD-01, <c>ChunkClaimStragglerTests</c>).
     /// </remarks>
-    private void DrainFailedSystemChunks(int sysIdx, int workerId, bool trackUtilization)
+    private bool DrainClaimedChunk(int sysIdx, int workerId, bool trackUtilization, int totalChunks)
     {
-        var totalChunks = Systems[sysIdx].TotalChunks;
-        while (true)
+        if (Interlocked.Decrement(ref _remainingChunks[sysIdx].Value) != 0)
         {
-            var chunk = Interlocked.Increment(ref _nextChunk[sysIdx].Value) - 1;
-            if (chunk >= totalChunks)
-            {
-                // No more chunks to claim. Either we already drove _remainingChunks to zero
-                // (handled below) or another worker did — either way, this worker's job is done.
-                return;
-            }
-            // Successfully claimed `chunk` without running it. Decrement remaining so the last
-            // claim fires OnSystemComplete and unblocks successor dispatch.
-            var remaining = Interlocked.Decrement(ref _remainingChunks[sysIdx].Value);
-            if (remaining == 0)
-            {
-                RecordSystemDone(sysIdx, Stopwatch.GetTimestamp());
-                // Mirror the success-path SystemEndCallback so a failed parallel system still gets its lifecycle hook
-                // (e.g. Phase A telemetry, transaction rollback wiring). success=false because we got here by drain.
-                SystemEndCallback?.Invoke(sysIdx, false);
-                OnSystemComplete(sysIdx, workerId, trackUtilization);
-                return;
-            }
+            return false;
         }
+
+        var doneTs = Stopwatch.GetTimestamp();
+        if (Systems[sysIdx].IsParallelQuery)
+        {
+            // The same completion as the last chunk that ran: a failed parallel query still owes its cleanup.
+            CompleteParallelDispatch(sysIdx, workerId, trackUtilization, doneTs, totalChunks);
+            return true;
+        }
+
+        RecordSystemDone(sysIdx, doneTs);
+        // Mirror the success-path SystemEndCallback so a failed system still gets its lifecycle hook (e.g. Phase A telemetry, transaction rollback wiring).
+        SystemEndCallback?.Invoke(sysIdx, false);
+        OnSystemComplete(sysIdx, workerId, trackUtilization);
+        return true;
+    }
+
+    /// <summary>
+    /// A parallel query's dispatch has counted its last chunk down, run or drained: its cleanup, then either the next phase (#234 checkerboard) or the
+    /// system's completion.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The cleanup runs however the dispatch ended.</b> It returns the dispatch's pooled entity list, flushes the workers' accessors and resets the
+    /// checkerboard phase. When a failed system completed through the drain it used to be skipped: the list was never returned and the phase was left
+    /// behind.</para>
+    /// <para><b>A failed system starts no further phase</b>, whatever the cleanup asks for — the single-threaded path's rule. It used to re-dispatch phase
+    /// B after a failed phase A, only for every chunk of it to be drained.</para>
+    /// </remarks>
+    private void CompleteParallelDispatch(int sysIdx, int workerId, bool trackUtilization, long doneTs, int totalChunks)
+    {
+        RecordSystemDone(sysIdx, doneTs);
+        _currentTickSystemMetrics[sysIdx].WorkersTouched = totalChunks;
+        var nextPhase = ParallelQueryCleanupCallback?.Invoke(sysIdx) ?? false;
+        if (nextPhase && !_systemFailed[sysIdx])
+        {
+            DispatchParallelQuery(sysIdx, workerId, trackUtilization);
+            return;
+        }
+
+        // System is genuinely done (no further checkerboard phase). Fire the system-end lifecycle hook so #327 Phase A emits its per-(system, archetype)
+        // row — this path was missing the call entirely, which is why parallel-query systems produced zero `SchedulerSystemArchetypeEvent` records on real
+        // workloads despite being correctly bound at runtime construction.
+        SystemEndCallback?.Invoke(sysIdx, !_systemFailed[sysIdx]);
+        OnSystemComplete(sysIdx, workerId, trackUtilization);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -1750,43 +1805,55 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     private void ProcessParallelQuery(int sysIdx, int workerId, bool trackUtilization)
     {
         var sys = Systems[sysIdx];
+        var probe = ClaimProbe;
         while (true)
         {
-            // See `ProcessPipeline` for the full rationale — same wedge applies here. Drain the
-            // remaining chunks so `FindReadySystem` stops returning this sysIdx and the last
-            // decrementer fires `OnSystemComplete` to dispatch successors.
-            if (_systemFailed[sysIdx])
-            {
-                DrainFailedSystemChunks(sysIdx, workerId, trackUtilization);
-                return;
-            }
-
-            var chunk = Interlocked.Increment(ref _nextChunk[sysIdx].Value) - 1;
-            if (chunk >= sys.TotalChunks)
+            probe?.Invoke(sysIdx, 0);
+            var claim = Interlocked.Increment(ref _claims[sysIdx].Value) - 1;
+            probe?.Invoke(sysIdx, 1);
+            var chunk = (int)claim;
+            var totalChunks = (int)(claim >> 32);
+            if ((uint)chunk >= (uint)totalChunks)
             {
                 break;
             }
+
+            // See ProcessPipeline: a failed system's chunks are counted down without running, one claim at a time.
+            if (_systemFailed[sysIdx])
+            {
+                if (DrainClaimedChunk(sysIdx, workerId, trackUtilization, totalChunks))
+                {
+                    break;
+                }
+
+                continue;
+            }
+
             TyphonEvent.EmitSchedulerDispense((ushort)sysIdx, chunk, (byte)workerId);
 
             if (chunk == 0)
             {
-                // Strict tick-abort start gate (#567, corrections C1/C2). The atomic counter hands chunk 0 to exactly one worker, so this is the system's
-                // single "does it begin?" decision — rule D1, granularity is the system, never the chunk. Folded into a branch that already existed, so it
-                // is free on the hot path.
+                // Strict tick-abort start gate (#567, corrections C1/C2). A claim hands chunk 0 to exactly one worker, so this is the system's single "does it
+                // begin?" decision — rule D1, granularity is the system, never the chunk. Folded into a branch that already existed, so it is free on the hot
+                // path.
                 if (IsTickAborted && !_systemIsEngine[sysIdx])
                 {
-                    AbortSystemFromChunkZero(sysIdx, workerId, trackUtilization);
-                    return;
+                    if (AbortSystemFromChunkZero(sysIdx, workerId, trackUtilization, totalChunks))
+                    {
+                        break;
+                    }
+
+                    continue;
                 }
                 RecordFirstChunkGrab(sysIdx, Stopwatch.GetTimestamp());
             }
 
             var workStart = Stopwatch.GetTimestamp();
-            InspectorChunkStart(sysIdx, chunk, workStart, sys.TotalChunks);
+            InspectorChunkStart(sysIdx, chunk, workStart, totalChunks);
             SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
             try
             {
-                ParallelQueryChunkCallback?.Invoke(sysIdx, chunk, sys.TotalChunks, workerId);
+                ParallelQueryChunkCallback?.Invoke(sysIdx, chunk, totalChunks, workerId);
             }
             catch (Exception ex)
             {
@@ -1807,27 +1874,10 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                 _workerActiveTicks[workerId] += workEnd - workStart;
             }
 
-            // D8: countdown — last completer dispatches successors and runs cleanup
-            var remaining = Interlocked.Decrement(ref _remainingChunks[sysIdx].Value);
-            if (remaining == 0)
+            // D8: countdown — last completer runs cleanup, then re-dispatches (#234 checkerboard) or completes the system
+            if (Interlocked.Decrement(ref _remainingChunks[sysIdx].Value) == 0)
             {
-                RecordSystemDone(sysIdx, workEnd);
-                _currentTickSystemMetrics[sysIdx].WorkersTouched = sys.TotalChunks;
-                // Issue #234: cleanup may return true to re-dispatch for another phase (checkerboard Black after Red).
-                var reDispatch = ParallelQueryCleanupCallback?.Invoke(sysIdx) ?? false;
-                if (reDispatch)
-                {
-                    DispatchParallelQuery(sysIdx, workerId, trackUtilization);
-                }
-                else
-                {
-                    // System is genuinely done (no further checkerboard phase). Fire the system-end lifecycle hook so
-                    // #327 Phase A emits its per-(system, archetype) row — this path was missing the call entirely,
-                    // which is why parallel-query systems produced zero `SchedulerSystemArchetypeEvent` records on
-                    // real workloads despite being correctly bound at runtime construction.
-                    SystemEndCallback?.Invoke(sysIdx, !_systemFailed[sysIdx]);
-                    OnSystemComplete(sysIdx, workerId, trackUtilization);
-                }
+                CompleteParallelDispatch(sysIdx, workerId, trackUtilization, workEnd, totalChunks);
                 break;
             }
         }
@@ -1840,9 +1890,8 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     /// </summary>
     private void DispatchParallelQuery(int sysIdx, int workerId, bool trackUtilization)
     {
-        // Issue #234: reset chunk counter for re-dispatch (checkerboard phase B). No-op for first dispatch (already 0 from ResetTickState).
-        _nextChunk[sysIdx].Value = 0;
-
+        // Nothing to close before preparing: a first dispatch finds the word closed by ResetTickState, and a re-dispatch (#234 checkerboard phase B)
+        // finds phase A's word exhausted — every chunk was claimed before phase A completed — so either refuses every claim until the publish below.
         var totalChunks = ParallelQueryPrepareCallback?.Invoke(sysIdx) ?? 0;
         if (totalChunks <= 0)
         {
@@ -1859,8 +1908,10 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
         Systems[sysIdx].TotalChunks = totalChunks;
         _remainingChunks[sysIdx].Value = totalChunks;
-        // Publish: MarkSystemReady stores _isReady with release semantics, ordering the two data stores above ahead of the ready flag. Workers gate on _isReady
-        // with an acquire load (FindReadySystem), so a worker that observes ready==1 also observes TotalChunks/_remainingChunks. Correct on arm64; free on x64 (TSO).
+        // Publish, claims first: a worker holding a ready flag from an earlier dispatch claims as soon as the word opens, so the open must follow the stores
+        // above (its release orders them). MarkSystemReady's release then does the same for workers that gate on the flag's acquire load (FindReadySystem).
+        // Correct on arm64; free on x64 (TSO).
+        OpenChunkClaims(sysIdx, totalChunks);
         MarkSystemReady(sysIdx);
     }
 
@@ -1955,6 +2006,9 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                         }
                         else
                         {
+                            // A pipeline: TotalChunks is fixed and _remainingChunks was seeded at tick reset, so opening its claims is all the
+                            // publish there is.
+                            OpenChunkClaims(succIdx, Systems[succIdx].TotalChunks);
                             MarkSystemReady(succIdx);
                         }
                     }
@@ -2168,6 +2222,10 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     // Release store: orders the preceding TotalChunks/_remainingChunks writes ahead of the ready flag (paired with the acquire load in FindReadySystem). Free on x64 (TSO); stlr on arm64.
     private void MarkSystemReady(int sysIdx) => Volatile.Write(ref _isReady[sysIdx].Value, 1);
 
+    /// <summary>Opens a multi-chunk system's claims for a dispatch of <paramref name="totalChunks"/>: its LAST store. See <see cref="_claims"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void OpenChunkClaims(int sysIdx, int totalChunks) => Volatile.Write(ref _claims[sysIdx].Value, (long)totalChunks << 32);
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void RecordFirstChunkGrab(int sysIdx, long timestamp)
     {
@@ -2207,7 +2265,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         // that track's dispatch.
         for (var i = 0; i < AllSystemCount; i++)
         {
-            _nextChunk[i].Value = 0;
+            _claims[i].Value = 0L;   // closed: a count of 0 until a dispatch publishes its word — see _claims
             _remainingChunks[i].Value = _templateChunks[i];
             _remainingDeps[i].Value = _templateDeps[i];
             _isReady[i].Value = 0;
@@ -2269,6 +2327,11 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                 }
                 else
                 {
+                    if (sys.Type == SystemType.PipelineSystem)
+                    {
+                        OpenChunkClaims(root, sys.TotalChunks);
+                    }
+
                     MarkSystemReady(root);
                 }
             }

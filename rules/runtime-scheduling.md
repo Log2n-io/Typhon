@@ -416,6 +416,52 @@ descends from this one property.
             concurrently" verifies the half that was never in doubt. A rule whose verifier cannot fail is worse
             than a rule with no verifier.
 
+## Module: Chunk Dispatch
+
+### CD-01: A chunk is claimed only from the dispatch it belongs to `[fatal]` `[silent]`
+  invariant a system's claim word packs the live dispatch's chunk count (high 32 bits) and the next index (low 32 bits); a claim is
+            ONE Interlocked.Increment, and it names chunk c of dispatch D only when c < D's count read from that same word
+  invariant the word holds count 0 from ResetTickState; a dispatch publishes (count << 32) as its LAST store (OpenChunkClaims, a
+            release after _remainingChunks and the prepared state); a completed dispatch leaves its word exhausted — every chunk was
+            claimed — so it refuses every claim and nothing has to close it between two dispatches of one tick
+  invariant a failed system's chunks are counted down one claim at a time by the ordinary claim loop (DrainClaimedChunk), the
+            failure flag read after the claim — never by a loop that cached the dispatch's size
+  invariant a claim is compared UNSIGNED against its count, so no number of increments on an exhausted word reads as a chunk
+  invariant a parallel query's dispatch ends in CompleteParallelDispatch whether its last chunk ran or was drained: its cleanup runs
+            once, and a failed system starts no further phase, whatever the cleanup asks for — the single-threaded path's rule. The
+            drain used to complete a failed system without its cleanup (its entity list never returned, its checkerboard phase left
+            behind), and a failed phase A still re-dispatched phase B
+  never a chunk index judged against a count read separately from its claim
+  rationale: nothing fences workers out between dispatches. A parallel system's ready flag stays set once it completes, and a worker
+    can be preempted anywhere in its claim loop and resume one or more dispatches later. With the count and the index held apart,
+    three windows let such a worker run a chunk of a dispatch it was never part of: (1) the ready flag read in tick N and a counter
+    that ResetTickState had put back to 0 read in tick N+1 — the finished dispatch's chunks re-run mid-tick, and their decrements
+    complete the system a second time; (2) an increment past the end of one dispatch judged against the NEXT dispatch's larger count —
+    a chunk run twice and the system completed one chunk early; (3) a drainer that had cached a failed dispatch's count swallowing
+    the next dispatch's chunks, or hanging its tick. With one word a claim either belongs to the live dispatch — legitimate, whatever
+    the worker did before — or answers "nothing left".
+  on_violation: silent for an application system — a chunk re-run or skipped outside its dispatch. Observed on the fence through
+    window 1: a stale FencePrep repair allocated a cluster, and a stale Finalize drain freed one, under the next tick's systems;
+    CellClusterPool's single-writer detector aborted 5 of 40 SWG Tatooine x64/w16 runs on it, and a counting build logged ~2 stale
+    claims in one ordinary run. A fence chunk also refuses to run with the fence window closed (FencePhaseExecSystemBase.Execute):
+    that names fence work running outside its tick whatever the cause — one of these windows, or a worker left behind when
+    shutdown abandons a stalled tick — but it cannot see a stale claim landing inside the NEXT fence window. The claim word is what
+    prevents those.
+  scope: DagScheduler.cs (ResetTickState, DispatchParallelQuery, OpenChunkClaims, FindReadySystem, ProcessParallelQuery,
+         ProcessPipeline, DrainClaimedChunk, CompleteParallelDispatch, AbortSystemFromChunkZero, MarkTrackRootsReady, OnSystemComplete),
+         FenceExecSystem.cs (ThrowOutsideFenceWindow)
+  verified: ChunkClaimStragglerTests, one deterministic test per window, each reproduced on the pre-fix code —
+            AWorkerCaughtMidScan_DoesNotRunChunksOfASystemTheNextTickHasNotDispatched (window 1: FindReadySystemProbe parks a worker
+            between P's ready flag and its claim word in tick 1 and releases it in tick 2 before P is dispatched);
+            AClaimPastTheEndOfOneDispatch_DoesNotRunAChunkOfTheNext (window 2: ClaimProbe parks a worker after a tick-1 claim past the
+            end and releases it once tick 2's larger dispatch is live — chunk 4 ran twice);
+            AClaimPastTheEndOfPhaseA_DoesNotRunAChunkOfPhaseB (window 2 within one tick: the same across the #234 checkerboard
+            re-dispatch, which is what shows an exhausted word needs no close between two dispatches);
+            ADrainerParkedInAFailedTick_DoesNotSwallowChunksOfTheNext (window 3: the worker that threw is parked before its next
+            drain claim — 13 of tick 2's 16 chunks were swallowed). Mutant: ACounterOpenAcrossTheTickBoundary_IsCaughtByTheVerifier
+            reopens P's finished dispatch's claims before the release. FenceWindowTripwireTests covers the tripwire, and
+            ExceptionHandlingTests.AFailedParallelSystem_RunsItsCleanupOnce_AndStartsNoFurtherPhase the completion of a drained system.
+
 ## Module: API Contract Stability
 
 ### AS-01: `.After()` / `.Before()` survive auto-DAG `[design]`

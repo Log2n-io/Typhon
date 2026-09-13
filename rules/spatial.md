@@ -1522,9 +1522,12 @@
   invariant phase 0 → 1: split into Red/Black, serve Red cluster list
   invariant phase 1 → 2: serve Black cluster list (triggered by re-dispatch after Red completes)
   invariant phase 2 → 0: reset for next tick
+  invariant every tick starts every system at phase 0 (OnTickStartInternal): a system that failed in its Red phase starts no Black
+    phase (CD-01's CompleteParallelDispatch, and the single-threaded path), so its cleanup has left phase 1 behind — kept, it would make
+    the next tick's first prepare serve the previous tick's Black list and skip Red
   never phase 0 serves Black (Black only served after Red completes)
   scope: TyphonRuntime.OnParallelQueryPrepare (checkerboard section, phase 0→1 / 1→2),
-         TyphonRuntime.OnParallelQueryCleanup (phase 2→0 reset + Red→Black re-dispatch)
+         TyphonRuntime.OnParallelQueryCleanup (phase 2→0 reset + Red→Black re-dispatch), TyphonRuntime.OnTickStartInternal
   note corrected 2026-07-27 — `OnParallelQueryEnd` does not exist in the engine
   on_violation: both phases see same partition → clusters processed twice or zero times
 
