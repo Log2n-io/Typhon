@@ -175,8 +175,7 @@ internal sealed class CheckpointDurabilityCrashTests
             // Phase 1: baseline, made durable by a CHECKPOINT (not by the WAL).
             var baselineIds = Spawn(dbe, checkpointArchetype, BaselineCount, BaselineBase);
             dbe.WriteTickFence(1);
-            dbe.ForceCheckpoint();
-            dbe.CheckpointManager.WaitForCheckpoint(TimeSpan.FromSeconds(10));
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint must cover what was written");
 
             // Phase 2: the crash window — everything from here on is post-checkpoint.
             var windowIds = Spawn(dbe, checkpointArchetype, WindowCount, WindowBase);
@@ -318,8 +317,7 @@ internal sealed class CheckpointDurabilityCrashTests
 
             var baselineIds = Spawn(dbe, checkpointArchetype: true, BaselineCount, BaselineBase);
             dbe.WriteTickFence(1);
-            dbe.ForceCheckpoint();
-            dbe.CheckpointManager.WaitForCheckpoint(TimeSpan.FromSeconds(10));
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint must cover what was written");
 
             // A window whose ONLY records are suppressed Spawns — the worst case for the watermark, since nothing else carries a TSN forward.
             Spawn(dbe, checkpointArchetype: true, WindowCount, WindowBase);

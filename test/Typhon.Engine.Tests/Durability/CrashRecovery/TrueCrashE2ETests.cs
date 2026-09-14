@@ -388,9 +388,7 @@ internal sealed class TrueCrashE2ETests
 
             // Persist the spawns to the data file and advance the checkpoint frontier past them, so the spawns are BELOW the
             // recovery window — only the destroys (below) remain in it. This is what makes the test exercise the base-entity path.
-            // ForceCheckpoint is asynchronous (signals the checkpoint thread); WaitForCheckpoint blocks until the cycle completes.
-            dbe.ForceCheckpoint();
-            Assert.That(dbe.CheckpointManager.WaitForCheckpoint(TimeSpan.FromSeconds(5)), Is.True, "checkpoint cycle must complete");
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(5)), Is.True, "checkpoint cycle must complete");
             var checkpointLsn = dbe.CheckpointManager.CheckpointLsn;
             Assert.That(checkpointLsn, Is.GreaterThanOrEqualTo(spawnHighLsn),
                 "the checkpoint must advance past the spawns so they fall below the recovery window (base-entity scenario)");
@@ -632,8 +630,7 @@ internal sealed class TrueCrashE2ETests
                 spawnHighLsn = dbe.DurabilityLog.LastAppendedLsn;
             }
 
-            dbe.ForceCheckpoint();
-            Assert.That(dbe.CheckpointManager.WaitForCheckpoint(TimeSpan.FromSeconds(5)), Is.True, "checkpoint cycle must complete");
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(5)), Is.True, "checkpoint cycle must complete");
             Assert.That(dbe.CheckpointManager.CheckpointLsn, Is.GreaterThanOrEqualTo(spawnHighLsn),
                 "the spawns must be checkpointed below the recovery window (base-entity scenario)");
 

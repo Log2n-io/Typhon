@@ -312,8 +312,7 @@ internal sealed class CommittedDisciplineRecoveryTests
 
             // Consolidate the Commit-discipline spawns into the data file (CheckpointLSN advances past their LSNs), then hard-crash with an empty WAL window —
             // recovery must restore the cluster SV state + rebuild the index from the persisted base alone.
-            dbe.ForceCheckpoint();
-            dbe.CheckpointManager.WaitForCheckpoint(TimeSpan.FromSeconds(10));
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint must cover what was written");
             dbe.SimulateHardCrash();
         }
 

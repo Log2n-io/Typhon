@@ -474,7 +474,7 @@ CK-08 (flush-only cycles) are later increments.
   scope: `CheckpointManager.RunCheckpointCycle` (the `PersistDurableMetadataHook` invocation), `DatabaseEngine.PersistArchetypeState`
          (skip-unchanged + cache writeback), `DatabaseEngine.DropLegacyClusterIndexBootstrapKeys` (retires the pre-#661 home),
          wired at `DatabaseEngine` checkpoint-manager construction. **Includes the recovery seal** (`DatabaseEngine.SealRecovery`,
-         itself a `ForceCheckpoint`): `_archetypeSpiPersistArmed` is set BEFORE it, in `RunWalV2Recovery`. It used to be set only
+         itself a `ForceCheckpointAndWait`): `_archetypeSpiPersistArmed` is set BEFORE it, in `RunWalV2Recovery`. It used to be set only
          at the end of `InitializeArchetypes`, which carved the seal out of this rule on the grounds that doing so "keeps its
          original behaviour" — a mechanical reason where the rule gives a correctness one. Distinct from #395 Face B
          (a plain SV cluster *spawn* value is not WAL-durable per-commit — the Committed discipline's concern, not this rule)
@@ -524,6 +524,43 @@ CK-08 (flush-only cycles) are later increments.
     Deliberately NOT a second writer thread: WritePagesForCheckpoint claims each page with CAS(ACW, -1, 0) and SKIPS on
     failure, so a concurrent writer holding that sentinel makes the checkpoint skip the page, stillSkipped > 0, the
     CK-03 gate stays shut and no WAL segment is ever recycled — #817's exact failure mode, by design.
+
+### CK-12: A forced wait is released only by a cycle that started after it and covered it `[fatal]` `[silent]`
+  invariant ForceCheckpointAndWait returns true ⟹ some cycle c finished, c started after the call's request, and c wrote every page it
+            collected (the CK-03 gate opened). So every page the caller dirtied before the call is on the data file, fsynced, and
+            CheckpointLSN ≥ every LSN durable at the call
+  invariant neither a cycle already running at the call, nor a gated or failed cycle, releases it. After either, the wait gives a later cycle
+            one retry pause (the CK-11 poll floor, 250 ms) to cover it, then forces another, until its timeout: a page the gate keeps skipping
+            must not drive back-to-back cycles, each one a WAL flush
+  invariant it returns false at once when checkpointing has halted: a fatal error, a simulated hard crash, the manager shutting down, or its
+            loop exiting. Each wakes a sleeping waiter. A shutdown cycle may still cover the request, and a waiter that sees it finish returns
+            true (coverage is tested first), but none waits for one
+  invariant the wait keys on the number of the first cycle to start after its request, never on a counter read after the force: an idle
+            engine finishes the forced cycle before the caller gets to wait, and that cycle must still count
+  invariant a force request is never lost: the loop reads and clears it in one exchange, so a request landing between the wake and the read
+            runs the next pass. A request posted while a cycle runs is kept (AForcedWait_IsNotReleasedByTheCycleAlreadyRunning); no test
+            reaches the window between the wake and the read, which is two adjacent statements
+  requires: CK-03 (the gate decides "covered"), CK-01/CK-02 (the covering cycle's barrier, taken after the request, is what puts
+            CheckpointLSN at or past every LSN durable at the call), PS-10 (only the covering write discharges a page's debt)
+  scope: CheckpointManager.ForceCheckpointAndWait, CheckpointManager.ForceCheckpoint, CheckpointManager.RequestCycle,
+         CheckpointManager.PublishCycleEnd, CheckpointManager.RunCheckpointCycle, CheckpointManager.CheckpointLoop,
+         CheckpointManager.PrepareCrashStop, CheckpointManager.Dispose, BulkLoadSession.CompleteBulkLoad, DatabaseEngine.SealRecovery
+  on_violation: the caller proceeds on a checkpoint that never covered its writes. CompleteBulkLoad makes BulkEnd durable over bulk pages that
+                reached no disk and have no WAL records (BL-01), so a crash loses them with no error (NEW-CK-2 in the 2026-07-06 assessment).
+                Or the wait misses the cycle it forced and times out: measured 7 runs in 8 of a quiescent-engine test (`before=0 after=1`, the
+                forced cycle already over when the wait read the count); in production a BulkLoadCheckpointTimeoutException, or a 30 s stall
+                in the recovery seal
+  verified: CheckpointManagerTests.AForcedWait_CountsItsOwnCycle_EvenIfItEndsFirst (a seam holds the caller until the forced cycle is
+            over), AForcedWait_IsNotReleasedByTheCycleAlreadyRunning, AForcedWait_IsNotReleasedByAGatedCycle,
+            AForcedWait_AsksAgainAfterAFailedCycle, AForcedWait_ReturnsAtOnceWhenCheckpointingHasHalted, AForcedWait_ReturnsAtOnceAfterACrashStop,
+            AForcedWait_ReturnsAtOnceOnACrashMidCycle, AForcedWait_ReturnsWhenTheLoopStops, AForcedWait_ReturnsWhenDisposedUnstarted,
+            AForcedWait_PausesBetweenGatedCycles.
+            Mutants: AWaitThatSamplesAfterItsOwnForce_IsRejected (the replaced pairing); AWaitReleasedByTheNextCycle_IsRejected,
+            AWaitReleasedByAGatedCycle_IsRejected, AWaitThatNeverAsksAgain_IsRejected and AWaitThatOutlastsAHaltedCheckpoint_IsRejected
+            (reading the count before the force, which fixes the measured race and none of these)
+  note: "covered" is the whole-cache CK-03 gate, not "the caller's pages were written": under writers that keep some page live, a forced
+        wait can time out although its own pages reached disk (the #817 class). CK-03's planned per-page refinement would let it require
+        only pages dirtied before the request
 
 ---
 
@@ -1560,7 +1597,7 @@ invariants continue to hold during a bulk session.
        ∧ (UNBUILT) every page in the bulk allocation log is on the data file — no such log exists; the manifest's
          page-range count is hard-zero in v1
   pre  Step 1: drain ChangeSet (DC ≥ 1 on every bulk page)
-  pre  Step 2: ForceCheckpoint + WaitForCheckpoint
+  pre  Step 2: ForceCheckpointAndWait — released only by a cycle that started after the call and covered it (CK-12)
   pre  Step 3: verify CheckpointLSN ≥ BulkBegin.LSN
   pre  Step 4: emit BulkEnd
   pre  Step 5: WaitForDurable(BulkEnd.LSN)

@@ -404,8 +404,7 @@ internal sealed class LinearizabilityTests : TestBase<LinearizabilityTests>
             }
         });
 
-        state.Engine.ForceCheckpoint();
-        state.Engine.CheckpointManager.WaitForCheckpoint(TimeSpan.FromSeconds(20));
+        state.Engine.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(20));
 
         var report = state.Engine.RunStorageIntegrityCheck();
         foreach (var issue in report.Issues)

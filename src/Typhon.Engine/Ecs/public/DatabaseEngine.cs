@@ -611,9 +611,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// leave indexes empty). Distinct from <see cref="_headsTrusted"/>, which can be false on a clean migration reopen with no WAL window (indexes load normally).</summary>
     internal bool WalFilesPresentAtOpen { get; private set; }
 
-    /// <summary>Gates the checkpoint-time <c>PersistArchetypeState</c> hook (#395 / CK-10). False during open + recovery (so the recovery seal — a
-    /// ForceCheckpoint — does NOT persist segment SPIs mid-rebuild); set true at the end of <c>InitializeArchetypes</c> so every steady-state
-    /// checkpoint records them.</summary>
+    /// <summary>Gates the checkpoint-time <c>PersistArchetypeState</c> hook (#395 / CK-10). False while segments are still being opened or rebuilt;
+    /// set true on the crash path just before the recovery seal, so the seal records the SPIs of the base it consolidates (#715), and at the end of
+    /// <c>InitializeArchetypes</c> otherwise, so every steady-state checkpoint records them.</summary>
     private volatile bool _archetypeSpiPersistArmed;
 
     /// <summary>Test-only: when set, <see cref="Dispose"/> skips <c>MarkCleanShutdown</c>, reproducing an unclean shutdown
@@ -1429,9 +1429,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         CheckpointManager.Logger = Logger;
         // Persist per-archetype segment SPIs at every checkpoint so a consolidated cluster/EntityMap base is reachable on reopen after a hard crash
         // (#395). Idempotent and skip-unchanged, so a steady-state cycle is nearly free. Runs at cycle start (before the barrier) so its WAL records +
-        // dirty pages ride the same cycle. Armed only AFTER InitializeArchetypes completes (incl. the recovery seal), so the seal — itself a
-        // ForceCheckpoint — keeps its original behaviour and does NOT persist SPIs mid-recovery (the rebuilt segments are sealed first; the first
-        // steady-state checkpoint then records them). #395.
+        // dirty pages ride the same cycle. Armed at the end of InitializeArchetypes, or on the crash path just before the recovery seal, so the seal
+        // records the SPIs of the base it consolidates (#715, CK-10); never earlier, while segments are still being rebuilt. #395.
         CheckpointManager.PersistDurableMetadataHook = () =>
         {
             if (_archetypeSpiPersistArmed)
@@ -3904,7 +3903,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // already-consolidated. The seal below then persists CheckpointLSN from this same frontier, so the two agree by construction.
         SeedWalFrontierAfterRecovery(Math.Max(result.MaxLsn, checkpointLsn));
 
-        // #715 / CK-10. Arm the checkpoint-time SPI persistence BEFORE the seal, so the seal's own ForceCheckpoint records the per-archetype segment SPIs
+        // #715 / CK-10. Arm the checkpoint-time SPI persistence BEFORE the seal, so the seal's own forced checkpoint records the per-archetype segment SPIs
         // alongside the data it is consolidating. Arming it after (its original position, at the end of InitializeArchetypes) left a window in which the seal
         // had already advanced CheckpointLSN — and therefore reclaimed every WAL segment below it — while the metadata needed to NAVIGATE to the consolidated
         // base was still unpersisted. "The first steady-state checkpoint then records them" assumes there is one: crash again before it and the WAL no longer
@@ -4190,17 +4189,16 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // next open reads the stale bootstrap value, snapshots BELOW the consolidated revisions, and MVCC hides every one of them: the entity is alive and its
         // components read as zeros. Data loss with no error (#673).
         WalManager.SeedDurableLsn(frontierLsn);
-        CheckpointManager.ForceCheckpoint();
         // A timeout here is non-fatal: the recovered state is already correct in the page cache for this session's reads — it just
         // isn't consolidated to the data file yet, so it falls back to being re-replayed on the next open (soft recovery).
-        CheckpointManager.WaitForCheckpoint(TimeSpan.FromSeconds(30));
+        CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(30));
 
         // Persist the TSN watermark AFTER the checkpoint, never before. The recovered revisions carry their ORIGINAL TSNs — RecoveryDriver advanced
         // TransactionChain.NextFreeId past them, and ScrubVersionedChains raises it again for anything a previous consolidating checkpoint left behind (RB-05)
         // — but that value only ever reached disk on a clean shutdown. Crash here and the next open reads the stale bootstrap value, snapshots BELOW the
         // consolidated revisions, and MVCC hides every one of them: entities alive, components reading as zeros, no error (#673).
         //
-        // Ordering is not cosmetic. Writing it BEFORE ForceCheckpoint takes the page-0 exclusive latch while the checkpoint thread is mid-cycle, and the
+        // Ordering is not cosmetic. Writing it BEFORE ForceCheckpointAndWait takes the page-0 exclusive latch while the checkpoint thread is mid-cycle, and the
         // process dies. Every other bootstrap write in the engine happens at creation or clean shutdown, when nothing else is running.
         PersistNextFreeTsn();
     }
