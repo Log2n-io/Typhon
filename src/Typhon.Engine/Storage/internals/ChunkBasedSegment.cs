@@ -308,87 +308,92 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
             // grow without a caller ChangeSet stranded one mark per new page for the lifetime of the process.
             var localChangeSet = changeSet == null ? _store.CreateChangeSet() : null;
             var effectiveChangeSet = changeSet ?? localChangeSet;
-
-            // Grow the underlying logical segment (thread-safe, will allocate new pages)
-            base.Grow(newLength, true, effectiveChangeSet);
-
-            // Clear the page metadata (bitmap) for newly allocated pages and protect against checkpoint race
+            try
             {
-                var epoch = _store.EpochManager.GlobalEpoch;
-                for (int i = currentLength; i < newLength; i++)
+                // Grow the underlying logical segment (thread-safe, will allocate new pages)
+                base.Grow(newLength, true, effectiveChangeSet);
+
+                // Clear the page metadata (bitmap) for newly allocated pages and protect against checkpoint race
                 {
-                    var page = GetPageExclusiveUnchecked(i, epoch, out var memPageIdx);
-                    page.Metadata<long>(0, _bitmapLongsOther).Clear();
-                    effectiveChangeSet?.AddByMemPageIndex(memPageIdx);
-
-                    // The clear above happened after base.Grow unlatched the page, so a checkpoint may already have
-                    // snapshotted the pre-clear bytes. Record the modification so the page stays owed and is rewritten —
-                    // the write in flight covers an older generation and cannot discharge this one.
-                    _store.MarkPageModified(memPageIdx);
-
-                    _store.UnlatchPageExclusive(memPageIdx);
-                }
-            }
-
-            // Expand _nextPage array and chain new pages
-            var newNextPage = new int[newLength];
-            Array.Copy(_nextPage, newNextPage, currentLength);
-
-            // Chain new pages: currentLength → currentLength+1 → ... → newLength-1 → EMPTY_PAGE
-            for (int i = currentLength; i < newLength - 1; i++)
-            {
-                newNextPage[i] = i + 1;
-            }
-            newNextPage[newLength - 1] = EMPTY_PAGE;
-
-            var oldCapacity = _capacity;
-            _nextPage = newNextPage;
-            _capacity = ComputeCapacity(newLength);
-
-            // Phase 5: Storage:ChunkSegment:Grow event.
-            TyphonEvent.EmitStorageChunkSegmentGrow(Stride, oldCapacity, _capacity);
-
-            // Splice new pages at tail of existing list
-            while (true)
-            {
-                var head = _freeHead;
-                if (head == EMPTY_PAGE)
-                {
-                    // List is empty, make first new page the head
-                    if (Interlocked.CompareExchange(ref _freeHead, currentLength, EMPTY_PAGE) == EMPTY_PAGE)
+                    var epoch = _store.EpochManager.GlobalEpoch;
+                    for (int i = currentLength; i < newLength; i++)
                     {
-                        break;
+                        var page = GetPageExclusiveUnchecked(i, epoch, out var memPageIdx);
+                        page.Metadata<long>(0, _bitmapLongsOther).Clear();
+                        effectiveChangeSet?.AddByMemPageIndex(memPageIdx);
+
+                        // The clear above happened after base.Grow unlatched the page, so a checkpoint may already have
+                        // snapshotted the pre-clear bytes. Record the modification so the page stays owed and is rewritten —
+                        // the write in flight covers an older generation and cannot discharge this one.
+                        _store.MarkPageModified(memPageIdx);
+
+                        _store.UnlatchPageExclusive(memPageIdx);
                     }
-                    continue;
                 }
 
-                // Walk to tail and link new chain
-                var cur = head;
+                // Expand _nextPage array and chain new pages
+                var newNextPage = new int[newLength];
+                Array.Copy(_nextPage, newNextPage, currentLength);
+
+                // Chain new pages: currentLength → currentLength+1 → ... → newLength-1 → EMPTY_PAGE
+                for (int i = currentLength; i < newLength - 1; i++)
+                {
+                    newNextPage[i] = i + 1;
+                }
+                newNextPage[newLength - 1] = EMPTY_PAGE;
+
+                var oldCapacity = _capacity;
+                _nextPage = newNextPage;
+                _capacity = ComputeCapacity(newLength);
+
+                // Phase 5: Storage:ChunkSegment:Grow event.
+                TyphonEvent.EmitStorageChunkSegmentGrow(Stride, oldCapacity, _capacity);
+
+                // Splice new pages at tail of existing list
                 while (true)
                 {
-                    var next = _nextPage[cur];
-                    if (next == EMPTY_PAGE)
+                    var head = _freeHead;
+                    if (head == EMPTY_PAGE)
                     {
-                        if (Interlocked.CompareExchange(ref _nextPage[cur], currentLength, EMPTY_PAGE) == EMPTY_PAGE)
+                        // List is empty, make first new page the head
+                        if (Interlocked.CompareExchange(ref _freeHead, currentLength, EMPTY_PAGE) == EMPTY_PAGE)
                         {
-                            goto spliced;
+                            break;
                         }
                         continue;
                     }
-                    if (next == NOT_IN_LIST)
+
+                    // Walk to tail and link new chain
+                    var cur = head;
+                    while (true)
                     {
-                        break; // cur removed, restart from head
+                        var next = _nextPage[cur];
+                        if (next == EMPTY_PAGE)
+                        {
+                            if (Interlocked.CompareExchange(ref _nextPage[cur], currentLength, EMPTY_PAGE) == EMPTY_PAGE)
+                            {
+                                goto spliced;
+                            }
+                            continue;
+                        }
+                        if (next == NOT_IN_LIST)
+                        {
+                            break; // cur removed, restart from head
+                        }
+                        cur = next;
                     }
-                    cur = next;
                 }
+                spliced:
+
+                return true;
             }
-            spliced:
-
-            // Release the marks the local set took. The new pages remain protected by their writeback debt until a
-            // checkpoint writes them, so nothing here depends on holding a counted mark past this point.
-            localChangeSet?.ReleaseDirtyMarks();
-
-            return true;
+            finally
+            {
+                // Release the marks the local set took, on a throw too (PS-05): a mark nobody releases pins its page for good, and a grow that fails
+                // has already marked the pages it initialized. The new pages remain protected by their writeback debt until a checkpoint writes them,
+                // so nothing here depends on holding a counted mark past this point.
+                localChangeSet?.ReleaseDirtyMarks();
+            }
         }
     }
 

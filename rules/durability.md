@@ -332,7 +332,9 @@ CK-08 (flush-only cycles) are later increments.
          fixed pages 3/7 — v4 genesis — to break the genesis chicken-and-egg), `ResolveDirectoryPairsForLoad` (read: physical
          both-slots walk before every `Load`, registers `_pairState`), `MapReadOffset` (directory page → `_pairState.CurrentSlot`),
          `DeleteSegment` (free every directory page's twin + the map-ext pages AND clear its `_pairState` entry — else the twin
-         leaks and a stale pair mis-routes a cold read after the primary is reallocated). Twin discovery survives a torn primary
+         leaks and a stale pair mis-routes a cold read after the primary is reallocated), `ReleaseUnpublishedPages` (the same for the
+         pages a failed grow allocated, PS-11). Both drop pairs under `_pairLock`, which `PersistProtectedPage` re-checks the pair under, so
+         a checkpoint persisting a page being freed neither throws nor re-adds its pair. Twin discovery survives a torn primary
          because the `IsLogicalSegment` flag + `TwinPageIndex` are immutable and in the first 4 KiB sector.
   on_violation: a torn write to the only persisted copy → database unopenable / segment unreadable (STO-4); a leaked/stale pair
                 on delete → silent mis-route of a reallocated page (STO-4)
@@ -1174,8 +1176,9 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   never let the checkpoint, SavePages, or any writer touch DirtyCounter at all
   invariant at quiesce — no unit of work open, no checkpoint running — every page has DirtyCounter == 0
   scope: ChangeSet.AddByMemPageIndex / RegisterReDirty / ReleaseDirtyMarks / Reset, PagedMMF.DecrementDirtyByDelta,
-         UnitOfWork.Dispose, Transaction.Dispose, EntityAccessor
-  verified: ChangeSetDirtyMarkConservationTests
+         UnitOfWork.Dispose, Transaction.Dispose, EntityAccessor, ChunkBasedSegment.Grow (its local set, released in a finally)
+  verified: ChangeSetDirtyMarkConservationTests; SegmentGrowAtomicityTests.AChunkSegmentGrowThatThrows_StillReleasesItsLocalChangeSet (the
+            throw path of a locally-created set), with its mutant AMarkLeftOnALocalChangeSet_IsRejected
   on_violation: under-release → page permanently unevictable, cache starves after tens of minutes (#824);
     over-release → page evictable with unwritten bytes, data lost before reaching stable media (#385)
   rationale: 🔴 REWRITTEN 2026-08-16. This rule used to REQUIRE the defect: "issues exactly (N-1) decrements, leaving one
@@ -1256,7 +1259,7 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             slot becomes evictable in the request→latch gap.
   requires: PS-01 (SlotRefCount blocks eviction), PS-06 (the TOCTOU this prevents)
   scope: LogicalSegment.RequestExclusiveForGrow (the pinned, bounded-retry helper) routing every grow latch site (GetPageExclusive[Unchecked],
-         CreateOrGrow data/map/end/old-tail pages, GetPageAddressExclusive)
+         CreateOrGrow data/map/end/old-tail pages, PinForPublish, GetPageAddressExclusive)
   on_violation: PS-06 TOCTOU — the slot is evicted and reused for another file page in the gap; the grow then clears/rewrites it
                 and calls UnlatchPageExclusive, releasing the OTHER thread's latch and forcing PageState=Idle + a stray seqlock
                 bump → cross-thread page-cache corruption (a native host crash in Debug; silent heap corruption in Release).
@@ -1264,6 +1267,38 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
                 stalls grows holding latches → the checkpoint spins forever in CopyPageWithSeqlock (hence the helper's try/finally).
   verified: empirically (latch-fail assert captures 11→0; SimdKwayMergeTests passes isolated; full suite no longer host-crashes);
             a deterministic eviction-in-the-gap fault-injection test is a follow-up
+
+### PS-11: A segment grow publishes all of its pages or none `[fatal]` `[silent]`
+  invariant a grow that throws leaves the segment as it was: its in-memory page list, its directory (entries and terminator, on the root and
+            map-extension pages) and its data-page forward chain (the old tail's `LogicalSegmentNextRawDataPBID`) all still describe the old length
+  invariant [allocate data pages, map pages, twins] → [initialize every new data page] → [slot-pin every directory page and the old tail] →
+            [latch them all] → [publish: directory entries, map links, old-tail link] → [`_pages` = new list]. Every step that can fail (wait
+            for the page cache, allocate, or lose a latch to another thread) comes before the publish; the publish only re-enters latches the
+            grow already holds, on resident pages
+  invariant the pages a failed grow allocated (data pages, map-extension pages, their twins) go back to the occupancy map, and the twins' pair
+            state goes with them
+  never write a page the published segment can reach (the root, an existing map page, the old tail) before every step that can throw has
+        succeeded
+  requires: PS-09 (the latch helper the pins go through), PS-05 (a grow's local ChangeSet is released on the throw too)
+  scope: LogicalSegment.CreateOrGrow, LogicalSegment.Grow, PinForPublish, InitDataPages, FilledDirectoryPageCount, ReleaseUnpublished,
+         IPageStore.ReleaseUnpublishedPages, ManagedPagedMMF.ReleaseUnpublishedPages, ManagedPagedMMF.PersistProtectedPage (re-checks a pair a
+         failed grow may have just dropped), ManagedPagedMMF.GrowOccupancySegment (its reserved map page counts as consumed only once the grow
+         publishes), ChunkBasedSegment.Grow
+  on_violation: a page-cache back-pressure timeout, or any other throw, mid-grow leaves the directory listing pages the segment never adopted
+                and the old tail linked into them. Nothing notices while the process runs, since the next grow rewrites both; if it stops first,
+                the shutdown checkpoint persists them and the next open's strict load throws "integrity check failed at Load" (measured:
+                directory=900 chain=800 for a 300-page segment grown to 900 behind an 800-page cache). The failed attempt's pages also leak.
+  verified: SegmentGrowAtomicityTests.AGrowThatFailsInitializingItsPages_LeavesTheSegmentAsItWas [VerifiesRule] (a probe fails the grow half-way
+            through its new pages; asserts the length, the directory, the chain, a fresh load, every allocated page freed and no slot reference
+            left), with its mutant APublishThatRanBeforeThePagesWereInitialized_IsRejected. AGrowThatFailsPreparingItsPublish_LeavesTheSegmentAsItWas
+            fails it at the old tail's pin, then at its latch; AGrowPastTheRootDirectoryThatFails_GivesBackItsMapPageAndTwin covers a
+            map-extension page, its twin and its pair; SegmentGrowBackpressureTests.AGrowThatRunsOutOfPageCache_LeavesTheSegmentAsItWas drives the
+            real back-pressure timeout
+  note: releasing needs the page cache too, so it can fail in turn. That failure is recorded on the grow's exception, which is still the one
+        thrown; the pages then leak, which corrupts nothing since nothing references them.
+  note: not covered. A Create that throws part-way leaves its pages allocated and its segment registered with no page list (nothing
+        references its root, so nothing is torn, but the pages leak). ChunkBasedSegment.Grow's own bookkeeping after `base.Grow` has published
+        (bitmap clear, free-list splice) is not atomic either; nothing but a failed CreateOrGrow post-condition is known to throw there.
 
 ---
 

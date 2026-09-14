@@ -636,13 +636,23 @@ public class ChunkBasedSegmentBitmapL3Tests
             $"Found {idList.Count - uniqueCount} duplicate IDs in concurrent allocation");
     }
 
-    [Property("MemPageCount", 16*1024)]
+    // The fixture is a bare page cache with no checkpoint, and Setup holds an epoch scope for the whole test, so every page the segment
+    // touches stays dirty and unevictable until TearDown: the segment has to fit in the cache. It used not to be bounded. It grew ~1 000
+    // pages per 100 ms, reached 9 500–15 600 pages in the test's second, and in ~1 run in 10 needed a grow past a 16 384-page cache: the
+    // engine's 5 s back-pressure timeout, which the old 5 s wait below reported as a deadlock. It now grows to 160 pages at most, then runs near-full.
+    [Property("MemPageCount", 2*1024)]
     [Test]
     [CancelAfter(10000)]
     [Category("Sensitive")] // timing-dependent concurrency test — flaky under parallel CPU load; runs in the gate's serial quiet pass
     public void ConcurrentAllocateAndFree_MaintainsConsistency()
     {
         var segment = _pmmf.AllocateChunkBasedSegment(PageBlockType.None, 20, 64);
+
+        // The segment grows freely up to maxPages (20 → 40 → 80 → 160), then the allocators leave `slack` chunks free: it runs near-full, the free
+        // list almost empty and allocate, free and rebuild racing, without an allocator ever finding it full, which is the only thing that grows it.
+        // The slack exceeds the four allocators, so no interleaving of theirs can use it up.
+        const int maxPages = 160;
+        const int slack = 64;
 
         var allocatedIds = new System.Collections.Concurrent.ConcurrentQueue<int>();
         var errors = new System.Collections.Concurrent.ConcurrentBag<string>();
@@ -660,7 +670,8 @@ public class ChunkBasedSegmentBitmapL3Tests
                     while (!cts.Token.IsCancellationRequested)
                     {
                         // Check if there's likely room before allocating
-                        if (segment.FreeChunkCount <= 0)
+                        var free = segment.FreeChunkCount;
+                        if (free <= 0 || (segment.Length >= maxPages && free <= slack))
                         {
                             Thread.SpinWait(100);
                             continue;
@@ -714,9 +725,16 @@ public class ChunkBasedSegmentBitmapL3Tests
             }));
         }
 
-        if (!Task.WaitAll(tasks.ToArray(), TimeSpan.FromSeconds(5)))
+        // Past the 1 s run plus one 5 s page-cache back-pressure timeout, so a grow that exhausts the cache surfaces as that exception (WaitAll
+        // rethrows it). Allocators queued on the segment's grow lock would each wait their own 5 s after it, so a timeout here reports what it saw
+        // rather than calling it a hang.
+        if (!Task.WaitAll(tasks.ToArray(), TimeSpan.FromSeconds(8)))
         {
-            Assert.Fail("ConcurrentAllocateAndFree tasks did not complete within 5s — likely deadlock in AllocateChunk/FreeChunk");
+            var faulted = string.Join(", ", tasks.Where(t => t.IsFaulted).Select(t => t.Exception?.InnerException?.GetType().Name));
+            var cache = _pmmf.CountUnevictablePages();
+            Assert.Fail($"ConcurrentAllocateAndFree tasks did not complete within 8s. Faulted so far: [{faulted}]; segment {segment.Length} pages; "
+                        + $"cache {cache.Unevictable} of {cache.Total} pages unevictable, {cache.Debt} owed. A full cache stalls each allocator queued on "
+                        + "the grow lock for 5 s in turn; anything else is a hang in AllocateChunk/FreeChunk.");
         }
 
         // Report any errors found during concurrent execution

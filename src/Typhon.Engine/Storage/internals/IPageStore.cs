@@ -172,6 +172,15 @@ public unsafe interface IPageStore
     void AllocatePages(ref Span<int> pageIds, int startFrom, ChangeSet changeSet);
 
     /// <summary>
+    /// Give back pages that a failed <see cref="LogicalSegment{TStore}.CreateOrGrow"/> allocated and never published (rule PS-11), together with
+    /// the twins of any that were paired as directory pages.
+    /// <para>Persistent: drops their directory pairs, frees those twins, then frees the pages on the occupancy map.</para>
+    /// <para>Transient: no-op. The heap allocator cannot take a page back, so a transient grow that fails after allocating leaks those pages
+    /// until the store is disposed.</para>
+    /// </summary>
+    void ReleaseUnpublishedPages(ReadOnlySpan<int> pageIds, ChangeSet changeSet);
+
+    /// <summary>
     /// Returns the twin (second physical slot) for a segment-directory page (CK-05, C2), allocating it on first request.
     /// Called by <see cref="LogicalSegment{TStore}.CreateOrGrow"/> when it initializes a directory page (root or
     /// map-extension), to stamp <see cref="LogicalSegmentHeader.TwinPageIndex"/>. Idempotent — an already-paired page

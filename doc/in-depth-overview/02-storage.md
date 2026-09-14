@@ -215,7 +215,7 @@ Forward traversal goes through the linked list in [`LogicalSegmentHeader`](https
 
 The root page holds **no** usable data (the directory fills the whole `PageRawDataSize`); every data page (segment page 1+) has the full 8000 bytes.
 
-`Grow(newLength, ...)` is `lock`-protected and `volatile`-publishes the new `_pages` array — concurrent reads always see a consistent index view. `GetPage(i, epoch, ...)` resolves the i-th segment page index through `_store.RequestPageEpoch`, returning a [`PageAccessor`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PageAccessor.cs) (a thin wrapper over the page address with typed `Metadata<T>` / `RawData<T>` / `StructAt<T>` slicing).
+`Grow(newLength, ...)` is `lock`-protected and `volatile`-publishes the new `_pages` array — concurrent reads always see a consistent index view. It is also all-or-nothing ([PS-11](https://github.com/Log2n-io/Typhon/blob/main/rules/durability.md)): it initializes the new pages, then pins and latches the directory pages and the old tail before it writes any of them, so a grow that fails — typically on a page-cache back-pressure timeout — leaves the segment exactly as it was and gives back the pages it allocated. `GetPage(i, epoch, ...)` resolves the i-th segment page index through `_store.RequestPageEpoch`, returning a [`PageAccessor`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PageAccessor.cs) (a thin wrapper over the page address with typed `Metadata<T>` / `RawData<T>` / `StructAt<T>` slicing).
 
 ### `ChunkBasedSegment<TStore>` — fixed-stride allocator
 
