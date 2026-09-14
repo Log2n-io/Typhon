@@ -3,6 +3,9 @@ using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
 using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
+using Typhon.Engine.Internals;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests;
@@ -154,6 +157,240 @@ internal sealed class CommittedDisciplineRecoveryTests
             // NB: the spawn-init Wallet value (SingleVersion, TickFence) is NOT asserted — without a checkpoint/tick fence it is not WAL-durable
             // (≤1-tick-loss by design). Only the Commit-discipline write carries the zero-loss guarantee under test here.
         }
+    }
+
+    /// <summary>What the Commit-discipline commit held between its append and its publish does.</summary>
+    public enum PausedOp { Write, Destroy }
+
+    /// <summary>Where the commit is held: right after its append, or just before its staged writes are published (a write's last page
+    /// effect).</summary>
+    public enum HoldPoint { AfterAppend, BeforeStagedPublish }
+
+    /// <summary>Distinctive substring of the CK-13 verifier's rejection messages, which its mutant must trip.</summary>
+    private const string Ck13Marker = "CK-13 violated";
+
+    /// <summary>
+    /// NEW-CK-1 (2026-07-06 assessment), for the Commit discipline: its staged writes reach page memory only at publish (CM-01), so a commit held
+    /// between its append and its publish has not written them yet. A checkpoint that runs then must still keep CheckpointLSN below the commit's
+    /// record, or recovery skips the record and the change is lost after a crash. Holding the commit just before its staged writes are published
+    /// also pins the other end of the window: the commit must not withdraw its floor before its last page effect.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    [VerifiesRule("CK-13")]
+    public void CommitDiscipline_ACheckpointDuringAPublish_KeepsTheCommitInTheRecoveryWindow([Values] PausedOp op, [Values] HoldPoint at) =>
+        PausedCommitScenario(op, at, withoutFloor: false);
+
+    /// <summary>
+    /// The <see cref="RuleMutantAttribute"/> companion: with the checkpoint's in-flight floor unwired, the cycle passes the held commit's record,
+    /// which the verifier must reject.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    [RuleMutant("CK-13")]
+    public void CommitDiscipline_ACheckpointThatIgnoresTheFloor_IsRejected([Values] PausedOp op) =>
+        RuleMutants.AssertDetects("CK-13", Ck13Marker, () => PausedCommitScenario(op, HoldPoint.AfterAppend, withoutFloor: true));
+
+    private void PausedCommitScenario(PausedOp op, HoldPoint at, bool withoutFloor)
+    {
+        EntityId id;
+        EntityId sibling;
+        string cycleReport;
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<CmPosition>();
+            dbe.RegisterComponentFromAccessor<CmWallet>();
+            dbe.InitializeArchetypes();
+            if (withoutFloor)
+            {
+                dbe.CheckpointManager.InFlightCommitFloor = null;
+            }
+
+            using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                id = tx.Spawn<CmEntity>(CmEntity.Position.Set(new CmPosition(1, 1)), CmEntity.Wallet.Set(new CmWallet(50)));
+                sibling = tx.Spawn<CmEntity>(CmEntity.Position.Set(new CmPosition(5, 5)), CmEntity.Wallet.Set(new CmWallet(7)));
+                tx.Commit();
+            }
+
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(5)), Is.True, "the base entities must be checkpointed first");
+
+            // Hold the commit inside its publish window. Only the committer's thread is held; nothing else commits here, so the guard is a defence.
+            using var held = new ManualResetEventSlim();
+            using var release = new ManualResetEventSlim();
+            var committerThread = 0;
+            Action hold = () =>
+            {
+                if (Environment.CurrentManagedThreadId == Volatile.Read(ref committerThread))
+                {
+                    held.Set();
+                    release.Wait(TimeSpan.FromSeconds(10));
+                }
+            };
+            if (at == HoldPoint.AfterAppend)
+            {
+                dbe.CommitAfterAppendProbe = hold;
+            }
+            else
+            {
+                dbe.CommitBeforeStagedPublishProbe = hold;
+            }
+
+            var committer = Task.Run(() =>
+            {
+                Volatile.Write(ref committerThread, Environment.CurrentManagedThreadId);
+                using var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit);
+                if (op == PausedOp.Write)
+                {
+                    tx.OpenMut(id).Write(CmEntity.Position) = new CmPosition(99, 88);
+                }
+                else
+                {
+                    tx.Destroy(id);
+                }
+                tx.Commit();
+            });
+            bool committed;
+            try
+            {
+                Assert.That(held.Wait(TimeSpan.FromSeconds(5)), Is.True, "the commit never reached its hold point");
+                var opLsn = dbe.DurabilityLog.LastAppendedLsn;
+
+                // The held commit's staged write is not in a page yet (CM-01), so the cycle covers everything it collects and the gate cannot hold
+                // the watermark back: only the floor can.
+                var cm = dbe.CheckpointManager;
+                var before = cm.TotalCheckpoints;
+                var covered = cm.ForceCheckpointAndWait(TimeSpan.FromSeconds(2));
+                cycleReport = $"held {at}: covered={covered}, cycles {before}->{cm.TotalCheckpoints}, gated={cm.ConsecutiveGatedCycles}, "
+                    + $"CheckpointLSN={cm.CheckpointLsn}, the commit's record={opLsn}";
+                Assert.That(covered, Is.True, $"the cycle must cover what it collected, so that the floor is what gets tested ({cycleReport})");
+                Assert.That(cm.CheckpointLsn, Is.LessThan(opLsn),
+                    $"{Ck13Marker}: CheckpointLSN passed the record of a commit that has not finished publishing ({cycleReport})");
+            }
+            finally
+            {
+                dbe.CommitAfterAppendProbe = null;
+                dbe.CommitBeforeStagedPublishProbe = null;
+                release.Set();
+                committed = committer.Wait(TimeSpan.FromSeconds(10));
+            }
+
+            // Tearing the engine down under a live commit would free memory it is still using.
+            Assert.That(committed, Is.True, "the held commit must finish before the crash");
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<CmPosition>();
+            dbe.RegisterComponentFromAccessor<CmWallet>();
+            dbe.InitializeArchetypes();
+
+            using var tx = dbe.CreateQuickTransaction();
+            if (op == PausedOp.Write)
+            {
+                Assert.That(tx.Open(id).Read(CmEntity.Position).X, Is.EqualTo(99f), $"{Ck13Marker}: the Commit-discipline write was lost ({cycleReport})");
+            }
+            else
+            {
+                Assert.That(tx.IsAlive(id), Is.False, $"{Ck13Marker}: the destroyed entity came back ({cycleReport})");
+            }
+
+            Assert.That(tx.IsAlive(sibling) && tx.Open(sibling).Read(CmEntity.Position).X == 5f, Is.True,
+                "the untouched entity must come through the crash unchanged");
+        }
+    }
+
+    /// <summary>
+    /// CK-13: a commit whose append fails after claiming its LSNs stored its floor before the frame's publish, and withdraws it when the commit
+    /// throws. While the failed transaction is still alive the checkpoint must read no floor; one left behind would hold the watermark below the
+    /// abandoned claim until the transaction is disposed. A checkpoint cannot show that: while the failed transaction is alive every cycle skips a page
+    /// (measured: all 20 cycles of a 5 s wait gated on one page), so the test asserts the floor the checkpoint reads. The last step is not CK-13: it
+    /// checks that CheckpointLSN passes the abandoned claim once a later commit's frame has drained.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("CK-13")]
+    public void CommitDiscipline_AnAppendThatFailsAfterItsClaim_WithdrawsItsFloor()
+    {
+        using var scope = _serviceProvider.CreateScope();
+        var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<CmPosition>();
+        dbe.RegisterComponentFromAccessor<CmWallet>();
+        dbe.InitializeArchetypes();
+
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+        {
+            id = tx.Spawn<CmEntity>(CmEntity.Position.Set(new CmPosition(1, 1)), CmEntity.Wallet.Set(new CmWallet(50)));
+            tx.Commit();
+        }
+
+        var log = (DurabilityLog)dbe.DurabilityLog;
+        var floorAtFailure = 0L;
+        var failed = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit);
+        try
+        {
+            failed.OpenMut(id).Write(CmEntity.Position) = new CmPosition(99, 88);
+            // The probe sits between the floor's store and the frame's publish. Only this thread's append fails; nothing else appends here, so the
+            // guard is a defence.
+            var committerThread = Environment.CurrentManagedThreadId;
+            log.AfterFloorProbe = () =>
+            {
+                if (Environment.CurrentManagedThreadId != committerThread)
+                {
+                    return;
+                }
+                floorAtFailure = failed.InFlightLsnFloor;
+                throw new InvalidOperationException("injected: the append fails after its claim");
+            };
+            Exception thrown = null;
+            try
+            {
+                failed.Commit();
+            }
+            catch (Exception e)
+            {
+                thrown = e;
+            }
+            finally
+            {
+                log.AfterFloorProbe = null;
+            }
+
+            var floorAfterFailure = failed.InFlightLsnFloor;
+            var floorTheCheckpointReads = dbe.CheckpointManager.InFlightCommitFloor();
+
+            // Before any assertion can fail, and before the dispose: a later commit takes LSNs past the abandoned claim. The UoW flush in Dispose and
+            // the checkpoint's barrier both wait for LastAppendedLsn, which no drained frame covers until one past the abandoned claim is published.
+            using (var next = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                next.Spawn<CmEntity>(CmEntity.Position.Set(new CmPosition(3, 3)), CmEntity.Wallet.Set(new CmWallet(1)));
+                next.Commit();
+            }
+
+            Assert.That(thrown, Is.TypeOf<InvalidOperationException>(), "the injected append failure must reach the caller");
+            Assert.That(floorAtFailure, Is.GreaterThan(0), $"{Ck13Marker}: the append had not stored its floor when its frame was about to be published");
+            Assert.That(floorAfterFailure, Is.Zero, $"{Ck13Marker}: the commit threw and kept its floor");
+            Assert.That(floorTheCheckpointReads, Is.EqualTo(long.MaxValue), $"{Ck13Marker}: the checkpoint still reads a floor from the failed transaction");
+        }
+        finally
+        {
+            failed.Dispose();
+        }
+
+        // Not CK-13: the abandoned claim must not keep CheckpointLSN from the later commit's records.
+        var target = dbe.DurabilityLog.LastAppendedLsn;
+        var cm = dbe.CheckpointManager;
+        var cyclesBefore = cm.TotalCheckpoints;
+        var reached = cm.ForceCheckpointAndWait(TimeSpan.FromSeconds(5), target);
+        var report = $"CheckpointLSN={cm.CheckpointLsn}, abandoned claim at {floorAtFailure}, target {target}, DurableLsn={dbe.DurabilityLog.DurableLsn}, "
+            + $"lowest floor={cm.InFlightCommitFloor()}, cycles {cyclesBefore}->{cm.TotalCheckpoints}, gated={cm.ConsecutiveGatedCycles}, "
+            + $"skipped pages={cm.LastSkippedPages.Length}, health={cm.Health}, fatal={cm.HasFatalError}";
+        Assert.That(reached, Is.True, $"the checkpoint stayed below the commit that follows the failed append ({report})");
     }
 
     /// <summary>

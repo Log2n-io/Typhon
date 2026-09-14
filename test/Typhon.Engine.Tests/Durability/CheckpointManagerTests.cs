@@ -793,6 +793,60 @@ public class CheckpointManagerTests : AllocatorTestBase
         }
     }
 
+    /// <summary>
+    /// A covering cycle that CK-13 held below the watermark the caller asked for does not release the wait: with a floor at 2 over three durable
+    /// records, a wait for CheckpointLSN 3 times out; once the floor lifts, it returns with the watermark there.
+    /// </summary>
+    [Test]
+    [CancelAfter(10000)]
+    [VerifiesRule("CK-12")]
+    public void AForcedWait_WaitsForTheWatermarkItAskedFor()
+    {
+        CreateTestInfrastructure();
+        _walManager = CreateWalManager();
+        ProduceWalRecords(_walManager, 3);
+        using var ckpt = StartForceOnlyManager();
+        var target = _walManager.LastAppendedLsn;
+
+        var floor = 2L;
+        ckpt.InFlightCommitFloor = () => Volatile.Read(ref floor);
+        Assert.That(ckpt.ForceCheckpointAndWait(TimeSpan.FromMilliseconds(300), target), Is.False,
+            $"{Ck12Marker}: the wait returned with CheckpointLSN at {ckpt.CheckpointLsn}, short of the {target} it asked for");
+
+        Volatile.Write(ref floor, long.MaxValue);
+        Assert.That(ckpt.ForceCheckpointAndWait(TimeSpan.FromSeconds(5), target), Is.True, "with the floor lifted the next cycle reaches it");
+        Assert.That(ckpt.CheckpointLsn, Is.GreaterThanOrEqualTo(target));
+    }
+
+    /// <summary>
+    /// CK-13: the cycle keeps CheckpointLSN below the oldest commit still between its append and its publish, and never lowers it. A floor of 2
+    /// holds a cycle over three durable records at 1; with no floor the next cycle reaches its barrier; a floor below the watermark leaves it.
+    /// </summary>
+    [Test]
+    [CancelAfter(5000)]
+    [VerifiesRule("CK-13")]
+    public void InFlightFloor_CapsTheWatermark()
+    {
+        CreateTestInfrastructure();
+        _walManager = CreateWalManager();
+        ProduceWalRecords(_walManager, 3);
+        using var ckpt = new CheckpointManager(_mmf, _uowRegistry, _walManager, _resourceOptions, _epochManager, _stagingPool, AllocationResource);
+
+        var floor = 2L;
+        ckpt.InFlightCommitFloor = () => floor;
+        ckpt.RunCheckpointCycle(_walManager.DurableLsn);
+        Assert.That(ckpt.CheckpointLsn, Is.EqualTo(1), "CK-13 violated: the watermark passed a commit that had not published");
+
+        floor = long.MaxValue;
+        ckpt.RunCheckpointCycle(_walManager.DurableLsn);
+        var advanced = ckpt.CheckpointLsn;
+        Assert.That(advanced, Is.EqualTo(_walManager.LastAppendedLsn), "with no commit in flight the cycle reaches its barrier");
+
+        floor = 1;
+        ckpt.RunCheckpointCycle(_walManager.DurableLsn);
+        Assert.That(ckpt.CheckpointLsn, Is.EqualTo(advanced), "a floor below the watermark must not lower it");
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // Trigger Tests
     // ═══════════════════════════════════════════════════════════════

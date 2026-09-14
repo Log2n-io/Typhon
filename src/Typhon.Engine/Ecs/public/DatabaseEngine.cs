@@ -616,6 +616,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <c>InitializeArchetypes</c> otherwise, so every steady-state checkpoint records them.</summary>
     private volatile bool _archetypeSpiPersistArmed;
 
+    /// <summary>Test seam (NEW-CK-1): invoked by every <see cref="Transaction"/> commit right after its WAL append and before any publish, so a
+    /// fixture can hold a commit in that window while a checkpoint runs. Null in production: one null check per commit.</summary>
+    internal Action CommitAfterAppendProbe { get; set; }
+
+    /// <summary>Test seam (CK-13): invoked by every <see cref="Transaction"/> commit just before it publishes its Commit-discipline staged writes,
+    /// its last page effect, so a fixture can show the checkpoint still stays below the commit's records there. Null in production.</summary>
+    internal Action CommitBeforeStagedPublishProbe { get; set; }
+
     /// <summary>Test-only: when set, <see cref="Dispose"/> skips <c>MarkCleanShutdown</c>, reproducing an unclean shutdown
     /// (a real crash also never writes the marker). Unit tests cannot abort the process — same convention as the
     /// <c>BulkLoadRecoveryTests</c> incomplete-bulk path.</summary>
@@ -1438,6 +1446,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 PersistArchetypeState();
             }
         };
+        // CK-13: the cycle keeps CheckpointLSN below any commit still between its WAL append and its publish.
+        CheckpointManager.InFlightCommitFloor = () => TransactionChain.LowestInFlightLsn();
         CheckpointManager.Start();
 
         // Wire demand-driven flush: when page cache backpressure fires, immediately wake

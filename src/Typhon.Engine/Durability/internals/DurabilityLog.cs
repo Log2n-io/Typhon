@@ -1,5 +1,6 @@
 using JetBrains.Annotations;
 using System;
+using System.Threading;
 
 namespace Typhon.Engine.Internals;
 
@@ -17,6 +18,10 @@ internal sealed class DurabilityLog : IDurabilityLog
         ArgumentNullException.ThrowIfNull(wal);
         _wal = wal;
     }
+
+    /// <summary>Test seam (CK-13): invoked inside <see cref="Append(ref CommitBatchBuilder, ref WaitContext, ref long)"/> after the floor is stored and
+    /// before the frame is published, so a fixture can fail an append after its claim. Null in production: one null check per append.</summary>
+    internal Action AfterFloorProbe { get; set; }
 
     public long DurableLsn => _wal.DurableLsn;
 
@@ -77,6 +82,12 @@ internal sealed class DurabilityLog : IDurabilityLog
 
     public long Append(ref CommitBatchBuilder batch, ref WaitContext ctx)
     {
+        long unused = 0;
+        return Append(ref batch, ref ctx, ref unused);
+    }
+
+    public long Append(ref CommitBatchBuilder batch, ref WaitContext ctx, ref long inFlightFloor)
+    {
         if (batch.IsEmpty)
         {
             return 0;
@@ -88,6 +99,11 @@ internal sealed class DurabilityLog : IDurabilityLog
         var claim = _wal.CommitBuffer.TryClaim(size, recordCount, ref ctx);
         try
         {
+            // CK-13: before the frame is published. The writer drains frames in LSN order and stops at an unpublished one (WP-06), so a checkpoint
+            // barrier at or past this batch has seen the frame's release, and with it this store.
+            Volatile.Write(ref inFlightFloor, claim.FirstLSN);
+            AfterFloorProbe?.Invoke();
+
             var written = RecordCodec.Write(claim.DataSpan, in batch, claim.FirstLSN);
 
             // Zero the 0–7 bytes of frame-alignment slack after the last chunk: TryClaim only zeroes the frame header, so stale

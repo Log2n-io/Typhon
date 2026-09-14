@@ -57,6 +57,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     private Thread _thread;
     private volatile bool _shutdown;
     private readonly Lock _lifecycleLock = new();
+    private readonly Lock _cycleLock = new();
     private readonly ManualResetEventSlim _wakeEvent = new(false);
 
     // ═══════════════════════════════════════════════════════════════
@@ -104,6 +105,13 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// (unreachable) base and loses the entities (#395). Null until the engine wires it (early/test cycles no-op).
     /// </summary>
     internal Action PersistDurableMetadataHook { get; set; }
+
+    /// <summary>
+    /// Wired by <see cref="DatabaseEngine"/> to <see cref="TransactionChain.LowestInFlightLsn"/>: the first LSN of any commit still between its WAL
+    /// append and the end of its publish, <see cref="long.MaxValue"/> for none. The cycle keeps CheckpointLSN below it (CK-13): those
+    /// records' page effects are not in memory yet, so no page the cycle writes can hold them. Null in fixtures with no transactions.
+    /// </summary>
+    internal Func<long> InFlightCommitFloor { get; set; }
 
     /// <summary>Max passes per cycle to retry pages skipped because a writer was active, before the coverage gate blocks the LSN advance (CK-03). Skip windows
     /// are accessor-scoped (~µs), so the second pass almost always clears them.</summary>
@@ -328,8 +336,8 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// <remarks>
     /// <para>
     /// On <see langword="true"/>, every page the caller dirtied before the call is on the data file and fsynced, and <see cref="CheckpointLsn"/> has
-    /// reached every LSN that was durable at the call. This is the synchronous barrier behind <see cref="BulkLoadSession.CompleteBulkLoad"/> and the
-    /// recovery seal.
+    /// reached every LSN that was durable at the call, except the records of another thread's commit still between its append and its publish,
+    /// which CK-13 keeps it below. This is the synchronous barrier behind <see cref="BulkLoadSession.CompleteBulkLoad"/> and the recovery seal.
     /// </para>
     /// <para>
     /// A cycle already running when the call arrives does not release the wait, since it may have collected before the caller's pages were dirty;
@@ -340,9 +348,11 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// </para>
     /// </remarks>
     /// <param name="timeout">Maximum wall-clock time to wait. <see cref="Timeout.InfiniteTimeSpan"/> waits indefinitely.</param>
+    /// <param name="minCheckpointLsn">Also wait until <see cref="CheckpointLsn"/> has reached this LSN: a covering cycle that CK-13 held below it
+    /// counts as not covering the request. 0 for no such requirement.</param>
     /// <returns><see langword="true"/> once a covering cycle has finished; <see langword="false"/> on timeout, and at once when checkpointing has
     /// halted (a fatal error, a simulated hard crash, or the loop stopping).</returns>
-    public bool ForceCheckpointAndWait(TimeSpan timeout)
+    public bool ForceCheckpointAndWait(TimeSpan timeout, long minCheckpointLsn = 0)
     {
         var ctx = WaitContext.FromTimeout(timeout);
         while (true)
@@ -352,11 +362,12 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
 
             lock (_cycleFinished)
             {
-                // Wait for the forced cycle, or a later one, to finish. If it did not cover the request (the gate stopped it, or it failed), keep
-                // waiting one retry pause for a later cycle that does before forcing another: a page the gate keeps skipping must not drive
-                // back-to-back cycles, each a WAL flush, until the timeout. CK-11 keeps the same floor between pressure cycles for that reason.
+                // Wait for the forced cycle, or a later one, to finish. If it did not cover the request (the gate stopped it, it failed, or CK-13
+                // held CheckpointLSN below minCheckpointLsn), keep waiting one retry pause for a later cycle that does before forcing another: a page
+                // the gate keeps skipping must not drive back-to-back cycles, each a WAL flush, until the timeout. CK-11 keeps the same floor between
+                // pressure cycles for that reason.
                 var retryAt = long.MaxValue;
-                while (_lastCoveredCycle < ticket)
+                while (!Covers(ticket, minCheckpointLsn))
                 {
                     if (CheckpointingHalted || ctx.ShouldStop)
                     {
@@ -375,13 +386,20 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                     Monitor.Wait(_cycleFinished, SleepMs(ctx, retryAt));
                 }
 
-                if (_lastCoveredCycle >= ticket)
+                if (Covers(ticket, minCheckpointLsn))
                 {
                     return true;
                 }
             }
         }
     }
+
+    /// <summary>
+    /// Whether cycle <paramref name="ticket"/> or a later one has written every page it collected, with <see cref="CheckpointLsn"/> at
+    /// <paramref name="minCheckpointLsn"/> or past it. The caller holds <see cref="_cycleFinished"/>, which <see cref="PublishCycleEnd"/> takes after the
+    /// cycle has written both.
+    /// </summary>
+    private bool Covers(long ticket, long minCheckpointLsn) => _lastCoveredCycle >= ticket && Interlocked.Read(ref _checkpointLsn) >= minCheckpointLsn;
 
     /// <summary>
     /// Milliseconds a forced waiter may sleep: until the deadline or until <paramref name="until"/> (a Stopwatch timestamp,
@@ -601,9 +619,18 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     // ═══════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Executes one full checkpoint cycle. Visible internally for testability.
+    /// Executes one full checkpoint cycle. Visible internally for testability. Cycles are serialized: a fixture that drives one directly waits for
+    /// the loop's, so the cycle numbers, their watermarks and CheckpointLSN only ever move forward (CK-12, CK-13).
     /// </summary>
     internal void RunCheckpointCycle(long targetLsn, CheckpointReason reason = CheckpointReason.Periodic)
+    {
+        lock (_cycleLock)
+        {
+            RunCheckpointCycleCore(targetLsn, reason);
+        }
+    }
+
+    private void RunCheckpointCycleCore(long targetLsn, CheckpointReason reason)
     {
         // Numbered before the cycle reads anything, with a full fence: a request that read the previous number is covered by this cycle (CK-12).
         var cycle = Interlocked.Increment(ref _cyclesStarted);
@@ -641,6 +668,15 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             _walManager.RequestFlush();
             _walManager.WaitForDurable(_walManager.LastAppendedLsn, ref ctx);
             long barrierLsn = _walManager.DurableLsn;
+
+            // CK-13: never past a commit still between its append and its publish. Read after the barrier: a barrier that covers a record has drained
+            // its frame, and the commit stored its floor before publishing that frame; a commit that has since withdrawn has already dirtied its
+            // pages, which the collection below finds. Never below the current watermark either: that would ask recovery for recycled segments.
+            var inFlightFloor = InFlightCommitFloor?.Invoke() ?? long.MaxValue;
+            if (inFlightFloor <= barrierLsn)
+            {
+                barrierLsn = Math.Max(inFlightFloor - 1, Interlocked.Read(ref _checkpointLsn));
+            }
 
             // Step 2: Collect dirty pages
             int[] dirtyPages;
@@ -827,11 +863,11 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     {
         lock (_cycleFinished)
         {
-            // Max rather than assignment: fixtures drive RunCheckpointCycle on their own thread while the loop may be running one.
-            _lastFinishedCycle = Math.Max(_lastFinishedCycle, cycle);
+            // Plain assignment: cycles are serialized (RunCheckpointCycle), so each one ends after every lower-numbered one.
+            _lastFinishedCycle = cycle;
             if (covered)
             {
-                _lastCoveredCycle = Math.Max(_lastCoveredCycle, cycle);
+                _lastCoveredCycle = cycle;
             }
             Monitor.PulseAll(_cycleFinished);
         }

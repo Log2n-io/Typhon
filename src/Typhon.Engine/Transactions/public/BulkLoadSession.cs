@@ -251,7 +251,8 @@ public sealed class BulkLoadSession : IDisposable
         // Step 3: Force a checkpoint and block until a cycle that STARTED after this call has written every page it collected (CK-12). That
         // drains every dirty page (including all bulk-allocated chunks) to disk + advances CheckpointLSN past the bulk anchor. A cycle already in
         // flight, or one the coverage gate stopped, does not count: either can leave bulk pages unwritten, and they have no WAL records (BL-01).
-        if (!_engine.CheckpointManager.ForceCheckpointAndWait(Options.CheckpointTimeout))
+        // It also holds out until CheckpointLSN passes the bulk anchor, which another thread's commit still mid-publish can delay (CK-13).
+        if (!_engine.CheckpointManager.ForceCheckpointAndWait(Options.CheckpointTimeout, BulkBeginLsn))
         {
             throw new BulkLoadCheckpointTimeoutException(BulkSessionId, Options.CheckpointTimeout);
         }

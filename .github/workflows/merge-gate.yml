@@ -303,18 +303,22 @@ jobs:
           shopt -s nullglob
           # Invoked via `bash` (not ./) so a missing exec bit — common when the script is committed from
           # Windows — doesn't fail the run with "Permission denied".
+          # <Spec>.cfg and <Spec>-<name>.cfg are models that must stay green; <Spec>-mutant.cfg and <Spec>-mutant-<name>.cfg must
+          # violate. Spec names carry no '-', so everything after the first one names the config.
           for cfg in *.cfg; do
             spec="${cfg%.cfg}"
-            case "$spec" in
-              *-mutant)
-                base="${spec%-mutant}"
-                echo "::group::genuineness — $base mutant must violate"
-                bash run-tlc.sh "$base" mutant --expect-violation
+            base="${spec%%-*}"
+            suffix="${spec#"$base"}"
+            suffix="${suffix#-}"
+            case "$suffix" in
+              mutant|mutant-*)
+                echo "::group::genuineness — $base $suffix must violate"
+                bash run-tlc.sh "$base" "$suffix" --expect-violation
                 echo "::endgroup::"
                 ;;
               *)
                 echo "::group::model-check — $spec"
-                bash run-tlc.sh "$spec"
+                bash run-tlc.sh "$base" "$suffix"
                 echo "::endgroup::"
                 ;;
             esac

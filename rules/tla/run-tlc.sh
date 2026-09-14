@@ -49,9 +49,8 @@ cd "$HERE"
 # tlc2.TLC = the model checker. -workers auto uses all cores; -config selects the model bounds + invariants.
 set +e
 java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC -workers auto -config "$cfg" "${spec}.tla" 2>&1 | tee "$out"
+tlc_rc="${PIPESTATUS[0]}"   # before any other command: PIPESTATUS describes the last one run
 set -e
-
-tlc_rc="${PIPESTATUS[0]}"
 
 # Three-state classification. The distinction matters: a mutant run is asserted to FAIL, so anything that merely
 # "is not green" -- a parse error, an undeclared constant, an OOM, a failed jar download -- used to satisfy
@@ -59,7 +58,7 @@ tlc_rc="${PIPESTATUS[0]}"
 # Require positive evidence that TLC actually evaluated an invariant and found it violated.
 if grep -q "No error has been found" "$out"; then
   result="GREEN"
-elif grep -qE "(Invariant .* is violated|Temporal property .* is violated|Error: Invariant)" "$out"; then
+elif grep -qE "(Invariant .* is violated|Temporal property .* is violated|Action property .* is violated|Error: Invariant)" "$out"; then
   result="VIOLATION"
 else
   result="ERROR"

@@ -181,6 +181,8 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
   note: handler-conflict commits hold the per-entity revision-chain lock from PREPARE through PUBLISH (spanning the staging
         Append) so `[detect, resolve-against-committed, IsolationFlag clear]` stays one atomic region — required by
         ConcurrencyConflictTests concurrent delta-rebase. This refines 07-rules' "re-acquire in publish" wording
+  note: between Append and the end of publish the records can be durable while their page effects are not in memory yet; CK-13 keeps the
+        checkpoint below them over that window
 
 ### AP-02: Append is the point of no return `[fatal]`
   invariant all conflict validation precedes Append; post-Append the tx reaches Committed and publish does not roll back. A
@@ -528,7 +530,9 @@ CK-08 (flush-only cycles) are later increments.
 ### CK-12: A forced wait is released only by a cycle that started after it and covered it `[fatal]` `[silent]`
   invariant ForceCheckpointAndWait returns true ⟹ some cycle c finished, c started after the call's request, and c wrote every page it
             collected (the CK-03 gate opened). So every page the caller dirtied before the call is on the data file, fsynced, and
-            CheckpointLSN ≥ every LSN durable at the call
+            CheckpointLSN ≥ every LSN durable at the call, except the records of another thread's commit still between its append and its
+            publish, which CK-13 keeps it below. With minCheckpointLsn the wait also requires CheckpointLSN ≥ that LSN (CompleteBulkLoad
+            passes its BulkBegin LSN)
   invariant neither a cycle already running at the call, nor a gated or failed cycle, releases it. After either, the wait gives a later cycle
             one retry pause (the CK-11 poll floor, 250 ms) to cover it, then forces another, until its timeout: a page the gate keeps skipping
             must not drive back-to-back cycles, each one a WAL flush
@@ -541,7 +545,8 @@ CK-08 (flush-only cycles) are later increments.
             runs the next pass. A request posted while a cycle runs is kept (AForcedWait_IsNotReleasedByTheCycleAlreadyRunning); no test
             reaches the window between the wake and the read, which is two adjacent statements
   requires: CK-03 (the gate decides "covered"), CK-01/CK-02 (the covering cycle's barrier, taken after the request, is what puts
-            CheckpointLSN at or past every LSN durable at the call), PS-10 (only the covering write discharges a page's debt)
+            CheckpointLSN at or past every LSN durable at the call), PS-10 (only the covering write discharges a page's debt), CK-13 (which can cap
+            that barrier)
   scope: CheckpointManager.ForceCheckpointAndWait, CheckpointManager.ForceCheckpoint, CheckpointManager.RequestCycle,
          CheckpointManager.PublishCycleEnd, CheckpointManager.RunCheckpointCycle, CheckpointManager.CheckpointLoop,
          CheckpointManager.PrepareCrashStop, CheckpointManager.Dispose, BulkLoadSession.CompleteBulkLoad, DatabaseEngine.SealRecovery
@@ -554,13 +559,60 @@ CK-08 (flush-only cycles) are later increments.
             over), AForcedWait_IsNotReleasedByTheCycleAlreadyRunning, AForcedWait_IsNotReleasedByAGatedCycle,
             AForcedWait_AsksAgainAfterAFailedCycle, AForcedWait_ReturnsAtOnceWhenCheckpointingHasHalted, AForcedWait_ReturnsAtOnceAfterACrashStop,
             AForcedWait_ReturnsAtOnceOnACrashMidCycle, AForcedWait_ReturnsWhenTheLoopStops, AForcedWait_ReturnsWhenDisposedUnstarted,
-            AForcedWait_PausesBetweenGatedCycles.
+            AForcedWait_PausesBetweenGatedCycles, AForcedWait_WaitsForTheWatermarkItAskedFor.
             Mutants: AWaitThatSamplesAfterItsOwnForce_IsRejected (the replaced pairing); AWaitReleasedByTheNextCycle_IsRejected,
             AWaitReleasedByAGatedCycle_IsRejected, AWaitThatNeverAsksAgain_IsRejected and AWaitThatOutlastsAHaltedCheckpoint_IsRejected
             (reading the count before the force, which fixes the measured race and none of these)
   note: "covered" is the whole-cache CK-03 gate, not "the caller's pages were written": under writers that keep some page live, a forced
         wait can time out although its own pages reached disk (the #817 class). CK-03's planned per-page refinement would let it require
         only pages dirtied before the request
+
+### CK-13: A checkpoint never passes a commit that is between its append and its publish `[fatal]` `[silent]`
+  invariant CheckpointLSN < the first LSN appended by any commit still between its WAL append and the end of its publish
+  invariant a commit records its first LSN (its floor) inside the append, after claiming it and before publishing the WAL frame, and
+            withdraws it once every publish-time page effect is in memory and marked dirty, or when the commit throws (AP-03's residual,
+            #396: the partial publish then outlives the next checkpoint, as it did before this rule)
+  invariant the cycle reads the lowest floor AFTER its barrier and BEFORE collecting dirty pages. A barrier that covers a record has drained
+            its frame (the drain stops at the first unpublished frame, and LSN order is buffer order, WP-06), so the floor, stored before the
+            frame was published, is visible; a commit that has withdrawn has already dirtied the pages the collection finds
+  invariant the cap never lowers CheckpointLSN: segments at or below it may already be recycled. Cycles are serialized (RunCheckpointCycle
+            takes a lock), so a fixture that drives one directly waits for the loop's and the watermark only moves forward. The Math.Max in the
+            cap is defence in depth: a stored floor is always above CheckpointLSN, and S3 holds CK13_NeverLowers without it.
+            CheckpointManagerTests.InFlightFloor_CapsTheWatermark exercises it with an artificial floor
+  invariant any path that appends records and then mutates pages passes a floor to DurabilityLog.Append. Only Transaction.Commit does so
+            today: the tick fence writes its pages before it appends, a bulk manifest mutates no page after its own, and PersistArchetypeState
+            appends no record
+  requires: AP-01 (nothing is published before its records are appended), CK-01/CK-02 (the barrier the floor caps), WP-06 (LSN order is
+            buffer order)
+  scope: DurabilityLog.Append, Transaction.Commit, Transaction.InFlightLsnFloor, Transaction.ResetCore, TransactionChain.LowestInFlightLsn,
+         CheckpointManager.InFlightCommitFloor, CheckpointManager.RunCheckpointCycle, DatabaseEngine.InitializeCheckpointManager (the wiring)
+  on_violation: a commit's publish-time page effects (DiedTSN, EnabledBits, the HEAD copy into the cluster slot, spawn finalize,
+                Commit-discipline staged writes) are in no page the cycle writes, yet CheckpointLSN passes their record. Recovery skips
+                records at or below it, so a crash loses the committed change with no error. Measured: a Commit-discipline write and a
+                Commit-discipline destroy, each held between append and publish while a forced checkpoint ran, were lost after a hard crash
+                (CheckpointLSN reached the record's LSN)
+  spec: rules/tla/CommittedDiscipline.tla (S3) — CK13_BelowUnpublished, CK13_NeverLowers (an action property) and AckDurable, green with one
+        slot and serialized writers and with two slots written concurrently (-twoslots.cfg). Six mutants each violate: the floors ignored
+        (-mutant-nofloor, which is NEW-CK-1), the floor stored after the frame is published (-mutant-floorafterframe), withdrawn before the
+        publish (-mutant-withdrawearly), read before the barrier (-mutant-readbeforebarrier), read after the capture (-mutant-readaftercapture),
+        or the highest floor used instead of the lowest (-mutant-latestfloor, on two slots)
+  verified: CommittedDisciplineRecoveryTests.CommitDiscipline_ACheckpointDuringAPublish_KeepsTheCommitInTheRecoveryWindow (Write and Destroy,
+            each held right after the append and just before the staged writes' publish: CheckpointLSN stays below the held commit's record, and the
+            change survives a crash), with its mutant CommitDiscipline_ACheckpointThatIgnoresTheFloor_IsRejected (the floor unwired);
+            CommittedDisciplineRecoveryTests.CommitDiscipline_AnAppendThatFailsAfterItsClaim_WithdrawsItsFloor (the append throws after its claim:
+            the floor was stored before the frame's publish and is withdrawn when the commit throws, so the checkpoint reads no floor while the
+            failed transaction is still alive);
+            CheckpointManagerTests.InFlightFloor_CapsTheWatermark
+  note: NEW-CK-1 in the 2026-07-06 assessment. For Versioned commits the CK-03 gate already held the watermark back: in the measured destroy,
+        update and spawn every cycle skipped a page a live chunk writer held (skip cause A). TrueCrashE2ETests.ACheckpointDuringAPublish_* guards
+        that but cannot fail on this rule. A Commit-discipline write or destroy touches no page before publish (CM-01), so nothing did
+  note: S3 could not find NEW-CK-1 before 2026-09-14: its checkpoint advanced CheckpointLSN to the LSN the page memory reflected, not to its
+        barrier as the engine does. S1 (CheckpointProtocol.tla) still models the append and the dirtying as one step; the floor does not depend
+        on pages, so S3 carries this rule
+  note: store-before-publish is pinned by CommitDiscipline_AnAppendThatFailsAfterItsClaim_WithdrawsItsFloor, whose probe sits between the store
+        and the frame's publish, and by -mutant-floorafterframe. No test reaches read-after-barrier-before-collect, because the verifiers hold the
+        commit across the whole cycle; the S3 mutants cover it. Withdraw-after-the-last-page-effect is pinned by the hold just before the staged
+        writes' publish; -mutant-withdrawearly pins only withdraw-after-publish, since S3's publish is one step
 
 ---
 
@@ -593,6 +645,10 @@ rejected and is the TLA+ mutant.
   note publish does NOT clear the bit; it issues the same SetDirty call every TickFence write makes
   scope: Transaction publish (PublishStagedEntry), fence snapshot
   spec: rules/tla/CommittedDiscipline.tla — CM03_RecoveryConverges
+  note S3 assumes the runtime DAG serializes same-entity writers (ADR-057). With that guard removed, TLC finds two commits to one slot
+       publishing out of LSN order: the page memory keeps the lower-LSN value while last-writer-wins by LSN says the higher one, so what a
+       crash recovers depends on where CheckpointLSN landed. Staging (EntityAccessor.WriteEcsComponentData) and publish
+       (Transaction.PublishStagedEntry) take no per-entity lock, so two ad-hoc Commit-discipline transactions outside the DAG can do this
 
 ### CM-04: ReadsSnapshot rejection
   invariant Build() rejects ReadsSnapshot declarations on SV-layout components
