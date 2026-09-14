@@ -231,7 +231,7 @@ b.Input(() => _characters).Parallel().WritesVersioned()
 
 > 💡 **The zero-lock read is the whole point.** Under the hood, parallel reads share one `PointInTimeAccessor` — a single frozen TSN that every worker reads against without taking a single per-entity lock, because [snapshot isolation](03-transactions.md) guarantees the snapshot can't move under them. That's how "iterate a million entities across every core at one consistent instant" is a normal operation here, not a feat. It only works because nobody is mutating the versions those readers can see — the same property you bought with *Versioned* storage.
 
-Two knobs worth knowing (both in `RuntimeOptions`):
+Knobs worth knowing (the first two in `RuntimeOptions`):
 
 - **`CostBasedChunking`** (default true) — from a system's second tick on, its chunks are sized by what it measurably costs rather than by how many entities it has: spread over the workers while each chunk carries 25–100 µs of work, fewer chunks below that, up to twice as many above it. A slow last chunk then no longer holds the whole pool.
 - **`ParallelQueryMinChunkSize`** (default 64) — the floor on entities per chunk when chunks are counted by entities: a system's first tick, or every tick with `CostBasedChunking` off. Small sets still run the parallel path, just as one chunk. Stops tiny populations from spawning a chunk per worker for no gain.

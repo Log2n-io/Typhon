@@ -81,6 +81,8 @@ public class MovementSystem : QuerySystem
   non-parallel system.
 - A parallel system's `ctx.ChunkCount` can change from one tick to the next and reach twice
   `round(WorkerCount × ChunksPerWorker)`. Never size per-chunk state by it; index per worker (`ctx.WorkerId`).
+- A dispatch's chunks tile the cluster list as it stood when the dispatch began: clusters a spawn appends
+  while they run are walked from the next tick (rule CD-02).
 - Path 1 vs. a per-chunk `Transaction`: ~2.2x lower per-chunk overhead (PTA ~380µs/chunk vs.
   Transaction ~850µs/chunk) — only declare `WritesVersioned()` when actually needed.
 - All workers in a tick see the same frozen MVCC snapshot (one TSN per `Attach()`); the PTA is reused
@@ -96,6 +98,7 @@ public class MovementSystem : QuerySystem
 - [ParallelQueryTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ParallelQueryTests.cs) — all four dispatch paths (`ParallelQuery_NonVersioned_ChunkReceivesAccessor`, `ParallelQuery_WritesVersioned_ChunkReceivesTransaction`), chunk partitioning, chunk-throw isolation
 - [ChunksPerWorkerTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ChunksPerWorkerTests.cs) — `ChunksPerWorker` oversubscription factor vs. worker-count cap and entity-count cap
 - [CostChunkingTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/CostChunkingTests.cs) — `RuntimeOptions.CostBasedChunking`: the cost rule's grain, an expensive system split past the worker count, the entity rule kept when it is off or when a system sets `MinChunkSize`
+- [ChunkClusterRangeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ChunkClusterRangeTests.cs) — a dispatch's chunks tile the cluster list Prepare counted, even when a spawn grows it while they run (CD-02)
 
 ## 🔗 Related
 

@@ -6,7 +6,8 @@ using NUnit.Framework;
 namespace Typhon.Engine.Tests.Runtime;
 
 /// <summary>
-/// Every dispatch wakes every parked worker, each through its own event: no wake is lost to a worker's Reset or left to the 50 ms backstop.
+/// Every dispatch wakes every parked worker, each through its own event: no wake is lost to a worker's Reset or left to the 50 ms backstop (rule WK-01),
+/// and a wake that is lost anyway is counted once (WK-02).
 /// </summary>
 /// <remarks>
 /// <para>The wake tests raise the backstop to 30 s, so a worker the scheduler fails to wake stays parked instead of joining 50 ms late; the lost-wake
@@ -22,6 +23,9 @@ public class WorkerWakeTests
     private static readonly TimeSpan Wait = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan Backstop = TimeSpan.FromSeconds(30);
 
+    /// <summary>Distinctive substring of WK-01's rejection messages, which its mutant must trip.</summary>
+    private const string Wk01Marker = "WK-01 violated";
+
     private ResourceRegistry _registry;
 
     [SetUp]
@@ -31,6 +35,7 @@ public class WorkerWakeTests
     public void TearDown() => _registry?.Dispose();
 
     [Test]
+    [VerifiesRule("WK-01")]
     public void EveryDispatch_WakesEveryWorker()
     {
         var stalls = 0;
@@ -51,7 +56,7 @@ public class WorkerWakeTests
             scheduler.Shutdown();
         }
 
-        Assert.That(stalls, Is.Zero, $"a dispatch in tick {stallTick} left a worker parked: the others waited in their chunks for it in vain");
+        Assert.That(stalls, Is.Zero, $"{Wk01Marker}: a dispatch in tick {stallTick} left a worker parked: the others waited in their chunks for it in vain");
         Assert.That(reached, Is.True, "precondition: the scheduler did not reach tick 50");
     }
 
@@ -60,18 +65,32 @@ public class WorkerWakeTests
     /// already set. It joins that dispatch only if nothing between its check and its wait clears the event.
     /// </summary>
     [Test]
-    public void AWakeLandingAsAWorkerParks_IsNotLost()
+    [VerifiesRule("WK-01")]
+    public void AWakeLandingAsAWorkerParks_IsNotLost() => WakeLandingAsAWorkerParks(swallowTheSet: false);
+
+    /// <summary>
+    /// The <see cref="RuleMutantAttribute"/> companion: a Set swallowed between the check and the wait. The held worker Resets its own event once the
+    /// dispatch has Set it and sits the dispatch out, which the verifier must reject. From then on its chunk-mates wait 1 s for it instead of 3, since here
+    /// the stall is the expected outcome.
+    /// </summary>
+    [Test]
+    [RuleMutant("WK-01")]
+    public void ASetSwallowedBeforeTheWait_IsCaughtByTheVerifier() =>
+        RuleMutants.AssertDetects("WK-01", Wk01Marker, () => WakeLandingAsAWorkerParks(swallowTheSet: true));
+
+    private void WakeLandingAsAWorkerParks(bool swallowTheSet)
     {
         var stalls = 0;
         var stallTick = -1L;
         var caughtWorker = -1;
         var caughtAtTick = long.MaxValue;
         var released = 0;
+        var shuttingDown = 0;
         using var scheduler = BuildAllHands(tick =>
         {
             Interlocked.Increment(ref stalls);
             Interlocked.CompareExchange(ref stallTick, tick, -1L);
-        });
+        }, () => swallowTheSet && Volatile.Read(ref released) == 1 ? TimeSpan.FromSeconds(1) : Wait);
         scheduler.BetweenTickWaitProbe = workerId =>
         {
             // Only a worker whose event is clear as it parks: one still set (by a dispatch the worker ran without parking) would end the hold at once and
@@ -82,10 +101,15 @@ public class WorkerWakeTests
                 return;
             }
 
+            // Released by a dispatch's Set, not by Shutdown's: a Set swallowed during shutdown would turn a harmless stall into the mutant's detection.
             Volatile.Write(ref caughtAtTick, scheduler.CurrentTickNumber);
-            if (SpinWait.SpinUntil(() => scheduler.WorkerWakeEvent(workerId).IsSet, Wait))
+            if (SpinFor(() => scheduler.WorkerWakeEvent(workerId).IsSet, Wait) && Volatile.Read(ref shuttingDown) == 0)
             {
                 Volatile.Write(ref released, 1);
+                if (swallowTheSet)
+                {
+                    scheduler.WorkerWakeEvent(workerId).Reset();
+                }
             }
         };
 
@@ -98,13 +122,15 @@ public class WorkerWakeTests
         }
         finally
         {
+            Volatile.Write(ref shuttingDown, 1);
             scheduler.Shutdown();
         }
 
-        // A worker that never reaches its wait with the event clear fails here too: that is what a Reset moved between this probe and the wait does.
-        Assert.That(caughtWorker, Is.Not.EqualTo(-1), "no worker reached its wait with its event clear");
+        // With the Reset after this probe instead of before it, the event is still set from the wake at every probe, so no worker is ever caught here.
+        Assert.That(caughtWorker, Is.Not.EqualTo(-1), $"{Wk01Marker}: no worker reached its wait with its event clear: the Reset no longer precedes the check");
         Assert.That(released, Is.EqualTo(1), "precondition: no dispatch set the caught worker's event");
-        Assert.That(stalls, Is.Zero, $"a dispatch in tick {stallTick} left a worker parked (worker {caughtWorker} was caught in tick {caughtAtTick})");
+        Assert.That(stalls, Is.Zero,
+            $"{Wk01Marker}: a dispatch in tick {stallTick} left a worker parked (worker {caughtWorker} was caught in tick {caughtAtTick})");
         Assert.That(reached, Is.True, "precondition: the scheduler did not complete three ticks after the catch");
     }
 
@@ -113,6 +139,7 @@ public class WorkerWakeTests
     /// the worker parks again at once instead of looping on an event that stays set until the next dispatch.
     /// </summary>
     [Test]
+    [VerifiesRule("WK-01")]
     public void AWakeAlreadySeen_IsConsumedNotSpunOn()
     {
         var calls = new int[Workers];
@@ -159,7 +186,7 @@ public class WorkerWakeTests
         var ticks = scheduler.CurrentTickNumber - Volatile.Read(ref staleAtTick);
         var spins = Volatile.Read(ref calls[staleWorker]) - callsAtStale;
         Assert.That(spins, Is.LessThanOrEqualTo(ticks + 3),
-            $"the worker went round the wait {spins} times in {ticks} ticks on a Set it had already seen, instead of parking again");
+            $"{Wk01Marker}: the worker went round the wait {spins} times in {ticks} ticks on a Set it had already seen, instead of parking again");
     }
 
     /// <summary>
@@ -167,6 +194,7 @@ public class WorkerWakeTests
     /// <c>Start</c> found, not from the one it reads once it gets going.
     /// </summary>
     [Test]
+    [VerifiesRule("WK-01")]
     public void AWorkerThatStartsLate_JoinsTheFirstDispatch()
     {
         var stalls = 0;
@@ -198,7 +226,7 @@ public class WorkerWakeTests
         }
 
         Assert.That(held, Is.EqualTo(1), "precondition: worker 0 was not held until the first dispatch had woken it");
-        Assert.That(stalls, Is.Zero, $"a worker that started late sat out the dispatch in tick {stallTick}");
+        Assert.That(stalls, Is.Zero, $"{Wk01Marker}: a worker that started late sat out the dispatch in tick {stallTick}");
         Assert.That(reached, Is.True, "precondition: the scheduler did not reach tick 3");
     }
 
@@ -207,6 +235,7 @@ public class WorkerWakeTests
     /// worker is resumed by its backstop.
     /// </summary>
     [Test]
+    [VerifiesRule("WK-02")]
     public void ALostWake_IsCountedOnce()
     {
         var victim = -1;
@@ -279,6 +308,7 @@ public class WorkerWakeTests
     /// just before the last worker's Set until that worker, resumed by its backstop past the bump, has come back to its wait; nothing may be counted.
     /// </summary>
     [Test]
+    [VerifiesRule("WK-02")]
     public void ABackstopFiringBeforeItsSetArrives_IsNotALostWake()
     {
         const int victim = Workers - 1; // the dispatcher Sets it last
@@ -342,6 +372,7 @@ public class WorkerWakeTests
     /// until a later dispatch has Set its event and its tick has ended, so the check finds a completed round newer than the worker's, with its event set.
     /// </summary>
     [Test]
+    [VerifiesRule("WK-02")]
     public void ASetLandingAfterTheBackstop_IsNotALostWake()
     {
         var victim = -1;
@@ -390,6 +421,7 @@ public class WorkerWakeTests
     /// <remarks>Sensitive: the assertion is a wall-clock bound, so it belongs in the gate's serial pass.</remarks>
     [Test]
     [Category("Sensitive")]
+    [VerifiesRule("WK-01")]
     public void Shutdown_WakesEveryParkedWorker()
     {
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = Workers, BaseTickRate = 100 })
@@ -409,16 +441,95 @@ public class WorkerWakeTests
     }
 
     /// <summary>
-    /// P on the Public track and Q on a second track, so every tick dispatches twice back to back, as a runtime tick does (the Public track, then the
-    /// fence). Each runs one chunk per worker, and each chunk waits until every worker is inside one: a dispatch completes only if it woke the whole pool.
+    /// The dispatcher bumps the generation before it Sets anyone, so a worker its Set wakes finds the dispatch instead of parking again. One dispatch a
+    /// tick, so the workers have long been parked when it comes; the dispatcher is held just before the last worker's Set. Worker 0, Set first, must spend
+    /// the hold in its chunk, whose barrier waits for the last worker, and never come back to its wait.
     /// </summary>
-    private DagScheduler BuildAllHands(Action<long> onStall)
+    [Test]
+    [VerifiesRule("WK-01")]
+    public void AWokenWorker_FindsTheDispatch_BeforeTheLastSet()
     {
+        var stalls = 0;
+        var holding = 0;
+        var held = 0;
+        var heldAtTick = long.MaxValue;
+        var parkedAgain = 0;
+        var back = new int[Workers];
+        using var scheduler = BuildAllHands(_ => Interlocked.Increment(ref stalls), twoTracks: false);
+        scheduler.BetweenTickWaitProbe = workerId =>
+        {
+            // Back only on a clear event: one parking on a stale Set would leave its Wait at once, and could take the held round's generation
+            // without its own Set.
+            if (!scheduler.WorkerWakeEvent(workerId).IsSet)
+            {
+                Volatile.Write(ref back[workerId], 1);
+            }
+
+            if (workerId == 0 && Volatile.Read(ref holding) == 1)
+            {
+                Volatile.Write(ref parkedAgain, 1);
+            }
+        };
+        scheduler.WakeProbe = workerId =>
+        {
+            if (workerId == 0)
+            {
+                // Armed only on a round every worker has come back to its wait for. One still on its way back from the last round could take this
+                // round's generation without its Set, finish the dispatch during the hold, and worker 0 would then return to its wait legitimately.
+                // From here on, a worker that finds the generation unchanged once woken comes straight back to its wait.
+                var allBack = true;
+                for (var w = 0; w < Workers; w++)
+                {
+                    allBack &= Interlocked.Exchange(ref back[w], 0) == 1;
+                }
+
+                if (allBack && scheduler.CurrentTickNumber >= 3 && Volatile.Read(ref held) == 0 && !scheduler.IsShutdownRequested)
+                {
+                    Volatile.Write(ref holding, 1);
+                }
+            }
+            else if (workerId == Workers - 1 && Volatile.Read(ref holding) == 1 && Volatile.Read(ref held) == 0)
+            {
+                Volatile.Write(ref heldAtTick, scheduler.CurrentTickNumber);
+                SpinFor(() => Volatile.Read(ref parkedAgain) == 1, TimeSpan.FromMilliseconds(200));
+                Volatile.Write(ref holding, 0);
+                Volatile.Write(ref held, 1);
+            }
+        };
+
+        bool reached;
+        try
+        {
+            scheduler.Start();
+            reached = SpinWait.SpinUntil(() => Volatile.Read(ref held) == 1 && scheduler.CurrentTickNumber >= Volatile.Read(ref heldAtTick) + 2,
+                TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            scheduler.Shutdown();
+        }
+
+        Assert.That(held, Is.EqualTo(1), "precondition: the dispatcher was never held before the last worker's Set");
+        Assert.That(parkedAgain, Is.Zero, $"{Wk01Marker}: worker 0, Set before the generation moved, found no dispatch and parked again");
+        Assert.That(stalls, Is.Zero, $"{Wk01Marker}: a dispatch left a worker parked");
+        Assert.That(reached, Is.True, "precondition: the scheduler did not complete two ticks after the hold");
+    }
+
+    /// <summary>
+    /// P on the Public track and, with <paramref name="twoTracks"/>, Q on a second track, so every tick dispatches twice back to back, as a runtime tick
+    /// does (the Public track, then the fence). Each runs one chunk per worker, and each chunk waits until every worker is inside one: a dispatch
+    /// completes only if it woke the whole pool.
+    /// </summary>
+    private DagScheduler BuildAllHands(Action<long> onStall, Func<TimeSpan> chunkWait = null, bool twoTracks = true)
+    {
+        var waitForAll = chunkWait ?? (() => Wait);
         var arrived = 0;
         var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = Workers, BaseTickRate = 1000 });
-        schedule.PublicTrack.DeclareDag("AllHands").QuerySystem("P", _ => { }, input: () => null, parallel: true);
-        var scheduler = schedule.DeclareTrack("Second").DeclareDag("AllHandsAgain").QuerySystem("Q", _ => { }, input: () => null, parallel: true)
-            .Build(_registry.Runtime);
+        var publicDag = schedule.PublicTrack.DeclareDag("AllHands").QuerySystem("P", _ => { }, input: () => null, parallel: true);
+        var scheduler = twoTracks
+            ? schedule.DeclareTrack("Second").DeclareDag("AllHandsAgain").QuerySystem("Q", _ => { }, input: () => null, parallel: true)
+                .Build(_registry.Runtime)
+            : publicDag.Build(_registry.Runtime);
         scheduler.BetweenTickWaitBackstop = Backstop;
         scheduler.ParallelQueryPrepareCallback = _ =>
         {
@@ -430,7 +541,7 @@ public class WorkerWakeTests
             // A dispatch still in flight when the test shuts the scheduler down loses its workers to the shutdown exit: not a stall, and not worth waiting on.
             // SpinFor, not SpinWait.SpinUntil: its back-off sleeps 1-15 ms at a time, once per dispatch, which put this fixture over a second.
             Interlocked.Increment(ref arrived);
-            SpinFor(() => Volatile.Read(ref arrived) >= Workers || scheduler.IsShutdownRequested, Wait);
+            SpinFor(() => Volatile.Read(ref arrived) >= Workers || scheduler.IsShutdownRequested, waitForAll());
             if (Volatile.Read(ref arrived) < Workers && !scheduler.IsShutdownRequested)
             {
                 onStall(scheduler.CurrentTickNumber);

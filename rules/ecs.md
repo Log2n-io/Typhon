@@ -305,7 +305,7 @@ applied synchronously inside `Commit()`, not at the fence.
   never loading the array before the count. That yields an array SHORTER than the count about to index it, and it needs no
         instruction reordering to fault — a plain interleaving suffices: read the length-16 array, let a concurrent spawn
         resize and bump the count to 17, read 17, index 16.
-  never a call site reading the pair directly. All five go through `TyphonRuntime.ReadActiveClusterList`, because the two
+  never a call site reading the pair directly. Every one goes through `TyphonRuntime.ReadActiveClusterList`, because the two
         sites that already loaded count-first were right by ACCIDENT and nothing stopped the next one from being written
         either way.
   enforce `AddToActiveList` stores the grown array plainly and publishes the count with `Volatile.Write`; the release
@@ -313,7 +313,8 @@ applied synchronously inside `Commit()`, not at the fence.
           either into a local first is what must NOT be done — it widens the writer's own window and reintroduces the fault.
   scope: ArchetypeClusterState.AddToActiveList / RemoveFromActiveList (writer), ArchetypeClusterState.ReadActiveClusterList
          (the one reader) and its callers — TyphonRuntime.ReadActiveClusterList, which now only delegates, and through it the
-         dormancy promote, the checkerboard promote and three chunk-partition sites, plus EcsQuery.TryCountViaOccupancy
+         dormancy promote, the checkerboard promote and the dispatch capture in OnParallelQueryPrepare (the chunk-partition sites
+         read that capture, never the pair: CD-02), plus EcsQuery.TryCountViaOccupancy
   on_violation: `IndexOutOfRangeException` out of the parallel-query prepare, on a worker thread. LOUD, which is the only
                 good thing about it.
   rationale: #582 face 2. Note what this rule does NOT give: it makes the pair CONSISTENT, not the walk SAFE. A walker

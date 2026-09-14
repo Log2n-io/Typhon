@@ -1434,6 +1434,8 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             byte wakeReason = 0; // woken: by the signal, or by the backstop with no wake lost
             while (Volatile.Read(ref _tickGeneration) == lastGen)
             {
+                // First after the check, so a Reset anywhere between the check and the Wait would come after it (WorkerWakeTests).
+                BetweenTickWaitProbe?.Invoke(workerId);
                 if (Volatile.Read(ref _workerShutdown) != 0)
                 {
                     betweenTickSpan.WakeReason = 1; // shutdown
@@ -1444,7 +1446,6 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                     return;
                 }
 
-                BetweenTickWaitProbe?.Invoke(workerId);
                 if (!wake.Wait(BetweenTickWaitBackstop))
                 {
                     BackstopProbe?.Invoke(workerId);
@@ -1460,10 +1461,11 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
                 // Reset after every return, before the loop re-checks the generation — never between the check and the wait, where it would swallow a Set
                 // that landed in between. Without it, a Set whose generation this worker had already seen (one that landed after the worker left this loop
-                // without parking) would keep the event set, and the loop would spin on it until the next dispatch. Reset is an interlocked update, a full
-                // fence, so the re-check is not read ahead of it; and the dispatcher bumps the generation before it Sets, so any Set the Reset clears
-                // belongs to a generation the re-check sees.
+                // without parking) would keep the event set, and the loop would spin on it until the next dispatch. The re-check must not be read ahead of
+                // the Reset, a store followed by a load, which x64 reorders too: hence the barrier, stated here rather than left to Reset's own interlocked
+                // update. The dispatcher bumps the generation before it Sets, so any Set the Reset clears belongs to a generation the re-check sees.
                 wake.Reset();
+                Interlocked.MemoryBarrier();
             }
             {
                 var btEnd = Stopwatch.GetTimestamp();

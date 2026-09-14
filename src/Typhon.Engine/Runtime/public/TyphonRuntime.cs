@@ -80,7 +80,10 @@ public sealed partial class TyphonRuntime : IDisposable
     // The cost rule's input (RuntimeOptions.CostBasedChunking): each parallel QuerySystem's worker time per entity, in Stopwatch ticks, at its last
     // dispatch. Written at tick end on the tick driver (CaptureChunkCosts), read by the next dispatch's Prepare. Zero = no measurement yet: entity rule.
     private readonly double[] _chunkTicksPerEntity;
-
+    // The cluster list a parallel QuerySystem's live dispatch splits, and its length, read once in Prepare. Its chunks walk this array and split this
+    // length, never the live pair (CD-02).
+    private readonly int[][] _dispatchClusterIds;
+    private readonly int[] _dispatchClusterCount;
     // Issue #234: checkerboard two-phase dispatch. Phase tracking + Red/Black cluster buffers per system.
     // _checkerboardPhase: 0 = not checkerboard or reset, 1 = Red (phase A active), 2 = Black (phase B active).
     private readonly int[] _checkerboardPhase;
@@ -271,6 +274,8 @@ public sealed partial class TyphonRuntime : IDisposable
         _systemTierClusterIds = new int[scheduler.AllSystemCount][];
         _systemTierClusterCount = new int[scheduler.AllSystemCount];
         _chunkTicksPerEntity = new double[scheduler.AllSystemCount];
+        _dispatchClusterIds = new int[scheduler.AllSystemCount][];
+        _dispatchClusterCount = new int[scheduler.AllSystemCount];
         _systemAmortizationBuffers = new int[scheduler.AllSystemCount][];
         _tierRangeViews = new ClusterRangeEntityView[scheduler.AllSystemCount][];
         _checkerboardPhase = new int[scheduler.AllSystemCount];
@@ -1338,6 +1343,25 @@ public sealed partial class TyphonRuntime : IDisposable
             }
         }
 
+        // CD-02: the dispatch splits the cluster list as it stands now, and its chunks walk this array and split this length, not the live pair. A spawn can
+        // append to the archetype's list while they run (AddToActiveList, under its latch), and chunks that read two lengths would not tile it; an append
+        // leaves the array's first entries as they are, even when it moves the list to a larger array. A removal does not, and no Destroy commit on the
+        // archetype may overlap the walk (CLUSTERWALK-01).
+        var dispatchIds = _systemTierClusterIds[sysIdx];
+        var dispatchClusters = _systemTierClusterCount[sysIdx];
+        if (dispatchIds == null)
+        {
+            dispatchClusters = 0;
+            var dispatchState = _systemClusterStates[sysIdx];
+            if (dispatchState != null)
+            {
+                dispatchIds = ReadActiveClusterList(dispatchState, out dispatchClusters);
+            }
+        }
+
+        _dispatchClusterIds[sysIdx] = dispatchIds;
+        _dispatchClusterCount[sysIdx] = dispatchClusters;
+
         if (sys.WritesVersioned)
         {
             // Paths 3 & 4: Versioned fallback — materialize entity list, per-chunk Transactions
@@ -1539,16 +1563,10 @@ public sealed partial class TyphonRuntime : IDisposable
     /// </summary>
     private int ChunkUnits(int entityCount, int width, int sysIdx)
     {
-        var clusters = int.MaxValue;
-        if (_systemTierClusterIds[sysIdx] != null)
-        {
-            clusters = _systemTierClusterCount[sysIdx];
-        }
-        else if (_systemClusterStates[sysIdx] is { ClusterSegment: not null } cs)
-        {
-            ReadActiveClusterList(cs, out clusters);
-        }
-
+        // The length Prepare counted (CD-02), not the live one: a spawn since must not size the chunks against a longer list than they split.
+        var clusters = _systemTierClusterIds[sysIdx] != null || _systemClusterStates[sysIdx] is { ClusterSegment: not null }
+            ? _dispatchClusterCount[sysIdx]
+            : int.MaxValue;
         return Math.Min(entityCount, Math.Max(width, clusters));
     }
 
@@ -1579,6 +1597,19 @@ public sealed partial class TyphonRuntime : IDisposable
                 _chunkTicksPerEntity[i] = (double)m.WorkTicks / m.EntitiesProcessed;
             }
         }
+    }
+
+    /// <summary>
+    /// The cluster range chunk <paramref name="chunkIndex"/> of <paramref name="totalChunks"/> walks: its share of an equal split of the list its dispatch
+    /// counted in Prepare, the first <c>clusters % totalChunks</c> chunks taking one cluster more. The ranges tile that list (CD-02).
+    /// </summary>
+    private void ChunkClusterRange(int sysIdx, int chunkIndex, int totalChunks, out int start, out int end)
+    {
+        var clusters = _dispatchClusterCount[sysIdx];
+        var size = clusters / totalChunks;
+        var remainder = clusters % totalChunks;
+        start = chunkIndex * size + Math.Min(chunkIndex, remainder);
+        end = start + size + (chunkIndex < remainder ? 1 : 0);
     }
 
     /// <summary>
@@ -1659,38 +1690,18 @@ public sealed partial class TyphonRuntime : IDisposable
             var count = baseSize + (chunkIndex < remainder ? 1 : 0);
             entities = new PooledEntitySlice(fullList.BackingArray, start, count);
 
-            // ClusterIds: tier list when present, otherwise the archetype's ActiveClusterIds. Game systems iterating via
+            // ClusterIds: the list Prepare captured — the tier list when present, otherwise the archetype's ActiveClusterIds. Game systems iterating via
             // ctx.Accessor.GetClusterEnumerator(ctx.ClusterIds, ...) still get the correct cluster set.
-            if (tierIds != null)
+            clusterIdArray = _dispatchClusterIds[sysIdx];
+            if (clusterIdArray != null)
             {
-                int tierCount = _systemTierClusterCount[sysIdx];
-                var tierBase = tierCount / totalChunks;
-                var tierRem = tierCount % totalChunks;
-                clusterStart = chunkIndex * tierBase + Math.Min(chunkIndex, tierRem);
-                clusterEnd = clusterStart + tierBase + (chunkIndex < tierRem ? 1 : 0);
-                clusterIdArray = tierIds;
-            }
-            else
-            {
-                var cs = _systemClusterStates[sysIdx];
-                if (cs != null)
-                {
-                    clusterIdArray = ReadActiveClusterList(cs, out var totalClusters);
-                    var cBase = totalClusters / totalChunks;
-                    var cRemainder = totalClusters % totalChunks;
-                    clusterStart = chunkIndex * cBase + Math.Min(chunkIndex, cRemainder);
-                    clusterEnd = clusterStart + cBase + (chunkIndex < cRemainder ? 1 : 0);
-                }
+                ChunkClusterRange(sysIdx, chunkIndex, totalChunks, out clusterStart, out clusterEnd);
             }
         }
         else if (tierIds != null)
         {
             // Tier-filtered, no change filter: walk the tier's clusters via ClusterRangeEntityView.
-            int tierCount = _systemTierClusterCount[sysIdx];
-            var tierBase = tierCount / totalChunks;
-            var tierRem = tierCount % totalChunks;
-            clusterStart = chunkIndex * tierBase + Math.Min(chunkIndex, tierRem);
-            clusterEnd = clusterStart + tierBase + (chunkIndex < tierRem ? 1 : 0);
+            ChunkClusterRange(sysIdx, chunkIndex, totalChunks, out clusterStart, out clusterEnd);
             clusterIdArray = tierIds;
 
             var cs = _systemClusterStates[sysIdx];
@@ -1731,11 +1742,8 @@ public sealed partial class TyphonRuntime : IDisposable
             var cs = _systemClusterStates[sysIdx];
             if (cs != null)
             {
-                clusterIdArray = ReadActiveClusterList(cs, out var totalClusters);
-                var cBase = totalClusters / totalChunks;
-                var cRemainder = totalClusters % totalChunks;
-                clusterStart = chunkIndex * cBase + Math.Min(chunkIndex, cRemainder);
-                clusterEnd = clusterStart + cBase + (chunkIndex < cRemainder ? 1 : 0);
+                clusterIdArray = _dispatchClusterIds[sysIdx];
+                ChunkClusterRange(sysIdx, chunkIndex, totalChunks, out clusterStart, out clusterEnd);
             }
         }
 
@@ -1881,28 +1889,10 @@ public sealed partial class TyphonRuntime : IDisposable
             // ctx.Accessor.GetClusterEnumerator(ctx.ClusterIds, ...) sees the correct tier scope. The cluster partition is computed independently of
             // the entity partition above.
             int clusterStart = 0, clusterEnd = 0;
-            int[] clusterIdArray = null;
-            var tierIds = _systemTierClusterIds[sysIdx];
-            if (tierIds != null)
+            var clusterIdArray = _dispatchClusterIds[sysIdx];
+            if (clusterIdArray != null)
             {
-                int tierCount = _systemTierClusterCount[sysIdx];
-                var tierBase = tierCount / totalChunks;
-                var tierRem = tierCount % totalChunks;
-                clusterStart = chunkIndex * tierBase + Math.Min(chunkIndex, tierRem);
-                clusterEnd = clusterStart + tierBase + (chunkIndex < tierRem ? 1 : 0);
-                clusterIdArray = tierIds;
-            }
-            else
-            {
-                var cs = _systemClusterStates[sysIdx];
-                if (cs != null)
-                {
-                    clusterIdArray = ReadActiveClusterList(cs, out var totalClusters);
-                    var cBase = totalClusters / totalChunks;
-                    var cRemainder = totalClusters % totalChunks;
-                    clusterStart = chunkIndex * cBase + Math.Min(chunkIndex, cRemainder);
-                    clusterEnd = clusterStart + cBase + (chunkIndex < cRemainder ? 1 : 0);
-                }
+                ChunkClusterRange(sysIdx, chunkIndex, totalChunks, out clusterStart, out clusterEnd);
             }
 
             var ctx = new TickContext
