@@ -79,6 +79,12 @@ public sealed class SimConfig
     /// <summary>Floor of the repair-nomination gate as a fraction of the cell edge — the engine's <c>ClusterRepairExtentRatio</c>.</summary>
     public float ClusterRepairExtentRatio = 0.75f;
 
+    /// <summary>
+    /// The repair safety valve's threshold — the engine's <c>ClusterRepairCriticalExtentRatio</c>. <c>0</c> disables the valve, which a repair ratio of
+    /// 1 or more requires: the valve must sit strictly between the repair ratio and 1.2.
+    /// </summary>
+    public float ClusterRepairCriticalExtentRatio = 1.0f;
+
     /// <summary>Clusters per repair unit — the engine's <c>RepairWorstClustersPerUnit</c>; <c>0</c> re-sorts a whole cell as one unit.</summary>
     public int RepairWorstClustersPerUnit = 8;
 

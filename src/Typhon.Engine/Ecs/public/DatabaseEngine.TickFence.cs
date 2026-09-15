@@ -1469,6 +1469,9 @@ public partial class DatabaseEngine
                     var accessorLocal = clusterState.ClusterSegment.CreateChunkAccessor();
                     try
                     {
+                        // Timed as ② and ⑤, which PrepMaskTicks' summary already said the clean branch was: untimed, a barrier-only archetype reported an
+                        // empty Prep split while its walk ran.
+                        var rebuildStart = Stopwatch.GetTimestamp();
                         var wordCount = clusterState.PrimarySegmentCapacity;
                         var spatialBits = new long[Math.Max(wordCount, 1)];
 
@@ -1506,7 +1509,10 @@ public partial class DatabaseEngine
                             spatialBits[chId] = (long)occ;
                         }
 
+                        var detectStart = Stopwatch.GetTimestamp();
+                        clusterState.PrepMaskTicks += detectStart - rebuildStart;
                         DetectClusterMigrations(clusterState, engineState, meta.ArchetypeId, spatialBits, ref accessorLocal);
+                        clusterState.PrepDetectTicks += Stopwatch.GetTimestamp() - detectStart;
                         clusterState.FenceDirtyBits = spatialBits;
                         clusterState.FenceBranchPath = 1; // clean-spatial-refresh: AABB recompute in Finalize, no WAL
                     }

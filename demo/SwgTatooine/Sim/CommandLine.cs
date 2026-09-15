@@ -23,6 +23,7 @@ public static class CommandLine
         c.ClusterTargetPackingSlack = Float(args, "--packing-slack", c.ClusterTargetPackingSlack);
         c.ClusterTargetExtentRatio = Float(args, "--target-ratio", c.ClusterTargetExtentRatio);
         c.ClusterRepairExtentRatio = Float(args, "--repair-ratio", c.ClusterRepairExtentRatio);
+        c.ClusterRepairCriticalExtentRatio = Float(args, "--repair-critical", c.ClusterRepairCriticalExtentRatio);
         c.RepairWorstClustersPerUnit = Int(args, "--repair-unit", c.RepairWorstClustersPerUnit);
         c.RepairCooldownTicks = Int(args, "--repair-cooldown", c.RepairCooldownTicks);
         c.ShuttleShare = Float(args, "--shuttle-share", c.ShuttleShare);

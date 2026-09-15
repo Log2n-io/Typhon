@@ -136,6 +136,24 @@ public sealed partial class SimBridge
         var busyNs = busyAll * 1e9 / Stopwatch.Frequency;
         Console.WriteLine($"  awareness work: {busyNs / Math.Max(1, queriesAll):F1} ns per query, {busyNs / Math.Max(1, hitsAll):F2} ns per hit, "
             + $"{Median(busyUs):F0} us of worker time per tick (median), {hitsAll / (double)Math.Max(1, queriesAll):F1} hits per query");
+
+        // The same cost per window of the measured run, oldest first: whether a query gets dearer as the run goes on.
+        var windowTicks = Math.Max(100, _config.MeasuredTicks / 10);
+        var windows = new SortedDictionary<long, (long Busy, long Queries)>();
+        for (var i = 0; i < n; i++)
+        {
+            var w = Math.Max(0, _chunkTick[i] - _config.WarmTicks) / windowTicks;
+            windows.TryGetValue(w, out var acc);
+            windows[w] = (acc.Busy + (_chunkEnd[i] - _chunkStart[i]), acc.Queries + _chunkQueries[i]);
+        }
+
+        var perWindow = new List<string>();
+        foreach (var acc in windows.Values)
+        {
+            perWindow.Add($"{acc.Busy * 1e9 / Stopwatch.Frequency / Math.Max(1, acc.Queries):F0}");
+        }
+
+        Console.WriteLine($"  awareness ns per query by {windowTicks}-tick window: {string.Join(" ", perWindow)}");
     }
 
     private static double At(List<double> sorted, double p) =>

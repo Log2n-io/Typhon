@@ -213,6 +213,7 @@ public static class Sweep
         ClusterTargetPackingSlack = c.ClusterTargetPackingSlack,
         ClusterTargetExtentRatio = c.ClusterTargetExtentRatio,
         ClusterRepairExtentRatio = c.ClusterRepairExtentRatio,
+        ClusterRepairCriticalExtentRatio = c.ClusterRepairCriticalExtentRatio,
         RepairWorstClustersPerUnit = c.RepairWorstClustersPerUnit,
         RepairCooldownTicks = c.RepairCooldownTicks,
         Shuttles = c.Shuttles,

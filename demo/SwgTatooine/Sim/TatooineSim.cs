@@ -119,6 +119,7 @@ public sealed partial class TatooineSim : IDisposable
             cellSize: cell,
             clusterTargetExtentRatio: _config.ClusterTargetExtentRatio,
             clusterRepairExtentRatio: _config.ClusterRepairExtentRatio,
+            clusterRepairCriticalExtentRatio: _config.ClusterRepairCriticalExtentRatio,
             reclusterBudgetMs: _config.ReclusterBudgetMs,
             repairWorstClustersPerUnit: _config.RepairWorstClustersPerUnit,
             repairCooldownTicks: _config.RepairCooldownTicks,
