@@ -127,6 +127,76 @@ class ExceptionHandlingTests
             "Independent successor should run on every tick after the throwing system");
     }
 
+    /// <summary>
+    /// A failed parallel system completes through the drain — the claims after the failure are counted down without running, and the last one completes it.
+    /// That completion must still run the system's cleanup, which returns the dispatch's entity list and resets the checkerboard phase, and must not start
+    /// the next phase the cleanup asks for: the single-threaded path stops there too. The drain used to complete the system without its cleanup.
+    /// </summary>
+    [Test]
+    public void AFailedParallelSystem_RunsItsCleanupOnce_AndStartsNoFurtherPhase()
+    {
+        const int workers = 4;
+        var tick = 0;
+        var prepares = new int[4];
+        var cleanups = new int[4];
+        var throwerThread = 0;
+        var throwerBack = 0;
+        var claimsInTickOne = 0;
+
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = workers, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.CallbackSystem("Gate", _ => Interlocked.Increment(ref tick));
+        dag.QuerySystem("P", _ => { }, after: "Gate", input: () => null, parallel: true);
+
+        using var scheduler = dag.Build(_registry.Runtime);
+        scheduler.ParallelQueryPrepareCallback = _ =>
+        {
+            Interlocked.Increment(ref prepares[Math.Min(Volatile.Read(ref tick), 3)]);
+            return 4;
+        };
+
+        // Phase A asks for a phase B; phase B ends the system — the checkerboard protocol, once per tick.
+        scheduler.ParallelQueryCleanupCallback = _ => Interlocked.Increment(ref cleanups[Math.Min(Volatile.Read(ref tick), 3)]) == 1;
+        scheduler.ParallelQueryChunkCallback = (_, chunk, _, _) =>
+        {
+            if (Volatile.Read(ref tick) == 1 && chunk == 0)
+            {
+                Volatile.Write(ref throwerThread, Environment.CurrentManagedThreadId);
+                throw new InvalidOperationException("P fails in tick 1 on purpose");
+            }
+        };
+
+        // Tick 1: the first claim (chunk 0) goes ahead; every other waits until the thrower has counted chunk 0 down and come back for its next claim. So
+        // chunks 1..3 are all claimed after the failure, all drained, and the system completes through the drain.
+        scheduler.ClaimProbe = (_, point) =>
+        {
+            if (point != 0 || Volatile.Read(ref tick) != 1)
+            {
+                return;
+            }
+
+            if (Environment.CurrentManagedThreadId == Volatile.Read(ref throwerThread))
+            {
+                Volatile.Write(ref throwerBack, 1);
+                return;
+            }
+
+            if (Interlocked.Increment(ref claimsInTickOne) != 1)
+            {
+                SpinWait.SpinUntil(() => Volatile.Read(ref throwerBack) == 1, TimeSpan.FromSeconds(3));
+            }
+        };
+
+        scheduler.Start();
+        var reachedTickThree = SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= 3, TimeSpan.FromSeconds(3));
+        scheduler.Shutdown();
+
+        Assert.That(reachedTickThree, Is.True, "precondition: the scheduler did not get past tick 2");
+        Assert.That(throwerBack, Is.EqualTo(1), "precondition: the worker that threw never came back for another claim, so nothing was drained");
+        Assert.That(cleanups[1], Is.EqualTo(1), "tick 1: the failed system's cleanup must run once, on the drain's completion");
+        Assert.That(prepares[1], Is.EqualTo(1), "tick 1: the failed system must not be dispatched for the phase its cleanup asked for");
+        Assert.That((prepares[2], cleanups[2]), Is.EqualTo((2, 2)), "tick 2: both phases run and each is cleaned up");
+    }
+
     [Test]
     public void SystemException_IndependentBranchContinues()
     {

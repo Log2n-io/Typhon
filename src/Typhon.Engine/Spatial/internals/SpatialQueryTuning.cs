@@ -35,4 +35,8 @@ internal static class SpatialQueryTuning
 
     /// <summary>Match the linear per-cell index a batch of 64 clusters at a time with SIMD, instead of one at a time.</summary>
     internal static bool SimdLinearScan = true;
+
+    /// <summary>Test an AABB2F cluster's entities sixteen at a time with SIMD (<c>NarrowphaseAabb2F</c>), instead of one at a time. Read when a query is
+    /// constructed.</summary>
+    internal static bool SimdNarrowphase = true;
 }

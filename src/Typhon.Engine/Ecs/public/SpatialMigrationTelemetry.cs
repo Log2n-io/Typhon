@@ -142,6 +142,8 @@ public readonly struct SpatialMigrationTelemetry
     /// A Morton sort cannot be halved — a partly re-sorted cell has paid the cost and banked only part of the benefit — so the budget admits whole units and
     /// refuses the rest outright. A persistently non-zero reading against a zero <see cref="RepairUnitCount"/> means the budget is below the cost of the
     /// smallest unit on offer and no repair can ever happen; raise <c>ReclusterBudgetMs</c>, or lower <c>RepairWorstClustersPerUnit</c> so a unit is smaller.
+    /// Only on ticks granted the whole budget: below it (<see cref="ReclusterBudgetGrantedMs"/>) the budget controller is withholding it by design (TH-04),
+    /// and units go unrepaired on purpose — refused, or at the controller's floor not even priced, so this reads zero there.
     /// </remarks>
     public int RepairUnitsRefused { get; }
 
@@ -327,7 +329,9 @@ public readonly struct SpatialMigrationTelemetry
     /// <remarks>
     /// <b>The only budget overshoot the engine permits</b>, and it is bounded: the valve caps its unit at <c>RepairWorstClustersPerUnit</c> clusters and
     /// fires at most once per tick per archetype. A persistently non-zero reading means degradation is outrunning the budget — the condition §5.6's valve
-    /// exists to bound rather than to hide, so raise <c>ReclusterBudgetMs</c> rather than treating the valve as the steady state.
+    /// exists to bound rather than to hide, so raise <c>ReclusterBudgetMs</c> rather than treating the valve as the steady state — unless
+    /// <see cref="ReclusterBudgetGrantedMs"/> sits below it, in which case the budget controller is withholding the budget and the valve is what still
+    /// bounds degradation meanwhile (TH-04).
     /// </remarks>
     public int RepairValveFires { get; init; }
 
@@ -343,6 +347,16 @@ public readonly struct SpatialMigrationTelemetry
     /// degrades, and cells are being forgotten. Zero at a depth below the cap is the healthy reading.
     /// </remarks>
     public long RepairQueueEvicted { get; init; }
+
+    /// <summary>
+    /// Cells waiting out <c>SpatialGridConfig.RepairCooldownTicks</c> after a repair. A LEVEL, like <see cref="RepairQueueDepth"/>, and disjoint from it: a
+    /// cooling cell is not a queue candidate.
+    /// </summary>
+    /// <remarks>
+    /// What separates "nothing was repaired because the degraded cells were repaired recently" from "nothing was repaired because nothing degraded" when
+    /// <see cref="RepairUnitCount"/> reads zero. Always zero with the cooldown disabled.
+    /// </remarks>
+    public int RepairCellsCooling { get; init; }
 
     /// <summary>
     /// Milliseconds spent maintaining the repair queue — absorbing nominations and re-ranking — during the most recently completed tick.
@@ -427,16 +441,24 @@ public readonly struct SpatialMigrationTelemetry
     public double RepairBudgetStarvedNs { get; init; }
 
     /// <summary>
-    /// The largest distance by which any of this archetype's cluster boxes reaches outside its own cell, in world units (#911 O2).
+    /// How far past its own cell every cell-walking query reaches for this archetype's clusters, in world units: the largest in-world overhang of any cluster
+    /// the queries do not visit by name (#911 O2; bounded 2026-09-13). The named ones are counted in <see cref="EscapedClusterCount"/>.
     /// </summary>
     /// <remarks>
-    /// <para><b>A third clock, and the only member with one.</b> It is neither per-tick nor a growing total: it is a running MAXIMUM that never falls, by
-    /// design — every kNN ring test widens by it, and too large merely widens a search while too small loses results. So it does not reset at the fence and
-    /// <see cref="DatabaseEngine.GetSpatialTelemetryTotal"/> takes the max across archetypes rather than the sum. Differentiating it yields nothing.</para>
-    /// <para>Non-zero only once a cluster has proved it: a world of point entities reports zero forever, which is correct rather than missing. Rises at the
-    /// fence following the write that produced it, not at the write.</para>
+    /// <para><b>A LEVEL, recomputed at every fence.</b> It was a running maximum that never fell, and one transient outlier — an entity teleported and not
+    /// yet migrated — then widened every later query of the archetype for the rest of the process. It now describes the boxes the coming tick's queries
+    /// read, so it falls once the cluster that raised it is fixed. <see cref="DatabaseEngine.GetSpatialTelemetryTotal"/> takes the max across
+    /// archetypes, never the sum: summing would widen every walk by bounds no single archetype has.</para>
+    /// <para>Only the part of a box inside the grid counts — an edge cell's outward side faces no cell, and every query range is clamped into the grid.
+    /// Between fences only a spawn raises it.</para>
     /// </remarks>
-    public float MaxClusterOverhang { get; init; }
+    public float ClusterReach { get; init; }
+
+    /// <summary>
+    /// Clusters whose in-world overhang exceeds <see cref="ClusterReach"/>, which every query therefore tests by name — at most 16; past that the reach
+    /// widens to cover the rest. A level, recomputed at every fence; the total sums it.
+    /// </summary>
+    public int EscapedClusterCount { get; init; }
 
     /// <summary>Cell halves promoted from the linear scan to a per-cell R-Tree during the most recently completed tick.</summary>
     /// <remarks>
@@ -494,6 +516,93 @@ public readonly struct SpatialMigrationTelemetry
     /// statistic can say so explicitly rather than inheriting one silently. Zero when <see cref="TightnessSampleCount"/> is zero.
     /// </remarks>
     public double MeanTightnessToBound => MeanPackingBound > 0d ? MeanClusterExtentRatio / MeanPackingBound : 0d;
+
+    /// <summary>
+    /// Clusters this archetype's range queries opened since the previous fence — the queries the systems of the tick this fence closes ran.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Range queries only:</b> AABB and radius queries through <c>MoveNext</c>, <c>Count</c> or <c>Fill</c>, one at a time or batched
+    /// (<c>CountRadius</c>, <c>ForEachInRadius</c>) — the game's, and the engine's own interest and trigger systems'. A batch counts what its members'
+    /// own queries would have: a cluster it opens once for five members counts five. Nearest-neighbour, ray and frustum queries are not counted.</para>
+    /// <para><b>A rate</b>, like the per-tick members, though queries produce it rather than the fence: each thread counts its own queries, and the fence
+    /// takes the delta once per tick (SO-02). Read it against <see cref="QueryHits"/>: clusters per match is the per-cluster side of what a query pays,
+    /// which <see cref="QueryCandidatesPerHit"/> does not see.</para>
+    /// </remarks>
+    public long QueryClustersOpened { get; init; }
+
+    /// <summary>
+    /// Entities in the clusters those queries opened: every occupied slot, whether or not the query went on to test it. A query that stops at its first
+    /// match still counts its whole cluster, so the count is the same whichever narrowphase the machine runs.
+    /// </summary>
+    public long QueryCandidates { get; init; }
+
+    /// <summary>Matches those queries returned.</summary>
+    public long QueryHits { get; init; }
+
+    /// <summary>
+    /// <see cref="QueryCandidates"/> over <see cref="QueryHits"/>: entities a match cost. <c>1</c> would be a partition whose every candidate matched.
+    /// What intra-cell maintenance buys, measured where it is spent.
+    /// </summary>
+    /// <remarks>
+    /// <para>A ratio of the tick's sums, so a query with many matches weighs more than one with few, and <see cref="DatabaseEngine.GetSpatialTelemetryTotal"/>
+    /// derives it from its own sums. Its floor depends on the query shape — a radius query's box holds more than its sphere — so compare it with itself
+    /// over time, not across games.</para>
+    /// <para><b>Zero when nothing matched</b>, including a tick whose queries opened clusters and matched nothing: below the floor of 1, so a consumer
+    /// tracking the best value seen must work from the sums, not from this ratio.</para>
+    /// </remarks>
+    public double QueryCandidatesPerHit => QueryHits > 0 ? (double)QueryCandidates / QueryHits : 0d;
+
+    /// <summary>
+    /// The re-clustering budget this archetype was granted for the most recently completed tick, in milliseconds: <c>ReclusterBudgetMs</c> times the share
+    /// its queries' efficiency earned (rule TH-04). What the repair planner, the throttle and the drift scan spent against.
+    /// </summary>
+    /// <remarks>
+    /// Read against <see cref="ReclusterBudgetUsedMs"/>, the part repair committed. The whole configured budget when the controller is off
+    /// (<c>QueryEfficiencyTolerance</c> 0) or the archetype's range queries hit too little to steer by; next to nothing while they test as few entities per
+    /// match as they ever have. <see cref="DatabaseEngine.GetSpatialTelemetryTotal"/> sums it: what the tick granted across archetypes.
+    /// </remarks>
+    public double ReclusterBudgetGrantedMs { get; init; }
+
+    /// <summary>
+    /// The budget controller's input: candidates per hit over about the last twenty ticks, as smoothed candidates over smoothed hits. A LEVEL. Zero while the
+    /// archetype's range queries hit too little to steer by.
+    /// </summary>
+    public double QueryCandidatesPerHitSmoothed { get; init; }
+
+    /// <summary>
+    /// The lowest <see cref="QueryCandidatesPerHitSmoothed"/> since the budget controller last re-based it, or since its first signal: the controller's set
+    /// point. A LEVEL. Zero without a signal.
+    /// </summary>
+    /// <remarks>
+    /// The granted share of the budget is <c>(smoothed / best - 1) / QueryEfficiencyTolerance</c>, clamped to (0, 1]. It is only ever lowered, except by a
+    /// re-base (<see cref="TotalEfficiencyRebases"/>). <see cref="DatabaseEngine.GetSpatialTelemetryTotal"/> gives the hits-weighted mean of the
+    /// archetypes' bests, the weighting its smoothed value carries.
+    /// </remarks>
+    public double QueryCandidatesPerHitBest { get; init; }
+
+    /// <summary>
+    /// Times the budget controller re-based its best since this archetype's cluster state was created: each one a level the whole budget failed to bring
+    /// back within the tolerance for 200 consecutive ticks, accepted as the world's (TH-04). Cumulative; differentiate for a rate.
+    /// </summary>
+    /// <remarks>
+    /// The controller's "maintenance could not keep up" event. Rare is healthy; a steady rate says the world degrades faster than the configured budget
+    /// repairs, which a fixed budget would have lost as well. <see cref="DatabaseEngine.GetSpatialTelemetryTotal"/> sums it.
+    /// </remarks>
+    public long TotalEfficiencyRebases { get; init; }
+
+    /// <summary>
+    /// Consecutive ticks the budget controller has granted the whole budget because the queries sat at or past the tolerance: the re-base window's
+    /// progress. A LEVEL. <see cref="DatabaseEngine.GetSpatialTelemetryTotal"/> takes the maximum across archetypes.
+    /// </summary>
+    public int TicksAtWholeBudget { get; init; }
+
+    /// <summary>
+    /// The throttle's multiplier on the drift target (step 14, D2): 1 is none, and at its cap the target reaches the cell and relocation detection is off.
+    /// It rises while relocations are throttled, the budget controller's floor included, and decays once they are not. A LEVEL.
+    /// <see cref="DatabaseEngine.GetSpatialTelemetryTotal"/> takes the maximum across archetypes. Zero, below the 1 that means no boost, when there is no
+    /// cluster state to read: an out-of-range id, or an engine that has none.
+    /// </summary>
+    public float DriftTargetBoost { get; init; }
 
     /// <summary>
     /// Clusters currently live. The denominator for every ratio above — a migration count means nothing without the population it came from.

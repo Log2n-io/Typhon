@@ -77,7 +77,13 @@ public sealed partial class TyphonRuntime : IDisposable
     // Issue #231: per-system cluster-range entity view, allocated lazily the first time a tier-filtered system runs Path 1 (full non-versioned). Reused across
     // ticks. [sysIdx][workerIdx]. Null slot = not allocated yet.
     private readonly ClusterRangeEntityView[][] _tierRangeViews;
-
+    // The cost rule's input (RuntimeOptions.CostBasedChunking): each parallel QuerySystem's worker time per entity, in Stopwatch ticks, at its last
+    // dispatch. Written at tick end on the tick driver (CaptureChunkCosts), read by the next dispatch's Prepare. Zero = no measurement yet: entity rule.
+    private readonly double[] _chunkTicksPerEntity;
+    // The cluster list a parallel QuerySystem's live dispatch splits, and its length, read once in Prepare. Its chunks walk this array and split this
+    // length, never the live pair (CD-02).
+    private readonly int[][] _dispatchClusterIds;
+    private readonly int[] _dispatchClusterCount;
     // Issue #234: checkerboard two-phase dispatch. Phase tracking + Red/Black cluster buffers per system.
     // _checkerboardPhase: 0 = not checkerboard or reset, 1 = Red (phase A active), 2 = Black (phase B active).
     private readonly int[] _checkerboardPhase;
@@ -267,6 +273,9 @@ public sealed partial class TyphonRuntime : IDisposable
         _partitionViews = new PartitionEntityView[scheduler.AllSystemCount][];
         _systemTierClusterIds = new int[scheduler.AllSystemCount][];
         _systemTierClusterCount = new int[scheduler.AllSystemCount];
+        _chunkTicksPerEntity = new double[scheduler.AllSystemCount];
+        _dispatchClusterIds = new int[scheduler.AllSystemCount][];
+        _dispatchClusterCount = new int[scheduler.AllSystemCount];
         _systemAmortizationBuffers = new int[scheduler.AllSystemCount][];
         _tierRangeViews = new ClusterRangeEntityView[scheduler.AllSystemCount][];
         _checkerboardPhase = new int[scheduler.AllSystemCount];
@@ -1334,6 +1343,25 @@ public sealed partial class TyphonRuntime : IDisposable
             }
         }
 
+        // CD-02: the dispatch splits the cluster list as it stands now, and its chunks walk this array and split this length, not the live pair. A spawn can
+        // append to the archetype's list while they run (AddToActiveList, under its latch), and chunks that read two lengths would not tile it; an append
+        // leaves the array's first entries as they are, even when it moves the list to a larger array. A removal does not, and no Destroy commit on the
+        // archetype may overlap the walk (CLUSTERWALK-01).
+        var dispatchIds = _systemTierClusterIds[sysIdx];
+        var dispatchClusters = _systemTierClusterCount[sysIdx];
+        if (dispatchIds == null)
+        {
+            dispatchClusters = 0;
+            var dispatchState = _systemClusterStates[sysIdx];
+            if (dispatchState != null)
+            {
+                dispatchIds = ReadActiveClusterList(dispatchState, out dispatchClusters);
+            }
+        }
+
+        _dispatchClusterIds[sysIdx] = dispatchIds;
+        _dispatchClusterCount[sysIdx] = dispatchClusters;
+
         if (sys.WritesVersioned)
         {
             // Paths 3 & 4: Versioned fallback — materialize entity list, per-chunk Transactions
@@ -1475,22 +1503,113 @@ public sealed partial class TyphonRuntime : IDisposable
         return ComputeChunkCount(entityList.Count, sysIdx);
     }
 
+    // The cost rule's grain (RuntimeOptions.CostBasedChunking): the reasoning of the fence's FenceWorkPlan.TargetChunkCost, at a query chunk's smaller
+    // dispatch cost — a claim, a context and a view reset, a few µs, where a fence chunk pays 10-30 µs. Below the floor a chunk costs more to hand out than
+    // the parallelism it buys; above the ceiling one chunk can keep the whole pool waiting at the end of its system.
+    internal const double ChunkCostFloorUs = 25;
+    internal const double ChunkCostCeilingUs = 100;
+
     private int ComputeChunkCount(int entityCount, int sysIdx)
     {
         var workerCount = Scheduler.WorkerCount;
         var sys = Scheduler.Systems[sysIdx];
 
-        // Per-system floor, falling back to the global one. The global value is a bet that per-entity work is roughly
-        // uniform across the schedule — it is the same entity count for every system — and a system whose per-entity
-        // cost is orders above its neighbours' is starved of workers by it: 320 entities against a 64 floor is five
-        // chunks no matter how high ChunksPerWorker goes, because the entity cap and not the worker cap is binding.
-        var minChunkSize = sys.MinChunkSize > 0 ? sys.MinChunkSize : Options.ParallelQueryMinChunkSize;
-        var maxChunks = Math.Max(1, (entityCount + minChunkSize - 1) / minChunkSize);
-
         // Per-system oversubscription: lift the workerCount cap by ChunksPerWorker (default 1.0 = no change).
         // Round-to-nearest so 1.5 × 16 = 24 exactly; small bumps like 1.1 × 16 = 17.6 → 18.
         var workerCap = Math.Max(1, (int)MathF.Round(workerCount * sys.ChunksPerWorker));
+
+        // The cost rule, from the system's second dispatch on: its previous dispatch's worker time per entity (CaptureChunkCosts). The option is read
+        // here too, not only at capture, so a host switching it off mid-run is obeyed from the next dispatch.
+        var ticksPerEntity = _chunkTicksPerEntity[sysIdx];
+        if (ticksPerEntity > 0 && Options.CostBasedChunking)
+        {
+            var costUs = entityCount * ticksPerEntity * 1_000_000.0 / Stopwatch.Frequency;
+            return CostChunkCount(costUs, workerCap, ChunkUnits(entityCount, workerCap, sysIdx));
+        }
+
+        // The entity rule: a first dispatch, or a system the cost rule does not size. Per-system floor, falling back to the global one. The global value is
+        // a bet that per-entity work is roughly uniform across the schedule — it is the same entity count for every system — and a system whose per-entity
+        // cost is orders above its neighbours' is starved of workers by it: 320 entities against a 64 floor is five chunks no matter how high
+        // ChunksPerWorker goes, because the entity cap and not the worker cap is binding.
+        var minChunkSize = sys.MinChunkSize > 0 ? sys.MinChunkSize : Options.ParallelQueryMinChunkSize;
+        var maxChunks = Math.Max(1, (entityCount + minChunkSize - 1) / minChunkSize);
         return Math.Min(workerCap, maxChunks);
+    }
+
+    /// <summary>
+    /// The cost rule's chunk count for <paramref name="costUs"/> of work: <paramref name="width"/> chunks while each would carry between
+    /// <see cref="ChunkCostFloorUs"/> and <see cref="ChunkCostCeilingUs"/>; below that band fewer chunks, of the floor; above it more, of the ceiling, up to
+    /// twice the width. At least one, at most <paramref name="units"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>Beyond the width the extra chunks buy the tail, not parallelism: each goes to whichever worker comes free, so the pool no longer waits on one
+    /// long last chunk (SWG x1, entity rule: Awareness ran as 5 chunks on a 32-worker pool; x64: the pool waited 3.9 ms per tick at the median for the
+    /// slowest of its 64).</para>
+    /// <para>Twice the width is the fence's cap too (FenceWorkPlan.ComputeMaxChunks), and for the same reason: every chunk pays for its own chunk
+    /// accessors, which is not free. Uncapped, SWG x64's Awareness went to 1,092 chunks, one per player cluster, for ~13 ms more worker time per tick,
+    /// while past twice the width the slowest chunk is already a small share of the span.</para>
+    /// </remarks>
+    internal static int CostChunkCount(double costUs, int width, int units)
+    {
+        var share = costUs / width;
+        var chunks = share < ChunkCostFloorUs ? Math.Ceiling(costUs / ChunkCostFloorUs)
+            : share > ChunkCostCeilingUs ? Math.Min(2.0 * width, Math.Ceiling(costUs / ChunkCostCeilingUs)) : width;
+        return (int)Math.Clamp(chunks, 1, Math.Max(1, units));
+    }
+
+    /// <summary>
+    /// The most chunks worth dispatching: one entity each, and beyond the width one cluster each — the smallest piece a system walking
+    /// <c>ctx.ClusterIds</c> can be handed; a chunk past it would find its cluster range empty.
+    /// </summary>
+    private int ChunkUnits(int entityCount, int width, int sysIdx)
+    {
+        // The length Prepare counted (CD-02), not the live one: a spawn since must not size the chunks against a longer list than they split.
+        var clusters = _systemTierClusterIds[sysIdx] != null || _systemClusterStates[sysIdx] is { ClusterSegment: not null }
+            ? _dispatchClusterCount[sysIdx]
+            : int.MaxValue;
+        return Math.Min(entityCount, Math.Max(width, clusters));
+    }
+
+    /// <summary>
+    /// The cost rule's input: each parallel QuerySystem's worker time per entity this tick, which sizes its next dispatch. Tick end, on the tick driver:
+    /// every system of the tick has completed. A checkerboard system (two dispatches, one entity count) and one with its own MinChunkSize keep the entity
+    /// rule. A failed or aborted dispatch is not a measurement — its drained chunks add no time against the full entity count — so the system keeps its
+    /// last one.
+    /// </summary>
+    private void CaptureChunkCosts()
+    {
+        if (!Options.CostBasedChunking)
+        {
+            return;
+        }
+
+        for (var i = 0; i < Scheduler.AllSystemCount; i++)
+        {
+            var sys = Scheduler.Systems[i];
+            if (!sys.IsParallelQuery || sys.ExplicitChunkCount > 0 || sys.IsCheckerboard || sys.MinChunkSize > 0)
+            {
+                continue;
+            }
+
+            ref var m = ref Scheduler.GetCurrentSystemMetrics(i);
+            if (!m.WasSkipped && m.EntitiesProcessed > 0 && m.WorkTicks > 0)
+            {
+                _chunkTicksPerEntity[i] = (double)m.WorkTicks / m.EntitiesProcessed;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The cluster range chunk <paramref name="chunkIndex"/> of <paramref name="totalChunks"/> walks: its share of an equal split of the list its dispatch
+    /// counted in Prepare, the first <c>clusters % totalChunks</c> chunks taking one cluster more. The ranges tile that list (CD-02).
+    /// </summary>
+    private void ChunkClusterRange(int sysIdx, int chunkIndex, int totalChunks, out int start, out int end)
+    {
+        var clusters = _dispatchClusterCount[sysIdx];
+        var size = clusters / totalChunks;
+        var remainder = clusters % totalChunks;
+        start = chunkIndex * size + Math.Min(chunkIndex, remainder);
+        end = start + size + (chunkIndex < remainder ? 1 : 0);
     }
 
     /// <summary>
@@ -1571,38 +1690,18 @@ public sealed partial class TyphonRuntime : IDisposable
             var count = baseSize + (chunkIndex < remainder ? 1 : 0);
             entities = new PooledEntitySlice(fullList.BackingArray, start, count);
 
-            // ClusterIds: tier list when present, otherwise the archetype's ActiveClusterIds. Game systems iterating via
+            // ClusterIds: the list Prepare captured — the tier list when present, otherwise the archetype's ActiveClusterIds. Game systems iterating via
             // ctx.Accessor.GetClusterEnumerator(ctx.ClusterIds, ...) still get the correct cluster set.
-            if (tierIds != null)
+            clusterIdArray = _dispatchClusterIds[sysIdx];
+            if (clusterIdArray != null)
             {
-                int tierCount = _systemTierClusterCount[sysIdx];
-                var tierBase = tierCount / totalChunks;
-                var tierRem = tierCount % totalChunks;
-                clusterStart = chunkIndex * tierBase + Math.Min(chunkIndex, tierRem);
-                clusterEnd = clusterStart + tierBase + (chunkIndex < tierRem ? 1 : 0);
-                clusterIdArray = tierIds;
-            }
-            else
-            {
-                var cs = _systemClusterStates[sysIdx];
-                if (cs != null)
-                {
-                    clusterIdArray = ReadActiveClusterList(cs, out var totalClusters);
-                    var cBase = totalClusters / totalChunks;
-                    var cRemainder = totalClusters % totalChunks;
-                    clusterStart = chunkIndex * cBase + Math.Min(chunkIndex, cRemainder);
-                    clusterEnd = clusterStart + cBase + (chunkIndex < cRemainder ? 1 : 0);
-                }
+                ChunkClusterRange(sysIdx, chunkIndex, totalChunks, out clusterStart, out clusterEnd);
             }
         }
         else if (tierIds != null)
         {
             // Tier-filtered, no change filter: walk the tier's clusters via ClusterRangeEntityView.
-            int tierCount = _systemTierClusterCount[sysIdx];
-            var tierBase = tierCount / totalChunks;
-            var tierRem = tierCount % totalChunks;
-            clusterStart = chunkIndex * tierBase + Math.Min(chunkIndex, tierRem);
-            clusterEnd = clusterStart + tierBase + (chunkIndex < tierRem ? 1 : 0);
+            ChunkClusterRange(sysIdx, chunkIndex, totalChunks, out clusterStart, out clusterEnd);
             clusterIdArray = tierIds;
 
             var cs = _systemClusterStates[sysIdx];
@@ -1643,11 +1742,8 @@ public sealed partial class TyphonRuntime : IDisposable
             var cs = _systemClusterStates[sysIdx];
             if (cs != null)
             {
-                clusterIdArray = ReadActiveClusterList(cs, out var totalClusters);
-                var cBase = totalClusters / totalChunks;
-                var cRemainder = totalClusters % totalChunks;
-                clusterStart = chunkIndex * cBase + Math.Min(chunkIndex, cRemainder);
-                clusterEnd = clusterStart + cBase + (chunkIndex < cRemainder ? 1 : 0);
+                clusterIdArray = _dispatchClusterIds[sysIdx];
+                ChunkClusterRange(sysIdx, chunkIndex, totalChunks, out clusterStart, out clusterEnd);
             }
         }
 
@@ -1793,28 +1889,10 @@ public sealed partial class TyphonRuntime : IDisposable
             // ctx.Accessor.GetClusterEnumerator(ctx.ClusterIds, ...) sees the correct tier scope. The cluster partition is computed independently of
             // the entity partition above.
             int clusterStart = 0, clusterEnd = 0;
-            int[] clusterIdArray = null;
-            var tierIds = _systemTierClusterIds[sysIdx];
-            if (tierIds != null)
+            var clusterIdArray = _dispatchClusterIds[sysIdx];
+            if (clusterIdArray != null)
             {
-                int tierCount = _systemTierClusterCount[sysIdx];
-                var tierBase = tierCount / totalChunks;
-                var tierRem = tierCount % totalChunks;
-                clusterStart = chunkIndex * tierBase + Math.Min(chunkIndex, tierRem);
-                clusterEnd = clusterStart + tierBase + (chunkIndex < tierRem ? 1 : 0);
-                clusterIdArray = tierIds;
-            }
-            else
-            {
-                var cs = _systemClusterStates[sysIdx];
-                if (cs != null)
-                {
-                    clusterIdArray = ReadActiveClusterList(cs, out var totalClusters);
-                    var cBase = totalClusters / totalChunks;
-                    var cRemainder = totalClusters % totalChunks;
-                    clusterStart = chunkIndex * cBase + Math.Min(chunkIndex, cRemainder);
-                    clusterEnd = clusterStart + cBase + (chunkIndex < cRemainder ? 1 : 0);
-                }
+                ChunkClusterRange(sysIdx, chunkIndex, totalChunks, out clusterStart, out clusterEnd);
             }
 
             var ctx = new TickContext
@@ -1899,6 +1977,10 @@ public sealed partial class TyphonRuntime : IDisposable
         var now = Stopwatch.GetTimestamp();
         _currentDeltaTime = _previousTickTimestamp > 0 ? (float)((now - _previousTickTimestamp) / (double)Stopwatch.Frequency) : 0f;
         _previousTickTimestamp = now;
+
+        // Every checkerboard system starts the tick at phase 0 (CB-02). A system that failed in its Red phase starts no Black phase, and its cleanup has left
+        // phase 1 behind; kept, it would make this tick's first prepare serve the previous tick's Black list and skip Red.
+        Array.Clear(_checkerboardPhase);
 
         // Create UoW for this tick (Deferred — batch all system commits, single WAL flush at end)
         _currentUow = Engine.CreateUnitOfWork();
@@ -2142,6 +2224,7 @@ public sealed partial class TyphonRuntime : IDisposable
 
         // Issue #234: compute per-tier budget metrics from this tick's system telemetry, for the next tick's TickContext.
         ComputeTierBudgetMetrics();
+        CaptureChunkCosts();
 
         // Publish this tick's outcome BEFORE the output phase, so a host reading LastTickOutcome from a subscription callback already sees the verdict.
         // Written on EVERY tick under EVERY policy (#567 AC8b) — a stale outcome must never be mistaken for a fresh one. Under Isolate this is always Success:
@@ -2214,8 +2297,8 @@ public sealed partial class TyphonRuntime : IDisposable
             ctx.Reset(scheduler.CurrentTickNumber, _currentUow?.ChangeSet, scheduler.WorkerCount, Options.FenceChunkOversubscription, _liveFenceCost,
                 Options.EntityMapBulkMinEntriesPerBucket);
 
-            // Drain dormancy wake requests globally on TickDriver (single-threaded contract from issue #233).
-            DormancyReporter.DrainAll(Engine._archetypeStates);
+            // Drain this engine's dormancy wake requests on TickDriver (single-threaded contract from issue #233).
+            Engine.DrainDormancyWakeRequests();
 
             // Serial table fences on TickDriver. Uses the UoW's ChangeSet (single-thread context).
             //

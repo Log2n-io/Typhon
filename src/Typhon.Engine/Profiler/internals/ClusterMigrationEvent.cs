@@ -166,6 +166,50 @@ internal ref partial struct SpatialArchetypeTelemetryEvent
     [BeginParam] public int CellTreePromotions;
     /// <summary>Cell halves demoted back to the linear scan this tick. Kept separate from the promotions: a net of zero hides a cell thrashing between both.</summary>
     [BeginParam] public int CellTreeDemotions;
+
+    // ── Appended for the maintenance controller (#906; rules SO-02, TH-04, RP-07). A record written before these is a strict prefix of one written after,
+    //    and the generated decoder zero-fills the fields a shorter record lacks. ─────────────────────────────────────────────────────────────────────
+
+    /// <summary>Clusters this archetype's range queries opened since the previous fence (SO-02). Sum across records for a window, never average.</summary>
+    [BeginParam] public long QueryClustersOpened;
+    /// <summary>Entities in those clusters, every occupied slot. Summed candidates over summed hits is what a match cost over the window.</summary>
+    [BeginParam] public long QueryCandidates;
+    /// <summary>Matches those queries returned.</summary>
+    [BeginParam] public long QueryHits;
+    /// <summary>
+    /// The configured <c>ReclusterBudgetMs</c>, the ceiling the grant is a share of. Repeated per record: the attach stream carries no configuration.
+    /// </summary>
+    [BeginParam] public float BudgetConfiguredMs;
+    /// <summary>The budget the controller granted this tick (TH-04): the configured budget times the share the queries' efficiency earned.</summary>
+    [BeginParam] public float BudgetGrantedMs;
+    /// <summary>The configured <c>QueryEfficiencyTolerance</c>: how far above the best the grant becomes whole. Zero means the controller is off.</summary>
+    [BeginParam] public float EfficiencyTolerance;
+    /// <summary>The controller's input: smoothed candidates over smoothed hits. Zero without a signal.</summary>
+    [BeginParam] public float CandidatesPerHitSmoothed;
+    /// <summary>The controller's set point: the lowest smoothed value since the last re-base. Zero without a signal.</summary>
+    [BeginParam] public float CandidatesPerHitBest;
+    /// <summary>
+    /// Consecutive ticks at the whole budget, set there by the distance. The re-base comes on the tick after <c>EfficiencyRebaseTicks</c> of them.
+    /// </summary>
+    [BeginParam] public int TicksAtWholeBudget;
+    /// <summary>Bit 0: the queries hit enough to steer by. Bit 1: this tick re-based the best, accepting what the whole budget could not recover.</summary>
+    [BeginParam] public byte ControllerFlags;
+    /// <summary>Re-bases since the archetype's cluster state was created. Cumulative, so a dropped record or a late attach loses none of them.</summary>
+    [BeginParam] public int EfficiencyRebases;
+    /// <summary>Cells waiting out <c>RepairCooldownTicks</c> after a repair (RP-07). A level.</summary>
+    [BeginParam] public int RepairCellsCooling;
+    /// <summary>Repair units the safety valve admitted past the budget this tick.</summary>
+    [BeginParam] public int RepairValveFires;
+    /// <summary>Entities the repair plan committed to move this tick.</summary>
+    [BeginParam] public int RepairedEntities;
+    /// <summary>
+    /// Repair-queue candidates evicted at the cap since the archetype's cluster state was created. Cumulative: differentiate across records.
+    /// </summary>
+    [BeginParam] public long RepairQueueEvicted;
+    /// <summary>The measured per-entity migration cost the budget was spent against, in nanoseconds.</summary>
+    [BeginParam] public float MeasuredNsPerEntity;
+    /// <summary>The throttle's multiplier on the drift target (step 14, D2): 1 is none; at its cap relocation detection is off.</summary>
+    [BeginParam] public float DriftTargetBoost;
 }
 
 /// <summary>

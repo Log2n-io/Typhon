@@ -313,4 +313,52 @@ class SchemaEvolutionStorageModeTests : TestBase<SchemaEvolutionStorageModeTests
             });
         }
     }
+
+    /// <summary>
+    /// An engine builds its cluster state from the layout IT computed, never from what the process-wide metadata holds a moment later.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ArchetypeMetadata"/> is one object per archetype for the whole process, and every engine's <c>InitializeArchetypes</c> writes its
+    /// <c>ClusterLayout</c>. The engine used to read it back to size its cluster segment and build its state, so another engine opening another schema
+    /// version of the same archetype in between — <c>SchemaEvolutionMatrixTests</c> running beside this fixture — handed it THAT version's layout: each
+    /// SingleVersion value stored at the wrong offset and read back as zeros after reopen (<c>SV 0 != 7</c> in
+    /// <see cref="MixedArchetype_SvMigrates_AndVersionedNeighbourSurvives"/>). The hook stands in for that other engine, deterministically.
+    /// </remarks>
+    [Test]
+    public void InitializeArchetypes_BuildsClusterStateFromItsOwnLayout_NotFromTheSharedMetadata()
+    {
+        var meta = Archetype<EvoMixArch>.Metadata;
+        using var scope = ServiceProvider.CreateScope();
+        using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<EvoMixSvV1>();
+        dbe.RegisterComponentFromAccessor<EvoMixVer>();
+
+        ArchetypeClusterInfo own = null;
+        dbe.AfterClusterLayoutPublishedForTest = m =>
+        {
+            if (!ReferenceEquals(m, meta))
+            {
+                return;
+            }
+
+            own = m.ClusterLayout;
+            m.ClusterLayout = ArchetypeClusterInfo.Compute(m.ComponentCount, [64, 64], 0, m.VersionedSlotMask, m.TransientSlotMask);
+        };
+
+        try
+        {
+            dbe.InitializeArchetypes();
+
+            Assert.That(own, Is.Not.Null, "precondition: the hook never ran for the archetype under test");
+            Assert.That(dbe._archetypeStates[meta.ArchetypeId].ClusterState.Layout, Is.SameAs(own),
+                "the cluster state was built from a layout another engine published, not from the one this engine computed");
+        }
+        finally
+        {
+            if (own != null)
+            {
+                meta.ClusterLayout = own;
+            }
+        }
+    }
 }

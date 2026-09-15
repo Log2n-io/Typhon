@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using Typhon.Schema.Definition;
 
@@ -77,10 +78,7 @@ public readonly ref struct ClusterSpatialQuery<TArch> where TArch : Archetype<TA
     {
         if (_state == null || !_state.SpatialSlot.HasSpatialIndex)
         {
-            throw new InvalidOperationException(
-                $"ClusterSpatialQuery<{typeof(TArch).Name}>: archetype has no spatial index. " +
-                "Ensure the archetype has a SpatialIndex field and that ConfigureSpatialGrid was called " +
-                "on the engine before InitializeArchetypes.");
+            ThrowNoSpatialIndex();
         }
 
         // Tier match: the generic TBox must live in the same (dimensionality × precision) tier as the archetype's storage. This is enforced before we even
@@ -144,10 +142,7 @@ public readonly ref struct ClusterSpatialQuery<TArch> where TArch : Archetype<TA
     {
         if (_state == null || !_state.SpatialSlot.HasSpatialIndex)
         {
-            throw new InvalidOperationException(
-                $"ClusterSpatialQuery<{typeof(TArch).Name}>: archetype has no spatial index. " +
-                "Ensure the archetype has a SpatialIndex field and that ConfigureSpatialGrid was called " +
-                "on the engine before InitializeArchetypes.");
+            ThrowNoSpatialIndex();
         }
 
         var storageTier = _state.SpatialSlot.FieldInfo.FieldType.ToTier();
@@ -169,10 +164,7 @@ public readonly ref struct ClusterSpatialQuery<TArch> where TArch : Archetype<TA
     {
         if (_state == null || !_state.SpatialSlot.HasSpatialIndex)
         {
-            throw new InvalidOperationException(
-                $"ClusterSpatialQuery<{typeof(TArch).Name}>: archetype has no spatial index. " +
-                "Ensure the archetype has a SpatialIndex field and that ConfigureSpatialGrid was called " +
-                "on the engine before InitializeArchetypes.");
+            ThrowNoSpatialIndex();
         }
 
         var storageTier = _state.SpatialSlot.FieldInfo.FieldType.ToTier();
@@ -194,10 +186,7 @@ public readonly ref struct ClusterSpatialQuery<TArch> where TArch : Archetype<TA
     {
         if (_state == null || !_state.SpatialSlot.HasSpatialIndex)
         {
-            throw new InvalidOperationException(
-                $"ClusterSpatialQuery<{typeof(TArch).Name}>: archetype has no spatial index. " +
-                "Ensure the archetype has a SpatialIndex field and that ConfigureSpatialGrid was called " +
-                "on the engine before InitializeArchetypes.");
+            ThrowNoSpatialIndex();
         }
 
         var storageTier = _state.SpatialSlot.FieldInfo.FieldType.ToTier();
@@ -219,10 +208,7 @@ public readonly ref struct ClusterSpatialQuery<TArch> where TArch : Archetype<TA
     {
         if (_state == null || !_state.SpatialSlot.HasSpatialIndex)
         {
-            throw new InvalidOperationException(
-                $"ClusterSpatialQuery<{typeof(TArch).Name}>: archetype has no spatial index. " +
-                "Ensure the archetype has a SpatialIndex field and that ConfigureSpatialGrid was called " +
-                "on the engine before InitializeArchetypes.");
+            ThrowNoSpatialIndex();
         }
 
         var storageTier = _state.SpatialSlot.FieldInfo.FieldType.ToTier();
@@ -236,6 +222,124 @@ public readonly ref struct ClusterSpatialQuery<TArch> where TArch : Archetype<TA
 
         return _state.QueryRadius(_grid, sphere.CenterX, sphere.CenterY, sphere.CenterZ, sphere.Radius, categoryMask);
     }
+
+    /// <summary>
+    /// For each sphere in <paramref name="members"/>, how many entities <see cref="Radius(in BSphere2F, uint)"/> returns for it:
+    /// <c>counts[j] == Radius(members[j], categoryMask).Count()</c>. The cells, cell halves and clusters the members share are walked and opened once for
+    /// the whole set instead of once per member. The archetype must be 2D (tier <c>Tier2F</c>).
+    /// </summary>
+    /// <remarks>
+    /// <para><b>When it pays.</b> When the members are close together — one source cluster's entities, a squad, a crowd's observers — their own queries
+    /// walk nearly the same cells and open the same clusters, which the batch then does once; each member is still tested only against the clusters its
+    /// own box overlaps. A member far from the others costs what its own query costs: no cell outside a member's own range is visited.</para>
+    /// <para>At most 64 members. The caller must be inside an <see cref="EpochGuard"/> scope, as for a single query.</para>
+    /// </remarks>
+    /// <param name="members">The query spheres, in world units.</param>
+    /// <param name="counts">Receives one count per member, in <paramref name="members"/>' order; entries past its length are left alone.</param>
+    /// <param name="categoryMask">As for <see cref="Radius(in BSphere2F, uint)"/>, for every member.</param>
+    /// <exception cref="ArgumentException">More than 64 members, a member that is not finite, or <paramref name="counts"/> shorter than
+    /// <paramref name="members"/>. Checked before anything is written: <paramref name="counts"/> is then left as it was.</exception>
+    /// <exception cref="InvalidOperationException">The archetype has no spatial index, or is not 2D f32.</exception>
+    public void CountRadius(ReadOnlySpan<BSphere2F> members, Span<int> counts, uint categoryMask = uint.MaxValue)
+    {
+        CheckRadiusBatch(members);
+        if (counts.Length < members.Length)
+        {
+            throw new ArgumentException($"CountRadius: counts holds {counts.Length} entries for {members.Length} members.", nameof(counts));
+        }
+
+        counts[..members.Length].Clear();
+        var drain = new ClusterRadiusBatch.CountDrain(counts);
+        ClusterRadiusBatch.Run(_state, _grid, members, categoryMask, ref drain);
+    }
+
+    /// <summary>
+    /// For each sphere in <paramref name="members"/>, the entities <see cref="Radius(in BSphere2F, uint)"/> returns for it, handed to
+    /// <paramref name="sink"/> as (member index, hit): each member's hits in its own query's <c>MoveNext</c> order, with the same bounds and squared
+    /// distance. The cells, cell halves and clusters the members share are walked and opened once for the whole set. The archetype must be 2D (tier
+    /// <c>Tier2F</c>).
+    /// </summary>
+    /// <remarks>
+    /// <para>The sink returns false to retire a member: it receives nothing further, and the others carry on. Members' hits interleave cluster by cluster;
+    /// only each member's own sequence is ordered.</para>
+    /// <para>The sink may run its own spatial queries: they take a page window of their own. If it throws, the batch hands its window back and the
+    /// exception propagates; <paramref name="sink"/> then holds the state it had reached.</para>
+    /// <para>At most 64 members. The caller must be inside an <see cref="EpochGuard"/> scope, as for a single query. See <see cref="CountRadius"/> for when
+    /// a batch pays.</para>
+    /// </remarks>
+    /// <param name="members">The query spheres, in world units.</param>
+    /// <param name="sink">Receives the hits. Copied into the batch and copied back when it returns or throws, so read its state after the call, not
+    /// from inside a <see cref="IRadiusBatchSink.Hit"/> through another reference to the caller's variable.</param>
+    /// <param name="categoryMask">As for <see cref="Radius(in BSphere2F, uint)"/>, for every member.</param>
+    /// <exception cref="ArgumentException">More than 64 members, or a member that is not finite; checked before any hit is delivered.</exception>
+    /// <exception cref="InvalidOperationException">The archetype has no spatial index, or is not 2D f32.</exception>
+    public void ForEachInRadius<TSink>(ReadOnlySpan<BSphere2F> members, ref TSink sink, uint categoryMask = uint.MaxValue)
+        where TSink : struct, IRadiusBatchSink, allows ref struct
+    {
+        CheckRadiusBatch(members);
+        var drain = new ClusterRadiusBatch.SinkDrain<TSink>(sink);
+        try
+        {
+            ClusterRadiusBatch.Run(_state, _grid, members, categoryMask, ref drain);
+        }
+        finally
+        {
+            sink = drain.Sink;
+        }
+    }
+
+    /// <summary>A batch's preconditions, all checked before anything is written: a spatial index, a 2D f32 archetype, at most 64 members, each finite.</summary>
+    private void CheckRadiusBatch(ReadOnlySpan<BSphere2F> members)
+    {
+        if (_state == null || !_state.SpatialSlot.HasSpatialIndex)
+        {
+            ThrowNoSpatialIndex();
+        }
+
+        var storageTier = _state.SpatialSlot.FieldInfo.FieldType.ToTier();
+        if (storageTier != SpatialTier.Tier2F)
+        {
+            throw new InvalidOperationException(
+                $"ClusterSpatialQuery<{typeof(TArch).Name}>: a radius batch takes BSphere2F members, which need storage tier Tier2F; this archetype's is " +
+                $"{storageTier}.");
+        }
+
+        if (members.Length > ClusterRadiusBatch.MaxMembers)
+        {
+            throw new ArgumentException($"A radius batch takes at most {ClusterRadiusBatch.MaxMembers} members; got {members.Length}.", nameof(members));
+        }
+
+        // A single query rejects a non-finite box (WorldToCellRange). Rejected here instead, the batch fails before it has written a count or delivered a
+        // hit, rather than halfway through its members.
+        for (var j = 0; j < members.Length; j++)
+        {
+            ref readonly var m = ref members[j];
+            if (!float.IsFinite(m.CenterX) || !float.IsFinite(m.CenterY) || !float.IsFinite(m.Radius))
+            {
+                throw new ArgumentException($"Radius batch member {j} is not finite: ({m.CenterX}, {m.CenterY}) r {m.Radius}.", nameof(members));
+            }
+        }
+    }
+
+    /// <summary>Out of line, so the message is not built into every inlined query construction.</summary>
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowNoSpatialIndex() =>
+        throw new InvalidOperationException(
+            $"ClusterSpatialQuery<{typeof(TArch).Name}>: archetype has no spatial index. " +
+            "Ensure the archetype has a SpatialIndex field and that ConfigureSpatialGrid was called " +
+            "on the engine before InitializeArchetypes.");
+}
+
+/// <summary>
+/// Receives a batched radius query's hits (<see cref="ClusterSpatialQuery{TArch}.ForEachInRadius{TSink}"/>): one call per (member, hit), each member's
+/// hits in the order its own query's <c>MoveNext</c> yields them.
+/// </summary>
+public interface IRadiusBatchSink
+{
+    /// <summary>One hit for member <paramref name="member"/>, an index into the batch's members. Return false to retire that member: it receives no
+    /// further hits.</summary>
+    bool Hit(int member, in ClusterSpatialQueryResult hit);
 }
 
 /// <summary>

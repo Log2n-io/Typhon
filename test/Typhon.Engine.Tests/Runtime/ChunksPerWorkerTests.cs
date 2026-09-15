@@ -56,7 +56,10 @@ class ChunksPerWorkerTests : TestBase<ChunksPerWorkerTests>
         {
             WorkerCount = workerCount,
             BaseTickRate = 1000,
-            ParallelQueryMinChunkSize = minChunkSize
+            ParallelQueryMinChunkSize = minChunkSize,
+
+            // These tests pin the entity rule; the cost rule, from a system's second dispatch on, sizes by measured cost (CostChunkingTests).
+            CostBasedChunking = false
         });
 
         runtime.Start();
@@ -162,7 +165,10 @@ class ChunksPerWorkerTests : TestBase<ChunksPerWorkerTests>
         {
             WorkerCount = workerCount,
             BaseTickRate = 1000,
-            ParallelQueryMinChunkSize = minChunkSize
+            ParallelQueryMinChunkSize = minChunkSize,
+
+            // These tests pin the entity rule; the cost rule, from a system's second dispatch on, sizes by measured cost (CostChunkingTests).
+            CostBasedChunking = false
         });
 
         runtime.Start();

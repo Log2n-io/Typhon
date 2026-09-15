@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Runtime.Intrinsics.X86;
 
 namespace Typhon.Engine.Internals;
 
@@ -11,7 +10,6 @@ namespace Typhon.Engine.Internals;
 /// High-performance in-memory hash map using open addressing with linear probing.
 /// Single flat entry array — no chains, no overflow, no pointer indirection.
 /// Backward-shift deletion avoids tombstone accumulation.
-/// POH (Pinned Object Heap) allocation + software prefetch on resize.
 /// <para>
 /// JIT-specialized dual path via <see cref="RuntimeHelpers.IsReferenceOrContainsReferences{T}"/>:
 /// <list type="bullet">
@@ -20,15 +18,17 @@ namespace Typhon.Engine.Internals;
 /// </list>
 /// </para>
 /// </summary>
-internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged, IEquatable<TKey>
+/// <remarks>
+/// The entry array is an ordinary managed <c>byte[]</c> reached through <c>ref</c>s, never a pointer — see <see cref="HashMap{TKey}"/> for why the
+/// pinned-heap + <c>byte*</c> version had to go.
+/// </remarks>
+internal class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged, IEquatable<TKey>
 {
     private const double MaxLoadFactor = 0.75;
-    private const int PrefetchLookahead = 8;
 
     private readonly int _entryStride;
     private readonly int _valueOffset;
-    private byte* _entries;
-    private byte[] _pohArray;
+    private byte[] _entries;
     private int _capacity;
     private int _mask;
     private int _count;
@@ -43,26 +43,40 @@ internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged
             _capacity = (int)BitOperations.RoundUpToPowerOf2((uint)_capacity);
         }
 
-        _valueOffset = 4 + sizeof(TKey);
+        _valueOffset = 4 + Unsafe.SizeOf<TKey>();
         if (!RuntimeHelpers.IsReferenceOrContainsReferences<TValue>())
         {
-            _entryStride = (4 + sizeof(TKey) + Unsafe.SizeOf<TValue>() + 3) & ~3;
+            _entryStride = (4 + Unsafe.SizeOf<TKey>() + Unsafe.SizeOf<TValue>() + 3) & ~3;
         }
         else
         {
-            _entryStride = (4 + sizeof(TKey) + 3) & ~3;
+            _entryStride = (4 + Unsafe.SizeOf<TKey>() + 3) & ~3;
             _managedValues = new TValue[_capacity];
         }
 
         _mask = _capacity - 1;
         _resizeThreshold = (int)(_capacity * MaxLoadFactor);
-
-        _pohArray = GC.AllocateArray<byte>(_capacity * _entryStride, true);
-        _entries = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_pohArray));
+        _entries = new byte[_capacity * _entryStride];
     }
 
     public int Count => _count;
     public int Capacity => _capacity;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ref byte EntryAt(byte[] entries, int idx, int stride) => ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(entries), (nint)idx * stride);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ref uint HashOf(ref byte entry) => ref Unsafe.As<byte, uint>(ref entry);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static TKey KeyOf(ref byte entry) => Unsafe.ReadUnaligned<TKey>(ref Unsafe.Add(ref entry, 4));
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void SetKey(ref byte entry, uint hash, TKey key)
+    {
+        HashOf(ref entry) = hash;
+        Unsafe.WriteUnaligned(ref Unsafe.Add(ref entry, 4), key);
+    }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool TryAdd(TKey key, TValue value)
@@ -80,22 +94,22 @@ internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged
 
         int idx = (int)(hash & (uint)_mask);
         int stride = _entryStride;
+        ref byte entries = ref MemoryMarshal.GetArrayDataReference(_entries);
 
         while (true)
         {
-            byte* entry = _entries + (long)idx * stride;
-            uint h = *(uint*)entry;
+            ref byte entry = ref Unsafe.Add(ref entries, (nint)idx * stride);
+            uint h = HashOf(ref entry);
 
             if (h == 0)
             {
-                *(uint*)entry = hash;
-                *(TKey*)(entry + 4) = key;
-                WriteValue(entry, idx, value);
+                SetKey(ref entry, hash, key);
+                WriteValue(ref entry, idx, value);
                 _count++;
                 return true;
             }
 
-            if (h == hash && (*(TKey*)(entry + 4)).Equals(key))
+            if (h == hash && KeyOf(ref entry).Equals(key))
             {
                 return false;
             }
@@ -115,11 +129,12 @@ internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged
 
         int idx = (int)(hash & (uint)_mask);
         int stride = _entryStride;
+        ref byte entries = ref MemoryMarshal.GetArrayDataReference(_entries);
 
         while (true)
         {
-            byte* entry = _entries + (long)idx * stride;
-            uint h = *(uint*)entry;
+            ref byte entry = ref Unsafe.Add(ref entries, (nint)idx * stride);
+            uint h = HashOf(ref entry);
 
             if (h == 0)
             {
@@ -127,9 +142,9 @@ internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged
                 return false;
             }
 
-            if (h == hash && (*(TKey*)(entry + 4)).Equals(key))
+            if (h == hash && KeyOf(ref entry).Equals(key))
             {
-                value = ReadValue(entry, idx);
+                value = ReadValue(ref entry, idx);
                 return true;
             }
 
@@ -147,11 +162,12 @@ internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged
 
         int idx = (int)(hash & (uint)_mask);
         int stride = _entryStride;
+        ref byte entries = ref MemoryMarshal.GetArrayDataReference(_entries);
 
         while (true)
         {
-            byte* entry = _entries + (long)idx * stride;
-            uint h = *(uint*)entry;
+            ref byte entry = ref Unsafe.Add(ref entries, (nint)idx * stride);
+            uint h = HashOf(ref entry);
 
             if (h == 0)
             {
@@ -159,9 +175,9 @@ internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged
                 return false;
             }
 
-            if (h == hash && (*(TKey*)(entry + 4)).Equals(key))
+            if (h == hash && KeyOf(ref entry).Equals(key))
             {
-                value = ReadValue(entry, idx);
+                value = ReadValue(ref entry, idx);
                 _count--;
                 BackwardShiftDelete(idx);
                 return true;
@@ -187,24 +203,24 @@ internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged
 
         int idx = (int)(hash & (uint)_mask);
         int stride = _entryStride;
+        ref byte entries = ref MemoryMarshal.GetArrayDataReference(_entries);
 
         while (true)
         {
-            byte* entry = _entries + (long)idx * stride;
-            uint h = *(uint*)entry;
+            ref byte entry = ref Unsafe.Add(ref entries, (nint)idx * stride);
+            uint h = HashOf(ref entry);
 
             if (h == 0)
             {
-                *(uint*)entry = hash;
-                *(TKey*)(entry + 4) = key;
-                WriteValue(entry, idx, value);
+                SetKey(ref entry, hash, key);
+                WriteValue(ref entry, idx, value);
                 _count++;
                 return value;
             }
 
-            if (h == hash && (*(TKey*)(entry + 4)).Equals(key))
+            if (h == hash && KeyOf(ref entry).Equals(key))
             {
-                return ReadValue(entry, idx);
+                return ReadValue(ref entry, idx);
             }
 
             idx = (idx + 1) & _mask;
@@ -222,20 +238,21 @@ internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged
 
         int idx = (int)(hash & (uint)_mask);
         int stride = _entryStride;
+        ref byte entries = ref MemoryMarshal.GetArrayDataReference(_entries);
 
         while (true)
         {
-            byte* entry = _entries + (long)idx * stride;
-            uint h = *(uint*)entry;
+            ref byte entry = ref Unsafe.Add(ref entries, (nint)idx * stride);
+            uint h = HashOf(ref entry);
 
             if (h == 0)
             {
                 return false;
             }
 
-            if (h == hash && (*(TKey*)(entry + 4)).Equals(key))
+            if (h == hash && KeyOf(ref entry).Equals(key))
             {
-                WriteValue(entry, idx, newValue);
+                WriteValue(ref entry, idx, newValue);
                 return true;
             }
 
@@ -253,24 +270,25 @@ internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged
 
         int idx = (int)(hash & (uint)_mask);
         int stride = _entryStride;
+        ref byte entries = ref MemoryMarshal.GetArrayDataReference(_entries);
 
         while (true)
         {
-            byte* entry = _entries + (long)idx * stride;
-            uint h = *(uint*)entry;
+            ref byte entry = ref Unsafe.Add(ref entries, (nint)idx * stride);
+            uint h = HashOf(ref entry);
 
             if (h == 0)
             {
                 return false;
             }
 
-            if (h == hash && (*(TKey*)(entry + 4)).Equals(key))
+            if (h == hash && KeyOf(ref entry).Equals(key))
             {
-                if (!EqualityComparer<TValue>.Default.Equals(ReadValue(entry, idx), comparisonValue))
+                if (!EqualityComparer<TValue>.Default.Equals(ReadValue(ref entry, idx), comparisonValue))
                 {
                     return false;
                 }
-                WriteValue(entry, idx, newValue);
+                WriteValue(ref entry, idx, newValue);
                 return true;
             }
 
@@ -303,24 +321,24 @@ internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged
 
             int idx = (int)(hash & (uint)_mask);
             int stride = _entryStride;
+            ref byte entries = ref MemoryMarshal.GetArrayDataReference(_entries);
 
             while (true)
             {
-                byte* entry = _entries + (long)idx * stride;
-                uint h = *(uint*)entry;
+                ref byte entry = ref Unsafe.Add(ref entries, (nint)idx * stride);
+                uint h = HashOf(ref entry);
 
                 if (h == 0)
                 {
-                    *(uint*)entry = hash;
-                    *(TKey*)(entry + 4) = key;
-                    WriteValue(entry, idx, value);
+                    SetKey(ref entry, hash, key);
+                    WriteValue(ref entry, idx, value);
                     _count++;
                     return;
                 }
 
-                if (h == hash && (*(TKey*)(entry + 4)).Equals(key))
+                if (h == hash && KeyOf(ref entry).Equals(key))
                 {
-                    WriteValue(entry, idx, value);
+                    WriteValue(ref entry, idx, value);
                     return;
                 }
 
@@ -331,7 +349,7 @@ internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged
 
     public void Clear()
     {
-        new Span<byte>(_entries, _capacity * _entryStride).Clear();
+        Array.Clear(_entries);
         if (RuntimeHelpers.IsReferenceOrContainsReferences<TValue>())
         {
             Array.Clear(_managedValues);
@@ -351,14 +369,25 @@ internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged
 
     public Enumerator GetEnumerator() => new(this);
 
+    /// <summary>Enumerates the table and values the map had when enumeration began; the map must not be modified meanwhile.</summary>
     public ref struct Enumerator
     {
-        private readonly HashMap<TKey, TValue> _map;
+        // A ref to the table data and the values array, not the map: MoveNext then needs no load through the map and no null check. The ref is
+        // GC-tracked and keeps the table alive.
+        private readonly ref byte _entries;
+        private readonly TValue[] _managedValues;
+        private readonly int _capacity;
+        private readonly int _stride;
+        private readonly int _valueOffset;
         private int _index;
 
         internal Enumerator(HashMap<TKey, TValue> map)
         {
-            _map = map;
+            _entries = ref MemoryMarshal.GetArrayDataReference(map._entries);
+            _managedValues = map._managedValues;
+            _capacity = map._capacity;
+            _stride = map._entryStride;
+            _valueOffset = map._valueOffset;
             _index = -1;
         }
 
@@ -366,18 +395,23 @@ internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged
 
         public bool MoveNext()
         {
-            int stride = _map._entryStride;
-            while (++_index < _map._capacity)
+            ref byte entries = ref _entries;
+            int stride = _stride;
+            int capacity = _capacity;
+            int index = _index;
+            while (++index < capacity)
             {
-                byte* entry = _map._entries + (long)_index * stride;
-                if (*(uint*)entry != 0)
+                ref byte entry = ref Unsafe.Add(ref entries, (nint)index * stride);
+                if (HashOf(ref entry) != 0)
                 {
-                    TKey key = *(TKey*)(entry + 4);
-                    TValue value = _map.ReadValue(entry, _index);
-                    Current = (key, value);
+                    _index = index;
+                    var value = RuntimeHelpers.IsReferenceOrContainsReferences<TValue>()
+                        ? _managedValues[index] : Unsafe.ReadUnaligned<TValue>(ref Unsafe.Add(ref entry, _valueOffset));
+                    Current = (KeyOf(ref entry), value);
                     return true;
                 }
             }
+            _index = index;
             return false;
         }
     }
@@ -389,7 +423,6 @@ internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged
             return;
         }
 
-        _pohArray = null;
         _entries = null;
         _managedValues = null;
     }
@@ -399,21 +432,21 @@ internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged
     // ═══════════════════════════════════════════════════════════════
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private TValue ReadValue(byte* entry, int idx)
+    private TValue ReadValue(ref byte entry, int idx)
     {
         if (!RuntimeHelpers.IsReferenceOrContainsReferences<TValue>())
         {
-            return Unsafe.Read<TValue>(entry + _valueOffset);
+            return Unsafe.ReadUnaligned<TValue>(ref Unsafe.Add(ref entry, _valueOffset));
         }
         return _managedValues[idx];
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void WriteValue(byte* entry, int idx, TValue value)
+    private void WriteValue(ref byte entry, int idx, TValue value)
     {
         if (!RuntimeHelpers.IsReferenceOrContainsReferences<TValue>())
         {
-            Unsafe.Write(entry + _valueOffset, value);
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref entry, _valueOffset), value);
         }
         else
         {
@@ -428,12 +461,13 @@ internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged
     private void BackwardShiftDelete(int idx)
     {
         int stride = _entryStride;
+        ref byte entries = ref MemoryMarshal.GetArrayDataReference(_entries);
         int j = (idx + 1) & _mask;
 
         while (true)
         {
-            byte* entryJ = _entries + (long)j * stride;
-            uint hj = *(uint*)entryJ;
+            ref byte entryJ = ref Unsafe.Add(ref entries, (nint)j * stride);
+            uint hj = HashOf(ref entryJ);
 
             if (hj == 0)
             {
@@ -446,7 +480,7 @@ internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged
 
             if (distI < distJ)
             {
-                Unsafe.CopyBlock(_entries + (long)idx * stride, entryJ, (uint)stride);
+                Unsafe.CopyBlockUnaligned(ref Unsafe.Add(ref entries, (nint)idx * stride), ref entryJ, (uint)stride);
 
                 if (RuntimeHelpers.IsReferenceOrContainsReferences<TValue>())
                 {
@@ -459,7 +493,7 @@ internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged
             j = (j + 1) & _mask;
         }
 
-        *(uint*)(_entries + (long)idx * stride) = 0;
+        HashOf(ref Unsafe.Add(ref entries, (nint)idx * stride)) = 0;
         if (RuntimeHelpers.IsReferenceOrContainsReferences<TValue>())
         {
             _managedValues[idx] = default;
@@ -467,7 +501,7 @@ internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // Private — resize (POH allocation + prefetch rehash)
+    // Private — resize
     // ═══════════════════════════════════════════════════════════════
 
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
@@ -475,11 +509,9 @@ internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged
     {
         int stride = _entryStride;
         int newMask = newCapacity - 1;
-        int newSize = newCapacity * stride;
-
-        // POH allocation: pre-zeroed pages from OS, nearly free for large buffers
-        var newPoh = GC.AllocateArray<byte>(newSize, true);
-        byte* newEntries = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(newPoh));
+        var newEntries = new byte[newCapacity * stride];
+        ref byte src = ref MemoryMarshal.GetArrayDataReference(_entries);
+        ref byte dst = ref MemoryMarshal.GetArrayDataReference(newEntries);
 
         TValue[] newManagedValues = null;
         if (RuntimeHelpers.IsReferenceOrContainsReferences<TValue>())
@@ -487,30 +519,18 @@ internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged
             newManagedValues = new TValue[newCapacity];
         }
 
-        // Rehash with software prefetch to hide write latency.
-        // Sse.IsSupported is a JIT constant: on non-x86 (e.g. arm64) the whole prefetch block is elided; Prefetch0 is x86-only and would otherwise throw.
         for (int i = 0; i < _capacity; i++)
         {
-            if (Sse.IsSupported && i + PrefetchLookahead < _capacity)
-            {
-                byte* future = _entries + (long)(i + PrefetchLookahead) * stride;
-                uint fh = *(uint*)future;
-                if (fh != 0)
-                {
-                    Sse.Prefetch0(newEntries + (long)((int)(fh & (uint)newMask)) * stride);
-                }
-            }
-
-            byte* entry = _entries + (long)i * stride;
-            uint h = *(uint*)entry;
+            ref byte entry = ref Unsafe.Add(ref src, (nint)i * stride);
+            uint h = HashOf(ref entry);
             if (h != 0)
             {
                 int idx = (int)(h & (uint)newMask);
-                while (*(uint*)(newEntries + (long)idx * stride) != 0)
+                while (HashOf(ref Unsafe.Add(ref dst, (nint)idx * stride)) != 0)
                 {
                     idx = (idx + 1) & newMask;
                 }
-                Unsafe.CopyBlock(newEntries + (long)idx * stride, entry, (uint)stride);
+                Unsafe.CopyBlockUnaligned(ref Unsafe.Add(ref dst, (nint)idx * stride), ref entry, (uint)stride);
 
                 if (newManagedValues != null)
                 {
@@ -519,10 +539,7 @@ internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged
             }
         }
 
-        // Release old POH array (GC collects it)
-
         _entries = newEntries;
-        _pohArray = newPoh;
         _capacity = newCapacity;
         _mask = newMask;
         _resizeThreshold = (int)(newCapacity * MaxLoadFactor);

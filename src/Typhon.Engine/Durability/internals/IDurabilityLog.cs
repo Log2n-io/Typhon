@@ -4,12 +4,12 @@ using System;
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// The single seam every WAL emitter goes through (01 §3). One <see cref="Append"/> entry point appends a transaction's (or
+/// The single seam every WAL emitter goes through (01 §3). One <c>Append</c> entry point appends a transaction's (or
 /// fence's) record batch through the codec into the kept transport. Failure THROWS — never a sentinel (LOG-01) — so an
 /// acknowledged commit can never have missing records.
 /// </summary>
 /// <remarks>
-/// P1.1 subset of the design's interface: <c>AppendFence</c> is folded into <see cref="Append"/> via the builder's fence mode,
+/// P1.1 subset of the design's interface: <c>AppendFence</c> is folded into <c>Append</c> via the builder's fence mode,
 /// <c>Barrier</c> stays in <see cref="BulkLoadSession"/>'s flush+checkpoint choreography, and <c>GetSnapshot</c> (introspection,
 /// M13) lands with checkpoint v2 (P1.3). The implementation composes <see cref="WalManager"/> in P1.1; <c>WalManager</c> is
 /// dissolved into a SnapshotStore-owned transport in P1.2/P1.3.
@@ -23,6 +23,12 @@ internal interface IDurabilityLog
     /// over-large record (LOG-01).
     /// </summary>
     long Append(ref CommitBatchBuilder batch, ref WaitContext ctx);
+
+    /// <summary>
+    /// <see cref="Append(ref CommitBatchBuilder, ref WaitContext)"/>, also storing the batch's first LSN into <paramref name="inFlightFloor"/> after
+    /// claiming it and before publishing the frame (CK-13). A barrier that covers the batch has drained that frame, so it also sees the floor.
+    /// </summary>
+    long Append(ref CommitBatchBuilder batch, ref WaitContext ctx, ref long inFlightFloor);
 
     /// <summary>
     /// Appends a run of columnar tick-fence blocks (#559), copying each cluster's SoA columns straight into the WAL claim with

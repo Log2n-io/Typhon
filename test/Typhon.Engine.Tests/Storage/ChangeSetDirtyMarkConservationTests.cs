@@ -37,8 +37,7 @@ internal sealed class ChangeSetDirtyMarkConservationTests : TestBase<ChangeSetDi
     {
         var cm = dbe.CheckpointManager;
         Assert.That(cm, Is.Not.Null, "these tests require the checkpoint manager");
-        cm.ForceCheckpoint();
-        Assert.That(cm.WaitForCheckpoint(TimeSpan.FromSeconds(5)), Is.True, "checkpoint cycle did not complete");
+        Assert.That(cm.ForceCheckpointAndWait(TimeSpan.FromSeconds(5)), Is.True, "checkpoint cycle did not complete");
     }
 
     /// <summary>

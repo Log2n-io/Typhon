@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -205,6 +206,14 @@ internal abstract class FencePhaseExecSystemBase : ChunkedCallbackSystem<FenceCo
 
     protected override void Execute(TickContext ctx)
     {
+        // Fence work runs inside the window its phase opened, or it is running against a tick that has moved on: a worker left behind when shutdown gave up
+        // on a stalled tick, or a claim from a finished dispatch (CD-01, which the claim word closes). Checked rather than trusted because EnterWorker below
+        // enrols the thread either way, and EW-01's detector cannot see an enrolled writer.
+        if (!Engine.EpochManager.FenceWindow.IsOpen)
+        {
+            ThrowOutsideFenceWindow(ctx.ChunkIndex);
+        }
+
         var plan = _plan;
         int k = ctx.ChunkIndex;
         if (k < 0 || k >= plan.ChunkCount)
@@ -275,6 +284,12 @@ internal abstract class FencePhaseExecSystemBase : ChunkedCallbackSystem<FenceCo
     }
 
     protected abstract long DispatchItem(int chunkIndex, in FenceWorkItem item, ChangeSet changeSet);
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void ThrowOutsideFenceWindow(int chunkIndex) =>
+        throw new InvalidOperationException(
+            $"{GetType().Name} chunk {chunkIndex} ran with the tick fence window closed, so its items would mutate fence-owned structures outside the "
+            + "fence: a worker is running fence work after the tick it was dispatched in ended.");
 }
 
 /// <summary>

@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine;
@@ -96,6 +97,14 @@ public unsafe partial class Transaction : EntityAccessor
     // AP-01 Debug guard: set true after the WAL Append phase, asserted when the PUBLISH phase begins so any future reorder that publishes before
     // appending trips loudly in Debug builds. Reset at the start of each commit (pooled Transaction reuse).
     private bool _appendPhaseEnteredThisCommit;
+
+    // CK-13: the first LSN this transaction's commit appended, from inside its append (before the WAL frame is published) to the end of its
+    // publish; 0 otherwise. The checkpoint keeps CheckpointLSN below the lowest one: those records' page effects are not in memory yet.
+    private long _inFlightLsnFloor;
+
+    /// <summary>The first LSN this transaction's commit appended, while that commit is between its append and the end of its publish; 0 otherwise
+    /// (CK-13).</summary>
+    internal long InFlightLsnFloor => Volatile.Read(ref _inFlightLsnFloor);
 
     // Drain cursor into _publishEntries: entries [0, _publishDrainIndex) have been fully published (and their retained handler locks released). On a
     // mid-drain throw the abort path releases only [_publishDrainIndex, Count), so each retained lock is released exactly once.
@@ -235,6 +244,7 @@ public unsafe partial class Transaction : EntityAccessor
         _committedOperationCount = null;
         _deletedComponentCount = 0;
         _deferredEnqueueBatch?.Clear();
+        _inFlightLsnFloor = 0;
     }
 
     /// <summary>Prepare for mutation via ArchetypeAccessor. Sets state to InProgress so Commit processes writes.</summary>
@@ -1234,9 +1244,11 @@ public unsafe partial class Transaction : EntityAccessor
         // If there is a valid component, copy its content to the destination.
         // No shared lock needed: deferred chunk freeing guarantees content chunks remain valid for the transaction's lifetime.
         t = default;
-        int size = info.ComponentTable.ComponentStorageSize;
+        // A span over t, not a pointer: t is the caller's variable and can be a field or an array element on the GC heap. Clamped to sizeof(T), so a
+        // storage size larger than T cannot write past it.
+        int size = Math.Min(info.ComponentTable.ComponentStorageSize, Unsafe.SizeOf<T>());
         var src = info.CompContentAccessor.GetChunkAsReadOnlySpan(compRevInfo.CurCompContentChunkId);
-        src.Slice(info.ComponentTable.ComponentOverhead).CopyTo(new Span<byte>(Unsafe.AsPointer(ref t), size));
+        src.Slice(info.ComponentTable.ComponentOverhead, size).CopyTo(MemoryMarshal.AsBytes(new Span<T>(ref t)));
 
         return true;
     }
@@ -2709,7 +2721,7 @@ public unsafe partial class Transaction : EntityAccessor
                 if (!batch.IsEmpty)
                 {
                     var wc = ComposeWaitContext(ref ctx, TimeoutOptions.Current.DefaultCommitTimeout);
-                    walHighLsn = _dbe.DurabilityLog.Append(ref batch, ref wc);
+                    walHighLsn = _dbe.DurabilityLog.Append(ref batch, ref wc, ref _inFlightLsnFloor);
                 }
 
                 persistScope.WalLsn = walHighLsn;
@@ -2952,7 +2964,10 @@ public unsafe partial class Transaction : EntityAccessor
             // ── AP-01: APPEND before PUBLISH. Build + append the WAL batch from the prepared (conflict-resolved) state. This is the point of no
             //    return (AP-02): nothing above made any change visible. ──
             _dbe.LogCommitPhase(TSN, "Append");
+            // CK-13: the append records the batch's first LSN in _inFlightLsnFloor before publishing its frame. It stays there, keeping the checkpoint
+            // below these records, until the publish below has put their page effects in memory.
             var walHighLsn = AppendToWal(ref ctx);
+            _dbe.CommitAfterAppendProbe?.Invoke();
 
             // ── PUBLISH (AP-01): now make the transaction's changes visible. Drain the component publish descriptors (clear IsolationFlag, bump
             //    LCRI/CommitSequence, copy HEAD→cluster slot, release retained handler locks), then flush ECS pending operations (EntityMap spawn
@@ -2962,7 +2977,11 @@ public unsafe partial class Transaction : EntityAccessor
             FlushEcsPendingOperations();
             // Commit-discipline (SingleVersion) staged writes: publish to cluster HEAD + reconcile exact indexes (after FinalizeSpawns so a staged
             // write to a same-tx-spawned entity resolves in the EntityMap). Variant A / issue #392.
+            _dbe.CommitBeforeStagedPublishProbe?.Invoke();
             PublishStagedCommitWrites();
+
+            // CK-13: every page effect is in memory and marked dirty, so a checkpoint that passes these records now also collects their pages.
+            Volatile.Write(ref _inFlightLsnFloor, 0);
 
             // ── WAIT (Immediate) + transition to Committed. Publish already ran and released handler locks, so the durability wait never spans a held
             //    lock; a wait timeout here means durability-uncertain, not rollback (AP-02). ──
@@ -2975,6 +2994,10 @@ public unsafe partial class Transaction : EntityAccessor
         }
         finally
         {
+            // First, so nothing below can leave it set: a commit that threw part-way stops holding the checkpoint back (CK-13; its partial publish is
+            // AP-03's residual, #396).
+            Volatile.Write(ref _inFlightLsnFloor, 0);
+
             // AP-01 safety net: if the commit threw between PREPARE and PUBLISH, retained handler locks would otherwise be orphaned. On the success
             // path PublishPreparedComponents already drained and cleared _publishEntries, so this is a no-op.
             ReleaseRetainedPublishLocks();

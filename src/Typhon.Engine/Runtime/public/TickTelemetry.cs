@@ -61,4 +61,11 @@ public struct TickTelemetry
 
     /// <summary>Total pending events across all event queues at tick end. Sustained growth indicates backlog.</summary>
     public int EventQueueDepth;
+
+    /// <summary>
+    /// Lost wakes caught this tick: a parked worker's between-tick backstop (50 ms) fired after a dispatch whose Set never reached it. Non-zero means the
+    /// wake protocol is broken; zero does not prove it is not, since a lost wake that the next dispatch's Set rescues before the backstop leaves nothing to
+    /// count. Counted when caught, so a wake lost late in one tick lands in the next. Cumulative: <see cref="DagScheduler.LostWakeCount"/>.
+    /// </summary>
+    public int LostWakes;
 }

@@ -86,7 +86,7 @@ dag.QuerySystem("GameRules", ctx => { foreach (var id in ctx.Entities) { /* ... 
 | `b.ChangeFilter(...)` | none | Reactive trigger — entity set narrows to `dirtySet ∪ Added`; OR logic across types |
 | `b.Parallel()` | off | Chunk the filtered entity set across workers |
 | `b.WritesVersioned()` | off | Switch chunk access from `ctx.Accessor` to a per-chunk `ctx.Transaction` (required to write `Versioned` data in parallel) |
-| `b.ChunksPerWorker(factor)` | `1.0` | Oversubscribe chunk count (`round(WorkerCount × factor)`), range `[1.0, 64.0]` |
+| `b.ChunksPerWorker(factor)` | `1.0` | Oversubscribe chunk count (`round(WorkerCount × factor)`, the width `RuntimeOptions.CostBasedChunking` spreads a system's measured cost over), range `[1.0, 64.0]` |
 
 ## ⚠️ Guarantees & limits
 

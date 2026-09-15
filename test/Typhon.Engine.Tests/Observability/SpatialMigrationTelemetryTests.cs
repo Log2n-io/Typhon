@@ -51,6 +51,22 @@ partial class SpTelUnitB : Archetype<SpTelUnitB>
     public static readonly Comp<SpTelPosB> Pos = Register<SpTelPosB>();
 }
 
+// A THIRD archetype, with no spatial field at all, for TH-04's fold: every archetype has a cluster state, and one with nothing to spend its budget on must
+// add nothing to the engine-wide grant.
+[Component("Typhon.Test.SpTel.Plain", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+struct SpTelPlain
+{
+    [Field]
+    public int Value;
+}
+
+[Archetype]
+partial class SpTelPlainUnit : Archetype<SpTelPlainUnit>
+{
+    public static readonly Comp<SpTelPlain> Plain = Register<SpTelPlain>();
+}
+
 [TestFixture]
 [NonParallelizable]
 class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
@@ -680,22 +696,34 @@ class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
 
     [VerifiesRule("SO-01")]
     [Test]
-    public void MaxClusterOverhang_IsPublished_AndIsARunningMaximumRatherThanAPerTickValue()
+    public void ClusterReach_IsPublished_AndFallsOnceTheOutlierIsGone()
     {
         using var dbe = SetupEngineWithGrid();
 
         // Centre at (150,150) — cell (1,1) — with a box reaching 10 units past the cell on every side. Membership is decided by
         // the CENTRE, so the entity belongs to cell (1,1) while its geometry does not fit inside it.
-        SpawnBox(dbe, 90f, 90f, 210f, 210f);
+        var outlier = SpawnBox(dbe, 90f, 90f, 210f, 210f);
+        Assert.That(dbe.GetSpatialTelemetry(ArchetypeId).ClusterReach, Is.EqualTo(10f).Within(1e-3f),
+            "a spawn raises the reach by its own overhang at once, so the entity is reachable before any fence");
+
         dbe.WriteTickFence(1);
+        var named = dbe.GetSpatialTelemetry(ArchetypeId);
+        Assert.Multiple(() =>
+        {
+            Assert.That(named.EscapedClusterCount, Is.EqualTo(1),
+                "the only cluster reaching past its cell, and by more than one hysteresis margin (5): named rather than widened for");
+            Assert.That(named.ClusterReach, Is.Zero, "with the outlier named, nothing else reaches past a cell, so the walks widen by nothing");
+        });
 
-        var afterSpawn = dbe.GetSpatialTelemetry(ArchetypeId).MaxClusterOverhang;
-        Assert.That(afterSpawn, Is.EqualTo(10f).Within(1e-3f), "the box reaches 10 world units outside its own cell on each axis");
-
-        dbe.WriteTickFence(2);   // quiet
-
-        Assert.That(dbe.GetSpatialTelemetry(ArchetypeId).MaxClusterOverhang, Is.EqualTo(afterSpawn),
-            "it is neither per-tick nor cumulative: every kNN ring widens by it, so it never falls and never resets");
+        // A point back at the centre: the cluster's box shrinks at the fence, and the reach is recomputed from the index rather than remembered.
+        WriteSpatialTo(dbe, outlier, 150f, 150f);
+        dbe.WriteTickFence(2);
+        var fixedUp = dbe.GetSpatialTelemetry(ArchetypeId);
+        Assert.Multiple(() =>
+        {
+            Assert.That(fixedUp.EscapedClusterCount, Is.Zero, "a level recomputed at every fence, not a running maximum: the outlier is gone");
+            Assert.That(fixedUp.ClusterReach, Is.Zero);
+        });
     }
 
     [Test]
@@ -719,7 +747,7 @@ class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
 
     [VerifiesRule("SO-01")]
     [Test]
-    public void Total_MaxesTheOverhang_AndWeightsTheTightnessMeansBySample()
+    public void Total_MaxesTheReach_AndWeightsTheTightnessMeansBySample()
     {
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<SpTelPos>();
@@ -730,17 +758,24 @@ class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
             cellSize: CellSize));
         dbe.InitializeArchetypes();
 
-        // Archetype A: a box overhanging its cell by 10, plus a wide cluster in cell (0,0).
+        // Archetype A: a box 10 past cell (1,1), which is named; a box 3 past cell (5,5), within one hysteresis margin (5) and so folded into A's reach;
+        // and a wide cluster in cell (0,0).
         SpawnBox(dbe, 90f, 90f, 210f, 210f);
+        SpawnBox(dbe, 497f, 497f, 603f, 603f);
         var a = Spawn(dbe, 10f, 10f);
         Spawn(dbe, 20f, 10f);
 
-        // Archetype B: a box overhanging by 2 only.
+        // Archetype B: a box 10 past cell (7,7), named, and one 2 past cell (3,3), folded. Reaches 3 and 2, one outlier each: a total that SUMMED the
+        // reaches would read 5, and one that MAXED the named counts would read 1.
         using (var tx = dbe.CreateQuickTransaction())
         {
             tx.Spawn<SpTelUnitB>(SpTelUnitB.Pos.Set(new SpTelPosB
             {
                 Bounds = new AABB2F { MinX = 298f, MinY = 298f, MaxX = 402f, MaxY = 402f },
+            }));
+            tx.Spawn<SpTelUnitB>(SpTelUnitB.Pos.Set(new SpTelPosB
+            {
+                Bounds = new AABB2F { MinX = 690f, MinY = 690f, MaxX = 810f, MaxY = 810f },
             }));
             tx.Commit();
         }
@@ -754,9 +789,14 @@ class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
 
         Assert.Multiple(() =>
         {
-            Assert.That(perArchetype.MaxClusterOverhang, Is.EqualTo(10f).Within(1e-3f), "precondition: archetype A owns the larger overhang");
-            Assert.That(total.MaxClusterOverhang, Is.EqualTo(10f).Within(1e-3f),
-                "engine-wide overhang is the largest any archetype proved, never the sum — summing would widen every kNN ring by 12");
+            Assert.That(perArchetype.ClusterReach, Is.EqualTo(3f).Within(1e-3f), "precondition: A folds its 3-unit box and names its 10-unit one");
+            Assert.That(perArchetype.EscapedClusterCount, Is.EqualTo(1));
+            var b = dbe.GetSpatialTelemetry(Archetype<SpTelUnitB>.Metadata.ArchetypeId);
+            Assert.That(b.ClusterReach, Is.EqualTo(2f).Within(1e-3f), "precondition: B folds its 2-unit box");
+            Assert.That(b.EscapedClusterCount, Is.EqualTo(1), "precondition: and names its 10-unit one");
+            Assert.That(total.ClusterReach, Is.EqualTo(3f).Within(1e-3f),
+                "engine-wide reach is the largest any archetype needs, never the sum (5) — summing would widen every walk by bounds no archetype has");
+            Assert.That(total.EscapedClusterCount, Is.EqualTo(2), "named outliers are distinct clusters, so they add rather than max");
 
             // B wrote nothing on tick 2, so it contributes no samples and the weighted mean is A's alone. Summing the two archetypes'
             // MEANS instead of their numerators would divide A's sum by two and halve the reading.
@@ -765,6 +805,245 @@ class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
                 "a quiet archetype contributes no samples and must not drag the mean toward zero");
             Assert.That(total.MeanPackingBound, Is.EqualTo(perArchetype.MeanPackingBound).Within(1e-9));
         });
+    }
+
+    /// <summary>
+    /// The query tally folds by sum, and the engine-wide candidates per hit comes from the summed counts. A mean of the two archetypes' ratios would weight
+    /// the one queried for four entities equally with the one queried for twenty.
+    /// </summary>
+    [VerifiesRule("SO-01")]
+    [VerifiesRule("SO-02")]
+    [Test]
+    public void Total_SumsTheQueryTally_AndDerivesTheRatioFromTheSums()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<SpTelPos>();
+        dbe.RegisterComponentFromAccessor<SpTelPosB>();
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
+            worldMin: new Vector2(0, 0),
+            worldMax: new Vector2(WorldMax, WorldMax),
+            cellSize: CellSize));
+        dbe.InitializeArchetypes();
+
+        // A: twenty points in cell (0,0), one cluster; B: four points in cell (5,5), one cluster.
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < 20; i++)
+            {
+                tx.Spawn<SpTelUnit>(SpTelUnit.Pos.Set(PointAt(10f + (4f * i), 50f)));
+            }
+
+            for (var i = 0; i < 4; i++)
+            {
+                tx.Spawn<SpTelUnitB>(SpTelUnitB.Pos.Set(new SpTelPosB
+                {
+                    Bounds = new AABB2F { MinX = 510f + i, MinY = 550f, MaxX = 510f + i, MaxY = 550f },
+                }));
+            }
+
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(1);
+
+        // A's query matches six of its twenty (x = 10 … 30), B's all four of its four.
+        var boxA = new AABB2F { MinX = 9f, MinY = 40f, MaxX = 31f, MaxY = 60f };
+        var boxB = new AABB2F { MinX = 500f, MinY = 500f, MaxX = 599f, MaxY = 599f };
+        using (EpochGuard.Enter(dbe.EpochManager))
+        {
+            Assert.That(dbe.ClusterSpatialQuery<SpTelUnit>().AABB(in boxA).Count(), Is.EqualTo(6));
+            Assert.That(dbe.ClusterSpatialQuery<SpTelUnitB>().AABB(in boxB).Count(), Is.EqualTo(4));
+        }
+
+        dbe.WriteTickFence(2);
+        var a = dbe.GetSpatialTelemetry(ArchetypeId);
+        var b = dbe.GetSpatialTelemetry(Archetype<SpTelUnitB>.Metadata.ArchetypeId);
+        var total = dbe.GetSpatialTelemetryTotal();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That((a.QueryClustersOpened, a.QueryCandidates, a.QueryHits), Is.EqualTo((1L, 20L, 6L)), "precondition: A's query");
+            Assert.That((b.QueryClustersOpened, b.QueryCandidates, b.QueryHits), Is.EqualTo((1L, 4L, 4L)), "precondition: B's query");
+            Assert.That((total.QueryClustersOpened, total.QueryCandidates, total.QueryHits), Is.EqualTo((2L, 24L, 10L)), "the counts sum");
+            Assert.That(total.QueryCandidatesPerHit, Is.EqualTo(2.4d).Within(1e-12),
+                "24 candidates over 10 hits; the mean of A's 3.33 and B's 1 would read 2.17");
+        });
+    }
+
+    /// <summary>
+    /// TH-04's three members fold like the rest: the granted budgets sum, the smoothed candidates per hit is re-derived from summed numerators over summed
+    /// denominators, and the bests are weighted by the same hits. An archetype with no spatial field has nothing to spend and is granted nothing.
+    /// </summary>
+    [VerifiesRule("SO-01")]
+    [VerifiesRule("TH-04")]
+    [Test]
+    public void Total_SumsTheGrantedBudget_AndWeightsTheControllerReadingsByHits()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<SpTelPos>();
+        dbe.RegisterComponentFromAccessor<SpTelPosB>();
+        dbe.RegisterComponentFromAccessor<SpTelPlain>();
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
+            worldMin: new Vector2(0, 0),
+            worldMax: new Vector2(WorldMax, WorldMax),
+            cellSize: CellSize));
+        dbe.InitializeArchetypes();
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < 20; i++)
+            {
+                tx.Spawn<SpTelUnit>(SpTelUnit.Pos.Set(PointAt(10f + (4f * i), 50f)));
+            }
+
+            for (var i = 0; i < 4; i++)
+            {
+                tx.Spawn<SpTelUnitB>(SpTelUnitB.Pos.Set(new SpTelPosB
+                {
+                    Bounds = new AABB2F { MinX = 510f + i, MinY = 550f, MaxX = 510f + i, MaxY = 550f },
+                }));
+            }
+
+            tx.Spawn<SpTelPlainUnit>(SpTelPlainUnit.Plain.Set(new SpTelPlain { Value = 1 }));
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(1);
+
+        // A: six of its twenty per query, five queries; B: all four of its four, ten queries — enough hits for a signal on the first fence.
+        var boxA = new AABB2F { MinX = 9f, MinY = 40f, MaxX = 31f, MaxY = 60f };
+        var boxB = new AABB2F { MinX = 500f, MinY = 500f, MaxX = 599f, MaxY = 599f };
+        using (EpochGuard.Enter(dbe.EpochManager))
+        {
+            for (var q = 0; q < 5; q++)
+            {
+                Assert.That(dbe.ClusterSpatialQuery<SpTelUnit>().AABB(in boxA).Count(), Is.EqualTo(6));
+            }
+
+            for (var q = 0; q < 10; q++)
+            {
+                Assert.That(dbe.ClusterSpatialQuery<SpTelUnitB>().AABB(in boxB).Count(), Is.EqualTo(4));
+            }
+        }
+
+        dbe.WriteTickFence(2);
+        var a = dbe.GetSpatialTelemetry(ArchetypeId);
+        var b = dbe.GetSpatialTelemetry(Archetype<SpTelUnitB>.Metadata.ArchetypeId);
+        var plain = dbe.GetSpatialTelemetry(Archetype<SpTelPlainUnit>.Metadata.ArchetypeId);
+        var total = dbe.GetSpatialTelemetryTotal();
+
+        // Every archetype the engine holds a state for, whatever other fixtures registered: what the total must be the sum of.
+        var granted = 0d;
+        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        {
+            granted += dbe.GetSpatialTelemetry(meta.ArchetypeId).ReclusterBudgetGrantedMs;
+        }
+
+        // Per tick, A tests 100 candidates for 30 hits and B 40 for 40, so the engine reads (100 + 40) / (30 + 40) = 2.0, and both sit at their best.
+        Assert.Multiple(() =>
+        {
+            Assert.That(a.QueryCandidatesPerHitSmoothed, Is.EqualTo(100d / 30d).Within(1e-9), "precondition: A's signal");
+            Assert.That(b.QueryCandidatesPerHitSmoothed, Is.EqualTo(1d).Within(1e-9), "precondition: B's signal");
+            Assert.That(plain.ReclusterBudgetGrantedMs, Is.Zero, "an archetype with no spatial field has nothing to spend, and is granted nothing");
+            Assert.That(total.ReclusterBudgetGrantedMs, Is.EqualTo(granted).Within(1e-12), "the grants sum");
+            Assert.That(total.QueryCandidatesPerHitSmoothed, Is.EqualTo(2d).Within(1e-9),
+                "summed numerators over summed denominators, not a mean of A's 3.33 and B's 1");
+            Assert.That(total.QueryCandidatesPerHitBest, Is.EqualTo(2d).Within(1e-9), "the bests weighted by the same hits");
+        });
+    }
+
+    /// <summary>
+    /// The budget controller's event and levels fold by kind: re-bases sum across archetypes, while the whole-budget streak and the drift boost are levels,
+    /// MAXED — the engine's worst archetype, not a sum no archetype has.
+    /// </summary>
+    [VerifiesRule("SO-01")]
+    [VerifiesRule("TH-04")]
+    [Test]
+    public void Total_SumsTheRebases_AndMaxesTheStreakAndTheBoost()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<SpTelPos>();
+        dbe.RegisterComponentFromAccessor<SpTelPosB>();
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
+            worldMin: new Vector2(0, 0),
+            worldMax: new Vector2(WorldMax, WorldMax),
+            cellSize: CellSize));
+        dbe.InitializeArchetypes();
+
+        var idB = Archetype<SpTelUnitB>.Metadata.ArchetypeId;
+        var sa = dbe._archetypeStates[ArchetypeId].ClusterState;
+        var sb = dbe._archetypeStates[idB].ClusterState;
+        var cfg = dbe.SpatialGrid.Config;
+
+        // A best of 2, then half as bad again: A for 10 ticks, B for 30, so both reach the whole budget and B's streak is the longer.
+        DriveController(sa, in cfg, 2_000, 200);
+        DriveController(sa, in cfg, 3_000, 10);
+        DriveController(sb, in cfg, 2_000, 200);
+        DriveController(sb, in cfg, 3_000, 30);
+        sa.TotalEfficiencyRebases = 2;
+        sb.TotalEfficiencyRebases = 3;
+        sa.DriftTargetBoost = 2.5f;
+        sb.DriftTargetBoost = 1.5f;
+
+        var a = dbe.GetSpatialTelemetry(ArchetypeId);
+        var b = dbe.GetSpatialTelemetry(idB);
+        var total = dbe.GetSpatialTelemetryTotal();
+        Assert.Multiple(() =>
+        {
+            Assert.That(a.TicksAtWholeBudget, Is.GreaterThan(0).And.LessThan(b.TicksAtWholeBudget), "precondition: both at the whole budget, B the longer");
+            Assert.That(a.TotalEfficiencyRebases, Is.EqualTo(2), "the accessor reads the archetype's own count");
+            Assert.That(a.DriftTargetBoost, Is.EqualTo(2.5f), "and its own boost");
+            Assert.That(total.TotalEfficiencyRebases, Is.EqualTo(5), "re-bases are events, so they sum");
+            Assert.That(total.TicksAtWholeBudget, Is.EqualTo(b.TicksAtWholeBudget), "the streak is a level: the longest, not a sum no archetype has");
+            Assert.That(total.DriftTargetBoost, Is.EqualTo(2.5f), "the boost too: the most boosted archetype");
+        });
+    }
+
+    /// <summary>
+    /// An archetype with nothing to spend a budget on — here no spatial field at all — keeps no whole-budget streak and never re-bases, however long its
+    /// queries sit past the tolerance, and stays out of the engine-wide controller readings: its queries are tallied, but no controller acts on them.
+    /// </summary>
+    [VerifiesRule("TH-04")]
+    [Test]
+    public void AnArchetypeWithNothingToSpend_KeepsNoStreak_NeverRebases_AndStaysOutOfTheControllerTotals()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<SpTelPos>();
+        dbe.RegisterComponentFromAccessor<SpTelPlain>();
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
+            worldMin: new Vector2(0, 0),
+            worldMax: new Vector2(WorldMax, WorldMax),
+            cellSize: CellSize));
+        dbe.InitializeArchetypes();
+
+        var id = Archetype<SpTelPlainUnit>.Metadata.ArchetypeId;
+        var state = dbe._archetypeStates[id]?.ClusterState;
+        Assert.That(state, Is.Not.Null, "precondition: the plain archetype has a cluster state, as every cluster-eligible archetype does");
+        var cfg = dbe.SpatialGrid.Config;
+        DriveController(state, in cfg, 2_000, 200);
+        DriveController(state, in cfg, 3_000, ArchetypeClusterState.EfficiencyRebaseTicks + 50);
+
+        var t = dbe.GetSpatialTelemetry(id);
+        var total = dbe.GetSpatialTelemetryTotal();
+        Assert.Multiple(() =>
+        {
+            Assert.That(state.MaintenanceBudgetScale, Is.EqualTo(1d), "precondition: its queries sit past the tolerance for longer than the window");
+            Assert.That(t.ReclusterBudgetGrantedMs, Is.Zero, "precondition: and it is granted nothing");
+            Assert.That(t.TicksAtWholeBudget, Is.Zero, "no streak toward a budget it never had");
+            Assert.That(t.TotalEfficiencyRebases, Is.Zero, "and no re-base");
+            Assert.That(total.QueryCandidatesPerHitSmoothed, Is.Zero, "the only archetype with a signal is one no controller acts on");
+        });
+    }
+
+    /// <summary>Feed the budget controller the same made-up tally, 1 000 hits a tick, for <paramref name="ticks"/> ticks.</summary>
+    private static void DriveController(ArchetypeClusterState state, in SpatialGridConfig config, long candidates, int ticks)
+    {
+        for (var i = 0; i < ticks; i++)
+        {
+            state.LastTickQueryCandidates = candidates;
+            state.LastTickQueryHits = 1_000;
+            state.UpdateMaintenanceBudgetScale(in config);
+        }
     }
 
     /// <summary>
@@ -974,12 +1253,19 @@ class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
         using var dbe = SetupEngineWithGrid();
         var a = Spawn(dbe, 10f, 10f);
         Spawn(dbe, 30f, 10f);
+
+        // A reach and a named outlier that are not zero, so the two gauges below agree on a VALUE: 10 past cell (1, 1) is named, 3 past cell (5, 5)
+        // lies within one hysteresis margin and is folded into the reach.
+        SpawnBox(dbe, 90f, 90f, 210f, 210f);
+        SpawnBox(dbe, 497f, 497f, 603f, 603f);
         dbe.WriteTickFence(1);
         WriteSpatialTo(dbe, a, 60f, 10f);
         dbe.WriteTickFence(2);
 
         var expected = dbe.GetSpatialTelemetry(ArchetypeId);
         Assert.That(expected.TightnessSampleCount, Is.GreaterThan(0), "precondition: there is a non-zero reading to agree ON");
+        Assert.That(expected.ClusterReach, Is.EqualTo(3f).Within(1e-3f), "precondition: a non-zero reach to agree on");
+        Assert.That(expected.EscapedClusterCount, Is.EqualTo(1), "precondition: a named outlier to agree on");
 
         using var exporter = new EcsMetricsExporter(dbe);
         var (longs, doubles) = ScrapeSpatialInstruments(exporter);
@@ -990,7 +1276,8 @@ class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
             Assert.That(doubles["typhon.ecs.spatial.cluster_extent_ratio"], Is.EqualTo(expected.MeanClusterExtentRatio).Within(1e-9));
             Assert.That(doubles["typhon.ecs.spatial.packing_bound"], Is.EqualTo(expected.MeanPackingBound).Within(1e-9));
             Assert.That(doubles["typhon.ecs.spatial.tightness_to_bound"], Is.EqualTo(expected.MeanTightnessToBound).Within(1e-9));
-            Assert.That(doubles["typhon.ecs.spatial.max_cluster_overhang"], Is.EqualTo((double)expected.MaxClusterOverhang).Within(1e-6));
+            Assert.That(doubles["typhon.ecs.spatial.cluster_reach"], Is.EqualTo((double)expected.ClusterReach).Within(1e-6));
+            Assert.That(longs["typhon.ecs.spatial.escaped_clusters"], Is.EqualTo(expected.EscapedClusterCount));
             Assert.That(longs["typhon.ecs.spatial.cell_tree_promotions"], Is.EqualTo(expected.CellTreePromotions));
             Assert.That(longs["typhon.ecs.spatial.cell_tree_demotions"], Is.EqualTo(expected.CellTreeDemotions));
         });

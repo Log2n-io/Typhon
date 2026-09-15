@@ -142,13 +142,9 @@ public static unsafe class EntityRecordAccessor
 
     /// <summary>Copy component locations from a raw record into an <see cref="EntityLocations"/> struct.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static void CopyLocationsTo(byte* record, ref EntityLocations locs, int componentCount)
-    {
-        fixed (int* dst = locs.Values)
-        {
-            Unsafe.CopyBlock(dst, record + HeaderSize, (uint)(componentCount * sizeof(int)));
-        }
-    }
+    internal static void CopyLocationsTo(byte* record, ref EntityLocations locs, int componentCount) =>
+        // A span over locs, not a pinned pointer: locs can live inside a class. The record itself is page memory.
+        new System.ReadOnlySpan<int>(record + HeaderSize, componentCount).CopyTo(MemoryMarshal.CreateSpan(ref locs.Values[0], componentCount));
 }
 
 /// <summary>

@@ -181,6 +181,8 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
   note: handler-conflict commits hold the per-entity revision-chain lock from PREPARE through PUBLISH (spanning the staging
         Append) so `[detect, resolve-against-committed, IsolationFlag clear]` stays one atomic region — required by
         ConcurrencyConflictTests concurrent delta-rebase. This refines 07-rules' "re-acquire in publish" wording
+  note: between Append and the end of publish the records can be durable while their page effects are not in memory yet; CK-13 keeps the
+        checkpoint below them over that window
 
 ### AP-02: Append is the point of no return `[fatal]`
   invariant all conflict validation precedes Append; post-Append the tx reaches Committed and publish does not roll back. A
@@ -332,7 +334,9 @@ CK-08 (flush-only cycles) are later increments.
          fixed pages 3/7 — v4 genesis — to break the genesis chicken-and-egg), `ResolveDirectoryPairsForLoad` (read: physical
          both-slots walk before every `Load`, registers `_pairState`), `MapReadOffset` (directory page → `_pairState.CurrentSlot`),
          `DeleteSegment` (free every directory page's twin + the map-ext pages AND clear its `_pairState` entry — else the twin
-         leaks and a stale pair mis-routes a cold read after the primary is reallocated). Twin discovery survives a torn primary
+         leaks and a stale pair mis-routes a cold read after the primary is reallocated), `ReleaseUnpublishedPages` (the same for the
+         pages a failed grow allocated, PS-11). Both drop pairs under `_pairLock`, which `PersistProtectedPage` re-checks the pair under, so
+         a checkpoint persisting a page being freed neither throws nor re-adds its pair. Twin discovery survives a torn primary
          because the `IsLogicalSegment` flag + `TwinPageIndex` are immutable and in the first 4 KiB sector.
   on_violation: a torn write to the only persisted copy → database unopenable / segment unreadable (STO-4); a leaked/stale pair
                 on delete → silent mis-route of a reallocated page (STO-4)
@@ -472,7 +476,7 @@ CK-08 (flush-only cycles) are later increments.
   scope: `CheckpointManager.RunCheckpointCycle` (the `PersistDurableMetadataHook` invocation), `DatabaseEngine.PersistArchetypeState`
          (skip-unchanged + cache writeback), `DatabaseEngine.DropLegacyClusterIndexBootstrapKeys` (retires the pre-#661 home),
          wired at `DatabaseEngine` checkpoint-manager construction. **Includes the recovery seal** (`DatabaseEngine.SealRecovery`,
-         itself a `ForceCheckpoint`): `_archetypeSpiPersistArmed` is set BEFORE it, in `RunWalV2Recovery`. It used to be set only
+         itself a `ForceCheckpointAndWait`): `_archetypeSpiPersistArmed` is set BEFORE it, in `RunWalV2Recovery`. It used to be set only
          at the end of `InitializeArchetypes`, which carved the seal out of this rule on the grounds that doing so "keeps its
          original behaviour" — a mechanical reason where the rule gives a correctness one. Distinct from #395 Face B
          (a plain SV cluster *spawn* value is not WAL-durable per-commit — the Committed discipline's concern, not this rule)
@@ -523,6 +527,93 @@ CK-08 (flush-only cycles) are later increments.
     failure, so a concurrent writer holding that sentinel makes the checkpoint skip the page, stillSkipped > 0, the
     CK-03 gate stays shut and no WAL segment is ever recycled — #817's exact failure mode, by design.
 
+### CK-12: A forced wait is released only by a cycle that started after it and covered it `[fatal]` `[silent]`
+  invariant ForceCheckpointAndWait returns true ⟹ some cycle c finished, c started after the call's request, and c wrote every page it
+            collected (the CK-03 gate opened). So every page the caller dirtied before the call is on the data file, fsynced, and
+            CheckpointLSN ≥ every LSN durable at the call, except the records of another thread's commit still between its append and its
+            publish, which CK-13 keeps it below. With minCheckpointLsn the wait also requires CheckpointLSN ≥ that LSN (CompleteBulkLoad
+            passes its BulkBegin LSN)
+  invariant neither a cycle already running at the call, nor a gated or failed cycle, releases it. After either, the wait gives a later cycle
+            one retry pause (the CK-11 poll floor, 250 ms) to cover it, then forces another, until its timeout: a page the gate keeps skipping
+            must not drive back-to-back cycles, each one a WAL flush
+  invariant it returns false at once when checkpointing has halted: a fatal error, a simulated hard crash, the manager shutting down, or its
+            loop exiting. Each wakes a sleeping waiter. A shutdown cycle may still cover the request, and a waiter that sees it finish returns
+            true (coverage is tested first), but none waits for one
+  invariant the wait keys on the number of the first cycle to start after its request, never on a counter read after the force: an idle
+            engine finishes the forced cycle before the caller gets to wait, and that cycle must still count
+  invariant a force request is never lost: the loop reads and clears it in one exchange, so a request landing between the wake and the read
+            runs the next pass. A request posted while a cycle runs is kept (AForcedWait_IsNotReleasedByTheCycleAlreadyRunning); no test
+            reaches the window between the wake and the read, which is two adjacent statements
+  requires: CK-03 (the gate decides "covered"), CK-01/CK-02 (the covering cycle's barrier, taken after the request, is what puts
+            CheckpointLSN at or past every LSN durable at the call), PS-10 (only the covering write discharges a page's debt), CK-13 (which can cap
+            that barrier)
+  scope: CheckpointManager.ForceCheckpointAndWait, CheckpointManager.ForceCheckpoint, CheckpointManager.RequestCycle,
+         CheckpointManager.PublishCycleEnd, CheckpointManager.RunCheckpointCycle, CheckpointManager.CheckpointLoop,
+         CheckpointManager.PrepareCrashStop, CheckpointManager.Dispose, BulkLoadSession.CompleteBulkLoad, DatabaseEngine.SealRecovery
+  on_violation: the caller proceeds on a checkpoint that never covered its writes. CompleteBulkLoad makes BulkEnd durable over bulk pages that
+                reached no disk and have no WAL records (BL-01), so a crash loses them with no error (NEW-CK-2 in the 2026-07-06 assessment).
+                Or the wait misses the cycle it forced and times out: measured 7 runs in 8 of a quiescent-engine test (`before=0 after=1`, the
+                forced cycle already over when the wait read the count); in production a BulkLoadCheckpointTimeoutException, or a 30 s stall
+                in the recovery seal
+  verified: CheckpointManagerTests.AForcedWait_CountsItsOwnCycle_EvenIfItEndsFirst (a seam holds the caller until the forced cycle is
+            over), AForcedWait_IsNotReleasedByTheCycleAlreadyRunning, AForcedWait_IsNotReleasedByAGatedCycle,
+            AForcedWait_AsksAgainAfterAFailedCycle, AForcedWait_ReturnsAtOnceWhenCheckpointingHasHalted, AForcedWait_ReturnsAtOnceAfterACrashStop,
+            AForcedWait_ReturnsAtOnceOnACrashMidCycle, AForcedWait_ReturnsWhenTheLoopStops, AForcedWait_ReturnsWhenDisposedUnstarted,
+            AForcedWait_PausesBetweenGatedCycles, AForcedWait_WaitsForTheWatermarkItAskedFor.
+            Mutants: AWaitThatSamplesAfterItsOwnForce_IsRejected (the replaced pairing); AWaitReleasedByTheNextCycle_IsRejected,
+            AWaitReleasedByAGatedCycle_IsRejected, AWaitThatNeverAsksAgain_IsRejected and AWaitThatOutlastsAHaltedCheckpoint_IsRejected
+            (reading the count before the force, which fixes the measured race and none of these)
+  note: "covered" is the whole-cache CK-03 gate, not "the caller's pages were written": under writers that keep some page live, a forced
+        wait can time out although its own pages reached disk (the #817 class). CK-03's planned per-page refinement would let it require
+        only pages dirtied before the request
+
+### CK-13: A checkpoint never passes a commit that is between its append and its publish `[fatal]` `[silent]`
+  invariant CheckpointLSN < the first LSN appended by any commit still between its WAL append and the end of its publish
+  invariant a commit records its first LSN (its floor) inside the append, after claiming it and before publishing the WAL frame, and
+            withdraws it once every publish-time page effect is in memory and marked dirty, or when the commit throws (AP-03's residual,
+            #396: the partial publish then outlives the next checkpoint, as it did before this rule)
+  invariant the cycle reads the lowest floor AFTER its barrier and BEFORE collecting dirty pages. A barrier that covers a record has drained
+            its frame (the drain stops at the first unpublished frame, and LSN order is buffer order, WP-06), so the floor, stored before the
+            frame was published, is visible; a commit that has withdrawn has already dirtied the pages the collection finds
+  invariant the cap never lowers CheckpointLSN: segments at or below it may already be recycled. Cycles are serialized (RunCheckpointCycle
+            takes a lock), so a fixture that drives one directly waits for the loop's and the watermark only moves forward. The Math.Max in the
+            cap is defence in depth: a stored floor is always above CheckpointLSN, and S3 holds CK13_NeverLowers without it.
+            CheckpointManagerTests.InFlightFloor_CapsTheWatermark exercises it with an artificial floor
+  invariant any path that appends records and then mutates pages passes a floor to DurabilityLog.Append. Only Transaction.Commit does so
+            today: the tick fence writes its pages before it appends, a bulk manifest mutates no page after its own, and PersistArchetypeState
+            appends no record
+  requires: AP-01 (nothing is published before its records are appended), CK-01/CK-02 (the barrier the floor caps), WP-06 (LSN order is
+            buffer order)
+  scope: DurabilityLog.Append, Transaction.Commit, Transaction.InFlightLsnFloor, Transaction.ResetCore, TransactionChain.LowestInFlightLsn,
+         CheckpointManager.InFlightCommitFloor, CheckpointManager.RunCheckpointCycle, DatabaseEngine.InitializeCheckpointManager (the wiring)
+  on_violation: a commit's publish-time page effects (DiedTSN, EnabledBits, the HEAD copy into the cluster slot, spawn finalize,
+                Commit-discipline staged writes) are in no page the cycle writes, yet CheckpointLSN passes their record. Recovery skips
+                records at or below it, so a crash loses the committed change with no error. Measured: a Commit-discipline write and a
+                Commit-discipline destroy, each held between append and publish while a forced checkpoint ran, were lost after a hard crash
+                (CheckpointLSN reached the record's LSN)
+  spec: rules/tla/CommittedDiscipline.tla (S3) — CK13_BelowUnpublished, CK13_NeverLowers (an action property) and AckDurable, green with one
+        slot and serialized writers and with two slots written concurrently (-twoslots.cfg). Six mutants each violate: the floors ignored
+        (-mutant-nofloor, which is NEW-CK-1), the floor stored after the frame is published (-mutant-floorafterframe), withdrawn before the
+        publish (-mutant-withdrawearly), read before the barrier (-mutant-readbeforebarrier), read after the capture (-mutant-readaftercapture),
+        or the highest floor used instead of the lowest (-mutant-latestfloor, on two slots)
+  verified: CommittedDisciplineRecoveryTests.CommitDiscipline_ACheckpointDuringAPublish_KeepsTheCommitInTheRecoveryWindow (Write and Destroy,
+            each held right after the append and just before the staged writes' publish: CheckpointLSN stays below the held commit's record, and the
+            change survives a crash), with its mutant CommitDiscipline_ACheckpointThatIgnoresTheFloor_IsRejected (the floor unwired);
+            CommittedDisciplineRecoveryTests.CommitDiscipline_AnAppendThatFailsAfterItsClaim_WithdrawsItsFloor (the append throws after its claim:
+            the floor was stored before the frame's publish and is withdrawn when the commit throws, so the checkpoint reads no floor while the
+            failed transaction is still alive);
+            CheckpointManagerTests.InFlightFloor_CapsTheWatermark
+  note: NEW-CK-1 in the 2026-07-06 assessment. For Versioned commits the CK-03 gate already held the watermark back: in the measured destroy,
+        update and spawn every cycle skipped a page a live chunk writer held (skip cause A). TrueCrashE2ETests.ACheckpointDuringAPublish_* guards
+        that but cannot fail on this rule. A Commit-discipline write or destroy touches no page before publish (CM-01), so nothing did
+  note: S3 could not find NEW-CK-1 before 2026-09-14: its checkpoint advanced CheckpointLSN to the LSN the page memory reflected, not to its
+        barrier as the engine does. S1 (CheckpointProtocol.tla) still models the append and the dirtying as one step; the floor does not depend
+        on pages, so S3 carries this rule
+  note: store-before-publish is pinned by CommitDiscipline_AnAppendThatFailsAfterItsClaim_WithdrawsItsFloor, whose probe sits between the store
+        and the frame's publish, and by -mutant-floorafterframe. No test reaches read-after-barrier-before-collect, because the verifiers hold the
+        commit across the whole cycle; the S3 mutants cover it. Withdraw-after-the-last-page-effect is pinned by the hold just before the staged
+        writes' publish; -mutant-withdrawearly pins only withdraw-after-publish, since S3's publish is one step
+
 ---
 
 ---
@@ -554,6 +645,10 @@ rejected and is the TLA+ mutant.
   note publish does NOT clear the bit; it issues the same SetDirty call every TickFence write makes
   scope: Transaction publish (PublishStagedEntry), fence snapshot
   spec: rules/tla/CommittedDiscipline.tla — CM03_RecoveryConverges
+  note S3 assumes the runtime DAG serializes same-entity writers (ADR-057). With that guard removed, TLC finds two commits to one slot
+       publishing out of LSN order: the page memory keeps the lower-LSN value while last-writer-wins by LSN says the higher one, so what a
+       crash recovers depends on where CheckpointLSN landed. Staging (EntityAccessor.WriteEcsComponentData) and publish
+       (Transaction.PublishStagedEntry) take no per-entity lock, so two ad-hoc Commit-discipline transactions outside the DAG can do this
 
 ### CM-04: ReadsSnapshot rejection
   invariant Build() rejects ReadsSnapshot declarations on SV-layout components
@@ -1174,8 +1269,9 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   never let the checkpoint, SavePages, or any writer touch DirtyCounter at all
   invariant at quiesce — no unit of work open, no checkpoint running — every page has DirtyCounter == 0
   scope: ChangeSet.AddByMemPageIndex / RegisterReDirty / ReleaseDirtyMarks / Reset, PagedMMF.DecrementDirtyByDelta,
-         UnitOfWork.Dispose, Transaction.Dispose, EntityAccessor
-  verified: ChangeSetDirtyMarkConservationTests
+         UnitOfWork.Dispose, Transaction.Dispose, EntityAccessor, ChunkBasedSegment.Grow (its local set, released in a finally)
+  verified: ChangeSetDirtyMarkConservationTests; SegmentGrowAtomicityTests.AChunkSegmentGrowThatThrows_StillReleasesItsLocalChangeSet (the
+            throw path of a locally-created set), with its mutant AMarkLeftOnALocalChangeSet_IsRejected
   on_violation: under-release → page permanently unevictable, cache starves after tens of minutes (#824);
     over-release → page evictable with unwritten bytes, data lost before reaching stable media (#385)
   rationale: 🔴 REWRITTEN 2026-08-16. This rule used to REQUIRE the defect: "issues exactly (N-1) decrements, leaving one
@@ -1256,7 +1352,7 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             slot becomes evictable in the request→latch gap.
   requires: PS-01 (SlotRefCount blocks eviction), PS-06 (the TOCTOU this prevents)
   scope: LogicalSegment.RequestExclusiveForGrow (the pinned, bounded-retry helper) routing every grow latch site (GetPageExclusive[Unchecked],
-         CreateOrGrow data/map/end/old-tail pages, GetPageAddressExclusive)
+         CreateOrGrow data/map/end/old-tail pages, PinForPublish, GetPageAddressExclusive)
   on_violation: PS-06 TOCTOU — the slot is evicted and reused for another file page in the gap; the grow then clears/rewrites it
                 and calls UnlatchPageExclusive, releasing the OTHER thread's latch and forcing PageState=Idle + a stray seqlock
                 bump → cross-thread page-cache corruption (a native host crash in Debug; silent heap corruption in Release).
@@ -1264,6 +1360,38 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
                 stalls grows holding latches → the checkpoint spins forever in CopyPageWithSeqlock (hence the helper's try/finally).
   verified: empirically (latch-fail assert captures 11→0; SimdKwayMergeTests passes isolated; full suite no longer host-crashes);
             a deterministic eviction-in-the-gap fault-injection test is a follow-up
+
+### PS-11: A segment grow publishes all of its pages or none `[fatal]` `[silent]`
+  invariant a grow that throws leaves the segment as it was: its in-memory page list, its directory (entries and terminator, on the root and
+            map-extension pages) and its data-page forward chain (the old tail's `LogicalSegmentNextRawDataPBID`) all still describe the old length
+  invariant [allocate data pages, map pages, twins] → [initialize every new data page] → [slot-pin every directory page and the old tail] →
+            [latch them all] → [publish: directory entries, map links, old-tail link] → [`_pages` = new list]. Every step that can fail (wait
+            for the page cache, allocate, or lose a latch to another thread) comes before the publish; the publish only re-enters latches the
+            grow already holds, on resident pages
+  invariant the pages a failed grow allocated (data pages, map-extension pages, their twins) go back to the occupancy map, and the twins' pair
+            state goes with them
+  never write a page the published segment can reach (the root, an existing map page, the old tail) before every step that can throw has
+        succeeded
+  requires: PS-09 (the latch helper the pins go through), PS-05 (a grow's local ChangeSet is released on the throw too)
+  scope: LogicalSegment.CreateOrGrow, LogicalSegment.Grow, PinForPublish, InitDataPages, FilledDirectoryPageCount, ReleaseUnpublished,
+         IPageStore.ReleaseUnpublishedPages, ManagedPagedMMF.ReleaseUnpublishedPages, ManagedPagedMMF.PersistProtectedPage (re-checks a pair a
+         failed grow may have just dropped), ManagedPagedMMF.GrowOccupancySegment (its reserved map page counts as consumed only once the grow
+         publishes), ChunkBasedSegment.Grow
+  on_violation: a page-cache back-pressure timeout, or any other throw, mid-grow leaves the directory listing pages the segment never adopted
+                and the old tail linked into them. Nothing notices while the process runs, since the next grow rewrites both; if it stops first,
+                the shutdown checkpoint persists them and the next open's strict load throws "integrity check failed at Load" (measured:
+                directory=900 chain=800 for a 300-page segment grown to 900 behind an 800-page cache). The failed attempt's pages also leak.
+  verified: SegmentGrowAtomicityTests.AGrowThatFailsInitializingItsPages_LeavesTheSegmentAsItWas [VerifiesRule] (a probe fails the grow half-way
+            through its new pages; asserts the length, the directory, the chain, a fresh load, every allocated page freed and no slot reference
+            left), with its mutant APublishThatRanBeforeThePagesWereInitialized_IsRejected. AGrowThatFailsPreparingItsPublish_LeavesTheSegmentAsItWas
+            fails it at the old tail's pin, then at its latch; AGrowPastTheRootDirectoryThatFails_GivesBackItsMapPageAndTwin covers a
+            map-extension page, its twin and its pair; SegmentGrowBackpressureTests.AGrowThatRunsOutOfPageCache_LeavesTheSegmentAsItWas drives the
+            real back-pressure timeout
+  note: releasing needs the page cache too, so it can fail in turn. That failure is recorded on the grow's exception, which is still the one
+        thrown; the pages then leak, which corrupts nothing since nothing references them.
+  note: not covered. A Create that throws part-way leaves its pages allocated and its segment registered with no page list (nothing
+        references its root, so nothing is torn, but the pages leak). ChunkBasedSegment.Grow's own bookkeeping after `base.Grow` has published
+        (bitmap clear, free-list splice) is not atomic either; nothing but a failed CreateOrGrow post-condition is known to throw there.
 
 ---
 
@@ -1525,7 +1653,7 @@ invariants continue to hold during a bulk session.
        ∧ (UNBUILT) every page in the bulk allocation log is on the data file — no such log exists; the manifest's
          page-range count is hard-zero in v1
   pre  Step 1: drain ChangeSet (DC ≥ 1 on every bulk page)
-  pre  Step 2: ForceCheckpoint + WaitForCheckpoint
+  pre  Step 2: ForceCheckpointAndWait — released only by a cycle that started after the call and covered it (CK-12)
   pre  Step 3: verify CheckpointLSN ≥ BulkBegin.LSN
   pre  Step 4: emit BulkEnd
   pre  Step 5: WaitForDurable(BulkEnd.LSN)

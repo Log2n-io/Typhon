@@ -90,7 +90,7 @@ public unsafe partial class Transaction
         var chunkId = AllocateVersionedSlotContent(meta, table, slot, id, out _);
 
         var dst = info.CompContentAccessor.GetChunkAsSpan(chunkId, true);
-        Unsafe.AsRef<T>((byte*)Unsafe.AsPointer(ref dst.GetPinnableReference()) + table.ComponentOverhead) = value;
+        Unsafe.WriteUnaligned(ref dst[table.ComponentOverhead], value);
         return chunkId;
     }
 
@@ -472,7 +472,9 @@ public unsafe partial class Transaction
                         dst = new Span<byte>(SpawnArena.Resolve(stage), overhead + table.ComponentStorageSize);
                     }
                     int copySize = Math.Min(sharedValues[sharedIndex].DataSize, dst.Length - overhead);
-                    new ReadOnlySpan<byte>((byte*)Unsafe.AsPointer(ref Unsafe.AsRef(in sharedValues[sharedIndex])) + 12, copySize)
+                    // A span, not a pointer: sharedValues is a managed array. The payload starts 12 bytes into a ComponentValue.
+                    MemoryMarshal.CreateReadOnlySpan(
+                            ref Unsafe.Add(ref Unsafe.As<ComponentValue, byte>(ref sharedValues[sharedIndex]), 12), copySize)
                         .CopyTo(dst.Slice(overhead));
                     entry.EnabledBits |= (ushort)(1 << slot);
                 }
@@ -702,7 +704,9 @@ public unsafe partial class Transaction
                     dst = new Span<byte>(SpawnArena.Resolve(stage), overhead + table.ComponentStorageSize);
                 }
                 int copySize = Math.Min(values[vi].DataSize, dst.Length - overhead);
-                new ReadOnlySpan<byte>((byte*)Unsafe.AsPointer(ref Unsafe.AsRef(in values[vi])) + 12, copySize)
+                // A span, not a pointer: values can be backed by a managed array. The payload starts 12 bytes into a ComponentValue.
+                MemoryMarshal.CreateReadOnlySpan(
+                        ref Unsafe.Add(ref Unsafe.As<ComponentValue, byte>(ref Unsafe.AsRef(in values[vi])), 12), copySize)
                     .CopyTo(dst.Slice(overhead));
                 entry.EnabledBits |= (ushort)(1 << slot);
             }
@@ -1594,7 +1598,7 @@ public unsafe partial class Transaction
         // Unguarded indexing would be a throw on the commit path for a routing id with no state; a membership notification is never worth that.
         var routing = entityId.ArchetypeId;
         var states = _dbe._stateByRouting;
-        var engineState = (uint)routing < (uint)states.Length ? states[routing] : null;
+        var engineState = routing < (uint)states.Length ? states[routing] : null;
         var registry = engineState?.MembershipViews;
 
         // The whole cost of this feature for a database that does not use it: one array index and one branch per structurally-changed entity.
@@ -2200,13 +2204,6 @@ public unsafe partial class Transaction
                                 ctx.ClusterState.EnsureClusterSpatialIndexSlotCapacity(clusterChunkId + 1);
 
                                 bool wasInIndex = ctx.ClusterState.ClusterSpatialIndexSlot[clusterChunkId] >= 0;
-                                ref var clusterAabb = ref ctx.ClusterState.ClusterAabbs[clusterChunkId];
-                                if (!wasInIndex)
-                                {
-                                    // A cell-claimed cluster is indexed, with an empty box, by its allocation site under the latch (step 15 review), so
-                                    // this branch is for a cluster that reached here without one. The reset then has no concurrent widener to wipe.
-                                    clusterAabb = ClusterSpatialAabb.Empty;
-                                }
                                 // Tier-dispatched union: 2D fields wrote [minX, minY, maxX, maxY] into the first 4 slots; 3D fields wrote the full
                                 // [minX, minY, minZ, maxX, maxY, maxZ] layout. Prior to issue #230 Phase 3 this site was hardcoded to the 2D layout
                                 // regardless of tier — a latent bug that was masked because 3D archetypes only reach this hook when ConfigureSpatialGrid
@@ -2215,15 +2212,41 @@ public unsafe partial class Transaction
                                 // for every entity in the archetype, so the cluster-level OR trivially converges to the archetype value. Defaults to
                                 // uint.MaxValue when the attribute doesn't set Category, matching pre-Phase-3 behavior.
                                 uint archetypeCategory = ss.FieldInfo.Category;
+                                bool is3D = ss.FieldInfo.FieldType.Is3D();
 
                                 // C15 (#872 step 9): the union is built in the CELL's frame, so the cell has to be resolved before it rather than after.
                                 // A cluster with no cell has no frame to be expressed in — its AABB is left at Empty rather than filled with world-space
                                 // values that would be indistinguishable from cell-relative ones on read.
                                 int cellKey = ctx.ClusterState.ClusterCellMap[clusterChunkId];
+                                double cellOriginX = 0d, cellOriginY = 0d, cellOriginZ = 0d;
                                 if (cellKey >= 0)
                                 {
-                                    ctx.ClusterState.Grid.CellOrigin(cellKey, out double cellOriginX, out double cellOriginY, out double cellOriginZ);
-                                    if (ss.FieldInfo.FieldType.Is3D())
+                                    ctx.ClusterState.Grid.CellOrigin(cellKey, out cellOriginX, out cellOriginY, out cellOriginZ);
+
+                                    // Before the index widen below, which is what makes the entity queryable: every query must already reach as far past
+                                    // this cell as the entity does (SQ-01). Between fences a spawn is the only thing that can push that reach out.
+                                    ctx.ClusterState.RaiseClusterReachForSpawn(cellKey, cellOriginX, cellOriginY, cellOriginZ, spawnSpatialCoords, is3D);
+                                }
+
+                                // Stamped: a concurrent grow of ClusterAabbs copies the array, and a widen into the old one after the copy read this entry
+                                // would be lost — see ArchetypeClusterState._clusterAabbsGrowth. The reset and the widen are redone in the new array.
+                                int aabbsStamp;
+                                do
+                                {
+                                    aabbsStamp = ctx.ClusterState.BeginClusterAabbsWrite();
+                                    ref var clusterAabb = ref Volatile.Read(ref ctx.ClusterState.ClusterAabbs)[clusterChunkId];
+                                    if (!wasInIndex)
+                                    {
+                                        // A cell-claimed cluster is indexed, with an empty box, by its allocation site under the latch (step 15 review), so
+                                        // this branch is for a cluster that reached here without one. The reset then has no concurrent widener to wipe.
+                                        clusterAabb = ClusterSpatialAabb.Empty;
+                                    }
+
+                                    if (cellKey < 0)
+                                    {
+                                        // No cell, no frame: the entry stays at Empty. Nothing to widen, but the reset above is still checked below.
+                                    }
+                                    else if (is3D)
                                     {
                                         ClusterSpatialAabb.WidenCas3F(ref clusterAabb,
                                             ClusterSpatialAabb.ToCellRelativeMin(spawnSpatialCoords[0], cellOriginX),
@@ -2243,9 +2266,17 @@ public unsafe partial class Transaction
                                             ClusterSpatialAabb.ToCellRelativeMax(spawnSpatialCoords[3], cellOriginY),
                                             archetypeCategory);
                                     }
+                                }
+                                while (!ctx.ClusterState.ClusterAabbsWriteLanded(aabbsStamp));
+
+                                if (cellKey >= 0)
+                                {
+                                    // Read back from the LIVE array: a grow after the loop copied the widen, and the index must never hold a box its
+                                    // ClusterAabbs entry does not — RefreshClusterReach computes the reach from the entries (SQ-01).
+                                    ref var liveAabb = ref Volatile.Read(ref ctx.ClusterState.ClusterAabbs)[clusterChunkId];
                                     if (!wasInIndex)
                                     {
-                                        ctx.ClusterState.AddClusterToPerCellIndex(clusterChunkId, cellKey, clusterAabb);
+                                        ctx.ClusterState.AddClusterToPerCellIndex(clusterChunkId, cellKey, liveAabb);
                                     }
                                     else
                                     {
@@ -2253,7 +2284,7 @@ public unsafe partial class Transaction
                                         // promoted cell has no linear index at all, so reaching for one is a null deref above the threshold. WIDEN, not
                                         // update: this runs on a user thread beside other spawns into the same cluster and a latched grow of the same
                                         // cell's index, and only the CAS form survives both (step 15 review).
-                                        ctx.ClusterState.WidenClusterInPerCellIndex(clusterChunkId, cellKey, in clusterAabb);
+                                        ctx.ClusterState.WidenClusterInPerCellIndex(clusterChunkId, cellKey, in liveAabb);
                                     }
                                 }
                             }
@@ -2353,7 +2384,6 @@ public unsafe partial class Transaction
         {
             var grid = _dbe.SpatialGrid;
             var lastArchId = -1;
-            ArchetypeClusterState clusterState = null;
             var spatialSlot = -1;
             var componentOverhead = 0;
             var fieldOffset = 0;
@@ -2370,7 +2400,7 @@ public unsafe partial class Transaction
                     spatialSlot = -1;
                     var meta = _dbe.GetMetaByRouting((ushort)archId);
                     var engineState = meta != null && meta.IsClusterEligible ? _dbe._archetypeStates[meta.ArchetypeId] : null;
-                    clusterState = engineState?.ClusterState;
+                    ArchetypeClusterState clusterState = engineState?.ClusterState;
                     if (grid != null && clusterState != null && clusterState.SpatialSlot.HasSpatialIndex)
                     {
                         ref readonly var ss = ref clusterState.SpatialSlot;
@@ -2395,7 +2425,7 @@ public unsafe partial class Transaction
                     {
                         var fieldPtr = SpawnArena.Resolve(stage) + componentOverhead + fieldOffset;
                         SpatialGrid.ReadSpatialCenter3D(fieldPtr, fieldType, out var x, out var y, out var z);
-                        cellKey = grid.WorldToCellKey(x, y, z);
+                        cellKey = grid!.WorldToCellKey(x, y, z);
                         grid.CellOrigin(cellKey, out var ox, out var oy, out var oz);
                         mortonKey = ArchetypeClusterState.EncodeIntraCellMorton((float)(x - ox), (float)(y - oy), (float)(z - oz), (float)inverseCellSize);
                     }

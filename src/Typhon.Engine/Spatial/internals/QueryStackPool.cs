@@ -7,9 +7,10 @@ namespace Typhon.Engine.Internals;
 /// </summary>
 /// <remarks>
 /// <para><b>What it replaces, and why the inline version cost what it did.</b> The stack used to be a <c>[InlineArray(256)]</c> field embedded by value in
-/// <see cref="SpatialRTree{TStore}.AABBQueryEnumerator"/>, which is itself embedded by value in <c>AabbClusterEnumerator</c>. So every spatial query
+/// <see cref="SpatialRTree{TStore}.AABBQueryEnumerator"/>, which was then embedded by value in <c>AabbClusterEnumerator</c>. So every spatial query
 /// constructed, zeroed and copied <b>1 KB</b> of traversal stack — for a per-cell tree that tightness-gated promotion (step 16) essentially never builds at
-/// the extents the engine produces. Ablation measured it at 18 ns of a 69.9 ns query setup, −26 %: the largest single identified component.</para>
+/// the extents the engine produces. Ablation measured it at 18 ns of a 69.9 ns query setup, −26 %: the largest single identified component. (#906 took
+/// the tree enumerator itself out of <c>AabbClusterEnumerator</c> too: a promoted half's hits are now collected up front, in a frame of their own.)</para>
 /// <para><b>Why <see cref="ThreadStaticAttribute"/> is sound here, and the hazard it creates.</b> This is the idiom
 /// <c>ArchetypeClusterState.CandidateScratch</c> uses and for the same reasons — one buffer per worker, capacity fixed, never trimmed. But a scratch
 /// buffer shared by a <c>ref struct</c> enumerator is a different problem from one shared by a method: <b>two enumerators can be live on one thread</b>.

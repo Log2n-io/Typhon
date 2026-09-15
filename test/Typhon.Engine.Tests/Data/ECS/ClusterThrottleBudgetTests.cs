@@ -57,7 +57,7 @@ class ClusterThrottleBudgetTests : TestBase<ClusterThrottleBudgetTests>
     /// per-entity charge and a whole-unit charge, and a discrepancy could belong to either. (The step-10 fixtures disable the DRIFT gate the same way by
     /// setting <c>ClusterTargetExtentRatio</c> to 100 — that one has no ceiling, this one does, which is why the values differ.)
     /// </remarks>
-    private DatabaseEngine SetupEngine(float budgetMs, float repairExtentRatio = 1.19f, float nsPerEntity = 1500f)
+    private DatabaseEngine SetupEngine(float budgetMs, float repairExtentRatio = 1.19f, float nsPerEntity = 1500f, float queryEfficiencyTolerance = 0.1f)
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<ClMigPos>();
@@ -76,7 +76,9 @@ class ClusterThrottleBudgetTests : TestBase<ClusterThrottleBudgetTests>
             clusterRepairCriticalExtentRatio: 0f,
             // Constant-mode target (step 14): at 1 200 entities per cell the density-derived target is 0.35 and the throttle's boost would
             // raise it tick by tick, so the drifter flood these tests budget against would not be steady.
-            clusterTargetPackingSlack: 0f));
+            clusterTargetPackingSlack: 0f,
+            // TH-04's controller steers only by range queries, and only its own tests below run any: everywhere else the configured budget stands.
+            queryEfficiencyTolerance: queryEfficiencyTolerance));
         dbe.InitializeArchetypes();
         return dbe;
     }
@@ -206,6 +208,405 @@ class ClusterThrottleBudgetTests : TestBase<ClusterThrottleBudgetTests>
             Assert.That(sawThrottling, Is.True,
                 "the budget was never binding, so the bound above held for want of work rather than because the throttle enforced it");
             Assert.That(totalAdmitted, Is.GreaterThan(0), "nothing was ever relocated, so the throttle was not the thing limiting the run");
+        });
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // TH-04 — the budget follows the queries' efficiency
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>The start of the verifier's message when the budget ignored the queries; the mutant looks for it.</summary>
+    private const string BudgetIgnoredTheQueries = "the budget did not follow the queries' efficiency";
+
+    /// <summary>
+    /// Count the whole cell. Every entity lives in it, so every candidate matches: one candidate per hit, the best a query can be, whatever the motion has
+    /// done to the clusters.
+    /// </summary>
+    private static int CountWholeCell(DatabaseEngine dbe)
+    {
+        var box = new AABB2F { MinX = 0f, MinY = 0f, MaxX = CellSize - 0.01f, MaxY = CellSize - 0.01f };
+        using var epoch = EpochGuard.Enter(dbe.EpochManager);
+        var e = dbe.ClusterSpatialQuery<ClMigUnit>().AABB(in box);
+        try
+        {
+            return e.Count();
+        }
+        finally
+        {
+            e.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Queries at the best efficiency they can have grant the maintenance next to nothing: however many drifters the motion produces, no relocation is
+    /// admitted, and the telemetry says why.
+    /// </summary>
+    [Test]
+    [VerifiesRule("TH-04")]
+    public void AtTheBestEfficiencyTheQueriesHaveShown_TheBudgetAdmitsNoRelocation()
+    {
+        using var dbe = SetupEngine(budgetMs: 1.0f);
+        Spawn(dbe);
+        AssertTheBudgetFollowsTheQueries(dbe);
+    }
+
+    /// <summary>With the controller off, the same queries leave the whole budget standing — so the test above is not green for want of drifters.</summary>
+    [Test]
+    [RuleMutant("TH-04")]
+    public void WithTheControllerOff_TheSameQueriesLeaveTheBudgetWhole()
+    {
+        using var dbe = SetupEngine(budgetMs: 1.0f, queryEfficiencyTolerance: 0f);
+        Spawn(dbe);
+        RuleMutants.AssertDetects("TH-04", BudgetIgnoredTheQueries, () => AssertTheBudgetFollowsTheQueries(dbe));
+    }
+
+    private static void AssertTheBudgetFollowsTheQueries(DatabaseEngine dbe)
+    {
+        var rng = new Random(4217);
+        var admitted = 0;
+        var throttled = 0;
+        for (var tick = 2; tick <= 12; tick++)
+        {
+            MoveAll(dbe, rng);
+            Assert.That(CountWholeCell(dbe), Is.EqualTo(Population), $"tick {tick}: precondition, the query matches the whole population");
+            dbe.WriteTickFence(tick);
+
+            var t = dbe.GetSpatialTelemetry(ArchetypeId);
+            Assert.That(t.QueryCandidatesPerHitSmoothed, Is.EqualTo(1d).Within(1e-9), $"tick {tick}: precondition, every candidate matched");
+
+            // Every tick from the first: the fence sets the scale before the throttle spends it, so tick 2's throttle — the first after a query — already
+            // admits nothing. A scale computed a tick late would let that tick's relocations through.
+            admitted += t.RelocationsAdmitted;
+            throttled += t.RelocationsThrottled;
+        }
+
+        // Admitted plus throttled, not throttled alone: with the whole budget a fast machine affords every drifter, and a precondition on the throttled
+        // count then failed the mutant on the wrong assertion (the gate's shards did, twice). The behavioural check comes first, so the mutant shows it can
+        // fail; the granted budget after it.
+        var last = dbe.GetSpatialTelemetry(ArchetypeId);
+        Assert.That(admitted + throttled, Is.GreaterThan(0), "precondition: the motion produced relocations for the budget to decide on");
+        Assert.That(admitted, Is.Zero, $"{BudgetIgnoredTheQueries}: {admitted} relocations admitted while every candidate matched");
+        Assert.That(last.ReclusterBudgetGrantedMs, Is.LessThan(1e-3),
+            $"{BudgetIgnoredTheQueries}: {last.ReclusterBudgetGrantedMs} ms granted while every candidate matched");
+    }
+
+    /// <summary>
+    /// The repair planner is a consumer too: at the best efficiency the queries have shown it admits no unit, while the degraded cell it would repair waits
+    /// in its queue.
+    /// </summary>
+    [Test]
+    [VerifiesRule("TH-04")]
+    public void AtTheBestEfficiency_TheRepairPlannerAdmitsNoUnit()
+    {
+        using var dbe = SetupEngine(budgetMs: 1.0f, repairExtentRatio: 0.75f);
+        Spawn(dbe);
+        AssertThePlannerFollowsTheQueries(dbe);
+    }
+
+    /// <summary>With the controller off, the same queries leave the planner its budget, and it repairs the cell.</summary>
+    [Test]
+    [RuleMutant("TH-04")]
+    public void WithTheControllerOff_ThePlannerRepairsTheSameCell()
+    {
+        using var dbe = SetupEngine(budgetMs: 1.0f, repairExtentRatio: 0.75f, queryEfficiencyTolerance: 0f);
+        Spawn(dbe);
+        RuleMutants.AssertDetects("TH-04", BudgetIgnoredTheQueries, () => AssertThePlannerFollowsTheQueries(dbe));
+    }
+
+    private static void AssertThePlannerFollowsTheQueries(DatabaseEngine dbe)
+    {
+        var rng = new Random(4219);
+        var units = 0;
+        var queued = 0;
+        for (var tick = 2; tick <= 12; tick++)
+        {
+            MoveAll(dbe, rng);
+            Assert.That(CountWholeCell(dbe), Is.EqualTo(Population), $"tick {tick}: precondition, the query matches the whole population");
+            dbe.WriteTickFence(tick);
+
+            var t = dbe.GetSpatialTelemetry(ArchetypeId);
+            units += t.RepairUnitCount;
+            queued = Math.Max(queued, t.RepairQueueDepth);
+        }
+
+        // Queued, not refused: at its floor the planner stops before pricing a unit, so nothing is counted as refused.
+        Assert.That(units + queued, Is.GreaterThan(0), "precondition: the scattered cell gave the planner a repair to decide on");
+        Assert.That(units, Is.Zero, $"{BudgetIgnoredTheQueries}: the planner admitted {units} repair units while every candidate matched");
+    }
+
+    /// <summary>
+    /// The controller's arithmetic, driven with made-up tallies: next to nothing at the best and never zero, the distance from the best over the tolerance
+    /// in between, and the whole budget at the tolerance and past it.
+    /// </summary>
+    [Test]
+    [VerifiesRule("TH-04")]
+    public void TheScaleIsTheDistanceFromTheBest_OverTheTolerance()
+    {
+        using var dbe = SetupEngine(budgetMs: 1.0f);
+        var cs = ClusterStateOf(dbe);
+        var cfg = dbe.SpatialGrid.Config;
+        void Tick(long candidates, long hits, int times) => FeedTally(cs, in cfg, candidates, hits, times);
+
+        // A steady two candidates per hit: the best, so next to nothing is granted — but never zero, which would read as no enforcement.
+        Tick(2_000, 1_000, 200);
+        Assert.Multiple(() =>
+        {
+            Assert.That(cs.QueryCandidatesPerHitSmoothed, Is.EqualTo(2d).Within(1e-9));
+            Assert.That(cs.QueryCandidatesPerHitBest, Is.EqualTo(2d).Within(1e-9));
+            Assert.That(cs.MaintenanceBudgetScale, Is.EqualTo(ArchetypeClusterState.MinMaintenanceBudgetScale));
+            Assert.That(cs.MaintenanceBudgetNs(in cfg), Is.GreaterThan(0d));
+            Assert.That(cs.ComputeDriftNominationCap(in cfg), Is.EqualTo(256), "the nomination cap follows the budget down to its floor");
+        });
+
+        // A step up: the scale is the distance from the best over the tolerance, from the controller's own smoothed value and best.
+        Tick(2_100, 1_000, 3);
+        var expected = ((cs.QueryCandidatesPerHitSmoothed / cs.QueryCandidatesPerHitBest) - 1d) / cfg.QueryEfficiencyTolerance;
+        Assert.Multiple(() =>
+        {
+            Assert.That(expected, Is.GreaterThan(0.01d).And.LessThan(1d), "precondition: a step inside the proportional band");
+            Assert.That(cs.MaintenanceBudgetScale, Is.EqualTo(expected).Within(1e-12));
+            Assert.That(cs.LastTickReclusterBudgetGrantedMs, Is.EqualTo(cfg.ReclusterBudgetMs * expected).Within(1e-9));
+        });
+
+        // Half as bad again: past the tolerance, the configured budget is the ceiling.
+        Tick(3_000, 1_000, 100);
+        Assert.That(cs.MaintenanceBudgetScale, Is.EqualTo(1d), "past the tolerance the configured budget is the ceiling");
+    }
+
+    /// <summary>
+    /// A decline at half the rate of the creep this replaced is not followed by the best: it raises the budget. The best that rose 1e-4 a tick followed
+    /// exactly this, and on the SWG demo held a starved archetype at the floor while its queries tested 5–8 % more entities per match (#906).
+    /// </summary>
+    [Test]
+    [VerifiesRule("TH-04")]
+    public void ASlowDecline_IsNotFollowedByTheBest_ItRaisesTheBudget()
+    {
+        using var dbe = SetupEngine(budgetMs: 1.0f);
+        var cs = ClusterStateOf(dbe);
+        var cfg = dbe.SpatialGrid.Config;
+        FeedTally(cs, in cfg, 2_000, 1_000, 200);
+        Assert.That(cs.MaintenanceBudgetScale, Is.EqualTo(ArchetypeClusterState.MinMaintenanceBudgetScale), "precondition: the queries at their best");
+
+        // 5e-5 a tick for 1 500 ticks: about 7.8 % more candidates per match, never faster than half the old creep.
+        var candidates = 2_000d;
+        for (var i = 0; i < 1_500; i++)
+        {
+            candidates *= 1d + 5e-5;
+            FeedTally(cs, in cfg, (long)candidates, 1_000, 1);
+        }
+
+        var expected = ((cs.QueryCandidatesPerHitSmoothed / 2d) - 1d) / cfg.QueryEfficiencyTolerance;
+        Assert.Multiple(() =>
+        {
+            Assert.That(cs.QueryCandidatesPerHitBest, Is.EqualTo(2d).Within(1e-9), "the best does not follow a decline");
+            Assert.That(expected, Is.GreaterThan(0.5d).And.LessThan(1d), "precondition: the decline sits inside the proportional band");
+            Assert.That(cs.MaintenanceBudgetScale, Is.EqualTo(expected).Within(1e-9), "the budget rises with the decline");
+        });
+    }
+
+    /// <summary>
+    /// A level the whole budget cannot bring back within the tolerance is accepted after <see cref="ArchetypeClusterState.EfficiencyRebaseTicks"/> ticks at
+    /// it: the best does not move before, and becomes the queries' present level on the tick after, which returns the grant to the floor.
+    /// </summary>
+    [Test]
+    [VerifiesRule("TH-04")]
+    public void AfterTheRebaseWindowAtTheWholeBudget_ThePresentLevelBecomesTheBest()
+    {
+        using var dbe = SetupEngine(budgetMs: 1.0f);
+        var cs = ClusterStateOf(dbe);
+        var cfg = dbe.SpatialGrid.Config;
+        FeedTally(cs, in cfg, 2_000, 1_000, 200);
+        ReachTheWholeBudget(cs, in cfg);
+
+        // The rest of the window at the whole budget, and the best has not moved.
+        FeedTally(cs, in cfg, 3_000, 1_000, ArchetypeClusterState.EfficiencyRebaseTicks - 1);
+        Assert.Multiple(() =>
+        {
+            Assert.That(cs.QueryCandidatesPerHitBest, Is.EqualTo(2d).Within(1e-9), "the best holds for the whole window");
+            Assert.That(cs.MaintenanceBudgetScale, Is.EqualTo(1d));
+            Assert.That(cs.TicksAtWholeBudget, Is.EqualTo(ArchetypeClusterState.EfficiencyRebaseTicks), "the streak counted the window to its end");
+            Assert.That(cs.TotalEfficiencyRebases, Is.Zero);
+        });
+
+        // One more: the whole budget has had its window, the present level is the best, and the grant is back at the floor.
+        FeedTally(cs, in cfg, 3_000, 1_000, 1);
+        Assert.Multiple(() =>
+        {
+            Assert.That(cs.QueryCandidatesPerHitBest, Is.EqualTo(cs.QueryCandidatesPerHitSmoothed).Within(1e-12), "re-based to the present level");
+            Assert.That(cs.MaintenanceBudgetScale, Is.EqualTo(ArchetypeClusterState.MinMaintenanceBudgetScale), "and the grant back at the floor");
+            Assert.That(cs.TotalEfficiencyRebases, Is.EqualTo(1), "the re-base is counted");
+            Assert.That(cs.TicksAtWholeBudget, Is.Zero, "and the streak starts over");
+            Assert.That(cs.ControllerFlags, Is.EqualTo(3), "the trace's flags: a signal, and a re-base this tick");
+        });
+
+        // The flag is this tick's alone; the count stays.
+        FeedTally(cs, in cfg, 3_000, 1_000, 1);
+        Assert.Multiple(() =>
+        {
+            Assert.That(cs.ControllerFlags, Is.EqualTo(1), "a signal, and no re-base this tick");
+            Assert.That(cs.TotalEfficiencyRebases, Is.EqualTo(1));
+        });
+    }
+
+    /// <summary>
+    /// The window is consecutive: half the window at the whole budget, a spell back inside the tolerance — whose first thirty-odd ticks, still above it,
+    /// count too — and half the window again add up to more than the window, and the best still does not move.
+    /// </summary>
+    [Test]
+    [VerifiesRule("TH-04")]
+    public void AWindowTheQueriesInterrupt_StartsAgain_AndDoesNotRebase()
+    {
+        using var dbe = SetupEngine(budgetMs: 1.0f);
+        var cs = ClusterStateOf(dbe);
+        var cfg = dbe.SpatialGrid.Config;
+        FeedTally(cs, in cfg, 2_000, 1_000, 200);
+        var span = ArchetypeClusterState.EfficiencyRebaseTicks / 2;
+
+        ReachTheWholeBudget(cs, in cfg);
+        FeedTally(cs, in cfg, 3_000, 1_000, span);
+
+        // Back inside the tolerance, which restarts the window. Bounded: the smoothing returns within about thirty ticks.
+        for (var i = 0; i < 200 && cs.MaintenanceBudgetScale >= 1d; i++)
+        {
+            FeedTally(cs, in cfg, 2_000, 1_000, 1);
+        }
+
+        Assert.That(cs.MaintenanceBudgetScale, Is.LessThan(1d), "precondition: back inside the tolerance");
+
+        // As many whole-budget ticks again, more than the window in all, and nothing is re-based.
+        ReachTheWholeBudget(cs, in cfg);
+        FeedTally(cs, in cfg, 3_000, 1_000, span);
+        Assert.Multiple(() =>
+        {
+            Assert.That(cs.QueryCandidatesPerHitBest, Is.EqualTo(2d).Within(1e-9), "an interrupted window re-bases nothing");
+            Assert.That(cs.MaintenanceBudgetScale, Is.EqualTo(1d));
+        });
+    }
+
+    /// <summary>
+    /// Only a whole budget the distance set counts toward the window. Without a signal the budget is whole by fall-back, and however long that lasts, the
+    /// signal's return does not re-base: the best is the one from before, and the returning queries, half as bad again, get the whole budget.
+    /// </summary>
+    [Test]
+    [VerifiesRule("TH-04")]
+    public void AWholeBudgetByFallBack_DoesNotCountTowardTheWindow()
+    {
+        using var dbe = SetupEngine(budgetMs: 1.0f);
+        var cs = ClusterStateOf(dbe);
+        var cfg = dbe.SpatialGrid.Config;
+        FeedTally(cs, in cfg, 2_000, 1_000, 200);
+
+        // The signal fades, lost after about 150 ticks, and the budget stays whole by fall-back for longer than the window.
+        FeedTally(cs, in cfg, 0, 0, 150 + ArchetypeClusterState.EfficiencyRebaseTicks + 50);
+        Assert.Multiple(() =>
+        {
+            Assert.That(cs.HasQuerySignal, Is.False, "precondition: no signal");
+            Assert.That(cs.MaintenanceBudgetScale, Is.EqualTo(1d), "precondition: the whole budget, by fall-back");
+        });
+
+        FeedTally(cs, in cfg, 3_000, 1_000, 1);
+        Assert.Multiple(() =>
+        {
+            Assert.That(cs.HasQuerySignal, Is.True, "precondition: the signal is back");
+            Assert.That(cs.QueryCandidatesPerHitBest, Is.EqualTo(2d).Within(1e-9), "the fall-back ticks re-based nothing");
+            Assert.That(cs.MaintenanceBudgetScale, Is.EqualTo(1d), "half as bad again as the best: the whole budget");
+        });
+    }
+
+    /// <summary>From a best of 2, feed half as bad again until the scale reaches the whole budget: a handful of ticks, bounded.</summary>
+    private static void ReachTheWholeBudget(ArchetypeClusterState cs, in SpatialGridConfig cfg)
+    {
+        for (var i = 0; i < 50 && cs.MaintenanceBudgetScale < 1d; i++)
+        {
+            FeedTally(cs, in cfg, 3_000, 1_000, 1);
+        }
+
+        Assert.That(cs.MaintenanceBudgetScale, Is.EqualTo(1d), "precondition: the whole budget");
+    }
+
+    /// <summary>Feed the controller the same made-up tally for <paramref name="times"/> ticks.</summary>
+    private static void FeedTally(ArchetypeClusterState cs, in SpatialGridConfig cfg, long candidates, long hits, int times)
+    {
+        for (var i = 0; i < times; i++)
+        {
+            cs.LastTickQueryCandidates = candidates;
+            cs.LastTickQueryHits = hits;
+            cs.UpdateMaintenanceBudgetScale(in cfg);
+        }
+    }
+
+    /// <summary>
+    /// Without a signal the configured budget stands, exactly as it did before the controller: from the start, and again once a signal that held the budget
+    /// at its floor fades — lost only below half the threshold it was gained at.
+    /// </summary>
+    [Test]
+    [VerifiesRule("TH-04")]
+    public void WithoutASignal_TheConfiguredBudgetStands_AndReturnsWhenTheSignalFades()
+    {
+        using var dbe = SetupEngine(budgetMs: 1.0f);
+        var cs = ClusterStateOf(dbe);
+        var cfg = dbe.SpatialGrid.Config;
+        FeedTally(cs, in cfg, 0, 0, 100);
+        Assert.Multiple(() =>
+        {
+            Assert.That(cs.HasQuerySignal, Is.False, "precondition: no query has hit");
+            Assert.That(cs.MaintenanceBudgetScale, Is.EqualTo(1d), "no signal: the configured budget");
+            Assert.That(cs.MaintenanceBudgetNs(in cfg), Is.EqualTo(1_000_000d));
+        });
+
+        // A signal at its best holds the budget at the floor...
+        FeedTally(cs, in cfg, 2_000, 1_000, 200);
+        Assert.That(cs.MaintenanceBudgetScale, Is.EqualTo(ArchetypeClusterState.MinMaintenanceBudgetScale), "precondition: the floor");
+
+        // ...and keeps holding it while the smoothed hits fade below the threshold, down to half of it: 1 000 x 0.95^140 is about 0.76 a tick.
+        FeedTally(cs, in cfg, 0, 0, 140);
+        Assert.Multiple(() =>
+        {
+            Assert.That(cs.QueryHitsEwma, Is.LessThan(1d).And.GreaterThan(0.5d), "precondition: between half the threshold and the threshold");
+            Assert.That(cs.HasQuerySignal, Is.True, "a signal is lost only below half the threshold it was gained at");
+            Assert.That(cs.MaintenanceBudgetScale, Is.EqualTo(ArchetypeClusterState.MinMaintenanceBudgetScale));
+        });
+
+        // Below half: the signal is gone, and the configured budget is back.
+        FeedTally(cs, in cfg, 0, 0, 20);
+        Assert.Multiple(() =>
+        {
+            Assert.That(cs.HasQuerySignal, Is.False, "precondition: below half the threshold");
+            Assert.That(cs.MaintenanceBudgetScale, Is.EqualTo(1d), "no signal: the configured budget again");
+            Assert.That(cs.LastTickReclusterBudgetGrantedMs, Is.EqualTo(1d).Within(1e-12));
+        });
+    }
+
+    /// <summary>With the tolerance at zero the controller still watches, and the configured budget stands however good the queries are.</summary>
+    [Test]
+    [VerifiesRule("TH-04")]
+    public void WithTheControllerOff_TheConfiguredBudgetStands_HoweverGoodTheQueries()
+    {
+        using var dbe = SetupEngine(budgetMs: 1.0f, queryEfficiencyTolerance: 0f);
+        var cs = ClusterStateOf(dbe);
+        var cfg = dbe.SpatialGrid.Config;
+        FeedTally(cs, in cfg, 2_000, 1_000, 200);
+        Assert.Multiple(() =>
+        {
+            Assert.That(cs.QueryCandidatesPerHitBest, Is.EqualTo(2d).Within(1e-9), "the controller still watches with the tolerance at zero");
+            Assert.That(cs.MaintenanceBudgetScale, Is.EqualTo(1d), "tolerance zero: the configured budget, however good the queries");
+        });
+    }
+
+    /// <summary>A zero budget stays zero whatever the queries say, which the throttle reads as no enforcement (TH-01).</summary>
+    [Test]
+    [VerifiesRule("TH-04")]
+    public void AZeroBudget_StaysUnenforced_WhateverTheQueriesSay()
+    {
+        using var dbe = SetupEngine(budgetMs: 0f, repairExtentRatio: 0.75f);
+        var cs = ClusterStateOf(dbe);
+        var cfg = dbe.SpatialGrid.Config;
+        FeedTally(cs, in cfg, 2_000, 1_000, 200);
+        Assert.Multiple(() =>
+        {
+            Assert.That(cs.MaintenanceBudgetScale, Is.EqualTo(ArchetypeClusterState.MinMaintenanceBudgetScale), "precondition: the queries sit at their best");
+            Assert.That(cs.MaintenanceBudgetNs(in cfg), Is.Zero, "a zero budget stays zero, which the throttle reads as no enforcement");
+            Assert.That(cs.ComputeDriftNominationCap(in cfg), Is.Zero, "and the nomination cap stays off");
         });
     }
 

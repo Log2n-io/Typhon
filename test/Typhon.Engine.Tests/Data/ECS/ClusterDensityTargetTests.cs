@@ -41,7 +41,8 @@ class ClusterDensityTargetTests : TestBase<ClusterDensityTargetTests>
     private static ArchetypeClusterState ClusterStateOf(DatabaseEngine dbe) =>
         dbe._archetypeStates[Archetype<ClMigUnit>.Metadata.ArchetypeId].ClusterState;
 
-    private DatabaseEngine SetupEngine(float budgetMs, float criticalRatio = 0f, float repairRatio = 0.75f, float seedNsPerEntity = 1500f)
+    private DatabaseEngine SetupEngine(float budgetMs, float criticalRatio = 0f, float repairRatio = 0.75f, float seedNsPerEntity = 1500f,
+        int repairCooldownTicks = 50)
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<ClMigPos>();
@@ -55,7 +56,8 @@ class ClusterDensityTargetTests : TestBase<ClusterDensityTargetTests>
             clusterRepairExtentRatio: repairRatio,
             reclusterBudgetMs: budgetMs, batchSpawnSortThreshold: 0 /* step 15: this fixture builds its layout by spawn ORDER; the Morton sort would tighten it at birth */,
             repairNsPerEntity: seedNsPerEntity,
-            clusterRepairCriticalExtentRatio: criticalRatio));
+            clusterRepairCriticalExtentRatio: criticalRatio,
+            repairCooldownTicks: repairCooldownTicks));
         dbe.InitializeArchetypes();
         return dbe;
     }
@@ -212,7 +214,11 @@ class ClusterDensityTargetTests : TestBase<ClusterDensityTargetTests>
     [VerifiesRule("TH-01")]
     public void RepairIsChargedBeforeRelocationAndCrossingsAlwaysExecute()
     {
-        using var dbe = SetupEngine(budgetMs: 8.0f, seedNsPerEntity: 10_000f);
+        // No repair cooldown (RP-07): the budget binds only while the planner takes cell 0's unit on the same ticks the relocations flood in, which is
+        // the planner re-sorting cell 0 on every tick. With the default 50-tick cooldown the unit runs on tick 2 and not again, the relocations then fit
+        // the whole budget, and nothing is refused — measured: a unit on 11 of 11 ticks and relocations refused on 4 at cooldown 0; units on 2 and
+        // refusals on none at 50. The charge ORDER is what this pins, so the cooldown is switched off rather than the scenario rebuilt around it.
+        using var dbe = SetupEngine(budgetMs: 8.0f, seedNsPerEntity: 10_000f, repairCooldownTicks: 0);
         var state = ClusterStateOf(dbe);
         SpawnScattered(dbe, cells: 1, perCell: 600, fence: false);
         SpawnScattered(dbe, cells: 1, perCell: 1200, firstCell: 1, spread: 60, fence: false);

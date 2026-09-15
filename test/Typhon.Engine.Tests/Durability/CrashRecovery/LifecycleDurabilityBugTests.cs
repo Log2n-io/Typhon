@@ -135,8 +135,7 @@ internal sealed class LifecycleDurabilityBugTests
 
             if (checkpoint)
             {
-                dbe.ForceCheckpoint();
-                dbe.CheckpointManager.WaitForCheckpoint(TimeSpan.FromSeconds(10));
+                Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint must cover what was written");
             }
 
             // clean dispose (no crash)
@@ -186,8 +185,7 @@ internal sealed class LifecycleDurabilityBugTests
                 uow.Flush();
             }
 
-            dbe.ForceCheckpoint();
-            dbe.CheckpointManager.WaitForCheckpoint(TimeSpan.FromSeconds(10));
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint must cover what was written");
 
             if (hardCrash)
             {

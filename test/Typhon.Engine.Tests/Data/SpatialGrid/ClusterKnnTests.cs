@@ -71,9 +71,10 @@ class ClusterKnnTests : TestBase<ClusterKnnTests>
     /// centred at (205, 150): its centre is in cell (2, 1), so it is filed one shell out, but its near edge is at x = 180 and it is only <b>30</b> units away,
     /// <c>30² = 900</c>. B is the true nearest neighbour and it is not in the first shell.</para>
     /// <para><b>What the bug did.</b> After ring 0 the search held A, and asked whether the region it had covered reached as far as A. Measuring to the cell
-    /// FACE it answered 50, and <c>50² = 2500 ≥ 1600</c>, so it stopped one shell too early and returned A. The fix subtracts
-    /// <c>ArchetypeClusterState.MaxClusterOverhang</c> — 20 here, since B's box starts 20 units inside cell (2, 1)'s lower face — giving
-    /// <c>30² = 900 &lt; 1600</c>, which does not satisfy the stopping rule, so ring 1 is collected and B is found.</para>
+    /// FACE it answered 50, and <c>50² = 2500 ≥ 1600</c>, so it stopped one shell too early and returned A. The fix accounts for B's 20-unit overhang
+    /// into cell (1, 1): either <c>ArchetypeClusterState.ClusterReach</c> covers it and the stopping rule subtracts it, or — as here, since B is the only
+    /// cluster reaching past its cell and reaches further than a hysteresis margin — B is NAMED in <c>EscapedClusters</c> and pushed onto the heap with its
+    /// true lower bound, <c>30² = 900 &lt; 1600</c>, before the first ring. Either way B is found.</para>
     /// <para><b>Why the rest of this fixture cannot catch it.</b> Every other test spawns <see cref="PointAt"/> — zero-extent entities, whose overhang is
     /// zero, which is the one shape where measuring to the cell face happens to be right. A differential against a brute-force oracle is not enough on its
     /// own if the population never exercises the term that is wrong.</para>
@@ -105,7 +106,8 @@ class ClusterKnnTests : TestBase<ClusterKnnTests>
         int nearCell = dbe.SpatialGrid.WorldToCellKey(205f, 150f, 0f);
         int farCell = dbe.SpatialGrid.WorldToCellKey(190f, 150f, 0f);
         Assert.That(nearCell, Is.Not.EqualTo(farCell), "the nearer entity must be filed one cell out, or the ring search never has to reach for it");
-        Assert.That(cs.MaxClusterOverhang, Is.GreaterThan(0f), "the overhang bound must have been observed, or the corrected stopping rule is a no-op");
+        Assert.That(cs.ClusterReach > 0f || cs.EscapedClusters.Count > 0, Is.True,
+            "B's overhang must have been observed — covered by the reach or named — or the corrected search is a no-op");
 
         var buffer = new (long entityId, double distSq)[1];
         int n;
@@ -114,7 +116,7 @@ class ClusterKnnTests : TestBase<ClusterKnnTests>
             n = cs.QueryNearest(dbe.SpatialGrid, 150f, 150f, 0f, k: 1, buffer, categoryMask: 0);
         }
 
-        TestContext.Out.WriteLine($"KNN overhang: n={n} distSq={(n > 0 ? buffer[0].distSq : -1f)} overhang={cs.MaxClusterOverhang}");
+        TestContext.Out.WriteLine($"KNN overhang: n={n} distSq={(n > 0 ? buffer[0].distSq : -1f)} reach={cs.ClusterReach} named={cs.EscapedClusters.Count}");
 
         Assert.Multiple(() =>
         {

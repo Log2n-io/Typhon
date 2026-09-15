@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
@@ -2243,9 +2244,29 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// in <c>OnParallelQueryPrepare</c> is skipped (zero overhead). Issue #233.</summary>
     public int SleepingClusterCount;
 
-    /// <summary>Archetype ID for this cluster state. Set during <see cref="InitializeSpatial"/>. Used by
-    /// <see cref="MarkEntityDirty"/> to tag wake requests via <see cref="DormancyReporter"/>. Issue #233.</summary>
+    /// <summary>Archetype ID for this cluster state. Set during <see cref="InitializeSpatial"/>. Issue #233.</summary>
     internal int ArchetypeId;
+
+    /// <summary>
+    /// Wake requests for this archetype's sleeping clusters, queued by <see cref="MarkEntityDirty"/> from any worker and applied at the next fence by
+    /// <see cref="DrainWakeRequests"/>, which only this archetype's own engine calls (#233).
+    /// </summary>
+    /// <remarks>
+    /// Per archetype state, and so per engine, on purpose. The requests used to go through one process-wide <c>DormancyReporter</c> of thread-static
+    /// lists: whichever engine fenced first drained EVERY engine's requests, routed by archetype id into its own states — waking its own cluster of the
+    /// same id and losing the other engine's wake — while reading lists other engines' workers were still appending to. A parallel fixture's fence could
+    /// consume <c>DormancyTests.SetDirty_WakesSleepingCluster</c>'s request between its write and its assert.
+    /// </remarks>
+    internal readonly ConcurrentQueue<int> PendingWakeRequests = new();
+
+    /// <summary>Apply every queued wake request (#233). Single-threaded, from the fence that owns this archetype.</summary>
+    internal void DrainWakeRequests()
+    {
+        while (PendingWakeRequests.TryDequeue(out var chunkId))
+        {
+            ProcessWakeRequest(chunkId);
+        }
+    }
 
     /// <summary>Back-reference to the engine's <see cref="SpatialGrid"/>. Set during <see cref="InitializeSpatial"/>. Used by <c>ClusterRef.WriteSpatial</c> to
     /// evaluate cell-boundary crossings at the write site without plumbing the grid through every call layer. <c>null</c> for non-spatial archetypes.</summary>
@@ -2337,7 +2358,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // means one extra tick of sleep (dirty bit still records the writes); false positive is a harmless duplicate request.
         if (SleepStates != null && clusterChunkId < SleepStates.Length && SleepStates[clusterChunkId] == ClusterSleepState.Sleeping)
         {
-            DormancyReporter.RequestWake(ArchetypeId, clusterChunkId);
+            PendingWakeRequests.Enqueue(clusterChunkId);
         }
     }
 
@@ -3821,6 +3842,8 @@ internal sealed unsafe partial class ArchetypeClusterState
 
             AddClusterToPerCellIndex(chunkId, cellKey, m.Aabb);
         }
+
+        RefreshClusterReach();
     }
 
     /// <summary>
@@ -3965,16 +3988,72 @@ internal sealed unsafe partial class ArchetypeClusterState
             newLen *= 2;
         }
         var oldLen = ClusterAabbs.Length;
-        // Copy-fill-publish — Array.Resize(ref field) would publish the reference before the Empty seed runs, and a zero-filled ClusterSpatialAabb is a
-        // DEGENERATE box at the cell origin rather than a neutral union identity, so a reader in that window widens every subsequent union to the origin.
-        var grown = new ClusterSpatialAabb[newLen];
-        Array.Copy(ClusterAabbs, grown, oldLen);
-        for (var i = oldLen; i < newLen; i++)
+
+        // Odd for the whole copy: a lock-free writer whose CAS the copy may have missed sees the stamp move and redoes it in the new array.
+        Interlocked.Increment(ref _clusterAabbsGrowth);
+        try
         {
-            grown[i] = ClusterSpatialAabb.Empty;
+            // Copy-fill-publish — Array.Resize(ref field) would publish the reference before the Empty seed runs, and a zero-filled ClusterSpatialAabb is a
+            // DEGENERATE box at the cell origin rather than a neutral union identity, so a reader in that window widens every subsequent union to the origin.
+            var grown = new ClusterSpatialAabb[newLen];
+            Array.Copy(ClusterAabbs, grown, oldLen);
+            for (var i = oldLen; i < newLen; i++)
+            {
+                grown[i] = ClusterSpatialAabb.Empty;
+            }
+            Volatile.Write(ref ClusterAabbs, grown);
         }
-        Volatile.Write(ref ClusterAabbs, grown);
+        finally
+        {
+            Interlocked.Increment(ref _clusterAabbsGrowth);
+        }
     }
+
+    /// <summary>
+    /// Odd while <see cref="EnsureClusterAabbsCapacityLocked"/> copies <see cref="ClusterAabbs"/> into a larger array, even otherwise: bumped once before the
+    /// copy and once after the publish.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Why.</b> Two writers CAS into a cluster's entry holding no latch: a spawn's widen (<c>Transaction.FinalizeSpawns</c>) and
+    /// <c>WriteSpatial</c>'s grow (<c>ClusterRef.ApplySpatialWrite</c>). A grow copies the array and publishes the copy, so a CAS into the old array after the
+    /// copy read that entry is lost. The entry then misses the entity; the fence later republishes the entry to the per-cell index, and the entity drops out
+    /// of every query (SQ-01). Before that, the index holds a box the entry does not, which is the bound <see cref="RefreshClusterReach"/> relies on.</para>
+    /// <para><b>The protocol.</b> A writer takes an even stamp (<see cref="BeginClusterAabbsWrite"/>), writes into the array it then reads, and keeps the
+    /// write only if the stamp has not moved (<see cref="ClusterAabbsWriteLanded"/>); otherwise it writes again, into the new array. Both sides fence between
+    /// their two accesses — the writer's CAS, the grower's first bump — so either the copy reads the write or the writer sees the bump. Every write under it
+    /// is a min/max CAS, an OR, or a reset of an entry no other thread writes, so a redo changes nothing the first attempt got right.</para>
+    /// <para>The fence's own writers need none of this: nothing grows the array while a fence phase runs (<see cref="ThrowIfGrowingInsideMigrateSlice"/>,
+    /// and EW-01 keeps spawns out), and the other writers hold <c>_finalizeLock</c>, as the grower does.</para>
+    /// </remarks>
+    private int _clusterAabbsGrowth;
+
+    /// <summary>The even growth stamp a lock-free write to <see cref="ClusterAabbs"/> starts from, once any grow in flight has published.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal int BeginClusterAabbsWrite()
+    {
+        var stamp = Volatile.Read(ref _clusterAabbsGrowth);
+        return (stamp & 1) == 0 ? stamp : WaitOutClusterAabbsGrow();
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private int WaitOutClusterAabbsGrow()
+    {
+        var spin = new SpinWait();
+        int stamp;
+        while (((stamp = Volatile.Read(ref _clusterAabbsGrowth)) & 1) != 0)
+        {
+            spin.SpinOnce();
+        }
+
+        return stamp;
+    }
+
+    /// <summary>
+    /// True when no grow of <see cref="ClusterAabbs"/> began since <paramref name="stamp"/>, so a write made since into the array read after it is in the
+    /// live array. Call after the write: its CAS is the fence the protocol needs.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal bool ClusterAabbsWriteLanded(int stamp) => Volatile.Read(ref _clusterAabbsGrowth) == stamp;
 
     /// <summary>
     /// Grow <see cref="ClusterSpatialIndexSlot"/> to hold at least <paramref name="requiredLength"/> entries, initializing new slots to <c>-1</c> (not in
@@ -4269,8 +4348,8 @@ internal sealed unsafe partial class ArchetypeClusterState
 
     /// <summary>
     /// Process a single wake request: if the cluster is <see cref="ClusterSleepState.Sleeping"/>, transition to <see cref="ClusterSleepState.WakePending"/>.
-    /// Deduplication is implicit: calling on an already-WakePending cluster is a no-op. Called single-threaded from <c>WriteClusterTickFence</c> after
-    /// draining <see cref="DormancyReporter"/>. Issue #233.
+    /// Deduplication is implicit: calling on an already-WakePending cluster is a no-op. Called single-threaded by <see cref="DrainWakeRequests"/> at the
+    /// fence. Issue #233.
     /// </summary>
     internal void ProcessWakeRequest(int chunkId)
     {
@@ -4617,6 +4696,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         {
             clusterAccessor.Dispose();
         }
+
+        RefreshClusterReach();
     }
 
     /// <summary>
@@ -4920,7 +5001,6 @@ internal sealed unsafe partial class ArchetypeClusterState
                                       stored.MaxX != fresh.MaxX || stored.MaxY != fresh.MaxY || stored.MaxZ != fresh.MaxZ;
 
                     fresh.CategoryMask = ReadStoredCategoryMask(slot, chunkId, indexSlot);
-                    NoteClusterOverhang(in fresh, cellSize);
                     if (boundsMoved)
                     {
                         // CA-01 PRECONDITION (see the method's remarks): `stored = fresh` is a BLIND STORE, not a grow-merge. Sound only under the tick fence
@@ -5142,7 +5222,6 @@ internal sealed unsafe partial class ArchetypeClusterState
                 }
 
                 fresh.CategoryMask = ReadStoredCategoryMask(slot, chunkId, indexSlot);
-                NoteClusterOverhang(in fresh, cellSize);
                 if (boundsMoved)
                 {
                     NoteAabbChange(in stored, in fresh);
@@ -5235,66 +5314,451 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
-    /// The largest distance by which any of this archetype's cluster boxes reaches OUTSIDE its own cell, in world units. Zero until a cluster proves otherwise.
+    /// How far past its own cell every cell-walking query reaches for this archetype's clusters, in world units: the largest IN-WORLD overhang of any cluster
+    /// not named in <see cref="EscapedClusters"/>. Recomputed at every fence from the live index (<see cref="RefreshClusterReach"/>), so it falls again once
+    /// the cluster that raised it is fixed; between fences only a spawn raises it (<see cref="RaiseClusterReachForSpawn"/>).
     /// </summary>
     /// <remarks>
     /// <para><b>Why a cluster can leave its cell at all.</b> Cell membership is decided by an entity's CENTRE — <c>SpatialGrid.ReadSpatialCenter3D</c>, and the
     /// migration check in <c>DetectClusterMigrations</c> uses the same point — so an entity with extent protrudes past its cell by up to its own
-    /// half-extent, and the cluster box that unions it protrudes with it. <c>C13</c> makes a cluster belong to exactly one cell; it does not make its geometry
-    /// fit inside one.</para>
-    /// <para><b>What breaks without it.</b> Every grid search that argues "rings 0..R cover a radius of R cells, so nothing outside can be nearer" is wrong by
-    /// exactly this much. <see cref="CoveredRadiusSq"/> made that argument and dropped true nearest neighbours whenever entities had extent — invisible to a
-    /// test that spawns points, which is what the first kNN fixture did.</para>
-    /// <para><b>Cell-relative bounds make it free to compute.</b> C15 stores <see cref="ClusterAabbs"/> as offsets from the cell origin, so the overhang is
-    /// <c>max(-Min, Max - cellSize)</c> per axis with no origin lookup and no second pass.</para>
-    /// <para><b>It only ever rises.</b> Too large merely widens a search; too small loses results — so the asymmetry is deliberate and it is never lowered.
-    /// The consequence to know: an entity whose overhang exceeds anything seen before becomes visible to kNN at the fence following its write, not at the
-    /// write itself. Entity sizes are effectively static in the workloads this serves, so that window is "a larger-than-ever entity was just spawned", not
-    /// steady-state motion.</para>
+    /// half-extent, a drifter inside the migration hysteresis band by that band as well, and the cluster box that unions them protrudes with them.
+    /// <c>C13</c> makes a cluster belong to exactly one cell; it does not make its geometry fit inside one. Every cell-walking query therefore grows its cell
+    /// range by this much (SQ-01), and kNN's stopping rule subtracts it (<see cref="CoveredRadiusSq"/>).</para>
+    /// <para><b>In-world only.</b> A side of an EDGE cell faces no cell, and every query's cell range is clamped into the grid, so the part of a box beyond
+    /// the grid can never make a query miss its cluster — a query reaching for it lands in that same edge cell. It is not counted. On the SWG Tatooine
+    /// world that part was the whole of the ~930 m every Creature and Lair query used to be widened by: lairs and their creatures placed outside the playable
+    /// area are filed in edge cells, and their boxes reach out of the world, never into a neighbour (2026-09-13).</para>
+    /// <para><b>Why it may fall, when it used to be a running maximum.</b> "Too large merely widens a search" held while only kNN read it. Once box, radius,
+    /// ray and frustum queries widened by it too, one transient outlier — an entity teleported across the map and not yet migrated, a box a migration left
+    /// stale — cost every later query of the archetype ~50x its cells for the rest of the process: SWG's whole-run slow mode and its x128 multi-second
+    /// ticks. So it is recomputed at each fence from the cluster boxes, which bound what the coming tick's queries read, and the outliers above it are
+    /// named instead.</para>
+    /// <para><b>Between fences only a spawn can raise it.</b> A move grows <see cref="ClusterAabbs"/> at once, but reaches the per-cell index — what queries
+    /// read — at the fence, or earlier only through a spawn's widen or a tree demotion that republish the cluster's current box; a moved entity is therefore
+    /// reachable from the fence after its write, as it always was. A spawn widens the index at once, so it raises the reach by the spawned entity's own
+    /// in-world overhang first. Nothing structural runs during the fence (EW-01: a spawn's EntityMap insert throws inside the fence window), and queries do
+    /// not either, so the recompute's stores cannot race a raise or be half-seen by a query.</para>
     /// </remarks>
-    internal float MaxClusterOverhang;
+    internal float ClusterReach;
 
-    /// <summary>Raise <see cref="MaxClusterOverhang"/> to cover one cluster box, given in that cluster's own cell frame.</summary>
-    /// <remarks>
-    /// CAS rather than a plain store because the parallel AabbRefresh slices all reach it; the loop is a max, so a lost race just retries. The common case is
-    /// the first compare failing, which is a load and a branch.
-    /// </remarks>
-    internal void NoteClusterOverhang(in ClusterSpatialAabb aabb, float cellSize)
+    /// <summary>
+    /// The clusters whose in-world overhang exceeds <see cref="ClusterReach"/>, named so that no query has to widen to reach them. Published by
+    /// <see cref="RefreshClusterReach"/> with a release store; never null.
+    /// </summary>
+    internal EscapedClusterSet EscapedClusters = EscapedClusterSet.Empty;
+
+    /// <summary>
+    /// One axis of a box's in-world overhang, in its cell's frame: how far it reaches below 0 or above <paramref name="cellSize"/>, ignoring whatever lies
+    /// past the grid's own extent — <paramref name="gridLo"/> and <paramref name="gridHi"/>, also in the cell's frame. Negative when the box stays inside.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static double AxisReach(double min, double max, double cellSize, double gridLo, double gridHi) =>
+        Math.Max(-Math.Max(min, gridLo), Math.Min(max, gridHi) - cellSize);
+
+    /// <summary>The smallest <see cref="float"/> not below <paramref name="value"/>: a reach rounded down would under-cover the box it came from.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static float RoundReachUp(double value)
     {
-        if (float.IsPositiveInfinity(aabb.MinX))
-        {
-            return;   // an empty box (a fresh cluster's) has no extent to note
-        }
+        var f = (float)value;
+        return f < value ? MathF.BitIncrement(f) : f;
+    }
 
-        if (!(cellSize > 0f))
+    /// <summary>Raise <see cref="ClusterReach"/> to at least <paramref name="reach"/>: a CAS max, since spawns on several threads raise it together.</summary>
+    private void RaiseClusterReach(float reach)
+    {
+        var current = Volatile.Read(ref ClusterReach);
+        while (reach > current)
         {
-            return;
-        }
-
-        var over = MathF.Max(-aabb.MinX, aabb.MaxX - cellSize);
-        over = MathF.Max(over, MathF.Max(-aabb.MinY, aabb.MaxY - cellSize));
-
-        // A 2D archetype leaves Z at the +/-Infinity sentinel; feeding that in would poison the max with an infinity that widens every search forever.
-        if (!float.IsPositiveInfinity(aabb.MinZ) && !float.IsNegativeInfinity(aabb.MaxZ))
-        {
-            over = MathF.Max(over, MathF.Max(-aabb.MinZ, aabb.MaxZ - cellSize));
-        }
-
-        if (!float.IsFinite(over) || over <= 0f)
-        {
-            return;
-        }
-
-        var current = Volatile.Read(ref MaxClusterOverhang);
-        while (over > current)
-        {
-            var prior = Interlocked.CompareExchange(ref MaxClusterOverhang, over, current);
+            var prior = Interlocked.CompareExchange(ref ClusterReach, reach, current);
             if (prior == current)
             {
                 return;
             }
             current = prior;
         }
+    }
+
+    /// <summary>
+    /// A spawned entity's contribution to <see cref="ClusterReach"/>: its own box's in-world overhang past the cell it is filed in, whose world-space minimum
+    /// corner is (<paramref name="originX"/>, <paramref name="originY"/>, <paramref name="originZ"/>). Called by the spawn path before the index widen that
+    /// makes the entity queryable. <paramref name="coords"/> is the field decode — <c>[minX, minY, maxX, maxY]</c> in 2D, <c>[minX, minY, minZ, maxX, maxY,
+    /// maxZ]</c> in 3D, world units.
+    /// </summary>
+    /// <remarks>
+    /// The entity's box and not the cluster's: the rest of the cluster box is already covered — by the reach, or by <see cref="EscapedClusters"/> — and a
+    /// spawn into a named outlier must not fold that outlier's whole reach into every query until the next fence.
+    /// </remarks>
+    internal void RaiseClusterReachForSpawn(int cellKey, double originX, double originY, double originZ, ReadOnlySpan<double> coords, bool is3D)
+    {
+        var grid = Grid;
+        if (grid == null)
+        {
+            return;
+        }
+
+        double cell = grid.Config.CellSize;
+        CellReachFrame(grid, cellKey, out double loX, out double hiX, out double loY, out double hiY, out double loZ, out double hiZ);
+        double reach;
+        if (is3D)
+        {
+            reach = Math.Max(AxisReach(coords[0] - originX, coords[3] - originX, cell, loX, hiX),
+                Math.Max(AxisReach(coords[1] - originY, coords[4] - originY, cell, loY, hiY),
+                    AxisReach(coords[2] - originZ, coords[5] - originZ, cell, loZ, hiZ)));
+        }
+        else
+        {
+            reach = Math.Max(AxisReach(coords[0] - originX, coords[2] - originX, cell, loX, hiX),
+                AxisReach(coords[1] - originY, coords[3] - originY, cell, loY, hiY));
+        }
+
+        if (reach > 0d)
+        {
+            RaiseClusterReach(RoundReachUp(reach));
+        }
+    }
+
+    /// <summary>
+    /// Where <see cref="AxisReach"/> clips a cell's boxes, in the cell's frame: a side is clipped only when it is an EDGE of the grid on that axis — at 0 on
+    /// the low side, at the cell's size on the high side — and not at all otherwise.
+    /// </summary>
+    /// <remarks>
+    /// Clipping at the world bound for EVERY cell loses entities. A query lying past the bound is clamped into the edge column after it is widened, so it
+    /// walks the edge cell and the reach's worth of cells inward of it, never further: a box filed in an INNER cell that crosses the bound must still be
+    /// reached from there, by its whole overhang. Only the edge cell's own outward side is free, since every query reaching past it lands in that cell.
+    /// </remarks>
+    private static void CellReachFrame(SpatialGrid grid, int cellKey, out double loX, out double hiX, out double loY, out double hiY, out double loZ,
+        out double hiZ)
+    {
+        ref readonly var cfg = ref grid.Config;
+        double cell = cfg.CellSize;
+        var (cx, cy, cz) = grid.CellKeyToCoords(cellKey);
+        loX = cx == 0 ? 0d : double.NegativeInfinity;
+        hiX = cx == cfg.GridWidth - 1 ? cell : double.PositiveInfinity;
+        loY = cy == 0 ? 0d : double.NegativeInfinity;
+        hiY = cy == cfg.GridHeight - 1 ? cell : double.PositiveInfinity;
+        loZ = cz == 0 ? 0d : double.NegativeInfinity;
+        hiZ = cz == cfg.GridDepth - 1 ? cell : double.PositiveInfinity;
+    }
+
+    /// <summary>
+    /// Recompute <see cref="ClusterReach"/> and <see cref="EscapedClusters"/> for the coming tick's queries, from the cluster boxes in
+    /// <see cref="ClusterAabbs"/>. Runs once the index is final — at the end of <c>FinalizeArchetypeFenceHead</c>, and after a rebuild.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Why <see cref="ClusterAabbs"/> covers the index.</b> What the reach must cover is the box the per-cell index holds for each cluster, since
+    /// that is what a query tests. Every index write stores <see cref="ClusterAabbs"/>' value at that moment — the fence's AABB refresh (directly, or through
+    /// the deferred apply of a promoted cell, which reads it at the drain), a migration, a spawn's widen, an allocation, a rebuild, a demotion — or, for a
+    /// promotion, a copy of an earlier one. Between writes <see cref="ClusterAabbs"/> only grows (the write-time CAS, a spawn's union, a migrant's union),
+    /// a grow of the array itself drops none of those (<see cref="_clusterAabbsGrowth"/>), and the one pass that shrinks an entry, the AABB refresh,
+    /// republishes the box to the index in the same pass. So once the fence has run, every index box lies inside its cluster's
+    /// <see cref="ClusterAabbs"/> entry, and a reach computed from the latter covers the former. <see cref="ReachCoversIndex"/> walks a linear half's
+    /// stored boxes, so the tests that assert it check this bound there; a promoted half's boxes cannot be read back out of its tree.</para>
+    /// <para><b>Why not the index.</b> Walking it costs a slot and an index object per occupied cell half before a single box is read. On SWG Tatooine at
+    /// x16 / 64 m cells, ~43 k occupied halves, that took serial <c>FenceFinalize</c> from 0.86 to 3.43 ms. This pass reads one dense array in order.</para>
+    /// <para><b>Keep the largest, then fold.</b> The scan keeps the <see cref="EscapedClusterSet.Capacity"/> + 1 largest in-world overhangs. The base
+    /// reach is the smallest of those — every cluster outside the kept set is at or below it — and the reach absorbs kept entries that exceed the BASE by no
+    /// more than one migration-hysteresis margin. Widening every walk by that little is cheaper than naming a cluster every query must test, and it is the
+    /// band ordinary drifters live in: an entity is let that far past its cell before it migrates. Whatever is left above the reach is named.</para>
+    /// <para><b>Past the capacity the reach widens instead.</b> With more outliers than <see cref="EscapedClusterSet.Capacity"/>, the reach is the
+    /// seventeenth-largest overhang, so every cluster is still covered by one of the two mechanisms — slower, never wrong.</para>
+    /// <para><b>Cost.</b> Four float compares per slot of <see cref="ClusterAabbs"/>, six in 3D, against the box that holds every overhang the kept set
+    /// would not admit (<see cref="RejectBounds"/>); only the rest look up their cell and pay the exact, edge-clipped <see cref="BoxReach"/>. The pass
+    /// spans the array's capacity, not its live clusters, which is most of the cost for a small archetype. Measured warm on SWG Tatooine for all five
+    /// archetypes: 154 µs at x16 / 64 m and at x64 / 1 024 m, 297 µs at x128 / 128 m, where the index walk took 1 022 µs. An archetype whose index did not
+    /// change takes fence path 0 and never gets here.</para>
+    /// </remarks>
+    internal void RefreshClusterReach()
+    {
+        var grid = Grid;
+        var aabbs = ClusterAabbs;
+        var cellMap = ClusterCellMap;
+        if (grid == null || PerCellIndex == null || aabbs == null || cellMap == null || !SpatialSlot.HasSpatialIndex)
+        {
+            Volatile.Write(ref EscapedClusters, EscapedClusterSet.Empty);
+            Volatile.Write(ref ClusterReach, 0f);
+            return;
+        }
+
+        double cell = grid.Config.CellSize;
+        bool is3D = SpatialSlot.FieldInfo.FieldType.Is3D();
+        const int keep = EscapedClusterSet.Capacity + 1;
+        Span<double> topReach = stackalloc double[keep];
+        Span<int> topId = stackalloc int[keep];
+        Span<int> topCell = stackalloc int[keep];
+        int kept = 0;
+
+        // The smallest reach the kept set still admits: zero until it is full, since only a positive overhang can matter, then the smallest kept.
+        double admit = 0d;
+        RejectBounds(cell, admit, out float lo, out float hi);
+        int count = Math.Min(aabbs.Length, cellMap.Length);
+        for (int id = 0; id < count; id++)
+        {
+            ref readonly var b = ref aabbs[id];
+
+            // Inside [lo, hi] on every axis, the box overhangs its cell by no more than admit even unclipped, and clipping at an edge only lowers that.
+            // Empty slots — freed, never used, the +inf/-inf sentinel — land here too.
+            if (b.MinX >= lo && b.MaxX <= hi && b.MinY >= lo && b.MaxY <= hi && (!is3D || (b.MinZ >= lo && b.MaxZ <= hi)))
+            {
+                continue;
+            }
+
+            int cellKey = cellMap[id];
+            if (cellKey < 0)
+            {
+                continue;   // in no cell, so in no cell's index
+            }
+
+            CellReachFrame(grid, cellKey, out double loX, out double hiX, out double loY, out double hiY, out double loZ, out double hiZ);
+            double r = BoxReach(b.MinX, b.MinY, b.MinZ, b.MaxX, b.MaxY, b.MaxZ, is3D, cell, loX, hiX, loY, hiY, loZ, hiZ);
+            if (r > admit)
+            {
+                KeepLargest(topReach, topId, topCell, ref kept, ref admit, r, id, cellKey);
+                RejectBounds(cell, admit, out lo, out hi);
+            }
+        }
+
+        double reach = FoldReach(topReach, kept, cell * grid.Config.MigrationHysteresisRatio, out int named);
+
+        // The set before the reach: a lower reach must never be observable beside the set it was computed without. Queries do not run during the fence
+        // (EW-01), so this ordering is belt and braces rather than the guarantee.
+        PublishEscapedClusters(grid, aabbs, topId[..named], topCell[..named], is3D);
+        Volatile.Write(ref ClusterReach, RoundReachUp(reach));
+    }
+
+    /// <summary>
+    /// The reach, and how many of the leading entries stay named, from the kept in-world overhangs in DESCENDING order — <paramref name="kept"/> of them, at
+    /// most <see cref="EscapedClusterSet.Capacity"/> + 1.
+    /// </summary>
+    /// <remarks>
+    /// The base is the last entry when the kept set is full, since every cluster outside it is at or below that, and zero otherwise. Entries within
+    /// <paramref name="fold"/> of the BASE are folded into the reach. Against the base, not against a reach that grows as it folds: a cascading fold would
+    /// let a ladder of outliers, each within a margin of the next, pull the reach up the whole ladder — the widening the names exist to avoid.
+    /// </remarks>
+    internal static double FoldReach(ReadOnlySpan<double> topDescending, int kept, double fold, out int named)
+    {
+        double baseReach = kept > EscapedClusterSet.Capacity ? topDescending[EscapedClusterSet.Capacity] : 0d;
+        double reach = baseReach;
+        named = Math.Min(kept, EscapedClusterSet.Capacity);
+        while (named > 0 && topDescending[named - 1] <= baseReach + fold)
+        {
+            reach = Math.Max(reach, topDescending[named - 1]);
+            named--;
+        }
+
+        return reach;
+    }
+
+    /// <summary>
+    /// SQ-01 checker, for tests: does every cluster in the per-cell index either stay within <see cref="ClusterReach"/> or appear, current, in
+    /// <see cref="EscapedClusters"/>? False with the first violation described.
+    /// </summary>
+    /// <remarks>
+    /// Walks the INDEX, cell by cell, where <see cref="RefreshClusterReach"/> reads <see cref="ClusterAabbs"/>: a write that left a linear half's box wider
+    /// than its cluster's entry — the bound the refresh relies on — fails here. A promoted half's boxes cannot be read back out of its tree, so for those
+    /// it reads <see cref="ClusterAabbs"/> as the refresh does, and checks the reach against its own input.
+    /// </remarks>
+    internal bool ReachCoversIndex(out string violation)
+    {
+        violation = null;
+        var grid = Grid;
+        var perCell = PerCellIndex;
+        var aabbs = ClusterAabbs;
+        if (grid == null || perCell == null || aabbs == null || !SpatialSlot.HasSpatialIndex)
+        {
+            return true;
+        }
+
+        double reach = Volatile.Read(ref ClusterReach);
+        var escaped = Volatile.Read(ref EscapedClusters);
+        double cell = grid.Config.CellSize;
+        bool is3D = SpatialSlot.FieldInfo.FieldType.Is3D();
+        for (int cellKey = 0; cellKey < perCell.Length; cellKey++)
+        {
+            var slot = perCell[cellKey];
+            if (slot == null)
+            {
+                continue;
+            }
+
+            CellReachFrame(grid, cellKey, out double loX, out double hiX, out double loY, out double hiY, out double loZ, out double hiZ);
+            for (int half = 0; half < 2; half++)
+            {
+                var tree = slot.ReadTree(half == 1);
+                if (tree != null)
+                {
+                    foreach (int id in tree.EnumerateClusterIds())
+                    {
+                        ref readonly var b = ref aabbs[id];
+                        double r = BoxReach(b.MinX, b.MinY, b.MinZ, b.MaxX, b.MaxY, b.MaxZ, is3D, cell, loX, hiX, loY, hiY, loZ, hiZ);
+                        if (!CoveredByReachOrName(r, reach, escaped, id, cellKey, ref violation))
+                        {
+                            return false;
+                        }
+                    }
+
+                    continue;
+                }
+
+                var linear = slot.ReadIndex(half == 1);
+                for (int i = 0; linear != null && i < linear.ClusterCount; i++)
+                {
+                    double r = BoxReach(linear.MinX[i], linear.MinY[i], linear.MinZ[i], linear.MaxX[i], linear.MaxY[i], linear.MaxZ[i], is3D, cell, loX, hiX,
+                        loY, hiY, loZ, hiZ);
+                    if (!CoveredByReachOrName(r, reach, escaped, linear.ClusterIds[i], cellKey, ref violation))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+
+    private bool CoveredByReachOrName(double overhang, double reach, EscapedClusterSet escaped, int id, int cellKey, ref string violation)
+    {
+        if (overhang <= reach)
+        {
+            return true;
+        }
+
+        for (int e = 0; e < escaped.Count; e++)
+        {
+            if (escaped.ChunkIds[e] == id && escaped.IsCurrent(e, ClusterCellMap))
+            {
+                return true;
+            }
+        }
+
+        violation = $"cluster {id} in cell {cellKey} reaches {overhang} past its cell, beyond the reach {reach}, and is not named";
+        return false;
+    }
+
+    /// <summary>A cluster box's in-world overhang past its cell, in the cell's frame; negative infinity for an empty box, which reaches nowhere.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static double BoxReach(float minX, float minY, float minZ, float maxX, float maxY, float maxZ, bool is3D, double cell, double loX, double hiX,
+        double loY, double hiY, double loZ, double hiZ)
+    {
+        if (float.IsPositiveInfinity(minX))
+        {
+            return double.NegativeInfinity;
+        }
+
+        double r = Math.Max(AxisReach(minX, maxX, cell, loX, hiX), AxisReach(minY, maxY, cell, loY, hiY));
+
+        // A 2D archetype leaves Z at the +/-Infinity sentinel, which would read as an infinite overhang.
+        return is3D ? Math.Max(r, AxisReach(minZ, maxZ, cell, loZ, hiZ)) : r;
+    }
+
+    /// <summary>
+    /// The float interval [<paramref name="lo"/>, <paramref name="hi"/>] a cell-relative box must stay inside, on every axis, to overhang a cell of size
+    /// <paramref name="cell"/> by at most <paramref name="admit"/>. Rounded inward and checked with the arithmetic <see cref="AxisReach"/> uses — a negation,
+    /// and a subtraction whose rounding is monotonic — so no box it passes is one <see cref="BoxReach"/> would keep.
+    /// </summary>
+    internal static void RejectBounds(double cell, double admit, out float lo, out float hi)
+    {
+        lo = (float)-admit;
+        while (-(double)lo > admit)
+        {
+            lo = MathF.BitIncrement(lo);
+        }
+
+        hi = (float)(cell + admit);
+        while ((double)hi - cell > admit)
+        {
+            hi = MathF.BitDecrement(hi);
+        }
+    }
+
+    /// <summary>Insert into the descending top list, dropping its smallest when full; once full, <paramref name="admit"/> is its smallest.</summary>
+    private static void KeepLargest(Span<double> topReach, Span<int> topId, Span<int> topCell, ref int kept, ref double admit, double reach, int id,
+        int cellKey)
+    {
+        int at = kept < topReach.Length ? kept++ : topReach.Length - 1;
+        while (at > 0 && topReach[at - 1] < reach)
+        {
+            topReach[at] = topReach[at - 1];
+            topId[at] = topId[at - 1];
+            topCell[at] = topCell[at - 1];
+            at--;
+        }
+
+        topReach[at] = reach;
+        topId[at] = id;
+        topCell[at] = cellKey;
+        if (kept == topReach.Length)
+        {
+            admit = topReach[kept - 1];
+        }
+    }
+
+    /// <summary>
+    /// Publish the named clusters as a new <see cref="EscapedClusterSet"/>, with their boxes in world f64 — or keep the current set when it names the same
+    /// clusters at the same bounds, so a settled world allocates nothing per fence.
+    /// </summary>
+    private void PublishEscapedClusters(SpatialGrid grid, ClusterSpatialAabb[] aabbs, ReadOnlySpan<int> ids, ReadOnlySpan<int> cellKeys, bool is3D)
+    {
+        var current = Volatile.Read(ref EscapedClusters);
+        if (ids.Length == 0)
+        {
+            if (current.Count != 0)
+            {
+                Volatile.Write(ref EscapedClusters, EscapedClusterSet.Empty);
+            }
+
+            return;
+        }
+
+        // Compared BEFORE anything is allocated: a set naming the same clusters at the same bounds is kept as it is.
+        if (current.Count == ids.Length)
+        {
+            bool same = true;
+            for (int i = 0; i < ids.Length && same; i++)
+            {
+                WorldBox(grid, in aabbs[ids[i]], cellKeys[i], is3D, out double minX, out double minY, out double minZ, out double maxX, out double maxY,
+                    out double maxZ);
+                same = current.ChunkIds[i] == ids[i] && current.HomeCellKeys[i] == cellKeys[i] && current.CategoryMasks[i] == aabbs[ids[i]].CategoryMask
+                    && current.MinX[i] == minX && current.MinY[i] == minY && current.MinZ[i] == minZ
+                    && current.MaxX[i] == maxX && current.MaxY[i] == maxY && current.MaxZ[i] == maxZ;
+            }
+
+            if (same)
+            {
+                return;
+            }
+        }
+
+        var set = new EscapedClusterSet(ids.Length);
+        for (int i = 0; i < ids.Length; i++)
+        {
+            var (cx, cy, cz) = grid.CellKeyToCoords(cellKeys[i]);
+            set.ChunkIds[i] = ids[i];
+            set.HomeCellKeys[i] = cellKeys[i];
+            set.CellX[i] = cx;
+            set.CellY[i] = cy;
+            set.CellZ[i] = cz;
+            WorldBox(grid, in aabbs[ids[i]], cellKeys[i], is3D, out set.MinX[i], out set.MinY[i], out set.MinZ[i], out set.MaxX[i], out set.MaxY[i],
+                out set.MaxZ[i]);
+            set.CategoryMasks[i] = aabbs[ids[i]].CategoryMask;
+        }
+
+        Volatile.Write(ref EscapedClusters, set);
+    }
+
+    /// <summary>
+    /// A cluster's C15 cell-relative box in WORLD f64, widened exactly through its cell's origin (SQ-06). A 2D box takes the whole Z axis, as every 2D
+    /// query does.
+    /// </summary>
+    private static void WorldBox(SpatialGrid grid, in ClusterSpatialAabb b, int cellKey, bool is3D, out double minX, out double minY, out double minZ,
+        out double maxX, out double maxY, out double maxZ)
+    {
+        grid.CellOrigin(cellKey, out double ox, out double oy, out double oz);
+        minX = ClusterSpatialAabb.ToWorldExact(b.MinX, ox);
+        minY = ClusterSpatialAabb.ToWorldExact(b.MinY, oy);
+        maxX = ClusterSpatialAabb.ToWorldExact(b.MaxX, ox);
+        maxY = ClusterSpatialAabb.ToWorldExact(b.MaxY, oy);
+        minZ = is3D ? ClusterSpatialAabb.ToWorldExact(b.MinZ, oz) : double.NegativeInfinity;
+        maxZ = is3D ? ClusterSpatialAabb.ToWorldExact(b.MaxZ, oz) : double.PositiveInfinity;
     }
 
     /// <summary>
@@ -5808,7 +6272,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </summary>
     internal void AddClusterToPerCellIndex(int clusterChunkId, int cellKey, in ClusterSpatialAabb aabb)
     {
-        NoteClusterOverhang(in aabb, (float)(Grid?.Config.CellSize ?? 0d));
+        // No reach bookkeeping here. The fence's and the rebuild's callers are followed by RefreshClusterReach, which reads the whole index, and the spawn
+        // path raises ClusterReach itself from the entity it spawns (RaiseClusterReachForSpawn) before it gets here.
 
         // The growers take _finalizeLock themselves (non-reentrant), so they run BEFORE the latch below; what they publish is monotonic, so the
         // references re-read under the latch are current and at least as long as what was just ensured.
@@ -6406,9 +6871,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     internal void WidenClusterInPerCellIndex(int clusterChunkId, int cellKey, in ClusterSpatialAabb aabb)
     {
-        // A spawn straddling its cell's edge widens every KNN ring — noted here as the add did.
-        NoteClusterOverhang(in aabb, (float)(Grid?.Config.CellSize ?? 0d));
-
+        // The spawn path has already raised ClusterReach by the entity's own overhang (RaiseClusterReachForSpawn). Not by this box: it is the whole
+        // cluster's, and a spawn into a named outlier would fold that outlier's reach into every query until the next fence.
         var perCell = Volatile.Read(ref PerCellIndex);
         if (perCell == null || (uint)cellKey >= (uint)perCell.Length)
         {

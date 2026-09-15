@@ -17,6 +17,6 @@ public enum ClusterSleepState : byte
     Sleeping = 1,
 
     /// <summary>Wake requested — will become <see cref="Active"/> at the start of the next tick (one-tick latency). Set by
-    /// <see cref="DormancyReporter.RequestWake"/> or the heartbeat timer inside <see cref="ArchetypeClusterState.DormancySweep"/>.</summary>
+    /// a wake request queued by a write to a sleeping cluster, or the heartbeat timer inside <see cref="ArchetypeClusterState.DormancySweep"/>.</summary>
     WakePending = 2,
 }

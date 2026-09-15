@@ -105,11 +105,11 @@ State transitions are protected by `StateSyncRoot`. The Idle → Exclusive trans
 
 ### Default cache size — 256 MiB
 
-`DatabaseCacheSize` on [`PagedMMFOptions`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PagedMMFOptions.cs) defaults to **256 MiB** (`DefaultDatabaseCacheSize`) — a production-sane size for the one primary engine a process normally runs. The hard minimum is **8 MiB** (`MinimumCacheSize` = `MinimumMemPageCount × 8 KiB`); a configured size below the **64 MiB** recommended floor (`RecommendedMinimumCacheSize`) logs a startup warning. Public byte constants — `PagedMMFOptions.DefaultCacheSizeBytes` / `MinimumCacheSizeBytes` / `PageSizeBytes` — expose these in-code.
+`DatabaseCacheSize` on [`PagedMMFOptions`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PagedMMFOptions.cs) defaults to **256 MiB** (`DefaultDatabaseCacheSize`) — a production-sane size for the one primary engine a process normally runs. The hard minimum is **8 MiB** (`MinimumCacheSize` = `MinimumMemPageCount × 8 KiB`); a configured size below the **64 MiB** recommended floor (`RecommendedMinimumCacheSize`) logs a startup warning. Public byte constants — `PagedMMFOptions.DefaultCacheSizeBytes` / `MinimumCacheSizeBytes` / `MaximumCacheSizeBytes` / `PageSizeBytes` — expose these in-code.
 
 **The 8 MiB minimum is deliberately small — but it's the hard floor; production-sane sizing starts far higher.** The internal `TestMode` flag suppresses the small-cache warning and the min-size floor so a fixture *can* run below 8 MiB; fixtures that deliberately exercise eviction opt in via `[Property("CacheSize", ...)]` to a sub-floor cache under `TestMode`, while the general test default is a representative 8 MiB (right at the floor). That puts the eviction, backpressure, and dirty-counter paths under real pressure exactly where a test wants it, while the rest of the suite runs representatively. Production leaves `TestMode` off and gets the 256 MiB default; size `DatabaseCacheSize` — or the fluent `TyphonOptions.PageCacheSize(...)` — for your workload's largest single-transaction working set (real servers go much higher).
 
-The validator enforces: the size must be a multiple of the page size, at least 8 MiB (unless `TestMode`), and ≤ 4 GiB. The **4 GiB ceiling is not a hard architectural limit** — it exists purely because the cache is currently a *single* contiguous allocation for all pages. It will be raised substantially soon (by splitting into multiple allocations, or moving to a 64-bit allocation); nothing in the page-cache design depends on staying under 4 GiB.
+The validator enforces: the size must be a multiple of the page size, at least 8 MiB (unless `TestMode`), and at most 2 GiB minus one page (`MaximumCacheSize`). The **ceiling is not an architectural limit** — it exists because the cache is a *single* contiguous allocation whose size travels as an `int` (`IMemoryAllocator.AllocatePinned`, and the `Memory<byte>` slices the page I/O takes from it). Raising it means a 64-bit allocation with per-page I/O buffers, or several allocations; nothing else in the page-cache design depends on staying under it.
 
 ### Two-pass clock-sweep eviction
 
@@ -215,7 +215,7 @@ Forward traversal goes through the linked list in [`LogicalSegmentHeader`](https
 
 The root page holds **no** usable data (the directory fills the whole `PageRawDataSize`); every data page (segment page 1+) has the full 8000 bytes.
 
-`Grow(newLength, ...)` is `lock`-protected and `volatile`-publishes the new `_pages` array — concurrent reads always see a consistent index view. `GetPage(i, epoch, ...)` resolves the i-th segment page index through `_store.RequestPageEpoch`, returning a [`PageAccessor`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PageAccessor.cs) (a thin wrapper over the page address with typed `Metadata<T>` / `RawData<T>` / `StructAt<T>` slicing).
+`Grow(newLength, ...)` is `lock`-protected and `volatile`-publishes the new `_pages` array — concurrent reads always see a consistent index view. It is also all-or-nothing ([PS-11](https://github.com/Log2n-io/Typhon/blob/main/rules/durability.md)): it initializes the new pages, then pins and latches the directory pages and the old tail before it writes any of them, so a grow that fails — typically on a page-cache back-pressure timeout — leaves the segment exactly as it was and gives back the pages it allocated. `GetPage(i, epoch, ...)` resolves the i-th segment page index through `_store.RequestPageEpoch`, returning a [`PageAccessor`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PageAccessor.cs) (a thin wrapper over the page address with typed `Metadata<T>` / `RawData<T>` / `StructAt<T>` slicing).
 
 ### `ChunkBasedSegment<TStore>` — fixed-stride allocator
 
@@ -420,7 +420,7 @@ The Workbench's Database File Map (Module 15) reads the engine's storage state w
 | `DatabaseName` | `"TyphonDB"` | Logical name. Validated against `^[A-Za-z0-9_-]+$` and ≤ 63 UTF-8 bytes. |
 | `DatabaseDirectory` | `Environment.CurrentDirectory` | Filesystem directory. Must exist. `DatabaseAbsoluteDirectory` returns the absolutized form. |
 | `DatabaseFileName` | `DatabaseName` (if unset) | Logical file prefix; backing file becomes `<DatabaseFileName>.bin`. Same validation rules. |
-| `DatabaseCacheSize` | `256 MiB` (`DefaultDatabaseCacheSize`) | Total page cache bytes. Must be a multiple of `PageSize`, between `MinimumCacheSize` (8 MiB) and 4 GiB. |
+| `DatabaseCacheSize` | `256 MiB` (`DefaultDatabaseCacheSize`) | Total page cache bytes. Must be a multiple of `PageSize`, between `MinimumCacheSize` (8 MiB) and `MaximumCacheSize` (2 GiB minus one page). |
 | `PagesDebugPattern` | `false` | Fill newly-allocated pages with a debug pattern (development/testing). |
 | `BackpressureStrategyFactory` (internal) | `() => new WaitForIOStrategy()` | Test hook to substitute the backpressure strategy. |
 

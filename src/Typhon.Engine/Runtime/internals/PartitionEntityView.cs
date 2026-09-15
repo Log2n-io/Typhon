@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Typhon.Engine.Internals;
 
@@ -16,11 +17,12 @@ namespace Typhon.Engine.Internals;
 /// <para>
 /// Iteration walks the HashMap's flat entry array sequentially (L1-friendly), skipping empty slots (hash == 0).
 /// Each entry stores [4-byte hash][8-byte long key]. The long key is reinterpreted as <see cref="EntityId"/>.
+/// The array is held by reference, not by pointer: it is managed memory, and holding it keeps it alive for the whole iteration.
 /// </para>
 /// </summary>
-internal sealed unsafe class PartitionEntityView : IReadOnlyCollection<EntityId>, IEnumerator<EntityId>
+internal sealed class PartitionEntityView : IReadOnlyCollection<EntityId>, IEnumerator<EntityId>
 {
-    private byte* _entries;
+    private byte[] _entries;
     private int _start;
     private int _end;
     private int _stride;
@@ -36,7 +38,7 @@ internal sealed unsafe class PartitionEntityView : IReadOnlyCollection<EntityId>
     /// <param name="totalPartitions">Total number of partitions across all workers.</param>
     public void Reset(HashMap<long> map, int partitionIndex, int totalPartitions)
     {
-        _entries = map.EntriesPtr;
+        _entries = map.Entries;
         _stride = map.EntryStride;
         var capacity = map.Capacity;
         _start = (int)((long)partitionIndex * capacity / totalPartitions);
@@ -72,16 +74,27 @@ internal sealed unsafe class PartitionEntityView : IReadOnlyCollection<EntityId>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool MoveNext()
     {
-        while (++_index < _end)
+        // Locals, not fields, and the table base taken once: the scan loop stays in registers. The range check comes first, so a view that was
+        // never Reset (no table yet) just ends.
+        int index = _index + 1;
+        int end = _end;
+        if (index < end)
         {
-            byte* entry = _entries + (long)_index * _stride;
-            if (*(uint*)entry != 0) // hash != 0 → occupied slot
+            ref byte entries = ref MemoryMarshal.GetArrayDataReference(_entries);
+            int stride = _stride;
+            do
             {
-                _current = EntityId.FromRaw(*(long*)(entry + 4));
-                return true;
-            }
+                ref byte entry = ref Unsafe.Add(ref entries, (nint)index * stride);
+                if (Unsafe.As<byte, uint>(ref entry) != 0) // hash != 0 → occupied slot
+                {
+                    _index = index;
+                    _current = EntityId.FromRaw(Unsafe.ReadUnaligned<long>(ref Unsafe.Add(ref entry, 4)));
+                    return true;
+                }
+            } while (++index < end);
         }
 
+        _index = index;
         return false;
     }
 

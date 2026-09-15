@@ -2,9 +2,41 @@ using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics.X86;
 using System.Threading;
+using Stripe = Typhon.Engine.Internals.ConcurrentStripe;
 
 namespace Typhon.Engine.Internals;
+
+/// <summary>One stripe of <see cref="ConcurrentHashMap{TKey}"/> and <see cref="ConcurrentHashMap{TKey,TValue}"/>, padded to 128 bytes.</summary>
+/// <remarks>
+/// Everything a lock-free reader touches (version, mask, table) is in the first 32 bytes, and the rest is padding. Writers CAS <see cref="OlcVersion"/> and
+/// write <see cref="Count"/>, so unpadded stripes put a writer on one stripe and readers of its neighbours on the same cache line (the unpadded 24-byte
+/// stripe cost contended readers and writers +22 %). At 128 bytes two stripes' hot fields are at least 96 bytes apart, so no cache line holds both,
+/// whatever the array's alignment. Not generic, because a generic struct cannot have an explicit layout; the KV map keeps its values array in
+/// <see cref="ManagedValues"/> as an <see cref="object"/>.
+/// </remarks>
+[StructLayout(LayoutKind.Explicit, Size = 128)]
+internal struct ConcurrentStripe
+{
+    [FieldOffset(0)]
+    public int OlcVersion;           // bit 0 = lock, bits 1-31 = version
+
+    [FieldOffset(4)]
+    public int Count;
+
+    [FieldOffset(8)]
+    public int Mask;                 // capacity - 1; published after Table on resize
+
+    [FieldOffset(12)]
+    public int ResizeThreshold;
+
+    [FieldOffset(16)]
+    public byte[] Table;             // entries; replaced whole on resize
+
+    [FieldOffset(24)]
+    public object ManagedValues;     // the KV map's TValue[] (managed TValue only); stored before Table on resize
+}
 
 /// <summary>
 /// Thread-safe in-memory hash set using striped open addressing with per-stripe OLC.
@@ -18,26 +50,20 @@ namespace Typhon.Engine.Internals;
 ///   <item><b>Resize</b>: Per-stripe, under existing write lock. Other stripes remain fully accessible.</item>
 /// </list>
 /// </para>
-/// Uses POH (Pinned Object Heap) allocation — same memory model as <see cref="HashMap{TKey}"/>.
 /// </summary>
-internal unsafe class ConcurrentHashMap<TKey> : IDisposable where TKey : unmanaged, IEquatable<TKey>
+/// <remarks>
+/// <para><b>Each stripe's table is a managed array</b> (entries <c>[uint hash][TKey key]</c>) reached through <c>ref</c>s. It replaced a pinned-object-heap
+/// array reached through a <c>byte*</c>: a reader probing the old array while a resize dropped it held only a raw pointer, invisible to the GC, so a gen2
+/// collection inside the probe could free the memory under it. A <c>ref</c> keeps the array alive.</para>
+/// <para><b>Table and mask are published in order, and a table only ever grows.</b> A resize stores the new table, then the new mask, both with release
+/// stores; a lock-free reader loads the mask, then the table, both with acquire loads. A reader that sees the new mask therefore sees the new table, and
+/// one that still sees the old mask indexes a table at least that large, so no reader can index past the end of its table (the old version loaded the
+/// two as unordered fields and could). The two loads stay independent, so the probe does not wait on a load chained through the table; a torn pair only
+/// reaches a reader whose version check then fails.</para>
+/// </remarks>
+internal class ConcurrentHashMap<TKey> : IDisposable where TKey : unmanaged, IEquatable<TKey>
 {
     private const double MaxLoadFactor = 0.75;
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Stripe structure
-    // ═══════════════════════════════════════════════════════════════════════
-
-    private struct Stripe
-    {
-        public int OlcVersion;        // bit 0 = lock, bits 1-31 = version
-        public int Count;
-        public int Capacity;          // power of 2
-        public int Mask;              // Capacity - 1
-        public int ResizeThreshold;
-        public byte* Entries;
-        public byte[] PohArray;       // POH array reference — prevents GC collection
-    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // Fields
@@ -55,7 +81,7 @@ internal unsafe class ConcurrentHashMap<TKey> : IDisposable where TKey : unmanag
 
     public ConcurrentHashMap(int initialCapacity = 1024)
     {
-        _entryStride = (4 + sizeof(TKey) + 3) & ~3;
+        _entryStride = (4 + Unsafe.SizeOf<TKey>() + 3) & ~3;
         _stripeCount = Math.Max(64, (int)BitOperations.RoundUpToPowerOf2((uint)Environment.ProcessorCount * 4));
         _stripeShift = 32 - BitOperations.Log2((uint)_stripeCount);
 
@@ -65,12 +91,9 @@ internal unsafe class ConcurrentHashMap<TKey> : IDisposable where TKey : unmanag
         for (int i = 0; i < _stripeCount; i++)
         {
             ref var stripe = ref _stripes[i];
-            stripe.Capacity = perStripeCapacity;
             stripe.Mask = perStripeCapacity - 1;
             stripe.ResizeThreshold = (int)(perStripeCapacity * MaxLoadFactor);
-            int size = perStripeCapacity * _entryStride;
-            stripe.PohArray = GC.AllocateArray<byte>(size, true);
-            stripe.Entries = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(stripe.PohArray));
+            stripe.Table = new byte[perStripeCapacity * _entryStride];
         }
     }
 
@@ -96,6 +119,19 @@ internal unsafe class ConcurrentHashMap<TKey> : IDisposable where TKey : unmanag
     public int StripeCount => _stripeCount;
 
     // ═══════════════════════════════════════════════════════════════════════
+    // Entry access
+    // ═══════════════════════════════════════════════════════════════════════
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ref byte EntriesOf(byte[] table) => ref MemoryMarshal.GetArrayDataReference(table);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ref uint HashOf(ref byte entry) => ref Unsafe.As<byte, uint>(ref entry);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static TKey KeyOf(ref byte entry) => Unsafe.ReadUnaligned<TKey>(ref Unsafe.Add(ref entry, 4));
+
+    // ═══════════════════════════════════════════════════════════════════════
     // Public API
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -119,31 +155,33 @@ internal unsafe class ConcurrentHashMap<TKey> : IDisposable where TKey : unmanag
 
             if (stripe.Count >= stripe.ResizeThreshold)
             {
-                ResizeStripe(ref stripe, checked(stripe.Capacity * 2));
+                ResizeStripe(ref stripe, checked((stripe.Mask + 1) * 2));
             }
 
-            int idx = (int)(hash & (uint)stripe.Mask);
+            int mask = stripe.Mask;
+            ref byte entries = ref EntriesOf(stripe.Table);
+            int idx = (int)(hash & (uint)mask);
             int stride = _entryStride;
 
             while (true)
             {
-                byte* entry = stripe.Entries + (long)idx * stride;
-                uint h = *(uint*)entry;
+                ref byte entry = ref Unsafe.Add(ref entries, (nint)idx * stride);
+                uint h = HashOf(ref entry);
 
                 if (h == 0)
                 {
-                    *(uint*)entry = hash;
-                    *(TKey*)(entry + 4) = key;
+                    HashOf(ref entry) = hash;
+                    Unsafe.WriteUnaligned(ref Unsafe.Add(ref entry, 4), key);
                     stripe.Count++;
                     return true;
                 }
 
-                if (h == hash && (*(TKey*)(entry + 4)).Equals(key))
+                if (h == hash && KeyOf(ref entry).Equals(key))
                 {
                     return false;
                 }
 
-                idx = (idx + 1) & stripe.Mask;
+                idx = (idx + 1) & mask;
             }
         }
         finally
@@ -169,7 +207,7 @@ internal unsafe class ConcurrentHashMap<TKey> : IDisposable where TKey : unmanag
         {
             ref var stripe = ref _stripes[stripeIdx];
 
-            // Acquire load: orders the following entries/mask/slot reads after this version snapshot (paired with the release in ReleaseStripeLock).
+            // Acquire load: orders the following table reads after this version snapshot (paired with the release in ReleaseStripeLock).
             int version = Volatile.Read(ref stripe.OlcVersion);
             if ((version & 1) != 0)
             {
@@ -177,28 +215,37 @@ internal unsafe class ConcurrentHashMap<TKey> : IDisposable where TKey : unmanag
                 continue;
             }
 
-            byte* entries = stripe.Entries;
-            int mask = stripe.Mask;
+            // Mask, then table (class remarks): the mask never exceeds this table. The ref keeps the table alive if a resize replaces it mid-probe.
+            int mask = Volatile.Read(ref stripe.Mask);
+            var table = Volatile.Read(ref stripe.Table);
+            ref byte entries = ref EntriesOf(table);
             int idx = (int)(hash & (uint)mask);
             bool found = false;
 
             while (true)
             {
-                byte* entry = entries + (long)idx * stride;
-                uint h = *(uint*)entry;
+                ref byte entry = ref Unsafe.Add(ref entries, (nint)idx * stride);
+                uint h = HashOf(ref entry);
 
                 if (h == 0)
                 {
                     break;
                 }
 
-                if (h == hash && (*(TKey*)(entry + 4)).Equals(key))
+                if (h == hash && KeyOf(ref entry).Equals(key))
                 {
                     found = true;
                     break;
                 }
 
                 idx = (idx + 1) & mask;
+            }
+
+            // The probe's loads are plain; on arm64 an acquire load alone would let them sink below the validating re-read (CLAUDE.md,
+            // memory-ordering discipline). JIT-folded away on x64.
+            if (!X86Base.IsSupported)
+            {
+                Interlocked.MemoryBarrier();
             }
 
             if (Volatile.Read(ref stripe.OlcVersion) != version)
@@ -225,27 +272,29 @@ internal unsafe class ConcurrentHashMap<TKey> : IDisposable where TKey : unmanag
         try
         {
             ref var stripe = ref _stripes[stripeIdx];
-            int idx = (int)(hash & (uint)stripe.Mask);
+            int mask = stripe.Mask;
+            ref byte entries = ref EntriesOf(stripe.Table);
+            int idx = (int)(hash & (uint)mask);
             int stride = _entryStride;
 
             while (true)
             {
-                byte* entry = stripe.Entries + (long)idx * stride;
-                uint h = *(uint*)entry;
+                ref byte entry = ref Unsafe.Add(ref entries, (nint)idx * stride);
+                uint h = HashOf(ref entry);
 
                 if (h == 0)
                 {
                     return false;
                 }
 
-                if (h == hash && (*(TKey*)(entry + 4)).Equals(key))
+                if (h == hash && KeyOf(ref entry).Equals(key))
                 {
                     stripe.Count--;
                     BackwardShiftDelete(ref stripe, idx);
                     return true;
                 }
 
-                idx = (idx + 1) & stripe.Mask;
+                idx = (idx + 1) & mask;
             }
         }
         finally
@@ -267,7 +316,7 @@ internal unsafe class ConcurrentHashMap<TKey> : IDisposable where TKey : unmanag
             for (int i = 0; i < _stripeCount; i++)
             {
                 ref var stripe = ref _stripes[i];
-                new Span<byte>(stripe.Entries, stripe.Capacity * _entryStride).Clear();
+                stripe.Table.AsSpan().Clear();
                 stripe.Count = 0;
             }
         }
@@ -289,7 +338,7 @@ internal unsafe class ConcurrentHashMap<TKey> : IDisposable where TKey : unmanag
         for (int i = 0; i < _stripeCount; i++)
         {
             ref var stripe = ref _stripes[i];
-            if (perStripe <= stripe.Capacity)
+            if (perStripe <= stripe.Mask + 1)
             {
                 continue;
             }
@@ -297,7 +346,7 @@ internal unsafe class ConcurrentHashMap<TKey> : IDisposable where TKey : unmanag
             AcquireStripeLock(ref stripe);
             try
             {
-                if (perStripe > stripe.Capacity)
+                if (perStripe > stripe.Mask + 1)
                 {
                     ResizeStripe(ref stripe, perStripe);
                 }
@@ -316,18 +365,22 @@ internal unsafe class ConcurrentHashMap<TKey> : IDisposable where TKey : unmanag
     /// <summary>Returns a best-effort <see langword="ref struct"/> enumerator. No locks held — may observe partial state under concurrent writes.</summary>
     public Enumerator GetEnumerator() => new(this);
 
-    /// <summary>Best-effort value-type enumerator. Iterates stripes sequentially, no locking.</summary>
+    /// <summary>Best-effort value-type enumerator. Iterates stripes sequentially, no locking; each stripe is walked on the table it had when reached.</summary>
     public ref struct Enumerator
     {
         private readonly ConcurrentHashMap<TKey> _map;
         private int _stripeIdx;
         private int _entryIdx;
+        private int _capacity;
+        private byte[] _table;
 
         internal Enumerator(ConcurrentHashMap<TKey> map)
         {
             _map = map;
             _stripeIdx = 0;
             _entryIdx = -1;
+            _capacity = 0;
+            _table = null;
         }
 
         public TKey Current { get; private set; }
@@ -337,18 +390,26 @@ internal unsafe class ConcurrentHashMap<TKey> : IDisposable where TKey : unmanag
             int stride = _map._entryStride;
             while (_stripeIdx < _map._stripeCount)
             {
-                ref var stripe = ref _map._stripes[_stripeIdx];
-                while (++_entryIdx < stripe.Capacity)
+                if (_table == null)
                 {
-                    byte* entry = stripe.Entries + (long)_entryIdx * stride;
-                    if (*(uint*)entry != 0)
+                    _table = Volatile.Read(ref _map._stripes[_stripeIdx].Table);
+                    _capacity = _table.Length / stride;   // from the table itself, so it can never disagree with it
+                }
+
+                ref byte entries = ref EntriesOf(_table);
+                int capacity = _capacity;
+                while (++_entryIdx < capacity)
+                {
+                    ref byte entry = ref Unsafe.Add(ref entries, (nint)_entryIdx * stride);
+                    if (HashOf(ref entry) != 0)
                     {
-                        Current = *(TKey*)(entry + 4);
+                        Current = KeyOf(ref entry);
                         return true;
                     }
                 }
                 _stripeIdx++;
                 _entryIdx = -1;
+                _table = null;
             }
             return false;
         }
@@ -369,8 +430,7 @@ internal unsafe class ConcurrentHashMap<TKey> : IDisposable where TKey : unmanag
 
         for (int i = 0; i < _stripeCount; i++)
         {
-            _stripes[i].PohArray = null;
-            _stripes[i].Entries = null;
+            _stripes[i].Table = null;
             _stripes[i].Count = 0;
         }
     }
@@ -430,19 +490,21 @@ internal unsafe class ConcurrentHashMap<TKey> : IDisposable where TKey : unmanag
     private static void ReleaseStripeLock(ref Stripe stripe) => Volatile.Write(ref stripe.OlcVersion, stripe.OlcVersion + 1);
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Private — backward shift deletion (per-stripe)
+    // Private — backward shift deletion (per-stripe, under the stripe lock)
     // ═══════════════════════════════════════════════════════════════════════
 
     private void BackwardShiftDelete(ref Stripe stripe, int idx)
     {
         int stride = _entryStride;
         int mask = stripe.Mask;
+        int capacity = mask + 1;
+        ref byte entries = ref EntriesOf(stripe.Table);
         int j = (idx + 1) & mask;
 
         while (true)
         {
-            byte* entryJ = stripe.Entries + (long)j * stride;
-            uint hj = *(uint*)entryJ;
+            ref byte entryJ = ref Unsafe.Add(ref entries, (nint)j * stride);
+            uint hj = HashOf(ref entryJ);
 
             if (hj == 0)
             {
@@ -450,19 +512,19 @@ internal unsafe class ConcurrentHashMap<TKey> : IDisposable where TKey : unmanag
             }
 
             int homeJ = (int)(hj & (uint)mask);
-            int distI = (idx - homeJ + stripe.Capacity) & mask;
-            int distJ = (j - homeJ + stripe.Capacity) & mask;
+            int distI = (idx - homeJ + capacity) & mask;
+            int distJ = (j - homeJ + capacity) & mask;
 
             if (distI < distJ)
             {
-                Unsafe.CopyBlock(stripe.Entries + (long)idx * stride, entryJ, (uint)stride);
+                Unsafe.CopyBlockUnaligned(ref Unsafe.Add(ref entries, (nint)idx * stride), ref entryJ, (uint)stride);
                 idx = j;
             }
 
             j = (j + 1) & mask;
         }
 
-        *(uint*)(stripe.Entries + (long)idx * stride) = 0;
+        HashOf(ref Unsafe.Add(ref entries, (nint)idx * stride)) = 0;
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -472,32 +534,33 @@ internal unsafe class ConcurrentHashMap<TKey> : IDisposable where TKey : unmanag
     private void ResizeStripe(ref Stripe stripe, int newCapacity)
     {
         int stride = _entryStride;
-        int newSize = newCapacity * stride;
-        var newPoh = GC.AllocateArray<byte>(newSize, true);
-        byte* newEntries = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(newPoh));
+        int oldCapacity = stripe.Mask + 1;
+        var newTable = new byte[newCapacity * stride];
         int newMask = newCapacity - 1;
+        ref byte src = ref EntriesOf(stripe.Table);
+        ref byte dst = ref EntriesOf(newTable);
 
-        for (int i = 0; i < stripe.Capacity; i++)
+        for (int i = 0; i < oldCapacity; i++)
         {
-            byte* entry = stripe.Entries + (long)i * stride;
-            uint h = *(uint*)entry;
+            ref byte entry = ref Unsafe.Add(ref src, (nint)i * stride);
+            uint h = HashOf(ref entry);
             if (h != 0)
             {
                 int idx = (int)(h & (uint)newMask);
-                while (*(uint*)(newEntries + (long)idx * stride) != 0)
+                while (HashOf(ref Unsafe.Add(ref dst, (nint)idx * stride)) != 0)
                 {
                     idx = (idx + 1) & newMask;
                 }
-                Unsafe.CopyBlock(newEntries + (long)idx * stride, entry, (uint)stride);
+                Unsafe.CopyBlockUnaligned(ref Unsafe.Add(ref dst, (nint)idx * stride), ref entry, (uint)stride);
             }
         }
 
-        // Old POH array: GC collects it once lock-free readers finish probing.
-        // OLC version bump in ReleaseStripeLock ensures readers retry with new entries pointer.
-        stripe.PohArray = newPoh;
-        stripe.Entries = newEntries;
-        stripe.Capacity = newCapacity;
-        stripe.Mask = newMask;
         stripe.ResizeThreshold = (int)(newCapacity * MaxLoadFactor);
+
+        // Table, then mask, both release stores (class remarks). The first release makes the rehashed entries visible before the table that holds them; the
+        // second makes the table visible before a mask that fits it. A reader still probing the old table keeps it alive through its ref, and fails its
+        // version check — the stripe lock is held, so OlcVersion stays odd until ReleaseStripeLock.
+        Volatile.Write(ref stripe.Table, newTable);
+        Volatile.Write(ref stripe.Mask, newMask);
     }
 }

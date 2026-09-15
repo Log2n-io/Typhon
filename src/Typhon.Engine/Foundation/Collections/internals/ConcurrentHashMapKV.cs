@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics.X86;
 using System.Threading;
+using Stripe = Typhon.Engine.Internals.ConcurrentStripe;
 
 namespace Typhon.Engine.Internals;
 
@@ -17,27 +19,17 @@ namespace Typhon.Engine.Internals;
 ///   <item>Managed TValue: keys in entry array, values in parallel <c>TValue[]</c>.</item>
 /// </list>
 /// </para>
-/// Uses POH (Pinned Object Heap) allocation — same memory model as <see cref="HashMap{TKey}"/>.
 /// </summary>
-internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey : unmanaged, IEquatable<TKey>
+/// <remarks>
+/// <para>Same tables and publication as <see cref="ConcurrentHashMap{TKey}"/> (entries <c>[uint hash][TKey key][TValue value]</c>): a managed array per stripe
+/// reached through <c>ref</c>s, the table then the mask published with release stores, loaded mask-then-table by lock-free readers — see there.</para>
+/// <para><b>Managed values.</b> A resize stores the new <c>ManagedValues</c> array before it publishes the new table, and a reader loads the table before
+/// the values. A reader that sees the new table therefore sees the new values; one that sees the old table sees values at least as large, so its index
+/// stays in range, and its version check rejects whatever it read.</para>
+/// </remarks>
+internal class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey : unmanaged, IEquatable<TKey>
 {
     private const double MaxLoadFactor = 0.75;
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Stripe structure
-    // ═══════════════════════════════════════════════════════════════════════
-
-    private struct Stripe
-    {
-        public int OlcVersion;        // bit 0 = lock, bits 1-31 = version
-        public int Count;
-        public int Capacity;          // power of 2
-        public int Mask;              // Capacity - 1
-        public int ResizeThreshold;
-        public byte* Entries;
-        public byte[] PohArray;       // POH array reference — prevents GC collection
-        public TValue[] ManagedValues;  // managed TValue path only (null for unmanaged)
-    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // Fields
@@ -57,14 +49,14 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
     public ConcurrentHashMap(int initialCapacity = 1024)
     {
         // Entry layout: [uint hash | TKey key | TValue value(unmanaged only)]
-        _valueOffset = 4 + sizeof(TKey);
+        _valueOffset = 4 + Unsafe.SizeOf<TKey>();
         if (!RuntimeHelpers.IsReferenceOrContainsReferences<TValue>())
         {
-            _entryStride = (4 + sizeof(TKey) + Unsafe.SizeOf<TValue>() + 3) & ~3;
+            _entryStride = (4 + Unsafe.SizeOf<TKey>() + Unsafe.SizeOf<TValue>() + 3) & ~3;
         }
         else
         {
-            _entryStride = (4 + sizeof(TKey) + 3) & ~3;
+            _entryStride = (4 + Unsafe.SizeOf<TKey>() + 3) & ~3;
         }
 
         _stripeCount = Math.Max(64, (int)BitOperations.RoundUpToPowerOf2((uint)Environment.ProcessorCount * 4));
@@ -76,12 +68,9 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
         for (int i = 0; i < _stripeCount; i++)
         {
             ref var stripe = ref _stripes[i];
-            stripe.Capacity = perStripeCapacity;
             stripe.Mask = perStripeCapacity - 1;
             stripe.ResizeThreshold = (int)(perStripeCapacity * MaxLoadFactor);
-            int size = perStripeCapacity * _entryStride;
-            stripe.PohArray = GC.AllocateArray<byte>(size, true);
-            stripe.Entries = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(stripe.PohArray));
+            stripe.Table = new byte[perStripeCapacity * _entryStride];
 
             if (RuntimeHelpers.IsReferenceOrContainsReferences<TValue>())
             {
@@ -112,6 +101,30 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
     public int StripeCount => _stripeCount;
 
     // ═══════════════════════════════════════════════════════════════════════
+    // Entry access
+    // ═══════════════════════════════════════════════════════════════════════
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ref byte EntriesOf(byte[] table) => ref MemoryMarshal.GetArrayDataReference(table);
+
+    /// <summary>The stripe's values array (managed TValue only). The shared stripe keeps it as an object, as it cannot be generic.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static TValue[] ValuesOf(ref Stripe stripe) => Unsafe.As<TValue[]>(stripe.ManagedValues);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ref uint HashOf(ref byte entry) => ref Unsafe.As<byte, uint>(ref entry);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static TKey KeyOf(ref byte entry) => Unsafe.ReadUnaligned<TKey>(ref Unsafe.Add(ref entry, 4));
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void SetKey(ref byte entry, uint hash, TKey key)
+    {
+        HashOf(ref entry) = hash;
+        Unsafe.WriteUnaligned(ref Unsafe.Add(ref entry, 4), key);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // Public API
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -135,32 +148,33 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
 
             if (stripe.Count >= stripe.ResizeThreshold)
             {
-                ResizeStripe(ref stripe, checked(stripe.Capacity * 2));
+                ResizeStripe(ref stripe, checked((stripe.Mask + 1) * 2));
             }
 
-            int idx = (int)(hash & (uint)stripe.Mask);
+            int mask = stripe.Mask;
+            ref byte entries = ref EntriesOf(stripe.Table);
+            int idx = (int)(hash & (uint)mask);
             int stride = _entryStride;
 
             while (true)
             {
-                byte* entry = stripe.Entries + (long)idx * stride;
-                uint h = *(uint*)entry;
+                ref byte entry = ref Unsafe.Add(ref entries, (nint)idx * stride);
+                uint h = HashOf(ref entry);
 
                 if (h == 0)
                 {
-                    *(uint*)entry = hash;
-                    *(TKey*)(entry + 4) = key;
-                    WriteValue(ref stripe, entry, idx, value);
+                    SetKey(ref entry, hash, key);
+                    WriteValue(ref stripe, ref entry, idx, value);
                     stripe.Count++;
                     return true;
                 }
 
-                if (h == hash && (*(TKey*)(entry + 4)).Equals(key))
+                if (h == hash && KeyOf(ref entry).Equals(key))
                 {
                     return false;
                 }
 
-                idx = (idx + 1) & stripe.Mask;
+                idx = (idx + 1) & mask;
             }
         }
         finally
@@ -187,7 +201,7 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
         {
             ref var stripe = ref _stripes[stripeIdx];
 
-            // Acquire load: orders the following entries/mask/value reads after this version snapshot (paired with the release in ReleaseStripeLock).
+            // Acquire load: orders the following table/value reads after this version snapshot (paired with the release in ReleaseStripeLock).
             int version = Volatile.Read(ref stripe.OlcVersion);
             if ((version & 1) != 0)
             {
@@ -195,31 +209,42 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
                 continue;
             }
 
-            byte* entries = stripe.Entries;
-            int mask = stripe.Mask;
-            TValue[] managedValues = stripe.ManagedValues; // snapshot for managed path
+            // Mask, table, then values — see the class remarks. The refs keep this table and its values alive if a resize replaces them mid-probe.
+            int mask = Volatile.Read(ref stripe.Mask);
+            var table = Volatile.Read(ref stripe.Table);
+            TValue[] managedValues = RuntimeHelpers.IsReferenceOrContainsReferences<TValue>()
+                ? Unsafe.As<TValue[]>(Volatile.Read(ref stripe.ManagedValues))
+                : null;
+            ref byte entries = ref EntriesOf(table);
             int idx = (int)(hash & (uint)mask);
             bool found = false;
             TValue result = default;
 
             while (true)
             {
-                byte* entry = entries + (long)idx * stride;
-                uint h = *(uint*)entry;
+                ref byte entry = ref Unsafe.Add(ref entries, (nint)idx * stride);
+                uint h = HashOf(ref entry);
 
                 if (h == 0)
                 {
                     break;
                 }
 
-                if (h == hash && (*(TKey*)(entry + 4)).Equals(key))
+                if (h == hash && KeyOf(ref entry).Equals(key))
                 {
-                    result = ReadValue(managedValues, entry, idx);
+                    result = ReadValue(managedValues, ref entry, idx);
                     found = true;
                     break;
                 }
 
                 idx = (idx + 1) & mask;
+            }
+
+            // The probe's loads are plain; on arm64 an acquire load alone would let them sink below the validating re-read (CLAUDE.md,
+            // memory-ordering discipline). JIT-folded away on x64.
+            if (!X86Base.IsSupported)
+            {
+                Interlocked.MemoryBarrier();
             }
 
             if (Volatile.Read(ref stripe.OlcVersion) != version)
@@ -247,13 +272,15 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
         try
         {
             ref var stripe = ref _stripes[stripeIdx];
-            int idx = (int)(hash & (uint)stripe.Mask);
+            int mask = stripe.Mask;
+            ref byte entries = ref EntriesOf(stripe.Table);
+            int idx = (int)(hash & (uint)mask);
             int stride = _entryStride;
 
             while (true)
             {
-                byte* entry = stripe.Entries + (long)idx * stride;
-                uint h = *(uint*)entry;
+                ref byte entry = ref Unsafe.Add(ref entries, (nint)idx * stride);
+                uint h = HashOf(ref entry);
 
                 if (h == 0)
                 {
@@ -261,15 +288,15 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
                     return false;
                 }
 
-                if (h == hash && (*(TKey*)(entry + 4)).Equals(key))
+                if (h == hash && KeyOf(ref entry).Equals(key))
                 {
-                    value = ReadValue(stripe.ManagedValues, entry, idx);
+                    value = ReadValue(ValuesOf(ref stripe), ref entry, idx);
                     stripe.Count--;
                     BackwardShiftDelete(ref stripe, idx);
                     return true;
                 }
 
-                idx = (idx + 1) & stripe.Mask;
+                idx = (idx + 1) & mask;
             }
         }
         finally
@@ -297,32 +324,33 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
 
             if (stripe.Count >= stripe.ResizeThreshold)
             {
-                ResizeStripe(ref stripe, checked(stripe.Capacity * 2));
+                ResizeStripe(ref stripe, checked((stripe.Mask + 1) * 2));
             }
 
-            int idx = (int)(hash & (uint)stripe.Mask);
+            int mask = stripe.Mask;
+            ref byte entries = ref EntriesOf(stripe.Table);
+            int idx = (int)(hash & (uint)mask);
             int stride = _entryStride;
 
             while (true)
             {
-                byte* entry = stripe.Entries + (long)idx * stride;
-                uint h = *(uint*)entry;
+                ref byte entry = ref Unsafe.Add(ref entries, (nint)idx * stride);
+                uint h = HashOf(ref entry);
 
                 if (h == 0)
                 {
-                    *(uint*)entry = hash;
-                    *(TKey*)(entry + 4) = key;
-                    WriteValue(ref stripe, entry, idx, value);
+                    SetKey(ref entry, hash, key);
+                    WriteValue(ref stripe, ref entry, idx, value);
                     stripe.Count++;
                     return value;
                 }
 
-                if (h == hash && (*(TKey*)(entry + 4)).Equals(key))
+                if (h == hash && KeyOf(ref entry).Equals(key))
                 {
-                    return ReadValue(stripe.ManagedValues, entry, idx);
+                    return ReadValue(ValuesOf(ref stripe), ref entry, idx);
                 }
 
-                idx = (idx + 1) & stripe.Mask;
+                idx = (idx + 1) & mask;
             }
         }
         finally
@@ -347,26 +375,28 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
         try
         {
             ref var stripe = ref _stripes[stripeIdx];
-            int idx = (int)(hash & (uint)stripe.Mask);
+            int mask = stripe.Mask;
+            ref byte entries = ref EntriesOf(stripe.Table);
+            int idx = (int)(hash & (uint)mask);
             int stride = _entryStride;
 
             while (true)
             {
-                byte* entry = stripe.Entries + (long)idx * stride;
-                uint h = *(uint*)entry;
+                ref byte entry = ref Unsafe.Add(ref entries, (nint)idx * stride);
+                uint h = HashOf(ref entry);
 
                 if (h == 0)
                 {
                     return false;
                 }
 
-                if (h == hash && (*(TKey*)(entry + 4)).Equals(key))
+                if (h == hash && KeyOf(ref entry).Equals(key))
                 {
-                    WriteValue(ref stripe, entry, idx, newValue);
+                    WriteValue(ref stripe, ref entry, idx, newValue);
                     return true;
                 }
 
-                idx = (idx + 1) & stripe.Mask;
+                idx = (idx + 1) & mask;
             }
         }
         finally
@@ -393,30 +423,32 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
         try
         {
             ref var stripe = ref _stripes[stripeIdx];
-            int idx = (int)(hash & (uint)stripe.Mask);
+            int mask = stripe.Mask;
+            ref byte entries = ref EntriesOf(stripe.Table);
+            int idx = (int)(hash & (uint)mask);
             int stride = _entryStride;
 
             while (true)
             {
-                byte* entry = stripe.Entries + (long)idx * stride;
-                uint h = *(uint*)entry;
+                ref byte entry = ref Unsafe.Add(ref entries, (nint)idx * stride);
+                uint h = HashOf(ref entry);
 
                 if (h == 0)
                 {
                     return false;
                 }
 
-                if (h == hash && (*(TKey*)(entry + 4)).Equals(key))
+                if (h == hash && KeyOf(ref entry).Equals(key))
                 {
-                    if (!EqualityComparer<TValue>.Default.Equals(ReadValue(stripe.ManagedValues, entry, idx), comparisonValue))
+                    if (!EqualityComparer<TValue>.Default.Equals(ReadValue(ValuesOf(ref stripe), ref entry, idx), comparisonValue))
                     {
                         return false;
                     }
-                    WriteValue(ref stripe, entry, idx, newValue);
+                    WriteValue(ref stripe, ref entry, idx, newValue);
                     return true;
                 }
 
-                idx = (idx + 1) & stripe.Mask;
+                idx = (idx + 1) & mask;
             }
         }
         finally
@@ -425,7 +457,10 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
         }
     }
 
-    /// <summary>Get or set the value for <paramref name="key"/>. Getter is lock-free (OLC); throws <see cref="KeyNotFoundException"/> if missing. Setter acquires stripe lock; adds or overwrites.</summary>
+    /// <summary>
+    /// Get or set the value for <paramref name="key"/>. Getter is lock-free (OLC); throws <see cref="KeyNotFoundException"/> if missing. Setter acquires
+    /// stripe lock; adds or overwrites.
+    /// </summary>
     public TValue this[TKey key]
     {
         get
@@ -453,33 +488,34 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
 
                 if (stripe.Count >= stripe.ResizeThreshold)
                 {
-                    ResizeStripe(ref stripe, checked(stripe.Capacity * 2));
+                    ResizeStripe(ref stripe, checked((stripe.Mask + 1) * 2));
                 }
 
-                int idx = (int)(hash & (uint)stripe.Mask);
+                int mask = stripe.Mask;
+                ref byte entries = ref EntriesOf(stripe.Table);
+                int idx = (int)(hash & (uint)mask);
                 int stride = _entryStride;
 
                 while (true)
                 {
-                    byte* entry = stripe.Entries + (long)idx * stride;
-                    uint h = *(uint*)entry;
+                    ref byte entry = ref Unsafe.Add(ref entries, (nint)idx * stride);
+                    uint h = HashOf(ref entry);
 
                     if (h == 0)
                     {
-                        *(uint*)entry = hash;
-                        *(TKey*)(entry + 4) = key;
-                        WriteValue(ref stripe, entry, idx, value);
+                        SetKey(ref entry, hash, key);
+                        WriteValue(ref stripe, ref entry, idx, value);
                         stripe.Count++;
                         return;
                     }
 
-                    if (h == hash && (*(TKey*)(entry + 4)).Equals(key))
+                    if (h == hash && KeyOf(ref entry).Equals(key))
                     {
-                        WriteValue(ref stripe, entry, idx, value);
+                        WriteValue(ref stripe, ref entry, idx, value);
                         return;
                     }
 
-                    idx = (idx + 1) & stripe.Mask;
+                    idx = (idx + 1) & mask;
                 }
             }
             finally
@@ -502,10 +538,10 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
             for (int i = 0; i < _stripeCount; i++)
             {
                 ref var stripe = ref _stripes[i];
-                new Span<byte>(stripe.Entries, stripe.Capacity * _entryStride).Clear();
+                stripe.Table.AsSpan().Clear();
                 if (RuntimeHelpers.IsReferenceOrContainsReferences<TValue>())
                 {
-                    Array.Clear(stripe.ManagedValues);
+                    Array.Clear(ValuesOf(ref stripe));
                 }
                 stripe.Count = 0;
             }
@@ -528,7 +564,7 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
         for (int i = 0; i < _stripeCount; i++)
         {
             ref var stripe = ref _stripes[i];
-            if (perStripe <= stripe.Capacity)
+            if (perStripe <= stripe.Mask + 1)
             {
                 continue;
             }
@@ -536,7 +572,7 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
             AcquireStripeLock(ref stripe);
             try
             {
-                if (perStripe > stripe.Capacity)
+                if (perStripe > stripe.Mask + 1)
                 {
                     ResizeStripe(ref stripe, perStripe);
                 }
@@ -561,12 +597,18 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
         private readonly ConcurrentHashMap<TKey, TValue> _map;
         private int _stripeIdx;
         private int _entryIdx;
+        private int _capacity;
+        private byte[] _table;
+        private TValue[] _managedValues;
 
         internal Enumerator(ConcurrentHashMap<TKey, TValue> map)
         {
             _map = map;
             _stripeIdx = 0;
             _entryIdx = -1;
+            _capacity = 0;
+            _table = null;
+            _managedValues = null;
         }
 
         public (TKey Key, TValue Value) Current { get; private set; }
@@ -576,20 +618,53 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
             int stride = _map._entryStride;
             while (_stripeIdx < _map._stripeCount)
             {
-                ref var stripe = ref _map._stripes[_stripeIdx];
-                while (++_entryIdx < stripe.Capacity)
+                if (_table == null)
                 {
-                    byte* entry = stripe.Entries + (long)_entryIdx * stride;
-                    if (*(uint*)entry != 0)
+                    ref var stripe = ref _map._stripes[_stripeIdx];
+                    if (!RuntimeHelpers.IsReferenceOrContainsReferences<TValue>())
                     {
-                        TKey key = *(TKey*)(entry + 4);
-                        TValue value = _map.ReadValue(stripe.ManagedValues, entry, _entryIdx);
-                        Current = (key, value);
+                        _table = Volatile.Read(ref stripe.Table);
+                    }
+                    else
+                    {
+                        // The table and its values must be one generation's. A resize stores the new values before it publishes the new table, so two
+                        // plain loads can take the old table with the new values and pair a key with another key's value. Read both between two equal,
+                        // even versions: a resize holds the stripe lock, so it moves the version. Every load is volatile, which keeps them in order on
+                        // arm64 too.
+                        while (true)
+                        {
+                            int version = Volatile.Read(ref stripe.OlcVersion);
+                            if ((version & 1) == 0)
+                            {
+                                _table = Volatile.Read(ref stripe.Table);
+                                _managedValues = Unsafe.As<TValue[]>(Volatile.Read(ref stripe.ManagedValues));
+                                if (Volatile.Read(ref stripe.OlcVersion) == version)
+                                {
+                                    break;
+                                }
+                            }
+                            Thread.SpinWait(1);
+                        }
+                    }
+
+                    _capacity = _table.Length / stride;   // from the table itself, so it can never disagree with it
+                }
+
+                ref byte entries = ref EntriesOf(_table);
+                int capacity = _capacity;
+                while (++_entryIdx < capacity)
+                {
+                    ref byte entry = ref Unsafe.Add(ref entries, (nint)_entryIdx * stride);
+                    if (HashOf(ref entry) != 0)
+                    {
+                        Current = (KeyOf(ref entry), _map.ReadValue(_managedValues, ref entry, _entryIdx));
                         return true;
                     }
                 }
                 _stripeIdx++;
                 _entryIdx = -1;
+                _table = null;
+                _managedValues = null;
             }
             return false;
         }
@@ -610,8 +685,7 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
 
         for (int i = 0; i < _stripeCount; i++)
         {
-            _stripes[i].PohArray = null;
-            _stripes[i].Entries = null;
+            _stripes[i].Table = null;
             _stripes[i].ManagedValues = null;
             _stripes[i].Count = 0;
         }
@@ -622,25 +696,25 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
     // ═══════════════════════════════════════════════════════════════════════
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private TValue ReadValue(TValue[] managedValues, byte* entry, int idx)
+    private TValue ReadValue(TValue[] managedValues, ref byte entry, int idx)
     {
         if (!RuntimeHelpers.IsReferenceOrContainsReferences<TValue>())
         {
-            return Unsafe.Read<TValue>(entry + _valueOffset);
+            return Unsafe.ReadUnaligned<TValue>(ref Unsafe.Add(ref entry, _valueOffset));
         }
         return managedValues[idx];
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void WriteValue(ref Stripe stripe, byte* entry, int idx, TValue value)
+    private void WriteValue(ref Stripe stripe, ref byte entry, int idx, TValue value)
     {
         if (!RuntimeHelpers.IsReferenceOrContainsReferences<TValue>())
         {
-            Unsafe.Write(entry + _valueOffset, value);
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref entry, _valueOffset), value);
         }
         else
         {
-            stripe.ManagedValues[idx] = value;
+            ValuesOf(ref stripe)[idx] = value;
         }
     }
 
@@ -699,19 +773,21 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
     private static void ReleaseStripeLock(ref Stripe stripe) => Volatile.Write(ref stripe.OlcVersion, stripe.OlcVersion + 1);
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Private — backward shift deletion (per-stripe)
+    // Private — backward shift deletion (per-stripe, under the stripe lock)
     // ═══════════════════════════════════════════════════════════════════════
 
     private void BackwardShiftDelete(ref Stripe stripe, int idx)
     {
         int stride = _entryStride;
         int mask = stripe.Mask;
+        int capacity = mask + 1;
+        ref byte entries = ref EntriesOf(stripe.Table);
         int j = (idx + 1) & mask;
 
         while (true)
         {
-            byte* entryJ = stripe.Entries + (long)j * stride;
-            uint hj = *(uint*)entryJ;
+            ref byte entryJ = ref Unsafe.Add(ref entries, (nint)j * stride);
+            uint hj = HashOf(ref entryJ);
 
             if (hj == 0)
             {
@@ -719,16 +795,16 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
             }
 
             int homeJ = (int)(hj & (uint)mask);
-            int distI = (idx - homeJ + stripe.Capacity) & mask;
-            int distJ = (j - homeJ + stripe.Capacity) & mask;
+            int distI = (idx - homeJ + capacity) & mask;
+            int distJ = (j - homeJ + capacity) & mask;
 
             if (distI < distJ)
             {
-                Unsafe.CopyBlock(stripe.Entries + (long)idx * stride, entryJ, (uint)stride);
+                Unsafe.CopyBlockUnaligned(ref Unsafe.Add(ref entries, (nint)idx * stride), ref entryJ, (uint)stride);
 
                 if (RuntimeHelpers.IsReferenceOrContainsReferences<TValue>())
                 {
-                    stripe.ManagedValues[idx] = stripe.ManagedValues[j];
+                    ValuesOf(ref stripe)[idx] = ValuesOf(ref stripe)[j];
                 }
 
                 idx = j;
@@ -738,10 +814,10 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
         }
 
         // Clear the gap
-        *(uint*)(stripe.Entries + (long)idx * stride) = 0;
+        HashOf(ref Unsafe.Add(ref entries, (nint)idx * stride)) = 0;
         if (RuntimeHelpers.IsReferenceOrContainsReferences<TValue>())
         {
-            stripe.ManagedValues[idx] = default;
+            ValuesOf(ref stripe)[idx] = default;
         }
     }
 
@@ -752,10 +828,11 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
     private void ResizeStripe(ref Stripe stripe, int newCapacity)
     {
         int stride = _entryStride;
-        int newSize = newCapacity * stride;
-        var newPoh = GC.AllocateArray<byte>(newSize, true);
-        byte* newEntries = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(newPoh));
+        int oldCapacity = stripe.Mask + 1;
+        var newTable = new byte[newCapacity * stride];
         int newMask = newCapacity - 1;
+        ref byte src = ref EntriesOf(stripe.Table);
+        ref byte dst = ref EntriesOf(newTable);
 
         TValue[] newManagedValues = null;
         if (RuntimeHelpers.IsReferenceOrContainsReferences<TValue>())
@@ -763,37 +840,37 @@ internal unsafe class ConcurrentHashMap<TKey, TValue> : IDisposable where TKey :
             newManagedValues = new TValue[newCapacity];
         }
 
-        for (int i = 0; i < stripe.Capacity; i++)
+        for (int i = 0; i < oldCapacity; i++)
         {
-            byte* entry = stripe.Entries + (long)i * stride;
-            uint h = *(uint*)entry;
+            ref byte entry = ref Unsafe.Add(ref src, (nint)i * stride);
+            uint h = HashOf(ref entry);
             if (h != 0)
             {
                 int idx = (int)(h & (uint)newMask);
-                while (*(uint*)(newEntries + (long)idx * stride) != 0)
+                while (HashOf(ref Unsafe.Add(ref dst, (nint)idx * stride)) != 0)
                 {
                     idx = (idx + 1) & newMask;
                 }
-                Unsafe.CopyBlock(newEntries + (long)idx * stride, entry, (uint)stride);
+                Unsafe.CopyBlockUnaligned(ref Unsafe.Add(ref dst, (nint)idx * stride), ref entry, (uint)stride);
 
                 if (newManagedValues != null)
                 {
-                    newManagedValues[idx] = stripe.ManagedValues[i];
+                    newManagedValues[idx] = ValuesOf(ref stripe)[i];
                 }
             }
         }
 
-        // Old POH array: GC collects it once lock-free readers finish probing.
-        // OLC version bump in ReleaseStripeLock ensures readers retry with new entries pointer.
-        stripe.PohArray = newPoh;
-        stripe.Entries = newEntries;
-        stripe.Capacity = newCapacity;
-        stripe.Mask = newMask;
         stripe.ResizeThreshold = (int)(newCapacity * MaxLoadFactor);
 
+        // Values, then table, then mask (class remarks). The table's release store makes the values and the rehashed entries visible before the table; the
+        // mask's makes the table visible before a mask that fits it. A reader still probing the old table keeps it alive through its ref, and fails its
+        // version check — the stripe lock is held, so OlcVersion stays odd until ReleaseStripeLock.
         if (newManagedValues != null)
         {
             stripe.ManagedValues = newManagedValues;
         }
+
+        Volatile.Write(ref stripe.Table, newTable);
+        Volatile.Write(ref stripe.Mask, newMask);
     }
 }

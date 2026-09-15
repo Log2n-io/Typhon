@@ -354,6 +354,111 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
             + "displace it, so anything but {cell 0} means the scenario is not lopsided and the arm above passes for the wrong reason");
     }
 
+    /// <summary>
+    /// A cell nominated while it cools re-enters the queue when its cooldown ends, at the worst degradation it was held at and with no nomination on that
+    /// tick; a cell nothing nominated while it cooled does not re-enter (RP-07).
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Driven against <c>CellRepairQueue</c> directly, because the engine cannot stage the case that matters.</b> The hold exists for a cell that
+    /// goes still while it cools and is never nominated again. An engine-level fixture has to keep the fence alive with a write, and a write to a degraded
+    /// cell nominates it — so there the hold and a fresh nomination are indistinguishable, and a queue that dropped held nominations would pass.</para>
+    /// <para><b>The quiet cell is the control.</b> Without it, "the held cell came back" is also satisfied by a release that re-queues every cooled cell,
+    /// which would bring back cells with nothing left to repair.</para>
+    /// </remarks>
+    [Test]
+    [VerifiesRule("RP-07")]
+    public void ANominationHeldDuringTheCooldownReturnsWhenTheCooldownEnds()
+    {
+        using var dbe = SetupEngine(budgetMs: 1.0f);
+        SpawnDegradedCells(dbe);
+        var state = ClusterStateOf(dbe);
+        var grid = dbe.SpatialGrid;
+        var held = grid.WorldToCellKey(50f, 50f, 0f);
+        var quiet = grid.WorldToCellKey(CellSize + 50f, 50f, 0f);
+
+        const int Cooldown = 10;
+        var queue = new CellRepairQueue(maxCells: 4096, agingRatePerTick: 0f, cooldownTicks: Cooldown);
+        var nominations = new List<ArchetypeClusterState.RepairNomination> { new(held, 0.8f), new(quiet, 0.8f) };
+        queue.Absorb(nominations, grid, state, 1);
+        queue.MarkRepaired(held, 1);
+        queue.MarkRepaired(quiet, 1);
+        Assert.That((queue.Count, queue.CoolingCount), Is.EqualTo((0, 2)), "a repaired cell must leave the candidates and start cooling");
+
+        // Nominated on every tick of its cooldown, the worst reading in the middle — then still: nothing nominates it on the tick the cooldown ends.
+        for (var tick = 2; tick <= Cooldown; tick++)
+        {
+            queue.ReleaseCooled(grid, state, tick);
+            nominations.Clear();
+            nominations.Add(new ArchetypeClusterState.RepairNomination(held, tick == 5 ? 0.95f : 0.85f));
+            queue.Absorb(nominations, grid, state, tick);
+            Assert.Multiple(() =>
+            {
+                Assert.That(queue.Count, Is.Zero, $"tick {tick}: a cell inside its {Cooldown}-tick cooldown became a repair candidate");
+
+                // What the safety valve reads: a cooling cell must not be offered it.
+                Assert.That(queue.DegradationOf(held), Is.Zero, $"tick {tick}: a cooling cell reports a candidate's degradation to the valve");
+
+                // What the fence's early-out reads: nothing to plan until the cooldown ends.
+                Assert.That(queue.NeedsPlanning(tick), Is.False, $"tick {tick}: the queue asks for planning with nothing waiting and no cooldown ending");
+            });
+        }
+
+        Assert.That(queue.HeldDegradationOf(held), Is.EqualTo(0.95f), "the cooldown must hold the WORST degradation nominated, not the latest");
+        Assert.That(queue.NeedsPlanning(1 + Cooldown), Is.True,
+            "a cooldown ends on this tick with no nomination and no candidate — the fence must still plan, or the released cell is never re-queued");
+        queue.ReleaseCooled(grid, state, 1 + Cooldown);
+        queue.Rerank(grid, state, 1 + Cooldown);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(queue.Ranked.ToArray(), Is.EqualTo(new[] { held }),
+                "on the tick its cooldown ended, the cell nominated while it cooled must be a candidate and the one nothing nominated must not — a held "
+                + "nomination dropped instead loses a cell that went still, and a release that re-queues everything brings back cells with nothing to repair");
+            Assert.That(queue.DegradationOf(held), Is.EqualTo(0.95f), "the cell must come back at the WORST degradation it was nominated at while it cooled");
+            Assert.That(queue.CoolingCount, Is.Zero, "both cooldowns ended, so nothing should still be cooling");
+        });
+    }
+
+    /// <summary>
+    /// A cooling cell takes none of the queue's capacity, <c>Clear</c> drops it with the candidates, and at a cooldown of 0 a repaired cell is forgotten
+    /// exactly as <c>Remove</c> forgets it (RP-07).
+    /// </summary>
+    [Test]
+    [VerifiesRule("RP-07")]
+    public void ACoolingCellTakesNoCapacityAndClearDropsIt()
+    {
+        using var dbe = SetupEngine(budgetMs: 1.0f);
+        SpawnDegradedCells(dbe);
+        var state = ClusterStateOf(dbe);
+        var grid = dbe.SpatialGrid;
+        var a = grid.WorldToCellKey(50f, 50f, 0f);
+        var b = grid.WorldToCellKey(CellSize + 50f, 50f, 0f);
+        var nominations = new List<ArchetypeClusterState.RepairNomination> { new(a, 0.9f) };
+
+        // A queue of ONE, whose one place a cooling cell must not occupy.
+        var queue = new CellRepairQueue(maxCells: 1, agingRatePerTick: 0f, cooldownTicks: 10);
+        queue.Absorb(nominations, grid, state, 1);
+        queue.MarkRepaired(a, 1);
+        nominations[0] = new ArchetypeClusterState.RepairNomination(b, 0.2f);
+        queue.Absorb(nominations, grid, state, 2);
+        Assert.That((queue.Count, queue.TotalEvicted, queue.CoolingCount), Is.EqualTo((1, 0L, 1)),
+            "a cooling cell took the queue's only place: the newcomer was dropped or something was evicted to make room");
+
+        // After a rebuild a cell key names another cell, so the cooling state goes with the candidates — and leaves no release behind.
+        queue.Clear();
+        Assert.That((queue.Count, queue.CoolingCount, queue.NeedsPlanning(1_000)), Is.EqualTo((0, 0, false)), "Clear left cooling state behind");
+        nominations[0] = new ArchetypeClusterState.RepairNomination(a, 0.9f);
+        queue.Absorb(nominations, grid, state, 3);
+        Assert.That(queue.Count, Is.EqualTo(1), "a cell cooling before Clear was held after it instead of admitted");
+
+        // Cooldown 0: MarkRepaired is the Remove it replaced, and the next nomination is admitted at once.
+        var off = new CellRepairQueue(maxCells: 4096, agingRatePerTick: 0f, cooldownTicks: 0);
+        off.Absorb(nominations, grid, state, 1);
+        off.MarkRepaired(a, 1);
+        off.Absorb(nominations, grid, state, 1);
+        Assert.That((off.Count, off.CoolingCount), Is.EqualTo((1, 0)), "with the cooldown off, a repaired cell was not simply forgotten");
+    }
+
     // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
     // AC-11.2 — degradation is bounded: the safety valve
     // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════

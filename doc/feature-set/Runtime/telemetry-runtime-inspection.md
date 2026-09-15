@@ -54,7 +54,7 @@ for (var n = ring.OldestAvailableTick; n <= ring.NewestTick; n++)
 - **Bounded retention** — only the last `TelemetryRingCapacity` ticks are kept; `GetTick`/`GetSystemMetrics` throw `ArgumentOutOfRangeException` once a tick scrolls out of the window. Read promptly if correlating with an external event (e.g. a player report).
 - **Single writer** — only the tick driver thread calls `Record`; readers get a consistent past-tick snapshot but must not assume the *current* in-flight tick's slot is stable.
 - **`TickTelemetry.OverrunRatio` is base-rate, not throttle-adjusted** — it is always `actual / target-at-1x`, even while `TickMultiplier > 1`. Use it to ask "are we over the engine's nominal budget", not "are we over our currently throttled budget".
-- **`SystemTelemetry.StragglerGapUs` is a placeholder today** — always `0` pending deeper Pipeline integration; don't rely on it for parallel-imbalance analysis yet.
+- **`SystemTelemetry.StragglerGapUs` covers parallel `QuerySystem`s only**, and only with scheduler telemetry on: `DurationUs − WorkUs / min(workers, chunks)`, where `WorkUs` is the system's chunks' durations summed. Pipelines still report `0`. `WorkUs` itself is always filled for parallel `QuerySystem`s.
 - **No remote/out-of-process inspection** — `IRuntimeInspector` is designed but unimplemented; there is no REST endpoint or web explorer hook today. All access is in-process (game code, admin commands compiled into the server).
 - **Reading is not free at scale** — `GetSystemMetrics` returns a span over a per-tick array sized to the full system count (engine-internal systems included); iterate only what you need on a hot path.
 

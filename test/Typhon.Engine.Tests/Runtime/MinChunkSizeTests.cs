@@ -59,6 +59,9 @@ class MinChunkSizeTests : TestBase<MinChunkSizeTests>
             WorkerCount = workerCount,
             BaseTickRate = 1000,
             ParallelQueryMinChunkSize = globalMinChunk,
+
+            // These tests pin the entity rule; the cost rule, from a system's second dispatch on, sizes by measured cost (CostChunkingTests).
+            CostBasedChunking = false,
         });
 
         runtime.Start();
@@ -176,6 +179,7 @@ class MinChunkSizeTests : TestBase<MinChunkSizeTests>
             WorkerCount = 8,
             BaseTickRate = 1000,
             ParallelQueryMinChunkSize = 64,
+            CostBasedChunking = false,
         });
 
         runtime.Start();

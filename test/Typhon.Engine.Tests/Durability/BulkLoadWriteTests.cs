@@ -6,6 +6,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using Typhon.Engine.Internals;
 
 namespace Typhon.Engine.Tests;
 
@@ -139,6 +140,51 @@ internal sealed class BulkLoadWriteTests
         for (int i = 0; i < count; i++)
         {
             Assert.That(tx.IsAlive(ids[i]), Is.True, $"entity {i} (id={ids[i]}) should be visible after CompleteBulkLoad");
+        }
+    }
+
+    /// <summary>
+    /// A CompleteBulkLoad whose checkpoint times out leaves the session alive, and a retry completes it. A page held by a live writer keeps every
+    /// cycle gated, so no checkpoint can cover the bulk (CK-12) until the writer lets go. The retry used to dereference the final transaction the
+    /// first attempt had already committed and disposed.
+    /// </summary>
+    [Test]
+    [CancelAfter(20000)]
+    public void CompleteBulkLoad_RetriedAfterACheckpointTimeout_Completes()
+    {
+        var dbe = BuildEngine();
+        var ids = new EntityId[20];
+
+        using var bulk = dbe.BeginBulkLoad(new BulkLoadOptions { CheckpointTimeout = TimeSpan.FromMilliseconds(300) });
+        for (var i = 0; i < ids.Length; i++)
+        {
+            var comp = new CompA(i + 1, i, i);
+            ids[i] = bulk.Spawn<CompAArch>(CompAArch.A.Set(in comp));
+        }
+
+        // A page that owes a write and has a live writer: every cycle collects it and skips it.
+        var page = dbe.MMF.FirstResidentPage();
+        var cs = new ChangeSet(dbe.MMF);
+        cs.AddByMemPageIndex(page);
+        cs.ReleaseDirtyMarks();
+        dbe.MMF.IncrementActiveChunkWriters(page);
+        try
+        {
+            Assert.Throws<BulkLoadCheckpointTimeoutException>(() => bulk.CompleteBulkLoad(), "no cycle can cover the bulk while the page is held");
+            Assert.That(bulk.IsClosed, Is.False, "a checkpoint timeout leaves the session alive, to be retried");
+        }
+        finally
+        {
+            dbe.MMF.DecrementActiveChunkWriters(page);
+        }
+
+        bulk.CompleteBulkLoad();
+        Assert.That(bulk.IsClosed, Is.True);
+
+        using var tx = dbe.CreateQuickTransaction();
+        foreach (var id in ids)
+        {
+            Assert.That(tx.IsAlive(id), Is.True, $"entity {id} must be visible once the retried completion returns");
         }
     }
 

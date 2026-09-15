@@ -186,10 +186,7 @@ public struct TickContext
     /// rejected here on purpose — lifecycle-hook contexts carry it, but they never reach system dispatch.
     /// </remarks>
     [Conditional("DEBUG")]
-    internal readonly void DebugValidateWorkerId(int slotCount, string systemName)
-    {
-        DebugValidateWorkerSlot(WorkerId, slotCount, systemName);
-    }
+    internal readonly void DebugValidateWorkerId(int slotCount, string systemName) => DebugValidateWorkerSlot(WorkerId, slotCount, systemName);
 
     /// <summary>
     /// Slot-value overload of <see cref="DebugValidateWorkerId"/>, for dispatch paths that build their context inside a <c>try</c> and so must
@@ -225,7 +222,9 @@ public struct TickContext
 
     /// <summary>
     /// Total number of chunks for chunked-parallel systems. For non-chunked systems, always 1.
-    /// Equal to the value passed to <see cref="SystemBuilder.ChunkedParallel"/>.
+    /// For a <see cref="ChunkedCallbackSystem"/>, the value passed to <see cref="SystemBuilder.ChunkedParallel"/> (or its Prepare's). For a parallel
+    /// QuerySystem, the live dispatch's count, which <see cref="RuntimeOptions.CostBasedChunking"/> sets from measured cost: it can change from one tick
+    /// to the next and reach twice <c>round(WorkerCount × ChunksPerWorker)</c>, so size nothing by that ceiling.
     /// </summary>
     public int ChunkCount { get; init; }
 

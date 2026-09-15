@@ -46,10 +46,14 @@ class ClusterRepairConvergenceTests : TestBase<ClusterRepairConvergenceTests>
     /// An engine with repair armed and, optionally, step 10's delta path armed alongside it.
     /// </summary>
     /// <remarks>
-    /// <paramref name="driftRatio"/> at 100 makes the drift gate unreachable — a cluster confined to one cell can never
-    /// exceed a hundred cell-widths — which is how the delta path is switched off without changing anything else.
+    /// <para><paramref name="driftRatio"/> at 100 makes the drift gate unreachable — a cluster confined to one cell can never
+    /// exceed a hundred cell-widths — which is how the delta path is switched off without changing anything else.</para>
+    /// <para><paramref name="repairCooldownTicks"/> defaults to 0, not to the engine's 50, because every termination test here
+    /// pins what stops a converged cell re-packing — RP-03's already-packed check and its geometry memo — and a cooldown
+    /// stops the re-packs by itself: with it on, deleting either guard would leave those tests green. The cooldown's own
+    /// tests (RP-07) pass their value explicitly.</para>
     /// </remarks>
-    private DatabaseEngine SetupEngine(float driftRatio = 100f)
+    private DatabaseEngine SetupEngine(float driftRatio = 100f, int repairCooldownTicks = 0)
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<ClMigPos>();
@@ -61,7 +65,8 @@ class ClusterRepairConvergenceTests : TestBase<ClusterRepairConvergenceTests>
             clusterTargetExtentRatio: driftRatio,
             clusterRepairExtentRatio: 0.75f,
             reclusterBudgetMs: 100f, batchSpawnSortThreshold: 0 /* step 15: this fixture builds its layout by spawn ORDER; the Morton sort would tighten it at birth */,
-            repairWorstClustersPerUnit: 0));
+            repairWorstClustersPerUnit: 0,
+            repairCooldownTicks: repairCooldownTicks));
         dbe.InitializeArchetypes();
         return dbe;
     }
@@ -199,6 +204,307 @@ class ClusterRepairConvergenceTests : TestBase<ClusterRepairConvergenceTests>
     }
 
     // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // Cadence — the cooldown (RP-07)
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    private const int CooldownTicks = 6;
+    private const string RepairedInsideItsCooldown = "repaired inside its cooldown";
+
+    /// <summary>
+    /// A cell that re-degrades after every repair is repaired again only once its cooldown has ended — and then promptly.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The workload is the churn the cooldown exists for, made deterministic.</b> Every entity is scrambled across
+    /// the cell before every fence, so a repair's tight packing is undone on the very next tick and the cell is nominated
+    /// again straight away. Without a cooldown it is re-packed every other tick for ever — the mutant below shows it —
+    /// which is what the SWG Tatooine workload spent its maintenance budget on.</para>
+    /// <para><b>Both halves are asserted, exactly.</b> The scenario is deterministic: cooldowns end before the tick's
+    /// nominations are absorbed, the budget cannot refuse the unit (the estimate is clamped at 31.2 us an entity, 31 ms
+    /// against 100) and the valve cannot fire (a scrambled cluster spans at most 0.96 of the cell). So every repair after
+    /// the first lands on the tick its cooldown ends, and a late release fails as surely as an early one.</para>
+    /// </remarks>
+    [Test]
+    [VerifiesRule("RP-07")]
+    public void ARepairedCellIsNotRepairedAgainUntilItsCooldownEnds()
+    {
+        var dbe = SetupEngine(repairCooldownTicks: CooldownTicks);
+        SpawnDegradedCell(dbe);
+
+        var (repairTicks, cooling) = AssertRepairsAreSpacedByTheCooldown(dbe, CooldownTicks, (2 * CooldownTicks) + 2);
+
+        // From its first repair on, the world's one cell is always cooling: each cooldown ends on the tick that repairs it again.
+        foreach (var (tick, cells) in cooling)
+        {
+            if (tick >= repairTicks[0])
+            {
+                Assert.That(cells, Is.EqualTo(1),
+                    $"tick {tick}: RepairCellsCooling reads {cells} for a world whose one cell was repaired on tick {repairTicks[0]}");
+            }
+        }
+
+        Assert.That(TotalOccupancy(dbe), Is.EqualTo(Population), "the repairs lost or duplicated entities");
+    }
+
+    /// <summary>
+    /// With the cooldown off, the same workload repairs the cell inside the window the rule forbids — so the test above is not green for want of churn.
+    /// </summary>
+    [Test]
+    [RuleMutant("RP-07")]
+    public void WithoutTheCooldownTheSameCellIsRepairedInsideIt()
+    {
+        var dbe = SetupEngine(repairCooldownTicks: 0);
+        SpawnDegradedCell(dbe);
+
+        RuleMutants.AssertDetects("RP-07", RepairedInsideItsCooldown, () => AssertRepairsAreSpacedByTheCooldown(dbe, CooldownTicks, CooldownTicks));
+    }
+
+    /// <summary>
+    /// A cell nominated once while it cools and then left still is repaired on the tick its cooldown ends, although nothing nominates it again.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The case the hold exists for, staged through the fence.</b> After its first repair the cell is degraded once, which files one nomination
+    /// while it cools, and is never written again. The fence is kept alive by rewriting an entity of a second cell whose only cluster is tight and never
+    /// nominates, so every later tick has no nomination and, while the cell cools, no candidate. A fence that planned only on nominations or candidates
+    /// never released the cell; a queue that dropped held nominations would release it with nothing to repair.</para>
+    /// <para><b>Then it settles.</b> On this path nothing nominates the re-packed cell again, so its second cooldown ends with nothing held: no third
+    /// repair, and nothing cooling after it.</para>
+    /// <para><b>Measured as the fix's ablation:</b> with the fence's early-out reverted to <c>Count</c>, the cell is repaired once and never again.</para>
+    /// </remarks>
+    [Test]
+    [VerifiesRule("RP-07")]
+    public void ACellThatGoesStillWhileItCoolsIsRepairedWhenTheCooldownEnds()
+    {
+        var dbe = SetupEngine(repairCooldownTicks: CooldownTicks);
+
+        // Barrier-only, the write path both demos run, and the only one on which a still cell is never nominated again (RP-04's gap). The legacy refresh
+        // re-walks every occupied cluster and re-nominates the still, degraded cell on every tick, which hides the case: measured, with the fence's
+        // early-out reverted to Count, the legacy-mode version of this test stayed green.
+        dbe.SetSpatialBarrierOnly<ClMigUnit>();
+        SpawnDegradedCell(dbe);
+        SpawnTightCell(dbe);
+
+        var rng = new Random(20260916);
+        var repairTicks = new List<int>();
+        var cooling = new List<(int Tick, int Cells)>();
+        for (var tick = 2; tick < 3 + (3 * CooldownTicks); tick++)
+        {
+            // Written until its first repair — on the barrier-only path a spawned layout nobody writes is never nominated (RP-04's gap) — then once
+            // more, the tick after it, and never again.
+            if (repairTicks.Count == 0 || (repairTicks.Count == 1 && tick == repairTicks[0] + 1))
+            {
+                ScrambleEveryEntity(dbe, rng, maxTag: Population);
+            }
+            else
+            {
+                RewriteOneTightCellEntity(dbe);
+            }
+
+            dbe.WriteTickFence(tick);
+            var t = dbe.GetSpatialTelemetry(ArchetypeId);
+            if (t.RepairUnitCount > 0)
+            {
+                repairTicks.Add(tick);
+            }
+
+            cooling.Add((tick, t.RepairCellsCooling));
+        }
+
+        Assert.That(repairTicks, Has.Count.GreaterThanOrEqualTo(2),
+            $"repairs on ticks [{string.Join(", ", repairTicks)}]: the cell nominated once while it cooled and then left still was never repaired again");
+        Assert.That(repairTicks[1], Is.EqualTo(repairTicks[0] + CooldownTicks),
+            $"the cell was repaired on tick {repairTicks[0]} and, nominated once while it cooled, again on tick {repairTicks[1]} — it should have been the "
+            + $"tick its {CooldownTicks}-tick cooldown ended");
+        Assert.That(repairTicks, Has.Count.EqualTo(2), $"a still, re-packed cell was repaired again: ticks [{string.Join(", ", repairTicks)}]");
+        foreach (var (tick, cells) in cooling)
+        {
+            if (tick >= repairTicks[1] + CooldownTicks)
+            {
+                Assert.That(cells, Is.Zero, $"tick {tick}: {cells} cell(s) cooling in a still world whose last repair was on tick {repairTicks[1]}");
+            }
+        }
+
+        Assert.That(TotalOccupancy(dbe), Is.EqualTo(Population + TightCellPopulation), "the repairs lost or duplicated entities");
+    }
+
+    /// <summary>
+    /// A re-sort that moves nothing starts no cooldown: a still, re-packed cell released from its cooldown re-sorts to a no-op and is not held out again.
+    /// </summary>
+    /// <remarks>
+    /// On the legacy refresh, which re-walks every occupied cluster, a re-packed cell's own clusters nominate it on every tick — a Morton run is not a
+    /// square, so some cluster stays over the repair gate (RP-03) — so it is held through its cooldown, asserted, or the clause would pass by default.
+    /// Released, it is re-sorted and nothing moves. A cooldown started by that no-op would read as one cell cooling on every tick after it.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("RP-07")]
+    public void ARepairThatMovesNothingStartsNoCooldown()
+    {
+        var dbe = SetupEngine(repairCooldownTicks: CooldownTicks);
+        SpawnDegradedCell(dbe);
+        SpawnTightCell(dbe);
+        var cell = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
+
+        var repairTicks = new List<int>();
+        var heldAtRelease = 0f;
+        var coolingAfter = new List<(int Tick, int Cells)>();
+        for (var tick = 2; tick < 2 + (2 * CooldownTicks); tick++)
+        {
+            RewriteOneTightCellEntity(dbe);
+            dbe.WriteTickFence(tick);
+            var t = dbe.GetSpatialTelemetry(ArchetypeId);
+            if (t.RepairUnitCount > 0)
+            {
+                repairTicks.Add(tick);
+            }
+
+            if (repairTicks.Count == 1 && tick == repairTicks[0] + CooldownTicks - 1)
+            {
+                heldAtRelease = ClusterStateOf(dbe).RepairQueue.HeldDegradationOf(cell);
+            }
+
+            if (repairTicks.Count > 0 && tick >= repairTicks[0] + CooldownTicks)
+            {
+                coolingAfter.Add((tick, t.RepairCellsCooling));
+            }
+        }
+
+        Assert.That(repairTicks, Has.Count.EqualTo(1), $"repairs on ticks [{string.Join(", ", repairTicks)}]: a still cell was re-packed with entities moving");
+        Assert.That(heldAtRelease, Is.GreaterThan(0f),
+            "precondition: nothing nominated the re-packed cell while it cooled, so its release re-queues nothing and no re-sort is attempted");
+        Assert.That(coolingAfter, Is.Not.Empty, "the run ended before the cooldown did");
+        foreach (var (tick, cells) in coolingAfter)
+        {
+            Assert.That(cells, Is.Zero, $"tick {tick}: a re-sort that moved nothing started a cooldown");
+        }
+    }
+
+    private const int TightCellTag = 100_000;
+    private const int TightCellPopulation = 20;
+
+    /// <summary>Spawn a second, tight cell far from the degraded one: one cluster a few units wide, which never nominates.</summary>
+    private static void SpawnTightCell(DatabaseEngine dbe)
+    {
+        using var tx = dbe.CreateQuickTransaction();
+        for (var i = 0; i < TightCellPopulation; i++)
+        {
+            tx.Spawn<ClMigUnit>(ClMigUnit.Pos.Set(PointAt(550f + (i % 5), 550f + (i / 5), TightCellTag + i)));
+        }
+
+        tx.Commit();
+    }
+
+    /// <summary>Rewrite one entity of the tight cell unchanged, so the archetype has fence work without anything in the degraded cell being written.</summary>
+    private static unsafe void RewriteOneTightCellEntity(DatabaseEngine dbe)
+    {
+        using var tx = dbe.CreateQuickTransaction();
+        var accessor = tx.For<ClMigUnit>();
+        try
+        {
+            foreach (var cluster in accessor.GetClusterEnumerator())
+            {
+#pragma warning disable TYPHON009 // Read-only: the value is written straight back unchanged.
+                var positions = cluster.GetSpan(ClMigUnit.Pos);
+#pragma warning restore TYPHON009
+                var bits = cluster.OccupancyBits;
+                while (bits != 0)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    bits &= bits - 1;
+                    if (positions[slot].Tag >= TightCellTag)
+                    {
+                        cluster.WriteSpatial(ClMigUnit.Pos, slot, positions[slot]);
+                        tx.Commit();
+                        return;
+                    }
+                }
+            }
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+
+        tx.Commit();
+    }
+
+    /// <summary>
+    /// Scramble the cell before each of <paramref name="ticks"/> fences and assert RP-07 over the ticks that repaired it: never two repairs within
+    /// <paramref name="cooldownTicks"/>, and each one after the first on exactly the tick the cooldown ends. Returns the repair ticks, and the cooling level
+    /// the telemetry read after every fence.
+    /// </summary>
+    private static (List<int> RepairTicks, List<(int Tick, int Cells)> Cooling) AssertRepairsAreSpacedByTheCooldown(DatabaseEngine dbe, int cooldownTicks,
+        int ticks)
+    {
+        var rng = new Random(20260915);
+        var repairTicks = new List<int>();
+        var cooling = new List<(int, int)>();
+        for (var tick = 2; tick < 2 + ticks; tick++)
+        {
+            ScrambleEveryEntity(dbe, rng);
+            dbe.WriteTickFence(tick);
+            var t = dbe.GetSpatialTelemetry(ArchetypeId);
+            if (t.RepairUnitCount > 0)
+            {
+                repairTicks.Add(tick);
+            }
+
+            cooling.Add((tick, t.RepairCellsCooling));
+        }
+
+        Assert.That(repairTicks, Has.Count.GreaterThanOrEqualTo(2),
+            $"the cell was repaired {repairTicks.Count} time(s) over {ticks} ticks of re-degradation, so the end of a cooldown was never observed");
+        for (var i = 1; i < repairTicks.Count; i++)
+        {
+            var gap = repairTicks[i] - repairTicks[i - 1];
+            Assert.That(gap, Is.GreaterThanOrEqualTo(cooldownTicks),
+                $"{RepairedInsideItsCooldown}: the cell was repaired on tick {repairTicks[i - 1]} and again on tick {repairTicks[i]}, {gap} tick(s) later, "
+                + $"inside its {cooldownTicks}-tick cooldown");
+            Assert.That(gap, Is.EqualTo(cooldownTicks),
+                $"the cell was repaired on tick {repairTicks[i - 1]} and not again until tick {repairTicks[i]}, although it was re-degraded on every tick — "
+                + $"the {cooldownTicks}-tick cooldown did not end on the tick it should have");
+        }
+
+        return (repairTicks, cooling);
+    }
+
+    /// <summary>
+    /// Move every entity whose tag is below <paramref name="maxTag"/> to a random point of cell (0,0), so every cluster spans it again — a repair's packing
+    /// undone in one tick.
+    /// </summary>
+    private static unsafe void ScrambleEveryEntity(DatabaseEngine dbe, Random rng, int maxTag = int.MaxValue)
+    {
+        using var tx = dbe.CreateQuickTransaction();
+        var accessor = tx.For<ClMigUnit>();
+        try
+        {
+            foreach (var cluster in accessor.GetClusterEnumerator())
+            {
+#pragma warning disable TYPHON009 // Read for the tag only; the position is replaced.
+                var positions = cluster.GetSpan(ClMigUnit.Pos);
+#pragma warning restore TYPHON009
+                var bits = cluster.OccupancyBits;
+                while (bits != 0)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    bits &= bits - 1;
+                    if (positions[slot].Tag >= maxTag)
+                    {
+                        continue;
+                    }
+
+                    cluster.WriteSpatial(ClMigUnit.Pos, slot,
+                        PointAt(2f + ((float)rng.NextDouble() * 96f), 2f + ((float)rng.NextDouble() * 96f), positions[slot].Tag));
+                }
+            }
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+
+        tx.Commit();
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
     // Coexistence with the delta path
     // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -215,10 +521,11 @@ class ClusterRepairConvergenceTests : TestBase<ClusterRepairConvergenceTests>
     /// </remarks>
     [Test]
     [CancelAfter(60_000)]
-    public void RepairAndRelocationCoexistWithoutLosingAnEntity()
+    public void RepairAndRelocationCoexistWithoutLosingAnEntity([Values(0, 50)] int repairCooldownTicks)
     {
-        // The default 0.25 drift ratio, so step 10's gate is live alongside repair.
-        var dbe = SetupEngine(driftRatio: 0.25f);
+        // The default 0.25 drift ratio, so step 10's gate is live alongside repair. Run at the shipped cooldown as well as at none: the other multi-tick
+        // repair fixtures here pin it to 0, and the mix of repair and relocation must hold at the setting that ships.
+        var dbe = SetupEngine(driftRatio: 0.25f, repairCooldownTicks: repairCooldownTicks);
         var ids = SpawnDegradedCell(dbe);
 
         var rng = new Random(20260904);

@@ -14,12 +14,6 @@ namespace Typhon.Engine.Tests.Runtime;
 [TestFixture]
 class DormancyTests : TestBase<DormancyTests>
 {
-    public override void TearDown()
-    {
-        DormancyReporter.Reset();
-        base.TearDown();
-    }
-
     private static TierPos PointAt(float x, float y) =>
         new() { Bounds = new AABB2F { MinX = x, MinY = y, MaxX = x, MaxY = y }, Data = 1.0f };
 
@@ -223,11 +217,11 @@ class DormancyTests : TestBase<DormancyTests>
         Assert.That(cs.SleepingClusterCount, Is.EqualTo(1));
 
         // Two wake requests from "different threads"
-        DormancyReporter.RequestWake(cs.ArchetypeId, chunkId);
-        DormancyReporter.RequestWake(cs.ArchetypeId, chunkId);
+        cs.PendingWakeRequests.Enqueue(chunkId);
+        cs.PendingWakeRequests.Enqueue(chunkId);
 
         // Drain: both resolve to the same cluster, second is a no-op
-        DormancyReporter.DrainAll(dbe._archetypeStates);
+        dbe.DrainDormancyWakeRequests();
         Assert.That(cs.SleepStates[chunkId], Is.EqualTo(ClusterSleepState.WakePending));
         // SleepingClusterCount decremented only once (in TransitionWakePendingToActive, not here)
     }
@@ -344,11 +338,12 @@ class DormancyTests : TestBase<DormancyTests>
         // Call SetDirty on an entity in the sleeping cluster
         cs.SetDirty(chunkId, 0);
 
-        // The DormancyReporter should have a pending wake request
-        Assert.That(DormancyReporter.HasPendingRequests, Is.True);
+        // The archetype's own queue holds the wake request — per engine, so no other fixture's fence can drain it before the assert (a process-wide
+        // reporter once could, and this test failed in parallel runs for exactly that reason).
+        Assert.That(cs.PendingWakeRequests, Is.Not.Empty);
 
         // Drain and verify WakePending
-        DormancyReporter.DrainAll(dbe._archetypeStates);
+        dbe.DrainDormancyWakeRequests();
         Assert.That(cs.SleepStates[chunkId], Is.EqualTo(ClusterSleepState.WakePending));
     }
 

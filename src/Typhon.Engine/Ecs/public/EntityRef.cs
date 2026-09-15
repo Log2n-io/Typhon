@@ -114,9 +114,10 @@ public unsafe ref struct EntityRef
     /// <summary>Copy locations from a managed byte array.</summary>
     internal void CopyLocationsFrom(byte[] recordBytes, int componentCount)
     {
-        fixed (byte* ptr = recordBytes)
+        // Read through a span, not a pinned pointer: recordBytes is managed.
+        for (int i = 0; i < componentCount; i++)
         {
-            CopyLocationsFrom(ptr, componentCount);
+            _locations[i] = System.Runtime.InteropServices.MemoryMarshal.Read<int>(recordBytes.AsSpan(EntityRecordAccessor.HeaderSize + i * sizeof(int)));
         }
     }
 

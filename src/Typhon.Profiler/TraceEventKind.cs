@@ -263,7 +263,16 @@ public enum TraceEventKind : byte
     /// Payload, all REQUIRED and in wire order — an instant has no optional-mask byte: <c>archetypeId: u16</c>, <c>activeClusters: i32</c>,
     /// <c>migrations: i32</c>, <c>migrationCpuMs: f32</c>, <c>hysteresisAbsorbed: i32</c>, <c>driftersDetected: i32</c>, <c>repairUnits: i32</c>,
     /// <c>repairUnitsRefused: i32</c>, <c>repairQueueDepth: i32</c>, <c>budgetUsedMs: f32</c>, <c>tightnessSamples: i32</c>, <c>extentRatio: f32</c>,
-    /// <c>packingBound: f32</c>, <c>cellTreePromotions: i32</c>, <c>cellTreeDemotions: i32</c>. 58 bytes.
+    /// <c>packingBound: f32</c>, <c>cellTreePromotions: i32</c>, <c>cellTreeDemotions: i32</c> (58 bytes); then, appended for the maintenance controller
+    /// (#906): <c>queryClustersOpened: i64</c>, <c>queryCandidates: i64</c>, <c>queryHits: i64</c>, <c>budgetConfiguredMs: f32</c>,
+    /// <c>budgetGrantedMs: f32</c>, <c>efficiencyTolerance: f32</c>, <c>candidatesPerHitSmoothed: f32</c>, <c>candidatesPerHitBest: f32</c>,
+    /// <c>ticksAtWholeBudget: i32</c>, <c>controllerFlags: u8</c>, <c>efficiencyRebases: i32</c>, <c>repairCellsCooling: i32</c>,
+    /// <c>repairValveFires: i32</c>, <c>repairedEntities: i32</c>, <c>repairQueueEvicted: i64</c>, <c>measuredNsPerEntity: f32</c>,
+    /// <c>driftTargetBoost: f32</c>. 139 bytes. Emitted every tick for every archetype with cluster state, whatever path its fence took.
+    /// <para><b>Grow it only by appending — never reorder or remove a field.</b> The Workbench decoder reads it by offset, and a record written before an
+    /// append must stay a prefix of one written after. A record shorter than 139 bytes predates the fields it lacks: treat them as absent, which its size
+    /// says, not as zero, because several read zero as a meaning — a configured budget of 0 is "no enforcement". The generated C# decoder zero-fills
+    /// them.</para>
     /// The relocation outcome split is NOT here — it is <see cref="SpatialRelocationOutcome"/>, joined by (archetype, tick).
     /// Gated on <c>SpatialArchetypeTelemetryActive</c>.
     /// </summary>
@@ -603,7 +612,8 @@ public enum TraceEventKind : byte
     /// <summary>Worker wake from kernel signal. Payload: <c>workerId: u8</c>, <c>delayUs: u32</c>.</summary>
     SchedulerWorkerWake = 151,
 
-    /// <summary>Worker between-tick wait (kernel wait span). Payload: <c>workerId: u8</c>, <c>waitUs: u32</c>, <c>wakeReason: u8</c> (0=signal, 1=shutdown).</summary>
+    /// <summary>Worker between-tick wait (kernel wait span). Payload: <c>workerId: u8</c>, <c>waitUs: u32</c>, <c>wakeReason: u8</c> (0=woken, by the
+    /// signal or by the backstop with no wake lost; 1=shutdown; 2=resumed by the backstop after a lost wake).</summary>
     SchedulerWorkerBetweenTick = 152,
 
     // ── Scheduler:Dispense (instant) ──

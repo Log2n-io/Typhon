@@ -185,6 +185,7 @@ public partial class DatabaseEngine
             RepairValveFires = clusterState.LastTickRepairValveFires,
             RepairQueueDepth = clusterState.RepairQueue?.Count ?? 0,
             RepairQueueEvicted = clusterState.RepairQueue?.TotalEvicted ?? 0L,
+            RepairCellsCooling = clusterState.RepairQueue?.CoolingCount ?? 0,
             RepairQueueMaintenanceMs = QueueMaintenanceMs(clusterState),
             MeasuredNsPerEntity = clusterState.LastTickMeasuredNsPerEntity,
             DriftGatedClusters = clusterState.LastTickDriftGatedClusters,
@@ -200,12 +201,22 @@ public partial class DatabaseEngine
             ArrivalCellsTouched = clusterState.LastTickArrivalCellsTouched,
             RelocationSpendNs = clusterState.LastTickRelocationSpendNs,
             RepairBudgetStarvedNs = clusterState.LastTickRepairBudgetStarvedNs,
-            MaxClusterOverhang = Volatile.Read(ref clusterState.MaxClusterOverhang),
+            ClusterReach = Volatile.Read(ref clusterState.ClusterReach),
+            EscapedClusterCount = Volatile.Read(ref clusterState.EscapedClusters).Count,
             CellTreePromotions = clusterState.LastTickCellTreePromotions,
             CellTreeDemotions = clusterState.LastTickCellTreeDemotions,
             TightnessSampleCount = samples,
             MeanClusterExtentRatio = samples > 0 ? clusterState.LastTickTightnessExtentSum / samples : 0d,
             MeanPackingBound = samples > 0 ? clusterState.LastTickTightnessBoundSum / samples : 0d,
+            QueryClustersOpened = clusterState.LastTickQueryClustersOpened,
+            QueryCandidates = clusterState.LastTickQueryCandidates,
+            QueryHits = clusterState.LastTickQueryHits,
+            ReclusterBudgetGrantedMs = clusterState.LastTickReclusterBudgetGrantedMs,
+            QueryCandidatesPerHitSmoothed = clusterState.QueryCandidatesPerHitSmoothed,
+            QueryCandidatesPerHitBest = clusterState.QueryCandidatesPerHitBest,
+            TotalEfficiencyRebases = clusterState.TotalEfficiencyRebases,
+            TicksAtWholeBudget = clusterState.TicksAtWholeBudget,
+            DriftTargetBoost = clusterState.DriftTargetBoost,
         };
     }
 
@@ -259,6 +270,7 @@ public partial class DatabaseEngine
         var valveFires = 0;
         var queueDepth = 0;
         var queueEvicted = 0L;
+        var queueCooling = 0;
         var queueMaintenanceMs = 0d;
         var measuredNsPerEntity = 0d;
         var measuredSamples = 0;
@@ -275,12 +287,23 @@ public partial class DatabaseEngine
         var arrivalCellsTouched = 0;
         var relocationSpendNs = 0d;
         var repairStarvedNs = 0d;
-        var maxOverhang = 0f;
+        var maxReach = 0f;
+        var escapedClusters = 0;
         var treePromotions = 0;
         var treeDemotions = 0;
         var tightnessSamples = 0;
         var tightnessExtentSum = 0d;
         var tightnessBoundSum = 0d;
+        var queryClusters = 0L;
+        var queryCandidates = 0L;
+        var queryHits = 0L;
+        var grantedMs = 0d;
+        var smoothedCandidates = 0d;
+        var smoothedHits = 0d;
+        var weightedBest = 0d;
+        var rebases = 0L;
+        var wholeBudgetStreak = 0;
+        var maxBoost = 0f;
 
         for (var i = 0; i < states.Length; i++)
         {
@@ -321,6 +344,7 @@ public partial class DatabaseEngine
             valveFires += clusterState.LastTickRepairValveFires;
             queueDepth += clusterState.RepairQueue?.Count ?? 0;
             queueEvicted += clusterState.RepairQueue?.TotalEvicted ?? 0L;
+            queueCooling += clusterState.RepairQueue?.CoolingCount ?? 0;
             queueMaintenanceMs += QueueMaintenanceMs(clusterState);
             driftGated += clusterState.LastTickDriftGatedClusters;
             driftSuppressedByDensity += clusterState.LastTickDriftSuppressedByDensity;
@@ -339,13 +363,37 @@ public partial class DatabaseEngine
             treePromotions += clusterState.LastTickCellTreePromotions;
             treeDemotions += clusterState.LastTickCellTreeDemotions;
 
-            // MAXED, not summed — see SpatialMigrationTelemetry.MaxClusterOverhang. It is a bound every kNN ring widens by, and the engine-wide bound is the
-            // largest any archetype has proved, not the sum of what each proved separately.
-            var overhang = Volatile.Read(ref clusterState.MaxClusterOverhang);
-            if (overhang > maxOverhang)
+            // Summed, and the ratio derived from the sums (QueryCandidatesPerHit), for the tightness means' reason: a mean of per-archetype ratios would
+            // weight an archetype queried once equally with one queried a million times.
+            queryClusters += clusterState.LastTickQueryClustersOpened;
+            queryCandidates += clusterState.LastTickQueryCandidates;
+            queryHits += clusterState.LastTickQueryHits;
+
+            // TH-04: the granted budgets sum; the controller's smoothed ratio is re-derived from summed numerators over summed denominators, and the bests
+            // are weighted by the same hits, so the total reads as one controller would over the whole engine. Archetypes without a signal stay out, and so
+            // do those with nothing to spend: their queries are tallied, but no controller acts on them.
+            grantedMs += clusterState.LastTickReclusterBudgetGrantedMs;
+            if (clusterState.HasQuerySignal && clusterState.SpendsMaintenance)
             {
-                maxOverhang = overhang;
+                smoothedCandidates += clusterState.QueryCandidatesEwma;
+                smoothedHits += clusterState.QueryHitsEwma;
+                weightedBest += clusterState.QueryCandidatesPerHitBest * clusterState.QueryHitsEwma;
             }
+
+            // Re-bases sum. The streak and the boost are per-archetype levels, MAXED like the reach: the engine's worst case, not a sum no archetype has.
+            rebases += clusterState.TotalEfficiencyRebases;
+            wholeBudgetStreak = Math.Max(wholeBudgetStreak, clusterState.TicksAtWholeBudget);
+            maxBoost = MathF.Max(maxBoost, clusterState.DriftTargetBoost);
+
+            // MAXED, not summed — see SpatialMigrationTelemetry.ClusterReach. It is a bound every walk widens by, and the engine-wide bound is the largest
+            // any archetype needs, not the sum of what each needs separately. The named outliers, by contrast, are distinct clusters and do add.
+            var reach = Volatile.Read(ref clusterState.ClusterReach);
+            if (reach > maxReach)
+            {
+                maxReach = reach;
+            }
+
+            escapedClusters += Volatile.Read(ref clusterState.EscapedClusters).Count;
 
             // Summed as NUMERATORS, divided once at the end: a mean of the per-archetype means would weight a quiet archetype that scanned one cluster
             // equally with a busy one that scanned ten thousand. Read the sample count once for the same reason the per-archetype accessor does.
@@ -386,6 +434,7 @@ public partial class DatabaseEngine
             RepairValveFires = valveFires,
             RepairQueueDepth = queueDepth,
             RepairQueueEvicted = queueEvicted,
+            RepairCellsCooling = queueCooling,
             RepairQueueMaintenanceMs = queueMaintenanceMs,
             MeasuredNsPerEntity = measuredSamples > 0 ? measuredNsPerEntity / measuredSamples : 0d,
             DriftGatedClusters = driftGated,
@@ -401,12 +450,22 @@ public partial class DatabaseEngine
             ArrivalCellsTouched = arrivalCellsTouched,
             RelocationSpendNs = relocationSpendNs,
             RepairBudgetStarvedNs = repairStarvedNs,
-            MaxClusterOverhang = maxOverhang,
+            ClusterReach = maxReach,
+            EscapedClusterCount = escapedClusters,
             CellTreePromotions = treePromotions,
             CellTreeDemotions = treeDemotions,
             TightnessSampleCount = tightnessSamples,
             MeanClusterExtentRatio = tightnessSamples > 0 ? tightnessExtentSum / tightnessSamples : 0d,
             MeanPackingBound = tightnessSamples > 0 ? tightnessBoundSum / tightnessSamples : 0d,
+            QueryClustersOpened = queryClusters,
+            QueryCandidates = queryCandidates,
+            QueryHits = queryHits,
+            ReclusterBudgetGrantedMs = grantedMs,
+            QueryCandidatesPerHitSmoothed = smoothedHits > 0d ? smoothedCandidates / smoothedHits : 0d,
+            QueryCandidatesPerHitBest = smoothedHits > 0d ? weightedBest / smoothedHits : 0d,
+            TotalEfficiencyRebases = rebases,
+            TicksAtWholeBudget = wholeBudgetStreak,
+            DriftTargetBoost = maxBoost,
         };
     }
 }

@@ -468,25 +468,23 @@ internal sealed unsafe partial class ArchetypeClusterState
         var shift = (index & 3) * 8;
         var orValue = mask << shift;
 
-        fixed (byte* basePtr = array)
+        // A ref into the array, not a pinned pointer: the GC tracks the ref, and Interlocked takes it directly. The word is 4-aligned.
+        ref var word = ref Unsafe.As<byte, int>(ref array[wordIndex * 4]);
+        var current = Volatile.Read(ref word);
+        while (true)
         {
-            ref var word = ref Unsafe.AsRef<int>(basePtr + wordIndex * 4);
-            var current = Volatile.Read(ref word);
-            while (true)
+            var desired = current | orValue;
+            if (desired == current)
             {
-                var desired = current | orValue;
-                if (desired == current)
-                {
-                    return;
-                }
-
-                var prior = Interlocked.CompareExchange(ref word, desired, current);
-                if (prior == current)
-                {
-                    return;
-                }
-                current = prior;
+                return;
             }
+
+            var prior = Interlocked.CompareExchange(ref word, desired, current);
+            if (prior == current)
+            {
+                return;
+            }
+            current = prior;
         }
     }
 

@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-05-17 |
+| Last Updated | 2026-09-15 |
 | Domain | DagScheduler, RuntimeSchedule, Track, Dag, AccessDagDeriver, SystemBuilder, Phase |
 
 > Invariants codifying the auto-DAG model from RFC 07. These rules describe what must
@@ -415,6 +415,124 @@ descends from this one property.
             ends, and the long-lived read transaction that owns a pull View. Asserting "no system runs
             concurrently" verifies the half that was never in doubt. A rule whose verifier cannot fail is worse
             than a rule with no verifier.
+
+## Module: Chunk Dispatch
+
+### CD-01: A chunk is claimed only from the dispatch it belongs to `[fatal]` `[silent]`
+  invariant a system's claim word packs the live dispatch's chunk count (high 32 bits) and the next index (low 32 bits); a claim is
+            ONE Interlocked.Increment, and it names chunk c of dispatch D only when c < D's count read from that same word
+  invariant the word holds count 0 from ResetTickState; a dispatch publishes (count << 32) as its LAST store (OpenChunkClaims, a
+            release after _remainingChunks and the prepared state); a completed dispatch leaves its word exhausted — every chunk was
+            claimed — so it refuses every claim and nothing has to close it between two dispatches of one tick
+  invariant a failed system's chunks are counted down one claim at a time by the ordinary claim loop (DrainClaimedChunk), the
+            failure flag read after the claim — never by a loop that cached the dispatch's size
+  invariant a claim is compared UNSIGNED against its count, so no number of increments on an exhausted word reads as a chunk
+  invariant a parallel query's dispatch ends in CompleteParallelDispatch whether its last chunk ran or was drained: its cleanup runs
+            once, and a failed system starts no further phase, whatever the cleanup asks for — the single-threaded path's rule. The
+            drain used to complete a failed system without its cleanup (its entity list never returned, its checkerboard phase left
+            behind), and a failed phase A still re-dispatched phase B
+  never a chunk index judged against a count read separately from its claim
+  rationale: nothing fences workers out between dispatches. A parallel system's ready flag stays set once it completes, and a worker
+    can be preempted anywhere in its claim loop and resume one or more dispatches later. With the count and the index held apart,
+    three windows let such a worker run a chunk of a dispatch it was never part of: (1) the ready flag read in tick N and a counter
+    that ResetTickState had put back to 0 read in tick N+1 — the finished dispatch's chunks re-run mid-tick, and their decrements
+    complete the system a second time; (2) an increment past the end of one dispatch judged against the NEXT dispatch's larger count —
+    a chunk run twice and the system completed one chunk early; (3) a drainer that had cached a failed dispatch's count swallowing
+    the next dispatch's chunks, or hanging its tick. With one word a claim either belongs to the live dispatch — legitimate, whatever
+    the worker did before — or answers "nothing left".
+  on_violation: silent for an application system — a chunk re-run or skipped outside its dispatch. Observed on the fence through
+    window 1: a stale FencePrep repair allocated a cluster, and a stale Finalize drain freed one, under the next tick's systems;
+    CellClusterPool's single-writer detector aborted 5 of 40 SWG Tatooine x64/w16 runs on it, and a counting build logged ~2 stale
+    claims in one ordinary run. A fence chunk also refuses to run with the fence window closed (FencePhaseExecSystemBase.Execute):
+    that names fence work running outside its tick whatever the cause — one of these windows, or a worker left behind when
+    shutdown abandons a stalled tick — but it cannot see a stale claim landing inside the NEXT fence window. The claim word is what
+    prevents those.
+  scope: DagScheduler.cs (ResetTickState, DispatchParallelQuery, OpenChunkClaims, FindReadySystem, ProcessParallelQuery,
+         ProcessPipeline, DrainClaimedChunk, CompleteParallelDispatch, AbortSystemFromChunkZero, MarkTrackRootsReady, OnSystemComplete),
+         FenceExecSystem.cs (ThrowOutsideFenceWindow)
+  verified: ChunkClaimStragglerTests, one deterministic test per window, each reproduced on the pre-fix code —
+            AWorkerCaughtMidScan_DoesNotRunChunksOfASystemTheNextTickHasNotDispatched (window 1: FindReadySystemProbe parks a worker
+            between P's ready flag and its claim word in tick 1 and releases it in tick 2 before P is dispatched);
+            AClaimPastTheEndOfOneDispatch_DoesNotRunAChunkOfTheNext (window 2: ClaimProbe parks a worker after a tick-1 claim past the
+            end and releases it once tick 2's larger dispatch is live — chunk 4 ran twice);
+            AClaimPastTheEndOfPhaseA_DoesNotRunAChunkOfPhaseB (window 2 within one tick: the same across the #234 checkerboard
+            re-dispatch, which is what shows an exhausted word needs no close between two dispatches);
+            ADrainerParkedInAFailedTick_DoesNotSwallowChunksOfTheNext (window 3: the worker that threw is parked before its next
+            drain claim — 13 of tick 2's 16 chunks were swallowed). Mutant: ACounterOpenAcrossTheTickBoundary_IsCaughtByTheVerifier
+            reopens P's finished dispatch's claims before the release. FenceWindowTripwireTests covers the tripwire, and
+            ExceptionHandlingTests.AFailedParallelSystem_RunsItsCleanupOnce_AndStartsNoFurtherPhase the completion of a drained system.
+
+### CD-02: A dispatch's chunks tile the cluster list Prepare counted `[fatal]` `[silent]`
+  invariant the cluster ranges a parallel QuerySystem's chunks walk tile the list its dispatch splits exactly: chunk k of n walks its share of an
+            equal split (ChunkClusterRange), the first (length mod n) chunks taking one cluster more, so every cluster is walked by exactly one chunk
+  invariant the list and its length are read once, in Prepare (OnParallelQueryPrepare), and every chunk walks that array and splits that length,
+            never the live pair: a spawn can append to an archetype's list while the chunks run (AddToActiveList, under its latch), and chunks that
+            read two lengths do not tile. An append leaves the array's first entries as they are, even when it moves the list to a larger array.
+            Clusters appended during a dispatch are walked from the next tick
+  requires: CLUSTERWALK-01 (no Destroy commit on the archetype overlaps the walk: a removal swaps the last cluster into the hole, which no snapshot
+            of the length protects against)
+  on_violation: silent: a cluster walked twice (its entities updated twice, its queries counted twice) or not at all (a tick of work skipped for
+    its entities), with nothing raised
+  scope: TyphonRuntime.cs (OnParallelQueryPrepare, ChunkUnits, ChunkClusterRange, ExecuteChunkWithAccessor, ExecuteChunkWithTransaction)
+  verified: ChunkClusterRangeTests.AListThatGrowsDuringTheDispatch_IsStillTiled (the first chunk spawns a new cluster before the next reads its
+            range, on the accessor path and on the per-chunk Transaction path; against the code that split the live length it fails:
+            "[0,18) [19,37)" for a list of 36 on both paths, the second chunk splitting the 37 clusters the spawn left). The change-filtered path reaches the
+            same ChunkClusterRange but no test drives it
+  note: no RuleMutant. Putting the live read back on the chunk path would take a seam there; the verifier was run against the code that did it,
+        and failed as quoted
+
+## Module: Worker Wake
+
+Between dispatches every worker parks in a kernel wait. These rules say how a dispatch gets each one back.
+
+### WK-01: Every dispatch wakes every parked worker `[perf]` `[silent]`
+  invariant each worker parks between dispatches on its OWN event (_workerWake[workerId], one per worker, made by the DagScheduler constructor);
+            every dispatch Sets every worker's event (WakeWorkers, called by DispatchTrackMultiThreaded), and so do Shutdown and Dispose
+  invariant the generation is bumped BEFORE any Set — an Interlocked.Increment, a full fence — so a worker a Set wakes reads a generation at least
+            as new as that Set's: the one it last joined only when the Set was stale, which the next invariant consumes. The dispatcher never Resets
+            an event
+  invariant only the owning worker Resets its event: after EVERY return from its Wait, and BEFORE it re-checks the generation, with a full barrier
+            between the two (a store, then a load, which x64 reorders too; the barrier is explicit rather than left to Reset's own implementation).
+            Never between the check and the Wait, where the Reset would swallow a Set that landed in between. Any Set the Reset clears then belongs
+            to a generation the re-check sees
+  invariant a worker starts from the generation Start found (_generationAtStart), not the one its thread first reads: a thread that first
+            runs after the first bump still joins that dispatch
+  invariant the backstop (BetweenTickWaitBackstop, 50 ms) is a shutdown-liveness net, not a way to be woken
+  rationale: one event shared by the pool made every released worker re-take the event's lock to leave its Wait, a convoy: with 32 workers the
+    median ran 293 µs after the Set and the last 5.9 ms. With an event each nothing queues, and a wake can only be lost through the orderings
+    above
+  on_violation: a worker sits a dispatch out until its backstop, or spins on a Set it has already seen until the next dispatch (the first
+    per-worker cut did: 114 k loop iterations in one gap). It costs latency, not correctness: the dispatch completes on the other workers, only
+    later. Silent: a lost wake the next dispatch's Set rescues leaves no trace (WK-02)
+  scope: DagScheduler.cs (DagScheduler, WorkerLoop, WakeWorkers, DispatchTrackMultiThreaded, Start, Shutdown, Dispose)
+  verified: WorkerWakeTests — EveryDispatch_WakesEveryWorker (two dispatches a tick, each chunk waiting until every worker is inside one);
+            AWakeLandingAsAWorkerParks_IsNotLost (a worker held between the check and the Wait until the next dispatch has Set its event; it also
+            fails, on no worker ever reaching the Wait with its event clear, when the Reset comes after the check instead of before it);
+            AWokenWorker_FindsTheDispatch_BeforeTheLastSet (the dispatcher held before the last Set: a worker already Set must not park again;
+            it sees a bump placed after the first Set, which the wake latency hides from every other test);
+            AWakeAlreadySeen_IsConsumedNotSpunOn (a stale Set costs one round, not a spin, bounded in ticks);
+            AWorkerThatStartsLate_JoinsTheFirstDispatch; Shutdown_WakesEveryParkedWorker. Mutant:
+            ASetSwallowedBeforeTheWait_IsCaughtByTheVerifier (the held worker Resets its own event once the dispatch has Set it)
+  note: hand-made mutants, each caught by its test: the last worker never woken, no Reset after a return, the generation read at thread start,
+        Shutdown without a wake (when the per-worker wake landed); the bump after the Sets, and a second Reset just before the Wait (2026-09-14).
+        No test pins the dispatcher never Resetting, the barrier after the Reset, or Dispose's wake (every test calls Shutdown first)
+
+### WK-02: A lost wake is counted once, and nothing else is counted
+  invariant the dispatcher publishes _wokenGeneration once a round's Sets are all done. A worker whose backstop fires while _wokenGeneration is
+            newer than the generation it last joined, with its own event still clear, missed that round's Set: it is counted once
+            (LostWakeCount, and TickTelemetry.LostWakes of the tick that catches it, which may be the one after) and warned about once per scheduler
+  never counting a backstop that fires between a bump and the worker's own Set (_wokenGeneration still older), nor one whose Set landed after
+        the backstop and before the check (the event is set)
+  requires: WK-01 (the bump before every Set, and only the owning worker Resetting its event, after each return and before the re-check: together
+            they make a clear event after a completed round mean a lost Set)
+  note: the count sees only a lost wake the backstop resumes. One the next dispatch's Set rescues first leaves no trace, so at tick rates faster
+        than the backstop a broken protocol mostly reads zero: non-zero proves a defect, zero proves nothing, and WK-01's tests remain the check.
+        No tag: a wrong count is neither corruption nor detectable. The once-per-scheduler warning is not asserted by any test
+  scope: DagScheduler.cs (WorkerLoop, OnLostWake, DispatchTrackMultiThreaded, LostWakeCount), DagScheduler.Telemetry.cs (ComputeAndRecordTelemetry)
+  verified: WorkerWakeTests — ALostWake_IsCountedOnce (a wake taken away before the worker parks, counted once in total and in the ticks'
+            telemetry); ABackstopFiringBeforeItsSetArrives_IsNotALostWake; ASetLandingAfterTheBackstop_IsNotALostWake
+  note: no RuleMutant. When the counter landed, hand-made mutants of the check, one of them dropping the clear-event clause, were each caught
+        by these tests
 
 ## Module: API Contract Stability
 

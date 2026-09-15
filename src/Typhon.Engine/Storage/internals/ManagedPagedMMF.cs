@@ -794,12 +794,17 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
             var dirPages = new List<int> { segment.RootPageIndex };
             segment.CollectDirectoryMapExtensionPages(EpochManager.GlobalEpoch, dirPages);
 
+            // Under _pairLock: the checkpoint may be persisting one of these pages right now, and PersistProtectedPage re-checks the pair under
+            // this lock rather than re-adding it after the removal.
             var toFree = new List<int>(dirPages.Count * 2);
-            foreach (var dirPage in dirPages)
+            lock (_pairLock)
             {
-                if (_pairState.TryRemove(dirPage, out var pair) && pair.Twin > 0)
+                foreach (var dirPage in dirPages)
                 {
-                    toFree.Add(pair.Twin);
+                    if (_pairState.TryRemove(dirPage, out var pair) && pair.Twin > 0)
+                    {
+                        toFree.Add(pair.Twin);
+                    }
                 }
             }
 
@@ -820,6 +825,49 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     }
 
     public bool DeleteSegment(LogicalSegment<PersistentStore> segment, ChangeSet changeSet = null) => DeleteSegment(segment.RootPageIndex, changeSet);
+
+    /// <summary>
+    /// Gives back pages that a failed structural operation allocated but never linked into anything (rule PS-11): drops the directory pair of any
+    /// that was paired, frees those twins, then frees the pages.
+    /// </summary>
+    /// <remarks>
+    /// Nothing reads these pages, since the operation that allocated them never published them. The checkpoint may still be persisting one as a
+    /// directory page, so the pairs are dropped under <see cref="_pairLock"/>, which <see cref="PersistProtectedPage"/> holds and re-checks.
+    /// A page still resident keeps whatever the failed operation wrote into it, and the caller's ChangeSet keeps its marks on it and releases
+    /// them as usual; the page's next owner initializes it before use, as it does any freshly allocated page.
+    /// </remarks>
+    internal void ReleaseUnpublishedPages(ReadOnlySpan<int> pageIds, ChangeSet changeSet)
+    {
+        if (pageIds.IsEmpty)
+        {
+            return;
+        }
+
+        List<int> twins = null;
+        lock (_pairLock)
+        {
+            foreach (var page in pageIds)
+            {
+                if (_pairState.TryRemove(page, out var pair) && pair.Twin > 0)
+                {
+                    (twins ??= []).Add(pair.Twin);
+                }
+            }
+        }
+
+        if (twins != null)
+        {
+            FreePages(twins.ToArray(), 0, changeSet);
+        }
+        FreePages(pageIds, 0, changeSet);
+    }
+
+    /// <summary>Whether <paramref name="filePageIndex"/> is allocated on the occupancy map. Diagnostic: the answer can change as soon as it returns.</summary>
+    internal bool IsPageAllocated(int filePageIndex)
+    {
+        using var guard = EpochGuard.Enter(EpochManager);
+        return _occupancyMap.IsSet(filePageIndex);
+    }
 
     // ═══════════════════════════════════════════════════════════════
     // Bootstrap Dictionary Persistence
@@ -1053,11 +1101,19 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     /// racing the checkpoint thread — both can touch a directory page via the CP-04 <c>DC=2</c> pattern) can never
     /// stale-read the current slot and clobber it. <paramref name="image"/> is mutated in place (gen + CRC stamped).
     /// </summary>
-    internal unsafe void PersistProtectedPage(int primaryPageIndex, byte* image)
+    /// <remarks>
+    /// Returns false, writing nothing, when the page has no pair any more: <see cref="DeleteSegment(int, ChangeSet)"/> or
+    /// <see cref="ReleaseUnpublishedPages"/> freed it after the caller looked. Both drop pairs under the same lock, so the pair is re-checked here
+    /// rather than read with the indexer, which would throw, and never re-added for a page that has been freed.
+    /// </remarks>
+    internal unsafe bool PersistProtectedPage(int primaryPageIndex, byte* image)
     {
         lock (_pairLock)
         {
-            var dp = _pairState[primaryPageIndex];
+            if (!_pairState.TryGetValue(primaryPageIndex, out var dp))
+            {
+                return false;
+            }
             var alternate = (dp.CurrentSlot == primaryPageIndex) ? dp.Twin : primaryPageIndex;
             var newGen = dp.Gen + 1;
 
@@ -1074,6 +1130,8 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
 
             _pairState[primaryPageIndex] = new DirPair(dp.Twin, alternate, newGen);
         }
+
+        return true;
     }
 
     /// <inheritdoc />
@@ -1084,8 +1142,7 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
             return false;
         }
 
-        PersistProtectedPage(filePageIndex, image);
-        return true;
+        return PersistProtectedPage(filePageIndex, image);
     }
 
     /// <inheritdoc />

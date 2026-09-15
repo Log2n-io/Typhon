@@ -82,7 +82,7 @@ cellSize = 4 000 / 19.8   ≈ 202       → round to 200
 
 That gives a 20 × 20 × 20 grid, 8 000 cell slots, comfortably inside the 32-bit cell-key limit the constructor enforces. Size for *occupied* density and ignore empty volume: the grid is sparse and materialises a cell only once something occupies it, measured at 3.9 MiB dense against 1.2 MiB resident at 20 % occupancy. Matching cell size to your typical query radius is a plausible second rule and is **unmeasured**; where the two disagree, follow density.
 
-One constraint that is not a tuning preference: cell membership is decided by an entity's **centre**, so a query box can miss an entity that overhangs its cell. Keep *query extent + largest entity extent ≤ cell size*. No assertion enforces this.
+One cost that is not a tuning preference: cell membership is decided by an entity's **centre**, so a cluster's box can overhang its cell. Every box, radius, ray and frustum query grows its cell range by the archetype's **cluster reach** (`ClusterReach` in spatial telemetry): the largest overhang among ordinary clusters, recomputed at every tick fence, so it falls again once the cluster that raised it is fixed. The few clusters that reach much further — an entity teleported and not yet migrated, an oversized entity — are not widened for; they are named (up to 16, `EscapedClusterCount`) and every query tests them directly. Past 16 the reach widens to cover the rest. Only the part of a box inside the world counts. Keep your largest entities small against the cell size all the same: a reach of a large fraction of a cell makes every query walk the neighbouring cells.
 
 ## 💻 Usage
 
@@ -116,7 +116,7 @@ dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
 
 ## 🎛️ Every parameter
 
-All eighteen settings, in constructor order. **Cliff** marks a value where a small change flips behaviour or throws; the rest are dials that move a cost smoothly.
+All twenty-one settings, in constructor order (`WorldMin` and `WorldMax` share a row). **Cliff** marks a value where a small change flips behaviour or throws; the rest are dials that move a cost smoothly.
 
 | Parameter | Default | Unit | Controls | Safe range | Symptom when wrong |
 |---|---|---|---|---|---|
@@ -126,7 +126,7 @@ All eighteen settings, in constructor order. **Cliff** marks a value where a sma
 | `ClusterTargetExtentRatio` | `0.25` | fraction of cell | The box a cluster should stay inside; the gate that admits a cluster to per-entity drift testing | dial · 0.1–0.5, **cliff above ~1.05** | Too tight and every written cluster enters a per-entity walk, producing drifters the budget then drops — pure cost, no tightness. Above ~1.05 no cluster can exceed it and drift detection silently stops |
 | `ClusterDriftMarginRatio` | `0.05` | fraction of cell | Dead zone around that target region | dial · 0.02–0.15 | Near-zero `DriftAbsorbedCount` — entities relocated every tick to move a few units |
 | `ClusterRepairExtentRatio` | `0.75` | fraction of cell | Extent past which a cell is nominated for a full re-sort | **cliff** · above the drift target, below 1.2 | At or above 1.2 the constructor throws: a cluster holding only its own cell's entities tops out near 1.05, so the threshold could never fire |
-| `ReclusterBudgetMs` | `1.0` | ms/tick/archetype | Admission threshold for relocations and repair units | **cliff** · see the budget table below | `0` disables repair **and** all throttle enforcement. Sustained `RelocationsThrottled > 0` means it sits under the cliff |
+| `ReclusterBudgetMs` | `1.0` | ms/tick/archetype | Admission threshold for relocations and repair units | **cliff** · see the budget table below | `0` disables repair **and** all throttle enforcement. Sustained `RelocationsThrottled > 0` on ticks granted the whole budget (`ReclusterBudgetGrantedMs`) means it sits under the cliff; below that grant the controller is withholding it by design |
 | `RepairNsPerEntity` | `1500` | ns | The exchange rate the budget is spent at; seed for the runtime EWMA | dial · 500–5 000 | Only the first ticks use it. Too low and those ticks admit units costing many times what was projected. Read `MeasuredNsPerEntity` for the live value |
 | `RepairWorstClustersPerUnit` | `8` | clusters | Size of one indivisible repair unit; `0` means the whole cell | dial · 2–16 | Too large and no unit is affordable: `RepairUnitsRefused` climbs while `RepairUnitCount` stays at 0. A whole-cell unit on a 100 K-entity cell projects to ~130 ms |
 | `ClusterRepairCriticalExtentRatio` | `1.0` | fraction of cell | Degradation at which a cell jumps the queue despite the budget | **cliff** · strictly between the repair ratio and 1.2, or `0` to disable | Outside that band the constructor throws. At or below the repair ratio every nominated cell is critical and the valve overshoots the budget on every tick, for ever |
@@ -138,6 +138,8 @@ All eighteen settings, in constructor order. **Cliff** marks a value where a sma
 | `GrowthCapSlack` | `1.25` | multiplier | How far past the target a candidate may stretch before a fresh cluster is opened instead | dial · 1.1–1.5 | Too low and nearly every arrival opens a cluster, exhausting `MaxOpenClustersPerCell` and scattering entities across half-empty clusters |
 | `MaxOpenClustersPerCell` | `4` | clusters | Open (non-full) clusters the growth cap may hold per cell before it falls back to least enlargement | dial · 2–8 | Constructor throws below 1. Too high and occupancy fragments without buying tightness |
 | `BatchSpawnSortThreshold` | `128` | entities | A transaction spawning at least this many places them in per-cell Morton order, so a bulk load is born at the packing bound | dial; `0` disables | A large load is born at the full extent of every cell it touches, handing the repair queue work that placement could have avoided |
+| `RepairCooldownTicks` | `50` | ticks | How long a cell whose repair moved entities stays out of the repair queue. Nominations meanwhile are held, and the cell returns when the cooldown ends | dial · 50–200 measured; `0` and `1` disable it | `0`: under motion the budget goes to re-sorting the same cells every tick. On the SWG Tatooine workload the default took a median 6 %, 20 % and 37 % off the tick at 64×, 16× and 4× population (three paired 20 s runs each), with query cost within 3 %; nothing in a mostly still world. Too long: `QueryCandidatesPerHit` climbs while `RepairCellsCooling` stays high |
+| `QueryEfficiencyTolerance` | `0.1` | ratio | How much of `ReclusterBudgetMs` each archetype gets, from its range queries: next to nothing while their candidates per hit sit at the best they have shown, the whole budget once they are this far above it | dial · 0.1 measured; `0` disables. The experiment behind it, with a 4× ceiling and a 200-tick cooldown, landed 0.05–0.3 within 3 % of each other | `0`: the configured budget every tick, spent whether or not the queries need it. On the SWG Tatooine workload the default took a median 10 % off the tick at 4× population, and 4.7 % and 1.9 % at 16× and 64× over 3 000 ticks, against `0` (three paired runs each, both with the cooldown), with queries testing 0.6–1.4 % more entities per match and no slower per query. Too high: maintenance waits until queries have degraded a long way. It holds the best it has seen and does not seek better, so a world that starts loose stays near its start. An archetype queried only by nearest-neighbour, ray or frustum queries keeps the configured budget |
 
 ## 🔍 Diagnosing a misconfigured world
 
@@ -145,7 +147,7 @@ Read `GetSpatialTelemetry(archetypeId)` or `GetSpatialTelemetryTotal()` from the
 
 **Migration storm.** `MigrationCount` is a large fraction of the population every tick. Check `HysteresisAbsorbedCount` first: near zero means the margin is too narrow, so raise `MigrationHysteresisRatio`. If absorption is healthy the world is genuinely crossing cells and the fix is a larger cell. A high migration rate is not by itself a fault — coherent swarms measured 7 090 migrations per tick at 32 000 entities and were the *best*-partitioned case in the whole matrix, at 63.0 % tightness.
 
-**Budget starvation, the budget buying zero units.** `RelocationsThrottled` sustained above zero means the budget is below the world's drift rate. `RepairUnitsRefused` above zero while `RepairUnitCount` stays at zero means it cannot afford even the smallest unit on offer. The arithmetic is unforgiving: at ~1 500 ns per entity a 1 ms budget buys ~667 entities, and a default unit of eight clusters at ~49 occupied slots is 392 — so the planner admits one unit or none. Matrix B, 16 000 entities at 512 per cell, eight workers:
+**Budget starvation, the budget buying zero units.** Read these on ticks granted the whole budget: with `QueryEfficiencyTolerance` on, a `ReclusterBudgetGrantedMs` below `ReclusterBudgetMs` means the controller chose not to spend, and throttling is then the point. `RelocationsThrottled` sustained above zero at the whole grant means the budget is below the world's drift rate. `RepairUnitsRefused` above zero while `RepairUnitCount` stays at zero means it cannot afford even the smallest unit on offer. The arithmetic is unforgiving: at ~1 500 ns per entity a 1 ms budget buys ~667 entities, and a default unit of eight clusters at ~49 occupied slots is 392 — so the planner admits one unit or none. Matrix B, 16 000 entities at 512 per cell, eight workers:
 
 | `ReclusterBudgetMs` | relocations throttled/tick | tightness | active clusters |
 |---|---|---|---|
@@ -156,9 +158,9 @@ Read `GetSpatialTelemetry(archetypeId)` or `GetSpatialTelemetryTotal()` from the
 | **8** | **0** | **80.9 %** | **507** |
 | 16 | 0 | 82.3 % | 518 |
 
-Below the cliff, across a 16× range of budget, tightness moves from 89 % to 97 % — *worse* — and query cost with it. Between 4 and 8 ms everything moves at once: throttling stops, and cluster count jumps from 381 to 507 as cells genuinely subdivide instead of holding one loose box each. **Double the budget until `RelocationsThrottled` reaches zero, then stop.** Note the first row: `0` means "no throttle enforcement", not "no re-clustering", and it produced the worst tightness in the table.
+Below the cliff, across a 16× range of budget, tightness moves from 89 % to 97 % — *worse* — and query cost with it. Between 4 and 8 ms everything moves at once: throttling stops, and cluster count jumps from 381 to 507 as cells genuinely subdivide instead of holding one loose box each. **Double the budget until `RelocationsThrottled` reaches zero on ticks granted the whole budget, then stop.** (This table predates the controller: it was measured with a fixed budget.) Note the first row: `0` means "no throttle enforcement", not "no re-clustering", and it produced the worst tightness in the table.
 
-**Clusters that never repair.** `RepairQueueDepth` grows while `RepairUnitCount` stays at zero. Rule out the budget, then three structural causes: the spatial field is not `SpatialMode.Dynamic`, so the planner exits early; nothing wrote to the archetype, and a still archetype is never planned; or `ClusterRepairExtentRatio` sits above the degradation this world actually reaches. Persistent `RepairValveFires` means degradation is outrunning the budget — raise the budget rather than treating the valve as a steady state.
+**Clusters that never repair.** `RepairQueueDepth` grows while `RepairUnitCount` stays at zero. Rule out the budget, then three structural causes: the spatial field is not `SpatialMode.Dynamic`, so the planner exits early; nothing wrote to the archetype, and a still archetype is never planned; or `ClusterRepairExtentRatio` sits above the degradation this world actually reaches. Persistent `RepairValveFires` means degradation is outrunning the budget — raise the budget rather than treating the valve as a steady state. Not this fault: `RepairUnitCount` and `RepairQueueDepth` both at zero with `RepairCellsCooling` above it. The degraded cells were repaired less than `RepairCooldownTicks` ago, and each returns to the queue when its cooldown ends.
 
 **Cells holding too many clusters.** Divide `ActiveClusterCount` by `GetSpatialGridOccupancy().OccupiedCellCount`. A per-cell broadphase is a linear scan over the cell's clusters, and for ordinary densities that is the right structure: it beats a per-cell tree at every selectivity up to 512 clusters in a cell. Past that the engine promotes the cell to a tree on its own, at `Spatial.CellTreePromoteThreshold` (1024 by default), so a dense pocket does not become a scan that grows without bound.
 
@@ -178,7 +180,7 @@ That does **not** make a high mean per cell something to ignore. Promotion caps 
 
 ## 🚦 Starting recipes
 
-**Dense 2D top-down** (RTS, MOBA). `SpatialGridConfig.Flat`, 32 entities per cell, everything else default. Watch `RelocationsThrottled` over the first few hundred ticks and double `ReclusterBudgetMs` until it reads zero.
+**Dense 2D top-down** (RTS, MOBA). `SpatialGridConfig.Flat`, 32 entities per cell, everything else default. Watch `RelocationsThrottled` over the first few hundred ticks and double `ReclusterBudgetMs` until it reads zero whenever `ReclusterBudgetGrantedMs` is the whole budget.
 
 **Sparse 3D volumetric** (space sim, voxel world, ray-heavy queries). Full constructor, 32–64 entities per cell. Resist going finer for precision: the ray walk is cell-major and cost 58.4 µs at 4 per cell against 9.6 µs at 64. Sparsity in the *world* is free, because empty cells are never materialised; sparsity in a *cell* is not.
 
@@ -186,7 +188,7 @@ That does **not** make a high mean per cell something to ignore. Promotion caps 
 
 **High-churn spawn and destroy.** 32 entities per cell, `ReclusterBudgetMs` at 2–4 ms to start. Churn moves no entity but it frees slots, and a freed slot refills first-fit with no regard for position, so the drift path carries more load here than in a purely kinematic world. Watch `DriftersUnplaced` and `RepairQueueEvicted`. An aged world measured 30–35 % *faster* than a fresh one at equal migration count and tightness, which is **unexplained** — do not tune against a freshly spawned world and expect the numbers to hold.
 
-Whatever the shape, the acceptance test is the same: run at the real population, read `RelocationsThrottled` and `RepairUnitsRefused` after a few hundred ticks, and do not ship until both are zero in the steady state.
+Whatever the shape, the acceptance test is the same: run at the real population, read `RelocationsThrottled` and `RepairUnitsRefused` after a few hundred ticks on the ticks granted the whole budget, and do not ship until both are zero there in the steady state. On ticks the controller grants less, both may sit above zero: that is it choosing not to spend, and `QueryCandidatesPerHit` holding steady is the check that it chose well.
 
 ## ⚠️ Guarantees & limits
 

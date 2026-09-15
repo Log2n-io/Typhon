@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Threading;
 
 namespace Typhon.Engine;
 
@@ -50,27 +51,17 @@ public sealed partial class DagScheduler
                 totalEntitiesProcessed += sm.EntitiesProcessed;
                 sm.TransitionLatencyUs = TicksToUs(sm.FirstChunkGrabTick - sm.ReadyTick);
                 sm.DurationUs = TicksToUs(sm.LastChunkDoneTick - sm.FirstChunkGrabTick);
+                sm.WorkUs = TicksToUs(sm.WorkTicks);
 
-                // Deep mode: straggler gap for multi-chunk systems (Pipeline and parallel QuerySystem)
+                // Deep mode: straggler gap for parallel QuerySystems — the span beyond a perfect split of their worker time over the workers their chunks
+                // could occupy. Pipelines do not sum their chunk times, so theirs stays zero; nor do checkerboard systems get one, whose two phases sum into
+                // one WorkTicks while TotalChunks holds the second phase's count and the span includes the hand-off between them.
                 if (TelemetryConfig.SchedulerActive && TelemetryConfig.SchedulerTrackStragglerGap)
                 {
                     var sys = Systems[i];
-                    if ((sys.Type == SystemType.PipelineSystem || sys.IsParallelQuery) && sys.TotalChunks > 1 && sm.WorkersTouched > 0)
+                    if (sys.IsParallelQuery && !sys.IsCheckerboard && sys.TotalChunks > 1 && sm.WorkTicks > 0)
                     {
-                        // Theoretical duration with perfect parallelism:
-                        // total work divided evenly across participating workers
-                        var parallelism = Math.Min(sm.WorkersTouched, sys.TotalChunks);
-                        if (parallelism > 1)
-                        {
-                            // Estimate: total sequential work ≈ duration × parallelism, theoretical = that / parallelism
-                            // More precisely: straggler = actual - (actual * parallelism / parallelism) = 0 in ideal.
-                            // We approximate: theoretical = actual if perfectly balanced. The gap is the deviation.
-                            // Use a simpler metric: chunk_work × totalChunks / parallelism (but we don't know chunk_work).
-                            // Fall back to: gap = 0 when only 1 worker touched it, otherwise report raw duration as-is.
-                            // For v1, just record duration. The straggler gap will be more meaningful when we have per-chunk timing data from actual
-                            // Pipeline integration.
-                            sm.StragglerGapUs = 0f; // Placeholder — refined in Pipeline integration (#196)
-                        }
+                        sm.StragglerGapUs = Math.Max(0f, sm.DurationUs - (sm.WorkUs / Math.Min(_workerCount, sys.TotalChunks)));
                     }
                 }
             }
@@ -127,6 +118,12 @@ public sealed partial class DagScheduler
             (byte)_overloadDetector.CurrentLevel,
             (byte)Math.Min(_tickMultiplier, byte.MaxValue));
 
+        // Lost wakes the workers caught since the previous tick end. The snapshot is the timer thread's alone; a wake lost late in one tick is caught in the
+        // next, when the worker's backstop fires.
+        var lostWakes = Volatile.Read(ref _lostWakes);
+        var lostWakesThisTick = (int)Math.Min(lostWakes - _lostWakesAtLastTick, int.MaxValue);
+        _lostWakesAtLastTick = lostWakes;
+
         var tickTelemetry = new TickTelemetry
         {
             TickNumber = _currentTickNumber,
@@ -139,7 +136,8 @@ public sealed partial class DagScheduler
             TotalEntitiesProcessed = totalEntitiesProcessed,
             CurrentLevel = _overloadDetector.CurrentLevel,
             TickMultiplier = _tickMultiplier,
-            EventQueueDepth = queueDepth
+            EventQueueDepth = queueDepth,
+            LostWakes = lostWakesThisTick
         };
 
         // Enrich with subscription metrics (Output phase duration, deltas pushed, overflows)

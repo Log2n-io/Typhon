@@ -118,8 +118,10 @@ public sealed class EcsMetricsExporter : IDisposable
             "Mean packing bound (slots/entities)^(1/d) as a fraction of the cell edge, over the same clusters, per archetype");
         _meter.CreateObservableGauge("typhon.ecs.spatial.tightness_to_bound", EnumerateMeanTightnessToBound, "1",
             "Measured extent against what geometry allows: 1 is optimal packing, per archetype");
-        _meter.CreateObservableGauge("typhon.ecs.spatial.max_cluster_overhang", EnumerateMaxClusterOverhang, "1",
-            "Largest distance any cluster box reaches outside its own cell, in world units, per archetype — a running maximum, not a per-tick value");
+        _meter.CreateObservableGauge("typhon.ecs.spatial.cluster_reach", EnumerateClusterReach, "1",
+            "How far past its own cell every query reaches for clusters, in world units, per archetype — recomputed at every fence, so it can fall");
+        _meter.CreateObservableGauge("typhon.ecs.spatial.escaped_clusters", EnumerateEscapedClusters, "{clusters}",
+            "Clusters reaching further past their cell than cluster_reach, which every query tests by name, per archetype (at most 16)");
         _meter.CreateObservableGauge("typhon.ecs.spatial.cell_tree_promotions", EnumerateCellTreePromotions, "{cells}",
             "Cell halves promoted to a per-cell R-Tree in the last completed tick, per archetype");
         _meter.CreateObservableGauge("typhon.ecs.spatial.cell_tree_demotions", EnumerateCellTreeDemotions, "{cells}",
@@ -209,7 +211,9 @@ public sealed class EcsMetricsExporter : IDisposable
 
     private IEnumerable<Measurement<double>> EnumerateMeanTightnessToBound() => EnumerateSpatialDouble(static t => t.MeanTightnessToBound);
 
-    private IEnumerable<Measurement<double>> EnumerateMaxClusterOverhang() => EnumerateSpatialDouble(static t => t.MaxClusterOverhang);
+    private IEnumerable<Measurement<double>> EnumerateClusterReach() => EnumerateSpatialDouble(static t => t.ClusterReach);
+
+    private IEnumerable<Measurement<long>> EnumerateEscapedClusters() => EnumerateSpatialLong(static t => t.EscapedClusterCount);
 
     /// <summary>
     /// Walks every archetype that owns cluster state and projects one field of its <see cref="SpatialMigrationTelemetry"/> snapshot, tagged by archetype name.

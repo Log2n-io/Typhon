@@ -57,6 +57,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     private Thread _thread;
     private volatile bool _shutdown;
     private readonly Lock _lifecycleLock = new();
+    private readonly Lock _cycleLock = new();
     private readonly ManualResetEventSlim _wakeEvent = new(false);
 
     // ═══════════════════════════════════════════════════════════════
@@ -66,9 +67,21 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     private long _checkpointLsn;
     private volatile Exception _fatalError;
     private volatile DurabilityHealth _health = DurabilityHealth.Ok;
-    private volatile bool _forceRequested;
+    // 1 while a force request waits for the loop. Read-and-cleared in one exchange, so a request landing between the loop's wake and its read
+    // survives to the next pass instead of being overwritten.
+    private int _forceRequested;
     private volatile bool _crashStop;
+    // Set when CheckpointLoop exits, however it exits: no cycle runs after it, so a forced waiter must stop waiting for one.
+    private volatile bool _loopExited;
     private long _consecutiveGatedCycles;
+
+    // Forced-wait accounting (CK-12). Cycles are numbered in the order they start. A waiter holds the number of the first cycle to start after its
+    // request, and is released once that cycle or a later one has finished having written every page it collected. The two watermarks are
+    // written under _cycleFinished, which waiters sleep on.
+    private long _cyclesStarted;
+    private long _lastFinishedCycle;
+    private long _lastCoveredCycle;
+    private readonly object _cycleFinished = new();
 
     /// <summary>Engine logger (wired by <see cref="DatabaseEngine"/>). Defaults to a no-op so direct unit construction
     /// (e.g. CheckpointManagerTests) never NREs in the <c>[LoggerMessage]</c> paths.</summary>
@@ -79,6 +92,11 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// background checkpoint thread, off every hot path.</summary>
     internal Action CycleFaultInjector { get; set; }
 
+    /// <summary>Test seam (CK-12): invoked by <see cref="ForceCheckpointAndWait"/> each time it posts a request (once per retry), before it waits,
+    /// so a fixture can let the forced cycle finish first — the ordering the old force-then-wait pairing lost its own cycle to. Must tolerate being
+    /// called more than once per call. Null in production.</summary>
+    internal Action AfterForceRequested { get; set; }
+
     /// <summary>
     /// Wired by <see cref="DatabaseEngine"/> to <c>PersistArchetypeState</c>. Invoked at the START of every checkpoint cycle (before the durability
     /// barrier) so the per-archetype segment pointers (EntityMap / cluster-segment SPIs in the <c>ArchetypeR1</c> table, plus NextEntityKey + EntityMap
@@ -87,6 +105,13 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// (unreachable) base and loses the entities (#395). Null until the engine wires it (early/test cycles no-op).
     /// </summary>
     internal Action PersistDurableMetadataHook { get; set; }
+
+    /// <summary>
+    /// Wired by <see cref="DatabaseEngine"/> to <see cref="TransactionChain.LowestInFlightLsn"/>: the first LSN of any commit still between its WAL
+    /// append and the end of its publish, <see cref="long.MaxValue"/> for none. The cycle keeps CheckpointLSN below it (CK-13): those
+    /// records' page effects are not in memory yet, so no page the cycle writes can hold them. Null in fixtures with no transactions.
+    /// </summary>
+    internal Func<long> InFlightCommitFloor { get; set; }
 
     /// <summary>Max passes per cycle to retry pages skipped because a writer was active, before the coverage gate blocks the LSN advance (CK-03). Skip windows
     /// are accessor-scoped (~µs), so the second pass almost always clears them.</summary>
@@ -287,6 +312,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             }
 
             _shutdown = false;
+            _loopExited = false;
             _thread = new Thread(CheckpointLoop)
             {
                 IsBackground = true,
@@ -298,35 +324,126 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     }
 
     /// <summary>
-    /// Requests an immediate checkpoint cycle. Wakes the background thread if sleeping.
+    /// Requests an immediate checkpoint cycle and returns without waiting. Wakes the background thread if sleeping; a request that lands while a
+    /// cycle is running is kept, and runs the next one.
     /// </summary>
-    public void ForceCheckpoint()
-    {
-        _forceRequested = true;
-        _wakeEvent.Set();
-    }
+    public void ForceCheckpoint() => RequestCycle();
 
     /// <summary>
-    /// Blocks until at least one checkpoint cycle has completed (since the call entered) or <paramref name="timeout"/>
-    /// elapses. Returns <see langword="true"/> if a cycle completed, <see langword="false"/> on timeout.
+    /// Requests a checkpoint cycle and blocks until one that started after this call has finished having written every page it collected, or
+    /// <paramref name="timeout"/> elapses (CK-12).
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Pairs with <see cref="ForceCheckpoint"/> to expose a synchronous checkpoint barrier. Used by <see cref="BulkLoadSession.CompleteBulkLoad"/> to drain
-    /// the bulk's dirty pages to disk before emitting the <c>BulkEnd</c> manifest. Detection is via the monotonic <see cref="TotalCheckpoints"/> counter — the
-    /// method records the count on entry and spin-waits (adaptively) until it advances.
+    /// On <see langword="true"/>, every page the caller dirtied before the call is on the data file and fsynced, and <see cref="CheckpointLsn"/> has
+    /// reached every LSN that was durable at the call, except the records of another thread's commit still between its append and its publish,
+    /// which CK-13 keeps it below. This is the synchronous barrier behind <see cref="BulkLoadSession.CompleteBulkLoad"/> and the recovery seal.
     /// </para>
     /// <para>
-    /// Concurrent waiters all observe the same cycle increment; this is safe (the counter is monotonic and the post-cycle invariants — CheckpointLSN advance,
-    /// page fsync — hold by the time any waiter returns).
+    /// A cycle already running when the call arrives does not release the wait, since it may have collected before the caller's pages were dirty;
+    /// nor does one the coverage gate stopped (CK-03), since the page it skipped reached no disk. After either, or after a cycle that failed, the
+    /// wait gives a later cycle one retry pause to cover the request, then forces another, until its timeout. The cycle it forced cannot be
+    /// missed: the wait keys on the number of the first cycle to start after the request, not on a counter read after the force, which an idle
+    /// engine had already moved past by the time the caller got to it.
     /// </para>
     /// </remarks>
-    /// <param name="timeout">Maximum wall-clock time to wait for the next cycle.</param>
-    /// <returns><see langword="true"/> if a checkpoint completed, <see langword="false"/> on timeout.</returns>
-    public bool WaitForCheckpoint(TimeSpan timeout)
+    /// <param name="timeout">Maximum wall-clock time to wait. <see cref="Timeout.InfiniteTimeSpan"/> waits indefinitely.</param>
+    /// <param name="minCheckpointLsn">Also wait until <see cref="CheckpointLsn"/> has reached this LSN: a covering cycle that CK-13 held below it
+    /// counts as not covering the request. 0 for no such requirement.</param>
+    /// <returns><see langword="true"/> once a covering cycle has finished; <see langword="false"/> on timeout, and at once when checkpointing has
+    /// halted (a fatal error, a simulated hard crash, or the loop stopping).</returns>
+    public bool ForceCheckpointAndWait(TimeSpan timeout, long minCheckpointLsn = 0)
     {
-        var startCount = Interlocked.Read(ref _totalCheckpoints);
-        return SpinWait.SpinUntil(() => Interlocked.Read(ref _totalCheckpoints) > startCount, timeout);
+        var ctx = WaitContext.FromTimeout(timeout);
+        while (true)
+        {
+            var ticket = RequestCycle();
+            AfterForceRequested?.Invoke();
+
+            lock (_cycleFinished)
+            {
+                // Wait for the forced cycle, or a later one, to finish. If it did not cover the request (the gate stopped it, it failed, or CK-13
+                // held CheckpointLSN below minCheckpointLsn), keep waiting one retry pause for a later cycle that does before forcing another: a page
+                // the gate keeps skipping must not drive back-to-back cycles, each a WAL flush, until the timeout. CK-11 keeps the same floor between
+                // pressure cycles for that reason.
+                var retryAt = long.MaxValue;
+                while (!Covers(ticket, minCheckpointLsn))
+                {
+                    if (CheckpointingHalted || ctx.ShouldStop)
+                    {
+                        return false;
+                    }
+
+                    if (retryAt == long.MaxValue && _lastFinishedCycle >= ticket)
+                    {
+                        retryAt = Stopwatch.GetTimestamp() + DirtyPagePollIntervalMs * Stopwatch.Frequency / 1000;
+                    }
+                    else if (Stopwatch.GetTimestamp() >= retryAt)
+                    {
+                        break;
+                    }
+
+                    Monitor.Wait(_cycleFinished, SleepMs(ctx, retryAt));
+                }
+
+                if (Covers(ticket, minCheckpointLsn))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether cycle <paramref name="ticket"/> or a later one has written every page it collected, with <see cref="CheckpointLsn"/> at
+    /// <paramref name="minCheckpointLsn"/> or past it. The caller holds <see cref="_cycleFinished"/>, which <see cref="PublishCycleEnd"/> takes after the
+    /// cycle has written both.
+    /// </summary>
+    private bool Covers(long ticket, long minCheckpointLsn) => _lastCoveredCycle >= ticket && Interlocked.Read(ref _checkpointLsn) >= minCheckpointLsn;
+
+    /// <summary>
+    /// Milliseconds a forced waiter may sleep: until the deadline or until <paramref name="until"/> (a Stopwatch timestamp,
+    /// <see cref="long.MaxValue"/> for none), whichever comes first. The end of a cycle wakes it sooner.
+    /// </summary>
+    private static int SleepMs(in WaitContext ctx, long until)
+    {
+        var remaining = ctx.Remaining;
+        var ms = remaining == Timeout.InfiniteTimeSpan ? long.MaxValue : (long)Math.Ceiling(remaining.TotalMilliseconds);
+        if (until != long.MaxValue)
+        {
+            ms = Math.Min(ms, (until - Stopwatch.GetTimestamp()) * 1000 / Stopwatch.Frequency + 1);
+        }
+        // Infinite only with no deadline and no retry point; a finite wait longer than int.MaxValue ms sleeps in slices and re-checks.
+        return ms == long.MaxValue ? Timeout.Infinite : (int)Math.Clamp(ms, 1, int.MaxValue);
+    }
+
+    /// <summary>
+    /// A forced waiter stops waiting: a fatal error has latched, a hard crash is being simulated, the manager is shutting down, or its loop has
+    /// exited. A shutdown cycle may still cover the request, and a waiter that sees it finish returns true (coverage is tested first), but none
+    /// waits for one.
+    /// </summary>
+    private bool CheckpointingHalted => _fatalError != null || _crashStop || _shutdown || _loopExited;
+
+    /// <summary>Wakes every forced waiter so it re-reads the cycle watermarks and the halt flags (CK-12).</summary>
+    private void WakeForcedWaiters()
+    {
+        lock (_cycleFinished)
+        {
+            Monitor.PulseAll(_cycleFinished);
+        }
+    }
+
+    /// <summary>
+    /// Posts a force request and returns the number of the first cycle to start after it (CK-12). The fence pairs with the full fence of the cycle's
+    /// own numbering, so whichever cycle takes that number collects after every write this thread made before the call.
+    /// </summary>
+    private long RequestCycle()
+    {
+        Interlocked.MemoryBarrier();
+        var ticket = Volatile.Read(ref _cyclesStarted) + 1;
+        Volatile.Write(ref _forceRequested, 1);
+        _wakeEvent.Set();
+        return ticket;
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -406,8 +523,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                     _wakeEvent.Wait(waitMs);
                     _wakeEvent.Reset();
 
-                    force = _forceRequested;
-                    _forceRequested = false;
+                    force = Interlocked.Exchange(ref _forceRequested, 0) != 0;
 
                     // When the trigger is disabled the wait above IS the checkpoint interval, so any wake is a tick and
                     // the due-time must not be consulted: the event wait and Stopwatch are different clocks, and a wake
@@ -490,6 +606,12 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
         {
             ClassifyCycleFailure(ex);
         }
+        finally
+        {
+            // However the loop ends, no cycle runs after this: release the forced waiters rather than let them sit out their timeouts (CK-12).
+            _loopExited = true;
+            WakeForcedWaiters();
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -497,10 +619,22 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     // ═══════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Executes one full checkpoint cycle. Visible internally for testability.
+    /// Executes one full checkpoint cycle. Visible internally for testability. Cycles are serialized: a fixture that drives one directly waits for
+    /// the loop's, so the cycle numbers, their watermarks and CheckpointLSN only ever move forward (CK-12, CK-13).
     /// </summary>
     internal void RunCheckpointCycle(long targetLsn, CheckpointReason reason = CheckpointReason.Periodic)
     {
+        lock (_cycleLock)
+        {
+            RunCheckpointCycleCore(targetLsn, reason);
+        }
+    }
+
+    private void RunCheckpointCycleCore(long targetLsn, CheckpointReason reason)
+    {
+        // Numbered before the cycle reads anything, with a full fence: a request that read the previous number is covered by this cycle (CK-12).
+        var cycle = Interlocked.Increment(ref _cyclesStarted);
+        var covered = false;
         var sw = Stopwatch.GetTimestamp();
 
         // CheckpointCycle span wraps the full cycle. DirtyPageCount is set after collection (not known at span-begin time).
@@ -534,6 +668,15 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             _walManager.RequestFlush();
             _walManager.WaitForDurable(_walManager.LastAppendedLsn, ref ctx);
             long barrierLsn = _walManager.DurableLsn;
+
+            // CK-13: never past a commit still between its append and its publish. Read after the barrier: a barrier that covers a record has drained
+            // its frame, and the commit stored its floor before publishing that frame; a commit that has since withdrawn has already dirtied its
+            // pages, which the collection below finds. Never below the current watermark either: that would ask recovery for recycled segments.
+            var inFlightFloor = InFlightCommitFloor?.Invoke() ?? long.MaxValue;
+            if (inFlightFloor <= barrierLsn)
+            {
+                barrierLsn = Math.Max(inFlightFloor - 1, Interlocked.Read(ref _checkpointLsn));
+            }
 
             // Step 2: Collect dirty pages
             int[] dirtyPages;
@@ -673,6 +816,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             }
 
             Interlocked.Increment(ref _totalCheckpoints);
+            covered = stillSkipped == 0;
             if (reason == CheckpointReason.DirtyPagePressure)
             {
                 // Counted HERE, beside the cycle counter, not at the call site: RunCheckpointCycle returns early under
@@ -697,6 +841,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
         finally
         {
             cycleScope.Dispose();
+            PublishCycleEnd(cycle, covered);
         }
 
         // Record duration
@@ -710,12 +855,35 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     }
 
     /// <summary>
+    /// Records that <paramref name="cycle"/> finished, <paramref name="covered"/> when it wrote every page it collected, and wakes the forced
+    /// waiters (CK-12). Every exit of <see cref="RunCheckpointCycle"/> comes through here, a failed or crash-stopped cycle included, so a waiter
+    /// always learns its cycle is over and can ask for another.
+    /// </summary>
+    private void PublishCycleEnd(long cycle, bool covered)
+    {
+        lock (_cycleFinished)
+        {
+            // Plain assignment: cycles are serialized (RunCheckpointCycle), so each one ends after every lower-numbered one.
+            _lastFinishedCycle = cycle;
+            if (covered)
+            {
+                _lastCoveredCycle = cycle;
+            }
+            Monitor.PulseAll(_cycleFinished);
+        }
+    }
+
+    /// <summary>
     /// Test hook: latches the crash flag so NO further checkpoint writes the data file — the shutdown final cycle is suppressed AND any periodic/forced cycle that
     /// begins afterward bails immediately (see <see cref="RunCheckpointCycle"/>). Used by <c>DatabaseEngine.SimulateHardCrash</c> to model a power cut where only
     /// WAL-durable data survives. Must be called before <see cref="Dispose"/>. (A cycle already mid-flight when the flag is set has a small residual window — the
     /// test sets this on an otherwise-idle engine, so in practice no cycle is in flight.)
     /// </summary>
-    internal void PrepareCrashStop() => _crashStop = true;
+    internal void PrepareCrashStop()
+    {
+        _crashStop = true;
+        WakeForcedWaiters();
+    }
 
     // ═══════════════════════════════════════════════════════════════
     // Failure classification (CK-06)
@@ -766,6 +934,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
         if (disposing)
         {
             _shutdown = true;
+            WakeForcedWaiters(); // they stop waiting now, not when the shutdown cycle ends, which may be never if the thread was not started
             _wakeEvent.Set(); // Wake the thread so it sees _shutdown
             _thread?.Join(TimeSpan.FromSeconds(10));
 

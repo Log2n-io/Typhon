@@ -160,7 +160,7 @@ class WalIntegrationTests : TestBase
     private string GetDatabaseFilePath() => Path.Combine(_dbDir, $"{CurrentDatabaseName}.bin");
 
     /// <summary>
-    /// Forces a checkpoint cycle and waits for it to complete.
+    /// Forces a checkpoint cycle and waits for one that covers everything written so far (CK-12).
     /// This prevents the shutdown path from hanging: when checkpointLsn == durableLsn,
     /// the final checkpoint cycle is skipped and the thread exits immediately.
     /// </summary>
@@ -172,14 +172,7 @@ class WalIntegrationTests : TestBase
             return;
         }
 
-        var before = cm.TotalCheckpoints;
-        cm.ForceCheckpoint();
-
-        var sw = Stopwatch.StartNew();
-        while (cm.TotalCheckpoints <= before && sw.ElapsedMilliseconds < 5000)
-        {
-            Thread.Sleep(10);
-        }
+        cm.ForceCheckpointAndWait(TimeSpan.FromSeconds(5));
     }
 
     /// <summary>

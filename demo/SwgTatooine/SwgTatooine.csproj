@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- SwgTatooine — a server-side simulation of Star Wars Galaxies' planet Tatooine, used as a spatial-partitioning
+       workload for the engine. No rendering, no client, no network: pure game logic driven by a Typhon system DAG.
+
+       DELIBERATELY does not reference samples/Typhon.Samples.Swg. That project is the API sample and its archetypes
+       are shaped to teach the API; this one is shaped to load the spatial layer the way a game server does. Anything
+       useful from it is copied and adapted here rather than shared, so neither can constrain the other. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>SwgTatooine</AssemblyName>
+    <RootNamespace>SwgTatooine</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>default</LangVersion>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Typhon.Engine\Typhon.Engine.csproj" />
+    <ProjectReference Include="..\..\src\Typhon.Schema.Definition\Typhon.Schema.Definition.csproj" />
+    <ProjectReference Include="..\..\src\Typhon.Profiler\Typhon.Profiler.csproj" />
+    <PackageReference Include="JetBrains.Annotations" Version="2026.2.0" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.9" />
+    <ProjectReference Include="..\..\src\Typhon.Analyzers\Typhon.Analyzers.csproj"
+                      ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
+    <ProjectReference Include="..\..\src\Typhon.Generators\Typhon.Generators.csproj"
+                      ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
+  </ItemGroup>
+</Project>

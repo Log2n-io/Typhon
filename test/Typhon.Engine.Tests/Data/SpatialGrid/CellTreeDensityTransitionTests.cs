@@ -528,7 +528,15 @@ class CellTreeDensityTransitionTests : TestBase<CellTreeDensityTransitionTests>
                     return;
                 }
 
-                state.ClusterSpatialIndexSlot = new int[8];
+                // Shrink WITHOUT zeroing. A fresh int[8] reads as "cluster k sits at leaf 0, slot 0" for every k below 8, so whenever the armed tick
+                // reached Finalize before a Migrate slice needed a grow, Finalize's RemoveChecked tripped ST-05 on that phantom location and the test
+                // failed on its own sabotage rather than on the guard it exists for. Keeping the live values (and -1, "not indexed", for any slot the
+                // old array did not have) leaves the array exactly as valid as before, only too short.
+                var live = state.ClusterSpatialIndexSlot;
+                var shrunk = new int[8];
+                Array.Fill(shrunk, -1);
+                Array.Copy(live, shrunk, Math.Min(shrunk.Length, live.Length));
+                state.ClusterSpatialIndexSlot = shrunk;
             };
 
             using var runtime = TyphonRuntime.Create(dbe, schedule =>

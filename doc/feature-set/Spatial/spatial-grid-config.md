@@ -51,7 +51,7 @@ schedule.CallbackSystem("TierAssignment", ctx =>
 }, priority: SystemPriority.High);
 ```
 
-`SpatialGridConfig` carries twelve settings. The first three define the grid itself; the rest govern how hard the engine works to keep clusters tight as entities move, and every one of them is a constructor argument with a default. This table is the inventory — for how to *derive* a value, what its safe range is, and which telemetry counter tells you it is wrong, see [Tuning the Spatial Grid](./spatial-tuning.md).
+`SpatialGridConfig` carries twenty-one settings. The first three define the grid itself; the rest govern how hard the engine works to keep clusters tight as entities move, and every one of them is a constructor argument with a default. This table is the inventory — for how to *derive* a value, what its safe range is, and which telemetry counter tells you it is wrong, see [Tuning the Spatial Grid](./spatial-tuning.md).
 
 | Config field | Default | Meaning |
 |---|---|---|
@@ -73,8 +73,10 @@ schedule.CallbackSystem("TierAssignment", ctx =>
 | `GrowthCapSlack` | `1.25` | How far past the target a candidate may stretch before a fresh cluster is opened |
 | `MaxOpenClustersPerCell` | `4` | Open clusters the growth cap may hold per cell before falling back to least enlargement. Must be at least 1 |
 | `BatchSpawnSortThreshold` | `128` | Spawn count at which a transaction places its entities in per-cell Morton order; `0` disables |
+| `RepairCooldownTicks` | `50` | Ticks a cell whose repair moved entities stays out of the repair queue; nominations meanwhile are held until it returns. `0` disables |
+| `QueryEfficiencyTolerance` | `0.1` | How far above the best candidates per hit an archetype's range queries may sit before its maintenance gets the whole `ReclusterBudgetMs`; next to nothing is granted at the best. `0` grants the configured budget every tick |
 
-The nine re-clustering settings below `MigrationHysteresisRatio` are **not persisted** with the database — only world bounds, cell size and the hysteresis ratio reach the bootstrap record, because those three decide which cell a position maps to. A tool that opens the database without calling `ConfigureSpatialGrid` therefore runs the rest at their defaults, and an application that does call it always wins.
+The re-clustering and placement settings below `MigrationHysteresisRatio` are **not persisted** with the database — only world bounds, cell size and the hysteresis ratio reach the bootstrap record, because those three decide which cell a position maps to. A tool that opens the database without calling `ConfigureSpatialGrid` therefore runs the rest at their defaults, and an application that does call it always wins.
 
 ## ⚠️ Guarantees & limits
 

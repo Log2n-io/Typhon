@@ -187,7 +187,7 @@ Beyond components, you can declare **resources** (`ReadsResource`/`WritesResourc
 
 Access declarations handle *data* ordering. For *structural* ordering you have two tools:
 
-- **Phases** — a DAG-local total order. Everything in `Input` finishes before anything in `Simulation` starts. Typhon ships `Input`, `Simulation`, `Output`, `Cleanup`; you can define your own. Use phases for coarse "all input before all simulation before all rendering" structure.
+- **Phases** — a DAG-local total order, enforced through access: a `Simulation` system waits for an `Input` system when a declared conflict or an explicit edge connects them, directly or through other systems; otherwise the two may run at the same time. So declare every component a system reads, spatial queries included; a read you don't declare is ordered by nothing. Typhon ships `Input`, `Simulation`, `Output`, `Cleanup`; you can define your own. Use phases for the coarse causal order (input, then simulation, then rendering); the access declarations are what enforce it.
 - **`After` / `Before` / `AfterAll`** — an explicit edge between two named systems in the same DAG. Use it to disambiguate two writers, or to force a specific order the access model can't infer.
 
 You declare the phase list when you create the DAG, and the engine slots each system into its phase:
@@ -231,10 +231,11 @@ b.Input(() => _characters).Parallel().WritesVersioned()
 
 > 💡 **The zero-lock read is the whole point.** Under the hood, parallel reads share one `PointInTimeAccessor` — a single frozen TSN that every worker reads against without taking a single per-entity lock, because [snapshot isolation](03-transactions.md) guarantees the snapshot can't move under them. That's how "iterate a million entities across every core at one consistent instant" is a normal operation here, not a feat. It only works because nobody is mutating the versions those readers can see — the same property you bought with *Versioned* storage.
 
-Two knobs worth knowing (both in `RuntimeOptions`):
+Knobs worth knowing (the first two in `RuntimeOptions`):
 
-- **`ParallelQueryMinChunkSize`** (default 64) — the floor on entities per chunk. Small sets still run the parallel path, just as one chunk. Stops tiny populations from spawning a chunk per worker for no gain.
-- **`ChunksPerWorker`** (per-system, via `b.ChunksPerWorker(f)`) — oversubscription. Above 1.0, fast workers can steal extra chunks while a slow one finishes — smooths out an uneven workload.
+- **`CostBasedChunking`** (default true) — from a system's second tick on, its chunks are sized by what it measurably costs rather than by how many entities it has: spread over the workers while each chunk carries 25–100 µs of work, fewer chunks below that, up to twice as many above it. A slow last chunk then no longer holds the whole pool.
+- **`ParallelQueryMinChunkSize`** (default 64) — the floor on entities per chunk when chunks are counted by entities: a system's first tick, or every tick with `CostBasedChunking` off. Small sets still run the parallel path, just as one chunk. Stops tiny populations from spawning a chunk per worker for no gain.
+- **`ChunksPerWorker`** (per-system, via `b.ChunksPerWorker(f)`) — oversubscription: the chunk count aims at `round(WorkerCount × f)`. Above 1.0, fast workers can steal extra chunks while a slow one finishes — smooths out an uneven workload.
 
 ---
 

@@ -49,7 +49,7 @@ internal struct ShadowEntry
 /// </para>
 /// <para>
 /// <b>Memory-ordering contract.</b> The reservation increments the count BEFORE the entry is written (the old lock-based version incremented it after). Reads
-/// are therefore only valid at the tick boundary, once the scheduler's phase barrier has retired every writer — which is exactly the contract
+/// are therefore only valid at the tick boundary, once the tick has drained and every writer has retired — which is exactly the contract
 /// <see cref="Count"/> and the indexer already document. Do not read this buffer concurrently with appends.
 /// </para>
 /// </remarks>

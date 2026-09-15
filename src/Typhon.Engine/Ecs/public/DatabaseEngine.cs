@@ -611,10 +611,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// leave indexes empty). Distinct from <see cref="_headsTrusted"/>, which can be false on a clean migration reopen with no WAL window (indexes load normally).</summary>
     internal bool WalFilesPresentAtOpen { get; private set; }
 
-    /// <summary>Gates the checkpoint-time <c>PersistArchetypeState</c> hook (#395 / CK-10). False during open + recovery (so the recovery seal — a
-    /// ForceCheckpoint — does NOT persist segment SPIs mid-rebuild); set true at the end of <c>InitializeArchetypes</c> so every steady-state
-    /// checkpoint records them.</summary>
+    /// <summary>Gates the checkpoint-time <c>PersistArchetypeState</c> hook (#395 / CK-10). False while segments are still being opened or rebuilt;
+    /// set true on the crash path just before the recovery seal, so the seal records the SPIs of the base it consolidates (#715), and at the end of
+    /// <c>InitializeArchetypes</c> otherwise, so every steady-state checkpoint records them.</summary>
     private volatile bool _archetypeSpiPersistArmed;
+
+    /// <summary>Test seam (NEW-CK-1): invoked by every <see cref="Transaction"/> commit right after its WAL append and before any publish, so a
+    /// fixture can hold a commit in that window while a checkpoint runs. Null in production: one null check per commit.</summary>
+    internal Action CommitAfterAppendProbe { get; set; }
+
+    /// <summary>Test seam (CK-13): invoked by every <see cref="Transaction"/> commit just before it publishes its Commit-discipline staged writes,
+    /// its last page effect, so a fixture can show the checkpoint still stays below the commit's records there. Null in production.</summary>
+    internal Action CommitBeforeStagedPublishProbe { get; set; }
 
     /// <summary>Test-only: when set, <see cref="Dispose"/> skips <c>MarkCleanShutdown</c>, reproducing an unclean shutdown
     /// (a real crash also never writes the marker). Unit tests cannot abort the process — same convention as the
@@ -897,6 +905,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     /// <summary>Registry of the component and archetype schema definitions registered on this engine instance.</summary>
     public DatabaseDefinitions DBD { get; }
+
+    /// <summary>
+    /// Test hook: invoked by <c>InitializeArchetypes</c> right after an archetype's cluster layout is computed and published to its process-wide
+    /// <see cref="ArchetypeMetadata"/>. Lets a test stand in for another engine publishing a different layout at that moment. Per engine; null in
+    /// production.
+    /// </summary>
+    internal Action<ArchetypeMetadata> AfterClusterLayoutPublishedForTest;
 
     /// <summary>Backing paged memory-mapped file store holding all persisted segments of this database.</summary>
     public ManagedPagedMMF MMF { get; }
@@ -1279,6 +1294,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 throw new InvalidOperationException("Simulated teardown-step failure (ThrowInDisposeCoreForTest).");
             }
 
+            // Warm spatial-query windows pin this engine's pages on every thread that queried it. Unpin them while this page cache is still alive, and
+            // before the final checkpoint and persistence steps need pages.
+            SpatialQueryAccessorCache.Release(MMF);
+
             // Statistics worker must stop before checkpoint (it holds epoch guards during scans)
             StatisticsWorker?.Dispose();
             StatisticsWorker = null;
@@ -1418,9 +1437,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         CheckpointManager.Logger = Logger;
         // Persist per-archetype segment SPIs at every checkpoint so a consolidated cluster/EntityMap base is reachable on reopen after a hard crash
         // (#395). Idempotent and skip-unchanged, so a steady-state cycle is nearly free. Runs at cycle start (before the barrier) so its WAL records +
-        // dirty pages ride the same cycle. Armed only AFTER InitializeArchetypes completes (incl. the recovery seal), so the seal — itself a
-        // ForceCheckpoint — keeps its original behaviour and does NOT persist SPIs mid-recovery (the rebuilt segments are sealed first; the first
-        // steady-state checkpoint then records them). #395.
+        // dirty pages ride the same cycle. Armed at the end of InitializeArchetypes, or on the crash path just before the recovery seal, so the seal
+        // records the SPIs of the base it consolidates (#715, CK-10); never earlier, while segments are still being rebuilt. #395.
         CheckpointManager.PersistDurableMetadataHook = () =>
         {
             if (_archetypeSpiPersistArmed)
@@ -1428,11 +1446,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 PersistArchetypeState();
             }
         };
+        // CK-13: the cycle keeps CheckpointLSN below any commit still between its WAL append and its publish.
+        CheckpointManager.InFlightCommitFloor = () => TransactionChain.LowestInFlightLsn();
         CheckpointManager.Start();
 
         // Wire demand-driven flush: when page cache backpressure fires, immediately wake
         // the checkpoint thread instead of waiting for the 30s timer interval.
-        MMF.OnBackpressure = () => CheckpointManager?.ForceCheckpoint();
+        MMF.OnBackpressure = () =>
+        {
+            // Warm spatial-query windows keep this cache's clean pages pinned between queries; under back-pressure they must become evictable again.
+            SpatialQueryAccessorCache.Release(MMF);
+            CheckpointManager?.ForceCheckpoint();
+        };
     }
 
     private void InitializeStatisticsWorker()
@@ -3297,9 +3322,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             meta.TransientSlotCount = isClusterEligible ? (byte)BitOperations.PopCount(transientSlotMask) : (byte)0;
             // Every declared slot that is not Versioned — i.e. SingleVersion and Transient. Bounded to ComponentCount rather than left as ~mask so the spare
             // high bits cannot make an absent slot look fence-maintained (#711).
-            meta.FenceMaintainedSlotMask = isClusterEligible
-                ? (ushort)(((1 << meta.ComponentCount) - 1) & ~versionedSlotMask)
-                : (ushort)0;
+            meta.FenceMaintainedSlotMask = isClusterEligible ? (ushort)(((1 << meta.ComponentCount) - 1) & ~versionedSlotMask) : (ushort)0;
+
+            ArchetypeClusterInfo clusterLayout = default;
 
             if (isClusterEligible)
             {
@@ -3324,8 +3349,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         }
                     }
                 }
-                meta.ClusterLayout = ArchetypeClusterInfo.Compute(meta.ComponentCount, componentSizes, multipleIndexedFieldCount,
-                    versionedSlotMask, transientSlotMask);
+                clusterLayout = ArchetypeClusterInfo.Compute(meta.ComponentCount, componentSizes, multipleIndexedFieldCount, versionedSlotMask, transientSlotMask);
+
+                // Published for the readers that take it from the metadata, and never read back from there below. ArchetypeMetadata is ONE object
+                // per archetype for the whole process and every engine's InitializeArchetypes writes it: an engine opening another schema version of
+                // the same archetype in between (SchemaEvolutionMatrixTests beside SchemaEvolutionStorageModeTests) left this one building its cluster
+                // segment and state from THAT version's layout — each SingleVersion value stored at the wrong offset, read back as zeros on reopen.
+                meta.ClusterLayout = clusterLayout;
+                AfterClusterLayoutPublishedForTest?.Invoke(meta);
 
                 // Override entity record size: base 19 bytes + 4 bytes per Versioned component slot
                 meta._entityRecordSize = ClusterEntityRecordAccessor.RecordSize(meta.VersionedSlotCount);
@@ -3418,12 +3449,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     ChunkBasedSegment<PersistentStore> clusterSegment = null;
                     if (!isPureTransient)
                     {
-                        clusterSegment = MMF.AllocateChunkBasedSegment(PageBlockType.None, 4, meta.ClusterLayout.ClusterStride, null, 
+                        clusterSegment = MMF.AllocateChunkBasedSegment(PageBlockType.None, 4, clusterLayout.ClusterStride, null, 
                             StorageSegmentKind.Cluster);
                         if (clusterSegment == null)
                         {
                             throw new InvalidOperationException(
-                                $"Failed to allocate cluster segment for archetype {meta.ArchetypeType?.Name} (Id={meta.ArchetypeId}, Stride={meta.ClusterLayout.ClusterStride})");
+                                $"Failed to allocate cluster segment for archetype {meta.ArchetypeType?.Name} (Id={meta.ArchetypeId}, Stride={clusterLayout.ClusterStride})");
                         }
                     }
 
@@ -3432,11 +3463,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     TransientStore? transientClusterStore = null;
                     if (transientSlotMask != 0)
                     {
-                        CreateTransientClusterSegment(meta.ClusterLayout.ClusterStride, out transientClusterStore, out transientClusterSegment);
+                        CreateTransientClusterSegment(clusterLayout.ClusterStride, out transientClusterStore, out transientClusterSegment);
                     }
 
                     _archetypeStates[meta.ArchetypeId].ClusterState =
-                        AttachCellTreeFactory(ArchetypeClusterState.Create(meta.ClusterLayout, clusterSegment, transientClusterSegment, transientClusterStore));
+                        AttachCellTreeFactory(ArchetypeClusterState.Create(clusterLayout, clusterSegment, transientClusterSegment, transientClusterStore));
                 }
                 else if (TryGetPersistedArchetype(meta, out var clusterPersisted) && clusterPersisted.Arch.ClusterSegmentSPI > 0)
                 {
@@ -3447,20 +3478,20 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     // is worse than starting empty because it looks like data. Fall through to a fresh allocation; RebuildClusterFromChains re-places the
                     // entities and RebuildVersionedHeadFromChain refills the slots (#671).
                     var loaded = !isPureTransient && !hasMigratedSlot && MMF.TryLoadChunkBasedSegment(
-                        clusterPersisted.Arch.ClusterSegmentSPI, meta.ClusterLayout.ClusterStride, out loadedCluster, WalFilesPresentAtOpen);
+                        clusterPersisted.Arch.ClusterSegmentSPI, clusterLayout.ClusterStride, out loadedCluster, WalFilesPresentAtOpen);
 
                     // TransientStore segment always created fresh on reopen (Transient data doesn't survive restart)
                     ChunkBasedSegment<TransientStore> transientClusterSegment = default;
                     TransientStore? transientClusterStore = null;
                     if (transientSlotMask != 0)
                     {
-                        CreateTransientClusterSegment(meta.ClusterLayout.ClusterStride, out transientClusterStore, out transientClusterSegment);
+                        CreateTransientClusterSegment(clusterLayout.ClusterStride, out transientClusterStore, out transientClusterSegment);
                     }
 
                     if (loaded)
                     {
                         using var clusterEpoch = EpochGuard.Enter(EpochManager);
-                        var clusterState = AttachCellTreeFactory(ArchetypeClusterState.CreateFromExisting(meta.ClusterLayout, loadedCluster, transientClusterSegment, transientClusterStore));
+                        var clusterState = AttachCellTreeFactory(ArchetypeClusterState.CreateFromExisting(clusterLayout, loadedCluster, transientClusterSegment, transientClusterStore));
                         _archetypeStates[meta.ArchetypeId].ClusterState = clusterState;
 
                         // Sync TransientSegment chunk IDs with PersistentStore's active clusters
@@ -3471,16 +3502,16 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     }
                     else if (!isPureTransient)
                     {
-                        var fallbackSegment = MMF.AllocateChunkBasedSegment(PageBlockType.None, 20, meta.ClusterLayout.ClusterStride, null, 
+                        var fallbackSegment = MMF.AllocateChunkBasedSegment(PageBlockType.None, 20, clusterLayout.ClusterStride, null, 
                             StorageSegmentKind.Cluster);
                         _archetypeStates[meta.ArchetypeId].ClusterState =
-                            AttachCellTreeFactory(ArchetypeClusterState.Create(meta.ClusterLayout, fallbackSegment, transientClusterSegment, transientClusterStore));
+                            AttachCellTreeFactory(ArchetypeClusterState.Create(clusterLayout, fallbackSegment, transientClusterSegment, transientClusterStore));
                     }
                     else
                     {
                         // Pure-Transient reopen: no persisted data, create fresh
                         _archetypeStates[meta.ArchetypeId].ClusterState =
-                            AttachCellTreeFactory(ArchetypeClusterState.Create(meta.ClusterLayout, null, transientClusterSegment, transientClusterStore));
+                            AttachCellTreeFactory(ArchetypeClusterState.Create(clusterLayout, null, transientClusterSegment, transientClusterStore));
                     }
                 }
 
@@ -3882,7 +3913,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // already-consolidated. The seal below then persists CheckpointLSN from this same frontier, so the two agree by construction.
         SeedWalFrontierAfterRecovery(Math.Max(result.MaxLsn, checkpointLsn));
 
-        // #715 / CK-10. Arm the checkpoint-time SPI persistence BEFORE the seal, so the seal's own ForceCheckpoint records the per-archetype segment SPIs
+        // #715 / CK-10. Arm the checkpoint-time SPI persistence BEFORE the seal, so the seal's own forced checkpoint records the per-archetype segment SPIs
         // alongside the data it is consolidating. Arming it after (its original position, at the end of InitializeArchetypes) left a window in which the seal
         // had already advanced CheckpointLSN — and therefore reclaimed every WAL segment below it — while the metadata needed to NAVIGATE to the consolidated
         // base was still unpersisted. "The first steady-state checkpoint then records them" assumes there is one: crash again before it and the WAL no longer
@@ -4168,17 +4199,16 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // next open reads the stale bootstrap value, snapshots BELOW the consolidated revisions, and MVCC hides every one of them: the entity is alive and its
         // components read as zeros. Data loss with no error (#673).
         WalManager.SeedDurableLsn(frontierLsn);
-        CheckpointManager.ForceCheckpoint();
         // A timeout here is non-fatal: the recovered state is already correct in the page cache for this session's reads — it just
         // isn't consolidated to the data file yet, so it falls back to being re-replayed on the next open (soft recovery).
-        CheckpointManager.WaitForCheckpoint(TimeSpan.FromSeconds(30));
+        CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(30));
 
         // Persist the TSN watermark AFTER the checkpoint, never before. The recovered revisions carry their ORIGINAL TSNs — RecoveryDriver advanced
         // TransactionChain.NextFreeId past them, and ScrubVersionedChains raises it again for anything a previous consolidating checkpoint left behind (RB-05)
         // — but that value only ever reached disk on a clean shutdown. Crash here and the next open reads the stale bootstrap value, snapshots BELOW the
         // consolidated revisions, and MVCC hides every one of them: entities alive, components reading as zeros, no error (#673).
         //
-        // Ordering is not cosmetic. Writing it BEFORE ForceCheckpoint takes the page-0 exclusive latch while the checkpoint thread is mid-cycle, and the
+        // Ordering is not cosmetic. Writing it BEFORE ForceCheckpointAndWait takes the page-0 exclusive latch while the checkpoint thread is mid-cycle, and the
         // process dies. Every other bootstrap write in the engine happens at creation or clean shutdown, when nothing else is running.
         PersistNextFreeTsn();
     }

@@ -257,6 +257,10 @@ internal unsafe struct TransientStore : IPageStore, IDisposable
     }
 
     /// <inheritdoc />
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void ReleaseUnpublishedPages(ReadOnlySpan<int> pageIds, ChangeSet changeSet) { }
+
+    /// <inheritdoc />
     /// <remarks>Transient segments are never persisted, so they are not protected — no twin. JIT eliminates the stamp at the call site.</remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public int GetOrAllocateDirectoryTwin(int primaryPageIndex, ChangeSet changeSet) => 0;

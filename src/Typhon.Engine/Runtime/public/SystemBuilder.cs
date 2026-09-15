@@ -220,8 +220,10 @@ public sealed class SystemBuilder
     }
 
     /// <summary>
-    /// Assign this system to a phase (RFC 07 / Q3). Phases form a DAG-local total order declared via <see cref="Dag.Phases"/> — all systems in phase N complete
-    /// before any system in phase N+1 of the same DAG. The phase must be one declared on the owning DAG. If not called, the system lands in the DAG's default phase.
+    /// Assign this system to a phase (RFC 07 / Q3). Phases form a DAG-local total order declared via <see cref="Dag.Phases"/>, and it binds through
+    /// declared access only: this system starts after a system of an earlier phase when their declarations conflict (rule ED-05), and may run alongside
+    /// it otherwise — so declare every component it reads, including through spatial queries. The phase must be one declared on the owning DAG. If not
+    /// called, the system lands in the DAG's default phase.
     /// </summary>
     public SystemBuilder Phase(Phase phase)
     {

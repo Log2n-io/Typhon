@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-04-10 |
+| Last Updated | 2026-09-15 |
 | Domain | Spatial R-Tree, Queries, Trigger Volumes, Interest Management, Spatial Tiers (Clusters, Dormancy, Checkerboard, Migration) |
 
 > Invariants that ensure spatial query correctness, tree structural integrity,
@@ -128,7 +128,58 @@
   invariant ∀ query Q, ∀ entity E:
     E geometrically matches Q ∧ (Q.categoryMask == 0 ∨ (E.CategoryMask & Q.categoryMask) == Q.categoryMask)
     → E ∈ result set
-  scope: SpatialRTree.Query.cs (all enumerators), CountInAABB
+  invariant a cell-walking cluster query examines every cluster whose box can REACH its region, not only those filed in the cells the region
+    covers: a cluster is filed by its entities' centres, so its box can leave its own cell. Two mechanisms, complete together:
+      ClusterReach — the cell range is the query's extent grown by it (AabbClusterEnumerator, QueryRay, QueryFrustum), a whole-cell rejection
+        tests the cell grown the same way (QueryFrustum), and kNN's stopping rule subtracts it (QueryNearest)
+      EscapedClusters — every cluster whose in-world overhang exceeds ClusterReach is NAMED, at most EscapedClusterSet.Capacity of them, and
+        each query tests the named clusters its walk did not reach; kNN pushes them onto its heap before the first ring
+  invariant an EDGE cell's outward side is not counted: nothing lies beyond it, and every query's cell range is clamped into the grid, so a
+    query reaching past the world bound lands in that same edge cell. An INNER cell's box that crosses the bound counts IN FULL — the query past
+    the bound walks the edge cell and the reach's worth of cells inward of it, and must get from there to the box's home cell
+    (CellReachFrame; clipping every cell at the world bound lost exactly those entities)
+  invariant the low side of every widened cell range is stepped one double down: a box is a closed interval, so a box ending exactly on a cell
+    boundary touches a query starting there, and the floor would otherwise map that boundary to the next cell up
+  invariant ClusterReach is recomputed at the end of every fenced tick's Finalize head and of every rebuild (RefreshClusterReach), and
+    may FALL; between fences only a spawn raises it, by the spawned entity's own in-world
+    overhang, before the entity is queryable (RaiseClusterReachForSpawn). A move reaches the index at the fence — or earlier only widened,
+    through a spawn's widen or a tree demotion — so a moved entity is reachable from the fence after its write. An archetype the fence
+    skips (FenceBranchPath 0: Static with a clean bitmap, pure-Transient) is not recomputed: its index gains only spawns, each raised for,
+    and loses only removals, so its reach still covers; it cannot fall until the archetype's next fenced tick
+  invariant the recompute reads ClusterAabbs, not the index, and is complete because at the fence's end every index box lies inside its
+    cluster's ClusterAabbs entry: every index write stores that entry's value at the time (a promotion copies an earlier one), between
+    writes the entry only grows, and the one pass that shrinks it — the AABB refresh — republishes the box to the index in the same pass.
+    A write that stores anything else into the index breaks SQ-01 silently. So does a grow of the ClusterAabbs ARRAY that drops a
+    concurrent write: its two lock-free writers, a spawn's widen and WriteSpatial's grow, redo any write a copy may have missed
+    (BeginClusterAabbsWrite / ClusterAabbsWriteLanded). ReachCoversIndex catches a violation in a linear half, whose stored boxes it
+    walks; a promoted half's boxes cannot be read back out of its tree, so there it checks nothing about this bound.
+    The fast reject's float bounds are rounded inward (RejectBounds), so it never drops a box the exact test would keep
+  invariant kNN keys a named cluster by its LIVE box (ClusterAabbs), never the set's fence-time copy: a spawn into it since the fence widens the
+    box, and a stale lower bound lets the stopping rule end the search before the cluster is opened
+  never widen every query by a bound that cannot fall. MaxClusterOverhang did (2026-09-12): one transient outlier — an entity teleported and
+    not yet migrated — then cost every later query of the archetype ~50x its cells for the rest of the process, SWG Tatooine's whole-run slow
+    mode and its x128 multi-second ticks; and the out-of-world half of edge-cell boxes widened every Creature query by ~930 m from tick 0
+  invariant a named cluster whose chunk id was freed and reused in another cell is skipped (EscapedClusterSet.IsCurrent) — opened, it would
+    report the reused cluster's entities a second time
+  scope: SpatialRTree.Query.cs (all enumerators), CountInAABB, AabbClusterEnumerator, ArchetypeClusterState.QueryRay,
+    ArchetypeClusterState.QueryFrustum, ArchetypeClusterState.QueryNearest, ArchetypeClusterState.CoveredRadiusSq,
+    ArchetypeClusterState.ClusterReach, ArchetypeClusterState.EscapedClusters, ArchetypeClusterState.RefreshClusterReach,
+    ArchetypeClusterState.RaiseClusterReachForSpawn, ArchetypeClusterState.CellReachFrame, ArchetypeClusterState.FoldReach,
+    ArchetypeClusterState.RejectBounds, ArchetypeClusterState.BeginClusterAabbsWrite, ArchetypeClusterState.ClusterAabbsWriteLanded,
+    ClusterRef.ApplySpatialWrite,
+    ArchetypeClusterState.ReachCoversIndex, ArchetypeClusterState.RebuildClusterAabbs, ArchetypeClusterState.RebuildSpatialStateFromData,
+    DatabaseEngine.FinalizeArchetypeFenceHead, Transaction.FinalizeSpawns, EscapedClusterSet, EscapedClusterSet.IsCurrent, ClusterRadiusBatch
+  verified: ClusterOverhangTests — one entity filed a row below each query and reaching 0.1 into it, found by AABB (all three drains),
+    radius, ray and frustum; AabbClusterEnumeratorDrainTests' oracle on a scattered population (added 2026-09-12, #906 — before it every
+    one of those four missed the entity); ClusterReachTests — an edge cell's out-of-world overhang widens nothing, an inner cell's box
+    crossing the bound is reached from beyond it, a box ending on a cell boundary is found by a query starting there, a named outlier is
+    found by every query shape (and by a frustum with a generous bounding box) without widening, kNN finds an entity spawned into a named
+    cluster before the fence, the reach falls at the next fence once the outlier is gone, more outliers than the capacity stay exact
+    against an oracle (AABB all drains, radius, kNN), a spawn is reachable before any fence, FoldReach's table, RejectBounds inward and
+    tight, a grow of ClusterAabbs sending a writer round again, spawns widening clusters while the array grows losing no widen, and IsCurrent
+    rejecting a freed or reused id (EscapedClusterSet_IsCurrent_RejectsAFreedOrReusedChunkId); ReachCoversIndex is asserted after every
+    fence and spawn; ClusterRadiusBatchTests.ANamedOutlier_IsFoundByEachMemberAsByItsOwnQuery — a batch member finds a named outlier as its own
+    query does, and once when its own walk reaches the outlier's home cell
   on_violation: spatial query misses entities — game logic sees incomplete world state
   requires: ST-01 (MBR correctness), ST-02 (union mask not under-representing)
 
@@ -141,7 +192,45 @@
 
 ### SQ-03: Count query consistency `[fatal]`
   invariant CountInAABB(region, mask) == |{ E : E ∈ QueryAABB(region, mask) }|
-  scope: SpatialRTree.CountInAABB, AABBQueryEnumerator
+  invariant the cluster query's three drains answer the same question: from any point of an enumeration, Count() returns the number of
+    further MoveNext() hits, and Fill() yields MoveNext()'s results in MoveNext()'s order, whatever the buffer size. They share one
+    narrowphase (DrainTier → Drain, one loop per storage tier, differing only in the sink) and one cluster walk (NextCluster), which is what
+    holds this; a drain with its own copy of either is the violation waiting to happen.
+  invariant the AABB2F tier's block kernel is that one narrowphase, not a second copy: NarrowphaseAabb2F decides each entity of a 16-entity block
+    with the loop's own predicates — SpatialGeometry.IsDegenerate on the stored floats, then the four skip conditions and the MaxNative clamp
+    distance in f64, written as skips because the positive form differs on a NaN query bound — so kernel and loop answer identically, entity for
+    entity. It runs once per cluster (DecideBlocks), for all three drains alike: it drops the slots it rejects and Count adds the ones it approves
+    as a popcount, while MoveNext and Fill walk the approved slots through the loop, which tests each again, so a result's bounds come from the read
+    that tested them. Blocks too sparse to pay for a kernel pass (under two occupied slots for Count, under three for MoveNext and Fill), and the
+    slots past the last whole block, go straight to the loop.
+  invariant the batched radius query (ClusterSpatialQuery.CountRadius / ForEachInRadius, ClusterRadiusBatch) answers each member exactly as that
+    member's own Radius query: counts[j] == Radius(members[j]).Count(), and the sink receives member j's hits in its MoveNext order with the same
+    bounds and DistanceSq. It shares the narrowphase (DrainCluster, ApplyBlockKernel at Count's and MoveNext's thresholds) and has its own walk,
+    held to each member's single walk three ways: a cell is visited for the members whose OWN reach-widened range holds it, and only those; a
+    cluster is opened for the members whose own cell-frame box overlaps its index box, by the single query's predicate, and not at all when none
+    does; the named outliers come after the walk, per member, with the single query's tests (EscapedClusterSet.Reaches and
+    AabbClusterEnumerator.CategoryAdmits, shared with the single query). Cells are visited in the single walk's order, so a member's hits keep
+    theirs; a promoted half is queried per member. The equality is with a single query run over the SAME index: a sink's own writes (a spawn
+    reachable before the fence) may land between two members' walks, as they would between two single queries
+  scope: SpatialRTree.CountInAABB, AABBQueryEnumerator, AabbClusterEnumerator.Count, AabbClusterEnumerator.Fill, AabbClusterEnumerator.DrainTier,
+    AabbClusterEnumerator.DrainCluster, AabbClusterEnumerator.Drain, AabbClusterEnumerator.DecideBlocks, AabbClusterEnumerator.DecideBlocksCore,
+    AabbClusterEnumerator.ApplyBlockKernel, NarrowphaseAabb2F.MatchAvx512, NarrowphaseAabb2F.MatchAvx2, ClusterRadiusBatch,
+    ClusterSpatialQuery`1.CountRadius, ClusterSpatialQuery`1.ForEachInRadius
+  verified by: AabbClusterEnumeratorDrainTests — MoveNext against an oracle computed from the spawned bounds (set, bounds and DistanceSq bit for
+    bit), Count and Fill against MoveNext, on the scalar scan, the batched scan past one 64-slot batch, a promoted cell and every storage tier;
+    resume after MoveNext for both; and each tier's bounds reader against ReadAndValidateBoundsFromPtr on valid, NaN, inverted and infinite input.
+    The block kernel: Drains_MatchTheOracle_WithTheAabb2FBlockKernel_AndWithout (scattered clusters, full clusters and a promoted cell, kernel on
+    and off, both against the oracle), Drains_MatchTheOracle_WhenTheClusterEndsInAPartialBlock (59-slot clusters: three blocks and an 11-slot tail
+    through the loop) and Resume_AfterMoveNext_ThroughTheAabb2FBlockKernel; NarrowphaseAabb2FTests holds each kernel (AVX-512, AVX2) to the loop ITSELF
+    — AabbClusterEnumerator.Drain run over the same column, not a transcription of it — over 40 000 random cases seeded with NaN, infinite, inverted,
+    touching, denormal and 2^36 inputs and NaN / infinite query bounds, which the enumerator cannot be driven with (it rejects a non-finite query box);
+    its mutants APositiveFormPredicate_IsCaughtByTheComparison and AQueryNarrowedToF32_IsCaughtByTheComparison show the comparison rejects the positive
+    form and an f32 query. The batch: ClusterRadiusBatchTests.EachMember_IsAnsweredAsItsOwnRadiusQuery holds every member's count and hit
+    sequence to its own query's, bit for bit, on scattered, full and promoted cells, kernel on and off, on AABB2F, a wide AABB2F component and
+    BSphere2F, with a member diagonally far from the others, two at opposite ends of a row, a negative radius and members at one point; under a
+    category mask that admits the archetype and one that rejects it; and with members retiring after 1-4 hits.
+    ANamedOutlier_IsFoundByEachMemberAsByItsOwnQuery adds members in the outlier's home row and column. Run by hand when written (2026-09-13):
+    dropping the named-outlier pass and reversing the batched scan's order each redden them
   on_violation: count disagrees with materialized query — game logic makes wrong density decisions
 
 ### SQ-04: Subtree counting shortcut correctness `[fatal]`
@@ -156,7 +245,30 @@
   invariant stackTop < 256 for all DFS-based queries
   invariant RayEnumerator never drops a child that hits within maxDist while below MaxRayHeapCapacity
   invariant 🔴 ∀ two enumerators live on one thread at once: their traversal stacks are DISTINCT arrays
-  scope: AABBQueryEnumerator, FrustumEnumerator, CountInAABB, RayEnumerator, QueryStackPool
+  invariant 🔴 ∀ two AabbClusterEnumerators live on one thread at once: their narrowphase page windows are DISTINCT
+    SpatialQueryAccessorCache entries, and a return is honoured only under the token its rent stamped
+  invariant a radius batch (ClusterRadiusBatch) holds ONE window for the whole batch, rented on its first cluster and handed back in a finally:
+    a sink that throws does not keep it, and a sink's own queries rent windows of their own. verified by ClusterRadiusBatchTests
+    (ASinkThatRunsItsOwnQuery_GetsItsOwnWindow; ASinkThatThrows_HandsTheWindowBack, which a batch without the finally reddens)
+  scope: AABBQueryEnumerator, FrustumEnumerator, CountInAABB, RayEnumerator, QueryStackPool, SpatialQueryAccessorCache, ClusterRadiusBatch
+  warm window (added 2026-09-12, #906): the cluster query no longer builds a ChunkAccessor per query. It rents this thread's warm window
+    over the cluster segment from SpatialQueryAccessorCache on its first cluster open (or a promoted half's first tree hit) and hands it back
+    — WITHOUT disposing it — when the query is exhausted or disposed, so the next query on the thread finds its pages resident. Same two
+    hazards as the pooled stack below, same defences: a rented entry is never given to a second rent (a nested query takes another entry,
+    and past TrimAbove an overflow entry that is not kept), and since GetEnumerator() returns a copy that carries the rent too, a return is
+    honoured only under its rent's token — and bumps it, so a copy that carries on after the return throws instead of reading a window
+    another query may hold.
+    An entry is NOT tied to the epoch it was filled in, unlike the B+Tree's warm accessor: its slots pin their pages through SlotRefCount
+    and eviction requires SlotRefCount == 0. Tying it to the epoch would make it useless — the global epoch advances on every outermost scope
+    exit. But an address from a warm window is valid only until the next GetChunkAddress on that window, not for the enclosing EpochGuard:
+    a slot evicted from the window drops its pin at once, and a page an earlier query loaded carries an old AccessEpoch.
+    Pins are released by SpatialQueryAccessorCache.Release(mmf) — an engine's call on its page cache's back-pressure and at its dispose,
+    reaching every thread's free entries over THAT cache and no other — by an entry's finalizer when its thread dies, and by recycling past
+    TrimAbove. An entry a release emptied is refilled by its thread's next query rather than replaced, so re-warming allocates nothing; a
+    process-wide release made one engine's dispose cost every other engine's next query a new entry.
+    verified by: SpatialQueryAccessorCacheTests (incl. Release_UnpinsFreeWindows_AndTheNextQueryRefillsTheSameEntryWithoutAllocating,
+    ReleasingAnotherPageCache_LeavesThisEnginesWindowWarm), AabbClusterEnumeratorDrainTests (stale copy throws; a query drained without
+    Dispose hands its window back)
   pooled stack (added 2026-09-08, #916 O1): AABBQueryEnumerator's stack is no longer the inline
     QueryStackBuffer. It is an int[256] rented from QueryStackPool, a per-thread FREE LIST, and returned in
     Dispose. Capacity is unchanged, so the 256 bound above still reads against the same number — PushChild
@@ -216,7 +328,10 @@
     broadphase — cluster bound vs query box, CELL-RELATIVE f32 (C15). SetCellQueryFrame converts once per cell;
                  the ray and kNN paths convert the CLUSTER bound outward instead, through ToWorldExact.
     narrowphase — entity bound vs query box, WORLD f64. Both sides come from the component and the caller
-                  unnarrowed; ReadAndValidateBoundsFromPtr has always produced doubles.
+                  unnarrowed; ReadAndValidateBoundsFromPtr has always produced doubles, and so do the per-tier
+                  readers AabbClusterEnumerator drains through (#906 step 3) — widening an f32 bound is exact. The AABB2F block
+                  kernel (NarrowphaseAabb2F) widens each transposed lane to f64 before its overlap and radius tests; its only f32 step is
+                  the degenerate test, which the scalar reader also runs on the stored floats.
     never narrow the world frame to f32 anywhere on the query path, in ANY of the four shapes — AABB, radius, ray,
     frustum, kNN. At 2^36 one f32 step is 8 192 units — wider than a 1 000-unit cell — so an f32 narrowphase
     compares two coordinates that are the SAME number and accepts every entity in the cell. That is a false
@@ -248,7 +363,7 @@
          ClusterSpatialQuery`1.AABB, ClusterSpatialQuery`1.Radius,
          SpatialGrid.ReadSpatialCenter3D, SpatialGrid.ValidateSupportedFieldType,
          SpatialGrid.ValidateWorldExtentForFieldType, SpatialGrid.AxisIsResolvableInF32,
-         ClusterSpatialAabb.ToWorldExact, ClusterWorldAabb, Vector3Like
+         ClusterSpatialAabb.ToWorldExact, ClusterWorldAabb, Vector3Like, NarrowphaseAabb2F
   verified: F64SpatialTierTests — NarrowQueryBoxAtExtent_SelectsOneOfTwoEntitiesInTheSameCell,
     OneUnitQueryBoxAtExtent_ReturnsExactlyTheEntityInsideIt and ResultBoundsComeBackAtFullPrecision cover the
     width invariant for AABB; RayAtExtent_HitsTheEntityInItsPathAndNotTheOneBesideIt,
@@ -263,7 +378,9 @@
     property it stands for, quantified over position rather than sampled at one point. Each precision case carries a PRECONDITION assertion
     that f32 cannot represent it, so a fixture that drifted to a smaller magnitude fails loudly instead of passing
     for the wrong reason.
-  note no [RuleMutant]: every mutant for this rule is an EDIT TO ENGINE CODE — narrow the narrowphase, the ray
+  note one [RuleMutant] only, for the AABB2F block kernel: NarrowphaseAabb2FTests.AQueryNarrowedToF32_IsCaughtByTheComparison
+    runs a predicate that narrows the query to f32 through the comparison that holds each kernel to the loop, and the
+    comparison catches it. Every other mutant for this rule is an EDIT TO ENGINE CODE — narrow the loop, the ray
     origin, the kNN operands or the frustum's bounding box to f32; restore the two-way dimensionality test; make
     the extent check always pass — not an input that can be driven through a verifier's assertion path.
     All six were run by hand when the rule was written (2026-09-08) and each reddens exactly the cases above.
@@ -382,13 +499,13 @@
      ClusterShrinkPendingAxes; and on the common grow path the CAS-grown superset is kept, never re-tightened,
      so "exact union" holds only when shrinkMask != 0)
   invariant 🔴 ClusterAabbs[chunkId] has EXACTLY ONE writer class at any instant:
-    (a) CAS-grow from ClusterRef.WriteSpatial / MaybeGrowAndFlagShrink, during system dispatch
+    (a) CAS-grow from ClusterRef.WriteSpatial, one slot (MaybeGrowAndFlagShrink) or a slot set (WriteSpatialSet, CA-03), during system dispatch
     (b) blind full-struct store from the AabbRefresh fence phase
     The tick barrier separating dispatch from the fence is what makes (b) safe, and it is LOAD-BEARING. Relax it and
     the fence store silently discards concurrent grows → AABB too tight → this rule's own containment fails.
   scope: ArchetypeClusterState.RecomputeClusterAabb, RecomputeDirtyClusterAabbs, RecomputeDirtyClusterAabbsSlice
          (the parallel path that performs the store), RebuildClusterAabbs,
-         ClusterRef.WriteSpatial / MaybeGrowAndFlagShrink (the concurrent writer class),
+         ClusterRef.WriteSpatial / MaybeGrowAndFlagShrink / WriteSpatialSet (the concurrent writer class),
          ClusterRef.TryGetCellOrigin, ClusterSpatialAabb.ToCellRelativeMin, ClusterSpatialAabb.ToCellRelativeMax,
          SpatialGrid.CellOrigin (the frame the containment is expressed in — C15),
          AabbClusterEnumerator.SetCellQueryFrame (the query half; without it the invariant is unobservable)
@@ -417,21 +534,25 @@
     On the SpatialBarrierOnly branch the comparison was worse than wrong, it was a TAUTOLOGY: `fresh` is assigned
     from `stored` when no shrink is pending, so a grow-only tick could never update the index at all — and both
     demos run barrier-only.
-  invariant the signal is ClusterProcessBitmap, which WriteSpatial sets on exactly `aabbChanged || migrationFlagged`
+  invariant the signal is ClusterProcessBitmap, which WriteSpatial sets on exactly `aabbChanged || migrationFlagged` (its slot-set form
+    once, when its publication grows the bound, flags a shrink or flags a crossing: CA-03)
     and ClearAabbRefreshBookkeeping zeroes once per tick. A writer that leaves ClusterAabbs alone for the fence to
     recompute (OpenMut / GetSpan) sets no bit, which is precisely the case where equality does mean nothing changed.
   invariant 🔴 OUTSIDE the fence, on user threads (#872 step 15 review): a cluster is in its cell's index from the moment
     it is in the cell's pool — the allocation site adds it under _finalizeLock with an EMPTY box before AddCluster
     publishes it (AddClusterToPerCellIndexLocked) — and every spawner thereafter only WIDENS: ClusterAabbs by per-axis
-    CAS (ClusterSpatialAabb.WidenCas2F/3F), the linear index slot by per-axis CAS that re-validates against a concurrent
-    grow (CellSpatialIndex.WidenAt), a promoted half under _finalizeLock (WidenClusterInPerCellIndex). Before this a
+    CAS (ClusterSpatialAabb.WidenCas2F/3F), the linear index slot by per-axis CAS kept only if the index's growth stamp
+    has not moved (CellSpatialIndex.WidenAt), a promoted half under _finalizeLock (WidenClusterInPerCellIndex). Before this a
     fresh cluster was published first, so two spawners both took the "first entity" branch — two index entries, one
     orphaned, and a reset that wiped the other's widening — and a plain-store widen landed in an array a grow had
     abandoned. Verified before any fence by
-    ClusterPlacementTests.ConcurrentSpawnsIntoOneCellLeaveTheIndexExactBeforeAnyFence
+    ClusterPlacementTests.ConcurrentSpawnsIntoOneCellLeaveTheIndexExactBeforeAnyFence, and a widen across a grow's copy by
+    CellSpatialIndexTests.AWidenDuringAGrowsCopy_LandsInTheGrownArrays and AWidenStampedBeforeAGrow_IsRedoneInTheGrownArrays
+    (mutants: the first form's re-check of ClusterIds, which the grow publishes last, and a widen with no re-check; both
+    lose the widen)
   scope: ArchetypeClusterState.RecomputeDirtyClusterAabbsSlice, ArchetypeClusterState.IsClusterProcessBitSet,
     ArchetypeClusterState.ApplyOrDeferClusterUpdate, ArchetypeClusterState.UpdateClusterInPerCellIndex,
-    ClusterRef.MaybeGrowAndFlagShrink
+    ClusterRef.MaybeGrowAndFlagShrink, ClusterRef.WriteSpatialSet, CellSpatialIndex.WidenAt
   verified: CellTreeParallelFenceTests.CellIndexTracksClusterAabbs_AfterAWriteTimeGrow (both slicing branches,
     50 serial fence ticks of rotation, queries compared against entity positions read straight out of cluster
     storage). Pre-fix it failed on both branches with the index one to two ticks inside ClusterAabbs on every axis.
@@ -441,6 +562,38 @@
   requires: CA-01 (ClusterAabbs itself contains the entities)
 
 ---
+
+### CA-03: A slot-set WriteSpatial is its single writes, published once `[fatal][silent]`
+  invariant on one thread, ClusterRef.WriteSpatial(comp, slots, values) leaves the cluster as WriteSpatial(comp, i, values[i]) for every i of
+            slots, in ascending order, would: the same slot values, ClusterAabbs entry, shrink and migration flags, destination hint,
+            MigrationHint, HysteresisAbsorbedLive and process bit. Each slot is tested against the bound as the writes before it have grown it,
+            which is what the single write finds at that slot
+  invariant the grow is carried in world space and converted only when a box extends the union, exact because ToCellRelativeMin/Max are
+            monotonic: converting the union is uniting the conversions. The union skips a NaN bound, as the single write's compare does. The
+            two forms decode the field separately, the set through AabbClusterEnumerator's IBoundsReader and the single through its per-tier
+            specialization, and must widen it the same way
+  invariant a slot beyond the cluster or beyond values is refused before anything is written, in every build: a slot past the cluster would
+            write into the next column
+  invariant a slot whose position is not finite stops the call where the single write throws (WorldToCellKey refuses a non-finite centre):
+            the slots before it and that slot's own grow are published, the slots after it are not written, and the same exception is thrown.
+            The one difference: the process bit is set when that slot's grow changed the bound, which the single write leaves clear
+  on_violation: a grow lost → CA-01's bound too tight → silent query false negatives; a migration flag lost → an entity stranded outside its
+    cell (CC-02); a shrink flag lost or added → a bound left loose or rescanned for nothing
+  note: a writer running on the same cluster meanwhile, a spawn widening it or a write to another of its slots, is seen by single writes as
+        they go and by the call only when it publishes. The shrink flags and the process bit can then differ; the grow, CA-01's containment and
+        the migration flags cannot. A widening the call leaves unflagged is flagged or indexed by the writer that made it: a write sets the
+        process bit itself, a spawn widens the index (CA-02), so neither the bound nor the index can end up too tight
+  scope: ClusterRef.WriteSpatial, ClusterRef.WriteSpatialSet, AabbClusterEnumerator.IBoundsReader, ClusterSpatialAabb.ToCellRelativeMin,
+         ClusterSpatialAabb.ToCellRelativeMax
+  verified: SpatialSetWriteTests.ASetWrite_LeavesTheClusterAsItsSingleWrites (all eight field types: two engines from one seed, one written
+            slot by slot, the other by slot set, with a cluster full to its last slot; every cluster's slot values, bound, flags and counters
+            compared for equality before the fence, entity cells and CA-01 after it);
+            SpatialSetWriteTests.ASetWriteThatChangesNothing_SetsNoProcessBit (every other slot rewritten unchanged: a partial mask, and a process
+            bit that must stay clear in both); SpatialSetWriteTests.ANonFinitePosition_PublishesTheSlotsBeforeIt;
+            SpatialSetWriteTests.ASlotBeyondTheValuesOrTheCluster_IsRefused (on a tier whose cluster holds fewer than 64 slots)
+  note: no RuleMutant. Hand-made mutants of WriteSpatialSet, each caught with this rule's marker: the X-min grow dropped, the migration flag
+        dropped, the shrink tested against the bound as the call began instead of as the earlier writes grew it, every shrink flag set, the
+        process bit set unconditionally, the cluster half of the bounds check removed, the non-finite stop removed
 
 ## Module: VDB Cell Grid (Issue #872 step 8)
 
@@ -1037,6 +1190,140 @@
     invalidate omitted → the re-packed cluster inherits a stale wide bound and prunes nothing
     invalidate without a following widen → the map reads "unknown", which is conservative but buys no pruning
 
+### TH-04: The maintenance budget follows the queries' efficiency, and the configured budget is its ceiling `[perf][silent]`
+  invariant every consumer of the re-clustering budget — the repair planner (DatabaseEngine.FinishArchetypeFencePrep), the throttle
+    (ApplyMigrationThrottle) and the drift scan's nomination cap (ComputeDriftNominationCap) — spends MaintenanceBudgetNs: ReclusterBudgetMs times
+    MaintenanceBudgetScale, in [MinMaintenanceBudgetScale, 1]. ReclusterBudgetMs is the ceiling. The scale never turns a positive budget into zero,
+    which the throttle reads as NO ENFORCEMENT, nor a zero one into a positive: ReclusterBudgetMs = 0 keeps meaning what TH-01 says
+  invariant the scale is set ONCE per archetype per tick, in ResetArchetypeFenceTickState, from the tick's query tally (SO-02) and before any consumer
+    reads it: the planner and the throttle in Prep's tail, the nomination cap in AabbRefresh
+  invariant the signal is candidates and hits each smoothed over about twenty ticks (EWMA weight 0.05) and then divided, never a mean of per-tick
+    ratios, so a tick with a handful of hits weighs what its handful is worth
+  invariant best = min(best, smoothed) on every tick with a signal — lowered, never raised — and
+    scale = clamp((smoothed / best - 1) / QueryEfficiencyTolerance, MinMaintenanceBudgetScale, 1): next to nothing at the best, the whole budget at the
+    tolerance above it. The one exception is the re-base: on a tick at the whole budget that follows EfficiencyRebaseTicks consecutive such ticks — the
+    whole budget set by the distance, not by a fall-back — best = smoothed and the scale falls to its floor. It is decided on that tick's own distance,
+    so a tick the whole budget has just brought back inside the tolerance never re-bases; what the whole budget could not recover in that time is taken
+    as the world's. 200 ticks: chosen, not measured, and paired with RepairCooldownTicks' default of 50
+  invariant a decline slower than any fixed rate still raises the budget. The creep this replaced (best x 1.0001 a tick) followed every decline slower
+    than itself: on the SWG demo it carried a starved archetype's best up 5-8 % in 1 000 ticks, its queries with it, and the controller granted nothing
+  invariant WITHOUT a signal — no range query lately, or only nearest-neighbour, ray and frustum queries, which SO-02 does not count — and with
+    QueryEfficiencyTolerance 0, the scale is 1: the configured budget, exactly as before the controller. The signal is gained at one smoothed hit a
+    tick and lost below half of that, so an archetype queried near the threshold does not flip between the floor and the whole budget. The
+    experiment granted next to nothing without a signal, which starves a world queried only through the kinds the tally cannot see
+  invariant a distance that is not finite leaves the scale at 1: NaN would pass every "budget <= 0" test downstream and read as no enforcement.
+    SO-02 keeps candidates at or above hits, so nothing reaches it today
+  invariant only an archetype with a dynamic spatial field is GRANTED anything in ReclusterBudgetGrantedMs: every archetype has a cluster state, and one
+    with nothing to relocate or repair reported the whole budget, which the engine-wide total then summed
+  invariant a budget at its floor stops relocations and ordinary repair units, never correctness: cell crossings are charged and never refused
+    (TH-01), and the safety valve still admits a critical cell's unit. At the floor the planner stops before pricing a unit, so RepairUnitsRefused
+    reads zero there, and the nominations keep arriving, so the repair queue fills to RepairQueueMaxCells and is re-ranked for nothing — the work
+    item 4 of the build order (skip the re-rank when the budget cannot pay for a unit) would remove, deferred as worth at most the planner's span there
+  invariant the drift target's boost (step 14, D2) reads a tick whose relocations were all throttled as budget pressure, whoever throttled them. At the
+    floor it therefore rises to its cap within about seven ticks and relocation detection stops, and when the budget returns it takes at least 28
+    unthrottled ticks to decay. Accepted rather than coupled to the scale: at the floor nothing would be admitted, so the detection it stops is work
+    saved, and its recovery is of the order of the smoothing's twenty ticks
+  invariant it holds the best seen, it does not seek it: a world whose clusters start loose reads that as its best and gets next to no maintenance to
+    improve it. A low outlier, whenever it comes, raises the grant by its depth: deeper than the tolerance it holds the budget whole until the re-base,
+    shallower it keeps that share of the budget for good; and a lasting shift smaller than the tolerance is never absorbed, since absorbing it is what
+    the creep did. All of these err toward the configured budget. Spawn placement and the safety valve bound the loose world; nothing here does
+  invariant every re-base is counted (SpatialMigrationTelemetry.TotalEfficiencyRebases) and carried in the trace's per-archetype record (kind 66) both
+    as that cumulative count, which a dropped record or a late attach cannot lose, and as a flag on its own tick (bit 1 of the controller flags), beside
+    the streak toward the next (TicksAtWholeBudget): the event that says maintenance could not keep up. The record is emitted every tick for every
+    archetype with cluster state, whatever path its fence took, so the trace's tally sums to the accessors'
+  invariant only an archetype with something to spend a budget on — a dynamic spatial field (SpendsMaintenance) — keeps a streak or re-bases, and only
+    those enter the engine-wide controller readings. The others' queries are still tallied, static halves included; no controller acts on them
+  scope: SpatialGridConfig.QueryEfficiencyTolerance, ArchetypeClusterState.UpdateMaintenanceBudgetScale, ArchetypeClusterState.MaintenanceBudgetNs,
+    ArchetypeClusterState.MaintenanceBudgetScale, ArchetypeClusterState.MinMaintenanceBudgetScale, ArchetypeClusterState.EfficiencyRebaseTicks,
+    ArchetypeClusterState.HasQuerySignal, ArchetypeClusterState.ApplyMigrationThrottle, ArchetypeClusterState.ComputeDriftNominationCap,
+    ArchetypeClusterState.RecomputeDirtyClusterAabbsSlice, ArchetypeClusterState.UpdateDriftTargetBoost, DatabaseEngine.FinishArchetypeFencePrep,
+    DatabaseEngine.ResetArchetypeFenceTickState, DatabaseEngine.PrepareArchetypeFenceHeads, DatabaseEngine.PrepareArchetypeFenceCore,
+    DatabaseEngine.GetSpatialTelemetry, DatabaseEngine.GetSpatialTelemetryTotal, SpatialMigrationTelemetry.ReclusterBudgetGrantedMs,
+    SpatialMigrationTelemetry.QueryCandidatesPerHitSmoothed, SpatialMigrationTelemetry.QueryCandidatesPerHitBest,
+    SpatialMigrationTelemetry.TotalEfficiencyRebases, SpatialMigrationTelemetry.TicksAtWholeBudget, ArchetypeClusterState.ControllerFlags,
+    ArchetypeClusterState.SpendsMaintenance, DatabaseEngine.EmitSpatialArchetypeSnapshot, DatabaseEngine.FinalizeArchetypeFenceHead
+  requires: SO-02, TH-01
+  verified: ClusterThrottleBudgetTests.AtTheBestEfficiencyTheQueriesHaveShown_TheBudgetAdmitsNoRelocation — a whole-cell query every tick, every
+    candidate a hit, grants next to nothing and admits no relocation from the first throttle after the first query, while the motion keeps producing
+    them; its mutant WithTheControllerOff_TheSameQueriesLeaveTheBudgetWhole. AtTheBestEfficiency_TheRepairPlannerAdmitsNoUnit holds the planner to
+    it, with its mutant WithTheControllerOff_ThePlannerRepairsTheSameCell. TheScaleIsTheDistanceFromTheBest_OverTheTolerance drives the arithmetic,
+    the ceiling and the nomination cap's floor; ASlowDecline_IsNotFollowedByTheBest_ItRaisesTheBudget a decline at half the old creep's rate, which
+    the creep followed (restoring it reddens this test and the next); AfterTheRebaseWindowAtTheWholeBudget_ThePresentLevelBecomesTheBest the re-base,
+    to the tick, with its count, streak and trace flags; AWindowTheQueriesInterrupt_StartsAgain_AndDoesNotRebase that the window is consecutive, and
+    AWholeBudgetByFallBack_DoesNotCountTowardTheWindow that only a whole budget the distance set counts (each reddened by its mutant, run by hand);
+    WithoutASignal_TheConfiguredBudgetStands_AndReturnsWhenTheSignalFades,
+    WithTheControllerOff_TheConfiguredBudgetStands_HoweverGoodTheQueries and AZeroBudget_StaysUnenforced_WhateverTheQueriesSay the fall-backs and the
+    signal's hysteresis; SpatialMigrationTelemetryTests.Total_SumsTheGrantedBudget_AndWeightsTheControllerReadingsByHits the fold, with an
+    archetype that has no spatial field granted nothing, and Total_SumsTheRebases_AndMaxesTheStreakAndTheBoost the fold of the re-base count;
+    AnArchetypeWithNothingToSpend_KeepsNoStreak_NeverRebases_AndStaysOutOfTheControllerTotals the gate on spending
+  on_violation: a fixed budget spent on a partition the queries already find tight — the churn RP-07 stops, paid for again; or, the other way, a
+    world whose queries the tally cannot see starved of maintenance
+
+### RP-07: A repaired cell is not repaired again until its cooldown ends, and what it is nominated for meanwhile is held `[perf][silent]`
+  invariant a unit that MOVED entities starts its cell's cooldown: RepairCooldownTicks ticks during which the cell
+    is not a queue candidate — not ranked, not serviced, not offered the valve, not counted against
+    RepairQueueMaxCells. A unit that moved nothing — RP-03's already-packed verdict, one cluster, a population below
+    two — and a refused unit start none: none of them was a repair, and RP-03's memo already stops the first recurring
+  invariant 🔴 what the cooldown removes is CHURN, and it was measured before it was built. Nomination fires on extent,
+    and under motion a re-packed cell spreads out again within a few ticks; RP-03's no-op memo stops a converged cell
+    re-packing only while its geometry holds still, so the planner re-sorted the same cells on every tick for a gain
+    the next ticks undid. SWG Tatooine, 2026-09-15: intra-cell maintenance was 13–51 % of the tick; the cooldown as
+    built took a median 6 %, 20 % and 37 % off the tick at 64×, 16× and 4× population, three paired 20 s runs each,
+    with query cost within 3 %, and the experiment before it took nothing off a mostly still world. In the engine's
+    own ClusterDensityTargetTests scenario, measured: a unit on every one of eleven ticks at cooldown 0, on two at 50
+  invariant nominations for a cooling cell are HELD at the worst degradation seen, and the cell re-enters the queue
+    when the cooldown ends WHETHER OR NOT it is nominated again. Dropping them would lose the cell RP-04 exists to
+    see: on the barrier-only path one that goes still while it cools is never nominated again. A cell nothing
+    nominated while it cooled does not re-enter — it had nothing left to repair. A released cell comes in like any
+    newcomer, so at RepairQueueMaxCells it can be evicted (TH-03)
+  invariant 🔴 the fence's early-out asks CellRepairQueue.NeedsPlanning — a candidate waiting, or a cooldown ending —
+    never Count. A cooling cell is not a candidate and the planner is what ends cooldowns, so a Count test skipped
+    the planner on every tick with no nomination and no candidate, and a still cell stayed cooling until some
+    unrelated cell nominated — the valve's bound gone with it. The first version shipped the Count test; review found it
+  invariant cooldowns end at the top of the planner, before the tick's nominations are absorbed and before the
+    rank — and on the idle absorb path, so RepairCellsCooling never counts a cell whose cooldown is over. In repair
+    order: one cooldown for every cell makes release order repair order, so a tick pays for the cells it releases and
+    nothing else. That rests on tick numbers increasing from fence to fence, which the fence already requires: a
+    repeated tick never ends a cooldown, a decreasing one delays releases behind an older head, and neither corrupts
+  invariant the valve's bound on degradation (RP-01, AC-11.2) stretches by RepairCooldownTicks: a cell repaired on
+    tick T is a candidate again on tick T + RepairCooldownTicks, at its held degradation, and the valve applies from
+    there — in an archetype that is planned; one nothing writes is not planned at all (TH-03). Meanwhile a cluster
+    of it above the repair gate is not drift-scanned either (CR-03), so the cell gets no intra-cell maintenance at
+    all for that long — which is the saving, and the price
+  invariant the cooling state lies outside RepairQueueMaxCells, bounded by the cells repaired in the last
+    RepairCooldownTicks ticks. 0 disables the cooldown, and so does 1, since a cell repaired on tick T is eligible
+    again from T + 1 anyway: MarkRepaired then forgets the cell exactly as Remove does
+  invariant the state is transient like the queue's (TH-03): Clear drops the cooling cells with the candidates,
+    because a cell key is a pool slot and names another cell after a rebuild
+  requires: TH-03 (the queue a cooling cell is held out of, and the planning its release waits for)
+  scope: SpatialGridConfig.RepairCooldownTicks, CellRepairQueue.MarkRepaired, CellRepairQueue.ReleaseCooled,
+    CellRepairQueue.NeedsPlanning, CellRepairQueue.Absorb, CellRepairQueue.Clear, CellRepairQueue.CoolingCount,
+    CellRepairQueue.HeldDegradationOf, ArchetypeClusterState.PlanCellRepairs, ArchetypeClusterState.RepairOneCell,
+    ArchetypeClusterState.AbsorbRepairNominations, ArchetypeClusterState.EnsureRepairQueue,
+    DatabaseEngine.PlanArchetypeRepairs, SpatialMigrationTelemetry.RepairCellsCooling
+  verified: ClusterRepairConvergenceTests.ARepairedCellIsNotRepairedAgainUntilItsCooldownEnds scrambles one cell
+    before every fence, so it re-degrades after each repair, and asserts that each repair after the first lands on
+    exactly the tick its cooldown ends — the scenario is deterministic, so a late release fails like an early one —
+    plus RepairCellsCooling on every tick. WithoutTheCooldownTheSameCellIsRepairedInsideIt runs the same verifier at
+    cooldown 0 and requires its own rejection, so the workload is shown to churn.
+    ACellThatGoesStillWhileItCoolsIsRepairedWhenTheCooldownEnds runs barrier-only, degrades the cell once while it
+    cools and keeps the fence alive through a second, tight cell that never nominates: the cell is repaired on the
+    tick its cooldown ends — with the early-out reverted to Count it is repaired once and never again, measured — and
+    nothing cools after its second cooldown. The legacy refresh cannot show this: it re-walks every occupied cluster
+    and re-nominates a still cell every tick, which is what ARepairThatMovesNothingStartsNoCooldown uses — a still,
+    re-packed cell held through its cooldown (asserted), released, re-sorted to nothing, and nothing cooling after.
+    ClusterRepairQueueTests.ANominationHeldDuringTheCooldownReturnsWhenTheCooldownEnds drives CellRepairQueue
+    directly — the worst held degradation, nothing offered to the valve, NeedsPlanning false while cooling and true
+    on the release tick, and a quiet control cell that must not come back; ACoolingCellTakesNoCapacityAndClearDropsIt
+    pins the cap, Clear and cooldown 0. ClusterRepairTests.ARepairIsNeverBegunWithoutTheBudgetToFinishIt asserts a
+    refused unit starts no cooldown
+  on_violation:
+    no cooldown → the budget buys churn: the same cells re-sorted every tick for a gain the next ticks undo
+    nominations dropped instead of held → a cell that goes still while it cools is never repaired
+    early-out on Count → the same, whenever the tick a cooldown ends carries no other nomination
+    cooldown started by a no-op or a refusal → a cell's next genuine degradation waits out a repair that never
+      happened
+
 ---
 
 ## Module: One spatial index home (Issue #872 step 13)
@@ -1382,15 +1669,19 @@
 
 ### DM-01: Wake guarantee — max one-tick latency `[fatal]`
   invariant ∀ cluster C in Sleeping state:
-    SetDirty(C.chunkId, _) → DormancyReporter.RequestWake(archetypeId, C.chunkId)
-  invariant DormancyReporter.DrainAll runs single-threaded at tick fence (WriteClusterTickFence),
-    processes all thread-local wake requests, calls ProcessWakeRequest per entry
+    SetDirty(C.chunkId, _) → C's own archetype state enqueues C.chunkId on its PendingWakeRequests
+  invariant each engine drains ONLY its own archetypes' queues (DatabaseEngine.DrainDormancyWakeRequests, over its
+    routing table), single-threaded at its tick fence (WriteClusterTickFence, RunParallelFence's serial prep),
+    calling ProcessWakeRequest per entry
+  never a process-wide wake queue: the DormancyReporter this replaced (2026-09-12) drained every engine's thread-static
+    lists into whichever engine fenced first, routed by archetype id into ITS states — waking its own cluster of that
+    id, losing the other engine's wake — while other engines' workers were still appending to the lists it read
   invariant ProcessWakeRequest: Sleeping → WakePending (no-op if already WakePending)
   invariant TransitionWakePendingToActive: WakePending → Active at next tick start
     (BuildTierIndexesAtTickStart, before tier index rebuild)
   post maximum latency: dirty write at tick T → WakePending at tick T fence → Active at tick T+1 start
-  scope: ArchetypeClusterState.SetDirty, DormancyReporter.RequestWake, DrainAll,
-    ArchetypeClusterState.ProcessWakeRequest, TransitionWakePendingToActive
+  scope: ArchetypeClusterState.SetDirty, ArchetypeClusterState.PendingWakeRequests, ArchetypeClusterState.DrainWakeRequests,
+    DatabaseEngine.DrainDormancyWakeRequests, ArchetypeClusterState.ProcessWakeRequest, TransitionWakePendingToActive
   on_violation: sleeping cluster with dirty writes never wakes → entity changes never dispatched to systems
 
 ### DM-02: SleepingClusterCount consistency `[fatal]`
@@ -1440,9 +1731,12 @@
   invariant phase 0 → 1: split into Red/Black, serve Red cluster list
   invariant phase 1 → 2: serve Black cluster list (triggered by re-dispatch after Red completes)
   invariant phase 2 → 0: reset for next tick
+  invariant every tick starts every system at phase 0 (OnTickStartInternal): a system that failed in its Red phase starts no Black
+    phase (CD-01's CompleteParallelDispatch, and the single-threaded path), so its cleanup has left phase 1 behind — kept, it would make
+    the next tick's first prepare serve the previous tick's Black list and skip Red
   never phase 0 serves Black (Black only served after Red completes)
   scope: TyphonRuntime.OnParallelQueryPrepare (checkerboard section, phase 0→1 / 1→2),
-         TyphonRuntime.OnParallelQueryCleanup (phase 2→0 reset + Red→Black re-dispatch)
+         TyphonRuntime.OnParallelQueryCleanup (phase 2→0 reset + Red→Black re-dispatch), TyphonRuntime.OnTickStartInternal
   note corrected 2026-07-27 — `OnParallelQueryEnd` does not exist in the engine
   on_violation: both phases see same partition → clusters processed twice or zero times
 
@@ -1466,24 +1760,27 @@
 
 ### SO-01: The telemetry surface has two clocks, and zero is a value `[silent]`
   invariant the surface carries THREE kinds of member, and reading one as another is the failure mode:
-    RATES — the `...Count` / `...Ms` members produced by a tick's fence, reset at the top of every fence. A consumer
-      polling at its own rate reads one arbitrary tick out of hundreds, so a per-second figure must be differentiated
-      from the cumulative members, never read off one of these
+    RATES — the `...Count` / `...Ms` members produced by a tick's fence, reset at the top of every fence, and
+      `QueryClustersOpened`, `QueryCandidates` and `QueryHits`, which queries produce and the fence publishes (SO-02).
+      A consumer polling at its own rate reads one arbitrary tick out of hundreds, so a per-second figure must be
+      differentiated from the cumulative members, never read off one of these
     CUMULATIVE — `Total...` and `RepairQueueEvicted`, which only grow; these are what a rate is differentiated FROM
-    LEVELS — `ActiveClusterCount`, `RepairQueueDepth`, `MaxClusterOverhang`, `MeasuredNsPerEntity`: a standing value,
+    LEVELS — `ActiveClusterCount`, `RepairQueueDepth`, `RepairCellsCooling`, `ClusterReach`, `EscapedClusterCount`, `MeasuredNsPerEntity`,
+      `QueryCandidatesPerHitSmoothed`, `QueryCandidatesPerHitBest`: a standing value,
       neither reset per tick nor monotonically accumulating. Differentiating a level yields nonsense — "clusters per
       second" off `ActiveClusterCount` is the concrete misuse this clause exists to name
-  invariant MaxClusterOverhang is the one LEVEL that is also monotonic: a running maximum that never falls and
-    never resets, because every kNN ring widens by it and too small loses results while too large only widens a
-    search. GetSpatialTelemetryTotal therefore MAXES it across archetypes; summing would widen every ring by the sum
-    of bounds no single archetype ever had
+  invariant ClusterReach is a LEVEL recomputed at the fence whenever the index changed, and it may FALL — it was a
+    running maximum until 2026-09-13, and SQ-01 records why it stopped being one. Between fences a spawn may RAISE
+    it, never lower it; only the fence lowers it. GetSpatialTelemetryTotal MAXES it across archetypes; summing would
+    widen every walk by the sum of bounds no single archetype has. EscapedClusterCount counts distinct clusters and is
+    SUMMED
   invariant zero means zero, never "unknown". An archetype with no cluster state, an out-of-range id and a quiet
     tick all report zero, and no consumer may invent a distinction the API does not make
   invariant the tightness triple is one reading, not three numbers. MeanClusterExtentRatio and MeanPackingBound are
     means over TightnessSampleCount clusters — the clusters the fence WROTE this tick, not the clusters that exist —
     so a settled world reports zero samples and both means read zero. Publishing the sample count is what keeps that
     distinguishable from "the clusters are points", which is the whole reason it is on the surface
-  invariant GetSpatialTelemetryTotal folds by KIND, not uniformly: extensive counters sum, MaxClusterOverhang maxes,
+  invariant GetSpatialTelemetryTotal folds by KIND, not uniformly: extensive counters sum, ClusterReach maxes,
     and the two tightness means are re-derived from summed numerators over the summed sample count. Averaging the
     per-archetype means would weight an archetype that scanned one cluster equally with one that scanned ten thousand
   invariant MigrationTotalMs is CPU-milliseconds SUMMED ACROSS WORKERS, not a span: W workers each busy for 1 ms
@@ -1558,7 +1855,7 @@
     of an uncontended latch
   invariant reading is allocation-free and lock-free — plain field reads of live engine state, torn only across a
     fence boundary. No accessor may take a lock or allocate to serialise against the fence
-  scope: SpatialMigrationTelemetry.MaxClusterOverhang, SpatialMigrationTelemetry.TightnessSampleCount,
+  scope: SpatialMigrationTelemetry.ClusterReach, SpatialMigrationTelemetry.EscapedClusterCount, SpatialMigrationTelemetry.TightnessSampleCount,
     SpatialMigrationTelemetry.MeanClusterExtentRatio, SpatialMigrationTelemetry.MeanPackingBound,
     SpatialMigrationTelemetry.MeanTightnessToBound, SpatialMigrationTelemetry.CellTreePromotions,
     SpatialMigrationTelemetry.CellTreeDemotions, SpatialMigrationTelemetry.MigrationSliceCount,
@@ -1573,8 +1870,8 @@
     TyphonRuntime.LastFenceWallTicks,
     FenceExecSystem.PhaseSpanTicks, FenceExecSystem.TotalWallTicks, ArchetypeClusterState.ClusterTightnessSample
   verified: SpatialMigrationTelemetryTests.Tightness_ReportsNoSamples_RatherThanAStaleMean_OnAQuietTick pins the
-    zero-samples case; MaxClusterOverhang_IsPublished_AndIsARunningMaximumRatherThanAPerTickValue pins the third
-    clock; Total_MaxesTheOverhang_AndWeightsTheTightnessMeansBySample pins the per-kind fold across two archetypes;
+    zero-samples case; ClusterReach_IsPublished_AndFallsOnceTheOutlierIsGone pins the reach as a level;
+    Total_MaxesTheReach_AndWeightsTheTightnessMeansBySample pins the per-kind fold across two archetypes;
     Accessor_AllocatesNothing pins the allocation-free read; FenceSpanMs_IsZero_WhenTheHostDrivesTheFenceItself pins
     the serial-fence zero, so it cannot be read as a fence that cost nothing;
     ExecutedKinds_SumExactlyToTheMigrationCount pins the per-kind identity;
@@ -1583,7 +1880,8 @@
     FenceStallMs_CoversTheSerialPrep_ThatTheSpanExcludes pins the stall-against-span relation;
     MigrationParallelism_IsExportedBesideTheSummedCpuGauges_AndIsNotFlooredAtOne pins both the export and the
     unclamped storage, so neither can be dropped without a red test;
-    Total_MaxesTheLargestArrival_AndSumsTheArrivalCounts pins the arrival members' fold, and
+    Total_MaxesTheLargestArrival_AndSumsTheArrivalCounts pins the arrival members' fold,
+    Total_SumsTheQueryTally_AndDerivesTheRatioFromTheSums the query tally's, and
     SmartTeleportationTests.ACornerNeighbourIsAStepAndThreeCellsIsAJump,
     AnOutOfWorldTeleportLandsInTheEdgeCellAndIsCountedAndWarnedOncePerWindow and
     TheLargestArrivalIsTheLongestDestinationRunOfTheDrainPrefix pin their per-archetype values;
@@ -1602,3 +1900,57 @@
       getting slower, in the direction that condemns the parallel fence for scaling
     an acquisition added straight onto `.Lock` → a latch that reads as uncontended because its busiest caller is
       not counted
+
+### SO-02: A range query adds its tally once, on its own thread, and a batch adds what its members' queries would `[silent]`
+  invariant a cluster range query — AabbClusterEnumerator (AABB and radius; MoveNext, Count and Fill) and ClusterRadiusBatch (CountRadius,
+    ForEachInRadius), whether the game runs it or the engine's interest and trigger systems do — adds to its archetype's SpatialQueryTally
+    ONCE, when it hands its page window back: the clusters it opened, every occupied slot of those clusters (its CANDIDATES), and the matches it
+    returned. A query that stops at its first match still counts its whole cluster
+  invariant the candidates are the same on every machine: counted from a cluster's occupancy when it opens, never from what the drain went on to
+    test. Counting tested slots made them depend on the narrowphase — the AABB2F block kernel (AVX2 / AVX-512, x64 only) decides sixteen slots
+    at once — so the same stopped query tallied one entity without the kernel and fifteen with it
+  invariant only the HONOURED hand-back tallies — SpatialQueryAccessorCache.Return reports whether the token matched. A copy of the enumerator
+    (GetEnumerator returns one) that carried the rent and returned it has tallied everything both counted before they split; the other's return
+    is stale and adds nothing. The token that stops a stale copy reusing a window (SQ-05) is what stops it counting twice. A query that opened no
+    cluster adds nothing, including one that rented a window on a promoted half's tree hit its category filter then rejected
+  invariant a batch adds what its members' own queries would: per member, each cluster opened for it with all its occupied slots, and its
+    matches. A cluster the batch opens once for k members counts k times, so the ratio does not depend on whether the caller batches — SQ-03's
+    equality, held for the tally as well as for the answer. A member's cluster is counted before its drain and a hit before the sink sees it, so
+    a batch whose sink throws tallies what its member's own query tallies when its caller throws on the same hit
+  invariant per thread, never shared: a slot per managed thread id up to SpatialQueryTally.MaxOwnedThreadId, the engine's bound on live threads,
+    in 32-slot chunks made as their threads arrive and never moved, 192 bytes apart — the adjacent-line prefetcher fetches 128-byte pairs, and an
+    array's data is only 8-byte aligned. Written with plain adds by the one live thread holding the id; the id rides on the rented window's entry,
+    stamped by its thread's cache, so the hand-back reads no thread-local. A slot is never reset — a thread inheriting a dead thread's id carries
+    on from its counts — so the totals only grow and the fence reads them while queries run; its delta is never negative. An id past the bound
+    shares one slot through interlocked adds
+  invariant the fence publishes the delta ONCE per archetype per tick, from ResetArchetypeFenceTickState: it runs exactly once per archetype on
+    every Prep path — the sliced head or the atomic item, never both (FenceWorkPlan.EmitArchetypePrepItems emits a head-sliced archetype's slices
+    instead of its item), and the serial fence's per-archetype Prep — after the tick's systems. The Query... members are therefore RATES in
+    SO-01's sense although queries, not the fence, produce them. GetSpatialTelemetryTotal sums the three and derives QueryCandidatesPerHit from
+    the sums, never from per-archetype ratios
+  invariant QueryCandidatesPerHit is zero when nothing matched: a tick that ran no range query, and a tick whose queries opened clusters and matched
+    nothing. That is below the ratio's floor of 1, so a consumer tracking the best value seen works from the sums, never from the ratio
+  invariant nearest-neighbour (QueryNearest), ray (QueryRay) and frustum (QueryFrustum) queries are NOT counted. kNN's matches are its k results,
+    not a region's contents, so its ratio would measure k and the density rather than the partition; rays and frustums walk their own paths. A
+    game that queries only through them reads zero, which is what the surface says rather than a broken counter
+  scope: SpatialQueryTally, SpatialQueryTally.Add, SpatialQueryTally.Read, ArchetypeClusterState.RecordQueryTally,
+    ArchetypeClusterState.TakeQueryTallyDelta, AabbClusterEnumerator.OpenOccupancy, AabbClusterEnumerator.MoveNext, AabbClusterEnumerator.Count,
+    AabbClusterEnumerator.Fill, AabbClusterEnumerator.ReleaseRent, AabbClusterEnumerator.ReleaseRentAfterDrain, AabbClusterEnumerator.HandBack,
+    ClusterRadiusBatch,
+    SpatialQueryAccessorCache.Return, DatabaseEngine.ResetArchetypeFenceTickState, DatabaseEngine.PrepareArchetypeFenceHeads,
+    DatabaseEngine.PrepareArchetypeFenceCore, FenceWorkPlan.EmitArchetypePrepItems, DatabaseEngine.GetSpatialTelemetry,
+    DatabaseEngine.GetSpatialTelemetryTotal, SpatialMigrationTelemetry.QueryClustersOpened, SpatialMigrationTelemetry.QueryCandidates,
+    SpatialMigrationTelemetry.QueryHits, SpatialMigrationTelemetry.QueryCandidatesPerHit
+  verified: SpatialQueryTallyTests — each drain (Count, MoveNext, Fill four at a time, a radius query drained without a Dispose) tallies one
+    cluster, its twenty entities and six matches; a query that opens the cluster and matches nothing tallies twenty and none, and one that opens
+    nothing tallies nothing; a query stopped after one MoveNext or one Fill of five tallies the whole cluster; the same stopped query tallies the
+    same with the block kernel and without; a copy that drains the rent tallies the query once; eight threads' 4 000 queries are each counted
+    once; ids across chunks and past the bound lose nothing; the fence publishes the tick's queries, and zero on a tick without. Its mutant
+    AQueryTalliedTwice_IsCaught shows the comparison is exact. ClusterRadiusBatchTests.EachMember_IsAnsweredAsItsOwnRadiusQuery and
+    ANamedOutlier_IsFoundByEachMemberAsByItsOwnQuery hold CountRadius's, ForEachInRadius's and a retiring batch's tallies to their members' own
+    queries' on every broadphase path, kernel on and off; ASinkThatThrows_HandsTheWindowBack holds a throwing batch's to its member's.
+    SpatialMigrationTelemetryTests.Total_SumsTheQueryTally_AndDerivesTheRatioFromTheSums pins the fold. Run by hand when written
+    (2026-09-15): tallying a stale return, counting a batch's cluster once for all its members, and counting a batch's hit only after the sink
+    returns each redden them
+  on_violation: the maintenance controller that reads candidates per hit steers on a number the queries did not produce — a copied query read
+    twice, a batch read as cheaper than the queries it answers, the same world read differently on two machines

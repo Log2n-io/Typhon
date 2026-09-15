@@ -354,6 +354,36 @@ class SpatialGridTests
     }
 
     [Test]
+    public void SpatialGridConfig_RepairCooldown_DefaultsTo50_ZeroDisables_NegativeThrows()
+    {
+        Assert.Multiple(() =>
+        {
+            Assert.That(SpatialGridConfig.Flat(new Vector2(0, 0), new Vector2(1000, 1000), cellSize: 100f).RepairCooldownTicks, Is.EqualTo(50));
+            Assert.That(SpatialGridConfig.Flat(new Vector2(0, 0), new Vector2(1000, 1000), cellSize: 100f, repairCooldownTicks: 0).RepairCooldownTicks,
+                Is.Zero);
+            Assert.Throws<System.ArgumentOutOfRangeException>(() =>
+                SpatialGridConfig.Flat(new Vector2(0, 0), new Vector2(1000, 1000), cellSize: 100f, repairCooldownTicks: -1));
+        });
+    }
+
+    [Test]
+    public void SpatialGridConfig_QueryEfficiencyTolerance_DefaultsToATenth_ZeroDisables_NegativeThrows()
+    {
+        Assert.Multiple(() =>
+        {
+            Assert.That(SpatialGridConfig.Flat(new Vector2(0, 0), new Vector2(1000, 1000), cellSize: 100f).QueryEfficiencyTolerance, Is.EqualTo(0.1f));
+            Assert.That(SpatialGridConfig.Flat(new Vector2(0, 0), new Vector2(1000, 1000), cellSize: 100f, queryEfficiencyTolerance: 0f)
+                .QueryEfficiencyTolerance, Is.Zero);
+            Assert.Throws<System.ArgumentOutOfRangeException>(() =>
+                SpatialGridConfig.Flat(new Vector2(0, 0), new Vector2(1000, 1000), cellSize: 100f, queryEfficiencyTolerance: -0.1f));
+            Assert.Throws<System.ArgumentOutOfRangeException>(() =>
+                SpatialGridConfig.Flat(new Vector2(0, 0), new Vector2(1000, 1000), cellSize: 100f, queryEfficiencyTolerance: float.PositiveInfinity));
+            Assert.Throws<System.ArgumentOutOfRangeException>(() =>
+                SpatialGridConfig.Flat(new Vector2(0, 0), new Vector2(1000, 1000), cellSize: 100f, queryEfficiencyTolerance: float.NaN));
+        });
+    }
+
+    [Test]
     public void SpatialGridConfig_CellCountJustUnderTheInt32Key_Succeeds()
     {
         // 1290 cubed = 2 146 689 000, just under int.MaxValue. The config allocates nothing, so this is a bound on the KEY type, not on memory.

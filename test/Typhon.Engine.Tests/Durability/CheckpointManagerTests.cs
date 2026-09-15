@@ -2,8 +2,10 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace Typhon.Engine.Tests;
 
@@ -354,6 +356,495 @@ public class CheckpointManagerTests : AllocatorTestBase
         cs.AddByMemPageIndex(memPageIdx);
         _mmf.UnlatchPageExclusive(memPageIdx);
         return memPageIdx;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Forced wait (CK-12)
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>Distinctive substring of the CK-12 verifiers' rejection messages; each mutant below must trip one of them.</summary>
+    private const string Ck12Marker = "CK-12 violated";
+
+    /// <summary>A way to force a cycle and wait for it: the manager's own, or one of the pairings it replaced (for the mutants).</summary>
+    private delegate bool ForceAndWait(CheckpointManager ckpt, TimeSpan timeout);
+
+    private static bool ManagerForceAndWait(CheckpointManager ckpt, TimeSpan timeout) => ckpt.ForceCheckpointAndWait(timeout);
+
+    /// <summary>The pairing CK-12 replaced: force, then wait for the cycle count to pass whatever it reads next, by which time the forced cycle
+    /// may be over.</summary>
+    private static bool SampleAfterForce(CheckpointManager ckpt, TimeSpan timeout)
+    {
+        ckpt.ForceCheckpoint();
+        ckpt.AfterForceRequested?.Invoke();
+        var start = ckpt.TotalCheckpoints;
+        return SpinWait.SpinUntil(() => ckpt.TotalCheckpoints > start, timeout);
+    }
+
+    /// <summary>The obvious repair, which is not enough: read the count before forcing, then take the first cycle to finish, whichever it is.</summary>
+    private static bool SampleBeforeForce(CheckpointManager ckpt, TimeSpan timeout)
+    {
+        var start = ckpt.TotalCheckpoints;
+        ckpt.ForceCheckpoint();
+        ckpt.AfterForceRequested?.Invoke();
+        return SpinWait.SpinUntil(() => ckpt.TotalCheckpoints > start, timeout);
+    }
+
+    /// <summary>A started manager that only a force wakes: no dirty-page trigger, and an interval far longer than any of these tests.</summary>
+    private CheckpointManager StartForceOnlyManager()
+    {
+        _resourceOptions.CheckpointIntervalMs = 60_000;
+        _resourceOptions.CheckpointDirtyPageThresholdPercent = 0;
+        var ckpt = new CheckpointManager(_mmf, _uowRegistry, _walManager, _resourceOptions, _epochManager, _stagingPool, AllocationResource);
+        ckpt.Start();
+        SpinWait.SpinUntil(() => ckpt.IsRunning, 2000);
+        return ckpt;
+    }
+
+    /// <summary>
+    /// The failure the suite measured, 7 runs in 8 of <c>ChangeSetDirtyMarkConservationTests.AQuiescentEngineHoldsNoMarksAndOwesNoWrites</c> with
+    /// <c>before=0 after=1</c>: on an idle engine the forced cycle finishes before the caller starts waiting. The seam makes that ordering certain.
+    /// The wait must still count the cycle it forced.
+    /// </summary>
+    [Test]
+    [CancelAfter(10000)]
+    [VerifiesRule("CK-12")]
+    public void AForcedWait_CountsItsOwnCycle_EvenIfItEndsFirst() => ForcedCycleFinishesFirst(ManagerForceAndWait, TimeSpan.FromSeconds(5));
+
+    /// <summary>
+    /// The <see cref="RuleMutantAttribute"/> companion: the pairing CK-12 replaced waits for a second cycle nobody asked for, so it sits out its
+    /// whole timeout; a short one keeps this cheap.
+    /// </summary>
+    [Test]
+    [CancelAfter(10000)]
+    [RuleMutant("CK-12")]
+    public void AWaitThatSamplesAfterItsOwnForce_IsRejected() =>
+        RuleMutants.AssertDetects("CK-12", Ck12Marker, () => ForcedCycleFinishesFirst(SampleAfterForce, TimeSpan.FromMilliseconds(500)));
+
+    /// <param name="forceAndWait">The wait under test.</param>
+    /// <param name="timeout">Covers the whole forced cycle, fsyncs included, since the seam holds the call until that cycle is over.</param>
+    private void ForcedCycleFinishesFirst(ForceAndWait forceAndWait, TimeSpan timeout)
+    {
+        CreateTestInfrastructure();
+        _walManager = CreateWalManager();
+        ProduceWalRecords(_walManager);
+        using var ckpt = StartForceOnlyManager();
+
+        ckpt.AfterForceRequested = () => SpinWait.SpinUntil(() => ckpt.TotalCheckpoints > 0, 5000);
+
+        Assert.That(forceAndWait(ckpt, timeout), Is.True,
+            $"{Ck12Marker}: the cycle this call forced finished before it waited, and the wait missed it ({ckpt.TotalCheckpoints} cycles ran)");
+    }
+
+    /// <summary>
+    /// A cycle already running when the call arrives does not release it: that cycle may have collected before the caller's pages were dirty,
+    /// which is how <c>CompleteBulkLoad</c> could make BulkEnd durable over bulk pages no cycle wrote (NEW-CK-2, 2026-07-06 assessment). Cycle 1 is
+    /// held in flight while the caller asks; the caller must still be waiting when it ends, and be released by cycle 2.
+    /// </summary>
+    [Test]
+    [CancelAfter(10000)]
+    [VerifiesRule("CK-12")]
+    public void AForcedWait_IsNotReleasedByTheCycleAlreadyRunning() => CycleAlreadyRunning(ManagerForceAndWait, TimeSpan.FromMilliseconds(200));
+
+    /// <summary>
+    /// The <see cref="RuleMutantAttribute"/> companion: reading the count before the force fixes the measured race but not this one. It polls the
+    /// count with sleeps of up to ~15 ms, so it gets a wider window to be caught in; it returns as soon as it is.
+    /// </summary>
+    [Test]
+    [CancelAfter(10000)]
+    [RuleMutant("CK-12")]
+    public void AWaitReleasedByTheNextCycle_IsRejected() =>
+        RuleMutants.AssertDetects("CK-12", Ck12Marker, () => CycleAlreadyRunning(SampleBeforeForce, TimeSpan.FromSeconds(2)));
+
+    /// <param name="forceAndWait">The wait under test.</param>
+    /// <param name="window">How long the wait gets to return wrongly once cycle 1 has ended. A correct wait cannot return while cycle 2 is held,
+    /// whatever the window; the window only decides how slow a wrong one may be and still be caught.</param>
+    private void CycleAlreadyRunning(ForceAndWait forceAndWait, TimeSpan window)
+    {
+        CreateTestInfrastructure();
+        _walManager = CreateWalManager();
+        ProduceWalRecords(_walManager);
+
+        // Declared before the manager so they outlive it: its Dispose runs a shutdown cycle through the injector below.
+        using var entered = new SemaphoreSlim(0);
+        using var gate1 = new ManualResetEventSlim();
+        using var gate2 = new ManualResetEventSlim();
+        using var requested = new ManualResetEventSlim();
+        using var ckpt = StartForceOnlyManager();
+
+        // Every cycle stops at its start until the test lets it through, so which cycle ends when is the test's choice.
+        var cyclesEntered = 0;
+        ckpt.CycleFaultInjector = () =>
+        {
+            var n = Interlocked.Increment(ref cyclesEntered);
+            entered.Release();
+            (n == 1 ? gate1 : n == 2 ? gate2 : null)?.Wait(TimeSpan.FromSeconds(5));
+        };
+
+        Task<bool> waiter = null;
+        try
+        {
+            ckpt.ForceCheckpoint();
+            Assert.That(entered.Wait(TimeSpan.FromSeconds(5)), Is.True, "cycle 1 never started");
+
+            ckpt.AfterForceRequested = requested.Set;
+            waiter = Task.Run(() => forceAndWait(ckpt, TimeSpan.FromSeconds(5)));
+            Assert.That(requested.Wait(TimeSpan.FromSeconds(5)), Is.True, "the caller never posted its request");
+
+            gate1.Set();
+            Assert.That(entered.Wait(TimeSpan.FromSeconds(5)), Is.True, "cycle 2, the one the caller forced, never started");
+
+            Assert.That(waiter.Wait(window), Is.False,
+                $"{Ck12Marker}: the wait returned when cycle 1 ended, and cycle 1 was already running when the call asked");
+
+            gate2.Set();
+            Assert.That(waiter.Result, Is.True, "cycle 2 started after the call and covered it, so it must release the wait");
+        }
+        finally
+        {
+            // Never leave the checkpoint thread parked, whatever failed, and let the caller finish before what it touches is disposed.
+            gate1.Set();
+            gate2.Set();
+            try
+            {
+                waiter?.Wait(TimeSpan.FromSeconds(5));
+            }
+            catch (AggregateException)
+            {
+                // The assertions above report the failure that matters.
+            }
+        }
+    }
+
+    /// <summary>
+    /// A cycle the coverage gate stopped does not release the wait: the page it skipped reached no disk (CK-03). With a page held by a live writer
+    /// every cycle is gated, so the wait must time out; once the writer lets go, the next cycle covers it and the wait returns.
+    /// </summary>
+    [Test]
+    [CancelAfter(10000)]
+    [VerifiesRule("CK-12")]
+    public void AForcedWait_IsNotReleasedByAGatedCycle() => GatedCycles(ManagerForceAndWait, TimeSpan.FromMilliseconds(200));
+
+    /// <summary>The <see cref="RuleMutantAttribute"/> companion: a wait that takes any cycle's completion takes a gated one too. It gets a wider
+    /// window to be caught in, and returns as soon as it is.</summary>
+    [Test]
+    [CancelAfter(10000)]
+    [RuleMutant("CK-12")]
+    public void AWaitReleasedByAGatedCycle_IsRejected() =>
+        RuleMutants.AssertDetects("CK-12", Ck12Marker, () => GatedCycles(SampleBeforeForce, TimeSpan.FromSeconds(2)));
+
+    /// <param name="forceAndWait">The wait under test.</param>
+    /// <param name="window">How long the wait runs while every cycle is gated. A correct wait returns false whatever the window.</param>
+    private void GatedCycles(ForceAndWait forceAndWait, TimeSpan window)
+    {
+        CreateTestInfrastructure();
+        _walManager = CreateWalManager();
+        ProduceWalRecords(_walManager);
+        var memPageIdx = DirtyRegularPage();
+        using var ckpt = StartForceOnlyManager();
+
+        _mmf.IncrementActiveChunkWriters(memPageIdx);
+        var held = true;
+        try
+        {
+            // The first cycle writes and fsyncs everything else the fixture dirtied. Run it before the timed phase, so that phase sees only
+            // cheap gated cycles.
+            ckpt.ForceCheckpoint();
+            Assert.That(SpinWait.SpinUntil(() => ckpt.ConsecutiveGatedCycles > 0, 5000), Is.True, "the first cycle must run, and be gated");
+
+            Assert.That(forceAndWait(ckpt, window), Is.False,
+                $"{Ck12Marker}: a cycle the coverage gate stopped released the wait, with page {memPageIdx} still unwritten");
+            Assert.That(ckpt.CheckpointLsn, Is.LessThan(_walManager.DurableLsn), "the gate must have held the watermark back");
+
+            _mmf.DecrementActiveChunkWriters(memPageIdx);
+            held = false;
+            Assert.That(forceAndWait(ckpt, TimeSpan.FromSeconds(5)), Is.True, "with the writer gone, the next cycle covers the page");
+            Assert.That(ckpt.CheckpointLsn, Is.EqualTo(_walManager.DurableLsn), "a covering cycle advances the watermark");
+        }
+        finally
+        {
+            if (held)
+            {
+                _mmf.DecrementActiveChunkWriters(memPageIdx);
+            }
+        }
+    }
+
+    /// <summary>
+    /// A cycle that fails does not end the wait; a later one has to cover it. The first cycle throws a transient fault (CK-06), and the wait must
+    /// ask again rather than sit out its timeout waiting for a timer tick a minute away.
+    /// </summary>
+    [Test]
+    [CancelAfter(10000)]
+    [VerifiesRule("CK-12")]
+    public void AForcedWait_AsksAgainAfterAFailedCycle() => FailedFirstCycle(ManagerForceAndWait, TimeSpan.FromSeconds(5));
+
+    /// <summary>
+    /// The <see cref="RuleMutantAttribute"/> companion: a failed cycle is not counted, so a wait for the count to move waits for a timer tick a
+    /// minute away. It sits out its timeout, so a short one keeps this cheap.
+    /// </summary>
+    [Test]
+    [CancelAfter(10000)]
+    [RuleMutant("CK-12")]
+    public void AWaitThatNeverAsksAgain_IsRejected() =>
+        RuleMutants.AssertDetects("CK-12", Ck12Marker, () => FailedFirstCycle(SampleBeforeForce, TimeSpan.FromMilliseconds(500)));
+
+    private void FailedFirstCycle(ForceAndWait forceAndWait, TimeSpan timeout)
+    {
+        CreateTestInfrastructure();
+        _walManager = CreateWalManager();
+        ProduceWalRecords(_walManager);
+        using var ckpt = StartForceOnlyManager();
+
+        var faulted = 0;
+        ckpt.CycleFaultInjector = () =>
+        {
+            if (Interlocked.Exchange(ref faulted, 1) == 0)
+            {
+                throw new WalBackPressureTimeoutException(0, TimeSpan.Zero);
+            }
+        };
+
+        Assert.That(forceAndWait(ckpt, timeout), Is.True, $"{Ck12Marker}: no cycle after the failed one covered the request");
+        Assert.That(ckpt.Health, Is.EqualTo(DurabilityHealth.Ok), "the covering cycle clears the transient fault");
+        Assert.That(ckpt.CheckpointLsn, Is.EqualTo(_walManager.DurableLsn));
+    }
+
+    /// <summary>A fatal failure halts every later cycle (CK-06), so the wait returns false at once instead of sitting out its timeout.</summary>
+    [Test]
+    [CancelAfter(10000)]
+    [VerifiesRule("CK-12")]
+    public void AForcedWait_ReturnsAtOnceWhenCheckpointingHasHalted() => HaltedCheckpoint(ManagerForceAndWait, crashStop: false);
+
+    /// <summary>After a simulated hard crash no cycle may write the data file (<see cref="CheckpointManager.PrepareCrashStop"/>), so none can cover
+    /// the request either.</summary>
+    [Test]
+    [CancelAfter(10000)]
+    [VerifiesRule("CK-12")]
+    public void AForcedWait_ReturnsAtOnceAfterACrashStop() => HaltedCheckpoint(ManagerForceAndWait, crashStop: true);
+
+    /// <summary>The <see cref="RuleMutantAttribute"/> companion: a wait that only watches the cycle count sits out its whole timeout on a halted
+    /// checkpoint.</summary>
+    [Test]
+    [CancelAfter(10000)]
+    [RuleMutant("CK-12")]
+    public void AWaitThatOutlastsAHaltedCheckpoint_IsRejected() =>
+        RuleMutants.AssertDetects("CK-12", Ck12Marker, () => HaltedCheckpoint(SampleBeforeForce, crashStop: false));
+
+    private void HaltedCheckpoint(ForceAndWait forceAndWait, bool crashStop)
+    {
+        CreateTestInfrastructure();
+        _walManager = CreateWalManager();
+        ProduceWalRecords(_walManager);
+        using var ckpt = StartForceOnlyManager();
+        if (crashStop)
+        {
+            ckpt.PrepareCrashStop();
+        }
+        else
+        {
+            ckpt.CycleFaultInjector = () => throw new InvalidOperationException("simulated fatal checkpoint fault");
+        }
+
+        var timeout = TimeSpan.FromSeconds(2);
+        var sw = Stopwatch.StartNew();
+        Assert.That(forceAndWait(ckpt, timeout), Is.False, "no cycle can cover the request once checkpointing has halted");
+        Assert.That(sw.Elapsed, Is.LessThan(timeout / 2), $"{Ck12Marker}: the wait sat out its timeout on a checkpoint that had halted");
+    }
+
+    /// <summary>
+    /// When the loop stops, no cycle will cover the request, so the wait returns rather than sit out its timeout. A page held by a live writer keeps
+    /// every cycle gated, the shutdown cycle included, so the caller is still waiting when the manager is disposed.
+    /// </summary>
+    [Test]
+    [CancelAfter(10000)]
+    [VerifiesRule("CK-12")]
+    public void AForcedWait_ReturnsWhenTheLoopStops()
+    {
+        CreateTestInfrastructure();
+        _walManager = CreateWalManager();
+        ProduceWalRecords(_walManager);
+        var memPageIdx = DirtyRegularPage();
+        using var requested = new ManualResetEventSlim();
+        var ckpt = StartForceOnlyManager();
+        ckpt.AfterForceRequested = requested.Set;
+
+        _mmf.IncrementActiveChunkWriters(memPageIdx);
+        try
+        {
+            var waiter = Task.Run(() => ckpt.ForceCheckpointAndWait(TimeSpan.FromSeconds(8)));
+            Assert.That(requested.Wait(TimeSpan.FromSeconds(5)), Is.True, "the caller never posted its request");
+
+            ckpt.Dispose();
+            Assert.That(waiter.Wait(TimeSpan.FromSeconds(4)), Is.True, "the wait must return once the loop has stopped, not at its 8 s timeout");
+            Assert.That(waiter.Result, Is.False, "every cycle was gated, so none covered the request");
+        }
+        finally
+        {
+            _mmf.DecrementActiveChunkWriters(memPageIdx);
+            ckpt.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// A simulated hard crash wakes a caller asleep behind a running cycle: no cycle may write the data file after it, so the wait returns false
+    /// while that cycle is still parked, instead of when it ends or at the timeout.
+    /// </summary>
+    [Test]
+    [CancelAfter(10000)]
+    [VerifiesRule("CK-12")]
+    public void AForcedWait_ReturnsAtOnceOnACrashMidCycle()
+    {
+        CreateTestInfrastructure();
+        _walManager = CreateWalManager();
+        ProduceWalRecords(_walManager);
+
+        // Declared before the manager so they outlive it.
+        using var entered = new ManualResetEventSlim();
+        using var gate = new ManualResetEventSlim();
+        using var requested = new ManualResetEventSlim();
+        using var ckpt = StartForceOnlyManager();
+        ckpt.CycleFaultInjector = () =>
+        {
+            entered.Set();
+            gate.Wait(TimeSpan.FromSeconds(5));
+        };
+        ckpt.AfterForceRequested = requested.Set;
+
+        Task<bool> waiter = null;
+        try
+        {
+            waiter = Task.Run(() => ckpt.ForceCheckpointAndWait(TimeSpan.FromSeconds(8)));
+            Assert.That(requested.Wait(TimeSpan.FromSeconds(5)), Is.True, "the caller never posted its request");
+            Assert.That(entered.Wait(TimeSpan.FromSeconds(5)), Is.True, "the forced cycle never started");
+
+            ckpt.PrepareCrashStop();
+            Assert.That(waiter.Wait(TimeSpan.FromSeconds(3)), Is.True, "the crash must wake the caller while its cycle is still parked");
+            Assert.That(waiter.Result, Is.False, "no cycle may cover the request once a crash is being simulated");
+        }
+        finally
+        {
+            gate.Set();
+            try
+            {
+                waiter?.Wait(TimeSpan.FromSeconds(5));
+            }
+            catch (AggregateException)
+            {
+                // The assertions above report the failure that matters.
+            }
+        }
+    }
+
+    /// <summary>
+    /// Dispose wakes a caller even when no cycle will ever end to do it: here the loop was never started. Without the wake the caller would sit
+    /// out its whole timeout.
+    /// </summary>
+    [Test]
+    [CancelAfter(10000)]
+    [VerifiesRule("CK-12")]
+    public void AForcedWait_ReturnsWhenDisposedUnstarted()
+    {
+        CreateTestInfrastructure();
+        _walManager = CreateWalManager();
+        using var requested = new ManualResetEventSlim();
+        var ckpt = new CheckpointManager(_mmf, _uowRegistry, _walManager, _resourceOptions, _epochManager, _stagingPool, AllocationResource);
+        ckpt.AfterForceRequested = requested.Set;
+        try
+        {
+            var waiter = Task.Run(() => ckpt.ForceCheckpointAndWait(TimeSpan.FromSeconds(8)));
+            Assert.That(requested.Wait(TimeSpan.FromSeconds(5)), Is.True, "the caller never posted its request");
+
+            ckpt.Dispose();
+            Assert.That(waiter.Wait(TimeSpan.FromSeconds(3)), Is.True, "Dispose must wake the caller; no cycle will ever end to do it");
+            Assert.That(waiter.Result, Is.False, "no cycle ran, so none covered the request");
+        }
+        finally
+        {
+            ckpt.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// After a cycle that did not cover the request, the caller pauses before forcing another. Without the pause, a page the gate keeps skipping
+    /// drives back-to-back cycles, each one a WAL flush, for the whole timeout.
+    /// </summary>
+    [Test]
+    [CancelAfter(10000)]
+    [VerifiesRule("CK-12")]
+    public void AForcedWait_PausesBetweenGatedCycles()
+    {
+        CreateTestInfrastructure();
+        _walManager = CreateWalManager();
+        ProduceWalRecords(_walManager);
+        var memPageIdx = DirtyRegularPage();
+        using var ckpt = StartForceOnlyManager();
+
+        _mmf.IncrementActiveChunkWriters(memPageIdx);
+        try
+        {
+            var before = ckpt.TotalCheckpoints;
+            Assert.That(ckpt.ForceCheckpointAndWait(TimeSpan.FromMilliseconds(600)), Is.False, "every cycle is gated, so none covers the request");
+            var cycles = ckpt.TotalCheckpoints - before;
+            Assert.That(cycles, Is.InRange(1, 4), $"at most one forced cycle per 250 ms retry pause over 600 ms; {cycles} ran");
+        }
+        finally
+        {
+            _mmf.DecrementActiveChunkWriters(memPageIdx);
+        }
+    }
+
+    /// <summary>
+    /// A covering cycle that CK-13 held below the watermark the caller asked for does not release the wait: with a floor at 2 over three durable
+    /// records, a wait for CheckpointLSN 3 times out; once the floor lifts, it returns with the watermark there.
+    /// </summary>
+    [Test]
+    [CancelAfter(10000)]
+    [VerifiesRule("CK-12")]
+    public void AForcedWait_WaitsForTheWatermarkItAskedFor()
+    {
+        CreateTestInfrastructure();
+        _walManager = CreateWalManager();
+        ProduceWalRecords(_walManager, 3);
+        using var ckpt = StartForceOnlyManager();
+        var target = _walManager.LastAppendedLsn;
+
+        var floor = 2L;
+        ckpt.InFlightCommitFloor = () => Volatile.Read(ref floor);
+        Assert.That(ckpt.ForceCheckpointAndWait(TimeSpan.FromMilliseconds(300), target), Is.False,
+            $"{Ck12Marker}: the wait returned with CheckpointLSN at {ckpt.CheckpointLsn}, short of the {target} it asked for");
+
+        Volatile.Write(ref floor, long.MaxValue);
+        Assert.That(ckpt.ForceCheckpointAndWait(TimeSpan.FromSeconds(5), target), Is.True, "with the floor lifted the next cycle reaches it");
+        Assert.That(ckpt.CheckpointLsn, Is.GreaterThanOrEqualTo(target));
+    }
+
+    /// <summary>
+    /// CK-13: the cycle keeps CheckpointLSN below the oldest commit still between its append and its publish, and never lowers it. A floor of 2
+    /// holds a cycle over three durable records at 1; with no floor the next cycle reaches its barrier; a floor below the watermark leaves it.
+    /// </summary>
+    [Test]
+    [CancelAfter(5000)]
+    [VerifiesRule("CK-13")]
+    public void InFlightFloor_CapsTheWatermark()
+    {
+        CreateTestInfrastructure();
+        _walManager = CreateWalManager();
+        ProduceWalRecords(_walManager, 3);
+        using var ckpt = new CheckpointManager(_mmf, _uowRegistry, _walManager, _resourceOptions, _epochManager, _stagingPool, AllocationResource);
+
+        var floor = 2L;
+        ckpt.InFlightCommitFloor = () => floor;
+        ckpt.RunCheckpointCycle(_walManager.DurableLsn);
+        Assert.That(ckpt.CheckpointLsn, Is.EqualTo(1), "CK-13 violated: the watermark passed a commit that had not published");
+
+        floor = long.MaxValue;
+        ckpt.RunCheckpointCycle(_walManager.DurableLsn);
+        var advanced = ckpt.CheckpointLsn;
+        Assert.That(advanced, Is.EqualTo(_walManager.LastAppendedLsn), "with no commit in flight the cycle reaches its barrier");
+
+        floor = 1;
+        ckpt.RunCheckpointCycle(_walManager.DurableLsn);
+        Assert.That(ckpt.CheckpointLsn, Is.EqualTo(advanced), "a floor below the watermark must not lower it");
     }
 
     // ═══════════════════════════════════════════════════════════════

@@ -43,6 +43,17 @@ foreach (var hit in dbe.ClusterSpatialQuery<Ant>().Radius(in sphere))
     // hit.DistanceSq is populated (closest point on entity AABB to sphere center)
 }
 
+// Bulk drains — the whole query in one call instead of one MoveNext per hit
+var e = dbe.ClusterSpatialQuery<Ant>().Radius(in sphere);
+try
+{
+    int inRange = e.Count();   // or Fill(Span<ClusterSpatialQueryResult>) repeatedly until it returns 0
+}
+finally
+{
+    e.Dispose();
+}
+
 // Equivalent Radius/Nearest access via the fluent ECS query (routes through the same cluster path)
 using var t = dbe.CreateQuickTransaction();
 var nearby = t.Query<AntArch>()
@@ -50,17 +61,17 @@ var nearby = t.Query<AntArch>()
     .Execute();
 ```
 
-`TBox` must be `AABB2F` or `AABB3F` and must match the archetype's declared spatial field dimensionality/precision exactly — a mismatch throws `InvalidOperationException` at the call site, not silently truncating coordinates.
+`TBox` must be `AABB2F`, `AABB3F`, `AABB2D` or `AABB3D` and must match the archetype's declared spatial field dimensionality/precision exactly — a mismatch throws `InvalidOperationException` at the call site, not silently truncating coordinates.
 
 ## ⚠️ Guarantees & limits
 
 - **Raw enumerator requires an `EpochGuard` scope** — `ClusterSpatialQuery<TArch>` reads cluster pages directly, so the caller must hold `EpochGuard.Enter(dbe.EpochManager)` for the call's duration. `EpochGuard` is `internal`; reaching it directly (as above) requires the same `InternalsVisibleTo` boundary as Cluster Dormancy. Application code without that access goes through `EcsQuery.WhereNearby`/`WhereInAABB`, which manages the epoch scope internally.
 - **Requires `ConfigureSpatialGrid`** before `InitializeArchetypes` — a cluster-eligible archetype with a `[SpatialIndex]` field and no configured grid throws at archetype initialization, not at first query.
 - **The raw enumerator exposes AABB and Radius only** — `ClusterSpatialQuery<TArch>` has no Ray or Frustum entry point. Both shapes *are* served on this same cluster path, through `EcsQuery.WhereRay` / `WhereFrustum` (see [Spatial Query API](./spatial-query-api.md)).
-- **f32 only** — `AABB2D`/`AABB3D` (f64) throw `NotSupportedException`; only `AABB2F`/`AABB3F` are implemented.
+- **All four tiers since #914** — `AABB2F`/`AABB3F` and the f64 `AABB2D`/`AABB3D`, with the matching `BSphere` radius shapes. The narrowphase compares in world f64 on every tier; an f32 bound is widened, which is exact.
 - **No false negatives** — cluster AABBs always contain every live entity in the cluster (recomputed at the tick fence for dirty clusters), so a query never misses a geometrically-matching entity.
 - **Category mask is "any bit overlaps"** — a non-zero mask skips a cluster only if none of its entities' OR'd category bits intersect the query mask; pass `uint.MaxValue` (default) for no filtering.
-- **Zero-allocation enumerator** — `AABB<TBox>` and `Radius` both return a `ref struct` enumerator; no heap allocation for the scan itself. `EcsQuery.WhereNearby`/`WhereInAABB` materialize results into a `HashSet<EntityId>` because the fluent API composes with archetype/Where filters.
+- **Zero-allocation enumerator** — `AABB<TBox>` and `Radius` both return a `ref struct` enumerator; no heap allocation for the scan itself. Its `Count()` and `Fill(Span)` drain the query in one frame rather than one call per hit, and it reads entities through a per-thread page window kept warm across queries, so consecutive nearby queries on a worker find their pages resident. `EcsQuery.WhereNearby`/`WhereInAABB` materialize results into a `HashSet<EntityId>` because the fluent API composes with archetype/Where filters.
 - **Query cost is 300-400ns, and per-entity index maintenance is zero** — broadphase plus narrowphase costs roughly 300-400ns for a typical 4-cell query, and that walk is the whole cost: moving an entity updates no per-entity index, so nothing is charged per entity per tick.
 - **No public `Nearest`/kNN on `ClusterSpatialQuery<TArch>` yet** — k-nearest is only reachable internally (consumed by `EcsQuery.WhereNearby`'s radius-expansion path); a dedicated public `.Nearest()` wrapper is deferred.
 - **The broadphase changes shape with density, and the engine drives it** — above a per-cell cluster-count threshold a cell half swaps its linear array for a per-cell R-Tree (`CellClusterTree`), and falls back below half that count. The two are mutually exclusive, never both, so no cell pays for a tree and a scan at once. The threshold is `DatabaseEngineOptions.Spatial.CellTreePromoteThreshold`, and it defaults to `int.MaxValue` — never — because on a game-shaped workload a promoted cell made the tick slower at every density measured (its upkeep runs in the fence's serial tail, and the narrowphase dominates the query it speeds); set a count to opt in. A second gate, `CellTreePromoteTightness`, requires the cell's clusters to be tight enough for a tree to prune between them at all. Both structures were vectorised in September 2026 and the scan gained more than the tree did, so the crossover moved *away* from the tree: at 512 clusters a selective query costs about 102 ns scanned against 247 ns through the tree, and the tree first wins around 2 048 (403 ns scanned, 246 ns through the tree). An unselective query never favours the tree at any density, because it must test every internal-node box on top of every leaf entry. Most databases never reach that density and never build a tree; the ones that do stop paying a scan that grows without bound. Both structures answer the same question, which the differential fixtures assert directly.
