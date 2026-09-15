@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-04-10 |
+| Last Updated | 2026-09-15 |
 | Domain | Spatial R-Tree, Queries, Trigger Volumes, Interest Management, Spatial Tiers (Clusters, Dormancy, Checkerboard, Migration) |
 
 > Invariants that ensure spatial query correctness, tree structural integrity,
@@ -499,13 +499,13 @@
      ClusterShrinkPendingAxes; and on the common grow path the CAS-grown superset is kept, never re-tightened,
      so "exact union" holds only when shrinkMask != 0)
   invariant 🔴 ClusterAabbs[chunkId] has EXACTLY ONE writer class at any instant:
-    (a) CAS-grow from ClusterRef.WriteSpatial / MaybeGrowAndFlagShrink, during system dispatch
+    (a) CAS-grow from ClusterRef.WriteSpatial, one slot (MaybeGrowAndFlagShrink) or a slot set (WriteSpatialSet, CA-03), during system dispatch
     (b) blind full-struct store from the AabbRefresh fence phase
     The tick barrier separating dispatch from the fence is what makes (b) safe, and it is LOAD-BEARING. Relax it and
     the fence store silently discards concurrent grows → AABB too tight → this rule's own containment fails.
   scope: ArchetypeClusterState.RecomputeClusterAabb, RecomputeDirtyClusterAabbs, RecomputeDirtyClusterAabbsSlice
          (the parallel path that performs the store), RebuildClusterAabbs,
-         ClusterRef.WriteSpatial / MaybeGrowAndFlagShrink (the concurrent writer class),
+         ClusterRef.WriteSpatial / MaybeGrowAndFlagShrink / WriteSpatialSet (the concurrent writer class),
          ClusterRef.TryGetCellOrigin, ClusterSpatialAabb.ToCellRelativeMin, ClusterSpatialAabb.ToCellRelativeMax,
          SpatialGrid.CellOrigin (the frame the containment is expressed in — C15),
          AabbClusterEnumerator.SetCellQueryFrame (the query half; without it the invariant is unobservable)
@@ -534,7 +534,8 @@
     On the SpatialBarrierOnly branch the comparison was worse than wrong, it was a TAUTOLOGY: `fresh` is assigned
     from `stored` when no shrink is pending, so a grow-only tick could never update the index at all — and both
     demos run barrier-only.
-  invariant the signal is ClusterProcessBitmap, which WriteSpatial sets on exactly `aabbChanged || migrationFlagged`
+  invariant the signal is ClusterProcessBitmap, which WriteSpatial sets on exactly `aabbChanged || migrationFlagged` (its slot-set form
+    once, when its publication grows the bound, flags a shrink or flags a crossing: CA-03)
     and ClearAabbRefreshBookkeeping zeroes once per tick. A writer that leaves ClusterAabbs alone for the fence to
     recompute (OpenMut / GetSpan) sets no bit, which is precisely the case where equality does mean nothing changed.
   invariant 🔴 OUTSIDE the fence, on user threads (#872 step 15 review): a cluster is in its cell's index from the moment
@@ -548,7 +549,7 @@
     ClusterPlacementTests.ConcurrentSpawnsIntoOneCellLeaveTheIndexExactBeforeAnyFence
   scope: ArchetypeClusterState.RecomputeDirtyClusterAabbsSlice, ArchetypeClusterState.IsClusterProcessBitSet,
     ArchetypeClusterState.ApplyOrDeferClusterUpdate, ArchetypeClusterState.UpdateClusterInPerCellIndex,
-    ClusterRef.MaybeGrowAndFlagShrink
+    ClusterRef.MaybeGrowAndFlagShrink, ClusterRef.WriteSpatialSet
   verified: CellTreeParallelFenceTests.CellIndexTracksClusterAabbs_AfterAWriteTimeGrow (both slicing branches,
     50 serial fence ticks of rotation, queries compared against entity positions read straight out of cluster
     storage). Pre-fix it failed on both branches with the index one to two ticks inside ClusterAabbs on every axis.
@@ -558,6 +559,38 @@
   requires: CA-01 (ClusterAabbs itself contains the entities)
 
 ---
+
+### CA-03: A slot-set WriteSpatial is its single writes, published once `[fatal][silent]`
+  invariant on one thread, ClusterRef.WriteSpatial(comp, slots, values) leaves the cluster as WriteSpatial(comp, i, values[i]) for every i of
+            slots, in ascending order, would: the same slot values, ClusterAabbs entry, shrink and migration flags, destination hint,
+            MigrationHint, HysteresisAbsorbedLive and process bit. Each slot is tested against the bound as the writes before it have grown it,
+            which is what the single write finds at that slot
+  invariant the grow is carried in world space and converted only when a box extends the union, exact because ToCellRelativeMin/Max are
+            monotonic: converting the union is uniting the conversions. The union skips a NaN bound, as the single write's compare does. The
+            two forms decode the field separately, the set through AabbClusterEnumerator's IBoundsReader and the single through its per-tier
+            specialization, and must widen it the same way
+  invariant a slot beyond the cluster or beyond values is refused before anything is written, in every build: a slot past the cluster would
+            write into the next column
+  invariant a slot whose position is not finite stops the call where the single write throws (WorldToCellKey refuses a non-finite centre):
+            the slots before it and that slot's own grow are published, the slots after it are not written, and the same exception is thrown.
+            The one difference: the process bit is set when that slot's grow changed the bound, which the single write leaves clear
+  on_violation: a grow lost → CA-01's bound too tight → silent query false negatives; a migration flag lost → an entity stranded outside its
+    cell (CC-02); a shrink flag lost or added → a bound left loose or rescanned for nothing
+  note: a writer running on the same cluster meanwhile, a spawn widening it or a write to another of its slots, is seen by single writes as
+        they go and by the call only when it publishes. The shrink flags and the process bit can then differ; the grow, CA-01's containment and
+        the migration flags cannot. A widening the call leaves unflagged is flagged or indexed by the writer that made it: a write sets the
+        process bit itself, a spawn widens the index (CA-02), so neither the bound nor the index can end up too tight
+  scope: ClusterRef.WriteSpatial, ClusterRef.WriteSpatialSet, AabbClusterEnumerator.IBoundsReader, ClusterSpatialAabb.ToCellRelativeMin,
+         ClusterSpatialAabb.ToCellRelativeMax
+  verified: SpatialSetWriteTests.ASetWrite_LeavesTheClusterAsItsSingleWrites (all eight field types: two engines from one seed, one written
+            slot by slot, the other by slot set, with a cluster full to its last slot; every cluster's slot values, bound, flags and counters
+            compared for equality before the fence, entity cells and CA-01 after it);
+            SpatialSetWriteTests.ASetWriteThatChangesNothing_SetsNoProcessBit (every other slot rewritten unchanged: a partial mask, and a process
+            bit that must stay clear in both); SpatialSetWriteTests.ANonFinitePosition_PublishesTheSlotsBeforeIt;
+            SpatialSetWriteTests.ASlotBeyondTheValuesOrTheCluster_IsRefused (on a tier whose cluster holds fewer than 64 slots)
+  note: no RuleMutant. Hand-made mutants of WriteSpatialSet, each caught with this rule's marker: the X-min grow dropped, the migration flag
+        dropped, the shrink tested against the bound as the call began instead of as the earlier writes grew it, every shrink flag set, the
+        process bit set unconditionally, the cluster half of the bounds check removed, the non-finite stop removed
 
 ## Module: VDB Cell Grid (Issue #872 step 8)
 

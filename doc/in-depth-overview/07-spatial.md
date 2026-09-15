@@ -300,6 +300,8 @@ Placement picks a cell from the entity's position and then a cluster in that cel
 
 It deliberately does **not** mark the slot dirty. The dirty bitmap drives WAL serialization and change-filtered dispatch, and marking every mover dirty every tick floods the WAL writer into backpressure. Fence-time spatial maintenance does not need the dirty bit; it consumes `ClusterProcessBitmap` and `ClusterMigrationPendingSlots` directly. A workload that genuinely needs the spatial field persisted writes through the MVCC `OpenMut` path instead, or calls `SetDirty` explicitly afterwards.
 
+**Per cluster.** A system that moves many entities of one cluster can hand them over in one call: `WriteSpatial(comp, slots, values)` takes a slot mask and a slot-indexed span, typically a stack buffer of `ClusterSize` elements filled for the moved slots. On one thread it leaves the cluster as the same single writes would, made in ascending slot order (rule **CA-03**): each slot is tested against the bound as the writes before it have grown it. The bookkeeping runs once per cluster: the field type is dispatched once, the new boxes are united in world space and a bound converted into the cell's frame only when a box extends the union, and each flag word is written at most once.
+
 A write that bypasses the barrier sets no process bit, and that is a real hole rather than a stylistic complaint: a cluster the fence is never told to recheck is invisible to drift detection on one of the two refresh branches ([§7](#7-intra-cell-drift-relocation-and-repair)). Analyzer rule **TYPHON009** flags mutable access to a spatial component through `GetSpan`/`Get` for exactly this reason.
 
 ### Fence

@@ -405,6 +405,8 @@ public sealed partial class SimBridge
     public void CreatureMoveTick(TickContext ctx)
     {
         var half = _config.WorldEdgeM * 0.5f;
+        var batched = _config.BatchedSpatialWrites;
+        Span<CreaturePlacement> next = stackalloc CreaturePlacement[64];
 
         using var clusters = ctx.ClusterIds != null
             ? ctx.Accessor.GetClusterEnumerator<Creature>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
@@ -422,6 +424,7 @@ public sealed partial class SimBridge
             var motions = cluster.GetReadOnlySpan(Creature.Move);
             var brains = cluster.GetReadOnlySpan(Creature.Ai);
 
+            var moved = 0UL;
             var bits = bits0;
             while (bits != 0)
             {
@@ -455,7 +458,21 @@ public sealed partial class SimBridge
                 // is what makes SetSpatialBarrierOnly correct for this archetype and lets the fence skip its slot scan.
                 var nb = default(CreaturePlacement);
                 nb.SetAt(x, z, h);
-                cluster.WriteSpatial(Creature.Bounds, idx, nb);
+                if (batched)
+                {
+                    next[idx] = nb;
+                    moved |= 1UL << idx;
+                }
+                else
+                {
+                    cluster.WriteSpatial(Creature.Bounds, idx, nb);
+                }
+            }
+
+            // The moved slots in one call: the barrier's bookkeeping once per cluster rather than once per creature.
+            if (batched)
+            {
+                cluster.WriteSpatial(Creature.Bounds, moved, next);
             }
         }
     }
@@ -464,6 +481,8 @@ public sealed partial class SimBridge
     public void PlayerMoveTick(TickContext ctx)
     {
         var half = _config.WorldEdgeM * 0.5f;
+        var batched = _config.BatchedSpatialWrites;
+        Span<PlayerPlacement> next = stackalloc PlayerPlacement[64];
 
         using var clusters = ctx.ClusterIds != null
             ? ctx.Accessor.GetClusterEnumerator<Player>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
@@ -480,6 +499,7 @@ public sealed partial class SimBridge
             var places = cluster.GetReadOnlySpan(Player.Bounds);
             var motions = cluster.GetReadOnlySpan(Player.Move);
 
+            var moved = 0UL;
             var bits = bits0;
             while (bits != 0)
             {
@@ -498,7 +518,20 @@ public sealed partial class SimBridge
                 var z = Math.Clamp(p.Z + move.VelZ, -half + h, half - h);
                 var nb = default(PlayerPlacement);
                 nb.SetAt(x, z, h);
-                cluster.WriteSpatial(Player.Bounds, idx, nb);
+                if (batched)
+                {
+                    next[idx] = nb;
+                    moved |= 1UL << idx;
+                }
+                else
+                {
+                    cluster.WriteSpatial(Player.Bounds, idx, nb);
+                }
+            }
+
+            if (batched)
+            {
+                cluster.WriteSpatial(Player.Bounds, moved, next);
             }
         }
     }
@@ -514,6 +547,8 @@ public sealed partial class SimBridge
     public void NpcMoveTick(TickContext ctx)
     {
         var tick = ctx.TickNumber;
+        var batched = _config.BatchedSpatialWrites;
+        Span<NpcPlacement> next = stackalloc NpcPlacement[64];
 
         using var clusters = ctx.ClusterIds != null
             ? ctx.Accessor.GetClusterEnumerator<CityNpc>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
@@ -532,6 +567,7 @@ public sealed partial class SimBridge
             var motions = cluster.GetSpan(CityNpc.Move);
             var chunk = cluster.ChunkId;
 
+            var moved = 0UL;
             var bits = bits0;
             while (bits != 0)
             {
@@ -566,7 +602,20 @@ public sealed partial class SimBridge
 
                 var nb = default(NpcPlacement);
                 nb.SetAt(p.X + move.VelX, p.Z + move.VelZ, p.HalfExtent);
-                cluster.WriteSpatial(CityNpc.Bounds, idx, nb);
+                if (batched)
+                {
+                    next[idx] = nb;
+                    moved |= 1UL << idx;
+                }
+                else
+                {
+                    cluster.WriteSpatial(CityNpc.Bounds, idx, nb);
+                }
+            }
+
+            if (batched)
+            {
+                cluster.WriteSpatial(CityNpc.Bounds, moved, next);
             }
         }
     }

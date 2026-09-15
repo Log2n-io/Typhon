@@ -186,10 +186,7 @@ public struct TickContext
     /// rejected here on purpose — lifecycle-hook contexts carry it, but they never reach system dispatch.
     /// </remarks>
     [Conditional("DEBUG")]
-    internal readonly void DebugValidateWorkerId(int slotCount, string systemName)
-    {
-        DebugValidateWorkerSlot(WorkerId, slotCount, systemName);
-    }
+    internal readonly void DebugValidateWorkerId(int slotCount, string systemName) => DebugValidateWorkerSlot(WorkerId, slotCount, systemName);
 
     /// <summary>
     /// Slot-value overload of <see cref="DebugValidateWorkerId"/>, for dispatch paths that build their context inside a <c>try</c> and so must

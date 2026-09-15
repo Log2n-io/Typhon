@@ -123,6 +123,12 @@ public sealed class SimConfig
     /// </summary>
     public bool SimdNarrowphase = true;
 
+    /// <summary>
+    /// Write the move systems' positions one call per cluster (<c>ClusterRef.WriteSpatial</c>'s slot-set form, the default) or one per entity
+    /// (<c>--per-entity-writespatial</c>), so one binary is both arms of an A/B.
+    /// </summary>
+    public bool BatchedSpatialWrites = true;
+
     // ── Runtime ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>

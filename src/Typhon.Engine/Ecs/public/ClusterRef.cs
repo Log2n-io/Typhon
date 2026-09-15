@@ -408,7 +408,93 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         }
     }
 
-    /// <summary>AABB3F specialization of <see cref="WriteSpatial{T}"/> — the 3D tier #914 exists for.</summary>
+    /// <summary>
+    /// The per-cluster form of the barrier: writes <c>newValues[i]</c> to every slot <c>i</c> set in <paramref name="slots"/>, and does the bookkeeping
+    /// once for the cluster rather than once per entity.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>It leaves the cluster as the same single-slot writes would, made in ascending slot order on one thread</b>: slot values, cluster bound,
+    /// shrink and migration flags, destination hint, counters, process bit (rule CA-03). Each slot is tested against the bound as the writes before it in
+    /// the call have grown it, which is what the single write finds there. A writer running on the same cluster meanwhile, a spawn or a write to another
+    /// of its slots, is seen by single writes as they go and by this call only when it publishes, so the shrink flags and the process bit can differ.
+    /// Containment cannot: the bound still covers every entity, and a widening this call leaves unflagged was indexed by the writer that made it.</para>
+    /// <para>A slot whose position is not finite stops the call where the single write would throw: the slots before it and that slot's own grow are
+    /// published, the slots after it are not written, and the call throws the single write's exception. The process bit is then set when that slot's
+    /// grow changed the bound, where the single write leaves it clear.</para>
+    /// <para><b>Why it is cheaper.</b> The single write dispatches on the field type, converts eight world bounds into the cell's frame, reads the growth
+    /// stamp and the stored bound, and may CAS the bound and OR three bitmaps, all per entity. Here the field type is dispatched once; the new boxes are
+    /// united in world space and a bound converted only when a box extends the union, exact because the conversion is monotonic; an old box is converted
+    /// only on an axis where its entity moved inward; and each bitmap is written at most once.</para>
+    /// <para><paramref name="newValues"/> is indexed by slot, so it must be longer than the highest slot set: a <see cref="ClusterSize"/>-element stack
+    /// buffer filled for the moved slots is the intended caller. As with the single write, the slots should be live ones, and they are not marked
+    /// dirty.</para>
+    /// </remarks>
+    /// <exception cref="ArgumentException">A slot of <paramref name="slots"/> is beyond the cluster or beyond <paramref name="newValues"/>.</exception>
+    public void WriteSpatial<T>(Comp<T> comp, ulong slots, scoped ReadOnlySpan<T> newValues) where T : unmanaged
+    {
+        if (slots == 0)
+        {
+            return;
+        }
+
+        var slot = _meta.GetSlot(comp._componentTypeId);
+        if (CheckConfig.Enabled && (_meta.VersionedSlotMask & (1 << slot)) != 0)
+        {
+            ThrowHelper.ThrowInvalidOp($"WriteSpatial on Versioned component bypasses revision chain.");
+        }
+        if (CheckConfig.Enabled && (_state == null || !_state.SpatialSlot.HasSpatialIndex || _state.SpatialSlot.Slot != slot))
+        {
+            ThrowHelper.ThrowInvalidOp(
+                $"WriteSpatial requires the archetype's spatial-indexed component (marked [SpatialIndex]). For non-spatial fields, use GetSpan or Get.");
+        }
+
+        CheckStride<T>(slot);
+
+        // Checked in every build, not only in strict mode: a slot past the cluster would write past its column, into the next one.
+        var highest = 63 - BitOperations.LeadingZeroCount(slots);
+        if ((slots & ~_layout.FullMask) != 0 || highest >= newValues.Length)
+        {
+            ThrowHelper.ThrowArgument(
+                $"WriteSpatial: slot {highest} is beyond the cluster ({_layout.ClusterSize} slots) or beyond the {newValues.Length} values given.");
+        }
+
+        var spatialSlot = _state.SpatialSlot;
+        var column = ResolveBase(slot) + _layout.ComponentOffset(slot);
+        var fieldOffset = spatialSlot.FieldOffset;
+        var fieldType = spatialSlot.FieldInfo.FieldType;
+        switch (fieldType)
+        {
+            case SpatialFieldType.AABB2F:
+                WriteSpatialSet<T, AabbClusterEnumerator.Aabb2FReader>(column, fieldOffset, slots, newValues);
+                break;
+            case SpatialFieldType.AABB3F:
+                WriteSpatialSet<T, AabbClusterEnumerator.Aabb3FReader>(column, fieldOffset, slots, newValues);
+                break;
+            case SpatialFieldType.BSphere2F:
+                WriteSpatialSet<T, AabbClusterEnumerator.BSphere2FReader>(column, fieldOffset, slots, newValues);
+                break;
+            case SpatialFieldType.BSphere3F:
+                WriteSpatialSet<T, AabbClusterEnumerator.BSphere3FReader>(column, fieldOffset, slots, newValues);
+                break;
+            case SpatialFieldType.AABB2D:
+                WriteSpatialSet<T, AabbClusterEnumerator.Aabb2DReader>(column, fieldOffset, slots, newValues);
+                break;
+            case SpatialFieldType.AABB3D:
+                WriteSpatialSet<T, AabbClusterEnumerator.Aabb3DReader>(column, fieldOffset, slots, newValues);
+                break;
+            case SpatialFieldType.BSphere2D:
+                WriteSpatialSet<T, AabbClusterEnumerator.BSphere2DReader>(column, fieldOffset, slots, newValues);
+                break;
+            case SpatialFieldType.BSphere3D:
+                WriteSpatialSet<T, AabbClusterEnumerator.BSphere3DReader>(column, fieldOffset, slots, newValues);
+                break;
+            default:
+                throw new NotSupportedException(
+                    $"WriteSpatial: spatial field type {fieldType} has no specialization. Add one when a new SpatialFieldType variant is introduced.");
+        }
+    }
+
+    /// <summary>AABB3F specialization of <c>WriteSpatial</c> — the 3D tier #914 exists for.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void WriteSpatialAabb3F<T>(int slotIndex, byte* slotBytes, byte* fieldPtr, in T newValue) where T : unmanaged
     {
@@ -598,7 +684,174 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         }
     }
 
-    /// <summary>AABB2F specialization of <see cref="WriteSpatial{T}"/>. Inlined into the barrier on the AntHill hot path (WorldBounds.Bounds is AABB2F,
+    /// <summary>
+    /// The bookkeeping of the slot-set <c>WriteSpatial</c>, compiled once per field type with the decode inlined. <typeparamref name="TReader"/> is the
+    /// query drain's decode, which widens exactly as the single-slot tiers do and gives a 2D tier Z = 0.
+    /// </summary>
+    /// <remarks>
+    /// Each step is the single write's, hoisted out of the entity loop: <c>ApplySpatialWrite</c>'s grow and shrink, <c>MaybeFlagMigration</c>'s test with
+    /// the grid's configuration read once, <c>SetClusterProcessBit</c> at most once. The publication keeps the single write's order and its growth stamp.
+    /// </remarks>
+    private void WriteSpatialSet<T, TReader>(byte* column, int fieldOffset, ulong slots, scoped ReadOnlySpan<T> newValues)
+        where T : unmanaged where TReader : struct, AabbClusterEnumerator.IBoundsReader
+    {
+        if (!TryGetCellOrigin(out int cellKey, out double originX, out double originY, out double originZ))
+        {
+            // No frame to grow a bound in or test a crossing against: the single write stores the value and stops there too.
+            for (var rest = slots; rest != 0; rest &= rest - 1)
+            {
+                var i = BitOperations.TrailingZeroCount(rest);
+                *(T*)(column + i * sizeof(T)) = newValues[i];
+            }
+
+            return;
+        }
+
+        // The bound as the call begins, grown by each write as the loop goes: what the single write finds at each slot on one thread, so the shrink
+        // test below gives its flags. A concurrent writer on this cluster is seen by single writes as they go and here only at the publication, so the
+        // shrink flags and the process bit can then differ (CA-03).
+        var start = Volatile.Read(ref _state.ClusterAabbs)[_chunkId];
+        float runMinX = start.MinX, runMinY = start.MinY, runMinZ = start.MinZ, runMaxX = start.MaxX, runMaxY = start.MaxY, runMaxZ = start.MaxZ;
+
+        var grid = _state.Grid;
+        ref readonly var cfg = ref grid.Config;
+        var cellSize = (float)cfg.CellSize;
+        var hyster = cellSize * cfg.MigrationHysteresisRatio;
+
+        double unionMinX = double.PositiveInfinity, unionMinY = double.PositiveInfinity, unionMinZ = double.PositiveInfinity;
+        double unionMaxX = double.NegativeInfinity, unionMaxY = double.NegativeInfinity, unionMaxZ = double.NegativeInfinity;
+        byte shrinkMask = 0;
+        ulong migrating = 0;
+        var destCellKey = -1;
+        var migrations = 0;
+        var absorbed = 0;
+        var nonFinite = false;
+        double stopX = 0d, stopY = 0d, stopZ = 0d;
+
+        for (var rest = slots; rest != 0; rest &= rest - 1)
+        {
+            var i = BitOperations.TrailingZeroCount(rest);
+            var slotBytes = column + i * sizeof(T);
+            var fieldPtr = slotBytes + fieldOffset;
+            TReader.Read(fieldPtr, out var oldMinX, out var oldMinY, out var oldMinZ, out var oldMaxX, out var oldMaxY, out var oldMaxZ);
+            *(T*)slotBytes = newValues[i];
+            TReader.Read(fieldPtr, out var newMinX, out var newMinY, out var newMinZ, out var newMaxX, out var newMaxY, out var newMaxZ);
+
+            // Grow first, as the single write does: the union of the new boxes in world space, and the running bound, converted only when a box extends
+            // the union. Exact, the conversion being monotonic. Compares rather than Math.Min, so a NaN bound drops out as it does from the single
+            // write's compare instead of poisoning the union.
+            if (newMinX < unionMinX) { unionMinX = newMinX; runMinX = MathF.Min(runMinX, ClusterSpatialAabb.ToCellRelativeMin(newMinX, originX)); }
+            if (newMinY < unionMinY) { unionMinY = newMinY; runMinY = MathF.Min(runMinY, ClusterSpatialAabb.ToCellRelativeMin(newMinY, originY)); }
+            if (newMaxX > unionMaxX) { unionMaxX = newMaxX; runMaxX = MathF.Max(runMaxX, ClusterSpatialAabb.ToCellRelativeMax(newMaxX, originX)); }
+            if (newMaxY > unionMaxY) { unionMaxY = newMaxY; runMaxY = MathF.Max(runMaxY, ClusterSpatialAabb.ToCellRelativeMax(newMaxY, originY)); }
+
+            // Shrink: the slot sat on an extreme of the running bound and moved inward on that axis. The world compare is necessary for the
+            // cell-relative one, the conversion being monotonic, and spares the conversions for every slot that moved outward or not at all.
+            if (newMinX > oldMinX && ClusterSpatialAabb.ToCellRelativeMin(oldMinX, originX) == runMinX
+                && ClusterSpatialAabb.ToCellRelativeMin(newMinX, originX) > runMinX) { shrinkMask |= 0x01; }
+            if (newMaxX < oldMaxX && ClusterSpatialAabb.ToCellRelativeMax(oldMaxX, originX) == runMaxX
+                && ClusterSpatialAabb.ToCellRelativeMax(newMaxX, originX) < runMaxX) { shrinkMask |= 0x02; }
+            if (newMinY > oldMinY && ClusterSpatialAabb.ToCellRelativeMin(oldMinY, originY) == runMinY
+                && ClusterSpatialAabb.ToCellRelativeMin(newMinY, originY) > runMinY) { shrinkMask |= 0x04; }
+            if (newMaxY < oldMaxY && ClusterSpatialAabb.ToCellRelativeMax(oldMaxY, originY) == runMaxY
+                && ClusterSpatialAabb.ToCellRelativeMax(newMaxY, originY) < runMaxY) { shrinkMask |= 0x08; }
+
+            // Z only for a 3D tier: a 2D archetype's stored Z is the ±Infinity sentinel, which a real 0 must not replace (see ApplySpatialWrite).
+            if (TReader.Is3D)
+            {
+                if (newMinZ < unionMinZ) { unionMinZ = newMinZ; runMinZ = MathF.Min(runMinZ, ClusterSpatialAabb.ToCellRelativeMin(newMinZ, originZ)); }
+                if (newMaxZ > unionMaxZ) { unionMaxZ = newMaxZ; runMaxZ = MathF.Max(runMaxZ, ClusterSpatialAabb.ToCellRelativeMax(newMaxZ, originZ)); }
+                if (newMinZ > oldMinZ && ClusterSpatialAabb.ToCellRelativeMin(oldMinZ, originZ) == runMinZ
+                    && ClusterSpatialAabb.ToCellRelativeMin(newMinZ, originZ) > runMinZ) { shrinkMask |= 0x10; }
+                if (newMaxZ < oldMaxZ && ClusterSpatialAabb.ToCellRelativeMax(oldMaxZ, originZ) == runMaxZ
+                    && ClusterSpatialAabb.ToCellRelativeMax(newMaxZ, originZ) < runMaxZ) { shrinkMask |= 0x20; }
+            }
+
+            // Migration: MaybeFlagMigration's test, term for term, including its Z terms for a 2D tier (centre 0, as there).
+            var centerX = 0.5d * (newMinX + newMaxX);
+            var centerY = 0.5d * (newMinY + newMaxY);
+            var centerZ = TReader.Is3D ? 0.5d * (newMinZ + newMaxZ) : 0d;
+            var relX = (float)(centerX - originX);
+            var relY = (float)(centerY - originY);
+            var relZ = (float)(centerZ - originZ);
+            if (relX < -hyster || relX > cellSize + hyster || relY < -hyster || relY > cellSize + hyster || relZ < -hyster || relZ > cellSize + hyster)
+            {
+                // WorldToCellKey refuses a non-finite centre, and the single write throws there with this slot's grow and every earlier slot already
+                // published. Stop at this slot, publish, then throw.
+                if (!double.IsFinite(centerX) || !double.IsFinite(centerY) || !double.IsFinite(centerZ))
+                {
+                    nonFinite = true;
+                    stopX = centerX;
+                    stopY = centerY;
+                    stopZ = centerZ;
+                    break;
+                }
+
+                var newCellKey = grid.WorldToCellKey(centerX, centerY, centerZ);
+                if (newCellKey != cellKey)
+                {
+                    migrating |= 1UL << i;
+                    destCellKey = newCellKey;
+                    migrations++;
+                }
+            }
+            else if (relX < 0f || relX > cellSize || relY < 0f || relY > cellSize || relZ < 0f || relZ > cellSize)
+            {
+                absorbed++;
+            }
+        }
+
+        // Publish in the single write's order. The grow (the running bound: the start bound lowered by the union's conversion) and the shrink flag go
+        // under the growth stamp: a spawn on another thread can grow ClusterAabbs, and a redo repeats both, idempotently, in the copy.
+        var changed = false;
+        int stamp;
+        do
+        {
+            stamp = _state.BeginClusterAabbsWrite();
+            ref var stored = ref Volatile.Read(ref _state.ClusterAabbs)[_chunkId];
+            if (runMinX < stored.MinX) { ClusterSpatialAabb.CasMin(ref stored.MinX, runMinX); changed = true; }
+            if (runMinY < stored.MinY) { ClusterSpatialAabb.CasMin(ref stored.MinY, runMinY); changed = true; }
+            if (runMaxX > stored.MaxX) { ClusterSpatialAabb.CasMax(ref stored.MaxX, runMaxX); changed = true; }
+            if (runMaxY > stored.MaxY) { ClusterSpatialAabb.CasMax(ref stored.MaxY, runMaxY); changed = true; }
+            if (TReader.Is3D)
+            {
+                if (runMinZ < stored.MinZ) { ClusterSpatialAabb.CasMin(ref stored.MinZ, runMinZ); changed = true; }
+                if (runMaxZ > stored.MaxZ) { ClusterSpatialAabb.CasMax(ref stored.MaxZ, runMaxZ); changed = true; }
+            }
+
+            if (shrinkMask != 0)
+            {
+                InterlockedOrByteArrayElement(_state.ClusterShrinkPendingAxes, _chunkId, shrinkMask);
+                changed = true;
+            }
+        }
+        while (!_state.ClusterAabbsWriteLanded(stamp));
+
+        if (migrating != 0)
+        {
+            Interlocked.Or(ref _state.ClusterMigrationPendingSlots[_chunkId], migrating);
+            _state.ClusterMigrationDestCellKeys[_chunkId] = destCellKey;
+            _state.MigrationHint += migrations;
+        }
+
+        if (absorbed != 0)
+        {
+            Interlocked.Add(ref _state.HysteresisAbsorbedLive, absorbed);
+        }
+
+        if (changed || migrating != 0)
+        {
+            SetClusterProcessBit();
+        }
+
+        if (nonFinite)
+        {
+            // Throws the single write's exception for that slot, now that what the single writes would have published is.
+            _ = grid.WorldToCellKey(stopX, stopY, stopZ);
+        }
+    }
+
+    /// <summary>AABB2F specialization of <c>WriteSpatial</c>. Inlined into the barrier on the AntHill hot path (WorldBounds.Bounds is AABB2F,
     /// point-form-encoded with MinX==MaxX, MinY==MaxY).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void WriteSpatialAabb2F<T>(int slotIndex, byte* slotBytes, byte* fieldPtr, in T newValue) where T : unmanaged

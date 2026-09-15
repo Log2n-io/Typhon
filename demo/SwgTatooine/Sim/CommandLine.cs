@@ -43,6 +43,7 @@ public static class CommandLine
         c.ParallelQueryMinChunkSize = Int(args, "--min-chunk", c.ParallelQueryMinChunkSize);
         c.AwarenessMinChunk = Int(args, "--awareness-min-chunk", c.AwarenessMinChunk);
         c.CostBasedChunking = Array.IndexOf(args, "--entity-chunking") < 0;
+        c.BatchedSpatialWrites = Array.IndexOf(args, "--per-entity-writespatial") < 0;
         c.TickLogPath = Str(args, "--tick-log", null);
         c.AwarenessApi = Str(args, "--awareness-api", "count") switch
         {
