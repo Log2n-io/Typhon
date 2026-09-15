@@ -26,6 +26,7 @@ public static class CommandLine
         c.ClusterRepairCriticalExtentRatio = Float(args, "--repair-critical", c.ClusterRepairCriticalExtentRatio);
         c.RepairWorstClustersPerUnit = Int(args, "--repair-unit", c.RepairWorstClustersPerUnit);
         c.RepairCooldownTicks = Int(args, "--repair-cooldown", c.RepairCooldownTicks);
+        c.QueryEfficiencyTolerance = Float(args, "--eff-tol", c.QueryEfficiencyTolerance);
         c.ShuttleShare = Float(args, "--shuttle-share", c.ShuttleShare);
         c.ShuttleIntervalS = Float(args, "--shuttle-interval", c.ShuttleIntervalS);
         c.BoardingWindowS = Float(args, "--boarding-window", c.BoardingWindowS);
@@ -37,6 +38,7 @@ public static class CommandLine
         c.SimdNarrowphase = Array.IndexOf(args, "--scalar-narrowphase") < 0;
         c.BatchSpawnSortThreshold = Int(args, "--batch-sort", c.BatchSpawnSortThreshold);
         c.TickRateHz = Int(args, "--hz", c.TickRateHz);
+        c.Unpaced = Array.IndexOf(args, "--unpaced") >= 0;
         c.WorkerCount = Int(args, "--workers", c.WorkerCount);
         c.WarmTicks = Int(args, "--warm", c.WarmTicks);
         c.MeasuredTicks = Int(args, "--ticks", c.MeasuredTicks);

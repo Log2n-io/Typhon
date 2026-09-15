@@ -91,6 +91,12 @@ public sealed class SimConfig
     /// <summary>Ticks a just-repaired cell waits before it can be repaired again — the engine's <c>RepairCooldownTicks</c>; <c>0</c> disables it.</summary>
     public int RepairCooldownTicks = 50;
 
+    /// <summary>
+    /// How far above the best candidates per hit the queries may drift before maintenance gets the whole budget — the engine's
+    /// <c>QueryEfficiencyTolerance</c>; <c>0</c> grants the configured budget every tick.
+    /// </summary>
+    public float QueryEfficiencyTolerance = 0.1f;
+
     // ── Shuttles (#910) ─────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>Players also travel between cities by shuttle. Off reproduces the pre-shuttle simulation exactly.</summary>
@@ -145,6 +151,16 @@ public sealed class SimConfig
     /// the system DAG is driven at and what a per-tick cost is measured against.
     /// </summary>
     public int TickRateHz = 10;
+
+    /// <summary>
+    /// Run ticks back to back rather than at <see cref="TickRateHz"/>, with the runtime's overload response off (<c>--unpaced</c>), so a count-only
+    /// comparison (candidates per hit, migrations, budget granted) takes the time the ticks take, not the time the clock allows. The simulation's own
+    /// intervals are unchanged — distance per tick, AI and shuttle intervals all come from <see cref="TickRateHz"/> — but the engine prices maintenance on
+    /// measured cost, and busy workers measure differently from parked ones, so admissions can shift: validated once against paced runs (16×, Creature's
+    /// candidates per hit within 1 %, migrations equal), not guaranteed. Not for a timing A/B. The run's last tick may still be in flight when the
+    /// summary prints.
+    /// </summary>
+    public bool Unpaced;
 
     /// <summary>Worker threads for the system DAG and the parallel fence. <c>0</c> means <see cref="Environment.ProcessorCount"/>.</summary>
     public int WorkerCount;
@@ -250,7 +266,7 @@ public sealed class SimConfig
     /// the label keys sweep results.</remarks>
     public string Label =>
         $"{WorldEdgeKm:N0}km x{PopulationScale:N1} cell={ResolveCellSize():N0}m floors={ClusterTargetExtentRatio:G}/{ClusterRepairExtentRatio:G} "
-        + $"unit={RepairWorstClustersPerUnit} shuttles={(!Shuttles ? "off" : ShuttleBurst ? "burst" : "trickle")}";
+        + $"unit={RepairWorstClustersPerUnit} shuttles={(!Shuttles ? "off" : ShuttleBurst ? "burst" : "trickle")}{(Unpaced ? " unpaced" : "")}";
 }
 
 /// <summary>How the awareness system drains its interest queries.</summary>

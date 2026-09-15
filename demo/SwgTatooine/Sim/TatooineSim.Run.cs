@@ -35,6 +35,8 @@ public sealed partial class TatooineSim
     /// its budget. Running at 10 Hz with a 100 ms budget also keeps the overload manager out of the measurement: a
     /// sustained overrun makes the runtime start shedding systems, and a measurement taken while work is being dropped
     /// is not a measurement of the work.</para>
+    /// <para><c>--unpaced</c> (<see cref="SimConfig.Unpaced"/>) is the one exception, for count-only comparisons: ticks back to back, with the overload
+    /// response off so that nothing is shed.</para>
     /// </remarks>
     public RunResult Run()
     {
@@ -57,7 +59,10 @@ public sealed partial class TatooineSim
 
         _runtime = TyphonRuntime.Create(Dbe, BuildSchedule, new RuntimeOptions
         {
-            BaseTickRate = _config.TickRateHz,
+            // Unpaced: a rate no tick can meet, so each starts when the last one ends, and an overload response that cannot escalate — at that overrun it
+            // would shed systems and change the workload being counted.
+            BaseTickRate = _config.Unpaced ? 100_000 : _config.TickRateHz,
+            Overload = _config.Unpaced ? new OverloadOptions { OverrunThreshold = float.MaxValue, QueueGrowthTicks = 0 } : new OverloadOptions(),
             WorkerCount = _config.ResolveWorkerCount(),
             ParallelQueryMinChunkSize = _config.ParallelQueryMinChunkSize,
             CostBasedChunking = _config.CostBasedChunking,
