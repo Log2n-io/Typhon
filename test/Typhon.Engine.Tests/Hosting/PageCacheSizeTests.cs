@@ -55,6 +55,7 @@ public class PageCacheSizeTests
         Assert.That(PagedMMFOptions.PageSizeBytes, Is.EqualTo(8 * 1024));
         Assert.That(PagedMMFOptions.MinimumCacheSizeBytes, Is.EqualTo(8UL * Mib));
         Assert.That(PagedMMFOptions.DefaultCacheSizeBytes, Is.EqualTo(256UL * Mib));
+        Assert.That(PagedMMFOptions.MaximumCacheSizeBytes, Is.EqualTo(2048UL * Mib - 8192), "2 GiB minus one page: the largest page multiple an int holds");
         Assert.That(new PagedMMFOptions().DatabaseCacheSize, Is.EqualTo(PagedMMFOptions.DefaultCacheSizeBytes));
     }
 
@@ -72,6 +73,21 @@ public class PageCacheSizeTests
 
         o.TestMode = true;
         Assert.That(o.IsValid, Is.True, "TestMode must allow a sub-8MiB cache for eviction-stress tests");
+    }
+
+    [Test]
+    public void CacheSize_AboveOneIntSizedAllocation_FailsValidation()
+    {
+        // The cache is one allocation whose size is an int. The check used to allow 4 GiB, so every size from 2 GiB passed it and then threw at startup,
+        // from the allocator.
+        var o = new PagedMMFOptions { DatabaseName = "cache_db", DatabaseDirectory = _dir, DatabaseCacheSize = PagedMMFOptions.MaximumCacheSizeBytes };
+        Assert.That(o.IsValid, Is.True, "the largest size the allocation can hold must pass");
+
+        o.DatabaseCacheSize = 2048UL * Mib;
+        Assert.That(o.IsValid, Is.False, "2 GiB does not fit the int-sized allocation: it must fail validation, not the allocation");
+
+        o.DatabaseCacheSize = 4096UL * Mib;
+        Assert.That(o.IsValid, Is.False, "4 GiB, the limit the check used to allow, must fail validation");
     }
 
     [Test]

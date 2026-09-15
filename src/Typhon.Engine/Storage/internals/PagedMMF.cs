@@ -94,9 +94,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     //    wrong reason on a format gate is worse than none, because the next person to weigh a layout change weighs it
     //    against a hazard that does not exist.
     internal const int DatabaseFormatRevision   = 8;
-    internal const ulong MinimumCacheSize       = MinimumMemPageCount * PageSize;      // 8 MiB — the hard floor (see Validate)
-    internal const ulong DefaultDatabaseCacheSize   = 256UL * 1024 * 1024;             // 256 MiB — the shipped production default
-    internal const ulong RecommendedMinimumCacheSize = 64UL * 1024 * 1024;             // 64 MiB — warn below this (unless TestMode)
+    internal const ulong MinimumCacheSize       = MinimumMemPageCount * PageSize;                   // 8 MiB — the hard floor (see Validate)
+    internal const ulong MaximumCacheSize       = (ulong)int.MaxValue & ~((ulong)PageSize - 1);     // 2 GiB − 8 KiB — one allocation, sized in an int
+    internal const ulong DefaultDatabaseCacheSize   = 256UL * 1024 * 1024;                          // 256 MiB — the shipped production default
+    internal const ulong RecommendedMinimumCacheSize = 64UL * 1024 * 1024;                          // 64 MiB — warn below this (unless TestMode)
     internal const int WriteCachePageSize       = 1024 * 1024;
 
     #endregion

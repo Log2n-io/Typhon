@@ -93,7 +93,7 @@ The engine manages its own memory: a paged, memory-mapped store with a cache, th
 });
 ```
 
-The page cache defaults to **256 MiB** (`PagedMMFOptions.DefaultCacheSizeBytes`) — a production-shaped default, not a development one. Size it to your workload's transaction working set; the permitted range is 8 MiB to 4 GiB. Every wired `Resources` knob is **range-checked automatically at DI resolution** by `DatabaseEngineOptionsValidator`, so an out-of-range configuration fails at startup rather than at first use — there is no manual validation step to remember.
+The page cache defaults to **256 MiB** (`PagedMMFOptions.DefaultCacheSizeBytes`) — a production-shaped default, not a development one. Size it to your workload's transaction working set; the permitted range is 8 MiB to 2 GiB minus one page. Every wired `Resources` knob is **range-checked automatically at DI resolution** by `DatabaseEngineOptionsValidator`, so an out-of-range configuration fails at startup rather than at first use — there is no manual validation step to remember.
 
 > 💡 **Cache size is not a database-size cap.** `DatabaseCacheSize` bounds the *resident working set*, not how much you can store — the on-disk database can be many times the cache; cold pages live on disk and page in on demand (persistent data, indexes, and the entity map all page out — only *Transient* components stay RAM-resident). Size the cache for throughput/latency, not capacity. This is the SQL/SQLite model, and it's what sets Typhon apart from in-memory ECS frameworks.
 
