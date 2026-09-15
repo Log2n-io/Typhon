@@ -541,15 +541,18 @@
   invariant 🔴 OUTSIDE the fence, on user threads (#872 step 15 review): a cluster is in its cell's index from the moment
     it is in the cell's pool — the allocation site adds it under _finalizeLock with an EMPTY box before AddCluster
     publishes it (AddClusterToPerCellIndexLocked) — and every spawner thereafter only WIDENS: ClusterAabbs by per-axis
-    CAS (ClusterSpatialAabb.WidenCas2F/3F), the linear index slot by per-axis CAS that re-validates against a concurrent
-    grow (CellSpatialIndex.WidenAt), a promoted half under _finalizeLock (WidenClusterInPerCellIndex). Before this a
+    CAS (ClusterSpatialAabb.WidenCas2F/3F), the linear index slot by per-axis CAS kept only if the index's growth stamp
+    has not moved (CellSpatialIndex.WidenAt), a promoted half under _finalizeLock (WidenClusterInPerCellIndex). Before this a
     fresh cluster was published first, so two spawners both took the "first entity" branch — two index entries, one
     orphaned, and a reset that wiped the other's widening — and a plain-store widen landed in an array a grow had
     abandoned. Verified before any fence by
-    ClusterPlacementTests.ConcurrentSpawnsIntoOneCellLeaveTheIndexExactBeforeAnyFence
+    ClusterPlacementTests.ConcurrentSpawnsIntoOneCellLeaveTheIndexExactBeforeAnyFence, and a widen across a grow's copy by
+    CellSpatialIndexTests.AWidenDuringAGrowsCopy_LandsInTheGrownArrays and AWidenStampedBeforeAGrow_IsRedoneInTheGrownArrays
+    (mutants: the first form's re-check of ClusterIds, which the grow publishes last, and a widen with no re-check; both
+    lose the widen)
   scope: ArchetypeClusterState.RecomputeDirtyClusterAabbsSlice, ArchetypeClusterState.IsClusterProcessBitSet,
     ArchetypeClusterState.ApplyOrDeferClusterUpdate, ArchetypeClusterState.UpdateClusterInPerCellIndex,
-    ClusterRef.MaybeGrowAndFlagShrink, ClusterRef.WriteSpatialSet
+    ClusterRef.MaybeGrowAndFlagShrink, ClusterRef.WriteSpatialSet, CellSpatialIndex.WidenAt
   verified: CellTreeParallelFenceTests.CellIndexTracksClusterAabbs_AfterAWriteTimeGrow (both slicing branches,
     50 serial fence ticks of rotation, queries compared against entity positions read straight out of cluster
     storage). Pre-fix it failed on both branches with the index one to two ticks inside ClusterAabbs on every axis.

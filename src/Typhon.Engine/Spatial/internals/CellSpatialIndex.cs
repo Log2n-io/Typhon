@@ -217,30 +217,76 @@ internal sealed class CellSpatialIndex
     }
 
     /// <summary>
+    /// Odd while <see cref="Grow"/> copies the arrays, even otherwise: bumped once before the copy and once after the publish. <see cref="WidenAt"/> keeps
+    /// a write only if the even stamp it started from has not moved. The protocol, and the argument for it, are
+    /// <c>ArchetypeClusterState._clusterAabbsGrowth</c>'s: both sides fence between their two accesses, so either the copy reads the widen or the widen
+    /// sees the bump. The grow's fence is its first bump. The widen's is its closing <c>Interlocked.Or</c>, which always runs: a CAS loop that finds its
+    /// axis already wide enough writes, and fences, nothing.
+    /// </summary>
+    private int _growth;
+
+    /// <summary>Test seam: runs inside <see cref="Grow"/> after the copy and before the publish, with <see cref="_growth"/> odd. Null outside tests.</summary>
+    internal Action GrowCopiedProbe;
+
+    /// <summary>Test seam: runs when <see cref="WidenAt"/> finds a grow in flight, before it waits the grow out. Null outside tests.</summary>
+    internal Action WidenWaitProbe;
+
+    /// <summary>Test seam: runs in <see cref="WidenAt"/> once it holds an even stamp, before each attempt's writes. Null outside tests.</summary>
+    internal Action WidenStampedProbe;
+
+    /// <summary>
     /// Widen the AABB at the given slot — every axis a CAS that only moves a min down or a max up — from a thread that holds no latch. The spawn path's
     /// funnel (<c>ArchetypeClusterState.WidenClusterInPerCellIndex</c>): two spawns into one cluster widen the same slot at once, and a spawn opening a
     /// cluster in the same cell may be inside a latched <see cref="Add"/> → <see cref="Grow"/> that replaces every array. A plain store there lands in
-    /// the abandoned array — a bound the index never sees (CA-02 → CA-01 false negative, step 15 review). <see cref="Grow"/> therefore copies and
-    /// publishes, <see cref="ClusterIds"/> last, and this method re-checks that witness after its writes: if it moved, the writes may have landed in
-    /// an orphaned array and are redone in the live one. Idempotent by construction, so a redo costs nothing but the CAS loops.
+    /// the abandoned array — a bound the index never sees (CA-02 → CA-01 false negative, step 15 review). The writes therefore run under
+    /// <see cref="_growth"/>: from an even stamp, kept if it has not moved, redone in the live arrays if it has. Idempotent by construction, so a redo
+    /// costs nothing but the CAS loops.
     /// </summary>
+    /// <remarks>
+    /// The first form re-checked <see cref="ClusterIds"/>, which <see cref="Grow"/> publishes last, as its witness. That missed a widen into an array the
+    /// grow had copied but not yet published whenever the re-check ran before the grow published <see cref="ClusterIds"/>: the witness had not moved, so
+    /// the write stayed in the abandoned array (<c>CellSpatialIndexTests.AWidenDuringAGrowsCopy_LandsInTheGrownArrays</c>). A widen stamped before a grow
+    /// and written after its copy is the redo's case (<c>AWidenStampedBeforeAGrow_IsRedoneInTheGrownArrays</c>).
+    /// </remarks>
     public void WidenAt(int slot, in ClusterSpatialAabb aabb)
     {
         while (true)
         {
-            var witness = Volatile.Read(ref ClusterIds);
+            var stamp = Volatile.Read(ref _growth);
+            if ((stamp & 1) != 0)
+            {
+                stamp = WaitOutGrow();
+            }
+
+            WidenStampedProbe?.Invoke();
             ClusterSpatialAabb.CasMin(ref Volatile.Read(ref MinX)[slot], aabb.MinX);
             ClusterSpatialAabb.CasMin(ref Volatile.Read(ref MinY)[slot], aabb.MinY);
             ClusterSpatialAabb.CasMin(ref Volatile.Read(ref MinZ)[slot], aabb.MinZ);
             ClusterSpatialAabb.CasMax(ref Volatile.Read(ref MaxX)[slot], aabb.MaxX);
             ClusterSpatialAabb.CasMax(ref Volatile.Read(ref MaxY)[slot], aabb.MaxY);
             ClusterSpatialAabb.CasMax(ref Volatile.Read(ref MaxZ)[slot], aabb.MaxZ);
+
+            // Always a write, so always a full fence: the protocol's fence on this side (see _growth). Do not skip it when the bits are already set.
             Interlocked.Or(ref Volatile.Read(ref CategoryMasks)[slot], aabb.CategoryMask);
-            if (ReferenceEquals(Volatile.Read(ref ClusterIds), witness))
+            if (Volatile.Read(ref _growth) == stamp)
             {
                 return;
             }
         }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private int WaitOutGrow()
+    {
+        WidenWaitProbe?.Invoke();
+        var spin = new SpinWait();
+        int stamp;
+        while (((stamp = Volatile.Read(ref _growth)) & 1) != 0)
+        {
+            spin.SpinOnce();
+        }
+
+        return stamp;
     }
 
     /// <summary>
@@ -283,16 +329,34 @@ internal sealed class CellSpatialIndex
         {
             newCapacity = ClusterIds.Length + 1;
         }
-        // Copy, then publish with release stores — the bound arrays first and ClusterIds LAST, because ClusterIds is the witness WidenAt re-checks: a
-        // widener that observes the new ClusterIds after its writes knows every bound array it wrote was already the new one.
-        Volatile.Write(ref MinX, Grown(MinX, newCapacity));
-        Volatile.Write(ref MinY, Grown(MinY, newCapacity));
-        Volatile.Write(ref MinZ, Grown(MinZ, newCapacity));
-        Volatile.Write(ref MaxX, Grown(MaxX, newCapacity));
-        Volatile.Write(ref MaxY, Grown(MaxY, newCapacity));
-        Volatile.Write(ref MaxZ, Grown(MaxZ, newCapacity));
-        Volatile.Write(ref CategoryMasks, Grown(CategoryMasks, newCapacity));
-        Volatile.Write(ref ClusterIds, Grown(ClusterIds, newCapacity));
+        // Odd for the whole copy: a WidenAt whose CAS the copy may have missed sees the stamp move and redoes it in the new arrays.
+        Interlocked.Increment(ref _growth);
+        try
+        {
+            var minX = Grown(MinX, newCapacity);
+            var minY = Grown(MinY, newCapacity);
+            var minZ = Grown(MinZ, newCapacity);
+            var maxX = Grown(MaxX, newCapacity);
+            var maxY = Grown(MaxY, newCapacity);
+            var maxZ = Grown(MaxZ, newCapacity);
+            var categoryMasks = Grown(CategoryMasks, newCapacity);
+            var clusterIds = Grown(ClusterIds, newCapacity);
+            GrowCopiedProbe?.Invoke();
+
+            // Release stores, the bound arrays before ClusterIds.
+            Volatile.Write(ref MinX, minX);
+            Volatile.Write(ref MinY, minY);
+            Volatile.Write(ref MinZ, minZ);
+            Volatile.Write(ref MaxX, maxX);
+            Volatile.Write(ref MaxY, maxY);
+            Volatile.Write(ref MaxZ, maxZ);
+            Volatile.Write(ref CategoryMasks, categoryMasks);
+            Volatile.Write(ref ClusterIds, clusterIds);
+        }
+        finally
+        {
+            Interlocked.Increment(ref _growth);
+        }
     }
 
     private static T[] Grown<T>(T[] source, int newCapacity)

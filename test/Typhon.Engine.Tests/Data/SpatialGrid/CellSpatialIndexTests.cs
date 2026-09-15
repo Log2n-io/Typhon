@@ -1,3 +1,5 @@
+using System;
+using System.Threading;
 using NUnit.Framework;
 
 namespace Typhon.Engine.Tests;
@@ -200,5 +202,192 @@ class CellSpatialIndexTests
         Assert.That(aabb.MaxX, Is.EqualTo(25f));
         Assert.That(aabb.MaxY, Is.EqualTo(30f));
         Assert.That(aabb.CategoryMask, Is.EqualTo(0xBu));
+    }
+
+    private const string Ca02Marker = "CA-02: a widen made during a grow's copy was lost";
+
+    /// <summary>
+    /// A widen that runs while a grow has copied the arrays but not yet published them must land in the grown arrays (CA-02, before any fence). The two
+    /// test seams make the interleaving deterministic: the grow parks after its copy, the widen runs, and the grow publishes once the widen has either
+    /// returned (the defect: its writes went to the arrays the grow had already copied) or started waiting the grow out.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("CA-02")]
+    public void AWidenDuringAGrowsCopy_LandsInTheGrownArrays() => WidenDuringAGrowsCopy((index, slot, aabb) => index.WidenAt(slot, in aabb));
+
+    /// <summary>
+    /// The first form of <see cref="CellSpatialIndex.WidenAt"/>, which re-checked <see cref="CellSpatialIndex.ClusterIds"/> as its witness. The grow
+    /// publishes that array last, so a widen that re-checks before then sees no move, and its writes stay in the abandoned arrays.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    [RuleMutant("CA-02")]
+    public void AWidenThatReChecksTheIdArray_IsLostInTheGrowsCopy() =>
+        RuleMutants.AssertDetects("CA-02", Ca02Marker, () => WidenDuringAGrowsCopy(WidenAgainstTheIdWitness));
+
+    /// <summary>
+    /// A widen that took its stamp before a grow and writes after the grow's copy puts its writes in arrays the grow has already copied: it must see the
+    /// stamp move and redo them in the grown arrays (CA-02). The widen parks on its even stamp, the grow runs to the end of its copy, the widen resumes.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("CA-02")]
+    public void AWidenStampedBeforeAGrow_IsRedoneInTheGrownArrays() =>
+        WidenStampedBeforeAGrowsCopy((index, slot, aabb, parkOnStamp) =>
+        {
+            index.WidenStampedProbe = parkOnStamp;
+            index.WidenAt(slot, in aabb);
+        });
+
+    /// <summary>A widen with no re-check: its writes after the grow's copy stay in the abandoned arrays.</summary>
+    [Test]
+    [CancelAfter(15_000)]
+    [RuleMutant("CA-02")]
+    public void AWidenThatNeverReChecks_IsLostInTheGrowsCopy() =>
+        RuleMutants.AssertDetects("CA-02", Ca02Marker, () => WidenStampedBeforeAGrowsCopy((index, slot, aabb, parkOnStamp) =>
+        {
+            parkOnStamp();
+            ClusterSpatialAabb.CasMin(ref Volatile.Read(ref index.MinX)[slot], aabb.MinX);
+            ClusterSpatialAabb.CasMin(ref Volatile.Read(ref index.MinY)[slot], aabb.MinY);
+            ClusterSpatialAabb.CasMin(ref Volatile.Read(ref index.MinZ)[slot], aabb.MinZ);
+            ClusterSpatialAabb.CasMax(ref Volatile.Read(ref index.MaxX)[slot], aabb.MaxX);
+            ClusterSpatialAabb.CasMax(ref Volatile.Read(ref index.MaxY)[slot], aabb.MaxY);
+            ClusterSpatialAabb.CasMax(ref Volatile.Read(ref index.MaxZ)[slot], aabb.MaxZ);
+            Interlocked.Or(ref Volatile.Read(ref index.CategoryMasks)[slot], aabb.CategoryMask);
+        }));
+
+    private static readonly TimeSpan HandshakeTimeout = TimeSpan.FromSeconds(10);
+    private static readonly ClusterSpatialAabb Wide = Aabb(-50, -60, 70, 80, cat: 0x10u);
+
+    private static void WidenDuringAGrowsCopy(Action<CellSpatialIndex, int, ClusterSpatialAabb> widen)
+    {
+        var index = FullIndexOfFour();
+        using var widenReleased = new ManualResetEventSlim();
+        using var widenSettled = new ManualResetEventSlim();   // the widen returned, or it is waiting the grow out
+        index.WidenWaitProbe = widenSettled.Set;
+        index.GrowCopiedProbe = () =>
+        {
+            widenReleased.Set();
+            Await(widenSettled, "the widen neither returned nor waited for the grow");
+        };
+
+        var widener = new Widener(() =>
+        {
+            Await(widenReleased, "the grow never reached its copy");
+            widen(index, 2, Wide);
+        }, widenSettled);
+
+        index.Add(clusterChunkId: 99, Aabb(9, 9, 10, 10));   // the fifth add grows 4 → 8 and parks in the probe
+        widener.AssertReturned();
+        AssertTheWidenLanded(index);
+    }
+
+    private static void WidenStampedBeforeAGrowsCopy(Action<CellSpatialIndex, int, ClusterSpatialAabb, Action> widen)
+    {
+        var index = FullIndexOfFour();
+        using var widenStamped = new ManualResetEventSlim();
+        using var growCopied = new ManualResetEventSlim();
+        using var widenSettled = new ManualResetEventSlim();   // the widen returned, or it is waiting the grow out
+        var parked = 0;
+        Action parkOnStamp = () =>
+        {
+            // The first attempt only: a redo runs straight through.
+            if (Interlocked.Exchange(ref parked, 1) == 0)
+            {
+                widenStamped.Set();
+                Await(growCopied, "the grow never reached its copy");
+            }
+        };
+        index.WidenWaitProbe = widenSettled.Set;
+        index.GrowCopiedProbe = () =>
+        {
+            growCopied.Set();
+            Await(widenSettled, "the widen neither returned nor waited for the grow");
+        };
+
+        var widener = new Widener(() => widen(index, 2, Wide, parkOnStamp), widenSettled);
+        Await(widenStamped, "the widen never took its stamp");
+        index.Add(clusterChunkId: 99, Aabb(9, 9, 10, 10));   // the fifth add grows 4 → 8 and parks in the probe
+        widener.AssertReturned();
+        AssertTheWidenLanded(index);
+    }
+
+    private static CellSpatialIndex FullIndexOfFour()
+    {
+        var index = new CellSpatialIndex(initialCapacity: 4);
+        for (var i = 0; i < 4; i++)
+        {
+            index.Add(clusterChunkId: 10 + i, Aabb(i, i, i + 1, i + 1));
+        }
+
+        return index;
+    }
+
+    private static void AssertTheWidenLanded(CellSpatialIndex index)
+    {
+        Assert.That(index.Capacity, Is.EqualTo(8), "the add must have grown the index, or the widen raced nothing");
+        var bound = (index.MinX[2], index.MinY[2], index.MaxX[2], index.MaxY[2], index.CategoryMasks[2]);
+        Assert.That(bound, Is.EqualTo((-50f, -60f, 70f, 80f, 0x11u)), Ca02Marker);
+    }
+
+    private static void Await(ManualResetEventSlim signal, string what)
+    {
+        if (!signal.Wait(HandshakeTimeout))
+        {
+            throw new TimeoutException(what);
+        }
+    }
+
+    /// <summary>Runs a widen on its own thread and sets <c>settled</c> when it returns, whether it threw or not.</summary>
+    private sealed class Widener
+    {
+        private readonly Thread _thread;
+        private Exception _failure;
+
+        public Widener(Action widen, ManualResetEventSlim settled)
+        {
+            _thread = new Thread(() =>
+            {
+                try
+                {
+                    widen();
+                }
+                catch (Exception e)
+                {
+                    _failure = e;
+                }
+                finally
+                {
+                    settled.Set();
+                }
+            }) { IsBackground = true };
+            _thread.Start();
+        }
+
+        public void AssertReturned()
+        {
+            Assert.That(_thread.Join(HandshakeTimeout), Is.True, "the widen never returned");
+            Assert.That(_failure, Is.Null);
+        }
+    }
+
+    private static void WidenAgainstTheIdWitness(CellSpatialIndex index, int slot, ClusterSpatialAabb aabb)
+    {
+        while (true)
+        {
+            var witness = Volatile.Read(ref index.ClusterIds);
+            ClusterSpatialAabb.CasMin(ref Volatile.Read(ref index.MinX)[slot], aabb.MinX);
+            ClusterSpatialAabb.CasMin(ref Volatile.Read(ref index.MinY)[slot], aabb.MinY);
+            ClusterSpatialAabb.CasMin(ref Volatile.Read(ref index.MinZ)[slot], aabb.MinZ);
+            ClusterSpatialAabb.CasMax(ref Volatile.Read(ref index.MaxX)[slot], aabb.MaxX);
+            ClusterSpatialAabb.CasMax(ref Volatile.Read(ref index.MaxY)[slot], aabb.MaxY);
+            ClusterSpatialAabb.CasMax(ref Volatile.Read(ref index.MaxZ)[slot], aabb.MaxZ);
+            Interlocked.Or(ref Volatile.Read(ref index.CategoryMasks)[slot], aabb.CategoryMask);
+            if (ReferenceEquals(Volatile.Read(ref index.ClusterIds), witness))
+            {
+                return;
+            }
+        }
     }
 }
