@@ -150,6 +150,14 @@ public unsafe ref struct AabbClusterEnumerator
     // Last-yielded result.
     private ClusterSpatialQueryResult _current;
 
+    // This query's tally (SO-02): the clusters it opened, their occupied slots, and its matches. Added to the archetype's once, when the window goes back.
+    // Last, after _current, so every earlier field keeps its offset. Declared beside _decidedHits, MoveNext measured +9 % on a 1 024-hit query — but two
+    // later builds whose MoveNext compiled to the same bytes also measured 12 % apart, so the profile cannot tell a layout cost from where the code
+    // landed. What the tally adds per hit is one increment.
+    private int _tallyClusters;
+    private int _tallyCandidates;
+    private int _tallyHits;
+
     internal AabbClusterEnumerator(ArchetypeClusterState state, SpatialGrid grid, double minX, double minY, double minZ, double maxX, double maxY,
         double maxZ, uint categoryMask, double radiusSq = 0d, double radiusCenterX = 0d, double radiusCenterY = 0d, double radiusCenterZ = 0d)
     {
@@ -207,6 +215,9 @@ public unsafe ref struct AabbClusterEnumerator
         _currentPerCellSlot = null;
         _current = default;
         _escapedNext = 0;
+        _tallyClusters = 0;
+        _tallyCandidates = 0;
+        _tallyHits = 0;
     }
 
     /// <summary>The most recently yielded result. Valid only after <see cref="MoveNext"/> returns <c>true</c>.</summary>
@@ -340,6 +351,7 @@ public unsafe ref struct AabbClusterEnumerator
                 if (sink.Found)
                 {
                     _current = sink.Result;
+                    _tallyHits++;
                     return true;
                 }
             }
@@ -347,6 +359,7 @@ public unsafe ref struct AabbClusterEnumerator
             // 2-3. Open the next cluster the query overlaps.
             if (!NextCluster())
             {
+                ReleaseRentAfterDrain();
                 return false;
             }
         }
@@ -378,6 +391,8 @@ public unsafe ref struct AabbClusterEnumerator
 
             if (!NextCluster())
             {
+                _tallyHits += sink.Count;
+                ReleaseRentAfterDrain();
                 return sink.Count;
             }
         }
@@ -408,12 +423,15 @@ public unsafe ref struct AabbClusterEnumerator
                 _decidedHits &= _currentOccupancyBits;
                 if (sink.Written == destination.Length)
                 {
+                    _tallyHits += sink.Written;
                     return sink.Written;
                 }
             }
 
             if (!NextCluster())
             {
+                _tallyHits += sink.Written;
+                ReleaseRentAfterDrain();
                 return sink.Written;
             }
         }
@@ -694,13 +712,18 @@ public unsafe ref struct AabbClusterEnumerator
         return (bits & ~dense) | approved;
     }
 
-    /// <summary>Make <paramref name="occupancy"/> the current cluster's slots to drain, none of them decided yet.</summary>
+    /// <summary>
+    /// Make <paramref name="occupancy"/> the current cluster's slots to drain, none of them decided yet, and count the cluster and its occupied slots in the
+    /// query's tally — all of them, whatever the drain goes on to test, so the count is the same whether or not the block kernel runs (SO-02).
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void OpenOccupancy(ulong occupancy)
     {
         _currentOccupancyBits = occupancy;
         _blocksDecided = false;
         _decidedHits = 0UL;
+        _tallyClusters++;
+        _tallyCandidates += BitOperations.PopCount(occupancy);
     }
 
     /// <summary>
@@ -977,17 +1000,12 @@ public unsafe ref struct AabbClusterEnumerator
                 _currentCellX = _cellMinX;
             }
 
-            // 4. The cell walk is done. Visit the named outliers it did not reach, then hand the window back: nothing reads it again, and a query drained
-            //    to the end without a Dispose — Count() called on the query itself — must not keep it rented.
+            // 4. The cell walk is done. Visit the named outliers it did not reach. The drain that asked then hands the window back, once it has added its
+            //    matches to the tally: nothing reads the window again, and a query drained to the end without a Dispose — Count() called on the query
+            //    itself — must not keep it rented.
             if (!HasStartedHalf)
             {
-                if (TryOpenEscapedCluster())
-                {
-                    return true;
-                }
-
-                ReleaseRent();
-                return false;
+                return TryOpenEscapedCluster();
             }
         }
     }
@@ -1113,15 +1131,59 @@ public unsafe ref struct AabbClusterEnumerator
         _warm = ref _warmEntry.Accessor;
     }
 
-    /// <summary>Hand the window back, if this enumerator holds one. The token makes a second return — a copy's — a no-op.</summary>
+    /// <summary>
+    /// Hand the window back, if this enumerator holds one, and add the query's tally to its archetype's (SO-02). The token makes a second return — a
+    /// copy's — a no-op, and its tally with it: the copy that returned the live rent carried everything both had counted before they split.
+    /// </summary>
+    /// <remarks>
+    /// <para>For <see cref="Dispose"/>, which callers inline: the test and the field stores stay inline, the return and the tally go out of line in a static
+    /// method handed values. An instance method taking this enumerator by reference there exposed the struct's address wherever the enumerator was used,
+    /// and one built and disposed could no longer be folded away: measured 7.2 → 26.4 ns for construct-and-dispose, with a bulk write barrier and a call in
+    /// the loop where there had been neither.</para>
+    /// <para>The drains use <see cref="ReleaseRentAfterDrain"/> instead: one compare and a call taking only the enumerator they already hold by reference,
+    /// the smallest addition to code that runs once per hit.</para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void ReleaseRent()
+    {
+        var entry = _warmEntry;
+        if (entry != null)
+        {
+            HandBack(entry, _warmToken, _state, _tallyClusters, _tallyCandidates, _tallyHits);
+            _warmEntry = null;
+            _warm = ref Unsafe.NullRef<ChunkAccessor<PersistentStore>>();
+        }
+    }
+
+    /// <summary>
+    /// <see cref="ReleaseRent"/> for the drains, called once the query is exhausted: one compare inline, and an out-of-line call that takes nothing but
+    /// this enumerator, which the drains already hold by reference.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void ReleaseRentAfterDrain()
     {
         if (_warmEntry != null)
         {
-            // Not disposed: the window stays warm for this thread's next query.
-            SpatialQueryAccessorCache.Return(_warmEntry, _warmToken);
-            _warmEntry = null;
-            _warm = ref Unsafe.NullRef<ChunkAccessor<PersistentStore>>();
+            ReleaseRentOutOfLine();
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void ReleaseRentOutOfLine() => ReleaseRent();
+
+    /// <summary>
+    /// Return the window (not disposed: it stays warm for this thread's next query) and, if the return was honoured, add the tally. Out of line: once per
+    /// query.
+    /// </summary>
+    /// <remarks>
+    /// A promoted half rents on its first tree hit, before the category filter, so a query can hold the window having opened nothing: it tallies nothing.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void HandBack(SpatialQueryAccessorCache.Entry entry, int token, ArchetypeClusterState state, int clusters, int candidates, int hits)
+    {
+        if (SpatialQueryAccessorCache.Return(entry, token) && clusters != 0)
+        {
+            state.RecordQueryTally(entry.ThreadId, clusters, candidates, hits);
         }
     }
 

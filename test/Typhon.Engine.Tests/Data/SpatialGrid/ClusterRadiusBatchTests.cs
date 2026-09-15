@@ -216,14 +216,17 @@ class ClusterRadiusBatchTests : TestBase<ClusterRadiusBatchTests>
         }
     }
 
-    private static List<ClusterSpatialQueryResult> Single<TArch>(DatabaseEngine dbe, in BSphere2F member, uint categoryMask)
+    /// <summary>
+    /// A member's own query through MoveNext, stopped after <paramref name="limit"/> hits as a caller breaking out of its loop would stop it.
+    /// </summary>
+    private static List<ClusterSpatialQueryResult> Single<TArch>(DatabaseEngine dbe, in BSphere2F member, uint categoryMask, int limit = int.MaxValue)
         where TArch : Archetype<TArch>, new()
     {
         var hits = new List<ClusterSpatialQueryResult>();
         var e = dbe.ClusterSpatialQuery<TArch>().Radius(in member, categoryMask);
         try
         {
-            while (e.MoveNext())
+            while (hits.Count < limit && e.MoveNext())
             {
                 hits.Add(e.Current);
             }
@@ -235,6 +238,22 @@ class ClusterRadiusBatchTests : TestBase<ClusterRadiusBatchTests>
 
         return hits;
     }
+
+    /// <summary>The archetype's query tally so far (SO-02): clusters opened, entities tested, matches.</summary>
+    private static (long Clusters, long Candidates, long Hits) TallyOf(ArchetypeClusterState cs)
+    {
+        var tally = cs.QueryTally;
+        if (tally == null)
+        {
+            return (0, 0, 0);
+        }
+
+        tally.Read(out var clusters, out var candidates, out var hits);
+        return (clusters, candidates, hits);
+    }
+
+    private static (long, long, long) Since((long Clusters, long Candidates, long Hits) before, (long Clusters, long Candidates, long Hits) after) =>
+        (after.Clusters - before.Clusters, after.Candidates - before.Candidates, after.Hits - before.Hits);
 
     /// <summary>Bit for bit, in order: <c>Equals</c> on a struct of doubles would take -0 for 0.</summary>
     private static void AssertSameHits(List<ClusterSpatialQueryResult> actual, List<ClusterSpatialQueryResult> expected, string what)
@@ -248,12 +267,15 @@ class ClusterRadiusBatchTests : TestBase<ClusterRadiusBatchTests>
 
     /// <summary>
     /// Both batch forms against each member's own query, then the sink form again with members retiring after 1–4 hits; returns the hits in total so a
-    /// test can tell it asked something.
+    /// test can tell it asked something. Each batch must also tally what its members' own queries tally (SO-02): the same clusters, entities and
+    /// matches, the retiring batch against queries stopped at the same hit.
     /// </summary>
     private static int AssertBatchAnswersAsSingles<TArch>(DatabaseEngine dbe, BSphere2F[] members, string what, uint categoryMask = uint.MaxValue)
         where TArch : Archetype<TArch>, new()
     {
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
+        var cs = StateOf<TArch>(dbe);
+        var tally = TallyOf(cs);
         var expected = new List<ClusterSpatialQueryResult>[members.Length];
         var total = 0;
         for (int j = 0; j < members.Length; j++)
@@ -262,20 +284,27 @@ class ClusterRadiusBatchTests : TestBase<ClusterRadiusBatchTests>
             total += expected[j].Count;
         }
 
+        var singlesTally = Since(tally, tally = TallyOf(cs));
+
         var counts = new int[members.Length];
         Array.Fill(counts, -1);
         dbe.ClusterSpatialQuery<TArch>().CountRadius(members, counts, categoryMask);
+        var countTally = Since(tally, tally = TallyOf(cs));
         var sink = new ListSink(members.Length);
         dbe.ClusterSpatialQuery<TArch>().ForEachInRadius(members, ref sink, categoryMask);
+        var sinkTally = Since(tally, tally = TallyOf(cs));
 
         var limit = new int[members.Length];
         for (int j = 0; j < members.Length; j++)
         {
             limit[j] = 1 + (j % 4);
+            Single<TArch>(dbe, in members[j], categoryMask, limit[j]);
         }
 
+        var stoppedTally = Since(tally, tally = TallyOf(cs));
         var retiring = new ListSink(members.Length, limit);
         dbe.ClusterSpatialQuery<TArch>().ForEachInRadius(members, ref retiring, categoryMask);
+        var retiringTally = Since(tally, TallyOf(cs));
 
         for (int j = 0; j < members.Length; j++)
         {
@@ -284,6 +313,14 @@ class ClusterRadiusBatchTests : TestBase<ClusterRadiusBatchTests>
             AssertSameHits(sink.Hits[j], expected[j], $"{who}: ForEachInRadius");
             AssertSameHits(retiring.Hits[j], expected[j].GetRange(0, Math.Min(limit[j], expected[j].Count)), $"{who}: retiring after {limit[j]}");
         }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(countTally, Is.EqualTo(singlesTally), $"{what}: CountRadius's tally (clusters, candidates, hits) against its members' own queries'");
+            Assert.That(sinkTally, Is.EqualTo(singlesTally), $"{what}: ForEachInRadius's tally against its members' own queries'");
+            Assert.That(retiringTally, Is.EqualTo(stoppedTally),
+                $"{what}: the retiring batch's tally against its members' queries stopped at the same hit");
+        });
 
         return total;
     }
@@ -310,6 +347,7 @@ class ClusterRadiusBatchTests : TestBase<ClusterRadiusBatchTests>
     [TestCase(1_000f, 4_000f, 3_000, 24, false, TestName = "EachMember_IsAnsweredAsItsOwnRadiusQuery(promotedCell,loop)")]
     [VerifiesRule("SQ-01")]
     [VerifiesRule("SQ-03")]
+    [VerifiesRule("SO-02")]
     public void EachMember_IsAnsweredAsItsOwnRadiusQuery(float cellSize, float worldMax, int count, int promoteThreshold, bool kernel)
     {
         if (kernel)
@@ -360,6 +398,7 @@ class ClusterRadiusBatchTests : TestBase<ClusterRadiusBatchTests>
     [Test]
     [VerifiesRule("SQ-01")]
     [VerifiesRule("SQ-03")]
+    [VerifiesRule("SO-02")]
     public void ANamedOutlier_IsFoundByEachMemberAsByItsOwnQuery()
     {
         using var dbe = Setup(100f, 1_000f);
@@ -483,9 +522,26 @@ class ClusterRadiusBatchTests : TestBase<ClusterRadiusBatchTests>
         var window = cache.Rent(segment, out var token);
         SpatialQueryAccessorCache.Return(window, token);
 
+        // The member's own query, whose caller throws on its first hit: what the batch must tally when its sink does the same (SO-02).
+        var cs = StateOf<ClBatchUnit>(dbe);
+        var tally = TallyOf(cs);
+        Assert.Throws<InvalidOperationException>(() =>
+        {
+            foreach (var _ in dbe.ClusterSpatialQuery<ClBatchUnit>().Radius(in batch[0]))
+            {
+                throw new InvalidOperationException("the caller fails on purpose");
+            }
+        });
+        var singleTally = Since(tally, tally = TallyOf(cs));
+
         var sink = new ThrowingSink();
         Assert.Throws<InvalidOperationException>(() => dbe.ClusterSpatialQuery<ClBatchUnit>().ForEachInRadius(batch, ref sink));
         Assert.That(sink.Calls, Is.EqualTo(1), "the sink's state reaches the caller even when it throws");
+        Assert.Multiple(() =>
+        {
+            Assert.That(singleTally.Item3, Is.EqualTo(1), "precondition: the single query took one hit before its caller threw");
+            Assert.That(Since(tally, TallyOf(cs)), Is.EqualTo(singleTally), "a batch whose sink throws tallies what its member's own query tallies");
+        });
 
         // Still rented by the failed batch, the window would not be handed to the next rent.
         var again = cache.Rent(segment, out var againToken);

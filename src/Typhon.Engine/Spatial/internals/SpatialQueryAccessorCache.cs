@@ -66,6 +66,9 @@ internal sealed class SpatialQueryAccessorCache
         /// <summary>False for an overflow entry, which is disposed on return rather than kept.</summary>
         internal bool Pooled;
 
+        /// <summary>The managed id of the thread whose cache made this entry, the only thread that rents it: its slot in a query tally (SO-02).</summary>
+        internal int ThreadId;
+
         /// <summary>Releases the window's pins once nothing references the entry: its thread died, or an overflow rent was never returned.</summary>
         ~Entry() => Accessor.Dispose();
     }
@@ -81,6 +84,9 @@ internal sealed class SpatialQueryAccessorCache
     private Entry[] _entries = new Entry[4];
     private int _count;
     private long _clock;
+
+    // The owning thread's managed id, stamped on every entry this cache makes. The cache is thread-static, so it is built on the thread it serves.
+    private readonly int _threadId = Environment.CurrentManagedThreadId;
 
     private SpatialQueryAccessorCache()
     {
@@ -147,12 +153,14 @@ internal sealed class SpatialQueryAccessorCache
     /// Hand an entry back. Ignored unless it is still rented under <paramref name="token"/>; honoured, it bumps the token, so no copy of the rent can use the
     /// window again. An overflow entry is disposed instead of kept.
     /// </summary>
-    internal static void Return(Entry entry, int token)
+    /// <returns>True when the return was honoured: exactly one of the copies that carried a rent sees it, which is what lets a query add its tally once
+    /// (SO-02).</returns>
+    internal static bool Return(Entry entry, int token)
     {
         // Only the live rent passes the token check, and no other thread writes a rented entry's State: this reads this thread's own write.
         if (entry.Token != token || entry.State != Rented)
         {
-            return;
+            return false;
         }
 
         entry.Token++;
@@ -160,11 +168,12 @@ internal sealed class SpatialQueryAccessorCache
         {
             entry.Accessor.Dispose();
             GC.SuppressFinalize(entry);
-            return;
+            return true;
         }
 
         // Release: a Release on another thread claims the entry by compare-and-swap and must find the window as this thread left it.
         Volatile.Write(ref entry.State, Free);
+        return true;
     }
 
     /// <summary>
@@ -223,7 +232,7 @@ internal sealed class SpatialQueryAccessorCache
     {
         if (_count < TrimAbove)
         {
-            var entry = new Entry { Pooled = true, State = Rented };
+            var entry = new Entry { Pooled = true, State = Rented, ThreadId = _threadId };
             if (_count == _entries.Length)
             {
                 var grown = new Entry[_count * 2];
@@ -246,7 +255,7 @@ internal sealed class SpatialQueryAccessorCache
         }
 
         // Every pooled entry is rented — nesting past TrimAbove, or rents never handed back. This entry serves the one query and is dropped on return.
-        return Fill(new Entry { Pooled = false, State = Rented }, segment);
+        return Fill(new Entry { Pooled = false, State = Rented, ThreadId = _threadId }, segment);
     }
 
     private static Entry Fill(Entry entry, ChunkBasedSegment<PersistentStore> segment)

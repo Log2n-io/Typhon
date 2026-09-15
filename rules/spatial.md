@@ -1187,6 +1187,75 @@
     invalidate omitted → the re-packed cluster inherits a stale wide bound and prunes nothing
     invalidate without a following widen → the map reads "unknown", which is conservative but buys no pruning
 
+### TH-04: The maintenance budget follows the queries' efficiency, and the configured budget is its ceiling `[perf][silent]`
+  invariant every consumer of the re-clustering budget — the repair planner (DatabaseEngine.FinishArchetypeFencePrep), the throttle
+    (ApplyMigrationThrottle) and the drift scan's nomination cap (ComputeDriftNominationCap) — spends MaintenanceBudgetNs: ReclusterBudgetMs times
+    MaintenanceBudgetScale, in [MinMaintenanceBudgetScale, 1]. ReclusterBudgetMs is the ceiling. The scale never turns a positive budget into zero,
+    which the throttle reads as NO ENFORCEMENT, nor a zero one into a positive: ReclusterBudgetMs = 0 keeps meaning what TH-01 says
+  invariant the scale is set ONCE per archetype per tick, in ResetArchetypeFenceTickState, from the tick's query tally (SO-02) and before any consumer
+    reads it: the planner and the throttle in Prep's tail, the nomination cap in AabbRefresh
+  invariant the signal is candidates and hits each smoothed over about twenty ticks (EWMA weight 0.05) and then divided, never a mean of per-tick
+    ratios, so a tick with a handful of hits weighs what its handful is worth
+  invariant best = min(best, smoothed) on every tick with a signal — lowered, never raised — and
+    scale = clamp((smoothed / best - 1) / QueryEfficiencyTolerance, MinMaintenanceBudgetScale, 1): next to nothing at the best, the whole budget at the
+    tolerance above it. The one exception is the re-base: on a tick at the whole budget that follows EfficiencyRebaseTicks consecutive such ticks — the
+    whole budget set by the distance, not by a fall-back — best = smoothed and the scale falls to its floor. It is decided on that tick's own distance,
+    so a tick the whole budget has just brought back inside the tolerance never re-bases; what the whole budget could not recover in that time is taken
+    as the world's. 200 ticks: chosen, not measured, and paired with RepairCooldownTicks' default of 50
+  invariant a decline slower than any fixed rate still raises the budget. The creep this replaced (best x 1.0001 a tick) followed every decline slower
+    than itself: on the SWG demo it carried a starved archetype's best up 5-8 % in 1 000 ticks, its queries with it, and the controller granted nothing
+  invariant WITHOUT a signal — no range query lately, or only nearest-neighbour, ray and frustum queries, which SO-02 does not count — and with
+    QueryEfficiencyTolerance 0, the scale is 1: the configured budget, exactly as before the controller. The signal is gained at one smoothed hit a
+    tick and lost below half of that, so an archetype queried near the threshold does not flip between the floor and the whole budget. The
+    experiment granted next to nothing without a signal, which starves a world queried only through the kinds the tally cannot see
+  invariant a distance that is not finite leaves the scale at 1: NaN would pass every "budget <= 0" test downstream and read as no enforcement.
+    SO-02 keeps candidates at or above hits, so nothing reaches it today
+  invariant only an archetype with a dynamic spatial field is GRANTED anything in ReclusterBudgetGrantedMs: every archetype has a cluster state, and one
+    with nothing to relocate or repair reported the whole budget, which the engine-wide total then summed
+  invariant a budget at its floor stops relocations and ordinary repair units, never correctness: cell crossings are charged and never refused
+    (TH-01), and the safety valve still admits a critical cell's unit. At the floor the planner stops before pricing a unit, so RepairUnitsRefused
+    reads zero there, and the nominations keep arriving, so the repair queue fills to RepairQueueMaxCells and is re-ranked for nothing — the work
+    item 4 of the build order (skip the re-rank when the budget cannot pay for a unit) would remove, deferred as worth at most the planner's span there
+  invariant the drift target's boost (step 14, D2) reads a tick whose relocations were all throttled as budget pressure, whoever throttled them. At the
+    floor it therefore rises to its cap within about seven ticks and relocation detection stops, and when the budget returns it takes at least 28
+    unthrottled ticks to decay. Accepted rather than coupled to the scale: at the floor nothing would be admitted, so the detection it stops is work
+    saved, and its recovery is of the order of the smoothing's twenty ticks
+  invariant it holds the best seen, it does not seek it: a world whose clusters start loose reads that as its best and gets next to no maintenance to
+    improve it. A low outlier, whenever it comes, raises the grant by its depth: deeper than the tolerance it holds the budget whole until the re-base,
+    shallower it keeps that share of the budget for good; and a lasting shift smaller than the tolerance is never absorbed, since absorbing it is what
+    the creep did. All of these err toward the configured budget. Spawn placement and the safety valve bound the loose world; nothing here does
+  invariant every re-base is counted (SpatialMigrationTelemetry.TotalEfficiencyRebases) and carried in the trace's per-archetype record (kind 66) both
+    as that cumulative count, which a dropped record or a late attach cannot lose, and as a flag on its own tick (bit 1 of the controller flags), beside
+    the streak toward the next (TicksAtWholeBudget): the event that says maintenance could not keep up. The record is emitted every tick for every
+    archetype with cluster state, whatever path its fence took, so the trace's tally sums to the accessors'
+  invariant only an archetype with something to spend a budget on — a dynamic spatial field (SpendsMaintenance) — keeps a streak or re-bases, and only
+    those enter the engine-wide controller readings. The others' queries are still tallied, static halves included; no controller acts on them
+  scope: SpatialGridConfig.QueryEfficiencyTolerance, ArchetypeClusterState.UpdateMaintenanceBudgetScale, ArchetypeClusterState.MaintenanceBudgetNs,
+    ArchetypeClusterState.MaintenanceBudgetScale, ArchetypeClusterState.MinMaintenanceBudgetScale, ArchetypeClusterState.EfficiencyRebaseTicks,
+    ArchetypeClusterState.HasQuerySignal, ArchetypeClusterState.ApplyMigrationThrottle, ArchetypeClusterState.ComputeDriftNominationCap,
+    ArchetypeClusterState.RecomputeDirtyClusterAabbsSlice, ArchetypeClusterState.UpdateDriftTargetBoost, DatabaseEngine.FinishArchetypeFencePrep,
+    DatabaseEngine.ResetArchetypeFenceTickState, DatabaseEngine.PrepareArchetypeFenceHeads, DatabaseEngine.PrepareArchetypeFenceCore,
+    DatabaseEngine.GetSpatialTelemetry, DatabaseEngine.GetSpatialTelemetryTotal, SpatialMigrationTelemetry.ReclusterBudgetGrantedMs,
+    SpatialMigrationTelemetry.QueryCandidatesPerHitSmoothed, SpatialMigrationTelemetry.QueryCandidatesPerHitBest,
+    SpatialMigrationTelemetry.TotalEfficiencyRebases, SpatialMigrationTelemetry.TicksAtWholeBudget, ArchetypeClusterState.ControllerFlags,
+    ArchetypeClusterState.SpendsMaintenance, DatabaseEngine.EmitSpatialArchetypeSnapshot, DatabaseEngine.FinalizeArchetypeFenceHead
+  requires: SO-02, TH-01
+  verified: ClusterThrottleBudgetTests.AtTheBestEfficiencyTheQueriesHaveShown_TheBudgetAdmitsNoRelocation — a whole-cell query every tick, every
+    candidate a hit, grants next to nothing and admits no relocation from the first throttle after the first query, while the motion keeps producing
+    them; its mutant WithTheControllerOff_TheSameQueriesLeaveTheBudgetWhole. AtTheBestEfficiency_TheRepairPlannerAdmitsNoUnit holds the planner to
+    it, with its mutant WithTheControllerOff_ThePlannerRepairsTheSameCell. TheScaleIsTheDistanceFromTheBest_OverTheTolerance drives the arithmetic,
+    the ceiling and the nomination cap's floor; ASlowDecline_IsNotFollowedByTheBest_ItRaisesTheBudget a decline at half the old creep's rate, which
+    the creep followed (restoring it reddens this test and the next); AfterTheRebaseWindowAtTheWholeBudget_ThePresentLevelBecomesTheBest the re-base,
+    to the tick, with its count, streak and trace flags; AWindowTheQueriesInterrupt_StartsAgain_AndDoesNotRebase that the window is consecutive, and
+    AWholeBudgetByFallBack_DoesNotCountTowardTheWindow that only a whole budget the distance set counts (each reddened by its mutant, run by hand);
+    WithoutASignal_TheConfiguredBudgetStands_AndReturnsWhenTheSignalFades,
+    WithTheControllerOff_TheConfiguredBudgetStands_HoweverGoodTheQueries and AZeroBudget_StaysUnenforced_WhateverTheQueriesSay the fall-backs and the
+    signal's hysteresis; SpatialMigrationTelemetryTests.Total_SumsTheGrantedBudget_AndWeightsTheControllerReadingsByHits the fold, with an
+    archetype that has no spatial field granted nothing, and Total_SumsTheRebases_AndMaxesTheStreakAndTheBoost the fold of the re-base count;
+    AnArchetypeWithNothingToSpend_KeepsNoStreak_NeverRebases_AndStaysOutOfTheControllerTotals the gate on spending
+  on_violation: a fixed budget spent on a partition the queries already find tight — the churn RP-07 stops, paid for again; or, the other way, a
+    world whose queries the tally cannot see starved of maintenance
+
 ### RP-07: A repaired cell is not repaired again until its cooldown ends, and what it is nominated for meanwhile is held `[perf][silent]`
   invariant a unit that MOVED entities starts its cell's cooldown: RepairCooldownTicks ticks during which the cell
     is not a queue candidate — not ranked, not serviced, not offered the valve, not counted against
@@ -1688,11 +1757,13 @@
 
 ### SO-01: The telemetry surface has two clocks, and zero is a value `[silent]`
   invariant the surface carries THREE kinds of member, and reading one as another is the failure mode:
-    RATES — the `...Count` / `...Ms` members produced by a tick's fence, reset at the top of every fence. A consumer
-      polling at its own rate reads one arbitrary tick out of hundreds, so a per-second figure must be differentiated
-      from the cumulative members, never read off one of these
+    RATES — the `...Count` / `...Ms` members produced by a tick's fence, reset at the top of every fence, and
+      `QueryClustersOpened`, `QueryCandidates` and `QueryHits`, which queries produce and the fence publishes (SO-02).
+      A consumer polling at its own rate reads one arbitrary tick out of hundreds, so a per-second figure must be
+      differentiated from the cumulative members, never read off one of these
     CUMULATIVE — `Total...` and `RepairQueueEvicted`, which only grow; these are what a rate is differentiated FROM
-    LEVELS — `ActiveClusterCount`, `RepairQueueDepth`, `RepairCellsCooling`, `ClusterReach`, `EscapedClusterCount`, `MeasuredNsPerEntity`: a standing value,
+    LEVELS — `ActiveClusterCount`, `RepairQueueDepth`, `RepairCellsCooling`, `ClusterReach`, `EscapedClusterCount`, `MeasuredNsPerEntity`,
+      `QueryCandidatesPerHitSmoothed`, `QueryCandidatesPerHitBest`: a standing value,
       neither reset per tick nor monotonically accumulating. Differentiating a level yields nonsense — "clusters per
       second" off `ActiveClusterCount` is the concrete misuse this clause exists to name
   invariant ClusterReach is a LEVEL recomputed at the fence whenever the index changed, and it may FALL — it was a
@@ -1806,7 +1877,8 @@
     FenceStallMs_CoversTheSerialPrep_ThatTheSpanExcludes pins the stall-against-span relation;
     MigrationParallelism_IsExportedBesideTheSummedCpuGauges_AndIsNotFlooredAtOne pins both the export and the
     unclamped storage, so neither can be dropped without a red test;
-    Total_MaxesTheLargestArrival_AndSumsTheArrivalCounts pins the arrival members' fold, and
+    Total_MaxesTheLargestArrival_AndSumsTheArrivalCounts pins the arrival members' fold,
+    Total_SumsTheQueryTally_AndDerivesTheRatioFromTheSums the query tally's, and
     SmartTeleportationTests.ACornerNeighbourIsAStepAndThreeCellsIsAJump,
     AnOutOfWorldTeleportLandsInTheEdgeCellAndIsCountedAndWarnedOncePerWindow and
     TheLargestArrivalIsTheLongestDestinationRunOfTheDrainPrefix pin their per-archetype values;
@@ -1825,3 +1897,57 @@
       getting slower, in the direction that condemns the parallel fence for scaling
     an acquisition added straight onto `.Lock` → a latch that reads as uncontended because its busiest caller is
       not counted
+
+### SO-02: A range query adds its tally once, on its own thread, and a batch adds what its members' queries would `[silent]`
+  invariant a cluster range query — AabbClusterEnumerator (AABB and radius; MoveNext, Count and Fill) and ClusterRadiusBatch (CountRadius,
+    ForEachInRadius), whether the game runs it or the engine's interest and trigger systems do — adds to its archetype's SpatialQueryTally
+    ONCE, when it hands its page window back: the clusters it opened, every occupied slot of those clusters (its CANDIDATES), and the matches it
+    returned. A query that stops at its first match still counts its whole cluster
+  invariant the candidates are the same on every machine: counted from a cluster's occupancy when it opens, never from what the drain went on to
+    test. Counting tested slots made them depend on the narrowphase — the AABB2F block kernel (AVX2 / AVX-512, x64 only) decides sixteen slots
+    at once — so the same stopped query tallied one entity without the kernel and fifteen with it
+  invariant only the HONOURED hand-back tallies — SpatialQueryAccessorCache.Return reports whether the token matched. A copy of the enumerator
+    (GetEnumerator returns one) that carried the rent and returned it has tallied everything both counted before they split; the other's return
+    is stale and adds nothing. The token that stops a stale copy reusing a window (SQ-05) is what stops it counting twice. A query that opened no
+    cluster adds nothing, including one that rented a window on a promoted half's tree hit its category filter then rejected
+  invariant a batch adds what its members' own queries would: per member, each cluster opened for it with all its occupied slots, and its
+    matches. A cluster the batch opens once for k members counts k times, so the ratio does not depend on whether the caller batches — SQ-03's
+    equality, held for the tally as well as for the answer. A member's cluster is counted before its drain and a hit before the sink sees it, so
+    a batch whose sink throws tallies what its member's own query tallies when its caller throws on the same hit
+  invariant per thread, never shared: a slot per managed thread id up to SpatialQueryTally.MaxOwnedThreadId, the engine's bound on live threads,
+    in 32-slot chunks made as their threads arrive and never moved, 192 bytes apart — the adjacent-line prefetcher fetches 128-byte pairs, and an
+    array's data is only 8-byte aligned. Written with plain adds by the one live thread holding the id; the id rides on the rented window's entry,
+    stamped by its thread's cache, so the hand-back reads no thread-local. A slot is never reset — a thread inheriting a dead thread's id carries
+    on from its counts — so the totals only grow and the fence reads them while queries run; its delta is never negative. An id past the bound
+    shares one slot through interlocked adds
+  invariant the fence publishes the delta ONCE per archetype per tick, from ResetArchetypeFenceTickState: it runs exactly once per archetype on
+    every Prep path — the sliced head or the atomic item, never both (FenceWorkPlan.EmitArchetypePrepItems emits a head-sliced archetype's slices
+    instead of its item), and the serial fence's per-archetype Prep — after the tick's systems. The Query... members are therefore RATES in
+    SO-01's sense although queries, not the fence, produce them. GetSpatialTelemetryTotal sums the three and derives QueryCandidatesPerHit from
+    the sums, never from per-archetype ratios
+  invariant QueryCandidatesPerHit is zero when nothing matched: a tick that ran no range query, and a tick whose queries opened clusters and matched
+    nothing. That is below the ratio's floor of 1, so a consumer tracking the best value seen works from the sums, never from the ratio
+  invariant nearest-neighbour (QueryNearest), ray (QueryRay) and frustum (QueryFrustum) queries are NOT counted. kNN's matches are its k results,
+    not a region's contents, so its ratio would measure k and the density rather than the partition; rays and frustums walk their own paths. A
+    game that queries only through them reads zero, which is what the surface says rather than a broken counter
+  scope: SpatialQueryTally, SpatialQueryTally.Add, SpatialQueryTally.Read, ArchetypeClusterState.RecordQueryTally,
+    ArchetypeClusterState.TakeQueryTallyDelta, AabbClusterEnumerator.OpenOccupancy, AabbClusterEnumerator.MoveNext, AabbClusterEnumerator.Count,
+    AabbClusterEnumerator.Fill, AabbClusterEnumerator.ReleaseRent, AabbClusterEnumerator.ReleaseRentAfterDrain, AabbClusterEnumerator.HandBack,
+    ClusterRadiusBatch,
+    SpatialQueryAccessorCache.Return, DatabaseEngine.ResetArchetypeFenceTickState, DatabaseEngine.PrepareArchetypeFenceHeads,
+    DatabaseEngine.PrepareArchetypeFenceCore, FenceWorkPlan.EmitArchetypePrepItems, DatabaseEngine.GetSpatialTelemetry,
+    DatabaseEngine.GetSpatialTelemetryTotal, SpatialMigrationTelemetry.QueryClustersOpened, SpatialMigrationTelemetry.QueryCandidates,
+    SpatialMigrationTelemetry.QueryHits, SpatialMigrationTelemetry.QueryCandidatesPerHit
+  verified: SpatialQueryTallyTests — each drain (Count, MoveNext, Fill four at a time, a radius query drained without a Dispose) tallies one
+    cluster, its twenty entities and six matches; a query that opens the cluster and matches nothing tallies twenty and none, and one that opens
+    nothing tallies nothing; a query stopped after one MoveNext or one Fill of five tallies the whole cluster; the same stopped query tallies the
+    same with the block kernel and without; a copy that drains the rent tallies the query once; eight threads' 4 000 queries are each counted
+    once; ids across chunks and past the bound lose nothing; the fence publishes the tick's queries, and zero on a tick without. Its mutant
+    AQueryTalliedTwice_IsCaught shows the comparison is exact. ClusterRadiusBatchTests.EachMember_IsAnsweredAsItsOwnRadiusQuery and
+    ANamedOutlier_IsFoundByEachMemberAsByItsOwnQuery hold CountRadius's, ForEachInRadius's and a retiring batch's tallies to their members' own
+    queries' on every broadphase path, kernel on and off; ASinkThatThrows_HandsTheWindowBack holds a throwing batch's to its member's.
+    SpatialMigrationTelemetryTests.Total_SumsTheQueryTally_AndDerivesTheRatioFromTheSums pins the fold. Run by hand when written
+    (2026-09-15): tallying a stale return, counting a batch's cluster once for all its members, and counting a batch's hit only after the sink
+    returns each redden them
+  on_violation: the maintenance controller that reads candidates per hit steers on a number the queries did not produce — a copied query read
+    twice, a batch read as cheaper than the queries it answers, the same world read differently on two machines

@@ -867,6 +867,14 @@ public partial class DatabaseEngine
         }
         clusterState.ResetThrottleTickState();
         clusterState.ResetPrepSubSpans();
+
+        // SO-02: the tick's range queries ran in its systems, all of which have finished; this reset runs once per archetype on every Prep path. TH-04: the
+        // budget follows them, set here, before the planner, the throttle and the drift scan spend it.
+        clusterState.TakeQueryTallyDelta();
+        if (_spatialGrid != null)
+        {
+            clusterState.UpdateMaintenanceBudgetScale(in _spatialGrid.Config);
+        }
         clusterState.PreviousTickMigrationCount = clusterState.LastTickMigrationCount;
         clusterState.LastTickMigrationCount = 0;
         clusterState.LastTickMigrationExecuteMs = 0d;
@@ -1032,7 +1040,7 @@ public partial class DatabaseEngine
         if (hasWork)
         {
             var tailStart = Stopwatch.GetTimestamp();
-            var budgetNs = _spatialGrid != null ? _spatialGrid.Config.ReclusterBudgetMs * 1_000_000d : 0d;
+            var budgetNs = _spatialGrid != null ? pending.MaintenanceBudgetNs(in _spatialGrid.Config) : 0d;
             var crossingsNs = _spatialGrid != null ? pending.PendingMandatoryCostNs(in _spatialGrid.Config) : 0d;
             var repairCommittedNs = 0d;
             // Zeroed here, not inside the planner: PlanArchetypeRepairs returns early on an empty queue without touching it, and a stale value from the
@@ -1817,41 +1825,60 @@ public partial class DatabaseEngine
     /// this tick's Prep did with what the PREVIOUS tick found (rule <c>TH-02</c>). A consumer checking
     /// <c>detected == admitted + throttled + superseded + unplaced</c> must pair tick N's detection with tick N+1's outcomes.</para>
     /// </remarks>
-    private static void EmitSpatialArchetypeSnapshot(ArchetypeClusterState clusterState, ushort archetypeId)
+    private static void EmitSpatialArchetypeSnapshot(ArchetypeClusterState clusterState, ushort archetypeId, SpatialGrid grid)
     {
         if (!TelemetryConfig.ProfilerActive)
         {
             return;
         }
 
+        // Every argument named: both records are runs of same-typed fields, and a swapped pair would compile, decode, and report one counter under
+        // another's name.
         TyphonEvent.EmitSpatialRelocationOutcome(
-            archetypeId,
-            clusterState.LastTickRelocationsAdmitted,
-            clusterState.LastTickRelocationsThrottled,
-            clusterState.LastTickRelocationsSuperseded,
-            clusterState.LastTickDriftersUnplaced,
-            clusterState.LastTickDriftersUnplacedNoCandidate,
-            clusterState.LastTickDriftersSpilled,
-            clusterState.LastTickPinsRejected,
-            clusterState.LastTickCrossingsQueued);
+            archetypeId: archetypeId,
+            admitted: clusterState.LastTickRelocationsAdmitted,
+            throttled: clusterState.LastTickRelocationsThrottled,
+            superseded: clusterState.LastTickRelocationsSuperseded,
+            unplaced: clusterState.LastTickDriftersUnplaced,
+            unplacedNoCandidate: clusterState.LastTickDriftersUnplacedNoCandidate,
+            spilled: clusterState.LastTickDriftersSpilled,
+            pinsRejected: clusterState.LastTickPinsRejected,
+            crossingsQueued: clusterState.LastTickCrossingsQueued);
 
         var samples = clusterState.LastTickTightnessSamples;
         TyphonEvent.EmitSpatialArchetypeTelemetry(
-            archetypeId,
-            clusterState.ActiveClusterCount,
-            clusterState.LastTickMigrationCount,
-            (float)clusterState.LastTickMigrationTotalMs,
-            clusterState.LastTickHysteresisAbsorbedCount,
-            clusterState.LastTickDriftersDetected,
-            clusterState.LastTickRepairUnitCount,
-            clusterState.LastTickRepairUnitsRefused,
-            clusterState.RepairQueue?.Count ?? 0,
-            (float)clusterState.LastTickReclusterBudgetUsedMs,
-            samples,
-            samples > 0 ? (float)(clusterState.LastTickTightnessExtentSum / samples) : 0f,
-            samples > 0 ? (float)(clusterState.LastTickTightnessBoundSum / samples) : 0f,
-            clusterState.LastTickCellTreePromotions,
-            clusterState.LastTickCellTreeDemotions);
+            archetypeId: archetypeId,
+            activeClusters: clusterState.ActiveClusterCount,
+            migrations: clusterState.LastTickMigrationCount,
+            migrationCpuMs: (float)clusterState.LastTickMigrationTotalMs,
+            hysteresisAbsorbed: clusterState.LastTickHysteresisAbsorbedCount,
+            driftersDetected: clusterState.LastTickDriftersDetected,
+            repairUnits: clusterState.LastTickRepairUnitCount,
+            repairUnitsRefused: clusterState.LastTickRepairUnitsRefused,
+            repairQueueDepth: clusterState.RepairQueue?.Count ?? 0,
+            budgetUsedMs: (float)clusterState.LastTickReclusterBudgetUsedMs,
+            tightnessSamples: samples,
+            extentRatio: samples > 0 ? (float)(clusterState.LastTickTightnessExtentSum / samples) : 0f,
+            packingBound: samples > 0 ? (float)(clusterState.LastTickTightnessBoundSum / samples) : 0f,
+            cellTreePromotions: clusterState.LastTickCellTreePromotions,
+            cellTreeDemotions: clusterState.LastTickCellTreeDemotions,
+            queryClustersOpened: clusterState.LastTickQueryClustersOpened,
+            queryCandidates: clusterState.LastTickQueryCandidates,
+            queryHits: clusterState.LastTickQueryHits,
+            budgetConfiguredMs: grid != null ? grid.Config.ReclusterBudgetMs : 0f,
+            budgetGrantedMs: (float)clusterState.LastTickReclusterBudgetGrantedMs,
+            efficiencyTolerance: grid != null ? grid.Config.QueryEfficiencyTolerance : 0f,
+            candidatesPerHitSmoothed: (float)clusterState.QueryCandidatesPerHitSmoothed,
+            candidatesPerHitBest: (float)clusterState.QueryCandidatesPerHitBest,
+            ticksAtWholeBudget: clusterState.TicksAtWholeBudget,
+            controllerFlags: clusterState.ControllerFlags,
+            efficiencyRebases: (int)clusterState.TotalEfficiencyRebases,
+            repairCellsCooling: clusterState.RepairQueue?.CoolingCount ?? 0,
+            repairValveFires: clusterState.LastTickRepairValveFires,
+            repairedEntities: clusterState.LastTickRepairedEntityCount,
+            repairQueueEvicted: clusterState.RepairQueue?.TotalEvicted ?? 0L,
+            measuredNsPerEntity: (float)clusterState.LastTickMeasuredNsPerEntity,
+            driftTargetBoost: clusterState.DriftTargetBoost);
     }
 
     /// <summary>
@@ -1867,8 +1894,16 @@ public partial class DatabaseEngine
         }
         var engineState = _archetypeStates[meta.ArchetypeId];
         var clusterState = engineState?.ClusterState;
-        if (clusterState == null || clusterState.FenceBranchPath == 0)
+        if (clusterState == null)
         {
+            return false;
+        }
+
+        if (clusterState.FenceBranchPath == 0)
+        {
+            // No fence work on this path — a pure-Transient archetype, or a Static one nobody wrote — but its queries still ran and the budget controller
+            // still moved, and a trace that skipped the record would sum to less than the accessors do.
+            EmitSpatialArchetypeSnapshot(clusterState, meta.ArchetypeId, _spatialGrid);
             return false;
         }
 
@@ -1913,7 +1948,7 @@ public partial class DatabaseEngine
         // the coming tick's queries must reach past a cell, and which outliers they visit by name instead (SQ-01). It may FALL — the reason it exists.
         clusterState.RefreshClusterReach();
 
-        EmitSpatialArchetypeSnapshot(clusterState, meta.ArchetypeId);
+        EmitSpatialArchetypeSnapshot(clusterState, meta.ArchetypeId, _spatialGrid);
 
         // Clean-spatial-refresh branch (path 1) stops here — no dormancy sweep change (already swept clean), no WAL emit.
         if (clusterState.FenceBranchPath == 1)

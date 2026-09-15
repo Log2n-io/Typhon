@@ -478,7 +478,7 @@ internal sealed partial class ArchetypeClusterState
     /// </remarks>
     internal int ComputeDriftNominationCap(in SpatialGridConfig cfg)
     {
-        var budgetNs = cfg.ReclusterBudgetMs * 1_000_000d;
+        var budgetNs = MaintenanceBudgetNs(in cfg);
         if (budgetNs <= 0d)
         {
             return 0;
@@ -585,7 +585,7 @@ internal sealed partial class ArchetypeClusterState
         }
 
         ref readonly var cfg = ref grid.Config;
-        var budgetNs = cfg.ReclusterBudgetMs * 1_000_000d;
+        var budgetNs = MaintenanceBudgetNs(in cfg);
         if (budgetNs <= 0d)
         {
             // Zero means NO BUDGET ENFORCEMENT, not "do no re-clustering", and the distinction is not a nicety.

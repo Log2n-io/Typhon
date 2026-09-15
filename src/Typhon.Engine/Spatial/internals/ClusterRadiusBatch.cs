@@ -44,14 +44,24 @@ internal static unsafe class ClusterRadiusBatch
     internal interface IMemberDrain
     {
         bool DrainMember(int member, in ClusterFieldLayout layout, in QueryGeometry query, byte* clusterBase, int chunkId, ulong occupancy);
+
+        /// <summary>The matches taken over the whole batch, the one a sink threw on included: the batch's hits in its tally (SO-02).</summary>
+        int Hits { get; }
     }
 
     /// <summary><see cref="ClusterSpatialQuery{TArch}.CountRadius"/>: each member's count, in <see cref="AabbClusterEnumerator.Count"/>'s shape.</summary>
-    internal readonly ref struct CountDrain : IMemberDrain
+    internal ref struct CountDrain : IMemberDrain
     {
         private readonly Span<int> _counts;
+        private int _hits;
 
-        public CountDrain(Span<int> counts) => _counts = counts;
+        public CountDrain(Span<int> counts)
+        {
+            _counts = counts;
+            _hits = 0;
+        }
+
+        public readonly int Hits => _hits;
 
         public bool DrainMember(int member, in ClusterFieldLayout layout, in QueryGeometry query, byte* clusterBase, int chunkId, ulong occupancy)
         {
@@ -70,7 +80,9 @@ internal static unsafe class ClusterRadiusBatch
                 AabbClusterEnumerator.DrainCluster(in layout, in query, clusterBase, chunkId, undecided, ref sink);
             }
 
-            _counts[member] += BitOperations.PopCount(approved) + sink.Count;
+            var hits = BitOperations.PopCount(approved) + sink.Count;
+            _counts[member] += hits;
+            _hits += hits;
             return true;
         }
     }
@@ -85,13 +97,17 @@ internal static unsafe class ClusterRadiusBatch
         public TSink Sink;
         private int _member;
         private bool _retired;
+        private int _hits;
 
         public SinkDrain(TSink sink)
         {
             Sink = sink;
             _member = 0;
             _retired = false;
+            _hits = 0;
         }
+
+        public readonly int Hits => _hits;
 
         public bool DrainMember(int member, in ClusterFieldLayout layout, in QueryGeometry query, byte* clusterBase, int chunkId, ulong occupancy)
         {
@@ -111,6 +127,8 @@ internal static unsafe class ClusterRadiusBatch
         public bool Hit(byte* clusterBase, int chunkId, int slot, int idsOffset, double minX, double minY, double minZ, double maxX, double maxY,
             double maxZ, double distSq)
         {
+            // Before the sink: a hit it throws on was delivered, as the single query's MoveNext counts the hit whose caller then throws.
+            _hits++;
             var result = AabbClusterEnumerator.ResultAt(clusterBase, chunkId, slot, idsOffset, minX, minY, minZ, maxX, maxY, maxZ, distSq);
             if (Sink.Hit(_member, in result))
             {
@@ -139,7 +157,7 @@ internal static unsafe class ClusterRadiusBatch
         }
         finally
         {
-            walk.ReleaseRent();
+            walk.ReleaseRent(drain.Hits);
         }
     }
 
@@ -193,6 +211,11 @@ internal static unsafe class ClusterRadiusBatch
         private SpatialQueryAccessorCache.Entry _entry;
         private int _token;
 
+        // The batch's tally, member by member as each member's own query would count it (SO-02); added once, when the window goes back, with the drain's
+        // hits.
+        private int _tallyClusters;
+        private int _tallyCandidates;
+
         public Walk(ArchetypeClusterState state, SpatialGrid grid, ReadOnlySpan<BSphere2F> members, uint categoryMask)
         {
             // Left unzeroed: every read of a member's slot is gated by a mask of members that have been written, so zeroing ~7 KB per batch buys nothing.
@@ -205,6 +228,8 @@ internal static unsafe class ClusterRadiusBatch
             _categoryMask = categoryMask;
             _entry = null;
             _token = 0;
+            _tallyClusters = 0;
+            _tallyCandidates = 0;
             _z = grid.FlatPlaneZ;
 
             // Read once, as a single query reads them at construction: every member walks with one reach and one set of names.
@@ -561,14 +586,22 @@ internal static unsafe class ClusterRadiusBatch
             EnsureRent();
             byte* clusterBase = _entry.Accessor.GetChunkAddress(chunkId);
             ulong occupancy = *(ulong*)clusterBase;
+
+            // Opened once, counted once per member, with all its occupied slots: each member's own query would have opened it (SO-02).
             if (occupancy == 0UL)
             {
+                _tallyClusters += BitOperations.PopCount(need);
                 return;
             }
 
+            var slots = BitOperations.PopCount(occupancy);
             for (var a = need; a != 0UL; a &= a - 1)
             {
                 int j = BitOperations.TrailingZeroCount(a);
+
+                // Before the drain, as the member's own query counts a cluster when it opens it: a sink that throws leaves the tally at the members reached.
+                _tallyClusters++;
+                _tallyCandidates += slots;
                 if (!drain.DrainMember(j, in _layout, in _queries[j], clusterBase, chunkId, occupancy))
                 {
                     _active &= ~(1UL << j);
@@ -588,11 +621,21 @@ internal static unsafe class ClusterRadiusBatch
         [MethodImpl(MethodImplOptions.NoInlining)]
         private void Rent() => _entry = SpatialQueryAccessorCache.Instance.Rent(_state.ClusterSegment, out _token);
 
-        public void ReleaseRent()
+        /// <summary>
+        /// Hand the window back and add the batch's tally, with <paramref name="hits"/> the drain took, once (SO-02). Runs in <see cref="Run{TDrain}"/>'s
+        /// finally, so a batch whose sink throws adds what its members' own queries would have up to that hit.
+        /// </summary>
+        public void ReleaseRent(int hits)
         {
-            if (_entry != null)
+            var entry = _entry;
+            if (entry != null)
             {
-                SpatialQueryAccessorCache.Return(_entry, _token);
+                // A promoted half rents on its first tree hit, before the category filter: a batch can hold the window having opened nothing.
+                if (SpatialQueryAccessorCache.Return(entry, _token) && _tallyClusters != 0)
+                {
+                    _state.RecordQueryTally(entry.ThreadId, _tallyClusters, _tallyCandidates, hits);
+                }
+
                 _entry = null;
             }
         }

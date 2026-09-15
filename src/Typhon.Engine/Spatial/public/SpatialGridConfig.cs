@@ -271,6 +271,33 @@ public readonly struct SpatialGridConfig
     /// </remarks>
     public readonly int RepairCooldownTicks;
 
+    /// <summary>
+    /// How far above the best candidates per hit an archetype's range queries have shown they may drift before its maintenance gets the whole of
+    /// <see cref="ReclusterBudgetMs"/>. Default 0.1; <c>0</c> turns the controller off and grants the configured budget every tick.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The budget follows what maintenance buys (rule TH-04).</b> Each tick an archetype's budget is <see cref="ReclusterBudgetMs"/> times
+    /// <c>(smoothed / best - 1) / tolerance</c>, clamped to (0, 1], where <c>smoothed</c> is its queries' candidates per hit over the last twenty ticks or so
+    /// and <c>best</c> the lowest that has reached: next to nothing while its queries test as few entities per match as they ever have, the whole budget
+    /// once they test 10 % more. <see cref="ReclusterBudgetMs"/> is the ceiling, and its <c>0</c> still means no enforcement.</para>
+    /// <para><b>Measured</b> on the SWG Tatooine workload with <see cref="RepairCooldownTicks"/> at 50, against a tolerance of 0 (2026-09-16, three paired
+    /// runs each at 50 Hz): a median 10 % off the tick at 4× population over 1 000 ticks, and 4.7 % and 1.9 % at 16× and 64× over 3 000 (9.5 % and
+    /// 2.6 % over the first 1 000, before the controller has had to spend). Migrations per tick fall 40–85 %, and queries test 0.6–1.4 % more entities
+    /// per match with the time per query within 1 %.</para>
+    /// <para><b>Only range queries steer it</b> — the counters rule SO-02 defines. An archetype without such queries, none at all or only nearest-neighbour,
+    /// ray and frustum ones, keeps the configured budget.</para>
+    /// <para><b>Dimensionless, which is the point.</b> A controller priced in time per wasted candidate had to be re-tuned for each population: the same
+    /// constant was the best balance at 16× and 9 % worse than a fixed budget at 64×, because the waste grows with the query volume and what maintenance
+    /// costs does not. In the experiment behind this one — four times the budget as its ceiling, and a 200-tick cooldown — one distance from the
+    /// archetype's own best held at 16× and 64×, and 0.05 to 0.3 landed within 3 % of each other. This controller has been measured at 0.1 only.</para>
+    /// <para><b>It holds the best; it does not seek it.</b> A world whose clusters start loose shows that as its best, and the controller then spends almost
+    /// nothing improving it: spawn placement and the safety valve (<see cref="ClusterRepairCriticalExtentRatio"/>) bound that case. The best is only ever
+    /// lowered, so a slow decline raises the budget as surely as a fast one; after 200 ticks at the whole budget the queries' present level becomes the
+    /// best, so a decline past the tolerance that maintenance cannot undo is accepted, and one it can undo is not. A lasting shift within the tolerance is
+    /// never accepted: it keeps its share of the budget, erring toward spending.</para>
+    /// </remarks>
+    public readonly float QueryEfficiencyTolerance;
+
     // ── Derived values, computed in the constructor ────────────────────────
 
     /// <summary>
@@ -283,7 +310,7 @@ public readonly struct SpatialGridConfig
 
     /// <summary>
     /// Number of cells along the Z axis. <c>1</c> for a flat world built with
-    /// <see cref="Flat(Vector2,Vector2,double,float,float,float,float,float,float,int,float,float,int,float,bool,bool,float,int,int,int)"/>.
+    /// <see cref="Flat(Vector2,Vector2,double,float,float,float,float,float,float,int,float,float,int,float,bool,bool,float,int,int,int,float)"/>.
     /// </summary>
     public readonly int GridDepth;
 
@@ -319,6 +346,9 @@ public readonly struct SpatialGridConfig
     /// <param name="maxOpenClustersPerCell">Open clusters the cap may hold per cell (default 4).</param>
     /// <param name="batchSpawnSortThreshold">Spawns per transaction above which the batch is placed in Morton order; 0 disables (default 128).</param>
     /// <param name="repairCooldownTicks">Ticks during which a just-repaired cell is not repaired again; 0 disables (default 50).</param>
+    /// <param name="queryEfficiencyTolerance">
+    /// Distance above the best candidates per hit at which maintenance gets the whole budget; 0 grants the configured budget every tick (default 0.1).
+    /// </param>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <paramref name="cellSize"/> is not positive, or the derived cell count does not fit a 32-bit cell key.
     /// </exception>
@@ -328,8 +358,16 @@ public readonly struct SpatialGridConfig
         float reclusterBudgetMs = 1.0f, float repairNsPerEntity = 1500f, int repairWorstClustersPerUnit = 8,
         float clusterRepairCriticalExtentRatio = 1.0f, float repairAgingRatePerTick = 0.05f, int repairQueueMaxCells = 4096,
         float clusterTargetPackingSlack = 1.5f, bool leastEnlargementPlacement = false, bool growthCapPlacement = false, float growthCapSlack = 1.25f,
-        int maxOpenClustersPerCell = 4, int batchSpawnSortThreshold = 128, int repairCooldownTicks = 50)
+        int maxOpenClustersPerCell = 4, int batchSpawnSortThreshold = 128, int repairCooldownTicks = 50, float queryEfficiencyTolerance = 0.1f)
     {
+        // Finite as well as non-negative: +Infinity would pin the budget at its floor for good, and NaN would switch the controller off without a word.
+        ArgumentOutOfRangeException.ThrowIfNegative(queryEfficiencyTolerance);
+        if (!float.IsFinite(queryEfficiencyTolerance))
+        {
+            throw new ArgumentOutOfRangeException(nameof(queryEfficiencyTolerance), queryEfficiencyTolerance,
+                "QueryEfficiencyTolerance must be a finite number: 0 grants the configured budget every tick, and anything above it is a distance.");
+        }
+
         ArgumentOutOfRangeException.ThrowIfNegative(repairCooldownTicks);
         ArgumentOutOfRangeException.ThrowIfNegative(clusterTargetPackingSlack);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(growthCapSlack);
@@ -398,6 +436,7 @@ public readonly struct SpatialGridConfig
         RepairAgingRatePerTick = repairAgingRatePerTick;
         RepairQueueMaxCells = repairQueueMaxCells;
         RepairCooldownTicks = repairCooldownTicks;
+        QueryEfficiencyTolerance = queryEfficiencyTolerance;
         InverseCellSize = 1.0d / cellSize;
 
         // Ceiling in DOUBLE, not MathF. At an f64 world extent the f32 product loses whole cells: (worldMax.X - worldMin.X) at 2 x 10^9 rounds to the
@@ -447,14 +486,17 @@ public readonly struct SpatialGridConfig
     /// <param name="maxOpenClustersPerCell">Open clusters the cap may hold per cell (default 4).</param>
     /// <param name="batchSpawnSortThreshold">Spawns per transaction above which the batch is placed in Morton order; 0 disables (default 128).</param>
     /// <param name="repairCooldownTicks">Ticks during which a just-repaired cell is not repaired again; 0 disables (default 50).</param>
+    /// <param name="queryEfficiencyTolerance">
+    /// Distance above the best candidates per hit at which maintenance gets the whole budget; 0 grants the configured budget every tick (default 0.1).
+    /// </param>
     public static SpatialGridConfig Flat(Vector2 worldMin, Vector2 worldMax, double cellSize, float migrationHysteresisRatio = 0.05f,
         float clusterTargetExtentRatio = 0.25f, float clusterDriftMarginRatio = 0.05f, float clusterRepairExtentRatio = 0.75f,
         float reclusterBudgetMs = 1.0f, float repairNsPerEntity = 1500f, int repairWorstClustersPerUnit = 8,
         float clusterRepairCriticalExtentRatio = 1.0f, float repairAgingRatePerTick = 0.05f, int repairQueueMaxCells = 4096,
         float clusterTargetPackingSlack = 1.5f, bool leastEnlargementPlacement = false, bool growthCapPlacement = false, float growthCapSlack = 1.25f,
-        int maxOpenClustersPerCell = 4, int batchSpawnSortThreshold = 128, int repairCooldownTicks = 50) =>
+        int maxOpenClustersPerCell = 4, int batchSpawnSortThreshold = 128, int repairCooldownTicks = 50, float queryEfficiencyTolerance = 0.1f) =>
         new(new Vector3D(worldMin, 0d), new Vector3D(worldMax, cellSize), cellSize, migrationHysteresisRatio, clusterTargetExtentRatio,
             clusterDriftMarginRatio, clusterRepairExtentRatio, reclusterBudgetMs, repairNsPerEntity, repairWorstClustersPerUnit,
             clusterRepairCriticalExtentRatio, repairAgingRatePerTick, repairQueueMaxCells, clusterTargetPackingSlack, leastEnlargementPlacement,
-            growthCapPlacement, growthCapSlack, maxOpenClustersPerCell, batchSpawnSortThreshold, repairCooldownTicks);
+            growthCapPlacement, growthCapSlack, maxOpenClustersPerCell, batchSpawnSortThreshold, repairCooldownTicks, queryEfficiencyTolerance);
 }

@@ -1,11 +1,11 @@
 ---
 uid: feature-spatial-spatial-telemetry
 title: 'Reading Spatial Telemetry'
-description: 'Sixty-three counters that say which spatial parameter is wrong, and the ten of them a metrics pipeline can actually see.'
+description: 'Seventy-three counters that say which spatial parameter is wrong, and where each of them can be seen.'
 ---
 
 # Reading Spatial Telemetry
-> Sixty-three counters that say which spatial parameter is wrong, and the ten of them a metrics pipeline can actually see.
+> Seventy-three counters that say which spatial parameter is wrong, and where each of them can be seen.
 
 **Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Spatial](./README.md)
 
@@ -16,17 +16,18 @@ not throw; it spends the re-clustering budget every tick and hands your queries 
 with. [Tuning the Spatial Grid](./spatial-tuning.md) lists the parameters. This page is the other half: the
 counters that tell you *which* of them to change, so tuning is a measurement rather than a guess.
 
-`SpatialMigrationTelemetry` carries **63 public members**, read through `DatabaseEngine.GetSpatialTelemetry(archetypeId)`
+`SpatialMigrationTelemetry` carries **73 public members**, read through `DatabaseEngine.GetSpatialTelemetry(archetypeId)`
 for one archetype or `GetSpatialTelemetryTotal()` for the engine. Each one is paired below with the parameter it moves.
 
-> ⚠️ **Most of these counters are not exported today, and this is the first thing to know about them.** Exactly **ten**
-> reach OpenTelemetry, under `typhon.ecs.spatial.*` ([`EcsMetricsExporter.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/EcsMetricsExporter.cs)).
-> The other **53 are API-only** — including `RelocationsThrottled`, `RepairUnitsRefused`, `RepairQueueDepth` and
-> `MeasuredNsPerEntity`, which are the four this page's three worked readings are built on, and the four the tuning page
-> names as the acceptance test before you ship. **No Workbench panel shows spatial partitioning telemetry at all**, and
-> nothing in `tools/` reads either accessor. So the loop below is real, but today you close it from your own tick loop —
-> log the struct, expose it on your own health endpoint, or read it in a debugger. Nothing else will show it to you.
-> `GetSpatialGridOccupancy()` is API-only on the same terms.
+> ⚠️ **Know where each counter reaches before you rely on it.** All 73 are readable in-process through the two accessors.
+> **30** are exported to OpenTelemetry under `typhon.ecs.spatial.*`, tagged by archetype
+> ([`EcsMetricsExporter.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/EcsMetricsExporter.cs));
+> most are per-tick gauges, so a scrape reads one arbitrary tick, and `RelocationsThrottled`, `RepairUnitsRefused`,
+> `RepairQueueDepth` and `MeasuredNsPerEntity` — the four this page's worked readings are built on — are not among them.
+> **The Workbench** reads a wider subset every tick from the profiler trace, live or from a recording: two per-archetype
+> records, kinds 65 and 66, gated by `SpatialClusterRelocationActive` and `SpatialArchetypeTelemetryActive`. They carry
+> the throttle's outcome split, repair and queue state, tightness, the query tally and the budget controller's state. Its
+> Spatial Maintenance panel shows the older part of that record today. `GetSpatialGridOccupancy()` is API-only.
 
 ## ⚙️ How it works (in brief)
 
@@ -52,10 +53,13 @@ nothing happened all report zero, so a flat line is only informative once you kn
 Read the snapshot after the fence, before the next tick:
 
 ```csharp
-var t = dbe.GetSpatialTelemetry(Archetype<Ant>.Metadata.ArchetypeId);   // or dbe.GetSpatialTelemetryTotal()
+// Per archetype: the engine total's grant is a sum across archetypes, so the whole-budget test below would not hold for it.
+var t = dbe.GetSpatialTelemetry(Archetype<Ant>.Metadata.ArchetypeId);
 
-// The two acceptance numbers. Both must settle at zero before you ship (see the tuning page).
-if (t.RelocationsThrottled > 0 || (t.RepairUnitsRefused > 0 && t.RepairUnitCount == 0))
+// The two acceptance numbers. Both must settle at zero before you ship (see the tuning page) — on ticks granted the whole
+// budget. Below it the budget controller is choosing not to spend, and throttling is then the point.
+var wholeBudget = t.ReclusterBudgetGrantedMs >= config.ReclusterBudgetMs;   // config: the SpatialGridConfig you configured
+if (wholeBudget && (t.RelocationsThrottled > 0 || (t.RepairUnitsRefused > 0 && t.RepairUnitCount == 0)))
 {
     _log.SpatialBudgetStarved(t.RelocationsThrottled, t.RepairUnitsRefused, t.MeasuredNsPerEntity);
 }
@@ -110,6 +114,7 @@ wrote it. It counts crossings, not entities: one already in an edge cell and wri
 | `RelocationsThrottled` | last tick | `ReclusterBudgetMs` | — |
 | `RelocationsSuperseded` | last tick | nothing — informational | — |
 | `DriftersUnplaced` | last tick | `CellSize` — every cluster in the cell was full | — |
+| `DriftTargetBoost` | **level** | `ClusterTargetPackingSlack` — the throttle's multiplier on the drift target; at its cap detection is off | — |
 
 Over one tick these close: `DriftersDetected = admitted + RelocationsThrottled + RelocationsSuperseded +
 DriftersUnplaced`. That identity is what makes "a drifter is never both absorbed and throttled" checkable rather than
@@ -138,6 +143,44 @@ budget covers its whole cost, so the estimate has to exist before the work does.
 report a number that gated nothing. Compare it against your measured tick time to find out whether the cost model is
 honest — which is what `MeasuredNsPerEntity` now does automatically, as an exponentially-weighted average clamped to a
 band around the configured seed.
+
+### Query efficiency — what maintenance buys
+
+| Counter | Clock | Tunes | OTel |
+|---|---|---|---|
+| `QueryClustersOpened` | last tick | nothing directly — the per-cluster cost of a loose partition | — |
+| `QueryCandidates` | last tick | — the entities in the clusters the range queries opened | — |
+| `QueryHits` | last tick | — the matches they returned | — |
+| `QueryCandidatesPerHit` | last tick | `ReclusterBudgetMs`, `RepairCooldownTicks` — what the maintenance they fund buys | — |
+| `ReclusterBudgetGrantedMs` | last tick | `QueryEfficiencyTolerance` — the budget the queries' efficiency earned this tick | — |
+| `QueryCandidatesPerHitSmoothed` | **level** | — the budget controller's input, over about twenty ticks | — |
+| `QueryCandidatesPerHitBest` | **level** | — the controller's set point: the lowest that value has reached since the controller last re-based it | — |
+| `TotalEfficiencyRebases` | cumulative | — each one a level the whole budget could not bring back, accepted | — |
+| `TicksAtWholeBudget` | **level** | — the streak toward the next re-base, at 200 | — |
+
+Every other counter on this page says what the fence **spends**. These four say what the queries **get**. Maintenance
+keeps cluster boxes tight so that a query tests fewer entities per match, and `QueryCandidatesPerHit` is that number: 1
+would mean every entity in the clusters a query opened matched. Read it over minutes, not per tick. Without maintenance
+it climbs: in the SWG demo at 64×, its value over the last stretch of the run stood 17 % above the default's after 150 s
+and 23 % after 300 s. A value that holds steady while the fence gets cheaper means the maintenance settings are right.
+It reads zero on a tick where nothing matched, so track its best value from the sums, not from the ratio.
+
+They count AABB and radius queries — yours, and the engine's own interest and trigger systems' — through any drain, one
+at a time or batched; a batch counts what its members' own queries would. A query that stops at its first match still
+counts every entity of the cluster it stopped in, so the numbers are the same on every CPU. Nearest-neighbour, ray and
+frustum queries are not counted. The clock is the queries run since the previous fence. Each thread counts its own
+queries, into a cache line no other thread writes, so counting costs a query a few additions.
+
+The last five are the budget controller at work (`QueryEfficiencyTolerance`, on by default). Each tick an archetype is
+granted `ReclusterBudgetMs` times `(smoothed / best - 1) / tolerance`, capped at the whole budget: next to nothing while
+its queries test as few entities per match as they ever have, everything once they test 10 % more. The best is only ever
+lowered, so a slow decline earns budget as surely as a fast one; after 200 ticks at the whole budget without getting back
+within the tolerance, the present level becomes the best, and `TotalEfficiencyRebases` counts it. That is the event to
+watch: a steady climb means the world degrades faster than the configured budget repairs, which a fixed budget would
+lose as well. So a `ReclusterBudgetGrantedMs` near zero with
+`QueryCandidatesPerHitSmoothed` at `QueryCandidatesPerHitBest` is the controller saving the budget, not a starved
+archetype. The whole configured budget with both reading zero means no range query hit the archetype lately, and it is
+spending as it would without the controller.
 
 ### Prep breakdown — profiling, not tuning
 
@@ -186,7 +229,9 @@ none**, and a slightly pessimistic cost estimate takes you from one to none. Che
 live figure is what the budget actually spends against: repair measures roughly a microsecond per entity, so budget against
 that range rather than against a per-entity figure you assume.
 
-**Which knob.** Raise `ReclusterBudgetMs`, doubling until `RelocationsThrottled` reaches zero, then stop. If you cannot
+**Which knob.** First check `ReclusterBudgetGrantedMs`: below `ReclusterBudgetMs`, the budget controller is withholding the
+budget because the queries are close to the best they have shown, and the refusals are deliberate. At the whole grant,
+raise `ReclusterBudgetMs`, doubling until `RelocationsThrottled` reaches zero, then stop. If you cannot
 afford the milliseconds, lower `RepairWorstClustersPerUnit` instead so a unit is smaller and something gets through.
 Do **not** set `ReclusterBudgetMs` to zero to make the counter go away: zero disables repair *and* disables throttle
 enforcement, so every relocation then runs unmetered, and it measured the worst cluster tightness of any budget tested.
@@ -206,7 +251,9 @@ queue ranks by degradation, tier weight, cluster count and an ageing term, and e
 the least urgent, which is the right choice but still a loss. A cell dropped from the queue is not repaired and not
 remembered; it must degrade its way back in.
 
-**Which knob.** Raise `RepairQueueMaxCells` above the number of cells your world degrades simultaneously. But treat a
+**Which knob.** Check `ReclusterBudgetGrantedMs` first: at the budget controller's floor the planner services nothing but
+the safety valve, so nominations fill the queue by design until the queries' efficiency slips and the budget returns.
+Otherwise, raise `RepairQueueMaxCells` above the number of cells your world degrades simultaneously. But treat a
 full queue as a symptom before you treat it as a cap: a queue at its cap usually means degradation is being *created*
 faster than the budget retires it, and the same reading almost always comes with `RepairUnitsRefused` above zero. Fix
 the budget first, then size the queue to what is left. If a specific cell is visibly never serviced while others are,
@@ -220,22 +267,26 @@ nothing is degraded enough to nominate, or that every cell that is was repaired 
 
 ## ⚠️ Guarantees & limits
 
-- **Ten of sixty-three counters are exported.** The `typhon.ecs.spatial.*` meter publishes eight observable gauges and
-  two observable counters, per archetype, tagged by archetype name. Everything else on the struct — including the four
-  the readings above depend on — is reachable only through the two accessor calls. Two further gauges,
-  `typhon.ecs.open.cellstate_rebuild_ms` and `typhon.ecs.open.cluster_aabb_rebuild_ms`, are engine-wide open timings
-  read from `DatabaseEngine`, not from this struct.
-- **No Workbench panel presents spatial partitioning telemetry.** The Workbench surfaces spatial *trace events* through
-  the profiler, and spatial clauses in the query console, but neither accessor is called anywhere in `tools/`.
+- **Thirty of seventy-three counters are exported.** The `typhon.ecs.spatial.*` meter publishes 28 observable gauges
+  and two observable counters per archetype, tagged by archetype name. Everything else on the struct is reachable
+  in-process through the two accessor calls, and part of it through the Workbench's trace records (next point). Five
+  further gauges are engine-wide, read from `DatabaseEngine` rather than this struct: three fence timings
+  (`typhon.ecs.spatial.fence_span_ms`, `…fence_migration_parallelism`, `…fence_stall_ms`) and two open timings
+  (`typhon.ecs.open.cellstate_rebuild_ms`, `typhon.ecs.open.cluster_aabb_rebuild_ms`).
+- **The Workbench reads the trace, not the accessors.** Its Spatial Maintenance panel is fed by two per-archetype trace
+  records a tick (kinds 65 and 66), live or from a recording; neither accessor is called anywhere in `tools/`. Kind 66
+  also carries the query tally and the budget controller's state, which the panel does not show yet.
 - **Reads are lock-free and can tear across the fence.** A snapshot taken while the fence runs may mix values from
   either side of it. That is deliberate — serialising a diagnostic reader against the fence would cost more than the
   inconsistency is worth. Call it after the fence and before the next tick for a coherent view.
 - **Per-tick members reset at the top of every fence; cumulative members restart with the cluster state.**
   `InitializeArchetypes` reallocates the per-archetype state, so a repeat call returns the totals to zero. They measure
   the life of the cluster state, not of the process.
-- **`GetSpatialTelemetryTotal()` sums, except where summing would lie.** Every member is summed across archetypes except
-  `MeasuredNsPerEntity`, which is averaged over the archetypes that produced an estimate — a cost *per entity* is
-  intensive, and four archetypes are not four times as expensive per entity as each of them is.
+- **`GetSpatialTelemetryTotal()` sums, except where summing would lie.** `MeasuredNsPerEntity` is averaged over the
+  archetypes that produced an estimate — a cost *per entity* is intensive, and four archetypes are not four times as
+  expensive per entity as each of them is. `LargestArrivalRun`, `ClusterReach`, `TicksAtWholeBudget` and
+  `DriftTargetBoost` take the maximum: each is a property of one archetype, and a sum would describe none. The ratios,
+  and the controller's smoothed and best readings, come from summed numerators over summed denominators.
 - **`MigrationExecuteMs` and `MigrationTotalMs` are CPU-milliseconds, not span.** Eight workers each busy for one
   millisecond report eight, not one, and the sum can exceed the tick's elapsed time.
 - **`RepairedEntityCount` is the planner's commitment, not the outcome.** A repair emits ordinary migration requests, so
@@ -248,19 +299,20 @@ nothing is degraded enough to nominate, or that every cell that is was repaired 
 ## 🧪 Tests
 
 - [SpatialMigrationTelemetryTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Observability/SpatialMigrationTelemetryTests.cs) — counters publish on both surfaces (`MigratingWorkload_PublishesNonZeroCounters`, `MeterListener_ObservesSameValuesAsAccessor`), the two clocks (`PerTickCounters_ResetToZero_OnATickWithoutMigration`, `HysteresisAbsorbed_IsRecomputedEachTick_NotLatched`), the per-write-path unit (`HysteresisAbsorbed_IsCounted_OnTheBarrierOnlyPath`), and that reading allocates nothing and tolerates a bad id (`Accessor_AllocatesNothing`, `OutOfRangeArchetypeId_ReturnsDefault`)
-- [ClusterThrottleBudgetTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterThrottleBudgetTests.cs) — the drifter identity (`EveryDetectedDrifterIsAccountedForExactlyOnce`), budget admission (`NoTickAdmitsMoreRelocationsThanTheBudgetPaysFor`), and the zero-budget case (`AZeroBudgetKeepsRelocatingAndKeepsEveryQueueBounded`)
+- [ClusterThrottleBudgetTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterThrottleBudgetTests.cs) — the drifter identity (`EveryDetectedDrifterIsAccountedForExactlyOnce`), budget admission (`NoTickAdmitsMoreRelocationsThanTheBudgetPaysFor`), the zero-budget case (`AZeroBudgetKeepsRelocatingAndKeepsEveryQueueBounded`), and the budget controller (`AtTheBestEfficiencyTheQueriesHaveShown_TheBudgetAdmitsNoRelocation`, `TheScaleIsTheDistanceFromTheBest_OverTheTolerance`, `WithoutASignal_TheConfiguredBudgetStands`, `ASlowDecline_IsNotFollowedByTheBest_ItRaisesTheBudget`, and the re-base with its count and streak in `AfterTheRebaseWindowAtTheWholeBudget_ThePresentLevelBecomesTheBest`); [TypedDtoRoundTripTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/TypedDtoRoundTripTests.cs) pins kind 66's byte layout and an older, shorter record's decode (`SpatialArchetypeTelemetry_DecodesTheDocumentedLayout_AndAnOlderRecordWithTheAppendedFieldsAtZero`)
 - [ClusterRepairQueueTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterRepairQueueTests.cs) — eviction reporting (`TheQueueStopsAtItsCapAndReportsTheEvictions`), refusal under budget (`WithTheValveDisabledAnUnderBudgetQueueServicesNobody`), the valve (`ACriticalCellIsServicedEvenWhenTheBudgetCannotAffordIt`), and ageing (`AgeingCarriesEveryCandidateToTheHeadOfTheQueue`, `WithoutAgeingTheWorstCandidateStarvesEveryoneElse`)
 - [ClusterRepairConvergenceTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterRepairConvergenceTests.cs) — `RepairCellsCooling` on every tick of a cell that re-degrades after each repair (`ARepairedCellIsNotRepairedAgainUntilItsCooldownEnds`)
+- [SpatialQueryTallyTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialGrid/SpatialQueryTallyTests.cs) — what the query members count (`EachDrain_TalliesTheClusterItOpened_TheEntitiesItTested_AndItsMatches`, `AStoppedQuery_CountsTheWholeClusterItOpened`, `TheTally_IsTheSameWithTheBlockKernelAndWithout`, `ACopyThatHandsTheWindowBack_TalliesTheQueryOnce`), that concurrent threads lose nothing (`ConcurrentQueries_OnEightThreads_AreEachCountedOnce`), and the per-tick clock (`TheFencePublishesTheTicksQueries_AndZeroOnATickWithNone`); [ClusterRadiusBatchTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialGrid/ClusterRadiusBatchTests.cs) holds a batch's counts to its members' own queries' (`EachMember_IsAnsweredAsItsOwnRadiusQuery`, `ASinkThatThrows_HandsTheWindowBack`); [SpatialMigrationTelemetryTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Observability/SpatialMigrationTelemetryTests.cs) pins the engine-wide folds (`Total_SumsTheQueryTally_AndDerivesTheRatioFromTheSums`, `Total_SumsTheRebases_AndMaxesTheStreakAndTheBoost`)
 - [ClusterAabbRefreshDirtyGateTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterAabbRefreshDirtyGateTests.cs) — what `SlotsScanned` and `ClustersScanned` must report (`ATickWithNoWritesWalksNoSlotsAtAll`, `OnlyTheClusterThatWasWrittenIsWalked`)
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Ecs/public/SpatialMigrationTelemetry.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/SpatialMigrationTelemetry.cs) (all 63 members)
+- Source: [src/Typhon.Engine/Ecs/public/SpatialMigrationTelemetry.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/SpatialMigrationTelemetry.cs) (all 73 members)
 - Source: [src/Typhon.Engine/Ecs/public/DatabaseEngine.SpatialTelemetry.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/DatabaseEngine.SpatialTelemetry.cs) (`GetSpatialTelemetry`, `GetSpatialTelemetryTotal`, `GetSpatialGridOccupancy`)
-- Source: [src/Typhon.Engine/Observability/public/EcsMetricsExporter.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/EcsMetricsExporter.cs) (the ten exported instruments)
+- Source: [src/Typhon.Engine/Observability/public/EcsMetricsExporter.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/EcsMetricsExporter.cs) (the exported instruments)
 - Related catalog entry: [Tuning the Spatial Grid](./spatial-tuning.md) — the parameters these counters point at, and how to derive them
 - Related catalog entry: [Spatially-Coherent Entity Clustering](./spatial-coherent-clustering.md) — the migration these counters measure
 - Related catalog entry: [Spatial Grid Configuration & Tier Control](./spatial-grid-config.md) — where the grid is configured
 
 <!-- Deep dive: claude/design/Spatial/vdb-cell-grid-and-migration.md (steps 10-12: drift detection, throttling, repair queue) -->
-<!-- Rules: rules/spatial.md (modules TH-01, CR-01) -->
+<!-- Rules: rules/spatial.md (modules TH-01, CR-01; SO-01, SO-02, TH-04) -->

@@ -1,5 +1,6 @@
 using NUnit.Framework;
 using System;
+using System.Buffers.Binary;
 using Typhon.Profiler;
 using Typhon.Profiler.Events;
 
@@ -323,5 +324,97 @@ public sealed class TypedDtoRoundTripTests
         Assert.That(dto.TickNumber, Is.EqualTo(CurrentTick));
         // Payload value lives under the renamed property.
         Assert.That(dto.TickNumberPayload, Is.EqualTo(999L));
+    }
+
+    /// <summary>
+    /// Kind 66 decodes in the order <see cref="TraceEventKind.SpatialArchetypeTelemetry"/> documents — the contract the Workbench's own decoder reads by
+    /// offset — and a record written before the maintenance controller's fields were appended decodes with them at zero, bounded by its own size rather
+    /// than by whatever bytes follow it.
+    /// </summary>
+    [Test]
+    public void SpatialArchetypeTelemetry_DecodesTheDocumentedLayout_AndAnOlderRecordWithTheAppendedFieldsAtZero()
+    {
+        const int legacyPayload = 58;
+        const int fullPayload = 139;
+        var full = new byte[TraceRecordHeader.CommonHeaderSize + fullPayload];
+        WriteInstantHeader(full, (ushort)full.Length, TraceEventKind.SpatialArchetypeTelemetry);
+        var p = full.AsSpan(TraceRecordHeader.CommonHeaderSize);
+        BinaryPrimitives.WriteUInt16LittleEndian(p, 7);                // archetypeId
+        BinaryPrimitives.WriteInt32LittleEndian(p[2..], 100);          // activeClusters
+        BinaryPrimitives.WriteInt32LittleEndian(p[54..], 9);           // cellTreeDemotions: the last of the original 58 bytes
+        BinaryPrimitives.WriteInt64LittleEndian(p[58..], 11);          // queryClustersOpened
+        BinaryPrimitives.WriteInt64LittleEndian(p[66..], 222);         // queryCandidates
+        BinaryPrimitives.WriteInt64LittleEndian(p[74..], 111);         // queryHits
+        BinaryPrimitives.WriteSingleLittleEndian(p[82..], 1f);         // budgetConfiguredMs
+        BinaryPrimitives.WriteSingleLittleEndian(p[86..], 0.25f);      // budgetGrantedMs
+        BinaryPrimitives.WriteSingleLittleEndian(p[90..], 0.1f);       // efficiencyTolerance
+        BinaryPrimitives.WriteSingleLittleEndian(p[94..], 2.5f);       // candidatesPerHitSmoothed
+        BinaryPrimitives.WriteSingleLittleEndian(p[98..], 2f);         // candidatesPerHitBest
+        BinaryPrimitives.WriteInt32LittleEndian(p[102..], 42);         // ticksAtWholeBudget
+        p[106] = 3;                                                     // controllerFlags
+        BinaryPrimitives.WriteInt32LittleEndian(p[107..], 4);          // efficiencyRebases
+        BinaryPrimitives.WriteInt32LittleEndian(p[111..], 5);          // repairCellsCooling
+        BinaryPrimitives.WriteInt32LittleEndian(p[115..], 1);          // repairValveFires
+        BinaryPrimitives.WriteInt32LittleEndian(p[119..], 64);         // repairedEntities
+        BinaryPrimitives.WriteInt64LittleEndian(p[123..], 8);          // repairQueueEvicted
+        BinaryPrimitives.WriteSingleLittleEndian(p[131..], 1500f);     // measuredNsPerEntity
+        BinaryPrimitives.WriteSingleLittleEndian(p[135..], 3.25f);     // driftTargetBoost
+
+        var dto = SpatialArchetypeTelemetryEventDto.Decode(full, CurrentTick, TicksPerUs);
+        Assert.Multiple(() =>
+        {
+            Assert.That(dto.ArchetypeId, Is.EqualTo(7));
+            Assert.That(dto.ActiveClusters, Is.EqualTo(100));
+            Assert.That(dto.CellTreeDemotions, Is.EqualTo(9));
+            Assert.That(dto.QueryClustersOpened, Is.EqualTo(11));
+            Assert.That(dto.QueryCandidates, Is.EqualTo(222));
+            Assert.That(dto.QueryHits, Is.EqualTo(111));
+            Assert.That(dto.BudgetConfiguredMs, Is.EqualTo(1f));
+            Assert.That(dto.BudgetGrantedMs, Is.EqualTo(0.25f));
+            Assert.That(dto.EfficiencyTolerance, Is.EqualTo(0.1f));
+            Assert.That(dto.CandidatesPerHitSmoothed, Is.EqualTo(2.5f));
+            Assert.That(dto.CandidatesPerHitBest, Is.EqualTo(2f));
+            Assert.That(dto.TicksAtWholeBudget, Is.EqualTo(42));
+            Assert.That(dto.ControllerFlags, Is.EqualTo(3));
+            Assert.That(dto.EfficiencyRebases, Is.EqualTo(4));
+            Assert.That(dto.RepairCellsCooling, Is.EqualTo(5));
+            Assert.That(dto.RepairValveFires, Is.EqualTo(1));
+            Assert.That(dto.RepairedEntities, Is.EqualTo(64));
+            Assert.That(dto.RepairQueueEvicted, Is.EqualTo(8));
+            Assert.That(dto.MeasuredNsPerEntity, Is.EqualTo(1500f));
+            Assert.That(dto.DriftTargetBoost, Is.EqualTo(3.25f));
+        });
+
+        // The same bytes under the size an older build wrote: the appended fields still sit in the buffer, and must not be read.
+        WriteInstantHeader(full, (ushort)(TraceRecordHeader.CommonHeaderSize + legacyPayload), TraceEventKind.SpatialArchetypeTelemetry);
+        var legacy = SpatialArchetypeTelemetryEventDto.Decode(full, CurrentTick, TicksPerUs);
+        Assert.Multiple(() =>
+        {
+            Assert.That(legacy.ArchetypeId, Is.EqualTo(7));
+            Assert.That(legacy.CellTreeDemotions, Is.EqualTo(9), "the original 58 bytes decode as before");
+            Assert.That(legacy.QueryCandidates, Is.Zero, "a field the record does not reach reads zero, not the bytes after the record");
+            Assert.That(legacy.ControllerFlags, Is.Zero);
+            Assert.That(legacy.DriftTargetBoost, Is.Zero);
+        });
+
+        // And a buffer that ends before the record it claims: the full size back in the header, over a span only the older record's length. The buffer
+        // alone bounds this read, and it must not run past it.
+        WriteInstantHeader(full, (ushort)full.Length, TraceEventKind.SpatialArchetypeTelemetry);
+        var clipped = SpatialArchetypeTelemetryEventDto.Decode(full.AsSpan(0, TraceRecordHeader.CommonHeaderSize + legacyPayload), CurrentTick, TicksPerUs);
+        Assert.Multiple(() =>
+        {
+            Assert.That(clipped.CellTreeDemotions, Is.EqualTo(9));
+            Assert.That(clipped.EfficiencyRebases, Is.Zero);
+            Assert.That(clipped.RepairQueueEvicted, Is.Zero);
+        });
+    }
+
+    /// <summary>Write an instant's 12-byte common header: u16 size, u8 kind, u8 thread slot, i64 timestamp.</summary>
+    private static void WriteInstantHeader(Span<byte> record, ushort size, TraceEventKind kind)
+    {
+        BinaryPrimitives.WriteUInt16LittleEndian(record, size);
+        record[2] = (byte)kind;
+        record[3] = ThreadSlot;
+        BinaryPrimitives.WriteInt64LittleEndian(record[4..], StartTs);
     }
 }

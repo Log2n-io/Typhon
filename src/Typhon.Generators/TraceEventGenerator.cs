@@ -916,11 +916,18 @@ public class TraceEventGenerator : IIncrementalGenerator
         sb.Append("    /// <summary>Decode a <c>").Append(model.KindName).AppendLine("</c> instant wire record into a typed DTO.</summary>");
         sb.Append("    public static ").Append(model.StructName).AppendLine("Dto Decode(global::System.ReadOnlySpan<byte> source, int currentTick, long ticksPerUs)");
         sb.AppendLine("    {");
-        sb.Append("        ").Append(TR).AppendLine(".ReadCommonHeader(source, out _, out _, out var threadSlot, out var timestamp);");
+        var hasPayload = model.PayloadFields.Length > 0;
+        sb.Append("        ").Append(TR).Append(".ReadCommonHeader(source, out ").Append(hasPayload ? "var recordSize" : "_")
+            .AppendLine(", out _, out var threadSlot, out var timestamp);");
 
-        if (model.PayloadFields.Length > 0)
+        if (hasPayload)
         {
-            sb.Append("        var payload = source[").Append(TR).AppendLine(".CommonHeaderSize..];");
+            // Bounded by the record's OWN size, and each field read only when the record reaches it. An instant has no optional mask, so it grows by
+            // appending fields — never by reordering or removing one — and a record written before an append is a strict prefix of one written after: its
+            // missing fields decode as zero instead of reading past the record into the next one, or past the buffer.
+            sb.Append("        var payloadEnd = global::System.Math.Max(").Append(TR).Append(".CommonHeaderSize, ")
+                .AppendLine("global::System.Math.Min((int)recordSize, source.Length));");
+            sb.Append("        var payload = source[").Append(TR).AppendLine(".CommonHeaderSize..payloadEnd];");
             int cursor = 0;
             foreach (var p in model.PayloadFields)
             {
@@ -936,7 +943,8 @@ public class TraceEventGenerator : IIncrementalGenerator
                 {
                     readExpr = $"({p.TypeFqn})({readExpr})";
                 }
-                sb.Append("        var p_").Append(p.FieldName).Append(" = ").Append(readExpr).AppendLine(";");
+                sb.Append("        var p_").Append(p.FieldName).Append(" = payload.Length >= ").Append(cursor + sz).Append(" ? ").Append(readExpr)
+                    .AppendLine(" : default;");
                 cursor += sz;
             }
         }
