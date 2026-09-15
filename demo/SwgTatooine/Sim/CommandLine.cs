@@ -24,6 +24,7 @@ public static class CommandLine
         c.ClusterTargetExtentRatio = Float(args, "--target-ratio", c.ClusterTargetExtentRatio);
         c.ClusterRepairExtentRatio = Float(args, "--repair-ratio", c.ClusterRepairExtentRatio);
         c.RepairWorstClustersPerUnit = Int(args, "--repair-unit", c.RepairWorstClustersPerUnit);
+        c.RepairCooldownTicks = Int(args, "--repair-cooldown", c.RepairCooldownTicks);
         c.ShuttleShare = Float(args, "--shuttle-share", c.ShuttleShare);
         c.ShuttleIntervalS = Float(args, "--shuttle-interval", c.ShuttleIntervalS);
         c.BoardingWindowS = Float(args, "--boarding-window", c.BoardingWindowS);

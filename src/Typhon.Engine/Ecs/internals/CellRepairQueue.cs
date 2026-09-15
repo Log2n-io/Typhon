@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Numerics;
 
 namespace Typhon.Engine.Internals;
@@ -20,6 +21,9 @@ namespace Typhon.Engine.Internals;
 /// the queue and the next tick's AABB pass re-nominates whatever still deserves it.</para>
 /// <para><b>Single-threaded by contract.</b> Every method is called from Prep, which runs one work item per archetype. Nomination — the parallel half —
 /// goes into <c>ArchetypeClusterState.RepairNominations</c> under the finalize lock and is folded in here by <see cref="Absorb"/>.</para>
+/// <para><b>A repaired cell cools before it can queue again</b> (<c>RP-07</c>, <c>SpatialGridConfig.RepairCooldownTicks</c>). Under motion a re-packed
+/// cell decays within a few ticks and is nominated again, and re-packing it every time is the churn the default spent its budget on. So a cell the planner
+/// has just repaired is held outside the candidate set until its cooldown ends; what it is nominated for meanwhile is kept and handed back then.</para>
 /// </remarks>
 internal sealed class CellRepairQueue
 {
@@ -67,6 +71,18 @@ internal sealed class CellRepairQueue
     /// <summary>The <c>SpatialGrid.TierVersion</c> the last re-rank saw, so a tier flip invalidates the order that used it.</summary>
     private int _rankedTierVersion = -1;
 
+    /// <summary>Ticks a repaired cell spends outside the candidate set; <c>0</c> disables the cooldown.</summary>
+    private readonly int _cooldownTicks;
+
+    /// <summary>
+    /// Cells waiting out a cooldown, each mapped to the worst degradation nominated for it since its repair — <c>0</c> when nothing nominated it. Disjoint
+    /// from <see cref="_candidates"/>: a cell is in one, the other, or neither. When each cooldown ends is <see cref="_coolingOrder"/>'s business.
+    /// </summary>
+    private readonly Dictionary<int, float> _cooling = [];
+
+    /// <summary>The same cells in the order they were repaired — which, with one cooldown for every cell, is the order they are released in.</summary>
+    private readonly Queue<(int CellKey, long ReleaseTick)> _coolingOrder = new();
+
     /// <summary>Candidates dropped because the queue was full, since this queue was created.</summary>
     internal long TotalEvicted;
 
@@ -74,14 +90,28 @@ internal sealed class CellRepairQueue
     /// <c>AC-11.5</c>'s numerator.</summary>
     internal long LastTickMaintenanceTicks;
 
-    internal CellRepairQueue(int maxCells, float agingRatePerTick)
+    internal CellRepairQueue(int maxCells, float agingRatePerTick, int cooldownTicks = 0)
     {
         _maxCells = Math.Max(1, maxCells);
         _agingRatePerTick = Math.Max(0f, agingRatePerTick);
+        _cooldownTicks = Math.Max(0, cooldownTicks);
     }
 
     /// <summary>Cells currently waiting. The queue-depth telemetry, and the denominator for the eviction rate.</summary>
     internal int Count => _candidates.Count;
+
+    /// <summary>Cells waiting out a repair cooldown. A level, like <see cref="Count"/>, and never counted in it.</summary>
+    internal int CoolingCount => _cooling.Count;
+
+    /// <summary>
+    /// Whether the planner has work here on <paramref name="tickNumber"/> even with nothing newly nominated: a candidate waiting, or a cooldown ending.
+    /// </summary>
+    /// <remarks>
+    /// The fence's early-out asks this, not <see cref="Count"/>. A cooling cell is not a candidate, so a <see cref="Count"/> test skips the planner on a
+    /// tick with no nomination and no candidate — and the planner is what calls <see cref="ReleaseCooled"/>, so a cell that went still while it cooled
+    /// would stay out of the queue until some other cell happened to nominate (RP-07).
+    /// </remarks>
+    internal bool NeedsPlanning(long tickNumber) => _candidates.Count > 0 || (_coolingOrder.TryPeek(out var next) && next.ReleaseTick <= tickNumber);
 
     /// <summary>Ranked cell keys, best first — valid only immediately after <see cref="Rerank"/>.</summary>
     internal ReadOnlySpan<int> Ranked => _ranked.AsSpan(0, _rankedCount);
@@ -101,47 +131,113 @@ internal sealed class CellRepairQueue
         for (var i = 0; i < nominations.Count; i++)
         {
             var nomination = nominations[i];
-            if (_candidates.TryGetValue(nomination.CellKey, out var existing))
-            {
-                if (nomination.Degradation > existing.Degradation)
-                {
-                    existing.Degradation = nomination.Degradation;
 
-                    // Re-scored, not just re-degraded. TryEvictWorst picks its victim on the CACHED score, so a cell whose degradation has just tripled
-                    // would otherwise carry its pre-nomination score into the victim scan and lose to a mediocre newcomer scored fresh — evicting the
-                    // candidate that most deserves servicing, at the exact moment it became the most deserving.
-                    existing.Score = Score(nomination.CellKey, in existing, grid, state, tickNumber);
-                    _candidates[nomination.CellKey] = existing;
-                    _dirtySinceRank++;
+            // HELD, neither admitted nor dropped (RP-07). The cell was repaired too recently to be a candidate, but the evidence is kept and handed back
+            // by ReleaseCooled. Dropping it would lose a cell that goes still while it cools: in barrier-only mode nothing nominates a cell nobody writes
+            // (RP-04's known gap), so this nomination may be the last one it ever gets.
+            if (_cooling.Count > 0 && _cooling.TryGetValue(nomination.CellKey, out var held))
+            {
+                if (nomination.Degradation > held)
+                {
+                    _cooling[nomination.CellKey] = nomination.Degradation;
                 }
 
                 continue;
             }
 
-            var candidate = new Candidate
-            {
-                Degradation = nomination.Degradation,
-                WaitingSinceTick = tickNumber,
-                Score = 0f,
-            };
+            Admit(nomination.CellKey, nomination.Degradation, grid, state, tickNumber);
+        }
+    }
 
-            // Scored BEFORE the eviction test, and the ordering is the whole difference between eviction and thrashing.
-            //
-            // An unscored newcomer enters at 0, which is below every ranked candidate — so the next newcomer of the same batch evicts IT, and the one
-            // after that evicts the second. Only the last nomination of a batch would survive, TotalEvicted would be inflated by the churn, and the
-            // eviction policy would be last-writer-wins wearing a ranking as a disguise. Scoring first makes the victim scan compare like with like.
-            candidate.Score = Score(nomination.CellKey, in candidate, grid, state, tickNumber);
-
-            if (_candidates.Count >= _maxCells && !TryEvictWorst(candidate.Score, grid, state, tickNumber))
+    /// <summary>Fold one degradation reading into the candidate set: raise an existing candidate's, or queue a new candidate, evicting at the cap.</summary>
+    private void Admit(int cellKey, float degradation, SpatialGrid grid, ArchetypeClusterState state, long tickNumber)
+    {
+        if (_candidates.TryGetValue(cellKey, out var existing))
+        {
+            if (degradation > existing.Degradation)
             {
-                // Every live candidate outranks the newcomer, so admitting it would mean evicting something better. Dropped, and counted: a non-zero
-                // eviction rate against a full queue is the reading that says the cap is below what the world actually degrades.
-                TotalEvicted++;
-                continue;
+                existing.Degradation = degradation;
+
+                // Re-scored, not just re-degraded. TryEvictWorst picks its victim on the CACHED score, so a cell whose degradation has just tripled
+                // would otherwise carry its pre-nomination score into the victim scan and lose to a mediocre newcomer scored fresh — evicting the
+                // candidate that most deserves servicing, at the exact moment it became the most deserving.
+                existing.Score = Score(cellKey, in existing, grid, state, tickNumber);
+                _candidates[cellKey] = existing;
+                _dirtySinceRank++;
             }
 
-            _candidates[nomination.CellKey] = candidate;
-            _dirtySinceRank++;
+            return;
+        }
+
+        var candidate = new Candidate
+        {
+            Degradation = degradation,
+            WaitingSinceTick = tickNumber,
+            Score = 0f,
+        };
+
+        // Scored BEFORE the eviction test, and the ordering is the whole difference between eviction and thrashing.
+        //
+        // An unscored newcomer enters at 0, which is below every ranked candidate — so the next newcomer of the same batch evicts IT, and the one
+        // after that evicts the second. Only the last nomination of a batch would survive, TotalEvicted would be inflated by the churn, and the
+        // eviction policy would be last-writer-wins wearing a ranking as a disguise. Scoring first makes the victim scan compare like with like.
+        candidate.Score = Score(cellKey, in candidate, grid, state, tickNumber);
+
+        if (_candidates.Count >= _maxCells && !TryEvictWorst(candidate.Score, grid, state, tickNumber))
+        {
+            // Every live candidate outranks the newcomer, so admitting it would mean evicting something better. Dropped, and counted: a non-zero
+            // eviction rate against a full queue is the reading that says the cap is below what the world actually degrades.
+            TotalEvicted++;
+            return;
+        }
+
+        _candidates[cellKey] = candidate;
+        _dirtySinceRank++;
+    }
+
+    /// <summary>
+    /// Forget a cell the planner has just repaired and, when a cooldown is configured, hold it out of the candidate set until the cooldown ends (<c>RP-07</c>).
+    /// </summary>
+    /// <remarks>
+    /// Called only for a unit that MOVED entities. A unit that moved nothing — already packed, a single cluster, a population below two — was not a repair,
+    /// and <see cref="Remove"/> is its path: RP-03's no-op memo already stops it recurring, and a cooldown would make the cell's next genuine degradation wait
+    /// out a repair that never happened.
+    /// </remarks>
+    internal void MarkRepaired(int cellKey, long tickNumber)
+    {
+        // A cooling cell is never a candidate, so the planner cannot have repaired one — and a second cooldown would leave one cell two FIFO entries.
+        Debug.Assert(!_cooling.ContainsKey(cellKey), "a cooling cell was repaired");
+        Remove(cellKey);
+        if (_cooldownTicks == 0)
+        {
+            return;
+        }
+
+        _cooling[cellKey] = 0f;
+        _coolingOrder.Enqueue((cellKey, tickNumber + _cooldownTicks));
+    }
+
+    /// <summary>
+    /// End every cooldown due by <paramref name="tickNumber"/>, and queue each released cell that was nominated while it cooled, at the worst degradation
+    /// seen — whether or not it is nominated again.
+    /// </summary>
+    /// <remarks>
+    /// <para>A cell nothing nominated while it cooled is simply released: it had nothing left to repair, and the next nomination queues it as usual. A released
+    /// cell enters through the same door as any newcomer, so at <c>RepairQueueMaxCells</c> it can be evicted (TH-03).</para>
+    /// <para><b>O(released), not O(cooling).</b> Every cell cools for the same number of ticks and <see cref="MarkRepaired"/> never sees a cooling cell, so
+    /// each cooling cell has exactly one FIFO entry and release order is repair order. That rests on tick numbers increasing from fence to fence, which the
+    /// fence already requires: a repeated tick never ends a cooldown, and a decreasing one delays releases behind an older head. Neither corrupts
+    /// anything.</para>
+    /// </remarks>
+    internal void ReleaseCooled(SpatialGrid grid, ArchetypeClusterState state, long tickNumber)
+    {
+        while (_coolingOrder.TryPeek(out var next) && next.ReleaseTick <= tickNumber)
+        {
+            _coolingOrder.Dequeue();
+            if (_cooling.Remove(next.CellKey, out var held) && held > 0f)
+            {
+                Admit(next.CellKey, held, grid, state, tickNumber);
+            }
         }
     }
 
@@ -312,7 +408,7 @@ internal sealed class CellRepairQueue
         return false;
     }
 
-    /// <summary>Forget one cell — called when the planner services it, or declines it as unrepairable.</summary>
+    /// <summary>Forget one cell — called when the planner declines it as unrepairable. A cell it services goes through <see cref="MarkRepaired"/>.</summary>
     internal void Remove(int cellKey)
     {
         if (_candidates.Remove(cellKey))
@@ -323,6 +419,9 @@ internal sealed class CellRepairQueue
 
     /// <summary>The degradation recorded for a queued cell, or <c>0</c> when it is not queued. Drives the safety valve's threshold test.</summary>
     internal float DegradationOf(int cellKey) => _candidates.TryGetValue(cellKey, out var candidate) ? candidate.Degradation : 0f;
+
+    /// <summary>The worst degradation nominated for a cooling cell since its repair, or <c>0</c> when it is not cooling or nothing nominated it.</summary>
+    internal float HeldDegradationOf(int cellKey) => _cooling.TryGetValue(cellKey, out var held) ? held : 0f;
 
     /// <summary>
     /// Drop every candidate. Called when the archetype's cluster AABBs are rebuilt, because a candidate describes bounds that no longer exist.
@@ -336,6 +435,8 @@ internal sealed class CellRepairQueue
     internal void Clear()
     {
         _candidates.Clear();
+        _cooling.Clear();
+        _coolingOrder.Clear();
         _rankedCount = 0;
         _dirtySinceRank = 0;
         _rankedTierVersion = -1;

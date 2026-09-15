@@ -121,6 +121,7 @@ public sealed partial class TatooineSim : IDisposable
             clusterRepairExtentRatio: _config.ClusterRepairExtentRatio,
             reclusterBudgetMs: _config.ReclusterBudgetMs,
             repairWorstClustersPerUnit: _config.RepairWorstClustersPerUnit,
+            repairCooldownTicks: _config.RepairCooldownTicks,
             clusterTargetPackingSlack: _config.ClusterTargetPackingSlack,
             batchSpawnSortThreshold: _config.BatchSpawnSortThreshold));
 

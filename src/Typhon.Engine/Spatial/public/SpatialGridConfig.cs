@@ -175,9 +175,9 @@ public readonly struct SpatialGridConfig
     /// this is the static knob that controller will drive, and the seam a test uses to pin the budget to just-below-cost.</para>
     /// <para><b>1.0 ms is sized against the measured cost, not chosen.</b> At <see cref="RepairNsPerEntity"/> it admits ~670 entities, which covers one
     /// default unit of eight 49-slot clusters (392 entities) with room to spare. The first value tried was 0.25 ms, which — once the cost was measured
-    /// rather than assumed — could not afford a single unit, so the feature would have shipped switched on and never run. Repair is self-limiting: a cell
-    /// that has been re-packed is refused on every later tick until its geometry actually changes, so this budget is a ceiling on a rare event and not a
-    /// per-tick tax.</para>
+    /// rather than assumed — could not afford a single unit, so the feature would have shipped switched on and never run. A re-packed cell is refused on
+    /// every later tick until its geometry actually changes — but under motion that is the next tick, which is why <see cref="RepairCooldownTicks"/> exists:
+    /// without it this budget was measured going, tick after tick, to re-sorting the same cells.</para>
     /// </remarks>
     public readonly float ReclusterBudgetMs;
 
@@ -252,6 +252,25 @@ public readonly struct SpatialGridConfig
     /// </remarks>
     public readonly int RepairQueueMaxCells;
 
+    /// <summary>
+    /// Ticks during which a cell whose repair unit has just moved entities is not repaired again. Default 50; <c>0</c> disables the cooldown.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>What the planner spent its budget on without it was churn.</b> Under motion a re-packed cell spreads out again within a few ticks, is
+    /// nominated again and is re-packed again: the same cells, tick after tick, each time for a gain the next ticks undo. Measured on the SWG Tatooine
+    /// workload (2026-09-15), intra-cell maintenance cost 13–51 % of the tick. This cooldown took a median 6 %, 20 % and 37 % off the tick at 64×, 16× and
+    /// 4× population (three paired 20 s runs each), with the queries' cost within 3 %; the experiment before it found nothing to take in a mostly still
+    /// world.</para>
+    /// <para><b>Nominations are held, not dropped.</b> A cell nominated during its cooldown re-enters the repair queue when the cooldown ends, at the worst
+    /// degradation seen meanwhile, whether or not it is nominated again — so a cell that stops moving while it cools is still repaired, the next time its
+    /// archetype is planned. Until then it is
+    /// not a queue candidate: not ranked, not counted against <see cref="RepairQueueMaxCells"/>, and not eligible for the safety valve, whose bound on
+    /// degradation therefore stretches by at most this many ticks.</para>
+    /// <para>In ticks, like <see cref="RepairAgingRatePerTick"/>: 2.5 s at 20 Hz. A cell repaired on tick T is eligible again from tick T + this value, so
+    /// 1 restricts nothing, like 0.</para>
+    /// </remarks>
+    public readonly int RepairCooldownTicks;
+
     // ── Derived values, computed in the constructor ────────────────────────
 
     /// <summary>
@@ -264,7 +283,7 @@ public readonly struct SpatialGridConfig
 
     /// <summary>
     /// Number of cells along the Z axis. <c>1</c> for a flat world built with
-    /// <see cref="Flat(Vector2,Vector2,double,float,float,float,float,float,float,int,float,float,int,float,bool,bool,float,int,int)"/>.
+    /// <see cref="Flat(Vector2,Vector2,double,float,float,float,float,float,float,int,float,float,int,float,bool,bool,float,int,int,int)"/>.
     /// </summary>
     public readonly int GridDepth;
 
@@ -299,6 +318,7 @@ public readonly struct SpatialGridConfig
     /// <param name="growthCapSlack">Multiplier on the density target the cap allows (default 1.25).</param>
     /// <param name="maxOpenClustersPerCell">Open clusters the cap may hold per cell (default 4).</param>
     /// <param name="batchSpawnSortThreshold">Spawns per transaction above which the batch is placed in Morton order; 0 disables (default 128).</param>
+    /// <param name="repairCooldownTicks">Ticks during which a just-repaired cell is not repaired again; 0 disables (default 50).</param>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <paramref name="cellSize"/> is not positive, or the derived cell count does not fit a 32-bit cell key.
     /// </exception>
@@ -308,8 +328,9 @@ public readonly struct SpatialGridConfig
         float reclusterBudgetMs = 1.0f, float repairNsPerEntity = 1500f, int repairWorstClustersPerUnit = 8,
         float clusterRepairCriticalExtentRatio = 1.0f, float repairAgingRatePerTick = 0.05f, int repairQueueMaxCells = 4096,
         float clusterTargetPackingSlack = 1.5f, bool leastEnlargementPlacement = false, bool growthCapPlacement = false, float growthCapSlack = 1.25f,
-        int maxOpenClustersPerCell = 4, int batchSpawnSortThreshold = 128)
+        int maxOpenClustersPerCell = 4, int batchSpawnSortThreshold = 128, int repairCooldownTicks = 50)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(repairCooldownTicks);
         ArgumentOutOfRangeException.ThrowIfNegative(clusterTargetPackingSlack);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(growthCapSlack);
         ArgumentOutOfRangeException.ThrowIfLessThan(maxOpenClustersPerCell, 1);
@@ -376,6 +397,7 @@ public readonly struct SpatialGridConfig
         ClusterRepairCriticalExtentRatio = clusterRepairCriticalExtentRatio;
         RepairAgingRatePerTick = repairAgingRatePerTick;
         RepairQueueMaxCells = repairQueueMaxCells;
+        RepairCooldownTicks = repairCooldownTicks;
         InverseCellSize = 1.0d / cellSize;
 
         // Ceiling in DOUBLE, not MathF. At an f64 world extent the f32 product loses whole cells: (worldMax.X - worldMin.X) at 2 x 10^9 rounds to the
@@ -424,14 +446,15 @@ public readonly struct SpatialGridConfig
     /// <param name="growthCapSlack">Multiplier on the density target the cap allows (default 1.25).</param>
     /// <param name="maxOpenClustersPerCell">Open clusters the cap may hold per cell (default 4).</param>
     /// <param name="batchSpawnSortThreshold">Spawns per transaction above which the batch is placed in Morton order; 0 disables (default 128).</param>
+    /// <param name="repairCooldownTicks">Ticks during which a just-repaired cell is not repaired again; 0 disables (default 50).</param>
     public static SpatialGridConfig Flat(Vector2 worldMin, Vector2 worldMax, double cellSize, float migrationHysteresisRatio = 0.05f,
         float clusterTargetExtentRatio = 0.25f, float clusterDriftMarginRatio = 0.05f, float clusterRepairExtentRatio = 0.75f,
         float reclusterBudgetMs = 1.0f, float repairNsPerEntity = 1500f, int repairWorstClustersPerUnit = 8,
         float clusterRepairCriticalExtentRatio = 1.0f, float repairAgingRatePerTick = 0.05f, int repairQueueMaxCells = 4096,
         float clusterTargetPackingSlack = 1.5f, bool leastEnlargementPlacement = false, bool growthCapPlacement = false, float growthCapSlack = 1.25f,
-        int maxOpenClustersPerCell = 4, int batchSpawnSortThreshold = 128) =>
+        int maxOpenClustersPerCell = 4, int batchSpawnSortThreshold = 128, int repairCooldownTicks = 50) =>
         new(new Vector3D(worldMin, 0d), new Vector3D(worldMax, cellSize), cellSize, migrationHysteresisRatio, clusterTargetExtentRatio,
             clusterDriftMarginRatio, clusterRepairExtentRatio, reclusterBudgetMs, repairNsPerEntity, repairWorstClustersPerUnit,
             clusterRepairCriticalExtentRatio, repairAgingRatePerTick, repairQueueMaxCells, clusterTargetPackingSlack, leastEnlargementPlacement,
-            growthCapPlacement, growthCapSlack, maxOpenClustersPerCell, batchSpawnSortThreshold);
+            growthCapPlacement, growthCapSlack, maxOpenClustersPerCell, batchSpawnSortThreshold, repairCooldownTicks);
 }

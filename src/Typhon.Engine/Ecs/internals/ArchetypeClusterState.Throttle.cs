@@ -243,6 +243,13 @@ internal sealed partial class ArchetypeClusterState
     /// </remarks>
     internal void AbsorbRepairNominations(SpatialGrid grid, long tickNumber)
     {
+        // Cooldowns end here too, nominations or not (RP-07). This path plans nothing — TH-03's gap — so a released cell waits as a candidate either way;
+        // releasing keeps RepairCellsCooling from reporting cells whose cooldown has ended as still cooling.
+        if (RepairQueue != null && grid != null)
+        {
+            RepairQueue.ReleaseCooled(grid, this, tickNumber);
+        }
+
         var nominations = RepairNominations;
         if (nominations.Count == 0)
         {
@@ -269,7 +276,7 @@ internal sealed partial class ArchetypeClusterState
         }
 
         ref readonly var cfg = ref grid.Config;
-        RepairQueue = new CellRepairQueue(cfg.RepairQueueMaxCells, cfg.RepairAgingRatePerTick);
+        RepairQueue = new CellRepairQueue(cfg.RepairQueueMaxCells, cfg.RepairAgingRatePerTick, cfg.RepairCooldownTicks);
         return RepairQueue;
     }
 

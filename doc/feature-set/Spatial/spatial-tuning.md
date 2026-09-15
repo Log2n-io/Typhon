@@ -116,7 +116,7 @@ dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
 
 ## 🎛️ Every parameter
 
-All eighteen settings, in constructor order. **Cliff** marks a value where a small change flips behaviour or throws; the rest are dials that move a cost smoothly.
+All twenty settings, in constructor order (`WorldMin` and `WorldMax` share a row). **Cliff** marks a value where a small change flips behaviour or throws; the rest are dials that move a cost smoothly.
 
 | Parameter | Default | Unit | Controls | Safe range | Symptom when wrong |
 |---|---|---|---|---|---|
@@ -138,6 +138,7 @@ All eighteen settings, in constructor order. **Cliff** marks a value where a sma
 | `GrowthCapSlack` | `1.25` | multiplier | How far past the target a candidate may stretch before a fresh cluster is opened instead | dial · 1.1–1.5 | Too low and nearly every arrival opens a cluster, exhausting `MaxOpenClustersPerCell` and scattering entities across half-empty clusters |
 | `MaxOpenClustersPerCell` | `4` | clusters | Open (non-full) clusters the growth cap may hold per cell before it falls back to least enlargement | dial · 2–8 | Constructor throws below 1. Too high and occupancy fragments without buying tightness |
 | `BatchSpawnSortThreshold` | `128` | entities | A transaction spawning at least this many places them in per-cell Morton order, so a bulk load is born at the packing bound | dial; `0` disables | A large load is born at the full extent of every cell it touches, handing the repair queue work that placement could have avoided |
+| `RepairCooldownTicks` | `50` | ticks | How long a cell whose repair moved entities stays out of the repair queue. Nominations meanwhile are held, and the cell returns when the cooldown ends | dial · 50–200 measured; `0` and `1` disable it | `0`: under motion the budget goes to re-sorting the same cells every tick. On the SWG Tatooine workload the default took a median 6 %, 20 % and 37 % off the tick at 64×, 16× and 4× population (three paired 20 s runs each), with query cost within 3 %; nothing in a mostly still world. Too long: query cost climbs while `RepairCellsCooling` stays high |
 
 ## 🔍 Diagnosing a misconfigured world
 
@@ -158,7 +159,7 @@ Read `GetSpatialTelemetry(archetypeId)` or `GetSpatialTelemetryTotal()` from the
 
 Below the cliff, across a 16× range of budget, tightness moves from 89 % to 97 % — *worse* — and query cost with it. Between 4 and 8 ms everything moves at once: throttling stops, and cluster count jumps from 381 to 507 as cells genuinely subdivide instead of holding one loose box each. **Double the budget until `RelocationsThrottled` reaches zero, then stop.** Note the first row: `0` means "no throttle enforcement", not "no re-clustering", and it produced the worst tightness in the table.
 
-**Clusters that never repair.** `RepairQueueDepth` grows while `RepairUnitCount` stays at zero. Rule out the budget, then three structural causes: the spatial field is not `SpatialMode.Dynamic`, so the planner exits early; nothing wrote to the archetype, and a still archetype is never planned; or `ClusterRepairExtentRatio` sits above the degradation this world actually reaches. Persistent `RepairValveFires` means degradation is outrunning the budget — raise the budget rather than treating the valve as a steady state.
+**Clusters that never repair.** `RepairQueueDepth` grows while `RepairUnitCount` stays at zero. Rule out the budget, then three structural causes: the spatial field is not `SpatialMode.Dynamic`, so the planner exits early; nothing wrote to the archetype, and a still archetype is never planned; or `ClusterRepairExtentRatio` sits above the degradation this world actually reaches. Persistent `RepairValveFires` means degradation is outrunning the budget — raise the budget rather than treating the valve as a steady state. Not this fault: `RepairUnitCount` and `RepairQueueDepth` both at zero with `RepairCellsCooling` above it. The degraded cells were repaired less than `RepairCooldownTicks` ago, and each returns to the queue when its cooldown ends.
 
 **Cells holding too many clusters.** Divide `ActiveClusterCount` by `GetSpatialGridOccupancy().OccupiedCellCount`. A per-cell broadphase is a linear scan over the cell's clusters, and for ordinary densities that is the right structure: it beats a per-cell tree at every selectivity up to 512 clusters in a cell. Past that the engine promotes the cell to a tree on its own, at `Spatial.CellTreePromoteThreshold` (1024 by default), so a dense pocket does not become a scan that grows without bound.
 

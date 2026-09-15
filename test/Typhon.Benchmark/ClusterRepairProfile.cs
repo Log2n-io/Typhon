@@ -185,7 +185,9 @@ public static class ClusterRepairProfile
             CellSize,
             clusterRepairExtentRatio: 0.75f,
             reclusterBudgetMs: NoRepair ? 0f : 1000f,
-            repairWorstClustersPerUnit: 0));
+            repairWorstClustersPerUnit: 0,
+            // No cooldown: each round scrambles and re-repairs the same cell within a few ticks, which a cooldown would refuse.
+            repairCooldownTicks: 0));
         dbe.InitializeArchetypes();
 
         var meta = Archetype<TArch>.Metadata;

@@ -54,7 +54,10 @@ class ClusterCostEstimatorTests : TestBase<ClusterCostEstimatorTests>
             clusterTargetExtentRatio: 100f,
             clusterRepairExtentRatio: 0.75f,
             reclusterBudgetMs: 5.0f, batchSpawnSortThreshold: 0 /* step 15: this fixture builds its layout by spawn ORDER; the Morton sort would tighten it at birth */,
-            repairNsPerEntity: seedNsPerEntity));
+            repairNsPerEntity: seedNsPerEntity,
+            // No repair cooldown (RP-07): repair is this fixture's only source of migrations, so a cell left alone for 50 ticks after each repair would
+            // starve the estimator of the samples it is being tested on.
+            repairCooldownTicks: 0));
         dbe.InitializeArchetypes();
         return dbe;
     }

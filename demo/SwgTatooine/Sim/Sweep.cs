@@ -214,6 +214,7 @@ public static class Sweep
         ClusterTargetExtentRatio = c.ClusterTargetExtentRatio,
         ClusterRepairExtentRatio = c.ClusterRepairExtentRatio,
         RepairWorstClustersPerUnit = c.RepairWorstClustersPerUnit,
+        RepairCooldownTicks = c.RepairCooldownTicks,
         Shuttles = c.Shuttles,
         ShuttleShare = c.ShuttleShare,
         ShuttleIntervalS = c.ShuttleIntervalS,

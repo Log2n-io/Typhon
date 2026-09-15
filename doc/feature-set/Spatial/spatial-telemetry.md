@@ -1,11 +1,11 @@
 ---
 uid: feature-spatial-spatial-telemetry
 title: 'Reading Spatial Telemetry'
-description: 'Thirty-two counters that say which spatial parameter is wrong, and the ten of them a metrics pipeline can actually see.'
+description: 'Sixty-three counters that say which spatial parameter is wrong, and the ten of them a metrics pipeline can actually see.'
 ---
 
 # Reading Spatial Telemetry
-> Thirty-two counters that say which spatial parameter is wrong, and the ten of them a metrics pipeline can actually see.
+> Sixty-three counters that say which spatial parameter is wrong, and the ten of them a metrics pipeline can actually see.
 
 **Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Spatial](./README.md)
 
@@ -16,12 +16,12 @@ not throw; it spends the re-clustering budget every tick and hands your queries 
 with. [Tuning the Spatial Grid](./spatial-tuning.md) lists the parameters. This page is the other half: the
 counters that tell you *which* of them to change, so tuning is a measurement rather than a guess.
 
-`SpatialMigrationTelemetry` carries **32 public members**, read through `DatabaseEngine.GetSpatialTelemetry(archetypeId)`
+`SpatialMigrationTelemetry` carries **63 public members**, read through `DatabaseEngine.GetSpatialTelemetry(archetypeId)`
 for one archetype or `GetSpatialTelemetryTotal()` for the engine. Each one is paired below with the parameter it moves.
 
 > ⚠️ **Most of these counters are not exported today, and this is the first thing to know about them.** Exactly **ten**
 > reach OpenTelemetry, under `typhon.ecs.spatial.*` ([`EcsMetricsExporter.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/EcsMetricsExporter.cs)).
-> The other **22 are API-only** — including `RelocationsThrottled`, `RepairUnitsRefused`, `RepairQueueDepth` and
+> The other **53 are API-only** — including `RelocationsThrottled`, `RepairUnitsRefused`, `RepairQueueDepth` and
 > `MeasuredNsPerEntity`, which are the four this page's three worked readings are built on, and the four the tuning page
 > names as the acceptance test before you ship. **No Workbench panel shows spatial partitioning telemetry at all**, and
 > nothing in `tools/` reads either accessor. So the loop below is real, but today you close it from your own tick loop —
@@ -38,8 +38,9 @@ driven exactly that second way.
 **There are two clocks, deliberately.** The `...Count` / `...Ms` members describe the **most recently completed tick**
 and are reset at the top of every fence. The `Total...` members and `RepairQueueEvicted` only grow. A scrape every few
 seconds that reads a per-tick member samples one arbitrary tick out of hundreds and tells you almost nothing; read the
-per-tick members from inside the tick loop, and differentiate the cumulative ones for a rate. `RepairQueueDepth` is
-neither — it is a **level**, and persists across ticks.
+per-tick members from inside the tick loop, and differentiate the cumulative ones for a rate. The **levels** —
+`RepairQueueDepth`, `RepairCellsCooling`, `ActiveClusterCount` and the others marked level below — are neither, and
+persist across ticks.
 
 **Zero means zero, never "unknown."** An archetype with no cluster state, an out-of-range id, and a tick in which
 nothing happened all report zero, so a flat line is only informative once you know a fence ran.
@@ -128,6 +129,7 @@ population instead, the refresh has lost its dirty gate — a defect to report, 
 | `RepairValveFires` | last tick | `ClusterRepairCriticalExtentRatio`, `ReclusterBudgetMs` | — |
 | `RepairQueueDepth` | **level** | `RepairQueueMaxCells` | — |
 | `RepairQueueEvicted` | cumulative | `RepairQueueMaxCells` | — |
+| `RepairCellsCooling` | **level** | `RepairCooldownTicks` — cells repaired too recently to queue again | — |
 | `RepairQueueMaintenanceMs` | last tick | `RepairAgingRatePerTick` | — |
 | `MeasuredNsPerEntity` | last tick | `RepairNsPerEntity` — the live value that replaced the seed | — |
 
@@ -213,11 +215,12 @@ for ever.
 
 **What you expect after.** Evictions stop and the depth settles below the cap. The healthy steady state is a depth
 comfortably under the cap with a flat eviction count. A depth that falls to zero and stays there is also fine — it means
-nothing is degraded enough to nominate.
+nothing is degraded enough to nominate, or that every cell that is was repaired recently and is cooling
+(`RepairCellsCooling`).
 
 ## ⚠️ Guarantees & limits
 
-- **Ten of thirty-two counters are exported.** The `typhon.ecs.spatial.*` meter publishes eight observable gauges and
+- **Ten of sixty-three counters are exported.** The `typhon.ecs.spatial.*` meter publishes eight observable gauges and
   two observable counters, per archetype, tagged by archetype name. Everything else on the struct — including the four
   the readings above depend on — is reachable only through the two accessor calls. Two further gauges,
   `typhon.ecs.open.cellstate_rebuild_ms` and `typhon.ecs.open.cluster_aabb_rebuild_ms`, are engine-wide open timings
@@ -247,11 +250,12 @@ nothing is degraded enough to nominate.
 - [SpatialMigrationTelemetryTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Observability/SpatialMigrationTelemetryTests.cs) — counters publish on both surfaces (`MigratingWorkload_PublishesNonZeroCounters`, `MeterListener_ObservesSameValuesAsAccessor`), the two clocks (`PerTickCounters_ResetToZero_OnATickWithoutMigration`, `HysteresisAbsorbed_IsRecomputedEachTick_NotLatched`), the per-write-path unit (`HysteresisAbsorbed_IsCounted_OnTheBarrierOnlyPath`), and that reading allocates nothing and tolerates a bad id (`Accessor_AllocatesNothing`, `OutOfRangeArchetypeId_ReturnsDefault`)
 - [ClusterThrottleBudgetTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterThrottleBudgetTests.cs) — the drifter identity (`EveryDetectedDrifterIsAccountedForExactlyOnce`), budget admission (`NoTickAdmitsMoreRelocationsThanTheBudgetPaysFor`), and the zero-budget case (`AZeroBudgetKeepsRelocatingAndKeepsEveryQueueBounded`)
 - [ClusterRepairQueueTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterRepairQueueTests.cs) — eviction reporting (`TheQueueStopsAtItsCapAndReportsTheEvictions`), refusal under budget (`WithTheValveDisabledAnUnderBudgetQueueServicesNobody`), the valve (`ACriticalCellIsServicedEvenWhenTheBudgetCannotAffordIt`), and ageing (`AgeingCarriesEveryCandidateToTheHeadOfTheQueue`, `WithoutAgeingTheWorstCandidateStarvesEveryoneElse`)
+- [ClusterRepairConvergenceTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterRepairConvergenceTests.cs) — `RepairCellsCooling` on every tick of a cell that re-degrades after each repair (`ARepairedCellIsNotRepairedAgainUntilItsCooldownEnds`)
 - [ClusterAabbRefreshDirtyGateTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterAabbRefreshDirtyGateTests.cs) — what `SlotsScanned` and `ClustersScanned` must report (`ATickWithNoWritesWalksNoSlotsAtAll`, `OnlyTheClusterThatWasWrittenIsWalked`)
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Ecs/public/SpatialMigrationTelemetry.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/SpatialMigrationTelemetry.cs) (all 32 members)
+- Source: [src/Typhon.Engine/Ecs/public/SpatialMigrationTelemetry.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/SpatialMigrationTelemetry.cs) (all 63 members)
 - Source: [src/Typhon.Engine/Ecs/public/DatabaseEngine.SpatialTelemetry.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/DatabaseEngine.SpatialTelemetry.cs) (`GetSpatialTelemetry`, `GetSpatialTelemetryTotal`, `GetSpatialGridOccupancy`)
 - Source: [src/Typhon.Engine/Observability/public/EcsMetricsExporter.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/EcsMetricsExporter.cs) (the ten exported instruments)
 - Related catalog entry: [Tuning the Spatial Grid](./spatial-tuning.md) — the parameters these counters point at, and how to derive them

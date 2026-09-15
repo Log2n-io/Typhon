@@ -1326,7 +1326,8 @@ public partial class DatabaseEngine
     /// <remarks>
     /// <para>The accessor carries <paramref name="changeSet"/> because the planner allocates clusters and publishes their occupancy word, which is a write
     /// and owes the WAL the same atomicity as every other fence write.</para>
-    /// <para><b>Skipped when there is nothing to absorb AND nothing waiting</b> — not merely when nothing was nominated. The queue is persistent since step
+    /// <para><b>Skipped when there is nothing to absorb AND nothing waiting</b> — a candidate, or a cooldown ending (RP-07) — not merely when nothing was
+    /// nominated. The queue is persistent since step
     /// 11, so a world that has stopped moving can still hold a backlog worth planning, and the early-out has to ask about both. The cost of that is stated
     /// rather than hidden: an archetype whose queue the budget can never drain rents an accessor and ranks every tick for as long as the backlog lasts.
     /// <c>PlanCellRepairs</c> bounds the per-tick work by stopping its scan once the budget cannot afford another unit; what it cannot avoid is the rent
@@ -1344,8 +1345,9 @@ public partial class DatabaseEngine
         }
 
         // The queue can hold candidates when nothing was nominated this tick — that is the whole point of it being persistent — so the early-out is on
-        // "nothing to absorb AND nothing waiting", not on the nomination list alone.
-        if (clusterState.RepairNominations.Count == 0 && (clusterState.RepairQueue == null || clusterState.RepairQueue.Count == 0))
+        // "nothing to absorb AND nothing waiting", not on the nomination list alone. Waiting includes a cooldown ending this tick (RP-07), which Count
+        // cannot see: a cooling cell is not a candidate.
+        if (clusterState.RepairNominations.Count == 0 && (clusterState.RepairQueue == null || !clusterState.RepairQueue.NeedsPlanning(tickNumber)))
         {
             return;
         }

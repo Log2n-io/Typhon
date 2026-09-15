@@ -382,6 +382,13 @@ internal sealed unsafe partial class ArchetypeClusterState
         var queue = EnsureRepairQueue(grid);
         var maintenanceStart = Stopwatch.GetTimestamp();
 
+        // Cooldowns end here, outside the nomination test below (RP-07): a cell that went still while it cooled nominates nothing, and it is exactly the
+        // one that must come back with the degradation it was held at.
+        if (queue != null && grid != null)
+        {
+            queue.ReleaseCooled(grid, this, tickNumber);
+        }
+
         // No CellClusterPool test: absorbing is what makes a nomination survive its tick (TH-03), and gating it on a structure the SCORE happens to read
         // meant that on the paths where the pool was not yet built the nomination was cleared below and lost outright — the exact failure step 11 exists
         // to remove. Score tolerates a missing pool by returning zero, which ranks the candidate last until the pool exists and it is re-ranked.
@@ -490,7 +497,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         if (criticalIndex >= 0)
         {
-            totalMoved += RepairOneCell(_repairCellScratch[criticalIndex], grid, ref accessor, estimateNsPerEntity, true, ref remainingNs);
+            totalMoved += RepairOneCell(_repairCellScratch[criticalIndex], grid, ref accessor, tickNumber, estimateNsPerEntity, true, ref remainingNs);
         }
 
         var minimumUnitNs = 2 * estimateNsPerEntity;
@@ -506,7 +513,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 break;
             }
 
-            totalMoved += RepairOneCell(_repairCellScratch[i], grid, ref accessor, estimateNsPerEntity, false, ref remainingNs);
+            totalMoved += RepairOneCell(_repairCellScratch[i], grid, ref accessor, tickNumber, estimateNsPerEntity, false, ref remainingNs);
         }
 
         // ── Top up the deferred-drain list for everything the plan added ────────────────────────────────────────────
@@ -542,8 +549,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// Plan one cell's repair unit: rank its clusters, admit the unit if the budget covers it, then hand off to <see cref="ExecuteRepairPlan"/>. Returns the
     /// number of entities the unit will move, or <c>0</c> when nothing was begun.
     /// </summary>
-    private int RepairOneCell(int cellKey, SpatialGrid grid, ref ChunkAccessor<PersistentStore> accessor, double estimateNsPerEntity, bool valveAvailable,
-        ref double remainingNs)
+    private int RepairOneCell(int cellKey, SpatialGrid grid, ref ChunkAccessor<PersistentStore> accessor, long tickNumber, double estimateNsPerEntity,
+        bool valveAvailable, ref double remainingNs)
     {
         var clusters = CellClusterPool.GetClusters(cellKey);
         if (clusters.Length < 2)
@@ -739,7 +746,9 @@ internal sealed unsafe partial class ArchetypeClusterState
         // negative in that case and every later candidate is refused, which is precisely the "at most one unit over" bound AC-11.1 asks for.
         remainingNs -= projectedNs;
         LastTickRepairUnitCount++;
-        RepairQueue?.Remove(cellKey);
+
+        // Out of the queue AND cooling (RP-07): re-packing this cell again before the cooldown ends would buy back what the next ticks' motion undoes.
+        RepairQueue?.MarkRepaired(cellKey, tickNumber);
         return moved;
     }
 

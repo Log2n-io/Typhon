@@ -185,6 +185,7 @@ public partial class DatabaseEngine
             RepairValveFires = clusterState.LastTickRepairValveFires,
             RepairQueueDepth = clusterState.RepairQueue?.Count ?? 0,
             RepairQueueEvicted = clusterState.RepairQueue?.TotalEvicted ?? 0L,
+            RepairCellsCooling = clusterState.RepairQueue?.CoolingCount ?? 0,
             RepairQueueMaintenanceMs = QueueMaintenanceMs(clusterState),
             MeasuredNsPerEntity = clusterState.LastTickMeasuredNsPerEntity,
             DriftGatedClusters = clusterState.LastTickDriftGatedClusters,
@@ -260,6 +261,7 @@ public partial class DatabaseEngine
         var valveFires = 0;
         var queueDepth = 0;
         var queueEvicted = 0L;
+        var queueCooling = 0;
         var queueMaintenanceMs = 0d;
         var measuredNsPerEntity = 0d;
         var measuredSamples = 0;
@@ -323,6 +325,7 @@ public partial class DatabaseEngine
             valveFires += clusterState.LastTickRepairValveFires;
             queueDepth += clusterState.RepairQueue?.Count ?? 0;
             queueEvicted += clusterState.RepairQueue?.TotalEvicted ?? 0L;
+            queueCooling += clusterState.RepairQueue?.CoolingCount ?? 0;
             queueMaintenanceMs += QueueMaintenanceMs(clusterState);
             driftGated += clusterState.LastTickDriftGatedClusters;
             driftSuppressedByDensity += clusterState.LastTickDriftSuppressedByDensity;
@@ -390,6 +393,7 @@ public partial class DatabaseEngine
             RepairValveFires = valveFires,
             RepairQueueDepth = queueDepth,
             RepairQueueEvicted = queueEvicted,
+            RepairCellsCooling = queueCooling,
             RepairQueueMaintenanceMs = queueMaintenanceMs,
             MeasuredNsPerEntity = measuredSamples > 0 ? measuredNsPerEntity / measuredSamples : 0d,
             DriftGatedClusters = driftGated,

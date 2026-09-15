@@ -345,6 +345,16 @@ public readonly struct SpatialMigrationTelemetry
     public long RepairQueueEvicted { get; init; }
 
     /// <summary>
+    /// Cells waiting out <c>SpatialGridConfig.RepairCooldownTicks</c> after a repair. A LEVEL, like <see cref="RepairQueueDepth"/>, and disjoint from it: a
+    /// cooling cell is not a queue candidate.
+    /// </summary>
+    /// <remarks>
+    /// What separates "nothing was repaired because the degraded cells were repaired recently" from "nothing was repaired because nothing degraded" when
+    /// <see cref="RepairUnitCount"/> reads zero. Always zero with the cooldown disabled.
+    /// </remarks>
+    public int RepairCellsCooling { get; init; }
+
+    /// <summary>
     /// Milliseconds spent maintaining the repair queue — absorbing nominations and re-ranking — during the most recently completed tick.
     /// </summary>
     /// <remarks>

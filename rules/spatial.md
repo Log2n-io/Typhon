@@ -1187,6 +1187,71 @@
     invalidate omitted → the re-packed cluster inherits a stale wide bound and prunes nothing
     invalidate without a following widen → the map reads "unknown", which is conservative but buys no pruning
 
+### RP-07: A repaired cell is not repaired again until its cooldown ends, and what it is nominated for meanwhile is held `[perf][silent]`
+  invariant a unit that MOVED entities starts its cell's cooldown: RepairCooldownTicks ticks during which the cell
+    is not a queue candidate — not ranked, not serviced, not offered the valve, not counted against
+    RepairQueueMaxCells. A unit that moved nothing — RP-03's already-packed verdict, one cluster, a population below
+    two — and a refused unit start none: none of them was a repair, and RP-03's memo already stops the first recurring
+  invariant 🔴 what the cooldown removes is CHURN, and it was measured before it was built. Nomination fires on extent,
+    and under motion a re-packed cell spreads out again within a few ticks; RP-03's no-op memo stops a converged cell
+    re-packing only while its geometry holds still, so the planner re-sorted the same cells on every tick for a gain
+    the next ticks undid. SWG Tatooine, 2026-09-15: intra-cell maintenance was 13–51 % of the tick; the cooldown as
+    built took a median 6 %, 20 % and 37 % off the tick at 64×, 16× and 4× population, three paired 20 s runs each,
+    with query cost within 3 %, and the experiment before it took nothing off a mostly still world. In the engine's
+    own ClusterDensityTargetTests scenario, measured: a unit on every one of eleven ticks at cooldown 0, on two at 50
+  invariant nominations for a cooling cell are HELD at the worst degradation seen, and the cell re-enters the queue
+    when the cooldown ends WHETHER OR NOT it is nominated again. Dropping them would lose the cell RP-04 exists to
+    see: on the barrier-only path one that goes still while it cools is never nominated again. A cell nothing
+    nominated while it cooled does not re-enter — it had nothing left to repair. A released cell comes in like any
+    newcomer, so at RepairQueueMaxCells it can be evicted (TH-03)
+  invariant 🔴 the fence's early-out asks CellRepairQueue.NeedsPlanning — a candidate waiting, or a cooldown ending —
+    never Count. A cooling cell is not a candidate and the planner is what ends cooldowns, so a Count test skipped
+    the planner on every tick with no nomination and no candidate, and a still cell stayed cooling until some
+    unrelated cell nominated — the valve's bound gone with it. The first version shipped the Count test; review found it
+  invariant cooldowns end at the top of the planner, before the tick's nominations are absorbed and before the
+    rank — and on the idle absorb path, so RepairCellsCooling never counts a cell whose cooldown is over. In repair
+    order: one cooldown for every cell makes release order repair order, so a tick pays for the cells it releases and
+    nothing else. That rests on tick numbers increasing from fence to fence, which the fence already requires: a
+    repeated tick never ends a cooldown, a decreasing one delays releases behind an older head, and neither corrupts
+  invariant the valve's bound on degradation (RP-01, AC-11.2) stretches by RepairCooldownTicks: a cell repaired on
+    tick T is a candidate again on tick T + RepairCooldownTicks, at its held degradation, and the valve applies from
+    there — in an archetype that is planned; one nothing writes is not planned at all (TH-03). Meanwhile a cluster
+    of it above the repair gate is not drift-scanned either (CR-03), so the cell gets no intra-cell maintenance at
+    all for that long — which is the saving, and the price
+  invariant the cooling state lies outside RepairQueueMaxCells, bounded by the cells repaired in the last
+    RepairCooldownTicks ticks. 0 disables the cooldown, and so does 1, since a cell repaired on tick T is eligible
+    again from T + 1 anyway: MarkRepaired then forgets the cell exactly as Remove does
+  invariant the state is transient like the queue's (TH-03): Clear drops the cooling cells with the candidates,
+    because a cell key is a pool slot and names another cell after a rebuild
+  requires: TH-03 (the queue a cooling cell is held out of, and the planning its release waits for)
+  scope: SpatialGridConfig.RepairCooldownTicks, CellRepairQueue.MarkRepaired, CellRepairQueue.ReleaseCooled,
+    CellRepairQueue.NeedsPlanning, CellRepairQueue.Absorb, CellRepairQueue.Clear, CellRepairQueue.CoolingCount,
+    CellRepairQueue.HeldDegradationOf, ArchetypeClusterState.PlanCellRepairs, ArchetypeClusterState.RepairOneCell,
+    ArchetypeClusterState.AbsorbRepairNominations, ArchetypeClusterState.EnsureRepairQueue,
+    DatabaseEngine.PlanArchetypeRepairs, SpatialMigrationTelemetry.RepairCellsCooling
+  verified: ClusterRepairConvergenceTests.ARepairedCellIsNotRepairedAgainUntilItsCooldownEnds scrambles one cell
+    before every fence, so it re-degrades after each repair, and asserts that each repair after the first lands on
+    exactly the tick its cooldown ends — the scenario is deterministic, so a late release fails like an early one —
+    plus RepairCellsCooling on every tick. WithoutTheCooldownTheSameCellIsRepairedInsideIt runs the same verifier at
+    cooldown 0 and requires its own rejection, so the workload is shown to churn.
+    ACellThatGoesStillWhileItCoolsIsRepairedWhenTheCooldownEnds runs barrier-only, degrades the cell once while it
+    cools and keeps the fence alive through a second, tight cell that never nominates: the cell is repaired on the
+    tick its cooldown ends — with the early-out reverted to Count it is repaired once and never again, measured — and
+    nothing cools after its second cooldown. The legacy refresh cannot show this: it re-walks every occupied cluster
+    and re-nominates a still cell every tick, which is what ARepairThatMovesNothingStartsNoCooldown uses — a still,
+    re-packed cell held through its cooldown (asserted), released, re-sorted to nothing, and nothing cooling after.
+    ClusterRepairQueueTests.ANominationHeldDuringTheCooldownReturnsWhenTheCooldownEnds drives CellRepairQueue
+    directly — the worst held degradation, nothing offered to the valve, NeedsPlanning false while cooling and true
+    on the release tick, and a quiet control cell that must not come back; ACoolingCellTakesNoCapacityAndClearDropsIt
+    pins the cap, Clear and cooldown 0. ClusterRepairTests.ARepairIsNeverBegunWithoutTheBudgetToFinishIt asserts a
+    refused unit starts no cooldown
+  on_violation:
+    no cooldown → the budget buys churn: the same cells re-sorted every tick for a gain the next ticks undo
+    nominations dropped instead of held → a cell that goes still while it cools is never repaired
+    early-out on Count → the same, whenever the tick a cooldown ends carries no other nomination
+    cooldown started by a no-op or a refusal → a cell's next genuine degradation waits out a repair that never
+      happened
+
 ---
 
 ## Module: One spatial index home (Issue #872 step 13)
@@ -1627,7 +1692,7 @@
       polling at its own rate reads one arbitrary tick out of hundreds, so a per-second figure must be differentiated
       from the cumulative members, never read off one of these
     CUMULATIVE — `Total...` and `RepairQueueEvicted`, which only grow; these are what a rate is differentiated FROM
-    LEVELS — `ActiveClusterCount`, `RepairQueueDepth`, `ClusterReach`, `EscapedClusterCount`, `MeasuredNsPerEntity`: a standing value,
+    LEVELS — `ActiveClusterCount`, `RepairQueueDepth`, `RepairCellsCooling`, `ClusterReach`, `EscapedClusterCount`, `MeasuredNsPerEntity`: a standing value,
       neither reset per tick nor monotonically accumulating. Differentiating a level yields nonsense — "clusters per
       second" off `ActiveClusterCount` is the concrete misuse this clause exists to name
   invariant ClusterReach is a LEVEL recomputed at the fence whenever the index changed, and it may FALL — it was a

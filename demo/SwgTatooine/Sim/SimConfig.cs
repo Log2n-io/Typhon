@@ -82,6 +82,9 @@ public sealed class SimConfig
     /// <summary>Clusters per repair unit — the engine's <c>RepairWorstClustersPerUnit</c>; <c>0</c> re-sorts a whole cell as one unit.</summary>
     public int RepairWorstClustersPerUnit = 8;
 
+    /// <summary>Ticks a just-repaired cell waits before it can be repaired again — the engine's <c>RepairCooldownTicks</c>; <c>0</c> disables it.</summary>
+    public int RepairCooldownTicks = 50;
+
     // ── Shuttles (#910) ─────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>Players also travel between cities by shuttle. Off reproduces the pre-shuttle simulation exactly.</summary>

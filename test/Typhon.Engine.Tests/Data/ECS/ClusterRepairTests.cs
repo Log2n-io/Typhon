@@ -61,7 +61,7 @@ class ClusterRepairTests : TestBase<ClusterRepairTests>
     /// and leaves the rest, so a cell-wide mean would be diluted by the untouched remainder and would measure the unit
     /// size rather than the re-sort.
     /// </remarks>
-    private DatabaseEngine SetupEngine(float budgetMs = 100f, int worstClustersPerUnit = 0, float repairExtentRatio = 0.75f)
+    private DatabaseEngine SetupEngine(float budgetMs = 100f, int worstClustersPerUnit = 0, float repairExtentRatio = 0.75f, int repairCooldownTicks = 50)
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<ClMigPos>();
@@ -72,7 +72,8 @@ class ClusterRepairTests : TestBase<ClusterRepairTests>
             CellSize,
             clusterRepairExtentRatio: repairExtentRatio,
             reclusterBudgetMs: budgetMs, batchSpawnSortThreshold: 0 /* step 15: this fixture builds its layout by spawn ORDER; the Morton sort would tighten it at birth */,
-            repairWorstClustersPerUnit: worstClustersPerUnit));
+            repairWorstClustersPerUnit: worstClustersPerUnit,
+            repairCooldownTicks: repairCooldownTicks));
         dbe.InitializeArchetypes();
         return dbe;
     }
@@ -335,7 +336,8 @@ class ClusterRepairTests : TestBase<ClusterRepairTests>
 
         Assert.That(cs.RepairQueue?.Count ?? 0, Is.Zero, "precondition: the queue has drained, so the planner returns at its first early exit");
         dbe.WriteTickFence(tick);
-        Assert.That(dbe.GetSpatialTelemetry(ArchetypeId).RepairUnitCount, Is.Zero, "precondition: the cell has converged, so nothing is being planned");
+        Assert.That(dbe.GetSpatialTelemetry(ArchetypeId).RepairUnitCount, Is.Zero,
+            "precondition: the cell has converged or is cooling (RP-07), so nothing is being planned");
 
         var reserved = new List<int>();
         for (var i = 0; i < cs.ActiveClusterCount; i++)
@@ -366,7 +368,9 @@ class ClusterRepairTests : TestBase<ClusterRepairTests>
     [Test]
     public void ARepairKeepsItsDestinationsFromTheCrossingDrain()
     {
-        var dbe = SetupEngine();
+        // No repair cooldown (RP-07). Cell (0,0) is repaired on the second tick-1 fence, before any crosser moves; at the shipped 50 it would then cool
+        // through every tick below, and the crossings would never meet a plan's destinations — the collision this test exists to stage.
+        var dbe = SetupEngine(repairCooldownTicks: 0);
         SpawnDegradedCell(dbe);
 
         // A second cell's population, poised on the boundary. Every one of these crosses into cell (0,0) on the tick the repair runs, so the crossing
@@ -558,6 +562,7 @@ class ClusterRepairTests : TestBase<ClusterRepairTests>
             Assert.That(t.RepairUnitCount, Is.Zero, $"tick {tick} began a unit the budget could not finish");
             Assert.That(t.RepairedEntityCount, Is.Zero, $"tick {tick} re-packed entities under an insufficient budget");
             Assert.That(t.ReclusterBudgetUsedMs, Is.Zero, $"tick {tick} reported budget spent on a unit that was refused");
+            Assert.That(t.RepairCellsCooling, Is.Zero, $"tick {tick}: a refused unit started a repair cooldown (RP-07)");
             refusals += t.RepairUnitsRefused;
         }
 
@@ -731,7 +736,8 @@ class ClusterRepairTests : TestBase<ClusterRepairTests>
     [Category("Manual")]
     public void MeasureRepairCostPerEntity()
     {
-        var dbe = SetupEngine();
+        // No cooldown (RP-07): the rounds below re-repair the same cell a few ticks apart, and a cooldown would measure the first repair only.
+        var dbe = SetupEngine(repairCooldownTicks: 0);
         SpawnDegradedCell(dbe);
 
         // ── Repeated, and the repeats are the measurement ──────────────────────────────────────────────────────────
