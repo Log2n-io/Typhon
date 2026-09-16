@@ -119,7 +119,10 @@ step "rule scopes (gate: invariants)"          python3 scripts/check-rule-scopes
 step "rule coverage (gate: rule-coverage)"     python3 scripts/audit-rule-coverage.py
 step "test suppressions (gate: invariants)"    python3 scripts/lint-test-suppressions.py
 step "runsettings (gate: invariants)"          python3 scripts/check-runsettings.py
-step "doc links (gate: doc-accuracy)"          python3 scripts/check-doc-links.py
+step "gate filters (gate: invariants)"         python3 scripts/check-gate-filters.py --quiet --no-github
+# Label corrected (#942): there is no `doc-accuracy` job in merge-gate.yml — check-doc-links.py runs in
+# build-docs.yml. The whole point of these labels is that a local failure names the CI job it mirrors.
+step "doc links (workflow: build-docs)"        python3 scripts/check-doc-links.py
 step "script unit tests (gate: invariants)"    python3 -m unittest discover -s scripts/tests
 
 if [ "$POLICY_ONLY" -eq 1 ]; then
