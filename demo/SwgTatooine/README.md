@@ -4,6 +4,10 @@ A server-side simulation of *Star Wars Galaxies*' planet Tatooine, built as a lo
 client, no rendering, no network: the planet is reconstructed into a real on-disk Typhon database and then ticked through
 a real system DAG, so the engine sees the traffic a game server actually produces.
 
+At its baseline it simulates **320 players, 10 524 creatures and 1 155 city NPCs** among 5 725 buildings, props and
+lairs, at 10 Hz. Scaled up (`--pop 128`) it simulates **40 960 players and 1.35 million creatures** — 2.14 million
+entities — and still ticks inside the 100 ms budget on one desktop CPU.
+
 It exists because every other spatial workload the engine was tuned against is synthetic — uniform fill or an abstract
 swarm, one archetype, one update rate, driven straight through the fence. A game server looks nothing like that. Its
 buildings never move and never tick; its creatures move on an AI cadence slower than the tick; its players move every
@@ -17,9 +21,6 @@ should constrain the other.
 ---
 
 ## What it does today
-
-At the real planet size with the baseline population it builds **17 724 entities**; `--pop 64` builds **1 072 848** and
-`--pop 128` builds **2 144 720**.
 
 | | |
 |---|---|
@@ -49,6 +50,39 @@ The systems, in phase order:
 
 `Awareness` is the dominant cost at every population, which is the intended shape: interest management is what a game
 server spends its spatial budget on.
+
+## How big is a "population factor"?
+
+`--pop <x>` multiplies every **agent** population. The planet's own geography does not scale — there is one Mos Eisley
+however many players walk around it — so the static prop count stays at 976 while everything player-driven grows with
+the factor. These are the worlds the numbers further down were measured on:
+
+| `--pop` | Players | Creatures | City NPCs | Lairs | Player structures | Static props | **Total entities** | World build |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 320 | 10 524 | 1 155 | 2 149 | 2 600 | 976 | **17 724** | 0.7 s |
+| 4 | 1 280 | 42 096 | 4 620 | 8 596 | 10 400 | 976 | **67 968** | 0.8 s |
+| 16 | 5 120 | 168 384 | 18 480 | 34 384 | 41 600 | 976 | **268 944** | 1.2 s |
+| 64 | 20 480 | 673 536 | 73 920 | 137 536 | 166 400 | 976 | **1 072 848** | 2.2 s |
+| 128 | 40 960 | 1 347 072 | 147 840 | 275 072 | 332 800 | 976 | **2 144 720** | 4.0 s |
+
+`--pop 1` is the faithful baseline the world data aims at — one planet's worth of a live galaxy. Everything above it is
+volumetry rather than fidelity, and the numbers below say which is which.
+
+## What one tick has to do
+
+Because the planet does not grow with the population, everything gets denser, and a fixed 192 m interest radius finds
+proportionally more. That is the whole difficulty of this workload:
+
+| `--pop` | Interest queries per tick | Hits per query | Aggro queries per tick | Allocated per tick |
+|---|---|---|---|---|
+| 1 | 1 536 | 15.6 | 1 078 | 77 KB |
+| 4 | 6 144 | 40.6 | 4 166 | 199 KB |
+| 16 | 24 576 | 152.9 | 15 253 | 508 KB |
+| 64 | 98 304 | 599.5 | 51 957 | 1.83 MB |
+| 128 | 196 608 | 1 177.4 | 95 419 | 3.39 MB |
+
+At `--pop 64` that is **59 million entity hits a tick**, 590 million a second. GC stays out of the way throughout: 6
+gen0, 3 gen1 and 1 gen2 collection over a 24 s run, 11.3 ms of pause in total — 0.05 % of the run.
 
 ## Where the world comes from
 
@@ -96,7 +130,7 @@ The grid is flat and configured once, in [`Sim/TatooineSim.cs`](Sim/TatooineSim.
 | `clusterTargetExtentRatio` | 0.25 | Drift gate floor, as a fraction of the cell edge |
 | `clusterRepairExtentRatio` | 0.75 | Repair-nomination gate floor |
 | `clusterRepairCriticalExtentRatio` | 1.0 | The repair safety valve |
-| `reclusterBudgetMs` | 1.0 | Per-tick maintenance budget. A cliff, not a dial: 0 means unbounded relocation |
+| `reclusterBudgetMs` | 1.0 ms | Per-tick maintenance budget. A cliff, not a dial: 0 means unbounded relocation |
 | `repairWorstClustersPerUnit` | 8 | Clusters per repair unit |
 | `repairCooldownTicks` | 50 | A repaired cell sits out this many ticks before it can be repaired again — the anti-churn half |
 | `queryEfficiencyTolerance` | 0.1 | How far the queries' candidates-per-hit may drift above their best before maintenance gets the whole budget — the adaptive half |
@@ -107,44 +141,78 @@ The grid is flat and configured once, in [`Sim/TatooineSim.cs`](Sim/TatooineSim.
 The last two rows of the maintenance block are the interesting pair. Left alone, intra-cell maintenance costs far more
 than the query it buys, because a re-packed cell decays within a few ticks and is nominated again — the cost is churn,
 not the packing. The cooldown stops a cell being re-packed immediately; the efficiency tolerance stops maintenance being
-paid for at all while the queries are still efficient, and releases the budget when they degrade.
+paid for at all while the queries are still efficient, and releases the budget when they degrade. At `--pop 64` what
+survives that pacing is about 200 player and 150 creature migrations a tick, against 673 536 moving creatures.
 
 ## Measured
 
-Median tick, in milliseconds, one run per point. **16 km world, 40 warm-up + 300 measured ticks at 10 Hz** (a 100 ms
-budget), defaults otherwise, on a Ryzen 9 7950X (16 cores / 32 threads) under Windows, .NET 10, Release, 32 workers, a
-1 GiB page cache.
+All numbers below: **16 km world, 10 Hz (a 100 ms budget), Release, on a Ryzen 9 7950X (16 cores / 32 threads) under
+Windows, .NET 10, 32 workers, a 1 GiB page cache**, with the fixed seed the demo ships.
 
-| Population | Entities | 128 m cells | 256 m cells | 1 024 m cells | 2 048 m cells |
+### Tick cost by population and cell size
+
+Median tick, 40 warm-up + 300 measured ticks, one run per point:
+
+| `--pop` | Entities | 128 m cells | 256 m cells | 1 024 m cells | 2 048 m cells |
 |---|---|---|---|---|---|
-| `--pop 1` | 17 724 | 1.01 | 0.80 | 0.68 | **0.65** |
-| `--pop 4` | 67 968 | 2.02 | 1.60 | **1.42** | — |
-| `--pop 16` | 268 944 | 5.49 | 4.45 | **4.01** | 4.21 |
-| `--pop 64` | 1 072 848 | 32.75 | 25.40 | **22.83** | 25.45 |
-| `--pop 128` | 2 144 720 | — | — | **76.35** | 86.41 |
+| 1 | 17 724 | 1.01 ms | 0.80 ms | 0.68 ms | **0.65 ms** |
+| 4 | 67 968 | 2.02 ms | 1.60 ms | **1.42 ms** | — |
+| 16 | 268 944 | 5.49 ms | 4.45 ms | **4.01 ms** | 4.21 ms |
+| 64 | 1 072 848 | 32.75 ms | 25.40 ms | **22.83 ms** | 25.45 ms |
+| 128 | 2 144 720 | — | — | **76.35 ms** | 86.41 ms |
 
-p99, same runs:
+p99 over the same runs:
 
-| Population | 128 m | 256 m | 1 024 m | 2 048 m |
+| `--pop` | 128 m | 256 m | 1 024 m | 2 048 m |
 |---|---|---|---|---|
-| `--pop 1` | 2.56 | 1.72 | 1.21 | 1.01 |
-| `--pop 4` | 2.77 | 2.26 | 2.11 | — |
-| `--pop 16` | 6.74 | 5.43 | 4.72 | 5.03 |
-| `--pop 64` | 37.57 | 28.97 | 26.69 | 29.24 |
-| `--pop 128` | — | — | 90.56 | 101.52 |
+| 1 | 2.56 ms | 1.72 ms | 1.21 ms | 1.01 ms |
+| 4 | 2.77 ms | 2.26 ms | 2.11 ms | — |
+| 16 | 6.74 ms | 5.43 ms | 4.72 ms | 5.03 ms |
+| 64 | 37.57 ms | 28.97 ms | 26.69 ms | 29.24 ms |
+| 128 | — | — | 90.56 ms | 101.52 ms |
 
 Reading it:
 
-- **A million entities tick in 23 ms**, under a quarter of the 10 Hz budget, with a p99 within 17 % of the median. Two
-  million tick in 76 ms, and that is where the budget starts to bind: the p99 is 91 ms of the 100 available.
+- **A million entities — 20 480 players and 673 536 creatures — tick in 23 ms**, under a quarter of the 10 Hz budget,
+  with a p99 within 17 % of the median. Two million tick in 76 ms, and that is where the budget starts to bind: the p99
+  is 91 ms of the 100 available.
 - **1 024 m cells are the optimum from `--pop 16` up** — about 30 % better than 128 m, 10 % better than either 256 m or
   2 048 m. At `--pop 1` the curve is nearly flat and the largest cells win by a hair, because the tick is dominated by
   fixed cost there rather than by the queries. Earlier sweeps of this workload preferred 128 m at the smaller
   populations; the query path has since been rebuilt, and fewer, fatter cells now win outright.
 - **Cost tracks population from `--pop 4` to `--pop 64`**: 15.8× the entities for 16.1× the tick, even though the planet
-  does not grow with the population and every cell gets denser. It turns superlinear past that — `--pop 128` carries
-  exactly 2× the entities of `--pop 64` for 3.3× the tick. Below `--pop 4` it is the other way: `--pop 1` has 15× fewer
-  entities than `--pop 16` and only 5.9× less tick.
+  does not grow and every cell gets denser. It turns superlinear past that — `--pop 128` carries exactly 2× the entities
+  of `--pop 64` for 3.3× the tick. Below `--pop 4` it is the other way: `--pop 1` has 15× fewer entities than `--pop 16`
+  and only 5.9× less tick.
+
+### Where the time goes at `--pop 64`
+
+One run at 1 024 m cells, 200 measured ticks — 1 072 848 entities, median tick **21.93 ms**. "Span" is wall-clock from
+the system's first chunk to its last; "worker time" is the CPU its chunks consumed across the pool:
+
+| System | Span | Share of tick | Entities walked | Worker time |
+|---|---|---|---|---|
+| `Awareness` | 13.59 ms | 62.0 % | 20 480 | 353.8 ms |
+| `CreatureCombat` | 4.01 ms | 18.3 % | 673 536 | 86.6 ms |
+| `CreatureMove` | 1.60 ms | 7.3 % | 673 536 | 42.6 ms |
+| `FencePrep` | 1.49 ms | 6.8 % | — | 1.8 ms |
+| `CreatureThink` | 1.35 ms | 6.1 % | 673 536 | 33.8 ms |
+| `FenceAabbRefresh` | 0.79 ms | 3.6 % | — | 21.3 ms |
+| `FenceFinalize` | 0.50 ms | 2.3 % | — | 0.5 ms |
+| `Missions` | 0.27 ms | 1.2 % | 137 536 | 4.5 ms |
+| `FenceMigrate` | 0.26 ms | 1.2 % | — | 0.4 ms |
+| `Economy` | 0.16 ms | 0.7 % | 167 376 | 2.9 ms |
+| `NpcMove` | 0.14 ms | 0.7 % | 73 920 | 2.5 ms |
+| `PlayerMove` | 0.14 ms | 0.6 % | 20 480 | 1.2 ms |
+| `PlayerThink` | 0.13 ms | 0.6 % | 20 480 | 1.2 ms |
+| `Shuttle` | 0.08 ms | 0.3 % | 20 480 | 0.4 ms |
+
+The shares sum past 100 % because systems that share no write run concurrently — the spans overlap. Adding the worker
+time up gives **≈ 553 ms of CPU compressed into a 21.9 ms tick**, a 25× speed-up on 32 threads, or 79 % of perfect.
+
+Two systems are the workload: interest management (`Awareness` walks only the 20 480 players, and spends 354 ms of CPU
+doing it) and combat's per-creature radius query. The five fence phases together cost 3.1 ms of the tick, of which `FencePrep` — which cannot
+parallelise for barrier-only archetypes — is half.
 
 **Caveats.** One run per point. The 1 024 m column was measured twice, in two separate sweeps — 0.68 / 0.72 ms at
 `--pop 1`, 4.01 / 4.10 at `--pop 16`, 22.83 / 22.98 at `--pop 64` — so read anything under about 5 % as noise. This
@@ -158,7 +226,7 @@ dotnet run -c Release --project demo/SwgTatooine -- --pop 16 --cell 1024
 
 Each run creates `SwgTatooine_<pid>.typhon` beside the binary — about 180 MB of it at `--pop 64` — and deletes only a
 database of its own name at startup. Because the name carries the process id, finished runs leave theirs behind; delete
-them when you are done sweeping.
+them when you are done sweeping. Resident memory is dominated by the page cache, 1 GiB by default (`--cache-mib`).
 
 Useful flags:
 
@@ -182,9 +250,9 @@ Useful flags:
 | `--tick-log <path>` | — | Every measured tick's duration, one per line |
 | `--seed <n>` | fixed | Every random decision, so two runs build the same world |
 
-A run prints the census, the grid, the tick distribution, the workload counters, and then a per-system table: median
-span, share of the tick, entities, workers used, worker time and the wait each system's chunks spent on stragglers. That
-last column is where imbalance shows up.
+A run prints the census, the grid, the tick distribution, the workload counters, the per-system table above, and a
+per-archetype maintenance table — drifters nominated, relocations admitted, cells repaired, migrations — which is where
+the spatial layer's own behaviour shows up.
 
 ## Known limitations
 
@@ -197,8 +265,8 @@ These are deliberate, and each one is a thing the workload does *not* currently 
   may only write components of its own input archetype, and reaching across through the transaction stalls the tick —
   filed against the engine. The spatial work, which is what this demo measures, is identical either way.
 - **`Awareness` counts hits by default.** A real interest system builds each player's list and diffs it against last
-  tick's to send enter/leave. Writing hits out costs about 2.8 ns each, which at this workload's hit rate would dominate
-  everything measured here — so the numbers above are for a caller that counts. `--awareness-api fill` writes into a
-  scratch buffer and throws it away; the engine's own `SpatialInterestSystem` produces real deltas and this demo does not
-  use it yet.
+  tick's to send enter/leave. Writing hits out costs about 2.8 ns each, which at `--pop 64`'s 59 million hits a tick
+  would dominate everything measured here — so the numbers above are for a caller that counts. `--awareness-api fill`
+  writes into a scratch buffer and throws it away; the engine's own `SpatialInterestSystem` produces real deltas and this
+  demo does not use it yet.
 - **The inventory is written at spawn and never again**, so the WAL carries no per-tick traffic from it.
