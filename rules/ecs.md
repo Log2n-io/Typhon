@@ -354,15 +354,26 @@ popcounts the occupancy word on the strength of the grant alone and has nothing 
           a grower has already copied and is about to replace.
   scope: ArchetypeClusterState.NoteClusterBorn, ArchetypeClusterState.NoteClusterDied, ArchetypeClusterState.ClaimSlot,
          ArchetypeClusterState.ClaimSlotInCell, ArchetypeClusterState.ResetClusterVisibility,
-         ArchetypeClusterState.IsClusterFullyVisibleAt, ArchetypeClusterState.EnsureClusterVisibilityCapacity
+         ArchetypeClusterState.IsClusterFullyVisibleAt, ArchetypeClusterState.EnsureClusterVisibilityCapacity,
+         ArchetypeClusterState.FreeClusterHead, ArchetypeClusterState.ClaimSlotHeadReadProbe
   on_violation: `Count()` returns a number no scan agrees with, and the scans emit an entity that does not exist at the
                 reader's snapshot. Silent both ways — every value looks plausible.
   rationale: found in review, not by tests. 5 300 tests pass with the fold on either side of the publish, because both
              states are momentary and both settle correct.
+  enforce a claim resolves FreeClusterHead ONCE and uses the value it read. Re-resolving it lets a peer that filled the
+          cluster store -1 between the two reads, and the loser claims into cluster -1 (#842) — which reaches the fold as a
+          negative id, and reached it for weeks as an IndexOutOfRangeException that read as a grow failure (#807).
+          NoteClusterBorn rejects a negative id by name so the next occurrence accuses the caller rather than the array.
   verified: ClusterVisibilitySummaryIntegrityTests.ClaimingASlot_BoundsTheClusterBeforeItPublishesTheOccupancyBit
             [VerifiesRule] — calls the claim and reads the summary with NOTHING in between, so the ordering is asserted
             single-threaded instead of raced for. Move the fold back to the caller and it fails every run, together with the
-            from-scratch audit in the same fixture.
+            from-scratch audit in the same fixture. AFoldAfterThePublishingStore_IsRejected [RuleMutant] drives that same
+            assertion helper with the state a caller-side fold leaves and requires it to reject — the rule had a verifier and
+            no mutant until then, which is the one shape the coverage audit cannot distinguish from real cover.
+            APeerEmptyingTheFreeClusterHead_DoesNotMakeTheClaimResolveItTwice pins the single-read clause through
+            ClaimSlotHeadReadProbe, which performs the peer's store at the vulnerable instant: raced, the defect reproduced
+            about 3 times in 40, a rate at which a green run is not evidence. ANegativeClusterId_IsRejectedByName pins the
+            message, since its whole value is naming the cause.
 
 ### CLUSTERVIS-02: A tombstone that keeps its occupancy bit must deny the gate outright `[fatal][silent]`
   invariant a cluster holding a slot whose entity is dead while its bit is still set never reports fully-visible

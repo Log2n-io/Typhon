@@ -259,6 +259,23 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     internal static Action<ArchetypeClusterState, long> PrepQueueProbe;
 
+    /// <summary>
+    /// Test hook: invoked by both <see cref="ClaimSlot(ref ChunkAccessor{PersistentStore}, ChangeSet, long)"/> overloads immediately after they read
+    /// <see cref="FreeClusterHead"/> and before they use the value. Null in production; the call is a null test.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>It exists to make one specific regression deterministic.</b> #842 was a double read of <see cref="FreeClusterHead"/>: the overloads tested
+    /// the field and then re-read it for the value, so a peer that filled the cluster and stored <c>-1</c> between the two left the loser claiming into
+    /// cluster <c>-1</c>. That is a timing race, and a stress test reproduces it about three times in forty — a rate at which a green run is no evidence.
+    /// A probe that performs the peer's store at exactly the vulnerable instant turns it into a single deterministic case.</para>
+    /// <para><b>Unconditional, not <c>[Conditional("DEBUG")]</c>, and that is the point.</b> The merge gate runs Release; a Debug-only seam would leave the
+    /// guarding test passing there without executing the thing it guards, which is the same false green <c>NotePrepSliceRun</c>'s own remark warns about.
+    /// The cost is a static load and a not-taken branch against a claim that already does a volatile read, a chunk-address resolve, a CAS loop in the fold
+    /// and a CAS to take the slot. It is a MUTABLE static, so the JIT cannot fold the load away the way it folds a readonly gate: the cost is permanent,
+    /// not merely cheap, and that is the honest price of the determinism.</para>
+    /// </remarks>
+    internal static Action<ArchetypeClusterState> ClaimSlotHeadReadProbe;
+
     /// <summary>Test-visible count of <c>PrepSlice</c> items executed, process-wide. Proves a fixture exercised the sliced path, not the atomic one.</summary>
     internal static int PrepSlicesRun;
 
@@ -1669,6 +1686,24 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     internal void NoteClusterBorn(int clusterChunkId, long bornTsn)
     {
+        // Name the caller's mistake rather than letting it surface as an IndexOutOfRangeException from the fold below. That exception was read for three
+        // weeks as "the visibility array had not grown to cover the cluster" (#807) — a theory the code refutes, since the array only ever grows and is
+        // sized for clusterChunkId + 1 on the next line. The real defect was a negative id produced one frame up (#842). An out-of-range index here is
+        // always the caller's, so it should say so; the array access bounds-checks anyway, so this replaces an implicit throw rather than adding a check.
+        // Mirrored onto NoteClusterDied, which needs it for a different reason: RecoveryApplier passes a chunk id decoded out of a WAL buffer, so that
+        // side takes untrusted input rather than an already-validated slot.
+        //
+        // int.MaxValue is rejected with the negatives, and not because such a cluster could exist: `clusterChunkId + 1` OVERFLOWS to int.MinValue on the
+        // next line, so the capacity call would be asked for a negative length, return without growing, and leave the index to fault anyway — past a guard
+        // whose whole purpose is to name the cause. A large-but-representable id is deliberately NOT rejected: sizing to it is a grow, not an error.
+        if (clusterChunkId < 0 || clusterChunkId == int.MaxValue)
+        {
+            ThrowHelper.ThrowInvalidOp(
+                $"Archetype {ArchetypeId}: NoteClusterBorn was given cluster id {clusterChunkId}. A negative id means the CALLER resolved its cluster "
+                + "more than once and lost the value to a concurrent peer — the shape of #842, where both ClaimSlot overloads tested FreeClusterHead and "
+                + "then re-read it, so a peer filling the cluster stored -1 between the two. Fix the caller; this method's own array only ever grows.");
+        }
+
         EnsureClusterVisibilityCapacity(clusterChunkId + 1);
 
         // CAS rather than a plain store, because two claimants can be folding into the SAME cluster at once — #708 records that Transient spawns commit
@@ -1777,6 +1812,18 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     internal void NoteClusterDied(int clusterChunkId, long diedTsn)
     {
+        // The mirror of NoteClusterBorn's precondition, and this side is the one with untrusted input: RecoveryApplier decodes the chunk id out of a WAL
+        // record buffer, so a truncated or corrupt record reaches here as an arbitrary int. Unguarded it lands as the same IndexOutOfRangeException from
+        // inside the fold that #807 spent weeks reading as a capacity problem. int.MaxValue joins the negatives — see NoteClusterBorn for why `+ 1` makes
+        // it the same case.
+        if (clusterChunkId < 0 || clusterChunkId == int.MaxValue)
+        {
+            ThrowHelper.ThrowInvalidOp(
+                $"Archetype {ArchetypeId}: NoteClusterDied was given cluster id {clusterChunkId}. Either a caller resolved its cluster twice (see "
+                + "NoteClusterBorn and #842) or a decoded WAL record carried a bad chunk id. This method's own array only ever grows, so the index is "
+                + "never this method's to fix.");
+        }
+
         EnsureClusterVisibilityCapacity(clusterChunkId + 1);
 
         // CAS, and the same post-CAS array re-read as NoteClusterBorn — see there. A lost update on this side under-records the watermark, which admits
@@ -2695,6 +2742,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // the loser passes the test and takes -1 as its cluster id, and NoteClusterBorn indexes an array at -1. The exception is the mild outcome — the
         // address for chunk -1 has already been computed by then, and only the throw stops a CAS into the word one chunk below chunk 0.
         var clusterId = Volatile.Read(ref FreeClusterHead);
+        ClaimSlotHeadReadProbe?.Invoke(this);   // a peer filling this cluster stores -1 here — see the probe's remark and #842
         if (clusterId >= 0)
         {
             var clusterBase = accessor.GetChunkAddress(clusterId, true);
@@ -2743,6 +2791,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     {
         // One read — see the PersistentStore overload and #842.
         var clusterId = Volatile.Read(ref FreeClusterHead);
+        ClaimSlotHeadReadProbe?.Invoke(this);   // see the PersistentStore overload
         if (clusterId >= 0)
         {
             var clusterBase = accessor.GetChunkAddress(clusterId, true);
