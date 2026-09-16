@@ -2203,7 +2203,11 @@ public unsafe partial class Transaction
                                 ctx.ClusterState.EnsureClusterAabbsCapacity(clusterChunkId + 1);
                                 ctx.ClusterState.EnsureClusterSpatialIndexSlotCapacity(clusterChunkId + 1);
 
-                                bool wasInIndex = ctx.ClusterState.ClusterSpatialIndexSlot[clusterChunkId] >= 0;
+                                // Latched when a cell tree could be in flight (#940): PromoteCellHalf transiently retires every back-pointer, and a plain
+                                // read crossing that window answers "not indexed" for a cluster that is — which resets its box to Empty below, wiping
+                                // concurrent spawners' widening, and then re-adds it to a tree that already holds it.
+                                ctx.ClusterState.SpawnIndexReadProbe?.Invoke();
+                                bool wasInIndex = ctx.ClusterState.IsClusterIndexed(clusterChunkId);
                                 // Tier-dispatched union: 2D fields wrote [minX, minY, maxX, maxY] into the first 4 slots; 3D fields wrote the full
                                 // [minX, minY, minZ, maxX, maxY, maxZ] layout. Prior to issue #230 Phase 3 this site was hardcoded to the 2D layout
                                 // regardless of tier — a latent bug that was masked because 3D archetypes only reach this hook when ConfigureSpatialGrid

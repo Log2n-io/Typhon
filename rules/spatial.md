@@ -550,12 +550,34 @@
     CellSpatialIndexTests.AWidenDuringAGrowsCopy_LandsInTheGrownArrays and AWidenStampedBeforeAGrow_IsRedoneInTheGrownArrays
     (mutants: the first form's re-check of ClusterIds, which the grow publishes last, and a widen with no re-check; both
     lose the widen)
+  invariant 🔴 a PROMOTION is a third writer of ClusterSpatialIndexSlot, and its window is not observable (#940).
+    PromoteCellHalf retires every linear slot index to NullHandle, re-issues packed tree handles into the same
+    array, then publishes the tree — all under _finalizeLock. A reader that crosses that window without the latch
+    sees "not indexed" for a cluster that IS indexed, and the spawn commit acts on it: it resets the cluster's
+    ClusterAabbs entry to Empty, discarding every concurrent spawner's widening, then re-adds the cluster, where
+    CellClusterTree.Add's duplicate guard throws out of the middle of a commit. Therefore:
+      the spawn's "is this cluster indexed" read goes through ArchetypeClusterState.IsClusterIndexed, which takes
+        _finalizeLock whenever a tree is possible (the gate is on, or a half was force-switched)
+      WidenClusterInPerCellIndex takes the latch for its WHOLE body, not merely its tree branch — the old shape
+        could read "no tree" before the publish and then hand a packed tree handle to CellSpatialIndex.WidenAt as
+        a linear slot, widening an unrelated cluster or indexing past capacity
+      the tree branch of AddClusterToPerCellIndexLocked is idempotent, as the linear branch already is: a cluster
+        the tree already holds is UpdateAt, never Add
+    an archetype with promotion off pays one predictable branch and takes no latch at all
   scope: ArchetypeClusterState.RecomputeDirtyClusterAabbsSlice, ArchetypeClusterState.IsClusterProcessBitSet,
     ArchetypeClusterState.ApplyOrDeferClusterUpdate, ArchetypeClusterState.UpdateClusterInPerCellIndex,
+    ArchetypeClusterState.IsClusterIndexed, ArchetypeClusterState.WidenClusterInPerCellIndex,
+    ArchetypeClusterState.AddClusterToPerCellIndexLocked, ArchetypeClusterState.PromoteCellHalf,
     ClusterRef.MaybeGrowAndFlagShrink, ClusterRef.WriteSpatialSet, CellSpatialIndex.WidenAt
   verified: CellTreeParallelFenceTests.CellIndexTracksClusterAabbs_AfterAWriteTimeGrow (both slicing branches,
     50 serial fence ticks of rotation, queries compared against entity positions read straight out of cluster
     storage). Pre-fix it failed on both branches with the index one to two ticks inside ClusterAabbs on every axis.
+    The promotion window by CellPromotionSpawnRaceTests.ASpawnRacingACellsPromotion_DoesNotObserveTheRetiredBackPointers,
+    which drives the interleaving through two seams — the racer parks immediately before the index read and the
+    promoter releases it from inside the retire window. Ablated (the unlatched read restored) it reddens on every
+    slot of the cluster whose box was reset: "sits outside its own bound on X — a widen was lost in the promotion
+    window". An earlier version of that fixture passed under the same ablation because its racer opened a FRESH
+    cluster, whose back-pointer promotion never retires; the racer must land in an already-indexed one.
   on_violation:
     index bound tighter than ClusterAabbs → the cell prunes a cluster the query overlaps → every entity in it
       disappears from the result, silently, and CA-01 holds throughout because ClusterAabbs is right

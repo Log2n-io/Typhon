@@ -4161,6 +4161,19 @@ internal sealed unsafe partial class ArchetypeClusterState
     private int _writeBookkeepingGrowth;
 
     /// <summary>Test seam: runs inside the quartet's grow after the copy and before the publish, with <see cref="_writeBookkeepingGrowth"/> odd.</summary>
+    /// <summary>
+    /// Test seam fired by <see cref="PromoteCellHalf"/> after it has retired every linear back-pointer and before it re-issues tree handles — the window
+    /// a concurrent spawn must not be able to observe (#940).
+    /// </summary>
+    internal Action PromoteRetiredProbe;
+
+    /// <summary>
+    /// Test seam fired by the spawn commit immediately before it asks <see cref="IsClusterIndexed"/>. Paired with <see cref="PromoteRetiredProbe"/> it puts
+    /// a spawner provably inside that read while a promotion holds the window open, which is the interleaving #940 is about — without it a fixture can only
+    /// hope the two overlap, and a test that merely hopes passes just as well against the defect.
+    /// </summary>
+    internal Action SpawnIndexReadProbe;
+
     internal Action WriteBookkeepingGrowCopiedProbe;
 
     /// <summary>Test seam: runs when a flag write finds a grow in flight, before it waits the grow out.</summary>
@@ -6565,6 +6578,15 @@ internal sealed unsafe partial class ArchetypeClusterState
         var tree = isStatic ? slot.StaticTree : slot.DynamicTree;
         if (tree != null)
         {
+            // Idempotent, as the linear branch below already is (#940). A spawn that read "not indexed" while promotion had the back-pointers retired
+            // arrives here for a cluster the tree already holds; Add's duplicate guard would throw out of the middle of its commit. Updating with the live
+            // box is what the caller wanted in either case — the box it passes is the one to publish.
+            if (!SpatialRTree<TransientStore>.IsNullHandle(backPointers[clusterChunkId]))
+            {
+                tree.UpdateAt(clusterChunkId, in aabb, out _);
+                return;
+            }
+
             tree.Add(clusterChunkId, in aabb);
             TyphonEvent.EmitSpatialCellIndexAdd(cellKey, backPointers[clusterChunkId], clusterChunkId, tree.ClusterCount);
             return;
@@ -6657,6 +6679,10 @@ internal sealed unsafe partial class ArchetypeClusterState
         {
             ClusterSpatialIndexSlot[linear.ClusterIds[i]] = SpatialRTree<TransientStore>.NullHandle;
         }
+
+        // The window #940 is about: every back-pointer reads as retired, no tree is published yet, and this method holds _finalizeLock throughout. A spawn
+        // that answers "is this cluster indexed" without that latch sees a lie here.
+        PromoteRetiredProbe?.Invoke();
 
         for (var i = 0; i < linear.ClusterCount; i++)
         {
@@ -7090,17 +7116,86 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
-    /// <see cref="UpdateClusterInPerCellIndex"/> for the SPAWN path, which runs on user threads with no latch and only ever widens. A linear half is
-    /// widened by per-axis CAS that survives a concurrent latched grow (<see cref="CellSpatialIndex.WidenAt"/>); a promoted half is written under
-    /// <c>_finalizeLock</c>, because <c>PC-01</c> makes the tree single-writer by the caller's discipline and a user thread has none of the fence's.
-    /// The fence's own callers keep <see cref="UpdateClusterInPerCellIndex"/>: they are exclusive by construction and may also shrink.
+    /// Can a cell half of this archetype be holding a <see cref="CellClusterTree"/>? If not, <see cref="ClusterSpatialIndexSlot"/> is never transiently
+    /// retired and the unlatched reads below are safe (#940).
     /// </summary>
     /// <remarks>
-    /// A promotion that lands between this method's read of the linear half and its widen leaves the widen in the linear half the tree was built
-    /// from; the fence's next AabbRefresh of the (dirty) cluster republishes the bound. Tolerated for the same reason CR-02 tolerates a stale box:
-    /// one tick of a too-tight leaf is a slower query, never a wrong cell.
+    /// <see cref="PromotedCellCount"/> is tested as well as the gate, because <c>ForceCellHalfStructure</c> switches a half in place with the gate off — an
+    /// instrument the crossover benchmark uses. Testing the gate alone would leave exactly that configuration on the unlatched path.
+    /// </remarks>
+    private bool CellTreesPossible => CellTreePromoteThreshold != int.MaxValue || Volatile.Read(ref PromotedCellCount) > 0;
+
+    /// <summary>
+    /// Is this cluster already carried by its cell's per-cell index? Answered under <c>_finalizeLock</c> when a promotion could be in flight (#940).
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Why the latch.</b> <see cref="PromoteCellHalf"/> retires every linear slot index to <c>NullHandle</c> and only then re-issues packed tree
+    /// handles into the same array, so a reader crossing that window sees "not indexed" for a cluster that is indexed. The spawn commit acts on that answer
+    /// by resetting the cluster's <see cref="ClusterAabbs"/> entry to <c>Empty</c> — discarding concurrent spawners' widening — and then adding it to the
+    /// cell again, which the tree's duplicate guard turns into an exception thrown out of the middle of a commit.</para>
+    /// <para>Outside that window the answer is monotone: a cluster that is indexed stays indexed until it leaves the cell, so a caller that finds no tree
+    /// possible needs no latch at all and pays one predictable branch.</para>
+    /// </remarks>
+    internal bool IsClusterIndexed(int clusterChunkId)
+    {
+        var backPointers = Volatile.Read(ref ClusterSpatialIndexSlot);
+        if (backPointers == null || (uint)clusterChunkId >= (uint)backPointers.Length)
+        {
+            return false;
+        }
+
+        if (!CellTreesPossible)
+        {
+            return backPointers[clusterChunkId] >= 0;
+        }
+
+        ref var ctx = ref Unsafe.NullRef<WaitContext>();
+        _finalizeLock.Enter(ref ctx);
+        try
+        {
+            // Re-read under the latch: a promotion that ran between the fast-path load above and here has republished the array.
+            var live = ClusterSpatialIndexSlot;
+            return live != null && (uint)clusterChunkId < (uint)live.Length && live[clusterChunkId] >= 0;
+        }
+        finally
+        {
+            _finalizeLock.Exit();
+        }
+    }
+
+    /// <summary>
+    /// Widen a cluster's entry in its cell's per-cell index. Taken under <c>_finalizeLock</c> for the WHOLE body when a promotion could be in flight, not
+    /// merely for its tree branch (#940).
+    /// </summary>
+    /// <remarks>
+    /// The old shape latched only the tree branch, so a widen could read "no tree" before the publish and then read a back-pointer that promotion had
+    /// already replaced with a packed tree handle — <c>leafChunkId * 32 + slotIndex</c> — and hand it to <see cref="CellSpatialIndex.WidenAt"/> as a linear
+    /// slot. That widens an unrelated cluster's entry, or indexes past the linear capacity. The other half of the same straddle drops the widen entirely
+    /// (the back-pointer reads as retired, or the linear half has been nulled by the publish), which leaves the cell's box tighter than the cluster's until
+    /// the next refresh — an SQ-01 false negative, and silent. CA-02 is explicit that too tight is the dangerous direction.
     /// </remarks>
     internal void WidenClusterInPerCellIndex(int clusterChunkId, int cellKey, in ClusterSpatialAabb aabb)
+    {
+        if (!CellTreesPossible)
+        {
+            WidenClusterInPerCellIndexCore(clusterChunkId, cellKey, in aabb);
+            return;
+        }
+
+        ref var ctx = ref Unsafe.NullRef<WaitContext>();
+        _finalizeLock.Enter(ref ctx);
+        try
+        {
+            WidenClusterInPerCellIndexCore(clusterChunkId, cellKey, in aabb);
+        }
+        finally
+        {
+            _finalizeLock.Exit();
+        }
+    }
+
+    /// <inheritdoc cref="WidenClusterInPerCellIndex"/>
+    private void WidenClusterInPerCellIndexCore(int clusterChunkId, int cellKey, in ClusterSpatialAabb aabb)
     {
         // The spawn path has already raised ClusterReach by the entity's own overhang (RaiseClusterReachForSpawn). Not by this box: it is the whole
         // cluster's, and a spawn into a named outlier would fold that outlier's reach into every query until the next fence.
@@ -7120,17 +7215,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         var tree = isStatic ? slot.StaticTree : slot.DynamicTree;
         if (tree != null)
         {
-            ref var treeCtx = ref Unsafe.NullRef<WaitContext>();
-            _finalizeLock.Enter(ref treeCtx);
-            try
-            {
-                tree.UpdateAt(clusterChunkId, in aabb, out _);
-            }
-            finally
-            {
-                _finalizeLock.Exit();
-            }
-
+            // No latch here: the caller holds it whenever a tree can exist. PaddedFinalizeLock is not re-entrant, so taking it again would deadlock.
+            tree.UpdateAt(clusterChunkId, in aabb, out _);
             return;
         }
 
