@@ -818,19 +818,21 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
                 if (runMinZ < stored.MinZ) { ClusterSpatialAabb.CasMin(ref stored.MinZ, runMinZ); changed = true; }
                 if (runMaxZ > stored.MaxZ) { ClusterSpatialAabb.CasMax(ref stored.MaxZ, runMaxZ); changed = true; }
             }
-
-            if (shrinkMask != 0)
-            {
-                InterlockedOrByteArrayElement(_state.ClusterShrinkPendingAxes, _chunkId, shrinkMask);
-                changed = true;
-            }
         }
         while (!_state.ClusterAabbsWriteLanded(stamp));
 
+        // The shrink mask and the crossing below belong to the write-bookkeeping quartet, which grows under its own latch, so they run under THAT stamp
+        // (CA-04) rather than this loop's: a flag left in an array the quartet's grow has already copied is a bound never refreshed or a crossing never
+        // detected. MigrationHint stays outside it — it is a counter, and a redo must not add to it twice.
+        if (shrinkMask != 0)
+        {
+            _state.FlagShrinkAxes(_chunkId, shrinkMask);
+            changed = true;
+        }
+
         if (migrating != 0)
         {
-            Interlocked.Or(ref _state.ClusterMigrationPendingSlots[_chunkId], migrating);
-            _state.ClusterMigrationDestCellKeys[_chunkId] = destCellKey;
+            _state.FlagMigration(_chunkId, migrating, destCellKey);
             _state.MigrationHint += migrations;
         }
 
@@ -946,35 +948,11 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
 
         if (shrinkMask != 0)
         {
-            InterlockedOrByteArrayElement(_state.ClusterShrinkPendingAxes, _chunkId, shrinkMask);
+            _state.FlagShrinkAxes(_chunkId, shrinkMask);
             changed = true;
         }
 
         return changed;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void InterlockedOrByteArrayElement(byte[] array, int index, byte mask)
-    {
-        // CAS loop on the byte directly: read, OR, CompareExchange byte's int-aligned word. Since `byte` is 1-byte and Interlocked operates on int+, we widen
-        // to a per-element approach: each cluster index gets its own array slot, so within-byte word collisions only happen across nearby cluster indices.
-        // A simple CAS loop on the single byte slot suffices.
-        while (true)
-        {
-            var current = array[index];
-            var updated = (byte)(current | mask);
-            if (current == updated)
-            {
-                return; // mask already set
-            }
-
-            // Use Interlocked.CompareExchange on the byte directly via Unsafe.As<byte, int>. Since the byte is part of a larger int chunk, we operate on
-            // a 1-byte CAS via a small helper. .NET 7+ has Interlocked.CompareExchange(ref byte, byte, byte) — use it.
-            if (Interlocked.CompareExchange(ref array[index], updated, current) == current)
-            {
-                return;
-            }
-        }
     }
 
     /// <summary>
@@ -1108,19 +1086,16 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         // the slot's position and decides from that, so two slots of one cluster written to two cells, an entity written out and back within the tick,
         // and a write that reached a spawn's slot before its data landed, all resolve to where the entity actually is (CC-02).
         var slotBit = 1UL << slotIndex;
-        Interlocked.Or(ref _state.ClusterMigrationPendingSlots[_chunkId], slotBit);
-        _state.ClusterMigrationDestCellKeys[_chunkId] = newCellKey;
+        _state.FlagMigration(_chunkId, slotBit, newCellKey);
         return true;
     }
 
-    /// <summary>Atomically set this cluster's bit in <see cref="ArchetypeClusterState.ClusterProcessBitmap"/>.</summary>
+    /// <summary>
+    /// Atomically set this cluster's bit in <see cref="ArchetypeClusterState.ClusterProcessBitmap"/>, under the quartet's growth stamp (CA-04): another
+    /// transaction's commit can replace that array while this write is in flight, and a bit left in the abandoned one is a bound never refreshed.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void SetClusterProcessBit()
-    {
-        var wordIdx = _chunkId >> 6;
-        var bit = 1L << (_chunkId & 63);
-        Interlocked.Or(ref _state.ClusterProcessBitmap[wordIdx], bit);
-    }
+    private void SetClusterProcessBit() => _state.SetClusterProcessBit(_chunkId);
 }
 
 /// <summary>

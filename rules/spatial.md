@@ -595,6 +595,46 @@
         dropped, the shrink tested against the bound as the call began instead of as the earlier writes grew it, every shrink flag set, the
         process bit set unconditionally, the cluster half of the bounds check removed, the non-finite stop removed
 
+### CA-04: A write-time flag lands in the LIVE bookkeeping array `[fatal][silent]`
+  invariant the four write-bookkeeping arrays — ClusterProcessBitmap, ClusterMigrationPendingSlots,
+    ClusterMigrationDestCellKeys, ClusterShrinkPendingAxes — grow in lockstep under _finalizeLock, and every write to
+    one of them from a thread holding no latch runs under the archetype's write-bookkeeping growth stamp:
+      stamp = BeginWriteBookkeepingWrite()    (even; waits out a grow already in flight)
+      write into the arrays read AFTER that
+      keep the write only if WriteBookkeepingWriteLanded(stamp), otherwise repeat it in the new arrays
+    Serialising the growers on _finalizeLock closes grower-versus-grower; this closes writer-versus-grower, where one
+    transaction commits and grows while another is mid-flag (#903)
+  invariant a crossing is a PAIR — the slot bits and the destination hint — and both land in the SAME generation of the
+    arrays. NoteClusterBorn's protocol (re-read the array reference after the RMW) is correct for ONE array and not for
+    this: it can leave the bits in the live array and the hint in the abandoned one, which is a crossing pointed at a
+    stale cell
+  invariant the counters beside these writes — MigrationHint, HysteresisAbsorbedLive — stay OUTSIDE the retry. A redo
+    repeats a flag idempotently; it must not add to a counter twice
+  invariant the fence's own writers need no stamp: nothing grows these arrays while a fence phase runs
+    (ThrowIfGrowingInsideMigrateSlice refuses it) and ClearAabbRefreshBookkeeping is single-threaded
+  scope: ArchetypeClusterState.FlagMigration, ArchetypeClusterState.SetClusterProcessBit,
+    ArchetypeClusterState.FlagShrinkAxes, ArchetypeClusterState.BeginWriteBookkeepingWrite,
+    ArchetypeClusterState.WriteBookkeepingWriteLanded,
+    ArchetypeClusterState.EnsureClusterWriteBookkeepingCapacityLocked, ArchetypeClusterState.FlagClusterShrinkAxesOnly,
+    ClusterRef.WriteSpatial, ClusterRef.WriteSpatialSet, ClusterRef.MaybeFlagMigration, ClusterRef.MaybeGrowAndFlagShrink
+  note the re-check is an ACQUIRE load, which orders nothing before it, so a helper whose writes end in a plain store must
+    put its interlocked write last. FlagMigration therefore stomps the destination hint BEFORE it ORs the slot bits: with
+    the OR first the key could still be in the store buffer when the re-check passes, and land in the abandoned array —
+    the bits live, the hint stale, which is this rule's own second invariant broken by its implementation
+  verified: ClusterWriteBookkeepingGrowthTests.AFlagWrittenDuringAGrowsCopy_LandsInTheGrownArrays and
+    AFlagStampedBeforeAGrow_IsRedoneInTheGrownArrays (a flag write and a grow driven through three seams; both assert the
+    slot bits AND the destination hint in the grown arrays). Their mutants write the pre-#903 way, and a third splits the
+    pair — the bits stamped, the hint outside — and loses one half every run
+  on_violation:
+    a migration bit lost → the crossing is never detected → the entity stays in a cluster mapped to another cell
+      (CC-02), invisible to its own cell's index (SQ-01), with every counter still balancing
+    a process bit lost → the cluster's bound is never refreshed (CA-01) and the index keeps the old box (CA-02) →
+      silent query false negatives
+    a shrink flag lost → a bound left loose, which costs overlap tests and nothing else
+  requires: the growers are serialised (EnsureClusterWriteBookkeepingCapacity) and refused inside a Migrate slice
+
+---
+
 ## Module: VDB Cell Grid (Issue #872 step 8)
 
 ### VG-01: A cell key names a live cell, or nothing `[fatal][silent]`

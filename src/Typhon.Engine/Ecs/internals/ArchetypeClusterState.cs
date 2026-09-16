@@ -4056,6 +4056,134 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal bool ClusterAabbsWriteLanded(int stamp) => Volatile.Read(ref _clusterAabbsGrowth) == stamp;
 
     /// <summary>
+    /// Odd while <see cref="EnsureClusterWriteBookkeepingCapacityLocked"/> copies the write-bookkeeping quartet into larger arrays, even otherwise: bumped
+    /// once before the copy and once after the last publish.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Why.</b> <c>ClusterRef</c> flags a cluster from a user thread holding no latch — the migration slot bits and their destination hint, a shrink
+    /// mask, the process bit — while another transaction's commit can be growing all four arrays. A flag written into an array the grow has already copied is
+    /// lost: the crossing is never detected (CC-02), or the cluster's bound is never refreshed (CA-01), with every counter still balancing. Serialising the
+    /// growers on <c>_finalizeLock</c> closed grower-versus-grower; this closes writer-versus-grower (CA-04, issue #903).</para>
+    /// <para><b>Why a stamp rather than <see cref="NoteClusterBorn"/>'s re-read of the array reference.</b> That protocol confirms ONE array. A crossing is a
+    /// PAIR — the slot bits in <see cref="ClusterMigrationPendingSlots"/> and the destination in <see cref="ClusterMigrationDestCellKeys"/> — and the quartet
+    /// grows in lockstep under one latch, so a per-array re-read can leave the bits in the live array and the key in the abandoned one: a crossing pointed at
+    /// a stale cell. One stamp over the group is the faithful model, and unlike a re-read it also covers the plain store the hint is written with.</para>
+    /// <para><b>The protocol</b> is <see cref="_clusterAabbsGrowth"/>'s: take an even stamp, write into the arrays read after it, and keep the write only if
+    /// the stamp has not moved. Both sides fence between their two accesses — the writer's interlocked RMW, the grower's first bump — so either the copy
+    /// reads the write or the writer sees the bump. Every write under it is an OR, or a stomp of an entry the fence clears once a tick, so a redo repeats
+    /// what the first attempt did rather than adding to it.</para>
+    /// <para>The fence's own writers need none of this, for the reason <see cref="_clusterAabbsGrowth"/> gives: nothing grows these arrays while a fence
+    /// phase runs (<see cref="ThrowIfGrowingInsideMigrateSlice"/>), and <see cref="ClearAabbRefreshBookkeeping"/> is single-threaded.</para>
+    /// </remarks>
+    private int _writeBookkeepingGrowth;
+
+    /// <summary>Test seam: runs inside the quartet's grow after the copy and before the publish, with <see cref="_writeBookkeepingGrowth"/> odd.</summary>
+    internal Action WriteBookkeepingGrowCopiedProbe;
+
+    /// <summary>Test seam: runs when a flag write finds a grow in flight, before it waits the grow out.</summary>
+    internal Action WriteBookkeepingWaitProbe;
+
+    /// <summary>Test seam: runs once a flag write holds an even stamp, before its writes.</summary>
+    internal Action WriteBookkeepingStampedProbe;
+
+    /// <summary>The even growth stamp a lock-free write to the write-bookkeeping quartet starts from, once any grow in flight has published.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal int BeginWriteBookkeepingWrite()
+    {
+        var stamp = Volatile.Read(ref _writeBookkeepingGrowth);
+        return (stamp & 1) == 0 ? stamp : WaitOutWriteBookkeepingGrow();
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private int WaitOutWriteBookkeepingGrow()
+    {
+        WriteBookkeepingWaitProbe?.Invoke();
+        var spin = new SpinWait();
+        int stamp;
+        while (((stamp = Volatile.Read(ref _writeBookkeepingGrowth)) & 1) != 0)
+        {
+            spin.SpinOnce();
+        }
+
+        return stamp;
+    }
+
+    /// <summary>
+    /// True when no grow of the write-bookkeeping quartet began since <paramref name="stamp"/>, so a write made since into arrays read after it is in the
+    /// live ones.
+    /// </summary>
+    /// <remarks>
+    /// Call it after an INTERLOCKED write: that write's full fence is what stops the store being buffered past this acquire load, which orders nothing
+    /// before it — StoreLoad is the one reordering x64 permits, and arm64 permits the rest as well. A helper whose writes end in a PLAIN store must
+    /// therefore put the interlocked one last (see <see cref="FlagMigration"/>), and one that wrote nothing at all needs no fence: there is no store that
+    /// could be left behind in an abandoned array.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal bool WriteBookkeepingWriteLanded(int stamp) => Volatile.Read(ref _writeBookkeepingGrowth) == stamp;
+
+    /// <summary>
+    /// Flag a crossing on <paramref name="clusterChunkId"/>: stomp <paramref name="destCellKey"/> into <see cref="ClusterMigrationDestCellKeys"/>, then OR
+    /// <paramref name="slotBits"/> into <see cref="ClusterMigrationPendingSlots"/> — both in the same generation of the arrays (CA-04).
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The hint is written FIRST, and that order is load-bearing.</b> The re-check is an acquire load, which does not order a preceding plain store
+    /// after it. With the OR first, the key's store could still sit in the store buffer when the re-check passes, and then land in an array the grow had
+    /// already abandoned: the bits live, the hint stale — the very split this protocol exists to prevent. Writing the key before the OR puts it behind that
+    /// OR's full fence, so one re-check covers both.</para>
+    /// <para>The destination is a HINT the drain re-derives from the entity's position (CC-02); the bit is what must not be lost.</para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void FlagMigration(int clusterChunkId, ulong slotBits, int destCellKey)
+    {
+        int stamp;
+        do
+        {
+            stamp = BeginWriteBookkeepingWrite();
+            WriteBookkeepingStampedProbe?.Invoke();
+            Volatile.Read(ref ClusterMigrationDestCellKeys)[clusterChunkId] = destCellKey;
+            Interlocked.Or(ref Volatile.Read(ref ClusterMigrationPendingSlots)[clusterChunkId], slotBits);
+        }
+        while (!WriteBookkeepingWriteLanded(stamp));
+    }
+
+    /// <summary>
+    /// Set <paramref name="clusterChunkId"/>'s bit in <see cref="ClusterProcessBitmap"/> — the signal the AABB refresh consumes (CA-02, CA-04).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void SetClusterProcessBit(int clusterChunkId)
+    {
+        var wordIdx = clusterChunkId >> 6;
+        var bit = 1L << (clusterChunkId & 63);
+        int stamp;
+        do
+        {
+            stamp = BeginWriteBookkeepingWrite();
+            WriteBookkeepingStampedProbe?.Invoke();
+            Interlocked.Or(ref Volatile.Read(ref ClusterProcessBitmap)[wordIdx], bit);
+        }
+        while (!WriteBookkeepingWriteLanded(stamp));
+    }
+
+    /// <summary>OR <paramref name="mask"/> into <paramref name="clusterChunkId"/>'s <see cref="ClusterShrinkPendingAxes"/> entry (CA-04).</summary>
+    /// <remarks>
+    /// A mask already set returns without writing anything, and so without an interlocked fence. That is sound for the reason
+    /// <see cref="WriteBookkeepingWriteLanded"/> gives: a write that never happened cannot be stranded in an abandoned array, and the bits that were
+    /// already there are what the grow's copy carries forward.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void FlagShrinkAxes(int clusterChunkId, byte mask)
+    {
+        int stamp;
+        do
+        {
+            stamp = BeginWriteBookkeepingWrite();
+            WriteBookkeepingStampedProbe?.Invoke();
+            InterlockedOrShrinkAxes(Volatile.Read(ref ClusterShrinkPendingAxes), clusterChunkId, mask);
+        }
+        while (!WriteBookkeepingWriteLanded(stamp));
+    }
+
+    /// <summary>
     /// Grow <see cref="ClusterSpatialIndexSlot"/> to hold at least <paramref name="requiredLength"/> entries, initializing new slots to <c>-1</c> (not in
     /// the per-cell index). Issue #230.
     /// </summary>
@@ -4153,58 +4281,78 @@ internal sealed unsafe partial class ArchetypeClusterState
     {
         AssertFinalizeLockHeld(nameof(EnsureClusterWriteBookkeepingCapacityLocked));
         Debug.Assert(!InPrepSlice, "a Prep slice must not grow the per-cluster arrays another slice is reading (#886)");
+
         // ClusterProcessBitmap: 1 bit per cluster → (requiredLength + 63) / 64 long words.
         var requiredWords = (requiredLength + 63) >> 6;
-        if (ClusterProcessBitmap == null)
+
+        // Nothing to grow: return BEFORE the stamp moves, as EnsureClusterAabbsCapacityLocked does. Every fresh cluster calls this method
+        // (AddClusterToPerCellIndexLocked), and a stamp bumped on a no-op would make every concurrent flagger redo its writes for nothing.
+        if (ClusterProcessBitmap != null && ClusterProcessBitmap.Length >= requiredWords
+            && ClusterMigrationPendingSlots != null && ClusterMigrationPendingSlots.Length >= requiredLength)
         {
-            Volatile.Write(ref ClusterProcessBitmap, new long[Math.Max(1, requiredWords)]);
+            return;
         }
-        else if (ClusterProcessBitmap.Length < requiredWords)
+
+        // Odd for the whole copy: a lock-free flag whose write the copy may have missed sees the stamp move and redoes it in the new arrays (CA-04).
+        Interlocked.Increment(ref _writeBookkeepingGrowth);
+        try
         {
-            var newLen = Math.Max(ClusterProcessBitmap.Length, 1);
-            while (newLen < requiredWords)
+            if (ClusterProcessBitmap == null)
             {
-                newLen *= 2;
+                Volatile.Write(ref ClusterProcessBitmap, new long[Math.Max(1, requiredWords)]);
+            }
+            else if (ClusterProcessBitmap.Length < requiredWords)
+            {
+                var newLen = Math.Max(ClusterProcessBitmap.Length, 1);
+                while (newLen < requiredWords)
+                {
+                    newLen *= 2;
+                }
+
+                var grownBitmap = new long[newLen];
+                Array.Copy(ClusterProcessBitmap, grownBitmap, ClusterProcessBitmap.Length);
+                Volatile.Write(ref ClusterProcessBitmap, grownBitmap);
             }
 
-            var grownBitmap = new long[newLen];
-            Array.Copy(ClusterProcessBitmap, grownBitmap, ClusterProcessBitmap.Length);
-            Volatile.Write(ref ClusterProcessBitmap, grownBitmap);
-        }
+            // Per-cluster arrays sized 1:1 with clusterChunkId range.
+            if (ClusterMigrationPendingSlots == null)
+            {
+                var initial = Math.Max(16, requiredLength);
+                var seededKeys = new int[initial];
+                Array.Fill(seededKeys, -1);
+                Volatile.Write(ref ClusterMigrationDestCellKeys, seededKeys);
+                Volatile.Write(ref ClusterShrinkPendingAxes, new byte[initial]);
+                // Published LAST: it is the array the lock-free fast path length-checks, so every sibling array must already be visible behind it.
+                Volatile.Write(ref ClusterMigrationPendingSlots, new ulong[initial]);
+                return;
+            }
+            if (ClusterMigrationPendingSlots.Length >= requiredLength)
+            {
+                return;
+            }
+            var newClusterLen = Math.Max(ClusterMigrationPendingSlots.Length, 1);
+            while (newClusterLen < requiredLength)
+            {
+                newClusterLen *= 2;
+            }
 
-        // Per-cluster arrays sized 1:1 with clusterChunkId range.
-        if (ClusterMigrationPendingSlots == null)
-        {
-            var initial = Math.Max(16, requiredLength);
-            var seededKeys = new int[initial];
-            Array.Fill(seededKeys, -1);
-            Volatile.Write(ref ClusterMigrationDestCellKeys, seededKeys);
-            Volatile.Write(ref ClusterShrinkPendingAxes, new byte[initial]);
-            // Published LAST: it is the array the lock-free fast path length-checks, so every sibling array must already be visible behind it.
-            Volatile.Write(ref ClusterMigrationPendingSlots, new ulong[initial]);
-            return;
+            var oldLen = ClusterMigrationPendingSlots.Length;
+            var grownSlots = new ulong[newClusterLen];
+            Array.Copy(ClusterMigrationPendingSlots, grownSlots, oldLen);
+            var grownKeys = new int[newClusterLen];
+            Array.Copy(ClusterMigrationDestCellKeys, grownKeys, oldLen);
+            Array.Fill(grownKeys, -1, oldLen, newClusterLen - oldLen);
+            var grownAxes = new byte[newClusterLen];
+            Array.Copy(ClusterShrinkPendingAxes, grownAxes, oldLen);
+            WriteBookkeepingGrowCopiedProbe?.Invoke();
+            Volatile.Write(ref ClusterMigrationDestCellKeys, grownKeys);
+            Volatile.Write(ref ClusterShrinkPendingAxes, grownAxes);
+            Volatile.Write(ref ClusterMigrationPendingSlots, grownSlots);
         }
-        if (ClusterMigrationPendingSlots.Length >= requiredLength)
+        finally
         {
-            return;
+            Interlocked.Increment(ref _writeBookkeepingGrowth);
         }
-        var newClusterLen = Math.Max(ClusterMigrationPendingSlots.Length, 1);
-        while (newClusterLen < requiredLength)
-        {
-            newClusterLen *= 2;
-        }
-
-        var oldLen = ClusterMigrationPendingSlots.Length;
-        var grownSlots = new ulong[newClusterLen];
-        Array.Copy(ClusterMigrationPendingSlots, grownSlots, oldLen);
-        var grownKeys = new int[newClusterLen];
-        Array.Copy(ClusterMigrationDestCellKeys, grownKeys, oldLen);
-        Array.Fill(grownKeys, -1, oldLen, newClusterLen - oldLen);
-        var grownAxes = new byte[newClusterLen];
-        Array.Copy(ClusterShrinkPendingAxes, grownAxes, oldLen);
-        Volatile.Write(ref ClusterMigrationDestCellKeys, grownKeys);
-        Volatile.Write(ref ClusterShrinkPendingAxes, grownAxes);
-        Volatile.Write(ref ClusterMigrationPendingSlots, grownSlots);
     }
 
     /// <summary>
