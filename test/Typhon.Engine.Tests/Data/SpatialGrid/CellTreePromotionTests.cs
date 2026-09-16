@@ -114,7 +114,7 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
         {
             foreach (var r in cs.QueryAabb(dbe.SpatialGrid, qMin, qMin, float.NegativeInfinity, qMax, qMax, float.PositiveInfinity))
             {
-                hits.Add(r.EntityId);
+                hits.Add(unchecked((long)r.Entity.RawValue));
             }
         }
 
@@ -450,7 +450,7 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
         foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 0f, 0f, float.NegativeInfinity, 4_000f, 4_000f, float.PositiveInfinity))
         {
             // Entity AND bounds: an entity that survived into the wrong cluster, or with a bound the rebuild recomputed differently, must not compare equal.
-            found.Add($"{r.EntityId}:{r.MinX:R},{r.MinY:R},{r.MaxX:R},{r.MaxY:R}");
+            found.Add($"{r.Entity}:{r.MinX:R},{r.MinY:R},{r.MaxX:R},{r.MaxY:R}");
         }
         return found;
     }
@@ -611,7 +611,7 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
         {
             foreach (var outerHit in cs.QueryAabb(dbe.SpatialGrid, 100f, 100f, float.NegativeInfinity, 600f, 600f, float.PositiveInfinity))
             {
-                outerNested.Add(outerHit.EntityId);
+                outerNested.Add(unchecked((long)outerHit.Entity.RawValue));
 
                 if (innerResults.Count >= NestedRuns)
                 {
@@ -622,7 +622,7 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
                 var inner = new HashSet<long>();
                 foreach (var innerHit in cs.QueryAabb(dbe.SpatialGrid, 400f, 400f, float.NegativeInfinity, 900f, 900f, float.PositiveInfinity))
                 {
-                    inner.Add(innerHit.EntityId);
+                    inner.Add(unchecked((long)innerHit.Entity.RawValue));
                 }
                 innerResults.Add(inner);
             }
@@ -693,7 +693,7 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
             {
                 foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 200f, 200f, float.NegativeInfinity, 500f, 500f, float.PositiveInfinity))
                 {
-                    warmHits += r.EntityId;
+                    warmHits += r.Entity.EntityKey;
                 }
             }
             Assert.That(warmHits, Is.Not.Zero, "the warm-up must actually hit entities, or the measured loop below walks a different path");
@@ -715,7 +715,7 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
                 {
                     foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 200f, 200f, float.NegativeInfinity, 500f, 500f, float.PositiveInfinity))
                     {
-                        hits += r.EntityId;
+                        hits += r.Entity.EntityKey;
                     }
                 }
 
@@ -743,7 +743,7 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
         foreach (var r in cs.QueryAabb(dbe.SpatialGrid, qMin, qMin, float.NegativeInfinity, qMax, qMax, float.PositiveInfinity))
         {
-            hits.Add(r.EntityId);
+            hits.Add(unchecked((long)r.Entity.RawValue));
         }
 
         return hits;

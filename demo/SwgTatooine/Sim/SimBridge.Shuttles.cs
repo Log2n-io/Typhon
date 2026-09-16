@@ -285,8 +285,7 @@ public sealed partial class SimBridge
             return;
         }
 
-        var cs = Dbe._archetypeStates[Archetype<Player>.Metadata.ArchetypeId]?.ClusterState;
-        using var epoch = EpochGuard.Enter(Dbe.EpochManager);
+        var cs = Dbe._archetypeStates[Archetype<Player>.CatalogId]?.ClusterState;
         var steadyProbed = false;
         var probes = 0;
         for (var k = 0; k < ports.Count; k++)
@@ -380,7 +379,7 @@ public sealed partial class SimBridge
     /// <summary>
     /// The work the engine's radius query does for the same centres, counted rather than timed, per query: cell halves opened, clusters the broadphase
     /// scans in them, clusters whose bound overlaps the query box, and entities the narrowphase then tests. Mirrors <c>AabbClusterEnumerator</c>'s linear
-    /// path — no cell is promoted to a tree at the default threshold. Caller holds an epoch.
+    /// path — no cell is promoted to a tree at the default threshold. Runs inside a system body, so RT-01 supplies the epoch scope.
     /// </summary>
     private unsafe (double Cells, double Scanned, double Overlapping, double Tested, double Pages) CountPortWork(ArchetypeClusterState cs,
         (float X, float Z) port)

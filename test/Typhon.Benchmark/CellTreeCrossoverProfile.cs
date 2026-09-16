@@ -694,7 +694,7 @@ static class CellTreeCrossoverProfile
             var (x, y) = boxes[b];
             foreach (var hit in arm.State.QueryAabb(arm.Engine.SpatialGrid, x, y, float.NegativeInfinity, x + edge, y + edge, float.PositiveInfinity))
             {
-                found += hit.EntityId == 0 ? 0 : 1;
+                found += hit.Entity.IsNull ? 0 : 1;
             }
         }
 

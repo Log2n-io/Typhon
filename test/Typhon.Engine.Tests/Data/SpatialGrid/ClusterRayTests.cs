@@ -134,7 +134,7 @@ class ClusterRayTests : TestBase<ClusterRayTests>
             {
                 if (OracleRayHit(ox, oy, ndx, ndy, maxDist, (float)r.MinX, (float)r.MinY, (float)r.MaxX, (float)r.MaxY, out float t))
                 {
-                    oracle.Add((r.EntityId, t));
+                    oracle.Add((unchecked((long)r.Entity.RawValue), t));
                 }
             }
         }

@@ -1702,7 +1702,27 @@ public sealed partial class TyphonRuntime : IDisposable
             SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid)
         };
         ctx.DebugValidateWorkerId(Scheduler.WorkerSlotCount, sys.Name);
-        sys.CallbackAction(ctx);
+
+        // RT-01: every system body runs inside an epoch scope. This shape is the one that had none — a serial system gets one from its transaction and a
+        // parallel query system from its per-worker accessor, but a chunked callback builds a bare TickContext and calls straight into user code. Without
+        // this, ChunkedCallbackSystem is a PUBLIC shape from which the public spatial query cannot legally be called (#909). EpochGuard nests and only the
+        // outermost scope advances the global epoch, so the fence's own guards stay correct and this costs one atomic pair per chunk.
+        // The null check is NOT dead code, whatever the construction path alone suggests. This file guards Engine at ten sites — two of them explicit
+        // `Engine != null` tests on dispatch paths (:588, :1064) — and the TickContext built just above already reads `Engine?.SpatialGrid`. A dispatch that
+        // reaches here without a live engine must not take an NullReferenceException on the tick path, which is what dereferencing unguarded would give it.
+        // When it does happen the body runs unscoped: that is exactly the pre-#909 behaviour for this shape, and strictly better than throwing, so RT-01
+        // carries the caveat rather than this method asserting it away.
+        var epochManager = Engine?.EpochManager;
+        if (epochManager == null)
+        {
+            sys.CallbackAction(ctx);
+            return;
+        }
+
+        using (EpochGuard.Enter(epochManager))
+        {
+            sys.CallbackAction(ctx);
+        }
     }
 
     /// <summary>Paths 1 &amp; 2: Non-Versioned chunk execution with per-worker EntityAccessor from per-system PTA.</summary>

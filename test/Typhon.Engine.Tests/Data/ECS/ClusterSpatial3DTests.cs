@@ -106,7 +106,7 @@ class ClusterSpatial3DTests : TestBase<ClusterSpatial3DTests>
             foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 0f, 0f, openAxis ? float.NegativeInfinity : 0f,
                          1_000f, 1_000f, openAxis ? float.PositiveInfinity : 1_000f))
             {
-                found.Add(r.EntityId);
+                found.Add(unchecked((long)r.Entity.RawValue));
             }
         }
 

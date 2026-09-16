@@ -2519,7 +2519,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                         using var guard = EpochGuard.Enter(_tx.DBE.EpochManager);
                         foreach (var hit in cs.QueryAabb(grid, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ))
                         {
-                            var entityId = EntityId.FromRaw(hit.EntityId);
+                            var entityId = hit.Entity;
                             if (!MaskTestByRouting(entityId.ArchetypeId))
                             {
                                 continue;
@@ -2541,7 +2541,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                             }
 
                             var hitGated = visGated && !memoFullyVisible;
-                            if (IsVisibleAtSnapshot(hit.EntityId, hitGated, visState, visBuf, meta._entityRecordSize, txTsn, ref visAccessor))
+                            if (IsVisibleAtSnapshot(unchecked((long)hit.Entity.RawValue), hitGated, visState, visBuf, meta._entityRecordSize, txTsn,
+                                    ref visAccessor))
                             {
                                 result.Add(entityId);
                             }
@@ -2564,7 +2565,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                         using var guard = EpochGuard.Enter(_tx.DBE.EpochManager);
                         foreach (var hit in cs.QueryRadius(grid, cX, cY, cZ, radius))
                         {
-                            var entityId = EntityId.FromRaw(hit.EntityId);
+                            var entityId = hit.Entity;
                             if (!MaskTestByRouting(entityId.ArchetypeId))
                             {
                                 continue;
@@ -2577,7 +2578,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                             }
 
                             var hitGated = visGated && !memoFullyVisible;
-                            if (IsVisibleAtSnapshot(hit.EntityId, hitGated, visState, visBuf, meta._entityRecordSize, txTsn, ref visAccessor))
+                            if (IsVisibleAtSnapshot(unchecked((long)hit.Entity.RawValue), hitGated, visState, visBuf, meta._entityRecordSize, txTsn,
+                                    ref visAccessor))
                             {
                                 result.Add(entityId);
                             }

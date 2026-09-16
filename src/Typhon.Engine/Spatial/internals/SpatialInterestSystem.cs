@@ -421,7 +421,11 @@ internal sealed unsafe class SpatialInterestSystem
                     foreach (var hit in clusterState.QueryAabb(grid, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, config.CategoryMask))
                     {
                         EnsureChangeBufferCapacity(state);
-                        state.ChangeBuffer[state.ChangeCount++] = hit.EntityId;
+
+                        // The buffer stays raw packed longs: it is handed out as a ReadOnlySpan<long> through SpatialChangeResult, and the other producer
+                        // (:349) already writes one. Only the query RESULT became typed (#909), so the unpacking happens here rather than the buffer changing
+                        // shape underneath its consumers.
+                        state.ChangeBuffer[state.ChangeCount++] = unchecked((long)hit.Entity.RawValue);
                     }
                 }
             }

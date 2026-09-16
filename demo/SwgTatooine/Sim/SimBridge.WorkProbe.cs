@@ -30,7 +30,7 @@ public sealed partial class SimBridge
     private ArchetypeClusterState StateOf<TArch>() where TArch : Archetype<TArch>, new()
         => Dbe._archetypeStates[Archetype<TArch>.Metadata.ArchetypeId]?.ClusterState;
 
-    /// <summary>Count one query's work into <paramref name="work"/>. Caller holds an epoch.</summary>
+    /// <summary>Count one query's work into <paramref name="work"/>. Runs inside a system body, so RT-01 supplies the epoch scope.</summary>
     private unsafe void ProbeWork(int target, ArchetypeClusterState cs, in BSphere2F sphere, long hits, Span<long> work)
     {
         var perCell = cs?.PerCellIndex;

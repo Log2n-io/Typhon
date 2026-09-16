@@ -491,6 +491,45 @@ descends from this one property.
   note: no RuleMutant. Putting the live read back on the chunk path would take a seam there; the verifier was run against the code that did it,
         and failed as quoted
 
+## Module: RT — Epoch scope around system bodies
+
+### RT-01: Every system body runs inside an epoch scope, and must not block in it `[fatal]` `[silent]`
+  invariant ∀ system S dispatched by the runtime: S's body executes with a live EpochGuard scope on the executing thread, whatever S's shape —
+            a serial CallbackSystem / non-parallel QuerySystem gets it from the transaction OnSystemStartInternal creates (Transaction.Init calls
+            EnterScope unconditionally); a parallel QuerySystem from the per-worker EntityAccessor (InitLightweight, for the accessor's lifetime);
+            a ChunkedCallbackSystem from the dispatcher itself, once per chunk (ExecuteChunkedCallback); and a parallel QuerySystem that WritesVersioned
+            from its per-chunk Transaction (ExecuteChunkWithTransaction) rather than from an accessor — four mechanisms, not three
+  note the parallel-query accessor pins for the ACCESSOR'S lifetime and never exits inside the tick (EntityAccessor.InitLightweight, "No epoch exit
+       here"): a standing pin rather than a scope. The guarantee holds, but this rule now makes that pin load-bearing for a public contract
+  note the dispatcher's own EpochGuard.Dispose THROWS on a depth mismatch (EpochThreadRegistry.UnpinCurrentThread), so a body that leaks a scope —
+       an undisposed Transaction, say — fails loudly here rather than corrupting reclamation silently. That is deliberate: swallowing it would hide
+       epoch-depth corruption, which is worse than a loud failure, but it does put a throw on the tick path
+  invariant the scopes NEST: EpochGuard.Enter increments a depth and only the outermost scope advances the global epoch, so a body that opens its
+            own guard — or the fence, which opens one in its own Execute override — stays correct and costs one atomic pair
+  never a system body that blocks — a lock held across I/O, a wait on another tick's work — because the scope pins an epoch for the body's whole
+        duration and page eviction plus view-buffer reclamation wait on the oldest live epoch (PS-09)
+  note the guarantee is scoped to a runtime WITH a live engine. ExecuteChunkedCallback runs the body unscoped when Engine or its EpochManager is
+       null, because throwing an NRE on the tick path would be worse and this file guards Engine at ten other sites (TyphonRuntime.cs:588, :1064
+       and the Engine?.SpatialGrid reads). That case is pre-#909 behaviour for this shape, not a regression — but it IS the one hole in the ∀, and
+       a body that reaches it can take no page access safely
+  requires: PS-02 (every page access sits inside an EpochGuard scope — this rule is how a system body satisfies it without saying so)
+  rationale: ClusterSpatialQuery is PUBLIC and its enumerator builds a ChunkAccessor over cluster pages, so it needs the pages pinned. EpochGuard is
+    internal and stays internal (a public RAII pin is the footgun PS-09 describes), so the guarantee has to come from the framework rather than from
+    the caller. Before this rule, ChunkedCallbackSystem — also public — was the one shape the dispatcher gave no scope: a user could write that shape
+    and then had NO legal way to call the public spatial query from it, because the only way to satisfy the documented precondition was a friend
+    declaration. Making the dispatcher open the scope costs one Interlocked pair per chunk against a per-dispatch overhead already in the 10-30 µs
+    range, and it is what lets the query's XML doc stop naming a precondition its caller cannot express.
+  on_violation: a body reading cluster or component pages with no live scope can have those pages reclaimed under it mid-read — a torn read or a
+    use-after-free, silent, and only under eviction pressure. The reverse violation, blocking inside the scope, is silent too: reclamation stalls
+    behind the oldest live epoch and the page cache grows until something else fails
+  scope: TyphonRuntime.cs (ExecuteChunkedCallback, ExecuteChunkWithAccessor, ExecuteChunkWithTransaction, OnParallelQueryChunk), Transaction.cs (Init),
+         ChunkedCallbackSystem.cs,
+         EntityAccessor.cs (InitLightweight), EpochGuard.cs (Enter, Dispose), ClusterSpatialQuery.cs
+  verified: EpochScopeAroundSystemBodiesTests — one test per mechanism, each asserting a live scope from inside the body:
+            ASerialCallbackSystemBody_RunsInsideAnEpochScope, AParallelQuerySystemBody_RunsInsideAnEpochScope,
+            AChunkedCallbackSystemBody_RunsInsideAnEpochScope (the last fails on the pre-fix dispatcher, which called CallbackAction with no guard), plus
+            AChunkedCallbackBody_CanRunThePublicClusterSpatialQuery, the case the rule exists for
+
 ## Module: Worker Wake
 
 Between dispatches every worker parks in a kernel wait. These rules say how a dispatch gets each one back.

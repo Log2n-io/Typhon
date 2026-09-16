@@ -74,7 +74,7 @@ class ClusterOverhangTests : TestBase<ClusterOverhangTests>
         {
             while (e.MoveNext())
             {
-                hits.Add(e.Current.EntityId);
+                hits.Add(unchecked((long)e.Current.Entity.RawValue));
             }
         }
         finally
@@ -110,7 +110,7 @@ class ClusterOverhangTests : TestBase<ClusterOverhangTests>
             Assert.That(hits, Is.EqualTo(new[] { id }), "MoveNext");
             Assert.That(count, Is.EqualTo(1), "Count");
             Assert.That(written, Is.EqualTo(1), "Fill");
-            Assert.That(buffer[0].EntityId, Is.EqualTo(id), "Fill");
+            Assert.That(unchecked((long)buffer[0].Entity.RawValue), Is.EqualTo(id), "Fill");
         });
     }
 
@@ -129,7 +129,7 @@ class ClusterOverhangTests : TestBase<ClusterOverhangTests>
         {
             while (e.MoveNext())
             {
-                hits.Add(e.Current.EntityId);
+                hits.Add(unchecked((long)e.Current.Entity.RawValue));
             }
         }
         finally

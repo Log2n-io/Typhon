@@ -128,7 +128,6 @@ public sealed partial class SimBridge
                 {
                     aggroQueries++;
                     var sphere = new BSphere2F { CenterX = x, CenterY = z, Radius = ai.AggroRadius };
-                    using var epoch = EpochGuard.Enter(Dbe.EpochManager);
                     var e = Dbe.ClusterSpatialQuery<Player>().Radius(in sphere);
                     try
                     {
@@ -694,7 +693,6 @@ public sealed partial class SimBridge
 
                 var sphere = new BSphere2F { CenterX = places[idx].X, CenterY = places[idx].Z, Radius = AwarenessRadius };
                 var sample = probe && ((cluster.ChunkId * 64) + idx) % WorkProbeSampleEvery == 0;
-                using var epoch = EpochGuard.Enter(Dbe.EpochManager);
                 if (only is null or AwarenessTarget.Structures)
                 {
                     var n = CountInRadius<WorldObject>(in sphere);
@@ -811,7 +809,8 @@ public sealed partial class SimBridge
     }
 
     /// <summary>
-    /// <see cref="AwarenessApi.Batch"/>: one <c>CountRadius</c> per target archetype for a source cluster's players, under one epoch scope. Each player's
+    /// <see cref="AwarenessApi.Batch"/>: one <c>CountRadius</c> per target archetype for a source cluster's players, inside the epoch
+    /// scope RT-01 supplies. Each player's
     /// count is exactly its own query's, so the statistics are those of the per-player path.
     /// </summary>
     private void AwarenessBatch(
@@ -823,7 +822,6 @@ public sealed partial class SimBridge
         ref long queries,
         ref long hits)
     {
-        using var epoch = EpochGuard.Enter(Dbe.EpochManager);
         if (only is null or AwarenessTarget.Structures)
         {
             hits += CountBatch<WorldObject>(members, counts, 0, sampled, work);

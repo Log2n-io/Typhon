@@ -619,7 +619,9 @@ public unsafe ref struct AabbClusterEnumerator
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static ClusterSpatialQueryResult ResultAt(byte* clusterBase, int chunkId, int slot, int idsOffset, double minX, double minY, double minZ,
         double maxX, double maxY, double maxZ, double distSq) =>
-        new(*(long*)(clusterBase + idsOffset + (slot * 8)), chunkId, slot, minX, minY, minZ, maxX, maxY, maxZ, distSq);
+        // The slab holds the packed EntityId bit pattern, so the typed wrap happens HERE — once per hit, with the bytes already in a register — rather than
+        // at every call site through an internal FromRaw the public API could not reach (#909 part 2).
+        new(EntityId.FromRaw(*(long*)(clusterBase + idsOffset + (slot * 8))), chunkId, slot, minX, minY, minZ, maxX, maxY, maxZ, distSq);
 
     /// <summary>Drain the current cluster's slots in <paramref name="bits"/> into <paramref name="sink"/> through this archetype's tier reader.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

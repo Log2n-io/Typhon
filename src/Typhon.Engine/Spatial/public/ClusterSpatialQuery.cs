@@ -27,8 +27,15 @@ namespace Typhon.Engine;
 /// is used by consumers that iterate cluster archetypes at runtime (<c>SpatialTriggerSystem</c>, <c>SpatialInterestSystem</c>, <c>EcsQuery</c>).
 /// </para>
 /// <para>
-/// <b>Epoch scope.</b> The caller must be inside an <see cref="EpochGuard"/> scope; the enumerator creates a <see cref="ChunkAccessor{TStore}"/> on the
-/// cluster segment to read entity bounds during the narrowphase pass.
+/// <b>Epoch scope: call this from a system body and there is nothing to do.</b> The enumerator creates a <see cref="ChunkAccessor{TStore}"/> on the cluster
+/// segment to read entity bounds during the narrowphase, so the cluster pages must not be reclaimed under it — and rule RT-01 makes the framework
+/// responsible for that: every system body, of every shape, runs inside an epoch scope the dispatcher opened. That is why this no longer names a precondition
+/// the caller has no public way to express (#909).
+/// </para>
+/// <para>
+/// The obligation that comes with it: <b>do not block inside a system body</b> (PS-09). The scope pins an epoch for as long as the body runs, and page
+/// eviction and view-buffer reclamation wait on the oldest live epoch. A caller that is <i>not</i> a system body — a tool, or a diagnostic run outside the
+/// tick — has no scope and cannot open one through the public API; such a caller belongs inside a system.
 /// </para>
 /// </remarks>
 public readonly ref struct ClusterSpatialQuery<TArch> where TArch : Archetype<TArch>, new()
@@ -343,9 +350,9 @@ public interface IRadiusBatchSink
 }
 
 /// <summary>
-/// Result of a cluster spatial query match. Holds the entity id, its location inside the cluster storage (chunk id and slot index), the entity's tight
-/// bounds as read by the narrowphase, and — for Radius queries — the squared distance from the query center to the closest point on the entity's AABB.
-/// For AABB queries, <see cref="DistanceSq"/> is <c>0</c> and should be ignored.
+/// Result of a cluster spatial query match. Holds the matched <see cref="Typhon.Engine.EntityId"/>, its location inside the cluster storage (chunk id and slot
+/// index), the entity's tight bounds as read by the narrowphase, and — for Radius queries — the squared distance from the query center to the closest point on
+/// the entity's AABB. For AABB queries, <see cref="DistanceSq"/> is <c>0</c> and should be ignored.
 /// </summary>
 /// <remarks>
 /// <b>The bounds are f64 since #914</b>, because they are WORLD coordinates and the world frame is f64. For an f32 tier the values are the stored floats
@@ -357,8 +364,8 @@ public interface IRadiusBatchSink
 /// </remarks>
 public readonly struct ClusterSpatialQueryResult
 {
-    /// <summary>Entity id of the matched entity.</summary>
-    public readonly long EntityId;
+    /// <summary>The matched entity, ready to <c>Open</c>, <c>Destroy</c> or store. Eight bytes, the same size as the packed id it replaced (#909).</summary>
+    public readonly EntityId Entity;
 
     /// <summary>Chunk id of the cluster holding the matched entity, within the archetype's cluster storage segment.</summary>
     public readonly int ClusterChunkId;
@@ -390,10 +397,10 @@ public readonly struct ClusterSpatialQueryResult
     /// <summary>Maximum Z of the entity's tight AABB. For 2D archetypes this reflects the query's Z range (typically an infinity sentinel) and should be ignored.</summary>
     public readonly double MaxZ;
 
-    internal ClusterSpatialQueryResult(long entityId, int clusterChunkId, int slotIndex, double minX, double minY, double minZ, double maxX, double maxY,
+    internal ClusterSpatialQueryResult(EntityId entity, int clusterChunkId, int slotIndex, double minX, double minY, double minZ, double maxX, double maxY,
         double maxZ, double distanceSq = 0d)
     {
-        EntityId = entityId;
+        Entity = entity;
         ClusterChunkId = clusterChunkId;
         SlotIndex = slotIndex;
         MinX = minX;
