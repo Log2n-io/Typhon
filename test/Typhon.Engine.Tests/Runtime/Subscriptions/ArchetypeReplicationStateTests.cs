@@ -18,23 +18,30 @@ unsafe class ArchetypeReplicationStateTests
 
     private ResourceRegistry _registry;
     private MemoryAllocator _allocator;
+    private NetIdAllocator _netIds;
 
     [SetUp]
     public void SetUp()
     {
         _registry = new ResourceRegistry(new ResourceRegistryOptions { Name = "ArchetypeReplicationStateTests" });
         _allocator = new MemoryAllocator(_registry, new MemoryAllocatorOptions { Name = "OwnerTestAllocator" });
+
+        // One allocator shared by every state the fixture builds, which is the production shape: netIds are global, so a per-archetype allocator would make
+        // the same number mean different entities to different readers and break the wire's encode-once property.
+        _netIds = new NetIdAllocator("NetIds", _registry.Runtime);
     }
 
     [TearDown]
     public void TearDown()
     {
+        _netIds?.Dispose();
         _allocator?.Dispose();
         _registry?.Dispose();
     }
 
     private ArchetypeReplicationState NewState(long budgetBytes = AmpleBudget, string id = "Creature") =>
-        new(id, _registry.Runtime, _allocator, new ReplicationBlockLayout(SlotCount), new SubscriptionsOptions { StatePoolBudgetBytes = budgetBytes });
+        new(id, _registry.Runtime, _allocator, new ReplicationBlockLayout(SlotCount), new SubscriptionsOptions { StatePoolBudgetBytes = budgetBytes },
+            _netIds);
 
     [Test]
     public void AFreshStateCommitsNothing()
@@ -233,15 +240,15 @@ unsafe class ArchetypeReplicationStateTests
     public void AConstructorWithoutAParentIsRejected()
     {
         Assert.Throws<System.ArgumentNullException>(() =>
-            _ = new ArchetypeReplicationState("NoParent", null, _allocator, new ReplicationBlockLayout(SlotCount), new SubscriptionsOptions()));
+            _ = new ArchetypeReplicationState("NoParent", null, _allocator, new ReplicationBlockLayout(SlotCount), new SubscriptionsOptions(), _netIds));
     }
 
     /// <summary>
-    /// The directory and the identity allocator were previously in no snapshot and no budget, while growing with untrusted client input. This node reports
-    /// them; the pool's slabs must stay excluded, because the pool is a child and the graph would otherwise double-count them.
+    /// The directory was previously in no snapshot and no budget, while growing with untrusted client input. This node reports it; the pool's slabs must stay
+    /// excluded because the pool is a child, and the SHARED identity allocator must stay excluded because it is not this node's to report.
     /// </summary>
     [Test]
-    public void ReportedMemoryCoversTheDirectoryAndIdentitiesButNotTheSlabs()
+    public void ReportedMemoryCoversTheDirectoryButNotTheSlabsOrTheSharedIdentities()
     {
         using var state = NewState();
         var atRest = state.EstimatedMemorySize;
@@ -249,33 +256,47 @@ unsafe class ArchetypeReplicationStateTests
         for (var chunkId = 0; chunkId < 400; chunkId++)
         {
             Assert.That(state.TryAttachBlock(chunkId, out _), Is.True);
-            state.NetIds.Allocate();
         }
 
         var afterGrowth = state.EstimatedMemorySize;
+
+        // Grow the identity space hard, with no blocks attached. Counting it here is what N replicated archetypes would each do to the SAME allocator, so the
+        // graph would report one shared array as many — the double-count IMemoryResource exists to forbid.
+        for (var i = 0; i < 4_000; i++)
+        {
+            _netIds.Allocate();
+        }
+
+        var afterIdentityGrowth = state.EstimatedMemorySize;
 
         Assert.Multiple(() =>
         {
             Assert.That(atRest, Is.GreaterThan(0), "the structures exist from construction, so they are never free");
             Assert.That(afterGrowth, Is.GreaterThan(atRest), "the reported figure must follow the watched set — that is the whole point of reporting it");
+            Assert.That(afterIdentityGrowth, Is.EqualTo(afterGrowth),
+                "the shared allocator's bytes are reported by the allocator, exactly once, not per archetype");
+            Assert.That(_netIds.EstimatedMemorySize, Is.GreaterThan(0), "and they are reported — excluding them here must not make them vanish");
             Assert.That(state.Pool.CommittedBytes, Is.GreaterThan(afterGrowth * 4L),
                 "slab bytes dwarf the side structures and must not be counted here; the pool reports them as a child");
         });
     }
 
     [Test]
-    public void IdentitiesComeFromTheOwnersAllocator()
+    public void IdentitiesComeFromTheSharedAllocator()
     {
         using var state = NewState();
+        using var other = NewState(id: "Player");
 
         var first = state.NetIds.Allocate();
         state.NetIds.Release(first);
+        state.NetIds.DrainQuarantine();
         var reused = state.NetIds.Allocate();
 
         Assert.Multiple(() =>
         {
+            Assert.That(state.NetIds, Is.SameAs(other.NetIds), "two replicated archetypes share one identity space — a netId is global");
             Assert.That(first, Is.Not.EqualTo(NetIdAllocator.NoNetId));
-            Assert.That(reused, Is.EqualTo(first), "identities recycle, keeping the space dense");
+            Assert.That(reused, Is.EqualTo(first), "identities recycle across the tick boundary, keeping the space dense");
             Assert.That(state.NetIds.GenerationOf(reused), Is.Not.Zero, "and a reused identity is observably a different entity");
         });
     }

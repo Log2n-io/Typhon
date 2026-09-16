@@ -51,6 +51,11 @@ public sealed partial class TyphonRuntime : IDisposable
     // SubscriptionsContext's remarks.
     private readonly SubscriptionsContext _subscriptionsContext = new();
 
+    // The database's network identities, shared by every replicated archetype because netIds are global: the wire encodes an event once and memcpy's it to
+    // every receiver on the strength of that, and an entityRef arrives with no archetype to disambiguate it. Constructed in the ctor rather than inline
+    // because it is a resource-graph node and needs a parent.
+    private readonly NetIdAllocator _netIds;
+
     /// <summary>The replication track's tick-scoped context. Internal: the session count is written by ingress, and tests read its ordering journal.</summary>
     internal SubscriptionsContext SubscriptionsContextForTest => _subscriptionsContext;
 
@@ -281,6 +286,10 @@ public sealed partial class TyphonRuntime : IDisposable
         Engine = engine;
         Scheduler = scheduler;
         Options = options;
+
+        // Parented under the scheduler, not under engine.Parent. The scheduler is always present, whereas a runtime built against an engine with no resource
+        // parent would otherwise throw here — during EVERY runtime construction, for a subsystem nothing has switched on yet.
+        _netIds = new NetIdAllocator("Subscriptions.NetIds", scheduler);
         _logger = logger ?? NullLogger.Instance;
         _systemTransactions = new Transaction[scheduler.AllSystemCount];
         _systemViews = new ViewBase[scheduler.AllSystemCount];
@@ -454,6 +463,12 @@ public sealed partial class TyphonRuntime : IDisposable
     {
         _tcpServer?.Dispose();
         Scheduler.Dispose();
+
+        // AFTER the scheduler, not before. A tick already past the shutdown check keeps dispatching on the timer thread, and every tick ends by draining this
+        // allocator's quarantine — so disposing it first opens a window where that drain runs against a disposed object. Scheduler.Dispose joins the workers
+        // and stops the timer thread, so nothing can reach it once this line is passed. DrainQuarantine tolerates disposal as well, because belt and braces is
+        // what the equivalent disposed-signal bug cost to learn the first time.
+        _netIds?.Dispose();
 
         // Dispose per-system PTAs AFTER scheduler — workers must be fully stopped
         // before we flush their per-thread EntityAccessors' ChangeSets.
@@ -2204,6 +2219,11 @@ public sealed partial class TyphonRuntime : IDisposable
         // Reset the replication context BEFORE the fence, not beside the dispatch. A fence that throws never reaches its dispatch, so a reset placed there
         // would leave the previous tick's journal standing on exactly the tick whose emptiness is the thing worth observing.
         _subscriptionsContext.Reset(scheduler.CurrentTickNumber, scheduler.WorkerCount);
+
+        // The tick boundary the identity quarantine is defined against. Every netId released during the previous tick becomes reissuable here and not before,
+        // so no frame can carry both the leave of an identity's old holder and the enter of its new one — the wire applies leaves last, so such a frame would
+        // land the leave on the entity that just entered. Once per tick, on the driver thread, before the track dispatches.
+        _netIds.DrainQuarantine();
 
         try
         {

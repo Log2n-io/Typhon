@@ -58,8 +58,10 @@ unsafe class ReplicationDrainHookParallelFenceTests : TestBase<ReplicationDrainH
 
         try
         {
+            // Shared database-wide, because netIds are global; disposed by cascade with the registry.
+            var netIds = new NetIdAllocator("NetIds", registry.Runtime);
             replication = new ArchetypeReplicationState("Creature", registry.Runtime, allocator,
-                new ReplicationBlockLayout(cs.Layout.ClusterSize), new SubscriptionsOptions { StatePoolBudgetBytes = AmpleBudget });
+                new ReplicationBlockLayout(cs.Layout.ClusterSize), new SubscriptionsOptions { StatePoolBudgetBytes = AmpleBudget }, netIds);
             // AttachTo rather than a raw field assignment, so disposal detaches automatically.
             replication.AttachTo(cs);
 

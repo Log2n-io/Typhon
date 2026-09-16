@@ -61,8 +61,11 @@ unsafe class ReplicationDrainHookTests : TestBase<ReplicationDrainHookTests>
         try
         {
             var cs = ClusterStateOf(dbe);
+            // The identity allocator is shared database-wide (netIds are global), so it is built beside the state rather than by it. Disposed by cascade with
+            // the registry in the finally below.
+            var netIds = new NetIdAllocator("NetIds", registry.Runtime);
             var replication = new ArchetypeReplicationState("Creature", registry.Runtime, allocator,
-                new ReplicationBlockLayout(cs.Layout.ClusterSize), new SubscriptionsOptions { StatePoolBudgetBytes = AmpleBudget });
+                new ReplicationBlockLayout(cs.Layout.ClusterSize), new SubscriptionsOptions { StatePoolBudgetBytes = AmpleBudget }, netIds);
 
             // Everything below the fence sees the hook; without this line all three drain sites stay no-ops. AttachTo rather than a raw field assignment,
             // so disposal detaches automatically — the ECS must not be left holding a disposed state.

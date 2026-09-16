@@ -37,14 +37,22 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// <param name="allocator">Engine allocator, supplied by DI.</param>
     /// <param name="layout">The archetype's block layout.</param>
     /// <param name="options">Operator configuration carrying the pool's budget.</param>
-    public ArchetypeReplicationState(string id, IResource parent, IMemoryAllocator allocator, ReplicationBlockLayout layout, SubscriptionsOptions options)
+    /// <param name="netIds">
+    /// The database's identity allocator, SHARED with every other replicated archetype. Injected rather than constructed here because netIds are global: the
+    /// wire encodes an event once and memcpy's it to every receiver on the strength of that, and an <c>entityRef</c> arrives with no archetype to disambiguate
+    /// it. This state uses the allocator but does not own it, so it neither reports its bytes nor disposes it.
+    /// </param>
+    public ArchetypeReplicationState(string id, IResource parent, IMemoryAllocator allocator, ReplicationBlockLayout layout, SubscriptionsOptions options,
+        NetIdAllocator netIds)
         : base(Require(id, nameof(id)), ResourceType.Node, Require(parent, nameof(parent)))
     {
         // id and parent are validated in the base-call arguments above: the base constructor registers this node with the graph, so validating them in the
         // body would run too late — a null parent would already have faulted inside ResourceNode, and a null id would leave a registered node behind.
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(netIds);
 
         Layout = layout;
+        NetIds = netIds;
 
         // The pool hangs off THIS node, not off `parent`, so the graph reads Runtime -> {id} -> {id}.Pool -> slabs. That nesting is what lets this node
         // report the directory and identity bytes — which are nobody's child and were previously invisible — while the slabs stay accounted to the pool.
@@ -55,7 +63,6 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
         try
         {
             Directory = new ReplicationDirectory();
-            NetIds = new NetIdAllocator();
         }
         catch
         {
@@ -67,9 +74,12 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// <inheritdoc />
     /// <remarks>
     /// <para>
-    /// The directory's backing map and the identity allocator's side arrays, which are plain managed arrays owned by this node rather than resources in
-    /// their own right. The pool's slabs are deliberately excluded: the pool is a CHILD of this node, and <see cref="IMemoryResource"/> requires a node to
-    /// exclude its children or the graph double-counts them.
+    /// The directory's backing map, a plain managed array owned by this node rather than a resource in its own right. The pool's slabs are deliberately
+    /// excluded: the pool is a CHILD of this node, and <see cref="IMemoryResource"/> requires a node to exclude its children or the graph double-counts them.
+    /// <para>
+    /// The identity allocator's side arrays were counted here until netIds went global, and stopped being countable here the moment the allocator became
+    /// shared: every replicated archetype would have added the same bytes to its own total. It is a node in its own right now and reports them once.
+    /// </para>
     /// </para>
     /// <para>
     /// This exists because <c>SubscriptionsOptions.StatePoolBudgetBytes</c> bounds the block pool alone. The bytes reported here follow the same untrusted
@@ -81,7 +91,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     {
         get
         {
-            var bytes = Directory.EstimatedBytes + NetIds.EstimatedBytes + 128L;
+            var bytes = Directory.EstimatedBytes + 128L;
             return bytes > int.MaxValue ? int.MaxValue : (int)bytes;
         }
     }
@@ -102,7 +112,10 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// <summary>Chunk id to block. Read directly by the projection passes.</summary>
     public ReplicationDirectory Directory { get; }
 
-    /// <summary>Network identities and their reuse generations.</summary>
+    /// <summary>
+    /// The database's network identities and their reuse generations. Shared with every other replicated archetype and owned by neither — disposing this
+    /// state leaves it alone.
+    /// </summary>
     public NetIdAllocator NetIds { get; }
 
     /// <summary>Clusters currently carrying a block.</summary>

@@ -107,12 +107,14 @@
 
 ### SUB-06: A reused network identity is observed as leave-then-enter `[fatal][silent]`
   invariant ∀ netId n reused by a different entity: generation(n) changes between the two holders
-  invariant [Release(n)] → [generation(n) incremented] → [n reachable by Allocate]
+  invariant [Release(n) in tick T] → [generation(n) incremented] → [n quarantined] → [n reachable by Allocate no earlier than T+1]
+  invariant the identity space is GLOBAL: a netId names at most one live entity across the whole database, never one per archetype
   never one netId held by two live entities at the same time
-  never a Release of an identity that is already free (it would thread the free list to itself, after which every
+  never reissue an identity in the tick it was released
+  never a Release of an identity that is already free or quarantined (it would thread the list to itself, after which every
     Allocate returns that same identity and LiveCount runs negative)
-  scope: NetIdAllocator.Allocate, NetIdAllocator.Release, NetIdAllocator.GenerationOf,
-    ReplicationHotEntry.NetId, ReplicationHotEntry.Generation
+  scope: NetIdAllocator.Allocate, NetIdAllocator.Release, NetIdAllocator.DrainQuarantine, NetIdAllocator.GenerationOf,
+    ArchetypeReplicationState.NetIds, ReplicationHotEntry.NetId, ReplicationHotEntry.Generation
   on_violation: a session that missed the release sees one identity carry a second entity's data and concludes the
     entity moved rather than that it was replaced — the client's world silently disagrees with the server's, with no
     error on either side. The double-release form is worse: two live entities share an identity, so one of them is
