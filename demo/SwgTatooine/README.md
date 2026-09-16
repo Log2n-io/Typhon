@@ -214,6 +214,27 @@ Two systems are the workload: interest management (`Awareness` walks only the 20
 doing it) and combat's per-creature radius query. The five fence phases together cost 3.1 ms of the tick, of which `FencePrep` — which cannot
 parallelise for barrier-only archetypes — is half.
 
+### What the tick fence costs
+
+The fence is where the engine reconciles what the systems moved — the phases the per-system table above reports
+alongside the application systems. Medians from the same five runs, at 1 024 m cells:
+
+| Phase | `--pop 1` | `--pop 4` | `--pop 16` | `--pop 64` | `--pop 128` |
+|---|---|---|---|---|---|
+| `FencePrep` | 0.06 ms | 0.16 ms | 0.35 ms | 1.49 ms | 2.86 ms |
+| `FenceAabbRefresh` | 0.04 ms | 0.06 ms | 0.19 ms | 0.79 ms | 1.56 ms |
+| `FenceMigrate` | 0.03 ms | 0.03 ms | 0.09 ms | 0.26 ms | 0.35 ms |
+| `FenceFinalize` | 0.03 ms | 0.06 ms | 0.14 ms | 0.50 ms | 0.93 ms |
+| **Fence total** | **0.16 ms** | **0.31 ms** | **0.78 ms** | **3.04 ms** | **5.70 ms** |
+| Tick | 0.71 ms | 1.40 ms | 4.01 ms | 21.93 ms | 72.74 ms |
+| **Fence share of the tick** | **22.4 %** | **22.2 %** | **19.5 %** | **13.9 %** | **7.8 %** |
+
+- **`FencePrep` is about half the fence at every population** — 49 % at `--pop 64`, 50 % at `--pop 128`. It is also the
+  phase that does not slice for a barrier-only archetype: one worker walks that archetype's clusters while the rest of
+  the pool waits on it.
+- **The fence's share of the tick falls as the population rises**, from 22 % to 8 %, because it grows with what actually
+  moved while the queries grow with density. At scale the fence is not what costs; interest management is.
+
 **Caveats.** One run per point. The 1 024 m column was measured twice, in two separate sweeps — 0.68 / 0.72 ms at
 `--pop 1`, 4.01 / 4.10 at `--pop 16`, 22.83 / 22.98 at `--pop 64` — so read anything under about 5 % as noise. This
 demo's CPU time is bimodal run to run; comparing two configurations needs interleaved pairs, not single runs.
