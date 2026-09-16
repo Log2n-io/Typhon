@@ -300,7 +300,7 @@ public unsafe ref struct AabbClusterEnumerator
         int count = 0;
         // categoryMask 0: the filter is applied on the way out instead, because this broadphase and SpatialRTree disagree on what a mask means. See the
         // tree branch in NextCluster.
-        var e = tree.Query(queryCoords, 0);
+        var e = tree.Query(queryCoords);
         try
         {
             while (e.MoveNext())

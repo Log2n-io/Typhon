@@ -234,7 +234,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         ref readonly var aabb = ref ClusterAabbs[clusterChunkId];
-        if (categoryMask != 0 && (aabb.CategoryMask & categoryMask) == 0)
+        // One spelling of the any-bit cluster admit for every shape (SQ-02) — this was open-coded until #900.
+        if (!AabbClusterEnumerator.CategoryAdmits(aabb.CategoryMask, categoryMask))
         {
             return;
         }

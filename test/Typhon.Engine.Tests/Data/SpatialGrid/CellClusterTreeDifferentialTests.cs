@@ -97,7 +97,7 @@ unsafe class CellClusterTreeDifferentialTests
         CellClusterTree.QueryToCoords(minX, minY, float.NegativeInfinity, maxX, maxY, float.PositiveInfinity, coords);
 
         var hits = new HashSet<int>();
-        foreach (var r in tree.Query(coords, 0))
+        foreach (var r in tree.Query(coords))
         {
             hits.Add((int)r.PayloadId);
         }

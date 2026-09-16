@@ -125,9 +125,17 @@
 ## Module: Queries
 
 ### SQ-01: Query completeness — no false negatives `[fatal]`
-  invariant ∀ query Q, ∀ entity E:
-    E geometrically matches Q ∧ (Q.categoryMask == 0 ∨ (E.CategoryMask & Q.categoryMask) == Q.categoryMask)
+  invariant ∀ query Q, ∀ entity E filed in cluster C:
+    E geometrically matches Q ∧ (Q.categoryMask == 0 ∨ (C.CategoryMask & Q.categoryMask) != 0)
     → E ∈ result set
+    CORRECTED 2026-09-17: this clause read `(E.CategoryMask & Q.categoryMask) == Q.categoryMask` — a PER-ENTITY mask, AND-conjunctive.
+    No per-entity category mask exists anywhere in the engine (SQ-02): the category is an archetype constant carried on the CLUSTER, and
+    a cluster query admits on ANY-BIT overlap. The old form could not fail — any-bit admits a superset of all-bits, so completeness held
+    by accident — which is exactly why it survived: a rule that quantifies over a field that does not exist is satisfiable by reading it
+    as something else, and every reader supplies a different something
+    the SpatialRTree enumerators named in this rule's scope are covered for GEOMETRIC completeness only. Their own leaf test is all-bits, which
+    is SQ-02's business and not a violation of the clause above: no cluster query reaches them with a non-zero mask, so the two semantics never
+    meet. Reading this rule's scope without that sentence makes SpatialRTree.Query.cs's leaf match look like an SQ-01 violation
   invariant a cell-walking cluster query examines every cluster whose box can REACH its region, not only those filed in the cells the region
     covers: a cluster is filed by its entities' centres, so its box can leave its own cell. Two mechanisms, complete together:
       ClusterReach — the cell range is the query's extent grown by it (AabbClusterEnumerator, QueryRay, QueryFrustum), a whole-cell rejection
@@ -183,12 +191,65 @@
   on_violation: spatial query misses entities — game logic sees incomplete world state
   requires: ST-01 (MBR correctness), ST-02 (union mask not under-representing)
 
-### SQ-02: Category mask semantics — AND-conjunctive `[fatal]`
-  invariant categoryMask == 0 → no category filtering (all entities match)
-  invariant categoryMask ≠ 0 → entry matches iff (entry.CategoryMask & categoryMask) == categoryMask
-  never (entry.CategoryMask & categoryMask) != 0 treated as a match (that would be OR-disjunctive)
-  scope: all query enumerators, CountInAABB leaf scan
-  on_violation: queries return wrong entity set — wrong enemies targeted, wrong zones triggered
+### SQ-02: Category filtering is decided at the CLUSTER, by any-bit overlap `[fatal][silent]`
+  invariant the category is an ARCHETYPE CONSTANT, never a per-entity value. `[SpatialIndex(Category = …)]` reaches the engine as
+    SpatialFieldInfo.Category; spawn and cluster migration OR that one value into ClusterSpatialAabb.CategoryMask, so a cluster's mask is
+    the OR of N IDENTICAL values — the archetype's own — and CellSpatialIndex.CategoryMasks mirrors it per cell. The fence recompute
+    reads
+    the stored mask back (ReadStoredCategoryMask) rather than re-deriving it, so it survives every AABB refresh and never changes after
+    the first entity lands. Nothing in the engine stores a per-entity category mask, and this rule may not be written as though one exists
+  invariant a cluster query admits a cluster iff queryMask == 0 ∨ (cluster.CategoryMask & queryMask) != 0 — ANY-BIT overlap, with 0 the
+    sentinel meaning "no filter". Because the mask is archetype-constant, every entity in an admitted cluster carries it, which makes the
+    cluster-level decision EXACT: there is no narrowphase category re-filter anywhere on the query path, and none is needed
+  invariant 🔴 every cluster query spells that test through the ONE helper, AabbClusterEnumerator.CategoryAdmits. It was open-coded in
+    three further places (the ray, frustum and kNN cluster gates) as `mask != 0 && (stored & mask) == 0`; that is the same predicate, but
+    a second spelling is how the semantics drift apart one shape at a time, and a rule cannot be checked against four transcriptions
+  never 🔴 a cluster query passes a NON-ZERO mask to a promoted cell's tree. Every cluster query hands the tree 0 and applies
+    CategoryAdmits
+    to what comes back, because SpatialRTree's own leaf test is AND-conjunctive (below): handing the mask down would make a promoted cell
+    answer a DIFFERENT question from an unpromoted one — an SQ-01 false negative appearing only above CellTreePromoteThreshold, which is
+    the hardest possible place to notice one. EVERY read path onto a cell's tree (CellClusterTree.Query, QueryWith, QueryF32, QueryF32With,
+    QueryRay, QueryFrustum, and EnumerateClusterIds — kNN's route, which is NOT a Query* wrapper and was missed by the first statement of this
+    clause) therefore takes no mask parameter at all: the invariant is structural, not a convention held by comments. The set is stated as read
+    paths rather than as "what a cluster query reaches" because three of them — QueryWith, QueryF32, QueryF32With — have no src/ caller at all
+    and exist for BroadphaseQueryProfile; they are covered anyway, since a mask reaching the tree through a benchmark-only door is still a
+    mask reaching the tree the day someone wires that door up. Until
+    #900 the ray and frustum paths reached SpatialRTree's masked overloads through CellClusterTree.Tree and passed 0 by hand — an accessor
+    whose own docstring called itself a test seam while two production queries depended on it. Nothing in src/ reads that property now, and
+    keeping it that way is what keeps this clause structural
+  invariant the AND-conjunctive test is REAL, is maintained, and no cluster query reaches it: SpatialRTree stores a per-entry CategoryMask
+    and a per-node UnionCategoryMask and its leaf scan matches on `(entry.CategoryMask & queryMask) == queryMask` — every requested bit
+    present. Since #872 step 13 the only spatial index is the per-cell cluster index (SH-01), so those masks are written, refit and never
+    read by a query. Keep the semantics stated: they are the contract of that layer, not of any query
+  invariant the two semantics BOTH run in production, at two levels of one query, and are not alternatives to choose between:
+    SpatialInterestSystem admits clusters any-bit through QueryAabb, then skips a changed entity unless
+    (SpatialFieldInfo.Category & observerMask) == observerMask — all requested bits present, tested against the archetype constant.
+    SpatialTriggerSystem applies the any-bit cluster admit and NO second test. So an observer asking for `Player|Alive` sees nothing from
+    an archetype declaring only `Player`, while a trigger region with the same mask sees it
+  scope: AabbClusterEnumerator.CategoryAdmits, AabbClusterEnumerator, ArchetypeClusterState.QueryAabb, ArchetypeClusterState.QueryRadius,
+    ArchetypeClusterState.QueryRay, ArchetypeClusterState.QueryFrustum, ArchetypeClusterState.QueryNearest, ClusterRadiusBatch,
+    CellClusterTree.Query, CellClusterTree.QueryWith, CellClusterTree.QueryF32, CellClusterTree.QueryF32With, CellClusterTree.QueryRay,
+    CellClusterTree.QueryFrustum, CellClusterTree.EnumerateClusterIds, CellClusterTree.Tree,
+    ClusterSpatialAabb.CategoryMask, CellSpatialIndex.CategoryMasks, SpatialFieldInfo, SpatialRTree.Query.cs,
+    SpatialNodeHelper.ReadLeafCategoryMask, SpatialNodeHelper.ReadUnionCategoryMask, SpatialInterestSystem, SpatialTriggerSystem
+  verified: ClusterCategoryFilterTests — two archetypes declaring DIFFERENT categories, separated through the public ClusterSpatialQuery
+    AABB and Radius surfaces in BOTH the linear and the promoted arm (AQueryMaskSelectsOneArchetypeAndNotTheOther, and the promoted cases
+    of the same, which assert PromotedCellCount > 0 as a precondition so a cell that quietly stopped promoting cannot pass them);
+    ThePromotedAndUnpromotedArmsAnswerIdentically_UnderEveryMask runs the same masks against the same population either side of the
+    threshold and requires the same entity sets, which is the assertion the "never hand the mask down" clause exists to protect;
+    EveryShapeAppliesTheSameAnyBitTest covers ray, frustum and kNN against the cluster gate; NoCellClusterTreeQueryTakesACategoryMask
+    asserts the structural half by REFLECTION over EVERY method the type declares — not a name prefix, because kNN's route onto the tree is
+    EnumerateClusterIds — so restoring a mask parameter anywhere on the type fails the build's tests rather than silently re-opening the hole.
+    It sees signatures rather than bodies: a wrapper that kept its mask-less signature and passed a non-zero mask through is caught by
+    ThePromotedAndUnpromotedArmsAnswerIdentically_UnderEveryMask instead, and the two arms together are what cover this clause.
+    ClusterRadiusBatchTests.EachMember_IsAnsweredAsItsOwnRadiusQuery already drove admitting and rejecting
+    masks through the batch and single paths, promoted and not, but claimed no rule
+  on_violation:
+    the mask handed to a tree → a promoted cell answers AND-conjunctively while its unpromoted neighbour answers any-bit; entities vanish
+      from queries only once a cell crosses the promotion threshold, and no test on a default configuration sees it
+    any-bit read as AND (or the reverse) at one shape → that shape disagrees with the other four about which clusters exist
+    a per-entity mask assumed → a narrowphase re-filter gets added that cannot ever change an answer, and the cost is paid per entity
+  requires: SH-01 (one index, and it is the cluster index), CA-01 (the cluster mask is maintained by spawn, migration and the refresh)
 
 ### SQ-03: Count query consistency `[fatal]`
   invariant CountInAABB(region, mask) == |{ E : E ∈ QueryAABB(region, mask) }|

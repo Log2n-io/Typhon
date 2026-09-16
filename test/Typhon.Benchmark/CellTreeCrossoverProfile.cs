@@ -373,7 +373,7 @@ static class CellTreeCrossoverProfile
                 }
 
                 var fromTree = 0;
-                var e = tree.Query(coords.AsSpan(b * 6, 6), 0);
+                var e = tree.Query(coords.AsSpan(b * 6, 6));
                 try
                 {
                     while (e.MoveNext())
@@ -473,7 +473,7 @@ static class CellTreeCrossoverProfile
         var sum = 0L;
         for (var b = 0; b < coords.Length / 6; b++)
         {
-            var e = tree.Query(coords.AsSpan(b * 6, 6), 0);
+            var e = tree.Query(coords.AsSpan(b * 6, 6));
             try
             {
                 while (e.MoveNext())

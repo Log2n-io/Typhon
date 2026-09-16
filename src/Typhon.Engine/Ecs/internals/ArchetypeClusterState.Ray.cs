@@ -168,7 +168,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             rayDir[1] = dirY;
             rayDir[2] = is3D ? dirZ : 0d;
 
-            foreach (var hit in tree.Tree.QueryRay(rayOrigin, rayDir, maxDistance, null, 0))
+            foreach (var hit in tree.QueryRay(rayOrigin, rayDir, maxDistance))
             {
                 RayScanCluster((int)hit.PayloadId, ref accessor, originX, originY, originZ, dirX, dirY, dirZ, maxDistance, is3D, categoryMask,
                     aabbs, ref visited, results, ref count);
@@ -223,7 +223,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         {
             return;
         }
-        if (categoryMask != 0 && (aabbs[clusterChunkId].CategoryMask & categoryMask) == 0)
+        // One spelling of the any-bit cluster admit for every shape (SQ-02) — this was open-coded until #900.
+        if (!AabbClusterEnumerator.CategoryAdmits(aabbs[clusterChunkId].CategoryMask, categoryMask))
         {
             return;
         }
