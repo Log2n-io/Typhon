@@ -1034,7 +1034,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
             FinaliseEmptyClusterCellState(grid, chunkId);
             RemoveFromActiveList(chunkId);
-            ResetClusterVisibility(chunkId);   // the id is about to be recyclable — see ResetClusterVisibility
+            RetireClusterId(chunkId);   // the id is about to be recyclable — clears every side table that must not outlive it
             ClusterSegment?.FreeChunk(chunkId);
             TransientSegment?.FreeChunk(chunkId);
         }
@@ -1051,6 +1051,44 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// field <c>null</c> — the existing <see cref="ClaimSlot(ref ChunkAccessor{PersistentStore}, ChangeSet, long)"/> path is unchanged for them.
     /// </remarks>
     public int[] ClusterCellMap;
+
+    /// <summary>
+    /// Engine-owned replication state for this archetype, or <c>null</c> when nothing is replicating it. Set by the subscriptions layer; the ECS never
+    /// creates it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// It hangs here rather than on <see cref="ArchetypeEngineState"/> because the only thing the ECS does with it is release a cluster's block when that
+    /// cluster drains, and all three drain sites are methods on THIS type. A back-pointer to the engine state purely to reach a sibling field would be more
+    /// plumbing for the same one-line call.
+    /// </para>
+    /// <para>
+    /// Null-conditional at every use, so an archetype nobody subscribes to pays one predictable null test per drained cluster.
+    /// </para>
+    /// </remarks>
+    internal ArchetypeReplicationState ReplicationState;
+
+    /// <summary>
+    /// Clears every per-cluster side table that must not outlive <paramref name="clusterChunkId"/>, immediately before the id goes back to the segment
+    /// allocator and becomes reusable.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// One place, called from all three sites that free a cluster id. The failure this shape prevents is the one that is easy to cause and hard to see: a
+    /// new side table added at two of the three sites and silently stale at the third, found later as a block or an index entry describing a cluster that no
+    /// longer exists. Anything added here is added everywhere by construction.
+    /// </para>
+    /// <para>
+    /// <b>Nothing called from here may throw.</b> The deferred drain loop has no <c>try</c>/<c>finally</c>, so an exception would skip the
+    /// <c>FreeChunk</c> that follows — orphaning the id permanently, since the cluster is by then off the active list — and would skip the drain-count reset,
+    /// replaying ids already processed. The inline callers are worse: they propagate out through <c>Transaction.Commit</c>.
+    /// </para>
+    /// </remarks>
+    private void RetireClusterId(int clusterChunkId)
+    {
+        ResetClusterVisibility(clusterChunkId);
+        ReplicationState?.ReleaseBlockForDrain(clusterChunkId);
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // Migration queue (issue #229 Phase 3). Lazily allocated; only used when
@@ -7942,7 +7980,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 // Single-threaded caller (Transaction.Destroy, etc.) — safe to finalize immediately.
                 FinaliseEmptyClusterCellState(grid, clusterChunkId);
                 RemoveFromActiveList(clusterChunkId);
-                ResetClusterVisibility(clusterChunkId);   // the id is about to be recyclable — see ResetClusterVisibility
+                RetireClusterId(clusterChunkId);   // the id is about to be recyclable — clears every side table that must not outlive it
                 ClusterSegment.FreeChunk(clusterChunkId);
                 TransientSegment?.FreeChunk(clusterChunkId);
             }
@@ -7995,7 +8033,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             {
                 FinaliseEmptyClusterCellState(grid, clusterChunkId);
                 RemoveFromActiveList(clusterChunkId);
-                ResetClusterVisibility(clusterChunkId);   // the id is about to be recyclable — see ResetClusterVisibility
+                RetireClusterId(clusterChunkId);   // the id is about to be recyclable — clears every side table that must not outlive it
                 TransientSegment.FreeChunk(clusterChunkId);
             }
         }
