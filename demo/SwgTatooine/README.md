@@ -282,9 +282,13 @@ These are deliberate, and each one is a thing the workload does *not* currently 
 - **Death is pooled, not structural.** A killed creature goes to a dead state and is revived at its lair rather than
   being destroyed and re-spawned, which is what SWG lairs did anyway. It does mean per-tick cluster-occupancy churn is
   exercised only through the world build and through revives, which teleport.
-- **Combat is creature-side.** A creature in a player's line of fire damages itself; players never take damage. A system
-  may only write components of its own input archetype, and reaching across through the transaction stalls the tick —
-  filed against the engine. The spatial work, which is what this demo measures, is identical either way.
+- **Combat is creature-side — the one limitation here that is not deliberate.** A creature in a player's line of fire
+  damages itself; players never take damage. The natural shape, a player-side system opening the creature through
+  `ctx.Transaction` and writing its vitals, stalls the tick loop at tick 1: engine bug
+  [#907](https://github.com/Log2n-io/Typhon/issues/907). It is a workaround, not a design rule — writing an entity of
+  another archetype from a system is legal — and it stays until #907 is fixed. Nor is it neutral: every creature whose
+  cooldown has expired issues its own 75 m query for players, where a player-side model would issue one per firing
+  player, and any player in range damages every creature in range, up to four shooters each.
 - **`Awareness` counts hits by default.** A real interest system builds each player's list and diffs it against last
   tick's to send enter/leave. Writing hits out costs about 2.8 ns each, which at `--pop 64`'s 59 million hits a tick
   would dominate everything measured here — so the numbers above are for a caller that counts. `--awareness-api fill`
