@@ -984,11 +984,25 @@
     valve, on a cell whose degradation has reached ClusterRepairCriticalExtentRatio. Per ARCHETYPE, because the
     planner runs one work item per archetype — an engine with N cluster-spatial archetypes can overshoot N times
     in one tick, each by one capped unit
-  invariant (step 11) that bound is STRUCTURAL, not stateful: PlanCellRepairs pre-scans the ranked candidates for
-    the first critical one, services it at the head, and passes valveAvailable:true from that ONE call site.
+  invariant (step 11) that bound is STRUCTURAL, not stateful: PlanCellRepairs pre-scans for the best-scoring
+    critical candidate, services it at the head, and passes valveAvailable:true from that ONE call site.
     Everything else in the loop is passed false. It was a _valveFiredThisTick flag until the pre-scan replaced
     it, and the flag then sat assigned-and-reset with no reader for a while — which is worse than no flag, since
     it reads as the thing enforcing the bound while enforcing nothing. One call site is provable by inspection
+  invariant (#949) the pre-scan has TWO forms and both must select the BEST-SCORING critical cell. When the budget
+    can afford the cheapest unit the planner ranks and takes the first critical cell in rank order; when it cannot
+    — remaining budget below 2 * estimateNsPerEntity, the queue below RepairQueueMaxCells, and the
+    SkipRankWhenBudgetStarved switch on — it skips the rank and takes the best-scoring critical cell by an O(n)
+    maximum over the candidates (CellRepairQueue.TryFindCritical). Returning merely SOME critical cell breaks it:
+    an arbitrary one can be a cell of a single cluster, which RepairOneCell declines outright (a partition of one
+    cannot be improved), spending the tick's one overshoot on nothing. Measured on SWG Tatooine x16 — Creature
+    lost 5 % of its repaired entities and 5 % of its units, and its run-to-run spread went from 0.7 entities to 5.8
+  invariant (#949) the two forms agree whenever the rank is FRESH, which is not the same as agreeing by
+    construction, and the difference is written down rather than assumed. Rerank early-outs when nothing is dirty
+    and the tier version has not moved, so the ranked path can hoist against age factors from an older tick, while
+    TryFindCritical always scores against the current one; and Array.Sort is unstable on tied scores where the
+    threshold scan keeps the first tie it meets. Both divergences resolve toward the FRESHER answer, which is why
+    they are accepted — but a reader must not take "same cell" as an identity that holds tick for tick
   invariant (step 11) a SECOND critical cell in the same tick gets no valve. It is refused like any other
     candidate, ages, keeps its queue place and is the hoisted one on a later tick — so AC-11.2's "within N ticks"
     holds with a larger N when several cells are critical at once, which is the case the budget is already losing
@@ -1008,7 +1022,8 @@
     SpatialGridConfig.ReclusterBudgetMs, SpatialGridConfig.RepairNsPerEntity,
     SpatialGridConfig.ClusterRepairCriticalExtentRatio,
     SpatialMigrationTelemetry.RepairUnitsRefused, SpatialMigrationTelemetry.ReclusterBudgetUsedMs,
-    SpatialMigrationTelemetry.RepairValveFires, SpatialMigrationTelemetry.MeasuredNsPerEntity
+    SpatialMigrationTelemetry.RepairValveFires, SpatialMigrationTelemetry.MeasuredNsPerEntity,
+    CellRepairQueue.TryFindCritical, ArchetypeClusterState.SkipRankWhenBudgetStarved
   verified: ClusterRepairTests.ARepairIsNeverBegunWithoutTheBudgetToFinishIt drives the budget to 99 % of the
     projected cost and asserts nothing moved, nothing was spent and the refusal was counted;
     TheSameCellIsRepairedOnceTheBudgetCoversTheUnit is its control at 150 %, so the pair separates "the rule
@@ -1016,6 +1031,12 @@
     ClusterRepairQueueTests.ACriticalCellIsServicedEvenWhenTheBudgetCannotAffordIt covers the valve and asserts
     it fires at most once per tick; WithTheValveDisabledAnUnderBudgetQueueServicesNobody is its ablation arm, and
     without it "nothing was repaired" cannot be told from "nothing needed repairing".
+    TheStarvedValvePicksTheCellTheRankingWouldHaveHoisted pins #949's equivalence directly on CellRepairQueue:
+    six critical candidates at ascending degradation, so the worst is the one a dictionary walk reaches LAST, and
+    the threshold scan must return the cell the ranked scan hoists. Ablated to "first qualifying candidate" it
+    reports Expected 5 / But was 0, so it is not vacuous.
+    NothingCriticalMeansTheStarvedPlannerFindsNoValveCell is its negative arm — nothing above the threshold, and a
+    valve disabled with ratio 0, both select nobody however degraded the queue is.
     ClusterCostEstimatorTests covers the measured estimate: it tracks the machine from a contradicted seed and
     settles (asserted as an ABSOLUTE spread, because two post-transient windows measure the same noise and noise
     is not monotone), stays inside its clamp band, and does not move once the world has genuinely settled —
@@ -1227,6 +1248,28 @@
     per-tick list could not leak; a persistent one can
   invariant re-ranking is LAZY — on new nominations or a SpatialGrid.TierVersion change, never on a timer — and
     its cost is reported. A queue that costs more to maintain than the work it schedules is a net loss
+  invariant (#949) lazy in its INPUTS is not enough; it is also skipped by USE. A tick whose remaining budget is
+    below 2 * estimateNsPerEntity can admit nothing but the valve, and the valve needs a threshold rather than an
+    order, so the rank is skipped and the critical cell found by an O(n) maximum. This is the steady state, not a
+    corner: on SWG Tatooine x16 the TH-04 controller granted Creature 0.003 ms while its mandatory crossings alone
+    cost about 0.072 ms, so the planner reached the admission loop with nothing to spend on nearly every tick and
+    sorted a queue of thousands anyway — 84 % of all queue maintenance. Measured, six interleaved same-binary
+    pairs: Creature's queue maintenance fell 45 % (0.0497 -> 0.0272 ms/tick, non-overlapping ranges), with
+    repaired entities and units IDENTICAL at 47.5 and 0.30. What that 45 % is NOT is the sort alone: the same
+    skip also drops BuildRepairSourceExclusions, an O(PendingMigrationCount) walk of the crossing prefix that has
+    nothing to do with the queue, and RepairQueueMaintenanceMs brackets both — the split between them is
+    unmeasured. The planner span moved 21 % over the same pairs, which OVERLAPS this saving rather than adding to
+    it, since PrepPlanTicks contains the maintenance the EWMA subtracts
+  invariant (#949) the skip does NOT apply while the queue is at RepairQueueMaxCells, and that exception is
+    load-bearing. TryEvictWorst takes its victim from the TAIL of the last ranking; with the rank skipped for many
+    ticks that tail goes stale, and once nothing in it is still live the eviction falls back to an arbitrary
+    candidate. A permanently starved archetype is exactly the one whose queue fills, so the case where the skip
+    saves most is the case where the ordering still has a job
+  invariant (#949) 🔴 that exception NARROWS the staleness, it does not remove it, and the residue is stated
+    rather than implied. Absorb runs BEFORE the gate, so the eviction that carries a queue over its cap uses the
+    rank of a previous tick — and after N skipped ticks near the cap that rank is N ticks old, with the valve
+    having removed one cell per tick from it. Ranking resumes only from the tick AFTER capacity is observed, so
+    the arbitrary-eviction fallback remains reachable on the transition tick. Bounded, not closed
   invariant 🔴 KNOWN GAP, narrowed not closed: PrepareArchetypeFenceCore returns false for an archetype nothing
     wrote to, and the wrapper then skips planning entirely, because a plan allocates clusters THIS tick's Migrate
     and Finalize must consume. So a queue full of candidates in a world that has gone completely still is not
@@ -1234,7 +1277,8 @@
   scope: CellRepairQueue, ArchetypeClusterState.RepairQueue, ArchetypeClusterState.AbsorbRepairNominations,
     SpatialGridConfig.RepairAgingRatePerTick, SpatialGridConfig.RepairQueueMaxCells,
     SpatialMigrationTelemetry.RepairQueueDepth, SpatialMigrationTelemetry.RepairQueueEvicted,
-    SpatialMigrationTelemetry.RepairQueueMaintenanceMs
+    SpatialMigrationTelemetry.RepairQueueMaintenanceMs, CellRepairQueue.IsAtCapacity,
+    CellRepairQueue.TryFindCritical
   verified: ClusterRepairQueueTests.AgeingCarriesEveryCandidateToTheHeadOfTheQueue drives CellRepairQueue
     DIRECTLY — one service per tick over a lopsided candidate set — because the engine-level form cannot be made
     machine-independent: the budget is spent against a MEASURED cost, Debug migrates at ~24 us and Release at

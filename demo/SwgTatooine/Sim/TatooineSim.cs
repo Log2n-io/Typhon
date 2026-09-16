@@ -136,6 +136,9 @@ public sealed partial class TatooineSim : IDisposable
         // test, which is why this repo's perf rule asks for a switch rather than a rebuild.
         Typhon.Engine.Internals.ArchetypeClusterState.GridWidePackingBound = _config.GridWideBound;
 
+        // #949's A/B arm, same shape as the line above: process-wide, read once per planning tick.
+        Typhon.Engine.Internals.ArchetypeClusterState.SkipRankWhenBudgetStarved = !_config.RankWhenStarved;
+
         // Buildings, terminals, houses, factories and harvesters never move. Telling the fence so is the difference
         // between a per-tick scan of the largest population in the world and nothing at all — and this population is
         // large precisely because a planet is mostly scenery.

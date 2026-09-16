@@ -168,6 +168,12 @@ public sealed class SimConfig
     /// </summary>
     public bool GridWideBound;
 
+    /// <summary>
+    /// Restore the pre-#949 behaviour: re-rank the repair queue on every planning tick, even when the granted budget cannot pay for the cheapest unit and
+    /// only the safety valve can be admitted. The A/B arm, so the comparison is one binary and one switch rather than two builds.
+    /// </summary>
+    public bool RankWhenStarved;
+
     /// <summary>Worker threads for the system DAG and the parallel fence. <c>0</c> means <see cref="Environment.ProcessorCount"/>.</summary>
     public int WorkerCount;
 

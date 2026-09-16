@@ -184,6 +184,12 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <inheritdoc cref="_repairEntryScratch"/>
     private RepairCandidate[] _repairCandidateScratch = [];
 
+    /// <summary>
+    /// #949's A/B arm, process-wide and read once per planning tick. <c>false</c> restores the pre-#949 behaviour of ranking the queue on every planning
+    /// tick, so the change is measured as one binary and one switch rather than as two builds whose JIT codegen also differs.
+    /// </summary>
+    internal static bool SkipRankWhenBudgetStarved = true;
+
     /// <inheritdoc cref="_repairEntryScratch"/>
     private int[] _repairCellScratch = [];
 
@@ -406,6 +412,15 @@ internal sealed unsafe partial class ArchetypeClusterState
         // cluster would then be excluded from every claim path and every relocation candidate for good.
         _repairDestinationReservations.Clear();
 
+        // The SOURCE exclusions clear here for the same reason and, since #949, with more force. BuildRepairSourceExclusions below is the only thing that
+        // rebuilds them, and it is now skipped on a tick that can admit nothing — which the measurements say is the steady state for a starved archetype,
+        // not a corner. The set is read outside this planner and outside the fence: TryClaimPlaced's least-enlargement placement and
+        // BuildRelocationCandidates both consult it, and TryClaimPlaced's own remark budgets for it being ONE tick stale. Left uncleared it would be stale
+        // for as long as the starvation lasts, and a drained source cluster is freed by the same Finalize that recycles its chunk id — so a stale claim
+        // comes to name a live, unrelated cluster and excludes it from every claim path and every relocation candidate for good. Empty is the correct
+        // reading when nothing was planned: the set means "slots this tick's plan has spoken for", and a tick that planned nothing has spoken for none.
+        _repairSourceExclusions.Clear();
+
         if (queue == null || queue.Count == 0)
         {
             AccrueQueueMaintenance(queue, maintenanceStart);
@@ -433,28 +448,71 @@ internal sealed unsafe partial class ArchetypeClusterState
             return 0;
         }
 
-        // Every source slot the queue has already spoken for, before a single unit is planned (#877). O(prefix) once, against a planner that walks entities.
-        BuildRepairSourceExclusions();
+        // ── When nothing but the valve can be admitted, the ORDER is worth nothing this tick (#949) ────────────────────
+        //
+        // The rank is lazy in its INPUTS (AC-11.5) but not in its USE: a tick whose nominations changed pays an O(n log n)
+        // sort whether or not the budget can buy anything with the order it produces. Measured on SWG Tatooine x16, that is
+        // the steady state rather than a corner — TH-04's controller granted Creature 0.003 ms while its mandatory crossings
+        // alone cost about 0.072 ms, so the planner reached the admission loop with nothing to spend on nearly every tick
+        // and sorted a queue of thousands anyway. Creature carried 84 % of all queue maintenance that way.
+        //
+        // The valve is the one admission a starved budget still allows (AC-11.2), and it needs a THRESHOLD test rather than
+        // an order: a critical cell is found by comparing degradations, which is O(n) over the candidates. So when the
+        // budget cannot cover the cheapest possible unit, we look for that one cell and skip the sort.
+        //
+        // NOT skipped while the queue is at its cap, and that exception is load-bearing rather than cautious. TryEvictWorst
+        // takes its victim from the TAIL of the last ranking; with the rank skipped for many ticks that tail goes stale, and
+        // once nothing in it is still live the eviction falls back to an arbitrary candidate. A permanently starved
+        // archetype is exactly the one whose queue fills, so the case where this saves most is the case where the ordering
+        // still has a job to do. There it costs what it always did.
+        var estimateNsPerEntity = RepairCostEstimateNs(in cfg);
+        var minimumUnitNs = 2 * estimateNsPerEntity;
+        var criticalRatio = cfg.ClusterRepairCriticalExtentRatio;
+        var valveOnly = SkipRankWhenBudgetStarved && remainingBudgetNs < minimumUnitNs && !queue.IsAtCapacity;
 
-        // Ranked, not sorted by cell key. §5.6: "round-robin is the wrong policy" — a region nobody queries never needs tight clusters. Lazy, so a tick
-        // whose nominations changed nothing pays a comparison rather than a sort (AC-11.5).
-        queue.Rerank(grid, this, tickNumber);
+        int rankedCount;
+        if (valveOnly)
+        {
+            rankedCount = queue.TryFindCritical(criticalRatio, grid, this, tickNumber, out var criticalCell) ? 1 : 0;
+            if (rankedCount == 1)
+            {
+                if (_repairCellScratch.Length < 1)
+                {
+                    _repairCellScratch = new int[16];
+                }
+
+                _repairCellScratch[0] = criticalCell;
+            }
+        }
+        else
+        {
+            // Ranked, not sorted by cell key. §5.6: "round-robin is the wrong policy" — a region nobody queries never needs tight clusters. Lazy, so a tick
+            // whose nominations changed nothing pays a comparison rather than a sort (AC-11.5).
+            queue.Rerank(grid, this, tickNumber);
+
+            // A snapshot, because RepairOneCell removes serviced cells from the queue and the ranked array is the queue's own buffer. Copying the keys out
+            // first is cheaper than the alternative of deferring every removal to a second pass, and the count is the candidate count, not the entity count.
+            var ranked = queue.Ranked;
+            if (_repairCellScratch.Length < ranked.Length)
+            {
+                _repairCellScratch = new int[Math.Max(ranked.Length, Math.Max(16, _repairCellScratch.Length * 2))];
+            }
+
+            ranked.CopyTo(_repairCellScratch);
+            rankedCount = ranked.Length;
+        }
+
+        // Every source slot the queue has already spoken for, before a single unit is planned (#877). O(prefix) once, against a planner that walks entities.
+        // Skipped with the rank when there is no candidate to service at all, since RepairOneCell is its only consumer.
+        if (rankedCount > 0)
+        {
+            BuildRepairSourceExclusions();
+        }
+
         AccrueQueueMaintenance(queue, maintenanceStart);
 
-        var estimateNsPerEntity = RepairCostEstimateNs(in cfg);
         var remainingNs = remainingBudgetNs;
         var totalMoved = 0;
-        var criticalRatio = cfg.ClusterRepairCriticalExtentRatio;
-
-        // A snapshot, because RepairOneCell removes serviced cells from the queue and the ranked array is the queue's own buffer. Copying the keys out
-        // first is cheaper than the alternative of deferring every removal to a second pass, and the count is the candidate count, not the entity count.
-        var ranked = queue.Ranked;
-        if (_repairCellScratch.Length < ranked.Length)
-        {
-            _repairCellScratch = new int[Math.Max(ranked.Length, Math.Max(16, _repairCellScratch.Length * 2))];
-        }
-        ranked.CopyTo(_repairCellScratch);
-        var rankedCount = ranked.Length;
 
         // ── The critical candidate goes FIRST, and the scan stops when the budget is gone ───────────────────────────
         //
@@ -500,7 +558,6 @@ internal sealed unsafe partial class ArchetypeClusterState
             totalMoved += RepairOneCell(_repairCellScratch[criticalIndex], grid, ref accessor, tickNumber, estimateNsPerEntity, true, ref remainingNs);
         }
 
-        var minimumUnitNs = 2 * estimateNsPerEntity;
         for (var i = 0; i < rankedCount; i++)
         {
             if (i == criticalIndex)

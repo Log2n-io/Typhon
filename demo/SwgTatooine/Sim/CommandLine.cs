@@ -40,6 +40,7 @@ public static class CommandLine
         c.TickRateHz = Int(args, "--hz", c.TickRateHz);
         c.Unpaced = Array.IndexOf(args, "--unpaced") >= 0;
         c.GridWideBound = Array.IndexOf(args, "--grid-wide-bound") >= 0;
+        c.RankWhenStarved = Array.IndexOf(args, "--rank-when-starved") >= 0;
         c.WorkerCount = Int(args, "--workers", c.WorkerCount);
         c.WarmTicks = Int(args, "--warm", c.WarmTicks);
         c.MeasuredTicks = Int(args, "--ticks", c.MeasuredTicks);

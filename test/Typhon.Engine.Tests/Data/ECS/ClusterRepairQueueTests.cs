@@ -543,6 +543,91 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
             "no unit was ever refused, so the budget was not actually binding and the arm above proves nothing by contrast");
     }
 
+    /// <summary>
+    /// When the budget cannot buy a unit the planner skips the rank and finds the valve's cell by threshold instead (#949) — and it must find the SAME
+    /// cell the ranking would have hoisted: the highest-scoring critical candidate, not merely a critical one.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>This pins the equivalence the optimisation rests on.</b> Skipping the sort is only sound if the choice among the cells the valve may take
+    /// is unchanged, and the ranked path takes the first critical cell in RANK order — which is the best-scoring one, since
+    /// <c>Score = degradation x tierWeight x clusterCount x ageFactor</c>.</para>
+    /// <para><b>The first version returned whichever candidate the dictionary yielded first, and the cost was measured rather than argued.</b> An arbitrary
+    /// critical cell can be one <c>RepairOneCell</c> declines outright — a cell of one cluster is already its own optimal packing — and declining it spends
+    /// the tick's single valve admission on nothing. On SWG Tatooine x16 that cost Creature 5 % of its repaired entities and 5 % of its units, and widened
+    /// its run-to-run spread from 0.7 entities to 5.8. No fixture in this repo would have caught it; only the demo did.</para>
+    /// <para><b>The degradations ascend with the cell index deliberately</b>, so the worst candidate is the one a dictionary walk reaches LAST. An
+    /// implementation that returns the first qualifying entry fails here rather than passing by luck.</para>
+    /// </remarks>
+    [Test]
+    [VerifiesRule("RP-01")]
+    public void TheStarvedValvePicksTheCellTheRankingWouldHaveHoisted()
+    {
+        using var dbe = SetupEngine(budgetMs: 1.0f);
+        SpawnDegradedCells(dbe);
+        var state = ClusterStateOf(dbe);
+        var grid = dbe.SpatialGrid;
+
+        const float Critical = 0.5f;
+        var queue = new CellRepairQueue(maxCells: 4096, agingRatePerTick: 0f);
+        var nominations = new List<ArchetypeClusterState.RepairNomination>();
+        for (var c = 0; c < CellCount; c++)
+        {
+            nominations.Add(new ArchetypeClusterState.RepairNomination(grid.WorldToCellKey((c * CellSize) + 50f, 50f, 0f), 0.60f + (c * 0.05f)));
+        }
+
+        queue.Absorb(nominations, grid, state, 1);
+        queue.Rerank(grid, state, 1);
+
+        // What the ranked path would service: the first candidate in rank order that clears the threshold.
+        var ranked = queue.Ranked;
+        var expected = -1;
+        for (var i = 0; i < ranked.Length && expected < 0; i++)
+        {
+            if (queue.DegradationOf(ranked[i]) >= Critical)
+            {
+                expected = ranked[i];
+            }
+        }
+
+        Assert.That(expected, Is.GreaterThanOrEqualTo(0), "precondition: the ranking must hold a critical candidate, or the comparison below is vacuous");
+        Assert.Multiple(() =>
+        {
+            Assert.That(queue.TryFindCritical(Critical, grid, state, 1, out var found), Is.True,
+                "the starved path must find the critical candidate the ranked scan can see");
+            Assert.That(found, Is.EqualTo(expected),
+                "the starved path must service the cell the ranking would have hoisted — an arbitrary critical cell can be one RepairOneCell declines, "
+                + "which spends the tick's single valve admission on nothing");
+        });
+    }
+
+    /// <summary>
+    /// With nothing critical queued there is no valve cell to find, so a starved planner does nothing at all rather than servicing the merely bad.
+    /// </summary>
+    [Test]
+    [VerifiesRule("RP-01")]
+    public void NothingCriticalMeansTheStarvedPlannerFindsNoValveCell()
+    {
+        using var dbe = SetupEngine(budgetMs: 1.0f);
+        SpawnDegradedCells(dbe);
+        var state = ClusterStateOf(dbe);
+        var grid = dbe.SpatialGrid;
+
+        var queue = new CellRepairQueue(maxCells: 4096, agingRatePerTick: 0f);
+        var nominations = new List<ArchetypeClusterState.RepairNomination>();
+        for (var c = 0; c < CellCount; c++)
+        {
+            nominations.Add(new ArchetypeClusterState.RepairNomination(grid.WorldToCellKey((c * CellSize) + 50f, 50f, 0f), 0.40f));
+        }
+
+        queue.Absorb(nominations, grid, state, 1);
+        Assert.Multiple(() =>
+        {
+            Assert.That(queue.Count, Is.EqualTo(CellCount), "precondition: the candidates are queued, they are merely not critical");
+            Assert.That(queue.TryFindCritical(0.8f, grid, state, 1, out _), Is.False, "0.40 degradation is below the 0.80 threshold and is not the valve's");
+            Assert.That(queue.TryFindCritical(0f, grid, state, 1, out _), Is.False, "a disabled valve (ratio 0) selects nobody, however degraded");
+        });
+    }
+
     // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
     // AC-11.5 — the queue costs less than the work it schedules
     // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
