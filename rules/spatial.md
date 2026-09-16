@@ -844,13 +844,25 @@
     gate    — a cluster whose largest axis extent ≤ the cell's TARGET EXTENT is skipped whole; no entity in
               it can be improved by moving, so a tight world does three float compares per written cluster
               and no per-entity work. The target is per cell (step 14): CellSize * clamp(
-              ClusterTargetPackingSlack * (slotsPerCluster / CellState.EntityCount)^(1/d),
+              ClusterTargetPackingSlack * (slotsPerCluster / E_own)^(1/d),
               ClusterTargetExtentRatio, 1) × the throttle's boost, where a value of the cell itself means OFF;
               a slack of 0 makes ClusterTargetExtentRatio the constant it used to be. A cluster above the
               repair-nomination gate max(target, ClusterRepairExtentRatio) is not drift-scanned at all
     entity  — inside a gated cluster, an entity whose centre lies outside the target box — the SAME target
               extent the gate used, never the configured constant — by more than
               CellSize * ClusterDriftMarginRatio is a drifter
+  invariant 🔴 E_own is THIS ARCHETYPE's population in the cell, never CellState.EntityCount (#927).
+    EntityCount sums every archetype sharing the cell, so a minority archetype is judged against the tiling of
+    entities it does not own: measured on SWG Tatooine x16 at 1024 m the engine's bound was 0.29x the Player
+    archetype's own and 0.85x Creature's, and the drift gate kept firing on player clusters no packing could
+    satisfy. CellRepairQueue.Score had already stopped using EntityCount for this reason; the bound had not.
+    E_own is taken as CellClusterPool.GetClusterCount(cellKey) * slotsPerCluster — the pool already maintains
+      that count per archetype per cell at O(1), at the same sites that bump EntityCount, so the correction
+      costs no new counter, no new maintenance site and no extra cache line
+    it OVER-estimates when clusters are partly full, which makes the bound tighter than the truth — the
+      conservative direction for correctness, and the reason it was measured rather than assumed
+    ArchetypeClusterState.GridWidePackingBound restores the old reading for a same-binary A/B
+    both consumers read it: CellTargetResolver.Resolve and ExceedsGrowthCap
   invariant 🔴 the target box is centred on the cluster's CENTROID, never on the midpoint of its AABB. A box
     midpoint sits halfway between the two extremes, so ONE far outlier drags it half the distance to itself:
     thirty entities at x≈12 plus one at x=90 put the midpoint at 50, where nothing lives, and the whole core
@@ -880,12 +892,18 @@
     up to a rounding step, so deriving one from the other would move drift decisions by an ULP at the
     target-region boundary and decouple production from the oracle that reads the component the same way
   scope: ArchetypeClusterState.DetectDriftersInCluster, ArchetypeClusterState.GatherClusterCentres,
+    ArchetypeClusterState.PackingPopulationInCell, ArchetypeClusterState.ExceedsGrowthCap,
     SpatialGridConfig.ClusterTargetExtentRatio, SpatialGridConfig.ClusterDriftMarginRatio,
     SpatialMigrationTelemetry.DriftAbsorbedCount
   verified: ClusterDriftDetectionTests against ClusterDriftOracle (an independent implementation of the rule,
     not a call to the production predicate), plus ClusterDriftParallelTests for the serial ≡ oracle ≡ parallel
     equality at W in {1,2,8} under a real TyphonRuntime. Ablated: swapping the centroid for the AABB midpoint,
-    and disabling the margin, each redden the differential
+    and disabling the margin, each redden the differential.
+    E_own by PackingPopulationTests — two pools over one cell key read their own populations and the minority
+    gets the looser bound, with the one-cluster and empty-cell basins pinned so the correction cannot switch
+    maintenance on where the bound already said it was off. Measured on the demo at x16/1024 m, four interleaved
+    same-binary pairs: tick median 3.78 -> 3.75 ms (-0.8 %, noise), Awareness -3.3 %, FencePrep -15 %, while
+    Player's drifters fall 84.2 -> 5.0 and its migrations 61.7 -> 44.9 per tick
   on_violation:
     midpoint instead of centroid → a one-entity repair becomes a full cluster shuffle, away from where the
       cluster actually is

@@ -3201,7 +3201,9 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         ref readonly var cfg = ref grid.Config;
         var flat = cfg.GridDepth == 1 || float.IsPositiveInfinity(box.MinZ) || float.IsNegativeInfinity(box.MaxZ);
-        var density = DensityTargetRatio(grid.GetCell(cellKey).EntityCount, BitOperations.PopCount(Layout.FullMask), flat, cfg.ClusterTargetPackingSlack);
+        var slotsPerCluster = BitOperations.PopCount(Layout.FullMask);
+        var density = DensityTargetRatio(PackingPopulationInCell(CellClusterPool, grid, cellKey, slotsPerCluster), slotsPerCluster, flat,
+            cfg.ClusterTargetPackingSlack);
         var ratio = density > 0f ? MathF.Max(density, cfg.ClusterTargetExtentRatio) : cfg.ClusterTargetExtentRatio;
         var limit = ratio * cfg.GrowthCapSlack * cfg.CellSize;
 
@@ -5140,7 +5142,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // change rather than per cluster — clusters of one cell are adjacent in both branches' iteration order often enough that the cache hits far more
         // than it misses, and a miss is one CellState load, one root and a handful of multiplies. `flat` is a property of the field, not of the cluster:
         // every cluster of this archetype packs in the same number of dimensions.
-        var targets = new CellTargetResolver(grid, cellSize, driftTargetExtent, repairExtent, BitOperations.PopCount(Layout.FullMask),
+        var targets = new CellTargetResolver(grid, CellClusterPool, cellSize, driftTargetExtent, repairExtent, BitOperations.PopCount(Layout.FullMask),
             SpatialSlot.HasSpatialIndex && SpatialSlot.FieldInfo.FieldType is SpatialFieldType.AABB2F or SpatialFieldType.BSphere2F or SpatialFieldType.AABB2D
                 or SpatialFieldType.BSphere2D,
             DriftTargetBoost);
@@ -6023,6 +6025,43 @@ internal sealed unsafe partial class ArchetypeClusterState
         slack <= 0f ? 0f : DensityTargetFromBound(PackingBoundRatio(entitiesInCell, slotsPerCluster, flat), slack);
 
     /// <summary>
+    /// A/B switch restoring the pre-#927 behaviour: the packing bound reads <c>CellState.EntityCount</c>, which sums every archetype sharing the cell.
+    /// </summary>
+    /// <remarks>
+    /// Static and mutable for the same reason as <see cref="DeferMigrateClusterFlags"/>: a perf claim here has to be a same-binary switch with interleaved
+    /// pairs, because two builds differ in JIT codegen as well as in the line under test.
+    /// </remarks>
+    internal static bool GridWidePackingBound;
+
+    /// <summary>
+    /// The population the packing bound is computed against — this ARCHETYPE's entities in the cell, not the grid-wide sum (#927).
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The defect.</b> <c>CellState.EntityCount</c> totals every archetype sharing the cell, so a minority archetype is judged against a tiling of
+    /// entities it does not own. Measured on SWG Tatooine x16 at 1 024 m: the engine's bound was 0.29x the Player archetype's own and 0.85x Creature's, and
+    /// the drift gate kept firing on player clusters that no packing could satisfy. <c>CellRepairQueue.Score</c> had already stopped using
+    /// <c>EntityCount</c> for this reason; the bound never did.</para>
+    /// <para><b>Why clusters rather than a new entity counter.</b> The bound is a RATIO — <c>slotsPerCluster / E</c> — and this archetype's own cluster count
+    /// in the cell is already maintained at O(1) by <see cref="CellClusterPool"/>, at the same sites that bump <c>EntityCount</c>. Substituting
+    /// <c>clusters x slotsPerCluster</c> for <c>E</c> gives <c>(1 / clusters)^(1/d)</c> and needs no new counter, no new maintenance site and no extra cache
+    /// line. The alternative — a per-archetype, per-cell entity population maintained at every claim and release — is what measured 2-7 % slower.</para>
+    /// <para><b>What it costs in accuracy, stated rather than hidden.</b> Cluster count over-estimates the population when clusters are partly full
+    /// (measured occupancy 81-94 %), which under-estimates <c>fill</c> and makes the bound TIGHTER than the truth. That is the conservative direction for
+    /// correctness — a tighter bound asks for more maintenance, never less — but it is the expensive direction for the tick, which is why this ships behind
+    /// <see cref="GridWidePackingBound"/> and was measured before adoption.</para>
+    /// </remarks>
+    internal static int PackingPopulationInCell(CellClusterPool pool, SpatialGrid grid, int cellKey, int slotsPerCluster)
+    {
+        if (GridWidePackingBound || pool == null)
+        {
+            return grid.GetCell(cellKey).EntityCount;
+        }
+
+        var clusters = pool.GetClusterCount(cellKey);
+        return clusters <= 0 ? 0 : clusters * slotsPerCluster;
+    }
+
+    /// <summary>
     /// <see cref="DensityTargetRatio"/> for a caller that already holds the cell's <see cref="PackingBoundRatio"/> — the AABB refresh's per-cell memo, which
     /// needs both readings and must not take the root twice (#911 O2).
     /// </summary>
@@ -6152,6 +6191,12 @@ internal sealed unsafe partial class ArchetypeClusterState
     private struct CellTargetResolver
     {
         private readonly SpatialGrid _grid;
+
+        /// <summary>
+        /// This archetype's own cell-to-clusters map, so the packing bound is computed from its own population rather than the grid-wide sum (#927).
+        /// </summary>
+        private readonly CellClusterPool _pool;
+
         private readonly float _cellSize;
         private readonly float _driftFloor;
         private readonly float _repairFloor;
@@ -6183,9 +6228,11 @@ internal sealed unsafe partial class ArchetypeClusterState
         /// </remarks>
         internal float PackingBound;
 
-        internal CellTargetResolver(SpatialGrid grid, float cellSize, float driftFloor, float repairFloor, int slotsPerCluster, bool flat, float boost)
+        internal CellTargetResolver(SpatialGrid grid, CellClusterPool pool, float cellSize, float driftFloor, float repairFloor, int slotsPerCluster,
+            bool flat, float boost)
         {
             _grid = grid;
+            _pool = pool;
             _cellSize = cellSize;
             _driftFloor = driftFloor;
             _repairFloor = repairFloor;
@@ -6215,7 +6262,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
             // One root per cell change, feeding both readings (#911 O2). The bound is pure geometry and is published even in constant mode, where the GATES
             // ignore it — a tightness reading is not a tuning decision and has no reason to go dark because the targets were pinned to constants.
-            var bound = PackingBoundRatio(_grid.GetCell(cellKey).EntityCount, _slotsPerCluster, _flat);
+            var bound = PackingBoundRatio(PackingPopulationInCell(_pool, _grid, cellKey, _slotsPerCluster), _slotsPerCluster, _flat);
             PackingBound = bound;
             var density = DensityTargetFromBound(bound, _slack);
             if (density <= 0f)

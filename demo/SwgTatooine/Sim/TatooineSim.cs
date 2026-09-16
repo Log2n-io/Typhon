@@ -132,6 +132,10 @@ public sealed partial class TatooineSim : IDisposable
         // Process-wide and read when each query is built, so setting it here covers every query the run makes.
         Typhon.Engine.Internals.SpatialQueryTuning.SimdNarrowphase = _config.SimdNarrowphase;
 
+        // #927's A/B arm, process-wide and read per cell resolve. Same binary, one switch: two builds differ in JIT codegen as well as in the line under
+        // test, which is why this repo's perf rule asks for a switch rather than a rebuild.
+        Typhon.Engine.Internals.ArchetypeClusterState.GridWidePackingBound = _config.GridWideBound;
+
         // Buildings, terminals, houses, factories and harvesters never move. Telling the fence so is the difference
         // between a per-tick scan of the largest population in the world and nothing at all — and this population is
         // large precisely because a planet is mostly scenery.

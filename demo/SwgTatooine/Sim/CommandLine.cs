@@ -39,6 +39,7 @@ public static class CommandLine
         c.BatchSpawnSortThreshold = Int(args, "--batch-sort", c.BatchSpawnSortThreshold);
         c.TickRateHz = Int(args, "--hz", c.TickRateHz);
         c.Unpaced = Array.IndexOf(args, "--unpaced") >= 0;
+        c.GridWideBound = Array.IndexOf(args, "--grid-wide-bound") >= 0;
         c.WorkerCount = Int(args, "--workers", c.WorkerCount);
         c.WarmTicks = Int(args, "--warm", c.WarmTicks);
         c.MeasuredTicks = Int(args, "--ticks", c.MeasuredTicks);
