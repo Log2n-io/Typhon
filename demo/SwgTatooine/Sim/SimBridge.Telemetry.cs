@@ -51,8 +51,8 @@ public sealed partial class SimBridge
 
         _telemetryIds ??=
         [
-            Archetype<WorldObject>.Metadata.ArchetypeId, Archetype<CreatureLair>.Metadata.ArchetypeId, Archetype<Creature>.Metadata.ArchetypeId,
-            Archetype<CityNpc>.Metadata.ArchetypeId, Archetype<Player>.Metadata.ArchetypeId,
+            Archetype<WorldObject>.CatalogId, Archetype<CreatureLair>.CatalogId, Archetype<Creature>.CatalogId,
+            Archetype<CityNpc>.CatalogId, Archetype<Player>.CatalogId,
         ];
         var w = (int)Math.Min(QueryWindows - 1, (ctx.TickNumber - _config.WarmTicks) / QueryWindowTicks);
         for (var a = 0; a < _telemetryIds.Length; a++)
@@ -64,8 +64,7 @@ public sealed partial class SimBridge
             _telemetrySums[a, 3] += t.RepairedEntityCount;
             _telemetrySums[a, 4] += t.RepairUnitCount;
             _telemetrySums[a, 5] += t.MigrationCount;
-            var clusterState = Dbe._archetypeStates[_telemetryIds[a]]?.ClusterState;
-            _telemetrySums[a, 6] += clusterState?.DriftTargetBoost ?? 0f;
+            _telemetrySums[a, 6] += t.DriftTargetBoost;
 
             _prepSums[a, 0] += t.PrepSnapshotMs;
             _prepSums[a, 1] += t.PrepMaskMs;
@@ -77,7 +76,7 @@ public sealed partial class SimBridge
             _prepSums[a, 7] += t.PrepSortMs;
             _prepSums[a, 8] += t.PrepPreSizeMs;
             _prepSums[a, 9] += t.PrepDirtyClusters;
-            var branch = clusterState?.FenceBranchPath ?? 0;
+            var branch = t.FenceBranchPath;
             _prepSums[a, 10] += branch == 1 ? 1 : 0;
             _prepSums[a, 11] += branch == 2 ? 1 : 0;
             _prepSums[a, 12] += t.RepairQueueMaintenanceMs;
