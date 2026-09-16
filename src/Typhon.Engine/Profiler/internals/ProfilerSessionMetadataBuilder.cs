@@ -1,10 +1,9 @@
 using System;
-using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Text;
 using Microsoft.Extensions.Logging;
 using Typhon.Profiler;
+using Typhon.Protocol;
 
 namespace Typhon.Engine.Internals;
 
@@ -121,25 +120,18 @@ internal static class ProfilerSessionMetadataBuilder
             return byName != 0 ? byName : x.Revision.CompareTo(y.Revision);
         });
 
-        const ulong offsetBasis = 14695981039346656037;
-        const ulong prime = 1099511628211;
-        var hash = offsetBasis;
-        Span<byte> revisionBytes = stackalloc byte[sizeof(int)];
+        // The construction moved into CanonicalHashBuilder (#957): UTF-8 bytes, little-endian integers, and the 0xFF separator without which ("Ab", 1) and
+        // ("A", …) could collide by concatenation. The digest is byte-identical to the loop that used to sit here, pinned by CanonicalHashTests against a
+        // verbatim copy of it. The ordinal sort above stays, because only this method knows what one of its entries is.
+        var hash = CanonicalHashBuilder.Create();
         foreach (var (name, revision) in entries)
         {
-            foreach (var b in Encoding.UTF8.GetBytes(name))
-            {
-                hash = (hash ^ b) * prime;
-            }
-            BinaryPrimitives.WriteInt32LittleEndian(revisionBytes, revision);
-            foreach (var b in revisionBytes)
-            {
-                hash = (hash ^ b) * prime;
-            }
-            // Separator: without it ("Ab", 1) and ("A", …) could collide by concatenation. Cheap insurance on a value used to claim schemas match.
-            hash = (hash ^ 0xFF) * prime;
+            hash.AddUtf8(name);
+            hash.AddInt32(revision);
+            hash.EndEntry();
         }
-        return hash;
+
+        return hash.Value;
     }
 }
 
