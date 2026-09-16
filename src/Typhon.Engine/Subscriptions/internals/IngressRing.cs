@@ -70,7 +70,8 @@ internal sealed unsafe class IngressRing
     /// <summary>Frames records into <paramref name="buffer"/>, which must remain valid for this ring's lifetime.</summary>
     /// <param name="buffer">Native memory, from <c>IMemoryAllocator.AllocatePinned</c>. Not owned, not freed here.</param>
     /// <param name="capacity">Buffer length in bytes; a power of two, at least 64.</param>
-    public IngressRing(byte* buffer, int capacity)
+    /// <param name="poolSlot">The carving pool's slot for this ring, or <c>-1</c> for a ring that belongs to no pool. Fixed for the ring's lifetime.</param>
+    public IngressRing(byte* buffer, int capacity, int poolSlot = -1)
     {
         if (buffer == null)
         {
@@ -85,10 +86,17 @@ internal sealed unsafe class IngressRing
         _buffer = buffer;
         _mask = capacity - 1;
         Capacity = capacity;
+        PoolSlot = poolSlot;
     }
 
     /// <summary>Bytes the ring can hold, framing included.</summary>
     public int Capacity { get; }
+
+    /// <summary>
+    /// This ring's slot in the pool that carved it, or <c>-1</c> when it has none. Assigned once at construction, so a ring can be returned by handing back
+    /// the ring itself rather than a slot the caller has to keep beside it — the pairing that goes wrong.
+    /// </summary>
+    public int PoolSlot { get; }
 
     /// <summary>Records refused because the ring was full. Never resets; a rising count is the session's own backpressure signal.</summary>
     public long DroppedRecords => _droppedRecords;

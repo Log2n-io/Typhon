@@ -42,4 +42,36 @@ public sealed class SubscriptionsOptions
     /// </para>
     /// </remarks>
     public long StatePoolBudgetBytes { get; init; } = 256L * 1024 * 1024;
+
+    /// <summary>
+    /// Capacity of one session's inbound command ring, in bytes. Must be a power of two and at least 64. Default: 4 KiB.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The ring holds the commands a client sent since the last tick drained it. Because a full ring <i>drops</i> rather than blocks, this size is the depth
+    /// at which a client that is both past its rate limit and unlucky in the tick's timing starts losing commands — not a throughput limit. Raising it buys
+    /// tolerance for a late tick; it does not buy a client more commands per second, which the token bucket governs.
+    /// </para>
+    /// <para>
+    /// 4 KiB is a rail, not a measurement. The command-rate data that would justify a different number does not exist until sessions do.
+    /// </para>
+    /// </remarks>
+    public int IngressRingBytes { get; init; } = 4 * 1024;
+
+    /// <summary>
+    /// Ceiling on native memory held by session ingress rings. Default: 64 MiB.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Rings are carved from slabs and the pool grows one slab at a time, so nothing is committed until the first session connects. When the ceiling binds,
+    /// <b>admission fails</b>: the session is refused at connect time, where refusing is cheap and honest. The pool never blocks and never throws for
+    /// exhaustion — a transport thread waiting on the tick is the failure this whole path exists to avoid.
+    /// </para>
+    /// <para>
+    /// This is the other piece of engine memory sized by client behaviour, and it divides: <c>budget / <see cref="IngressRingBytes"/></c> is the hard cap on
+    /// concurrent sessions, which makes it the honest place to set that cap. Like the state budget it is a rail chosen as a fraction of that pool, and is not
+    /// derived from any application's session count.
+    /// </para>
+    /// </remarks>
+    public long IngressPoolBudgetBytes { get; init; } = 64L * 1024 * 1024;
 }
