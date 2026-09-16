@@ -1624,12 +1624,15 @@
         — reached only from the non-barrier arm — treats null as "no information" and recomputes
     a null list reaching a NON-barrier archetype would silently skip step (b) — one crossing never detected,
       no crash — so DetectClusterMigrationsRange asserts against it rather than tolerating it
-  COVERAGE CAVEAT (#963): the absence invariant directly above is verified on the SERIAL fence ONLY —
-    CleanBranchChangeListTests drives WriteTickFence. The parallel arm carries no verifier for it:
-    FenceWorkPlan's two `FenceDirtyBits != null` gates, ApplyDirtyBitDeltas, and EmitAabbRefreshSliceItems.
-    This rule is otherwise about PARALLEL migration apply, and audit-rule-coverage.py counts ATTRIBUTES rather
-    than paths — so the verifier count (3 -> 8, every addition serial-side) must NOT be read as covering both
-    halves. Remove this caveat when the parallel arm is pinned.
+  the absence invariant is pinned on BOTH fences, deliberately, because audit-rule-coverage.py counts
+    ATTRIBUTES and not paths — a verifier count alone cannot say which half of a parallel rule is covered:
+      serial: CleanBranchChangeListTests drives WriteTickFence
+      parallel: CleanBranchParallelFenceTests runs a barrier-only archetype under EnableParallelFence with
+        four workers and real cell crossings, and observes the buffer at Prep's tail through PrepQueueProbe —
+        after the fence proves nothing, since the on-demand GrowFenceDirtyBitsForChunkId explains a non-null
+        array just as well as the pre-size does
+    structurally unreachable, and so deliberately unverified: the Finalize-slice gate on a null list. Branch 1
+      returns before Finalize's emit, so FinalizeSliceable is never set for an archetype without a change list
   invariant the drain prefix is sorted by DestCellKey (OrderDrainAndMeasureArrivals) in Prep's serial tail,
     before Migrate dispatches, so each worker slice owns disjoint dst cells
   invariant PendingMigrationCount = 0 reset happens once per fence in FinalizeArchetypeFence
@@ -1639,7 +1642,8 @@
     ReleaseSlot (Persistent + Transient overloads), DecrementCellEntityCountOnRelease,
     FinaliseEmptyClusterCellState, ClaimSlotInCell (both overloads),
     RecordClusterDrain, DrainPendingClusterFinalizations
-  verified: FenceDirtyBitApplyTests, CellTreeDensityTransitionTests
+  verified: FenceDirtyBitApplyTests, CellTreeDensityTransitionTests, CleanBranchChangeListTests,
+    CleanBranchParallelFenceTests
   on_violation:
     plain ++/-- on cell counters → torn updates across workers → drift in EntityCount/ClusterCount
     plain occupancy clear → lost concurrent slot release → ghost entity in cluster

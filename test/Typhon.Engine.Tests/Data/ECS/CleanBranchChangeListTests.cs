@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
@@ -247,6 +248,69 @@ class CleanBranchChangeListTests : TestBase<CleanBranchChangeListTests>
                 "the Migrate phase would have begun with no buffer for its dirty-bit deltas");
             Assert.That(bufferAtPrepEnd.Length, Is.GreaterThanOrEqualTo(preSizeBound),
                 "the buffer was grown on demand inside ExecuteMigrations rather than pre-sized in Prep's tail, which is the thing this gate exists to keep");
+        });
+    }
+
+    [Test]
+    [VerifiesRule("MD-02")]
+    public void TheBranchOneChangeListIsReusedAcrossTicks_AndHandedOutZeroed()
+    {
+        // #963. The buffer the Migrate phase writes its dirty-bit deltas into used to be a fresh long[upperBound] on every tick with a crossing — ~273 KB on
+        // the large-object heap per archetype per tick at the demo's x64. It is now retained and reused, which is safe on THIS branch only: branch 2 hands
+        // its array to the next tick as PreviousTickDirtySnapshot, branch 1 sets that to null and returns before the assignment.
+        //
+        // Two things are asserted, and the second is the one that matters. Reuse is the performance claim. Being handed out ZEROED is the correctness claim:
+        // the previous tick's Migrate left destination bits set, and a stale bit makes an untouched cluster read as dirty to ClusterNeedsAabbRecompute.
+        using var dbe = SetupEngine(barrierOnly: true);
+        var id = Spawn(dbe, 50f, 50f);
+        dbe.WriteTickFence(1);
+
+        var buffers = new List<long[]>();
+        var staleBitObserved = 0;
+        ArchetypeClusterState.PrepQueueProbe = (state, _) =>
+        {
+            if (state.ArchetypeId != ArchetypeId || state.PendingMigrationCount <= 0)
+            {
+                return;
+            }
+
+            var bits = state.FenceDirtyBits;
+            if (bits == null)
+            {
+                return;
+            }
+
+            buffers.Add(bits);
+            foreach (var word in bits)
+            {
+                if (word != 0)
+                {
+                    staleBitObserved++;
+                    break;
+                }
+            }
+        };
+
+        try
+        {
+            // Two crossings on consecutive ticks, so the buffer is rented twice with a Migrate phase in between to dirty it.
+            WriteSpatialTo(dbe, id, 250f, 50f);
+            dbe.WriteTickFence(2);
+            WriteSpatialTo(dbe, id, 450f, 50f);
+            dbe.WriteTickFence(3);
+        }
+        finally
+        {
+            ArchetypeClusterState.PrepQueueProbe = null;
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(buffers, Has.Count.EqualTo(2), "both ticks must have queued a migration, or there is nothing to reuse");
+            Assert.That(staleBitObserved, Is.Zero,
+                "the reused buffer was handed to the Migrate phase still carrying the previous tick's bits — an untouched cluster now reads as dirty");
+            Assert.That(ReferenceEquals(buffers[0], buffers[1]), Is.True,
+                "the change list was reallocated rather than reused, which is the large-object-heap allocation this change removes");
         });
     }
 

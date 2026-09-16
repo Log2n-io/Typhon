@@ -360,7 +360,7 @@ internal sealed class FenceWorkPlan
 
             // The head already ran for this archetype (#886 lead D): its snapshot is in FenceDirtyBits and the bitmap is drained, so the atomic item's
             // own HasDirty test below would read false. The slices are the item.
-            if (state.PrepSliceable && state.FenceDirtyBits != null)
+            if (state.PrepSliceable && state.FenceChangeListPublished)
             {
                 EmitPrepSliceItems(meta, state, costModel);
                 continue;
@@ -648,7 +648,7 @@ internal sealed class FenceWorkPlan
             // because the atomic path would sweep dormancy a second time.
             if (state.FinalizeHeadRan)
             {
-                if (state.FinalizeSliceable && state.FenceDirtyBits != null)
+                if (state.FinalizeSliceable && state.FenceChangeListPublished)
                 {
                     EmitFinalizeSliceItems(meta, state, costModel);
                 }

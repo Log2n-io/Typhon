@@ -1790,7 +1790,7 @@ public partial class DatabaseEngine
 
             cs.FinalizeHeadRan = false;
             cs.FinalizeSliceable = false;
-            if (workerCount < 2 || cs.FenceBranchPath != 2 || cs.FenceDirtyBits == null
+            if (workerCount < 2 || cs.FenceBranchPath != 2 || !cs.FenceChangeListPublished
                 || FenceWorkPlan.CountPopulatedRanges(cs.FenceDirtyBits, FenceWorkPlan.FinalizeSliceWords) < FinalizeSliceMinRanges)
             {
                 continue;

@@ -417,6 +417,71 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// On branch path 1 this is the local occupancy-only spatialBits buffer; on path 2 it's the real <c>ClusterDirtyBitmap.Snapshot()</c> result.</summary>
     internal long[] FenceDirtyBits;
 
+    /// <summary>
+    /// Did Prep publish a change list this tick? The single place the meaning of a null <see cref="FenceDirtyBits"/> is written down (#963).
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Why this exists.</b> Null is the representation for THREE different facts, decided in two files, and before this every reader re-derived
+    /// which one it meant from context:</para>
+    /// <list type="bullet">
+    ///   <item>the archetype had no work at all this tick (branch 0), so Prep published nothing;</item>
+    ///   <item>it is <see cref="SpatialBarrierOnly"/> on the clean branch (branch 1), where a change list is not built because nothing on that path
+    ///         reads one (#939);</item>
+    ///   <item>it had no migrations to execute, so <c>PreSizeMigrationBuffers</c> did not allocate a buffer nothing would have read.</item>
+    /// </list>
+    /// <para><b>What a caller may conclude, and what it may not.</b> False means "there is no per-cluster change list to read or slice this tick" — that
+    /// and nothing more. It does NOT mean the archetype is idle, that no cluster changed, or that the AABB refresh has nothing to do: on the barrier-only
+    /// path the refresh is driven by <see cref="ClusterProcessBitmap"/> and is entirely independent of this. A caller that needs "did anything change"
+    /// must ask the bitmap, not this.</para>
+    /// <para><b>Deliberately not consulted by <see cref="ClusterNeedsAabbRecompute"/></b>, which needs the ARRAY rather than its presence — it reads the
+    /// per-cluster word and falls through to the other signals when there is none, so a boolean would lose the distinction it depends on.</para>
+    /// </remarks>
+    internal bool FenceChangeListPublished => FenceDirtyBits != null;
+
+    /// <summary>
+    /// The branch-1 change list, retained across ticks and reused instead of reallocated (#963).
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Why only branch 1.</b> On branch 2 the array is <c>ClusterDirtyBitmap.Snapshot()</c>'s result, and Finalize hands that same instance to the
+    /// NEXT tick as <see cref="PreviousTickDirtySnapshot"/>, which change-filtered dispatch reads while the next tick's systems run. Reusing it there would
+    /// rewrite what those systems are reading — the aliasing hazard `design/Runtime/11-prep-phase-optimisation.md` §7.3 records. Branch 1 has no such alias:
+    /// it sets <see cref="PreviousTickDirtySnapshot"/> to null, and <c>FinalizeArchetypeFenceHead</c> returns at its path-1 exit BEFORE the assignment that
+    /// would publish it. Nothing holds the branch-1 array past the tick that used it.</para>
+    /// <para><b>Why this is a strict win rather than a trade.</b> <c>new long[n]</c> already pays a zeroing pass — the CLR zeroes every array it hands out —
+    /// so renting and clearing costs the same memset, minus the allocation and minus the large-object-heap pressure it adds. At the SWG demo's x64 this array
+    /// is ~273 KB per archetype on every tick with a crossing, which is GC cost paid later as a pause rather than in the pre-size's own sub-span.</para>
+    /// </remarks>
+    private long[] _branch1ChangeListScratch;
+
+    /// <summary>
+    /// Hand out a zeroed branch-1 change list of at least <paramref name="upperBound"/> words, reusing the retained buffer when it is large enough.
+    /// </summary>
+    private long[] RentBranch1ChangeList(int upperBound)
+    {
+        Debug.Assert(FenceBranchPath == 1,
+            "the retained change list is only safe on branch 1 — branch 2's array is published to the next tick as PreviousTickDirtySnapshot");
+
+        var buf = _branch1ChangeListScratch;
+        if (buf == null || buf.Length < upperBound)
+        {
+            var newLen = buf?.Length ?? 0;
+            while (newLen < upperBound)
+            {
+                newLen = Math.Max(newLen * 2, upperBound);
+            }
+
+            // A fresh array is already zeroed, so the clear below is skipped for it.
+            buf = new long[newLen];
+            _branch1ChangeListScratch = buf;
+            return buf;
+        }
+
+        // Reused: the previous tick's Migrate phase left source bits cleared and destination bits set, so it must be zeroed before it is handed out again.
+        // A stale bit would make an untouched cluster read as dirty to ClusterNeedsAabbRecompute and cost a bound recompute that nothing asked for.
+        Array.Clear(buf, 0, buf.Length);
+        return buf;
+    }
+
     /// <summary>Popcount of dirty entries after occupancy-masking. Drives WAL chunk sizing in Finalize. Path 1 leaves this at 0.</summary>
     internal int FenceEntryCount;
 
@@ -603,18 +668,20 @@ internal sealed unsafe partial class ArchetypeClusterState
         // large-object-heap array that nothing ever reads. The barrier-only clean branch now publishes no change list, which is what makes this reachable:
         // before it, every path arrived here with a non-null array and the branch was dead.
         //
-        // SCOPE, because the saving is narrower than it looks: ResetArchetypeFenceTickState nulls FenceDirtyBits at the top of EVERY Prep, so this allocates
-        // afresh on every tick that has any migration at all. A MOVING world therefore pays the same per-archetype-per-tick LOH array it always did; what is
-        // removed is the quiet tick's. The walk on the clean branch is the saving that does hold for a moving world — this is not that.
+        // ResetArchetypeFenceTickState nulls FenceDirtyBits at the top of EVERY Prep, so without the retained buffer below this allocated afresh on every
+        // tick with a migration — which, in a moving world, is most of them. RentBranch1ChangeList reuses one array per archetype instead (#963); it is a
+        // strict win rather than a trade, because `new long[n]` already pays the zeroing pass that Array.Clear pays, minus the allocation and the LOH churn.
         //
         // This does not weaken the pre-size guarantee, and MD-02 says why: pre-sizing is a performance measure, not the safety argument. The parallel path
         // never touches the array directly, and the on-demand grow under _finalizeLock (ApplyDirtyBitDeltas, GrowFenceDirtyBitsForChunkId) is what makes an
         // under-estimate survivable. "Not yet allocated" is the limiting case of an under-estimate and takes the same path.
         if (FenceDirtyBits == null)
         {
+            // Only when this tick has migrations to execute (#939): the array exists for the Migrate phase, and a tick with an empty drain prefix runs no
+            // Migrate slice at all, so handing one out manufactures a buffer nothing reads.
             if (PendingMigrationCount > 0)
             {
-                FenceDirtyBits = new long[upperBound];
+                FenceDirtyBits = RentBranch1ChangeList(upperBound);
             }
         }
         else if (FenceDirtyBits.Length < upperBound)
