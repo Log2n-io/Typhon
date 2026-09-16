@@ -2439,79 +2439,165 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         if (state.ClusterArchetypes != null)
         {
             var grid = _tx.DBE.SpatialGrid;
+
+            // MVCC born/died gate, the same one the SoA scan applies (04-data.md "Isolation guarantees").
+            //
+            // The spatial index walks CURRENT occupancy and knows nothing about the reader's snapshot, so without this an entity committed AFTER the
+            // snapshot is returned - the phantom read the fixed snapshot is specified to prevent. The SAME transaction's scan path already hides it, so the
+            // two predicates disagreed about which entities exist, and the spatial one was the wrong side of the disagreement (#899).
+            //
+            // Only Versioned archetypes promise isolation - the storage-mode matrix is explicit that SingleVersion and Transient offer none - so a
+            // non-Versioned spatial archetype keeps the lookup-free collect it always had.
+            //
+            // The record buffer is sized ONCE, to the widest record among the gated archetypes, and reused across them: a stackalloc inside the loop below
+            // would grow the frame once per archetype rather than once per query.
+            var txTsn = _tx.TSN;
+            var visRecordSize = 0;
             foreach (var cs in state.ClusterArchetypes)
             {
                 if (!cs.SpatialSlot.HasSpatialIndex)
                 {
                     continue;
                 }
-                if (_spatialQueryType == SpatialQueryType.AABB)
+
+                var probe = ArchetypeRegistry.GetMetadata((ushort)cs.ArchetypeId);
+                if (probe.VersionedSlotMask != 0 && probe._entityRecordSize > visRecordSize)
                 {
-                    // The max corner is ALWAYS at [3]/[4], for both dimensions. Only Z varies.
-                    //
-                    // This block used to read qMaxX from [2] and qMaxY from [3] for a 2D component — i.e. it took the caller's minZ as maxX and their maxX as
-                    // maxY. WhereInAABB documents and packs six doubles as (minX, minY, minZ, maxX, maxY, maxZ) whatever the dimension, so a 2D query got a
-                    // garbage box and a silently empty answer: an SQ-01 false negative with no exception. It survived because every EcsQuery spatial test
-                    // uses a 3D component, and because the Workbench's QuerySpecCompiler re-packed its arguments to compensate — a workaround at a call site
-                    // three projects away, which is how a defect gets mistaken for a convention. Found by the #872 measurement harness, whose 2D rows all
-                    // reported zero hits.
-                    // No narrowing: _spatialParams has always been doubles — WhereInAABB takes them — and QueryAabb takes doubles since #914, so the
-                    // (float) casts that used to sit here were a lossy round trip through a width neither end asked for. At a 10^9 world coordinate they
-                    // quantised the query box to ~128-unit steps, which is an SQ-01 false negative for any box narrower than that.
-                    var qMinX = _spatialParams[0];
-                    var qMinY = _spatialParams[1];
-                    var qMaxX = _spatialParams[3];
-                    var qMaxY = _spatialParams[4];
+                    visRecordSize = probe._entityRecordSize;
+                }
+            }
 
-                    // A 2D archetype stores its clusters on a flat Z slab, so an unbounded Z accepts them whatever the caller passed.
-                    var is3D = state.Descriptor.CoordCount == 6;
-                    var qMinZ = is3D ? _spatialParams[2] : double.NegativeInfinity;
-                    var qMaxZ = is3D ? _spatialParams[5] : double.PositiveInfinity;
+            byte* visBuf = stackalloc byte[visRecordSize > 0 ? visRecordSize : 1];
 
-                    using var guard = EpochGuard.Enter(_tx.DBE.EpochManager);
-                    foreach (var hit in cs.QueryAabb(grid, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ))
+            foreach (var cs in state.ClusterArchetypes)
+            {
+                if (!cs.SpatialSlot.HasSpatialIndex)
+                {
+                    continue;
+                }
+
+                var meta = ArchetypeRegistry.GetMetadata((ushort)cs.ArchetypeId);
+                var visGated = meta.VersionedSlotMask != 0;
+                var visState = visGated ? _tx.DBE._archetypeStates[meta.ArchetypeId] : null;
+                var visAccessor = visState != null ? visState.EntityMap.Segment.CreateChunkAccessor() : default;
+                try
+                {
+                    if (_spatialQueryType == SpatialQueryType.AABB)
                     {
-                        var entityId = EntityId.FromRaw(hit.EntityId);
-                        if (MaskTestByRouting(entityId.ArchetypeId))
+                        // The max corner is ALWAYS at [3]/[4], for both dimensions. Only Z varies.
+                        //
+                        // This block used to read qMaxX from [2] and qMaxY from [3] for a 2D component, taking the caller's minZ as maxX and their maxX as
+                        // maxY. WhereInAABB documents and packs six doubles as (minX, minY, minZ, maxX, maxY, maxZ) whatever the dimension, so a 2D query
+                        // got a garbage box and a silently empty answer: an SQ-01 false negative with no exception. It survived because every EcsQuery
+                        // spatial test uses a 3D component, and because the Workbench's QuerySpecCompiler re-packed its arguments to compensate - a
+                        // workaround at a call site three projects away, which is how a defect gets mistaken for a convention.
+                        // No narrowing: _spatialParams has always been doubles and QueryAabb takes doubles since #914, so the (float) casts that used to sit
+                        // here were a lossy round trip through a width neither end asked for.
+                        var qMinX = _spatialParams[0];
+                        var qMinY = _spatialParams[1];
+                        var qMaxX = _spatialParams[3];
+                        var qMaxY = _spatialParams[4];
+
+                        // A 2D archetype stores its clusters on a flat Z slab, so an unbounded Z accepts them whatever the caller passed.
+                        var is3D = state.Descriptor.CoordCount == 6;
+                        var qMinZ = is3D ? _spatialParams[2] : double.NegativeInfinity;
+                        var qMaxZ = is3D ? _spatialParams[5] : double.PositiveInfinity;
+
+                        // One-entry memo over the cluster summary. The enumerator drains a whole cluster's occupancy bits before advancing, so consecutive
+                        // hits share a chunk id — without this the four acquire loads inside IsClusterFullyVisibleAt would be paid per HIT where the SoA
+                        // scan pays them per CLUSTER, 256 against 4 for a full cluster.
+                        var memoChunkId = -1;
+                        var memoFullyVisible = false;
+
+                        using var guard = EpochGuard.Enter(_tx.DBE.EpochManager);
+                        foreach (var hit in cs.QueryAabb(grid, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ))
                         {
-                            result.Add(entityId);
+                            var entityId = EntityId.FromRaw(hit.EntityId);
+                            if (!MaskTestByRouting(entityId.ArchetypeId))
+                            {
+                                continue;
+                            }
+
+                            // The per-cluster summary first, exactly as the SoA scan uses it: a cluster every one of whose entities was born at or before
+                            // this snapshot, with every death already visible to it, needs no per-entity EntityMap probe. The hit carries its
+                            // ClusterChunkId, so the memo above answers most hits for nothing and a miss costs four acquire loads against the ~80-166 ns
+                            // point lookup it replaces.
+                            //
+                            // The occupancy word those loads are ordered against is read with an acquire by the enumerator (OpenOccupancy), which is
+                            // required rather than incidental: an acquire inside IsClusterFullyVisibleAt does not stop an EARLIER plain load from sinking
+                            // past it, so a plain read there would let arm64 pair a fresh occupancy word with a stale born watermark — a phantom, and the
+                            // exact hazard the SoA scan's own comment records.
+                            if (visGated && hit.ClusterChunkId != memoChunkId)
+                            {
+                                memoChunkId = hit.ClusterChunkId;
+                                memoFullyVisible = cs.IsClusterFullyVisibleAt(memoChunkId, txTsn);
+                            }
+
+                            var hitGated = visGated && !memoFullyVisible;
+                            if (IsVisibleAtSnapshot(hit.EntityId, hitGated, visState, visBuf, meta._entityRecordSize, txTsn, ref visAccessor))
+                            {
+                                result.Add(entityId);
+                            }
                         }
                     }
-                }
-                else if (_spatialQueryType == SpatialQueryType.Radius)
-                {
-                    // Per-cell cluster index Radius query (issue #230 Phase 3). Parameter layout matches QuerySingleTree's Radius case:
-                    // _spatialParams[0..halfCoord] is the center, _spatialParams[3] is the radius (regardless of dimension — a quirk of the existing
-                    // parameter packing for the per-entity tree).
-                    var cX = _spatialParams[0];
-                    var cY = _spatialParams[1];
-                    var cZ = state.Descriptor.CoordCount == 6 ? _spatialParams[2] : 0d;
-                    var radius = _spatialParams[3];
-
-                    using var guard = EpochGuard.Enter(_tx.DBE.EpochManager);
-                    foreach (var hit in cs.QueryRadius(grid, cX, cY, cZ, radius))
+                    else if (_spatialQueryType == SpatialQueryType.Radius)
                     {
-                        var entityId = EntityId.FromRaw(hit.EntityId);
-                        if (MaskTestByRouting(entityId.ArchetypeId))
+                        // Per-cell cluster index Radius query (issue #230 Phase 3). Parameter layout matches QuerySingleTree's Radius case:
+                        // _spatialParams[0..halfCoord] is the center, _spatialParams[3] is the radius (regardless of dimension - a quirk of the existing
+                        // parameter packing for the per-entity tree).
+                        var cX = _spatialParams[0];
+                        var cY = _spatialParams[1];
+                        var cZ = state.Descriptor.CoordCount == 6 ? _spatialParams[2] : 0d;
+                        var radius = _spatialParams[3];
+
+                        // See the AABB branch: consecutive hits share a cluster, so the summary is consulted once per cluster rather than once per hit.
+                        var memoChunkId = -1;
+                        var memoFullyVisible = false;
+
+                        using var guard = EpochGuard.Enter(_tx.DBE.EpochManager);
+                        foreach (var hit in cs.QueryRadius(grid, cX, cY, cZ, radius))
                         {
-                            result.Add(entityId);
+                            var entityId = EntityId.FromRaw(hit.EntityId);
+                            if (!MaskTestByRouting(entityId.ArchetypeId))
+                            {
+                                continue;
+                            }
+
+                            if (visGated && hit.ClusterChunkId != memoChunkId)
+                            {
+                                memoChunkId = hit.ClusterChunkId;
+                                memoFullyVisible = cs.IsClusterFullyVisibleAt(memoChunkId, txTsn);
+                            }
+
+                            var hitGated = visGated && !memoFullyVisible;
+                            if (IsVisibleAtSnapshot(hit.EntityId, hitGated, visState, visBuf, meta._entityRecordSize, txTsn, ref visAccessor))
+                            {
+                                result.Add(entityId);
+                            }
                         }
                     }
+                    else if (_spatialQueryType == SpatialQueryType.Ray)
+                    {
+                        CollectClusterRay(cs, grid, result, visGated, visState, visBuf, meta._entityRecordSize, txTsn, ref visAccessor);
+                    }
+                    else if (_spatialQueryType == SpatialQueryType.Frustum)
+                    {
+                        CollectClusterFrustum(cs, grid, state, result, visGated, visState, visBuf, meta._entityRecordSize, txTsn, ref visAccessor);
+                    }
+                    else
+                    {
+                        // Every shape the builder can set is handled above. This is the guard for a shape ADDED to SpatialQueryType without a cluster branch,
+                        // the alternative being a query that silently returns nothing, which is an SQ-01 false negative that no differential test would catch
+                        // because the shape would have no oracle either.
+                        throw new NotSupportedException($"Cluster spatial queries for shape '{_spatialQueryType}' have no implementation.");
+                    }
                 }
-                else if (_spatialQueryType == SpatialQueryType.Ray)
+                finally
                 {
-                    CollectClusterRay(cs, grid, result);
-                }
-                else if (_spatialQueryType == SpatialQueryType.Frustum)
-                {
-                    CollectClusterFrustum(cs, grid, state, result);
-                }
-                else
-                {
-                    // Every shape the builder can set is handled above. This is the guard for a shape ADDED to SpatialQueryType without a cluster branch —
-                    // the alternative being a query that silently returns nothing, which is an SQ-01 false negative that no differential test would catch
-                    // because the shape would have no oracle either.
-                    throw new NotSupportedException($"Cluster spatial queries for shape '{_spatialQueryType}' have no implementation.");
+                    if (visState != null)
+                    {
+                        visAccessor.Dispose();
+                    }
                 }
             }
         }
@@ -2543,7 +2629,14 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// The cluster API returns hits front-to-back; that ordering is discarded here because <c>ExecuteSpatial</c>'s contract is a set, and honouring it would
     /// mean merging across archetypes on a distance this method no longer carries.
     /// </remarks>
-    private void CollectClusterRay(ArchetypeClusterState cs, SpatialGrid grid, HashSet<EntityId> result)
+    /// <remarks>
+    /// Takes the MVCC gate by parameter rather than rebuilding it: the caller has already resolved it once for this archetype, and the record buffer is
+    /// sized for the whole query (SQ-07). Unlike the AABB and radius shapes this one has no per-cluster shortcut available — <c>QueryRay</c> yields bare
+    /// entity ids with no <c>ClusterChunkId</c> — so a gated archetype pays the EntityMap probe on every hit. That is a property of the result type, not a
+    /// choice.
+    /// </remarks>
+    private void CollectClusterRay(ArchetypeClusterState cs, SpatialGrid grid, HashSet<EntityId> result, bool visGated, ArchetypeEngineState visState,
+        byte* visBuf, int visRecordSize, long txTsn, ref ChunkAccessor<PersistentStore> visAccessor)
     {
         // No narrowing: WhereRay takes doubles and QueryRay takes doubles since #919 F2. The casts that used to sit here quantised BOTH the origin and the
         // direction — and a quantised direction is the worse of the two, because the error grows with distance along the ray rather than staying bounded.
@@ -2588,7 +2681,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 for (var i = 0; i < hits; i++)
                 {
                     var entityId = EntityId.FromRaw(span[i].entityId);
-                    if (MaskTestByRouting(entityId.ArchetypeId))
+                    if (MaskTestByRouting(entityId.ArchetypeId)
+                        && IsVisibleAtSnapshot(span[i].entityId, visGated, visState, visBuf, visRecordSize, txTsn, ref visAccessor))
                     {
                         result.Add(entityId);
                     }
@@ -2608,7 +2702,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
     /// <summary>Frustum query against one cluster archetype, collected into <paramref name="result"/>.</summary>
     /// <remarks><inheritdoc cref="CollectClusterRay" path="/remarks"/></remarks>
-    private void CollectClusterFrustum(ArchetypeClusterState cs, SpatialGrid grid, SpatialIndexState state, HashSet<EntityId> result)
+    private void CollectClusterFrustum(ArchetypeClusterState cs, SpatialGrid grid, SpatialIndexState state, HashSet<EntityId> result, bool visGated,
+        ArchetypeEngineState visState, byte* visBuf, int visRecordSize, long txTsn, ref ChunkAccessor<PersistentStore> visAccessor)
     {
         // The caller packs planes for the component's dimension; a 2D component takes 3 doubles per plane and a 3D one takes 4. Checking here rather than
         // letting the cluster query throw keeps the message in terms of the API the user called.
@@ -2658,7 +2753,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 for (var i = 0; i < hits; i++)
                 {
                     var entityId = EntityId.FromRaw(span[i]);
-                    if (MaskTestByRouting(entityId.ArchetypeId))
+                    if (MaskTestByRouting(entityId.ArchetypeId)
+                        && IsVisibleAtSnapshot(span[i], visGated, visState, visBuf, visRecordSize, txTsn, ref visAccessor))
                     {
                         result.Add(entityId);
                     }

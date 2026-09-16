@@ -398,6 +398,46 @@
     result narrowed → the caller reads a coordinate quantised to ~64-unit steps at 10^9 and cannot tell
   requires: C15 (stored bounds are cell-relative f32 — this rule is why that is not a limitation), CA-01
 
+### SQ-07: A spatial predicate answers at the reader's snapshot, exactly as the scan path does `[fatal][silent]`
+  invariant every entity a spatial query emits passes the SAME born/died gate the cluster SoA scan applies
+    (IsVisibleAtSnapshot): born at or before the reader's TSN, and either undead or dead only after it. The
+    spatial index walks CURRENT occupancy and knows nothing about the snapshot, so ungated it returns an entity
+    committed AFTER the snapshot — the phantom read 04-data.md "Isolation guarantees" says the fixed snapshot
+    prevents. Measured before the fix: a reader seeing 40 entities saw 45 after a concurrent commit of 5
+  invariant the gate applies to ALL FOUR shapes — AABB, radius, ray and frustum. The first two take the cheap
+    path because ClusterSpatialQueryResult carries ClusterChunkId, so IsClusterFullyVisibleAt (FOUR acquire loads)
+    answers once per CLUSTER rather than per hit: the enumerator drains a cluster's occupancy bits before
+    advancing, so consecutive hits share a chunk id and a one-entry memo collapses them. Without the memo a full
+    cluster pays 256 loads where the SoA scan pays 4. Ray and frustum return bare entity ids with no chunk id, so
+    each of their hits pays the EntityMap probe — an asymmetry forced by the result types, not a decision
+  invariant 🔴 the occupancy word the summary is ordered against is read with an ACQUIRE by the enumerator
+    (AabbClusterEnumerator.OpenOccupancy call sites), and that is load-bearing rather than incidental. An acquire
+    inside IsClusterFullyVisibleAt does not stop an EARLIER plain load from sinking past it, so a plain read
+    there lets arm64 pair a fresh occupancy word with a stale born watermark: born <= txTsn reads true, the probe
+    is skipped and the phantom is emitted. The SoA scan records the same requirement at its own call site. A
+    stale SHORT watermark array fails safe (returns false, probe taken); only the stale-low value leaks, and it
+    leaks silently and only off x86
+  invariant only Versioned archetypes are gated (meta.VersionedSlotMask != 0). SingleVersion and Transient
+    promise no isolation, so gating them would buy a guarantee they do not make at the price of a hash lookup per
+    hit — the same reasoning, and the same predicate, the scan path uses
+  invariant this is a FALSE-POSITIVE rule and SQ-01 is a false-negative one; they are not the same guarantee and
+    neither implies the other. A gate that dropped a visible entity would break SQ-01 while satisfying this, so
+    the gate never runs where the archetype makes no isolation promise, and an unreadable EntityMap record is
+    treated as VISIBLE — shrinking a result silently is the worse failure
+  never gate on MaskTestByRouting alone: the routing mask is an archetype test and knows nothing about TSNs
+  never stackalloc the record buffer inside the per-archetype loop — it is sized once, to the widest gated
+    record, and reused, or the frame grows with the number of spatial archetypes in the query
+  scope: EcsQuery`1.ExecuteSpatial, EcsQuery`1.CollectClusterRay, EcsQuery`1.CollectClusterFrustum,
+    EcsQuery`1.IsVisibleAtSnapshot, ArchetypeClusterState.IsClusterFullyVisibleAt,
+    ClusterSpatialQueryResult.ClusterChunkId
+  verified: SpatialSnapshotIsolationTests.ASpatialQueryDoesNotSeeEntitiesCommittedAfterItsSnapshot over both
+    Versioned spatial shapes the axis kit builds (PureVersioned and VerPlusTransient): a reader takes its
+    snapshot, five more entities are committed inside its query box and published by a fence, and the reader's
+    box count must not move. It failed 6 of 6 cells before the gate (Expected 40, But was 45)
+  on_violation:
+    a spatial predicate and a scan predicate in ONE transaction disagree about which entities exist, silently
+  requires: SQ-01 (the gate must not turn a phantom fix into a dropped entity)
+
 ---
 
 ## Module: Fat AABB Updates

@@ -846,7 +846,7 @@ public unsafe ref struct AabbClusterEnumerator
                     EnsureAccessor();
                     _currentClusterBase = _warm.GetChunkAddress(treeChunkId);
                     _currentClusterChunkId = treeChunkId;
-                    OpenOccupancy(*(ulong*)_currentClusterBase);
+                    OpenOccupancy(Volatile.Read(ref *(ulong*)_currentClusterBase));
                     return true;
                 }
 
@@ -866,7 +866,7 @@ public unsafe ref struct AabbClusterEnumerator
                 EnsureAccessor();
                 _currentClusterBase = _warm.GetChunkAddress(batchedChunkId);
                 _currentClusterChunkId = batchedChunkId;
-                OpenOccupancy(*(ulong*)_currentClusterBase);
+                OpenOccupancy(Volatile.Read(ref *(ulong*)_currentClusterBase));
                 return true;
             }
 
@@ -913,7 +913,7 @@ public unsafe ref struct AabbClusterEnumerator
                 EnsureAccessor();
                 _currentClusterBase = _warm.GetChunkAddress(chunkId);
                 _currentClusterChunkId = chunkId;
-                OpenOccupancy(*(ulong*)_currentClusterBase);
+                OpenOccupancy(Volatile.Read(ref *(ulong*)_currentClusterBase));
                 return true;
             }
 
@@ -1037,7 +1037,7 @@ public unsafe ref struct AabbClusterEnumerator
             EnsureAccessor();
             _currentClusterBase = _warm.GetChunkAddress(chunkId);
             _currentClusterChunkId = chunkId;
-            OpenOccupancy(*(ulong*)_currentClusterBase);
+            OpenOccupancy(Volatile.Read(ref *(ulong*)_currentClusterBase));
             return true;
         }
 
