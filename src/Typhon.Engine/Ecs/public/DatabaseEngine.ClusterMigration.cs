@@ -204,7 +204,10 @@ public partial class DatabaseEngine
         ref ChunkAccessor<PersistentStore> clusterAccessor)
     {
         clusterState.EnsurePendingMigrationCapacityForTick();
-        DetectClusterMigrationsRange(clusterState, engineState, archetypeId, dirtyBits, ref clusterAccessor, 0, dirtyBits.Length, null);
+
+        // A null <paramref name="dirtyBits"/> means "this archetype has no change list this tick", which is the barrier-only clean branch (#939): step (a)
+        // is the whole of detection there, so there is nothing to size a word range against and the range is empty by construction.
+        DetectClusterMigrationsRange(clusterState, engineState, archetypeId, dirtyBits, ref clusterAccessor, 0, dirtyBits?.Length ?? 0, null);
     }
 
     /// <summary>
@@ -350,8 +353,12 @@ public partial class DatabaseEngine
         // which is fast even at 100k entities.
         var migrationPending = clusterState.ClusterMigrationPendingSlots;
 
+        // The span's slot count changes meaning for a barrier-only clean tick as of #939, and the change is deliberate: it used to be the popcount of the
+        // occupancy words Prep had just written into a synthetic change list, and is now 0, because there is no longer a list and nothing is scanned. The
+        // field means "slots this call iterated", which is honest in both readings — but a trace spanning the commit will show it fall to zero for those
+        // archetypes without their workload having changed.
         var scanSlotCount = 0;
-        if (TelemetryConfig.SpatialClusterMigrationDetectActive)
+        if (dirtyBits != null && TelemetryConfig.SpatialClusterMigrationDetectActive)
         {
             var scanEnd = Math.Min(dirtyBits.Length, firstWord + wordCount);
             for (var wi = firstWord; wi < scanEnd; wi++)
@@ -382,6 +389,17 @@ public partial class DatabaseEngine
             // ─── Step (b): legacy scan over dirtyBits for slots not covered by step (a) ───
             // Skipped entirely when SpatialBarrierOnly — caller has guaranteed every spatial write
             // goes through WriteSpatial, so step (a) is exhaustive.
+            //
+            // A null change list means the same thing said the other way round (#939): the clean branch builds none for a barrier-only archetype, because
+            // this is the guard it would have been built for. Asserted rather than merely tolerated — any OTHER archetype arriving without one would skip
+            // step (b) silently, which is a crossing never detected rather than a crash.
+            Debug.Assert(dirtyBits != null || clusterState.SpatialBarrierOnly,
+                "a null change list is only meaningful when the caller has guaranteed every spatial write goes through WriteSpatial");
+
+            // Deliberately NOT `|| dirtyBits == null`. In every state the assert above permits, null implies SpatialBarrierOnly and the test below has already
+            // fired, so the extra disjunct is dead — it becomes live only in the state the assert FORBIDS, and there it would turn a Release
+            // NullReferenceException into a silently skipped step (b): one crossing never detected, which is exactly the [fatal][silent] outcome MD-02 names.
+            // A Debug-only assert paired with Release silence is the wrong pairing for a silent-fatal rule; let it throw.
             if (clusterState.SpatialBarrierOnly)
             {
                 // This branch contributes NOTHING to the absorbed count, and must not pretend otherwise. The local's only ++ is in step (b) below, which this
@@ -749,6 +767,13 @@ public partial class DatabaseEngine
         // dirtyBits[] is the FenceDirtyBits buffer set by Prep. Pre-sized by TickDriver to PrimarySegmentCapacity + PendingMigrationCount, so no Array.Resize
         // is ever needed inside this slice loop — workers Interlocked.Or/And on disjoint or shared words without parallel-resize race.
         var dirtyBits = clusterState.FenceDirtyBits;
+
+        // Non-null by construction, and worth asserting now that it is conditional (#939): PreSizeArchetypeFence runs from FinishArchetypeFencePrep on every
+        // Prep exit, outside the hasWork gate, and allocates whenever PendingMigrationCount > 0 — the same count that gates this phase running at all. The
+        // pairing is prose rather than a type, and the contemplated `hasWork |= queue.Count > 0` (TickFence.cs, the barrier-only re-nomination gap) is exactly
+        // the edit that would file requests after that count is read.
+        Debug.Assert(dirtyBits != null,
+            "the Migrate phase reached a slice with no dirty-bit buffer — PreSizeArchetypeFence did not run, or ran before the queue was filled");
 
         var startTimestamp = Stopwatch.GetTimestamp();
 

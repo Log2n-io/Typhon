@@ -1605,6 +1605,31 @@
     used to state — that one was observed to under-estimate under AntHill loads. It is a performance
     measure, not the safety argument: the parallel path never touches the array, and the on-demand grow in
     ApplyDirtyBitDeltas / GrowFenceDirtyBitsForChunkId is what actually makes an under-estimate survivable
+  invariant the array may legitimately be ABSENT, and absence is the limiting case of that under-estimate,
+    not a violation (#939):
+      PreSizeMigrationBuffers creates it from null only when PendingMigrationCount > 0, because a tick with
+        an empty drain prefix dispatches no Migrate slice and nothing would ever read it
+      the clean branch (FenceBranchPath 1) publishes NO change list for a SpatialBarrierOnly archetype,
+        because on that path nothing reads one:
+          detection skips step (b) by construction — crossings come from step (a)'s drain of
+            ClusterMigrationPendingSlots, which SetSpatialBarrierOnly guarantees is exhaustive
+          the AABB refresh takes the BITMAP arm of RecomputeDirtyClusterAabbsSlice, which iterates
+            ClusterProcessBitmap and never consults the change list at all. It is the non-barrier arm that
+            gates on ClusterNeedsAabbRecompute, and that helper's own remark says so
+          the removed walk populated a word only where ClusterNeedsAabbRecompute was true, and the process
+            bit is one of that predicate's three signals — so the clusters the refresh visits are the
+            process-bitmap set either way. That, not a fall-through, is why dropping the list is equivalence
+      ∴ every reader tolerates null: FinalizeArchetypeFenceHead returns at its path-1 exit before
+        dereferencing it, both slice planners gate on FenceDirtyBits != null, and ClusterNeedsAabbRecompute
+        — reached only from the non-barrier arm — treats null as "no information" and recomputes
+    a null list reaching a NON-barrier archetype would silently skip step (b) — one crossing never detected,
+      no crash — so DetectClusterMigrationsRange asserts against it rather than tolerating it
+  COVERAGE CAVEAT (#963): the absence invariant directly above is verified on the SERIAL fence ONLY —
+    CleanBranchChangeListTests drives WriteTickFence. The parallel arm carries no verifier for it:
+    FenceWorkPlan's two `FenceDirtyBits != null` gates, ApplyDirtyBitDeltas, and EmitAabbRefreshSliceItems.
+    This rule is otherwise about PARALLEL migration apply, and audit-rule-coverage.py counts ATTRIBUTES rather
+    than paths — so the verifier count (3 -> 8, every addition serial-side) must NOT be read as covering both
+    halves. Remove this caveat when the parallel arm is pinned.
   invariant the drain prefix is sorted by DestCellKey (OrderDrainAndMeasureArrivals) in Prep's serial tail,
     before Migrate dispatches, so each worker slice owns disjoint dst cells
   invariant PendingMigrationCount = 0 reset happens once per fence in FinalizeArchetypeFence

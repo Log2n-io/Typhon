@@ -597,9 +597,25 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         // FenceDirtyBits is per-cluster (one long word per cluster chunk id). Grow to at least the upper bound.
+        //
+        // Created here ONLY when this tick has migrations to execute (#939). The array exists for the Migrate phase — ExecuteMigrations clears the source
+        // bit and sets the destination one — and a tick with an empty drain prefix runs no Migrate slice at all, so allocating one manufactures a
+        // large-object-heap array that nothing ever reads. The barrier-only clean branch now publishes no change list, which is what makes this reachable:
+        // before it, every path arrived here with a non-null array and the branch was dead.
+        //
+        // SCOPE, because the saving is narrower than it looks: ResetArchetypeFenceTickState nulls FenceDirtyBits at the top of EVERY Prep, so this allocates
+        // afresh on every tick that has any migration at all. A MOVING world therefore pays the same per-archetype-per-tick LOH array it always did; what is
+        // removed is the quiet tick's. The walk on the clean branch is the saving that does hold for a moving world — this is not that.
+        //
+        // This does not weaken the pre-size guarantee, and MD-02 says why: pre-sizing is a performance measure, not the safety argument. The parallel path
+        // never touches the array directly, and the on-demand grow under _finalizeLock (ApplyDirtyBitDeltas, GrowFenceDirtyBitsForChunkId) is what makes an
+        // under-estimate survivable. "Not yet allocated" is the limiting case of an under-estimate and takes the same path.
         if (FenceDirtyBits == null)
         {
-            FenceDirtyBits = new long[upperBound];
+            if (PendingMigrationCount > 0)
+            {
+                FenceDirtyBits = new long[upperBound];
+            }
         }
         else if (FenceDirtyBits.Length < upperBound)
         {
