@@ -97,6 +97,10 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     {
         public string Name;
         public bool IsEngine;
+
+        /// <summary>Whether a system failing on this track latches the terminal fence-failure verdict. See <see cref="Track.FailureIsTerminal"/>.</summary>
+        public bool FailureIsTerminal = true;
+
         public int[] Roots = [];
         public int[] Members = [];
         public int MemberCount => Members.Length;
@@ -247,12 +251,21 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             return;
         }
 
-        // Latch before the detail, exactly as TryRecordTickAbort does and for the same reason: the CAS elects one recorder and racing losers must not stomp it.
-        if (Interlocked.CompareExchange(ref _fenceFailed.Value, 1, 0) == 0)
+        // Not every engine track's failure is terminal. The latch below stops the runtime for good, which is the correct response to a fence that did not
+        // finish — its half-written pages are dirty and un-logged, and every further tick adds more. It is the wrong response to engine work with no
+        // durability role: the Engine-Subscriptions track writes only RAM-only replication blocks, so a throw there endangers nothing a later tick compounds,
+        // and stopping the database over it would make a bug in the newest subsystem the most destructive kind of bug there is. Such a track still logs, still
+        // captures, and still reaches the host through the callback below — it simply does not take the engine with it.
+        if (_scheduledTracks[_systemTrackIndex[sysIdx]].FailureIsTerminal)
         {
-            _fenceFailedSystemIndex = sysIdx;
-            _fenceFailedException = ex;
-            _fenceFailedTickNumber = _currentTickNumber;
+            // Latch before the detail, exactly as TryRecordTickAbort does and for the same reason: the CAS elects one recorder and racing losers must not
+            // stomp it.
+            if (Interlocked.CompareExchange(ref _fenceFailed.Value, 1, 0) == 0)
+            {
+                _fenceFailedSystemIndex = sysIdx;
+                _fenceFailedException = ex;
+                _fenceFailedTickNumber = _currentTickNumber;
+            }
         }
 
         // Fired per failure rather than once per tick: a second engine phase failing for a second reason is a second thing the host has to be told about.
@@ -732,6 +745,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             {
                 Name = track.Name,
                 IsEngine = track.IsEngine,
+                FailureIsTerminal = track.FailureIsTerminal,
                 Members = [.. members],
                 Roots = [.. roots],
             };
@@ -2447,6 +2461,19 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         // cycle, so the worker dispatch loop terminates on this track only.
         _systemsRemaining.Value = track.MemberCount;
         MarkTrackRootsReady(track.Roots);
+
+        // Every member already finished, on this thread, inside MarkTrackRootsReady — so there is nothing for a worker to do and no reason to wake one. A
+        // system whose ShouldRun returns false completes inline and fans out inline (EvaluateShouldRunAndPrepare → OnSystemComplete), so a track that is
+        // entirely gated off for this tick drains to zero before we get here.
+        //
+        // Without this, a declared-but-idle track costs a full wake/barrier cycle — a generation bump plus a ManualResetEventSlim.Set per worker,
+        // ≈ 0.1 ms — on EVERY tick of EVERY runtime. That is what the Engine-Subscriptions track would have charged every existing user for a feature
+        // none of them have switched on yet, and it is charged again by any future built-in track that spends most of its life gated off. A plain read
+        // is correct here: no worker has been woken for this round, so this thread is the only writer.
+        if (_systemsRemaining.Value == 0)
+        {
+            return;
+        }
 
         // Activate — bump the generation, wake the workers, then publish the round as complete (the lost-wake check in WorkerLoop keys on it).
         _tickInProgress = 1;

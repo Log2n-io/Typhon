@@ -44,6 +44,26 @@ public sealed partial class TyphonRuntime : IDisposable
     private readonly LiveFenceCostModel _liveFenceCost;
     private readonly bool _parallelFenceEnabled;
 
+    // Engine-owned replication (Subscriptions v2, #955). The track is always declared — unlike the Fence DAG it has no alternative implementation, so
+    // there is nothing to fall back to and no switch worth offering. With nothing subscribed its cost is the four gate checks, but only because
+    // DispatchTrackMultiThreaded now returns before waking the pool for a track that drained inline; until that was fixed a declared-but-idle track cost
+    // a full wake/barrier cycle every tick. The context is owned here rather than on DatabaseEngine because nothing in the engine touches v2; see
+    // SubscriptionsContext's remarks.
+    private readonly SubscriptionsContext _subscriptionsContext = new();
+
+    /// <summary>The replication track's tick-scoped context. Internal: the session count is written by ingress, and tests read its ordering journal.</summary>
+    internal SubscriptionsContext SubscriptionsContextForTest => _subscriptionsContext;
+
+    /// <summary>
+    /// Invoked on the TickDriver at the very end of every tick that ran, with the context whose ordering journal has just been sealed.
+    /// </summary>
+    /// <remarks>
+    /// The instrument SUB-02's verifier is written against. Asserting a phase ORDER from the test thread means reading four counters that the tick driver is
+    /// concurrently resetting, and any such read can straddle a tick boundary; handing the sealed journal to a callback ON the driver thread removes the race
+    /// rather than narrowing it. Null in every production path, so the cost is one null check per tick.
+    /// </remarks>
+    internal Action<SubscriptionsContext> SubscriptionsJournalObserver;
+
     // Per-system transaction tracking. Only one worker processes a given system index at a time (CAS on _isReady ensures single claimer), so no contention
     // on these slots.
     private readonly Transaction[] _systemTransactions;
@@ -229,6 +249,10 @@ public sealed partial class TyphonRuntime : IDisposable
             fenceBundle = FenceDagBuilder.DeclareFenceDag(schedule, engine);
         }
 
+        // Engine-owned replication on the Engine-Subscriptions track (#955). Declared unconditionally and with no option to suppress it: a disable switch would
+        // reintroduce, as configuration, the same "silently never runs" trap the serial-fence dispatch below closes.
+        SubscriptionsDagBuilder.DeclareSubscriptionsDag(schedule, engine);
+
         var resourceParent = parent ?? engine.Parent; // DatabaseEngine registers under DataEngine node
         var scheduler = schedule.Build(resourceParent, logger);
 
@@ -326,6 +350,11 @@ public sealed partial class TyphonRuntime : IDisposable
         {
             Scheduler.RegisterContext(Engine.FenceContext);
         }
+
+        // Same window as the fence context: after Build, before Start, or Start's binding validation rejects the typed stages. Unconditional, because the
+        // Subscriptions track is unconditional — a stage left with a null Context would throw at Start rather than quietly not run.
+        _subscriptionsContext.AttachScheduler(Scheduler);
+        Scheduler.RegisterContext(_subscriptionsContext);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -2171,6 +2200,11 @@ public sealed partial class TyphonRuntime : IDisposable
         // outcome stayed the PREVIOUS tick's `Success`, and the runtime went on ticking — the same silence the parallel arm had, reached a different way.
         // The parallel arm's own phases are caught by the scheduler and reported through RecordSystemFailure; what can still reach here from it is a throw
         // in RunParallelFence's serial prep, which is engine code on the tick driver and belongs in the same verdict.
+
+        // Reset the replication context BEFORE the fence, not beside the dispatch. A fence that throws never reaches its dispatch, so a reset placed there
+        // would leave the previous tick's journal standing on exactly the tick whose emptiness is the thing worth observing.
+        _subscriptionsContext.Reset(scheduler.CurrentTickNumber, scheduler.WorkerCount);
+
         try
         {
             if (_parallelFenceEnabled)
@@ -2194,7 +2228,19 @@ public sealed partial class TyphonRuntime : IDisposable
             }
             else
             {
+                // EW-01's window is opened INSIDE DatabaseEngine.WriteTickFence and closes when that returns, so a track dispatched afterwards would run
+                // OUTSIDE it — while the parallel path runs the same track inside one. Opening a window here holds it across both the fence and the dispatch,
+                // so the two fence paths offer the same quiescence, which is what SingleVersion and Transient reads require (AC-05 / SNAP-02: no snapshot to
+                // read from, so the guarantee has to be that nothing is writing). ExclusiveWindow keeps a DEPTH rather than a flag precisely so this nests —
+                // the inner Open() takes it to 2 and back to 1, and the track still sees an open window.
+                using var window = Engine.EpochManager.FenceWindow.Open();
                 InspectorPhase(TickPhase.WriteTickFence, () => Engine.WriteTickFence(scheduler.CurrentTickNumber, _currentUow?.ChangeSet));
+
+                // The trap #955 closes. DispatchDeferredTracks had exactly ONE call site — inside RunParallelFence — so with EnableParallelFence = false
+                // every deferred track silently never executed. That was invisible while the Fence DAG was the only one, because it is not declared in
+                // serial mode at all: the loop was empty, so nothing was missing. A second deferred track inherits the trap instead of revealing it.
+                _subscriptionsContext.NoteFence();
+                scheduler.DispatchDeferredTracks();
             }
         }
         catch (Exception ex)
@@ -2219,6 +2265,11 @@ public sealed partial class TyphonRuntime : IDisposable
                 _currentUow?.Dispose();
                 _currentUow = null;
                 TyphonEvent.EmitRuntimePhaseUoWFlush(scheduler.CurrentTickNumber, 0);
+
+                // In the `finally`, so a flush that THREW still stamps. SUB-02's fourth clause is about exactly that tick — a flush that fails after
+                // frames were produced has to close every session, because produced-but-unpublished frames leave client baselines ahead of the
+                // clients — and a verifier for it needs to see that the flush was reached at all.
+                _subscriptionsContext.NoteFlush();
             }
         });
 
@@ -2258,6 +2309,16 @@ public sealed partial class TyphonRuntime : IDisposable
                 // Stats fields (clientCount, viewsRefreshed, deltasPushed, overflowCount) populated when Phase 9 wires per-tick subscription metrics back from
                 // SubscriptionOutputPhase.
             });
+
+            // Subscriptions v2 publishes here, after the flush, under the same gate as the compute half PLUS the fault check — SUB-02 makes the two skippable
+            // together and only together. The extra condition exists because making a replication failure non-terminal (Track.FailureIsTerminal) removed the
+            // signal this gate used to key on: a stage throw latches neither `tickAborted` nor `fenceFailed`, so without it a tick whose compute blew up would
+            // publish as though it had succeeded — moving every receiving session's baseline past records it was never sent. v1's output phase above
+            // keeps the original gate, because a replication fault says nothing about it.
+            if (!_subscriptionsContext.Faulted)
+            {
+                _subscriptionsContext.NotePublish();
+            }
         }
         else if (!_tickAbortedNotified)
         {
@@ -2268,6 +2329,10 @@ public sealed partial class TyphonRuntime : IDisposable
             _tickAbortedNotified = true;
             OnTickAborted?.Invoke(this, LastTickOutcome);
         }
+
+        // Last statement of the tick, and on EVERY path through it — an aborted or fence-failed tick seals a journal too, because "nothing was computed or
+        // published" is an observation that needs a sealed record to be read from, not an absence of one.
+        SubscriptionsJournalObserver?.Invoke(_subscriptionsContext);
     }
 
     /// <summary>
@@ -2328,6 +2393,10 @@ public sealed partial class TyphonRuntime : IDisposable
         // Dispatch the deferred Engine-Post track (the Fence DAG) — OUTSIDE the WriteTickFence marker (see above). The scheduler walks Prep → Migrate →
         // AabbRefresh → Finalize via the declared `.After()` edges. Each phase's Prepare(ctx) builds its plan from FenceContext and sets RuntimeChunkCount;
         // ShouldRun/Prepare returning 0 skips cleanly with successor fan-out.
+        // Stamped immediately before the dispatch, because this ONE call walks Engine-Post and Engine-Subscriptions in order: there is no statement between
+        // the Fence DAG and the replication track to stamp from. Track order is a barrier (PH-01), and THAT is what guarantees every fence phase completes
+        // before replication's first stage starts — the stamp records the serial fence prep, and the barrier does the rest.
+        _subscriptionsContext.NoteFence();
         scheduler.DispatchDeferredTracks();
 
         ctx.HighestArchetypeLsn = _fenceFinalizeExec.HighestLsn;

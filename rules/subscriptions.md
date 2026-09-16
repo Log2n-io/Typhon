@@ -15,6 +15,53 @@
 
 ---
 
+## Module: Tick Placement
+
+### SUB-02: Compute after the fence, publish after the flush `[fatal][silent]` (amends TP-01 / TP-01a)
+  invariant within one tick: WriteTickFence completes → replication computes → the UoW flush completes → replication publishes
+  invariant [tick aborted ∨ fence failed] → nothing is computed AND nothing is published; no baseline moves
+  never publish a frame for a tick that is not yet durable — publication is gated on the flush, not merely ordered after it
+  never suppress one of compute / publish without the other: they are skippable together and only together
+  never let a replication failure stop the engine: a throw in any stage is logged, captured and surfaced to the host, and the track is skipped for that
+    tick, but it does NOT latch the terminal fence verdict
+  never publish for a tick whose compute faulted — a stage throw suppresses publication exactly as an abort or a fence failure does
+  scope: TyphonRuntime.OnTickEndInternal, DagScheduler.DispatchDeferredTracks, RuntimeSchedule.EngineSubscriptionsTrack,
+    SubscriptionsContext.ShouldTrackRun, SubscriptionsExecSystemBase.ShouldRun,
+    Track.FailureIsTerminal, DagScheduler.RecordEngineTrackFailure
+  on_violation: computing for an aborted tick reads structures a partly-run fence left incomplete, and publishing from it tells a session a story the WAL
+    does not carry. Suppressing publish alone is worse than either: the frames were produced, so the per-entity state has already advanced, and every
+    session's baseline is now ahead of what it was actually sent — which no later frame corrects, because records describe the present rather than a delta.
+  rationale: the track is a barrier (PH-01) placed after Engine-Post, so every fence phase is complete before the first stage starts; and it runs INSIDE the
+    EW-01 window, which is the quiescence that snapshot-less SingleVersion and Transient reads require (AC-05, SNAP-02). Publication cannot join it there:
+    a track cannot pause for the flush and resume, and PS-09 forbids holding an epoch scope across a blocking wait.
+  note the gate is evaluated by EVERY stage, not by the DAG's root. `Events` is a parallel branch with no predecessor, so a root-only gate would leave it
+    dispatching on an aborted tick. It is also read LIVE from the scheduler rather than snapshotted, because DispatchDeferredTracks walks Engine-Post and
+    Engine-Subscriptions in one loop — a fence failure during Engine-Post latches after any per-tick reset has already run.
+  note the two clauses above are a PAIR, and the second exists because the first removed the signal publication used to key on. Publication shares v1's gate,
+    `!tickAborted && !fenceFailed`; a stage throw latches neither (engine tracks are already exempt from the abort latch, and the no-stop clause skips the
+    fence latch), so making replication non-terminal silently made every faulted tick publishable. `SubscriptionsContext.Faulted` restores the pairing.
+    Without it the isolation fix would have traded a crash for a worse failure: frames half-produced by a faulted tick, published as though the tick had
+    succeeded, moving every receiving session's baseline past records it was never sent — and SUB-03 makes baselines advance only on what was carried.
+  note the no-stop clause is a DEVIATION from how every other engine track behaves, and deliberate. A throw on an engine-tagged track latches
+    `IsFenceFailed`, which is terminal — `ExecuteCallbacks` returns early on every later tick. That is right for the fence, whose half-finished work leaves
+    cluster pages dirty and un-logged for the checkpoint to persist (TP-01a), and wrong here: replication writes only RAM-only blocks that no checkpoint or
+    WAL ever sees, so nothing a later tick does can compound a replication bug. Left unchanged, a defect in the newest and least-proven subsystem in the
+    engine would have been strictly more destructive than the same defect in a user system. `Track.FailureIsTerminal` carries the distinction, so the fence
+    keeps its semantics exactly.
+  note the serial and parallel fence paths dispatch the track identically, and both hold an EW-01 window across it. On the serial path the window opened
+    inside `DatabaseEngine.WriteTickFence` closes when that returns, so `OnTickEndInternal` opens its own around the fence AND the dispatch;
+    `ExclusiveWindow` keeps a depth rather than a flag, so the two nest.
+  verified: SubscriptionsTrackTests.NormalTick_RunsFenceThenComputeThenFlushThenPublish,
+    SubscriptionsTrackTests.AbortedTick_StillFencesAndFlushes_ButNeitherComputesNorPublishes,
+    SubscriptionsTrackTests.AStageThatThrows_DoesNotStopTheEngine
+  [UNBUILT] Two clauses state intent rather than behaviour, and are called out so a reader does not mistake the `verified:` above for the whole rule.
+    (1) FENCE FAILURE is verified only for the abort case; inducing a fence-phase throw needs a seam no test has yet, and the code path is shared with the
+    abort (both read the same two latches), so the risk is a shared-path assumption rather than an untested branch.
+    (2) "A flush that throws after frames were produced closes every session" cannot be built until sessions exist (#956 / #957) — there is nothing to close.
+    The flush stamp is already taken in a `finally` so a throwing flush is observable when that verifier can be written.
+
+---
+
 ## Module: Replication State Sizing
 
 ### SUB-13: Replication cost follows the watched set, never the archetype `[design]`
