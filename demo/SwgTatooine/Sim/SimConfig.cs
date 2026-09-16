@@ -235,6 +235,18 @@ public sealed class SimConfig
     /// </summary>
     public CombatApi CombatApi = CombatApi.MoveNext;
 
+    /// <summary>
+    /// Which side of combat runs the range test: each creature asks which players are in range, or each player publishes the creatures in its range to an
+    /// event queue that the creature side applies. Both decide exactly the same hits.
+    /// </summary>
+    public CombatModel CombatModel = CombatModel.Pull;
+
+    /// <summary>
+    /// Push only: every creature ready to take fire also runs pull's query, and the run counts creatures whose two answers differ. A correctness check, not
+    /// a measurement — it pays for both models.
+    /// </summary>
+    public bool CombatVerify;
+
     /// <summary>Seed for every random decision, so a run is reproducible and two arms see the same world.</summary>
     public int Seed = 20260907;
 
@@ -262,8 +274,8 @@ public sealed class SimConfig
     public int ResolveWorkerCount() => WorkerCount > 0 ? WorkerCount : Environment.ProcessorCount;
 
     /// <summary>A short label identifying this configuration in a results table.</summary>
-    /// <remarks>Deliberately omits <see cref="AwarenessApi"/>, <see cref="CombatApi"/> and <see cref="SimdNarrowphase"/>: none changes the workload, and
-    /// the label keys sweep results.</remarks>
+    /// <remarks>Deliberately omits <see cref="AwarenessApi"/>, <see cref="CombatApi"/>, <see cref="CombatModel"/> and <see cref="SimdNarrowphase"/>: none
+    /// changes the workload, and the label keys sweep results.</remarks>
     public string Label =>
         $"{WorldEdgeKm:N0}km x{PopulationScale:N1} cell={ResolveCellSize():N0}m floors={ClusterTargetExtentRatio:G}/{ClusterRepairExtentRatio:G} "
         + $"unit={RepairWorstClustersPerUnit} shuttles={(!Shuttles ? "off" : ShuttleBurst ? "burst" : "trickle")}{(Unpaced ? " unpaced" : "")}";
@@ -296,4 +308,17 @@ public enum CombatApi
 
     /// <summary>One <c>ForEachInRadius</c> per creature cluster, each creature retiring at four hits.</summary>
     Batch,
+}
+
+/// <summary>Which side of combat runs the range test.</summary>
+public enum CombatModel
+{
+    /// <summary>Every creature ready to take fire runs one radius query for players and applies its own damage.</summary>
+    Pull,
+
+    /// <summary>
+    /// Every player runs one radius query for creatures and pushes one event per creature in range; a serial drain folds them into per-creature shooter
+    /// counts, which the creature side applies.
+    /// </summary>
+    Push,
 }

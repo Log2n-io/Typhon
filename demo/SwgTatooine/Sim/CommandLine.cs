@@ -63,6 +63,23 @@ public static class CommandLine
             "batch" => CombatApi.Batch,
             var other => throw new ArgumentException($"--combat-api takes movenext or batch, not '{other}'"),
         };
+        c.CombatModel = Str(args, "--combat-model", "pull") switch
+        {
+            "pull" => CombatModel.Pull,
+            "push" => CombatModel.Push,
+            var other => throw new ArgumentException($"--combat-model takes pull or push, not '{other}'"),
+        };
+        c.CombatVerify = Array.IndexOf(args, "--combat-verify") >= 0;
+        if (c.CombatVerify && c.CombatModel != CombatModel.Push)
+        {
+            throw new ArgumentException("--combat-verify checks push against pull, so it needs --combat-model push");
+        }
+
+        if (c.CombatModel == CombatModel.Push && c.CombatApi == CombatApi.Batch)
+        {
+            throw new ArgumentException("--combat-api batch drains the creature-side queries, which --combat-model push does not issue");
+        }
+
         if (Array.IndexOf(args, "--split-awareness") >= 0)
         {
             c.SplitAwareness = true;

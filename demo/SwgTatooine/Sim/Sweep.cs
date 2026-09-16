@@ -236,6 +236,8 @@ public static class Sweep
         // Not part of the workload, so not part of the label either (SimConfig.Label) — but an A/B arm set on the command line must reach every sweep arm.
         AwarenessApi = c.AwarenessApi,
         CombatApi = c.CombatApi,
+        CombatModel = c.CombatModel,
+        CombatVerify = c.CombatVerify,
         SimdNarrowphase = c.SimdNarrowphase,
     };
 

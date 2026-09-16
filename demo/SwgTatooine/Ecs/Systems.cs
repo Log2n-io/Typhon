@@ -177,12 +177,10 @@ internal sealed class EconomySystem : QuerySystem
 /// Creature-side combat: a creature standing in a player's line of fire takes damage, dies, and is revived by its lair.
 /// </summary>
 /// <remarks>
-/// <para><b>Why the creature applies the damage to itself rather than the player applying it.</b> A system may only
-/// write components of its OWN input archetype. Reaching across — opening a Creature from a system whose input is
-/// Player, through <c>ctx.Transaction</c>, and writing its vitals — stalls the tick loop outright: the runtime reached
-/// tick 1 and never advanced. That is filed against the engine; here the model is inverted instead, and the inversion is
-/// not a distortion. The spatial query, the range test, the weapon cadence and the health arithmetic are identical; only
-/// which side of the exchange runs the code has moved.</para>
+/// <para><b>Why the creature applies the damage to itself rather than the player applying it.</b> A player-side system that opens the creature through
+/// <c>ctx.Transaction</c> and writes its vitals stalls the tick loop at tick 1 — engine bug #907, not a rule. With <c>--combat-model push</c> the range
+/// test runs on the player side instead (<see cref="PlayerFireSystem"/>, <see cref="CombatDrainSystem"/>), and this system only applies the shooter counts
+/// they produced.</para>
 /// <para><b>Death is pooled, not structural.</b> A killed creature goes to <see cref="AiMode.Dead"/> and is revived at
 /// its lair after the respawn interval, rather than being destroyed and re-spawned. That is what SWG lairs did anyway —
 /// a lair owns a fixed set of spawn slots — but it does mean this workload exercises cluster-occupancy churn only
@@ -195,20 +193,88 @@ internal sealed class CreatureCombatSystem : QuerySystem
 
     public CreatureCombatSystem(SimBridge bridge) => _bridge = bridge;
 
+    protected override void Configure(SystemBuilder b)
+    {
+        b
+            .Name("CreatureCombat")
+            .Phase(SimPhases.Resolve)
+            .Parallel()
+            .ChunksPerWorker(2f)
+            .Reads<CreaturePlacement>()
+            .Writes<CreatureVitals>()
+            .Writes<CreatureBrain>()
+            .Input(() => _bridge.CreatureView);
+
+        if (_bridge.CombatModel == CombatModel.Pull)
+        {
+            // The line-of-fire query reads player positions (rule ED-05: undeclared, PlayerMove would be free to write them while it runs).
+            b.Reads<PlayerPlacement>();
+        }
+        else
+        {
+            // The shooter counts the drain folded this tick: the resource edge (rule ED-04) runs this system after it.
+            b.ReadsResource(SimBridge.ShooterLaneResource);
+            if (_bridge.CombatVerify)
+            {
+                // --combat-verify replays pull's query.
+                b.Reads<PlayerPlacement>();
+            }
+        }
+    }
+
+    protected override void Execute(TickContext ctx) => _bridge.CreatureCombatTick(ctx);
+}
+
+/// <summary>
+/// Push combat, player side: each player queries the creatures in weapon range and publishes a hit event per creature.
+/// </summary>
+/// <remarks>
+/// Writes nothing but events, so its chunks share no write with each other or with the creature side, and run on the whole pool. Only with
+/// <c>--combat-model push</c>.
+/// </remarks>
+internal sealed class PlayerFireSystem : QuerySystem
+{
+    private readonly SimBridge _bridge;
+
+    public PlayerFireSystem(SimBridge bridge) => _bridge = bridge;
+
     protected override void Configure(SystemBuilder b) => b
-        .Name("CreatureCombat")
+        .Name("PlayerFire")
         .Phase(SimPhases.Resolve)
         .Parallel()
         .ChunksPerWorker(2f)
-        .Reads<CreaturePlacement>()
 
-        // The line-of-fire query reads player positions (rule ED-05: undeclared, PlayerMove would be free to write them while it runs).
+        // Per-player work is a radius query, as in Awareness; the same chunk floor.
+        .MinChunkSize(_bridge.AwarenessMinChunk)
         .Reads<PlayerPlacement>()
-        .Writes<CreatureVitals>()
-        .Writes<CreatureBrain>()
-        .Input(() => _bridge.CreatureView);
 
-    protected override void Execute(TickContext ctx) => _bridge.CreatureCombatTick(ctx);
+        // The query reads creature positions (rule ED-05).
+        .Reads<CreaturePlacement>()
+        .WritesEvents(_bridge.CombatQueue)
+        .Input(() => _bridge.PlayerView);
+
+    protected override void Execute(TickContext ctx) => _bridge.PlayerFireTick(ctx);
+}
+
+/// <summary>
+/// Push combat, the serial part: drains the tick's hit events into per-creature shooter counts. Only with <c>--combat-model push</c>.
+/// </summary>
+/// <remarks>A parallel system cannot consume an event queue (the drain is single-consumer), so the fold sits between the producer and the parallel
+/// creature side. Declaring the queue orders it after <see cref="PlayerFireSystem"/> (rule ED-03); the lane resource orders
+/// <see cref="CreatureCombatSystem"/> after it (ED-04).</remarks>
+internal sealed class CombatDrainSystem : CallbackSystem
+{
+    private readonly SimBridge _bridge;
+
+    public CombatDrainSystem(SimBridge bridge) => _bridge = bridge;
+
+    protected override void Configure(SystemBuilder b) => b
+        .Name("CombatDrain")
+        .Phase(SimPhases.Resolve)
+        .ReadsEvents(_bridge.CombatQueue)
+        .WritesResource(SimBridge.ShooterLaneResource);
+
+    protected override void Execute(TickContext ctx) => _bridge.CombatDrainTick(ctx);
 }
 
 /// <summary>

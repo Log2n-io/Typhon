@@ -45,6 +45,15 @@ internal static class Program
             + $"{s.EconomyTicks / (double)Math.Max(1, result.TicksMeasured):F1} economy updates");
         Console.WriteLine($"  combat: {s.PlayersEngaged} attacks, {s.CreaturesKilled} creatures killed, "
             + $"{s.CreaturesRespawned} revived over {result.TicksMeasured} ticks");
+        var measured = (double)Math.Max(1, config.MeasuredTicks);
+        Console.WriteLine($"  combat work ({config.CombatModel.ToString().ToLowerInvariant()}), per measured tick: {s.CombatQueries / measured:F0} queries, "
+            + $"{s.CombatCandidates / measured:F0} entities returned, {s.CombatEvents / measured:F0} events drained"
+            + (s.CombatDropped > 0 ? $", !! {s.CombatDropped} events DROPPED" : ""));
+        if (config.CombatVerify)
+        {
+            Console.WriteLine($"  combat verify: {s.CombatMismatches} of {s.CombatVerified} creatures got a different shooter count from push than from pull "
+                + $"({s.CombatPushHigher} higher from push, {s.CombatMismatches - s.CombatPushHigher} higher from pull)");
+        }
         Console.WriteLine($"  missions: {s.MissionsIssued} issued, {s.MissionsCompleted} completed");
         var gc = sim.LastGc;
         Console.WriteLine($"  gc while ticking: {gc.Gen0} gen0, {gc.Gen1} gen1, {gc.Gen2} gen2 collections, {gc.PauseMs:F1} ms paused "

@@ -265,6 +265,8 @@ Useful flags:
 | `--work-probe` | off | Counts a sample of interest queries: cells walked, clusters opened, entities tested, hits, pages |
 | `--awareness-api <mode>` | count | `count`, `movenext`, `fill` or `batch` — how each interest query is drained |
 | `--combat-api <mode>` | movenext | `movenext` or `batch` — one query per creature, or one per creature cluster |
+| `--combat-model <m>` | pull | `pull` or `push` — creatures query for players, or players query for creatures and push hit events the creature side applies. Same hits either way |
+| `--combat-verify` | off | With `push`: every ready creature also runs pull's query, and the run reports how many shooter counts differ. A check, not a timing |
 | `--eff-tol <r>` / `--repair-cooldown <n>` | 0.1 / 50 | The two maintenance knobs above; `0` disables either |
 | `--promote <n>` / `--tightness <r>` | off / 1 | Turn per-cell R-tree promotion on |
 | `--no-shuttles` | shuttles on | Drop the shuttle systems and the mass-arrival traffic they produce |

@@ -375,6 +375,16 @@ public sealed partial class TatooineSim
             dag.Add(new AwarenessSystem(_bridge));
         }
 
+        if (_config.CombatModel == CombatModel.Push)
+        {
+            // Sized from the population: at most one event per player-creature pair in range. The capacity is also each worker segment's growth ceiling,
+            // and a drop is counted and reported rather than thrown (rule EQ-03).
+            var capacity = (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(4096, Census.Players * 256));
+            _bridge.CombatQueue = dag.CreateEventQueue<CombatHit>("CombatHits", capacity);
+            dag.Add(new PlayerFireSystem(_bridge));
+            dag.Add(new CombatDrainSystem(_bridge));
+        }
+
         dag.Add(new CreatureCombatSystem(_bridge));
 
         dag.Add(new EconomySystem(_bridge));
