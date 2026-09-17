@@ -460,6 +460,18 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
         var arm = RunArmOn(w);
         Assert.Multiple(() =>
         {
+            // AC-6 runs FIRST and INSIDE this block, so ONE run reports both a coverage gap and a queue disagreement. The two answer different questions —
+            // "did every dirty word reach a slice at all" versus "did the slices agree with the serial detector" — and #946's single reproduction could
+            // answer neither, because these assertions used to sit AFTER this block, which throws at its end and so never reached them.
+            if (expectSlices)
+            {
+                AssertSlicesCoverEveryDirtyWord(arm, w);
+            }
+            else
+            {
+                Assert.That(arm.PrepItems, Is.Empty, $"W={w}: PrepSlice items emitted only when slicing is on");
+            }
+
             if (expectSlices)
             {
                 // Release cannot count slices (see SliceCounterCounts); the PrepItems assertion below is the proof that survives, and it reads the plan the
@@ -475,30 +487,47 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
             }
 
             Assert.That(Crossings(arm.Queue), Is.EquivalentTo(Crossings(serial.Queue)),
-                $"W={w}: the same entities must cross to the same cells whichever path detected them");
+                () => $"W={w}: the same entities must cross to the same cells whichever path detected them. {QueueDelta(arm.Queue, serial.Queue)}");
             Assert.That(IsInDrainOrder(arm.Queue), Is.True,
                 $"W={w}: the prefix Migrate slices must be in drain order — ascending destination cell (#910's sort, which the slice planner carves on), "
                 + "and inside one cell the order the detector appends in and the slices' crossings are concatenated in (TH-01 admits the first N)");
             Assert.That(arm.MigrationsExecuted, Is.EqualTo(serial.MigrationsExecuted), $"W={w}: same crossings, same migrations");
             Assert.That(arm.Arrivals, Is.EqualTo(serial.Arrivals),
                 $"W={w}: the same crossings classify and group the same way whichever producer filed them — head drain, slice sink or serial scan");
-            Assert.That(arm.PrepItems, expectSlices ? Is.Not.Empty : Is.Empty, $"W={w}: PrepSlice items emitted only when slicing is on");
         });
 
-        if (!expectSlices)
-        {
-            return;
-        }
+    }
 
-        // AC-6: disjoint, ordered, and covering — every word that was dirty when the tail ran lies inside exactly one item.
-        arm.PrepItems.Sort(static (x, y) => x.Start.CompareTo(y.Start));
-        for (var i = 1; i < arm.PrepItems.Count; i++)
-        {
-            Assert.That(arm.PrepItems[i].Start, Is.GreaterThanOrEqualTo(arm.PrepItems[i - 1].Start + arm.PrepItems[i - 1].Count),
-                $"W={w}: slices overlap at item {i}");
-        }
-
+    /// <summary>
+    /// AC-6: the emitted work items are non-empty, disjoint, ordered, and cover every word still dirty when the tail ran — so each such word lies in
+    /// exactly one item.
+    /// </summary>
+    /// <remarks>
+    /// Each property is ONE assertion carrying a count and the first few offenders, not one assertion per word. This runs inside <c>Assert.Multiple</c>,
+    /// where a failure records and continues, so a per-word form would emit thousands of entries for a broken arm and bury the queue comparison after it.
+    /// </remarks>
+    private static void AssertSlicesCoverEveryDirtyWord(Outcome arm, int w)
+    {
+        // Release cannot count slices (see SliceCounterCounts), so this is the proof of execution that survives there, and it comes first: with no items at
+        // all every later check fails too, and their messages would describe the symptom rather than the cause.
+        Assert.That(arm.PrepItems, Is.Not.Empty, $"W={w}: PrepSlice items are emitted whenever slicing is on");
         Assert.That(arm.DirtyWords, Is.Not.Empty, $"W={w}: sanity — the write tick left dirty words for the slices to cover");
+
+        arm.PrepItems.Sort(static (x, y) => x.Start.CompareTo(y.Start));
+        var firstOverlap = -1;
+        for (var i = 1; i < arm.PrepItems.Count && firstOverlap < 0; i++)
+        {
+            if (arm.PrepItems[i].Start < arm.PrepItems[i - 1].Start + arm.PrepItems[i - 1].Count)
+            {
+                firstOverlap = i;
+            }
+        }
+
+        // The message indexes firstOverlap, so it is lazy by necessity as well as by preference: it is well-defined only on the failing branch.
+        Assert.That(firstOverlap, Is.LessThan(0),
+            () => $"W={w}: slices overlap at item {firstOverlap} — {Describe(arm.PrepItems[firstOverlap - 1])} then {Describe(arm.PrepItems[firstOverlap])}");
+
+        var uncovered = new List<int>();
         foreach (var word in arm.DirtyWords)
         {
             var covered = false;
@@ -511,8 +540,76 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
                 }
             }
 
-            Assert.That(covered, Is.True, $"W={w}: dirty word {word} lies in no PrepSlice item");
+            if (!covered)
+            {
+                uncovered.Add(word);
+            }
         }
+
+        Assert.That(uncovered, Is.Empty, () => $"W={w}: {uncovered.Count} of {arm.DirtyWords.Count} dirty words lie in no PrepSlice item, so no slice ever "
+            + $"detected their clusters — first few: {string.Join(", ", uncovered.GetRange(0, Math.Min(8, uncovered.Count)))}");
+    }
+
+    private static string Describe((int Start, int Count) item) => $"[{item.Start}, {item.Start + item.Count})";
+
+    /// <summary>
+    /// Whether the arm's crossing set is a strict SUBSET of the serial one, a strict superset, or a genuine permutation. The shape is the first thing to
+    /// know about a disagreement and it is not readable off NUnit's missing/extra lists once both run to thousands of entries — #946 has been observed
+    /// wearing three different shapes (2 001 missing with 2 001 extra, 7 missing with none extra, and an index/data failure that never reached here), and
+    /// telling them apart by eye from truncated lists is how two of those were first mis-read as one defect.
+    /// </summary>
+    private static string QueueDelta(List<Request> armQueue, List<Request> serialQueue)
+    {
+        // MULTISET counting, because the constraint this annotates is Is.EquivalentTo, which is multiset. A set-based count reports 0 missing and 0 extra
+        // for an arm that filed one entity TWICE — a duplicate is one of the shapes #946 could wear, since three producers file into this queue and AC-6's
+        // disjointness check exists because overlapping slices, hence double detection, are conceivable. A diagnostic that contradicts the assertion it
+        // explains is worse than none on a failure this rare.
+        var counts = new Dictionary<(long Entity, int Cell), int>();
+        foreach (var c in Crossings(serialQueue))
+        {
+            counts.TryGetValue(c, out var n);
+            counts[c] = n + 1;
+        }
+
+        foreach (var c in Crossings(armQueue))
+        {
+            counts.TryGetValue(c, out var n);
+            counts[c] = n - 1;
+        }
+
+        var missing = 0;
+        var extra = 0;
+        foreach (var n in counts.Values)
+        {
+            if (n > 0)
+            {
+                missing += n;
+            }
+            else if (n < 0)
+            {
+                extra -= n;
+            }
+        }
+
+        string shape;
+        if (missing == 0 && extra == 0)
+        {
+            shape = "identical multisets — the constraint and this diagnostic disagree, so one of the two needs fixing";
+        }
+        else if (extra == 0)
+        {
+            shape = "the sliced path LOST crossings";
+        }
+        else if (missing == 0)
+        {
+            shape = "the sliced path filed crossings the serial path did not — a DUPLICATE or an invented one";
+        }
+        else
+        {
+            shape = "the two disagree about WHICH entities cross";
+        }
+
+        return $"[arm {armQueue.Count} vs serial {serialQueue.Count}: {missing} missing, {extra} extra — {shape}]";
     }
 
     /// <summary>

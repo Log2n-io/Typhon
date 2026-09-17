@@ -310,7 +310,7 @@ static class BroadphaseQueryProfile
         Span<double> coords = stackalloc double[6];
         CellClusterTree.QueryToCoords(minX, minY, float.NegativeInfinity, maxX, maxY, float.PositiveInfinity, coords);
         int checksum = 0;
-        foreach (var r in tree.QueryWith(coords, ref accessor, 0))
+        foreach (var r in tree.QueryWith(coords, ref accessor))
         {
             checksum += (int)r.PayloadId;
         }
@@ -363,7 +363,7 @@ static class BroadphaseQueryProfile
             Span<double> coords = stackalloc double[6];
             CellClusterTree.QueryToCoords(qMin, qMin, float.NegativeInfinity, qMax, qMax, float.PositiveInfinity, coords);
             int checksum = 0;
-            foreach (var r in tree.QueryWith(coords, ref acc, 0))
+            foreach (var r in tree.QueryWith(coords, ref acc))
             {
                 checksum += (int)r.PayloadId;
             }
@@ -381,7 +381,7 @@ static class BroadphaseQueryProfile
         Span<double> coords = stackalloc double[6];
         CellClusterTree.QueryToCoords(minX, minY, float.NegativeInfinity, maxX, maxY, float.PositiveInfinity, coords);
         int n = 0;
-        foreach (var _ in tree.Query(coords, 0))
+        foreach (var _ in tree.Query(coords))
         {
             n++;
         }
@@ -537,7 +537,7 @@ static class BroadphaseQueryProfile
         if (SpatialQueryTuning.DirectFloatBox)
         {
             // The f32 entry point: no QueryToCoords call at all, which is half of what this lever is worth.
-            foreach (var r in tree.QueryF32(minX, minY, float.NegativeInfinity, maxX, maxY, float.PositiveInfinity, 0))
+            foreach (var r in tree.QueryF32(minX, minY, float.NegativeInfinity, maxX, maxY, float.PositiveInfinity))
             {
                 checksum += (int)r.PayloadId;
             }
@@ -547,7 +547,7 @@ static class BroadphaseQueryProfile
 
         Span<double> coords = stackalloc double[6];
         CellClusterTree.QueryToCoords(minX, minY, float.NegativeInfinity, maxX, maxY, float.PositiveInfinity, coords);
-        foreach (var r in tree.Query(coords, 0))
+        foreach (var r in tree.Query(coords))
         {
             checksum += (int)r.PayloadId;
         }

@@ -61,6 +61,12 @@ internal sealed class CellClusterTree
     internal int ClusterCount => _clusterCount;
 
     /// <summary>The tree, for the differential harness and the validator. Not part of the index contract.</summary>
+    /// <remarks>
+    /// That sentence was false between #872 step 9 and #900: the ray and frustum query paths reached <c>SpatialRTree</c>'s masked overloads through here,
+    /// so the accessor was load-bearing for two production queries while documenting itself as a test seam. They now go through
+    /// <see cref="QueryRay"/> and <see cref="QueryFrustum"/>, which take no mask — keep it that way, or SQ-02's structural half lapses back into a
+    /// convention. Nothing in <c>src/</c> reads this property.
+    /// </remarks>
     internal SpatialRTree<TransientStore> Tree => _tree;
 
     internal CellClusterTree(ChunkBasedSegment<TransientStore> segment, int[] payloadBackPointers)
@@ -353,8 +359,17 @@ internal sealed class CellClusterTree
     /// <summary>
     /// Cluster chunk ids whose bounds overlap <paramref name="queryCoords"/>, which must already be in this cell's frame.
     /// </summary>
-    internal SpatialRTree<TransientStore>.AABBQueryEnumerator Query(scoped ReadOnlySpan<double> queryCoords, uint categoryMask) =>
-        _tree.QueryAABB(queryCoords, null, categoryMask);
+    /// <remarks>
+    /// <b>No category mask, on purpose (SQ-02).</b> The tree's own leaf test is AND-conjunctive while every cluster query filters ANY-BIT, so handing a
+    /// caller's mask down here would make a promoted cell answer a different question from an unpromoted one — a false negative appearing only above
+    /// <c>CellTreePromoteThreshold</c>. Callers apply <see cref="AabbClusterEnumerator.CategoryAdmits"/> to what comes back. Until #900 this took a
+    /// <c>categoryMask</c> that every caller passed <c>0</c>; removing the parameter is what makes the invariant structural rather than a convention.
+    /// <para><b>The price, stated so it is not rediscovered as a missed optimisation.</b> Passing <c>0</c> makes <c>SpatialRTree</c>'s node-level union
+    /// prune unreachable for cluster queries, so a promoted cell descends to every geometrically overlapping cluster and filters afterwards. That is the
+    /// cost of the two layers disagreeing about what a mask means; it is not a regression, since every caller already passed <c>0</c>.</para>
+    /// </remarks>
+    internal SpatialRTree<TransientStore>.AABBQueryEnumerator Query(scoped ReadOnlySpan<double> queryCoords) =>
+        _tree.QueryAABB(queryCoords, null, 0);
 
     /// <summary>
     /// The same query, over an accessor the caller owns rather than one rented per call.
@@ -362,31 +377,50 @@ internal sealed class CellClusterTree
     /// <remarks>
     /// A cell walk touches many cells and asks each a small question, so an accessor created per question starts with an empty
     /// page window and takes the load-and-evict slow path every time. One accessor held across the walk pays that once.
+    /// <para><b>No category mask, on purpose (SQ-02)</b> — see <see cref="Query"/> for why the <c>0</c> below is hardcoded.</para>
     /// </remarks>
     internal SpatialRTree<TransientStore>.AABBQueryEnumerator QueryWith(
         scoped ReadOnlySpan<double> queryCoords,
-        ref ChunkAccessor<TransientStore> accessor,
-        uint categoryMask) =>
-        _tree.QueryAABBWith(queryCoords, ref accessor, categoryMask);
+        ref ChunkAccessor<TransientStore> accessor) =>
+        _tree.QueryAABBWith(queryCoords, ref accessor, 0);
 
-    /// <summary>Create an accessor over this cell tree's segment, for a caller that will run several queries against it.</summary>
     /// <summary>
     /// The same query, stated in this cell's f32 frame rather than marshalled through f64.
     /// </summary>
     /// <remarks>
     /// Every caller already holds floats — cluster bounds are f32 and <c>C15</c> cell-relative — so the f64 array was a
     /// round trip to a width nothing on the vector path reads. See <c>AABBQueryEnumerator</c>'s f32 constructor.
+    /// <para><b>No category mask, on purpose (SQ-02)</b> — see <see cref="Query"/> for why the <c>0</c> below is hardcoded.</para>
     /// </remarks>
     internal SpatialRTree<TransientStore>.AABBQueryEnumerator QueryF32(
-        float minX, float minY, float minZ, float maxX, float maxY, float maxZ, uint categoryMask) =>
-        _tree.QueryAABBF32(minX, minY, minZ, maxX, maxY, maxZ, categoryMask);
+        float minX, float minY, float minZ, float maxX, float maxY, float maxZ) =>
+        _tree.QueryAABBF32(minX, minY, minZ, maxX, maxY, maxZ, 0);
 
     /// <inheritdoc cref="QueryF32"/>
     internal SpatialRTree<TransientStore>.AABBQueryEnumerator QueryF32With(
-        float minX, float minY, float minZ, float maxX, float maxY, float maxZ, uint categoryMask,
+        float minX, float minY, float minZ, float maxX, float maxY, float maxZ,
         ref ChunkAccessor<TransientStore> accessor) =>
-        _tree.QueryAABBF32With(minX, minY, minZ, maxX, maxY, maxZ, categoryMask, ref accessor);
+        _tree.QueryAABBF32With(minX, minY, minZ, maxX, maxY, maxZ, 0, ref accessor);
 
+    /// <summary>
+    /// Cluster chunk ids whose bounds the ray enters, in the tree's own priority order, stated in this cell's frame.
+    /// </summary>
+    /// <remarks>
+    /// <b>No category mask, on purpose (SQ-02)</b> — see <see cref="Query"/>. This wrapper exists so the ray path does not have to reach
+    /// <see cref="Tree"/> to get at a masked overload: before #900 it did, and the invariant held there only because a hand-written <c>0</c> sat at the
+    /// call site. Two wrappers are a small price for the half of "structural, not conventional" that was otherwise unsupported.
+    /// </remarks>
+    internal SpatialRTree<TransientStore>.RayEnumerator QueryRay(ReadOnlySpan<double> origin, ReadOnlySpan<double> direction, double maxDist) =>
+        _tree.QueryRay(origin, direction, maxDist, null, 0);
+
+    /// <summary>
+    /// Cluster chunk ids not fully outside a set of half-space planes, which must already be in this cell's frame and 3D.
+    /// </summary>
+    /// <inheritdoc cref="QueryRay"/>
+    internal SpatialRTree<TransientStore>.FrustumEnumerator QueryFrustum(ReadOnlySpan<double> planes, int planeCount) =>
+        _tree.QueryFrustum(planes, planeCount, null, 0);
+
+    /// <summary>Create an accessor over this cell tree's segment, for a caller that will run several queries against it.</summary>
     internal ChunkAccessor<TransientStore> CreateAccessor() => _segment.CreateChunkAccessor();
 
     /// <summary>
@@ -423,7 +457,9 @@ internal sealed class CellClusterTree
                 all[3] = FullExtentMax;
                 all[4] = FullExtentMax;
                 all[5] = FullExtentMax;
-                _inner = owner._tree.QueryAABB(all);
+                // The 0 is written out rather than left to QueryAABB's default (SQ-02): SpatialRTree spells the same concept both ways — 0 here, but
+                // uint.MaxValue on Insert — so an invariant resting on which default applies is one rename away from silently inverting.
+                _inner = owner._tree.QueryAABB(all, null, 0);
             }
 
             public int Current => (int)_inner.Current.PayloadId;

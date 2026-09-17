@@ -125,9 +125,17 @@
 ## Module: Queries
 
 ### SQ-01: Query completeness — no false negatives `[fatal]`
-  invariant ∀ query Q, ∀ entity E:
-    E geometrically matches Q ∧ (Q.categoryMask == 0 ∨ (E.CategoryMask & Q.categoryMask) == Q.categoryMask)
+  invariant ∀ query Q, ∀ entity E filed in cluster C:
+    E geometrically matches Q ∧ (Q.categoryMask == 0 ∨ (C.CategoryMask & Q.categoryMask) != 0)
     → E ∈ result set
+    CORRECTED 2026-09-17: this clause read `(E.CategoryMask & Q.categoryMask) == Q.categoryMask` — a PER-ENTITY mask, AND-conjunctive.
+    No per-entity category mask exists anywhere in the engine (SQ-02): the category is an archetype constant carried on the CLUSTER, and
+    a cluster query admits on ANY-BIT overlap. The old form could not fail — any-bit admits a superset of all-bits, so completeness held
+    by accident — which is exactly why it survived: a rule that quantifies over a field that does not exist is satisfiable by reading it
+    as something else, and every reader supplies a different something
+    the SpatialRTree enumerators named in this rule's scope are covered for GEOMETRIC completeness only. Their own leaf test is all-bits, which
+    is SQ-02's business and not a violation of the clause above: no cluster query reaches them with a non-zero mask, so the two semantics never
+    meet. Reading this rule's scope without that sentence makes SpatialRTree.Query.cs's leaf match look like an SQ-01 violation
   invariant a cell-walking cluster query examines every cluster whose box can REACH its region, not only those filed in the cells the region
     covers: a cluster is filed by its entities' centres, so its box can leave its own cell. Two mechanisms, complete together:
       ClusterReach — the cell range is the query's extent grown by it (AabbClusterEnumerator, QueryRay, QueryFrustum), a whole-cell rejection
@@ -183,12 +191,65 @@
   on_violation: spatial query misses entities — game logic sees incomplete world state
   requires: ST-01 (MBR correctness), ST-02 (union mask not under-representing)
 
-### SQ-02: Category mask semantics — AND-conjunctive `[fatal]`
-  invariant categoryMask == 0 → no category filtering (all entities match)
-  invariant categoryMask ≠ 0 → entry matches iff (entry.CategoryMask & categoryMask) == categoryMask
-  never (entry.CategoryMask & categoryMask) != 0 treated as a match (that would be OR-disjunctive)
-  scope: all query enumerators, CountInAABB leaf scan
-  on_violation: queries return wrong entity set — wrong enemies targeted, wrong zones triggered
+### SQ-02: Category filtering is decided at the CLUSTER, by any-bit overlap `[fatal][silent]`
+  invariant the category is an ARCHETYPE CONSTANT, never a per-entity value. `[SpatialIndex(Category = …)]` reaches the engine as
+    SpatialFieldInfo.Category; spawn and cluster migration OR that one value into ClusterSpatialAabb.CategoryMask, so a cluster's mask is
+    the OR of N IDENTICAL values — the archetype's own — and CellSpatialIndex.CategoryMasks mirrors it per cell. The fence recompute
+    reads
+    the stored mask back (ReadStoredCategoryMask) rather than re-deriving it, so it survives every AABB refresh and never changes after
+    the first entity lands. Nothing in the engine stores a per-entity category mask, and this rule may not be written as though one exists
+  invariant a cluster query admits a cluster iff queryMask == 0 ∨ (cluster.CategoryMask & queryMask) != 0 — ANY-BIT overlap, with 0 the
+    sentinel meaning "no filter". Because the mask is archetype-constant, every entity in an admitted cluster carries it, which makes the
+    cluster-level decision EXACT: there is no narrowphase category re-filter anywhere on the query path, and none is needed
+  invariant 🔴 every cluster query spells that test through the ONE helper, AabbClusterEnumerator.CategoryAdmits. It was open-coded in
+    three further places (the ray, frustum and kNN cluster gates) as `mask != 0 && (stored & mask) == 0`; that is the same predicate, but
+    a second spelling is how the semantics drift apart one shape at a time, and a rule cannot be checked against four transcriptions
+  never 🔴 a cluster query passes a NON-ZERO mask to a promoted cell's tree. Every cluster query hands the tree 0 and applies
+    CategoryAdmits
+    to what comes back, because SpatialRTree's own leaf test is AND-conjunctive (below): handing the mask down would make a promoted cell
+    answer a DIFFERENT question from an unpromoted one — an SQ-01 false negative appearing only above CellTreePromoteThreshold, which is
+    the hardest possible place to notice one. EVERY read path onto a cell's tree (CellClusterTree.Query, QueryWith, QueryF32, QueryF32With,
+    QueryRay, QueryFrustum, and EnumerateClusterIds — kNN's route, which is NOT a Query* wrapper and was missed by the first statement of this
+    clause) therefore takes no mask parameter at all: the invariant is structural, not a convention held by comments. The set is stated as read
+    paths rather than as "what a cluster query reaches" because three of them — QueryWith, QueryF32, QueryF32With — have no src/ caller at all
+    and exist for BroadphaseQueryProfile; they are covered anyway, since a mask reaching the tree through a benchmark-only door is still a
+    mask reaching the tree the day someone wires that door up. Until
+    #900 the ray and frustum paths reached SpatialRTree's masked overloads through CellClusterTree.Tree and passed 0 by hand — an accessor
+    whose own docstring called itself a test seam while two production queries depended on it. Nothing in src/ reads that property now, and
+    keeping it that way is what keeps this clause structural
+  invariant the AND-conjunctive test is REAL, is maintained, and no cluster query reaches it: SpatialRTree stores a per-entry CategoryMask
+    and a per-node UnionCategoryMask and its leaf scan matches on `(entry.CategoryMask & queryMask) == queryMask` — every requested bit
+    present. Since #872 step 13 the only spatial index is the per-cell cluster index (SH-01), so those masks are written, refit and never
+    read by a query. Keep the semantics stated: they are the contract of that layer, not of any query
+  invariant the two semantics BOTH run in production, at two levels of one query, and are not alternatives to choose between:
+    SpatialInterestSystem admits clusters any-bit through QueryAabb, then skips a changed entity unless
+    (SpatialFieldInfo.Category & observerMask) == observerMask — all requested bits present, tested against the archetype constant.
+    SpatialTriggerSystem applies the any-bit cluster admit and NO second test. So an observer asking for `Player|Alive` sees nothing from
+    an archetype declaring only `Player`, while a trigger region with the same mask sees it
+  scope: AabbClusterEnumerator.CategoryAdmits, AabbClusterEnumerator, ArchetypeClusterState.QueryAabb, ArchetypeClusterState.QueryRadius,
+    ArchetypeClusterState.QueryRay, ArchetypeClusterState.QueryFrustum, ArchetypeClusterState.QueryNearest, ClusterRadiusBatch,
+    CellClusterTree.Query, CellClusterTree.QueryWith, CellClusterTree.QueryF32, CellClusterTree.QueryF32With, CellClusterTree.QueryRay,
+    CellClusterTree.QueryFrustum, CellClusterTree.EnumerateClusterIds, CellClusterTree.Tree,
+    ClusterSpatialAabb.CategoryMask, CellSpatialIndex.CategoryMasks, SpatialFieldInfo, SpatialRTree.Query.cs,
+    SpatialNodeHelper.ReadLeafCategoryMask, SpatialNodeHelper.ReadUnionCategoryMask, SpatialInterestSystem, SpatialTriggerSystem
+  verified: ClusterCategoryFilterTests — two archetypes declaring DIFFERENT categories, separated through the public ClusterSpatialQuery
+    AABB and Radius surfaces in BOTH the linear and the promoted arm (AQueryMaskSelectsOneArchetypeAndNotTheOther, and the promoted cases
+    of the same, which assert PromotedCellCount > 0 as a precondition so a cell that quietly stopped promoting cannot pass them);
+    ThePromotedAndUnpromotedArmsAnswerIdentically_UnderEveryMask runs the same masks against the same population either side of the
+    threshold and requires the same entity sets, which is the assertion the "never hand the mask down" clause exists to protect;
+    EveryShapeAppliesTheSameAnyBitTest covers ray, frustum and kNN against the cluster gate; NoCellClusterTreeQueryTakesACategoryMask
+    asserts the structural half by REFLECTION over EVERY method the type declares — not a name prefix, because kNN's route onto the tree is
+    EnumerateClusterIds — so restoring a mask parameter anywhere on the type fails the build's tests rather than silently re-opening the hole.
+    It sees signatures rather than bodies: a wrapper that kept its mask-less signature and passed a non-zero mask through is caught by
+    ThePromotedAndUnpromotedArmsAnswerIdentically_UnderEveryMask instead, and the two arms together are what cover this clause.
+    ClusterRadiusBatchTests.EachMember_IsAnsweredAsItsOwnRadiusQuery already drove admitting and rejecting
+    masks through the batch and single paths, promoted and not, but claimed no rule
+  on_violation:
+    the mask handed to a tree → a promoted cell answers AND-conjunctively while its unpromoted neighbour answers any-bit; entities vanish
+      from queries only once a cell crosses the promotion threshold, and no test on a default configuration sees it
+    any-bit read as AND (or the reverse) at one shape → that shape disagrees with the other four about which clusters exist
+    a per-entity mask assumed → a narrowphase re-filter gets added that cannot ever change an answer, and the cost is paid per entity
+  requires: SH-01 (one index, and it is the cluster index), CA-01 (the cluster mask is maintained by spawn, migration and the refresh)
 
 ### SQ-03: Count query consistency `[fatal]`
   invariant CountInAABB(region, mask) == |{ E : E ∈ QueryAABB(region, mask) }|
@@ -398,6 +459,46 @@
     result narrowed → the caller reads a coordinate quantised to ~64-unit steps at 10^9 and cannot tell
   requires: C15 (stored bounds are cell-relative f32 — this rule is why that is not a limitation), CA-01
 
+### SQ-07: A spatial predicate answers at the reader's snapshot, exactly as the scan path does `[fatal][silent]`
+  invariant every entity a spatial query emits passes the SAME born/died gate the cluster SoA scan applies
+    (IsVisibleAtSnapshot): born at or before the reader's TSN, and either undead or dead only after it. The
+    spatial index walks CURRENT occupancy and knows nothing about the snapshot, so ungated it returns an entity
+    committed AFTER the snapshot — the phantom read 04-data.md "Isolation guarantees" says the fixed snapshot
+    prevents. Measured before the fix: a reader seeing 40 entities saw 45 after a concurrent commit of 5
+  invariant the gate applies to ALL FOUR shapes — AABB, radius, ray and frustum. The first two take the cheap
+    path because ClusterSpatialQueryResult carries ClusterChunkId, so IsClusterFullyVisibleAt (FOUR acquire loads)
+    answers once per CLUSTER rather than per hit: the enumerator drains a cluster's occupancy bits before
+    advancing, so consecutive hits share a chunk id and a one-entry memo collapses them. Without the memo a full
+    cluster pays 256 loads where the SoA scan pays 4. Ray and frustum return bare entity ids with no chunk id, so
+    each of their hits pays the EntityMap probe — an asymmetry forced by the result types, not a decision
+  invariant 🔴 the occupancy word the summary is ordered against is read with an ACQUIRE by the enumerator
+    (AabbClusterEnumerator.OpenOccupancy call sites), and that is load-bearing rather than incidental. An acquire
+    inside IsClusterFullyVisibleAt does not stop an EARLIER plain load from sinking past it, so a plain read
+    there lets arm64 pair a fresh occupancy word with a stale born watermark: born <= txTsn reads true, the probe
+    is skipped and the phantom is emitted. The SoA scan records the same requirement at its own call site. A
+    stale SHORT watermark array fails safe (returns false, probe taken); only the stale-low value leaks, and it
+    leaks silently and only off x86
+  invariant only Versioned archetypes are gated (meta.VersionedSlotMask != 0). SingleVersion and Transient
+    promise no isolation, so gating them would buy a guarantee they do not make at the price of a hash lookup per
+    hit — the same reasoning, and the same predicate, the scan path uses
+  invariant this is a FALSE-POSITIVE rule and SQ-01 is a false-negative one; they are not the same guarantee and
+    neither implies the other. A gate that dropped a visible entity would break SQ-01 while satisfying this, so
+    the gate never runs where the archetype makes no isolation promise, and an unreadable EntityMap record is
+    treated as VISIBLE — shrinking a result silently is the worse failure
+  never gate on MaskTestByRouting alone: the routing mask is an archetype test and knows nothing about TSNs
+  never stackalloc the record buffer inside the per-archetype loop — it is sized once, to the widest gated
+    record, and reused, or the frame grows with the number of spatial archetypes in the query
+  scope: EcsQuery`1.ExecuteSpatial, EcsQuery`1.CollectClusterRay, EcsQuery`1.CollectClusterFrustum,
+    EcsQuery`1.IsVisibleAtSnapshot, ArchetypeClusterState.IsClusterFullyVisibleAt,
+    ClusterSpatialQueryResult.ClusterChunkId
+  verified: SpatialSnapshotIsolationTests.ASpatialQueryDoesNotSeeEntitiesCommittedAfterItsSnapshot over both
+    Versioned spatial shapes the axis kit builds (PureVersioned and VerPlusTransient): a reader takes its
+    snapshot, five more entities are committed inside its query box and published by a fence, and the reader's
+    box count must not move. It failed 6 of 6 cells before the gate (Expected 40, But was 45)
+  on_violation:
+    a spatial predicate and a scan predicate in ONE transaction disagree about which entities exist, silently
+  requires: SQ-01 (the gate must not turn a phantom fix into a dropped entity)
+
 ---
 
 ## Module: Fat AABB Updates
@@ -550,12 +651,34 @@
     CellSpatialIndexTests.AWidenDuringAGrowsCopy_LandsInTheGrownArrays and AWidenStampedBeforeAGrow_IsRedoneInTheGrownArrays
     (mutants: the first form's re-check of ClusterIds, which the grow publishes last, and a widen with no re-check; both
     lose the widen)
+  invariant 🔴 a PROMOTION is a third writer of ClusterSpatialIndexSlot, and its window is not observable (#940).
+    PromoteCellHalf retires every linear slot index to NullHandle, re-issues packed tree handles into the same
+    array, then publishes the tree — all under _finalizeLock. A reader that crosses that window without the latch
+    sees "not indexed" for a cluster that IS indexed, and the spawn commit acts on it: it resets the cluster's
+    ClusterAabbs entry to Empty, discarding every concurrent spawner's widening, then re-adds the cluster, where
+    CellClusterTree.Add's duplicate guard throws out of the middle of a commit. Therefore:
+      the spawn's "is this cluster indexed" read goes through ArchetypeClusterState.IsClusterIndexed, which takes
+        _finalizeLock whenever a tree is possible (the gate is on, or a half was force-switched)
+      WidenClusterInPerCellIndex takes the latch for its WHOLE body, not merely its tree branch — the old shape
+        could read "no tree" before the publish and then hand a packed tree handle to CellSpatialIndex.WidenAt as
+        a linear slot, widening an unrelated cluster or indexing past capacity
+      the tree branch of AddClusterToPerCellIndexLocked is idempotent, as the linear branch already is: a cluster
+        the tree already holds is UpdateAt, never Add
+    an archetype with promotion off pays one predictable branch and takes no latch at all
   scope: ArchetypeClusterState.RecomputeDirtyClusterAabbsSlice, ArchetypeClusterState.IsClusterProcessBitSet,
     ArchetypeClusterState.ApplyOrDeferClusterUpdate, ArchetypeClusterState.UpdateClusterInPerCellIndex,
+    ArchetypeClusterState.IsClusterIndexed, ArchetypeClusterState.WidenClusterInPerCellIndex,
+    ArchetypeClusterState.AddClusterToPerCellIndexLocked, ArchetypeClusterState.PromoteCellHalf,
     ClusterRef.MaybeGrowAndFlagShrink, ClusterRef.WriteSpatialSet, CellSpatialIndex.WidenAt
   verified: CellTreeParallelFenceTests.CellIndexTracksClusterAabbs_AfterAWriteTimeGrow (both slicing branches,
     50 serial fence ticks of rotation, queries compared against entity positions read straight out of cluster
     storage). Pre-fix it failed on both branches with the index one to two ticks inside ClusterAabbs on every axis.
+    The promotion window by CellPromotionSpawnRaceTests.ASpawnRacingACellsPromotion_DoesNotObserveTheRetiredBackPointers,
+    which drives the interleaving through two seams — the racer parks immediately before the index read and the
+    promoter releases it from inside the retire window. Ablated (the unlatched read restored) it reddens on every
+    slot of the cluster whose box was reset: "sits outside its own bound on X — a widen was lost in the promotion
+    window". An earlier version of that fixture passed under the same ablation because its racer opened a FRESH
+    cluster, whose back-pointer promotion never retires; the racer must land in an already-indexed one.
   on_violation:
     index bound tighter than ClusterAabbs → the cell prunes a cluster the query overlaps → every entity in it
       disappears from the result, silently, and CA-01 holds throughout because ClusterAabbs is right
@@ -594,6 +717,46 @@
   note: no RuleMutant. Hand-made mutants of WriteSpatialSet, each caught with this rule's marker: the X-min grow dropped, the migration flag
         dropped, the shrink tested against the bound as the call began instead of as the earlier writes grew it, every shrink flag set, the
         process bit set unconditionally, the cluster half of the bounds check removed, the non-finite stop removed
+
+### CA-04: A write-time flag lands in the LIVE bookkeeping array `[fatal][silent]`
+  invariant the four write-bookkeeping arrays — ClusterProcessBitmap, ClusterMigrationPendingSlots,
+    ClusterMigrationDestCellKeys, ClusterShrinkPendingAxes — grow in lockstep under _finalizeLock, and every write to
+    one of them from a thread holding no latch runs under the archetype's write-bookkeeping growth stamp:
+      stamp = BeginWriteBookkeepingWrite()    (even; waits out a grow already in flight)
+      write into the arrays read AFTER that
+      keep the write only if WriteBookkeepingWriteLanded(stamp), otherwise repeat it in the new arrays
+    Serialising the growers on _finalizeLock closes grower-versus-grower; this closes writer-versus-grower, where one
+    transaction commits and grows while another is mid-flag (#903)
+  invariant a crossing is a PAIR — the slot bits and the destination hint — and both land in the SAME generation of the
+    arrays. NoteClusterBorn's protocol (re-read the array reference after the RMW) is correct for ONE array and not for
+    this: it can leave the bits in the live array and the hint in the abandoned one, which is a crossing pointed at a
+    stale cell
+  invariant the counters beside these writes — MigrationHint, HysteresisAbsorbedLive — stay OUTSIDE the retry. A redo
+    repeats a flag idempotently; it must not add to a counter twice
+  invariant the fence's own writers need no stamp: nothing grows these arrays while a fence phase runs
+    (ThrowIfGrowingInsideMigrateSlice refuses it) and ClearAabbRefreshBookkeeping is single-threaded
+  scope: ArchetypeClusterState.FlagMigration, ArchetypeClusterState.SetClusterProcessBit,
+    ArchetypeClusterState.FlagShrinkAxes, ArchetypeClusterState.BeginWriteBookkeepingWrite,
+    ArchetypeClusterState.WriteBookkeepingWriteLanded,
+    ArchetypeClusterState.EnsureClusterWriteBookkeepingCapacityLocked, ArchetypeClusterState.FlagClusterShrinkAxesOnly,
+    ClusterRef.WriteSpatial, ClusterRef.WriteSpatialSet, ClusterRef.MaybeFlagMigration, ClusterRef.MaybeGrowAndFlagShrink
+  note the re-check is an ACQUIRE load, which orders nothing before it, so a helper whose writes end in a plain store must
+    put its interlocked write last. FlagMigration therefore stomps the destination hint BEFORE it ORs the slot bits: with
+    the OR first the key could still be in the store buffer when the re-check passes, and land in the abandoned array —
+    the bits live, the hint stale, which is this rule's own second invariant broken by its implementation
+  verified: ClusterWriteBookkeepingGrowthTests.AFlagWrittenDuringAGrowsCopy_LandsInTheGrownArrays and
+    AFlagStampedBeforeAGrow_IsRedoneInTheGrownArrays (a flag write and a grow driven through three seams; both assert the
+    slot bits AND the destination hint in the grown arrays). Their mutants write the pre-#903 way, and a third splits the
+    pair — the bits stamped, the hint outside — and loses one half every run
+  on_violation:
+    a migration bit lost → the crossing is never detected → the entity stays in a cluster mapped to another cell
+      (CC-02), invisible to its own cell's index (SQ-01), with every counter still balancing
+    a process bit lost → the cluster's bound is never refreshed (CA-01) and the index keeps the old box (CA-02) →
+      silent query false negatives
+    a shrink flag lost → a bound left loose, which costs overlap tests and nothing else
+  requires: the growers are serialised (EnsureClusterWriteBookkeepingCapacity) and refused inside a Migrate slice
+
+---
 
 ## Module: VDB Cell Grid (Issue #872 step 8)
 
@@ -782,13 +945,25 @@
     gate    — a cluster whose largest axis extent ≤ the cell's TARGET EXTENT is skipped whole; no entity in
               it can be improved by moving, so a tight world does three float compares per written cluster
               and no per-entity work. The target is per cell (step 14): CellSize * clamp(
-              ClusterTargetPackingSlack * (slotsPerCluster / CellState.EntityCount)^(1/d),
+              ClusterTargetPackingSlack * (slotsPerCluster / E_own)^(1/d),
               ClusterTargetExtentRatio, 1) × the throttle's boost, where a value of the cell itself means OFF;
               a slack of 0 makes ClusterTargetExtentRatio the constant it used to be. A cluster above the
               repair-nomination gate max(target, ClusterRepairExtentRatio) is not drift-scanned at all
     entity  — inside a gated cluster, an entity whose centre lies outside the target box — the SAME target
               extent the gate used, never the configured constant — by more than
               CellSize * ClusterDriftMarginRatio is a drifter
+  invariant 🔴 E_own is THIS ARCHETYPE's population in the cell, never CellState.EntityCount (#927).
+    EntityCount sums every archetype sharing the cell, so a minority archetype is judged against the tiling of
+    entities it does not own: measured on SWG Tatooine x16 at 1024 m the engine's bound was 0.29x the Player
+    archetype's own and 0.85x Creature's, and the drift gate kept firing on player clusters no packing could
+    satisfy. CellRepairQueue.Score had already stopped using EntityCount for this reason; the bound had not.
+    E_own is taken as CellClusterPool.GetClusterCount(cellKey) * slotsPerCluster — the pool already maintains
+      that count per archetype per cell at O(1), at the same sites that bump EntityCount, so the correction
+      costs no new counter, no new maintenance site and no extra cache line
+    it OVER-estimates when clusters are partly full, which makes the bound tighter than the truth — the
+      conservative direction for correctness, and the reason it was measured rather than assumed
+    ArchetypeClusterState.GridWidePackingBound restores the old reading for a same-binary A/B
+    both consumers read it: CellTargetResolver.Resolve and ExceedsGrowthCap
   invariant 🔴 the target box is centred on the cluster's CENTROID, never on the midpoint of its AABB. A box
     midpoint sits halfway between the two extremes, so ONE far outlier drags it half the distance to itself:
     thirty entities at x≈12 plus one at x=90 put the midpoint at 50, where nothing lives, and the whole core
@@ -818,12 +993,18 @@
     up to a rounding step, so deriving one from the other would move drift decisions by an ULP at the
     target-region boundary and decouple production from the oracle that reads the component the same way
   scope: ArchetypeClusterState.DetectDriftersInCluster, ArchetypeClusterState.GatherClusterCentres,
+    ArchetypeClusterState.PackingPopulationInCell, ArchetypeClusterState.ExceedsGrowthCap,
     SpatialGridConfig.ClusterTargetExtentRatio, SpatialGridConfig.ClusterDriftMarginRatio,
     SpatialMigrationTelemetry.DriftAbsorbedCount
   verified: ClusterDriftDetectionTests against ClusterDriftOracle (an independent implementation of the rule,
     not a call to the production predicate), plus ClusterDriftParallelTests for the serial ≡ oracle ≡ parallel
     equality at W in {1,2,8} under a real TyphonRuntime. Ablated: swapping the centroid for the AABB midpoint,
-    and disabling the margin, each redden the differential
+    and disabling the margin, each redden the differential.
+    E_own by PackingPopulationTests — two pools over one cell key read their own populations and the minority
+    gets the looser bound, with the one-cluster and empty-cell basins pinned so the correction cannot switch
+    maintenance on where the bound already said it was off. Measured on the demo at x16/1024 m, four interleaved
+    same-binary pairs: tick median 3.78 -> 3.75 ms (-0.8 %, noise), Awareness -3.3 %, FencePrep -15 %, while
+    Player's drifters fall 84.2 -> 5.0 and its migrations 61.7 -> 44.9 per tick
   on_violation:
     midpoint instead of centroid → a one-entity repair becomes a full cluster shuffle, away from where the
       cluster actually is
@@ -904,11 +1085,25 @@
     valve, on a cell whose degradation has reached ClusterRepairCriticalExtentRatio. Per ARCHETYPE, because the
     planner runs one work item per archetype — an engine with N cluster-spatial archetypes can overshoot N times
     in one tick, each by one capped unit
-  invariant (step 11) that bound is STRUCTURAL, not stateful: PlanCellRepairs pre-scans the ranked candidates for
-    the first critical one, services it at the head, and passes valveAvailable:true from that ONE call site.
+  invariant (step 11) that bound is STRUCTURAL, not stateful: PlanCellRepairs pre-scans for the best-scoring
+    critical candidate, services it at the head, and passes valveAvailable:true from that ONE call site.
     Everything else in the loop is passed false. It was a _valveFiredThisTick flag until the pre-scan replaced
     it, and the flag then sat assigned-and-reset with no reader for a while — which is worse than no flag, since
     it reads as the thing enforcing the bound while enforcing nothing. One call site is provable by inspection
+  invariant (#949) the pre-scan has TWO forms and both must select the BEST-SCORING critical cell. When the budget
+    can afford the cheapest unit the planner ranks and takes the first critical cell in rank order; when it cannot
+    — remaining budget below 2 * estimateNsPerEntity, the queue below RepairQueueMaxCells, and the
+    SkipRankWhenBudgetStarved switch on — it skips the rank and takes the best-scoring critical cell by an O(n)
+    maximum over the candidates (CellRepairQueue.TryFindCritical). Returning merely SOME critical cell breaks it:
+    an arbitrary one can be a cell of a single cluster, which RepairOneCell declines outright (a partition of one
+    cannot be improved), spending the tick's one overshoot on nothing. Measured on SWG Tatooine x16 — Creature
+    lost 5 % of its repaired entities and 5 % of its units, and its run-to-run spread went from 0.7 entities to 5.8
+  invariant (#949) the two forms agree whenever the rank is FRESH, which is not the same as agreeing by
+    construction, and the difference is written down rather than assumed. Rerank early-outs when nothing is dirty
+    and the tier version has not moved, so the ranked path can hoist against age factors from an older tick, while
+    TryFindCritical always scores against the current one; and Array.Sort is unstable on tied scores where the
+    threshold scan keeps the first tie it meets. Both divergences resolve toward the FRESHER answer, which is why
+    they are accepted — but a reader must not take "same cell" as an identity that holds tick for tick
   invariant (step 11) a SECOND critical cell in the same tick gets no valve. It is refused like any other
     candidate, ages, keeps its queue place and is the hoisted one on a later tick — so AC-11.2's "within N ticks"
     holds with a larger N when several cells are critical at once, which is the case the budget is already losing
@@ -928,7 +1123,8 @@
     SpatialGridConfig.ReclusterBudgetMs, SpatialGridConfig.RepairNsPerEntity,
     SpatialGridConfig.ClusterRepairCriticalExtentRatio,
     SpatialMigrationTelemetry.RepairUnitsRefused, SpatialMigrationTelemetry.ReclusterBudgetUsedMs,
-    SpatialMigrationTelemetry.RepairValveFires, SpatialMigrationTelemetry.MeasuredNsPerEntity
+    SpatialMigrationTelemetry.RepairValveFires, SpatialMigrationTelemetry.MeasuredNsPerEntity,
+    CellRepairQueue.TryFindCritical, ArchetypeClusterState.SkipRankWhenBudgetStarved
   verified: ClusterRepairTests.ARepairIsNeverBegunWithoutTheBudgetToFinishIt drives the budget to 99 % of the
     projected cost and asserts nothing moved, nothing was spent and the refusal was counted;
     TheSameCellIsRepairedOnceTheBudgetCoversTheUnit is its control at 150 %, so the pair separates "the rule
@@ -936,6 +1132,12 @@
     ClusterRepairQueueTests.ACriticalCellIsServicedEvenWhenTheBudgetCannotAffordIt covers the valve and asserts
     it fires at most once per tick; WithTheValveDisabledAnUnderBudgetQueueServicesNobody is its ablation arm, and
     without it "nothing was repaired" cannot be told from "nothing needed repairing".
+    TheStarvedValvePicksTheCellTheRankingWouldHaveHoisted pins #949's equivalence directly on CellRepairQueue:
+    six critical candidates at ascending degradation, so the worst is the one a dictionary walk reaches LAST, and
+    the threshold scan must return the cell the ranked scan hoists. Ablated to "first qualifying candidate" it
+    reports Expected 5 / But was 0, so it is not vacuous.
+    NothingCriticalMeansTheStarvedPlannerFindsNoValveCell is its negative arm — nothing above the threshold, and a
+    valve disabled with ratio 0, both select nobody however degraded the queue is.
     ClusterCostEstimatorTests covers the measured estimate: it tracks the machine from a contradicted seed and
     settles (asserted as an ABSOLUTE spread, because two post-transient windows measure the same noise and noise
     is not monotone), stays inside its clamp band, and does not move once the world has genuinely settled —
@@ -1147,6 +1349,28 @@
     per-tick list could not leak; a persistent one can
   invariant re-ranking is LAZY — on new nominations or a SpatialGrid.TierVersion change, never on a timer — and
     its cost is reported. A queue that costs more to maintain than the work it schedules is a net loss
+  invariant (#949) lazy in its INPUTS is not enough; it is also skipped by USE. A tick whose remaining budget is
+    below 2 * estimateNsPerEntity can admit nothing but the valve, and the valve needs a threshold rather than an
+    order, so the rank is skipped and the critical cell found by an O(n) maximum. This is the steady state, not a
+    corner: on SWG Tatooine x16 the TH-04 controller granted Creature 0.003 ms while its mandatory crossings alone
+    cost about 0.072 ms, so the planner reached the admission loop with nothing to spend on nearly every tick and
+    sorted a queue of thousands anyway — 84 % of all queue maintenance. Measured, six interleaved same-binary
+    pairs: Creature's queue maintenance fell 45 % (0.0497 -> 0.0272 ms/tick, non-overlapping ranges), with
+    repaired entities and units IDENTICAL at 47.5 and 0.30. What that 45 % is NOT is the sort alone: the same
+    skip also drops BuildRepairSourceExclusions, an O(PendingMigrationCount) walk of the crossing prefix that has
+    nothing to do with the queue, and RepairQueueMaintenanceMs brackets both — the split between them is
+    unmeasured. The planner span moved 21 % over the same pairs, which OVERLAPS this saving rather than adding to
+    it, since PrepPlanTicks contains the maintenance the EWMA subtracts
+  invariant (#949) the skip does NOT apply while the queue is at RepairQueueMaxCells, and that exception is
+    load-bearing. TryEvictWorst takes its victim from the TAIL of the last ranking; with the rank skipped for many
+    ticks that tail goes stale, and once nothing in it is still live the eviction falls back to an arbitrary
+    candidate. A permanently starved archetype is exactly the one whose queue fills, so the case where the skip
+    saves most is the case where the ordering still has a job
+  invariant (#949) 🔴 that exception NARROWS the staleness, it does not remove it, and the residue is stated
+    rather than implied. Absorb runs BEFORE the gate, so the eviction that carries a queue over its cap uses the
+    rank of a previous tick — and after N skipped ticks near the cap that rank is N ticks old, with the valve
+    having removed one cell per tick from it. Ranking resumes only from the tick AFTER capacity is observed, so
+    the arbitrary-eviction fallback remains reachable on the transition tick. Bounded, not closed
   invariant 🔴 KNOWN GAP, narrowed not closed: PrepareArchetypeFenceCore returns false for an archetype nothing
     wrote to, and the wrapper then skips planning entirely, because a plan allocates clusters THIS tick's Migrate
     and Finalize must consume. So a queue full of candidates in a world that has gone completely still is not
@@ -1154,7 +1378,8 @@
   scope: CellRepairQueue, ArchetypeClusterState.RepairQueue, ArchetypeClusterState.AbsorbRepairNominations,
     SpatialGridConfig.RepairAgingRatePerTick, SpatialGridConfig.RepairQueueMaxCells,
     SpatialMigrationTelemetry.RepairQueueDepth, SpatialMigrationTelemetry.RepairQueueEvicted,
-    SpatialMigrationTelemetry.RepairQueueMaintenanceMs
+    SpatialMigrationTelemetry.RepairQueueMaintenanceMs, CellRepairQueue.IsAtCapacity,
+    CellRepairQueue.TryFindCritical
   verified: ClusterRepairQueueTests.AgeingCarriesEveryCandidateToTheHeadOfTheQueue drives CellRepairQueue
     DIRECTLY — one service per tick over a lopsided candidate set — because the engine-level form cannot be made
     machine-independent: the budget is spent against a MEASURED cost, Debug migrates at ~24 us and Release at
@@ -1470,6 +1695,14 @@
     before any parallel system dispatch begins
   invariant Debug: Interlocked.CompareExchange(_rebuildInProgress, 1, 0) == 0
     asserts no concurrent Rebuild calls
+  invariant 🔴 the ClusterSetVersion a Rebuild records is the one it read BEFORE walking the cluster list, never a second read taken after.
+    Recorded after, a spawn landing mid-walk bumps the version, is absent from the list that rebuild produced, and is still covered by the
+    stamp written against it — so RebuildIfStale sees "unchanged" and skips the rebuild that would have picked it up, serving a tier list
+    missing that cluster for the rest of the process rather than for a tick. Captured first, the same interleaving leaves the stamp BEHIND
+    the live version, which costs one redundant rebuild and nothing else. The telemetry pair (OldVersion, NewVersion) uses that same captured
+    value, because two reads of the counter can now legitimately differ and would describe a window the rebuild did not cover.
+    This is NOT what making the counter Interlocked buys (CLUSTERWALK-02): that fixes lost updates between two writers, and the two failures
+    are easy to mistake for one — both end in a stale tier list that never self-corrects
   scope: TierClusterIndex.Rebuild, TierClusterIndex.RebuildIfStale, TyphonRuntime.BuildTierIndexesAtTickStart
   on_violation: parallel readers see partially-written tier arrays → torn reads, wrong cluster lists,
     clusters dispatched to wrong systems
@@ -1565,6 +1798,34 @@
     used to state — that one was observed to under-estimate under AntHill loads. It is a performance
     measure, not the safety argument: the parallel path never touches the array, and the on-demand grow in
     ApplyDirtyBitDeltas / GrowFenceDirtyBitsForChunkId is what actually makes an under-estimate survivable
+  invariant the array may legitimately be ABSENT, and absence is the limiting case of that under-estimate,
+    not a violation (#939):
+      PreSizeMigrationBuffers creates it from null only when PendingMigrationCount > 0, because a tick with
+        an empty drain prefix dispatches no Migrate slice and nothing would ever read it
+      the clean branch (FenceBranchPath 1) publishes NO change list for a SpatialBarrierOnly archetype,
+        because on that path nothing reads one:
+          detection skips step (b) by construction — crossings come from step (a)'s drain of
+            ClusterMigrationPendingSlots, which SetSpatialBarrierOnly guarantees is exhaustive
+          the AABB refresh takes the BITMAP arm of RecomputeDirtyClusterAabbsSlice, which iterates
+            ClusterProcessBitmap and never consults the change list at all. It is the non-barrier arm that
+            gates on ClusterNeedsAabbRecompute, and that helper's own remark says so
+          the removed walk populated a word only where ClusterNeedsAabbRecompute was true, and the process
+            bit is one of that predicate's three signals — so the clusters the refresh visits are the
+            process-bitmap set either way. That, not a fall-through, is why dropping the list is equivalence
+      ∴ every reader tolerates null: FinalizeArchetypeFenceHead returns at its path-1 exit before
+        dereferencing it, both slice planners gate on FenceDirtyBits != null, and ClusterNeedsAabbRecompute
+        — reached only from the non-barrier arm — treats null as "no information" and recomputes
+    a null list reaching a NON-barrier archetype would silently skip step (b) — one crossing never detected,
+      no crash — so DetectClusterMigrationsRange asserts against it rather than tolerating it
+  the absence invariant is pinned on BOTH fences, deliberately, because audit-rule-coverage.py counts
+    ATTRIBUTES and not paths — a verifier count alone cannot say which half of a parallel rule is covered:
+      serial: CleanBranchChangeListTests drives WriteTickFence
+      parallel: CleanBranchParallelFenceTests runs a barrier-only archetype under EnableParallelFence with
+        four workers and real cell crossings, and observes the buffer at Prep's tail through PrepQueueProbe —
+        after the fence proves nothing, since the on-demand GrowFenceDirtyBitsForChunkId explains a non-null
+        array just as well as the pre-size does
+    structurally unreachable, and so deliberately unverified: the Finalize-slice gate on a null list. Branch 1
+      returns before Finalize's emit, so FinalizeSliceable is never set for an archetype without a change list
   invariant the drain prefix is sorted by DestCellKey (OrderDrainAndMeasureArrivals) in Prep's serial tail,
     before Migrate dispatches, so each worker slice owns disjoint dst cells
   invariant PendingMigrationCount = 0 reset happens once per fence in FinalizeArchetypeFence
@@ -1574,7 +1835,8 @@
     ReleaseSlot (Persistent + Transient overloads), DecrementCellEntityCountOnRelease,
     FinaliseEmptyClusterCellState, ClaimSlotInCell (both overloads),
     RecordClusterDrain, DrainPendingClusterFinalizations
-  verified: FenceDirtyBitApplyTests, CellTreeDensityTransitionTests
+  verified: FenceDirtyBitApplyTests, CellTreeDensityTransitionTests, CleanBranchChangeListTests,
+    CleanBranchParallelFenceTests
   on_violation:
     plain ++/-- on cell counters → torn updates across workers → drift in EntityCount/ClusterCount
     plain occupancy clear → lost concurrent slot release → ghost entity in cluster

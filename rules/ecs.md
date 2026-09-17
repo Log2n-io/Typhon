@@ -305,16 +305,44 @@ applied synchronously inside `Commit()`, not at the fence.
   never loading the array before the count. That yields an array SHORTER than the count about to index it, and it needs no
         instruction reordering to fault — a plain interleaving suffices: read the length-16 array, let a concurrent spawn
         resize and bump the count to 17, read 17, index 16.
-  never a call site reading the pair directly. Every one goes through `TyphonRuntime.ReadActiveClusterList`, because the two
-        sites that already loaded count-first were right by ACCIDENT and nothing stopped the next one from being written
-        either way.
-  enforce `AddToActiveList` stores the grown array plainly and publishes the count with `Volatile.Write`; the release
-          cannot let the preceding array store sink past it, so acquiring the count guarantees seeing the array. Caching
-          either into a local first is what must NOT be done — it widens the writer's own window and reintroduces the fault.
+  never a call site OUTSIDE the fence window reading the pair directly. Every such reader goes through
+        `ArchetypeClusterState.ReadActiveClusterList` — `TyphonRuntime.ReadActiveClusterList` now only delegates to it — because the
+        sites that already loaded count-first were right by ACCIDENT and nothing stopped the next one from being written either way.
+        The exceptions are named rather than implied, because "every one" was false when this clause was first written and a rule that
+        overstates its reach gets discounted wholesale:
+          reopen / rebuild — `RebuildCellState`, `RebuildSpatialStateFromData`, `RebuildClusterAabbs` and
+            `DatabaseEngine.RebuildClusterEntityMapEntries` walk the pair directly and may, because they run at open or on the crash-rebuild
+            path, with no concurrent writer in existence
+          fence-phase passes — `DormancySweep`, `TransitionWakePendingToActive`, `RecomputeDirtyClusterAabbsSlice`,
+            `DatabaseEngine.SyncTransientSegmentToActive` and `DatabaseEngine.BuildLegacyScanChangeList` likewise, because
+            EW-01's window excludes user-thread structural mutation for the fence's duration. Note that `RecomputeDirtyClusterAabbsSlice` is a
+            PARALLEL slice, not a serial pass: what makes it safe is the window, not single-threadedness, and it clamps its end to the live count anyway
+        CORRECTED 2026-09-17: this clause was FALSE when first written, at `EcsQuery.ScanClusterSoa` and `EcsQuery.ScanPerArchetypeBTreeSelective`.
+        Both read the pair directly with plain loads, re-reading the count every iteration, on a query path that is neither reopen/rebuild nor
+        fence-phase — so neither exception covered them. Count-first is the safe ORDER and x64 does not reorder loads, so they could not fault there;
+        on arm64 the two plain loads may be satisfied out of order and reach the (new count, old array) quadrant this rule exists to remove. Both now
+        hoist one `ReadActiveClusterList` out of the loop. Three further sites were exempt but UNNAMED, which is the same failure in a quieter form:
+        the list above was written from the sites the fixing commit happened to touch, not from an enumeration of every reader. The enumeration is
+        mechanical — `grep -rn ActiveClusterIds src/Typhon.Engine` outside `ArchetypeClusterState.cs` must return only comments, this rule's named
+        exceptions, and null-guards that never index (`EcsQuery.TryCountViaOccupancy` tests the field for null before calling the reader, which cannot
+        tear) — and that is the check, not a reviewer's memory.
+  enforce `AddToActiveList` publishes the GROWN ARRAY with `Volatile.Write`, then the count with `Volatile.Write` — TWO
+          releases, and the first is not redundant. A reader that acquires the OLD count and loads the NEW array derives no
+          ordering from the count release at all, yet it walks entries `Array.Copy` wrote with plain stores; that quadrant is
+          reachable and the array release is the only thing ordering it. `Array.Resize` cannot carry it — the `ref` assignment
+          inside it is a plain store — so the grow is written out by hand.
+          CORRECTED 2026-09-17: this clause said the grown array is stored PLAINLY and that holding it in a local is what must
+          not be done. Both were written against `Array.Resize`, where there is no local to hold; under the hand-written grow
+          the local is REQUIRED and is safe because it is reassigned to the grown array. What must not be done is narrower
+          than the old text claimed: caching the array ACROSS the resize and appending afterwards, which puts the append in the
+          copy `Array.Resize` abandoned — the regression `be05c594` fixed, and the reason this shape is spelled out.
   scope: ArchetypeClusterState.AddToActiveList / RemoveFromActiveList (writer), ArchetypeClusterState.ReadActiveClusterList
          (the one reader) and its callers — TyphonRuntime.ReadActiveClusterList, which now only delegates, and through it the
          dormancy promote, the checkerboard promote and the dispatch capture in OnParallelQueryPrepare (the chunk-partition sites
-         read that capture, never the pair: CD-02), plus EcsQuery.TryCountViaOccupancy
+         read that capture, never the pair: CD-02), plus EcsQuery.TryCountViaOccupancy, EcsQuery.ScanClusterSoa and
+         EcsQuery.ScanPerArchetypeBTreeSelective (the last two hoist it out of their scan loop), ClusterEnumerator.Create and
+         ClusterEnumerator.CreateScoped (reached from the PUBLIC ArchetypeAccessor.GetClusterEnumerator), TierClusterIndex and
+         StatisticsRebuilder — the last of these being the only reader on a thread no tick phase bounds
   on_violation: `IndexOutOfRangeException` out of the parallel-query prepare, on a worker thread. LOUD, which is the only
                 good thing about it.
   rationale: #582 face 2. Note what this rule does NOT give: it makes the pair CONSISTENT, not the walk SAFE. A walker
@@ -325,6 +353,12 @@ applied synchronously inside `Commit()`, not at the fence.
             does not work: a 40 000-add spin, about twelve resizes, landed inside the two-instruction window zero times in
             three runs, so a stress test would assert only that a safe order is safe. One case positively demonstrates the
             removed order producing `count > ids.Length` rather than merely asserting the new one does not.
+            NOT covered by any of them: that the array publication is a RELEASE rather than a plain store. All four assert
+            single-threaded observations after the fact — the element is present, the prior elements survived, the count is
+            within the array — and every one of those holds identically whether the array is published by `Volatile.Write`
+            or by `Array.Resize`'s plain `ref` assignment. The clause is upheld by the enforce text and by review, not by a
+            test, because x64 gives the same answer either way and the quadrant it protects needs a weak model to observe.
+            Reverting the hand-written grow to `Array.Resize` would leave all four cases green.
 
 ## Module: CLUSTERVIS — The per-cluster MVCC visibility summary (H1)
 
@@ -354,15 +388,26 @@ popcounts the occupancy word on the strength of the grant alone and has nothing 
           a grower has already copied and is about to replace.
   scope: ArchetypeClusterState.NoteClusterBorn, ArchetypeClusterState.NoteClusterDied, ArchetypeClusterState.ClaimSlot,
          ArchetypeClusterState.ClaimSlotInCell, ArchetypeClusterState.ResetClusterVisibility,
-         ArchetypeClusterState.IsClusterFullyVisibleAt, ArchetypeClusterState.EnsureClusterVisibilityCapacity
+         ArchetypeClusterState.IsClusterFullyVisibleAt, ArchetypeClusterState.EnsureClusterVisibilityCapacity,
+         ArchetypeClusterState.FreeClusterHead, ArchetypeClusterState.ClaimSlotHeadReadProbe
   on_violation: `Count()` returns a number no scan agrees with, and the scans emit an entity that does not exist at the
                 reader's snapshot. Silent both ways — every value looks plausible.
   rationale: found in review, not by tests. 5 300 tests pass with the fold on either side of the publish, because both
              states are momentary and both settle correct.
+  enforce a claim resolves FreeClusterHead ONCE and uses the value it read. Re-resolving it lets a peer that filled the
+          cluster store -1 between the two reads, and the loser claims into cluster -1 (#842) — which reaches the fold as a
+          negative id, and reached it for weeks as an IndexOutOfRangeException that read as a grow failure (#807).
+          NoteClusterBorn rejects a negative id by name so the next occurrence accuses the caller rather than the array.
   verified: ClusterVisibilitySummaryIntegrityTests.ClaimingASlot_BoundsTheClusterBeforeItPublishesTheOccupancyBit
             [VerifiesRule] — calls the claim and reads the summary with NOTHING in between, so the ordering is asserted
             single-threaded instead of raced for. Move the fold back to the caller and it fails every run, together with the
-            from-scratch audit in the same fixture.
+            from-scratch audit in the same fixture. AFoldAfterThePublishingStore_IsRejected [RuleMutant] drives that same
+            assertion helper with the state a caller-side fold leaves and requires it to reject — the rule had a verifier and
+            no mutant until then, which is the one shape the coverage audit cannot distinguish from real cover.
+            APeerEmptyingTheFreeClusterHead_DoesNotMakeTheClaimResolveItTwice pins the single-read clause through
+            ClaimSlotHeadReadProbe, which performs the peer's store at the vulnerable instant: raced, the defect reproduced
+            about 3 times in 40, a rate at which a green run is not evidence. ANegativeClusterId_IsRejectedByName pins the
+            message, since its whole value is naming the cause.
 
 ### CLUSTERVIS-02: A tombstone that keeps its occupancy bit must deny the gate outright `[fatal][silent]`
   invariant a cluster holding a slot whose entity is dead while its bit is still set never reports fully-visible

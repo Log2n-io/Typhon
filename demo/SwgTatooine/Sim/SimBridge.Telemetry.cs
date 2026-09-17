@@ -13,8 +13,12 @@ public sealed partial class SimBridge
     private int[] _telemetryIds;
     private readonly double[,] _telemetrySums = new double[5, 7];
 
-    /// <summary>Prep's split per archetype: the nine sub-spans in ms, the clusters Prep masked, and the ticks spent on each branch.</summary>
-    private readonly double[,] _prepSums = new double[5, 12];
+    /// <summary>
+    /// Prep's split per archetype: the nine sub-spans in ms, the clusters Prep masked, the ticks spent on each branch, and the repair queue's own
+    /// maintenance — absorbing nominations and re-ranking (AC-11.5). That last term is reported separately from "plan" because "plan" is the whole
+    /// planner, execution included, and the question #949 asks is about the rank alone.
+    /// </summary>
+    private readonly double[,] _prepSums = new double[5, 13];
 
     /// <summary>
     /// The engine's query tally per archetype — clusters the range queries opened, entities they tested, matches — then the budget the controller granted
@@ -76,6 +80,7 @@ public sealed partial class SimBridge
             var branch = clusterState?.FenceBranchPath ?? 0;
             _prepSums[a, 10] += branch == 1 ? 1 : 0;
             _prepSums[a, 11] += branch == 2 ? 1 : 0;
+            _prepSums[a, 12] += t.RepairQueueMaintenanceMs;
 
             _querySums[a, 0] += t.QueryClustersOpened;
             _querySums[a, 1] += t.QueryCandidates;
@@ -113,10 +118,12 @@ public sealed partial class SimBridge
             Console.WriteLine($"  {TelemetryNames[a],-15} {M(0),8:F1} {M(1),9:F1} {M(2),10:F1} {M(3),9:F1} {M(4),7:F2} {M(5),11:F1} {M(6),6:F2}");
         }
 
-        // Wall time on the one worker that ran the archetype's Prep item: the sum is that item's timed part, and the planner is "plan".
+        // Wall time on the one worker that ran the archetype's Prep item: the sum is that item's timed part, and the planner is "plan". "qmaint" brackets
+        // the repair queue's cooldown release, absorb, source-exclusion rebuild and rank — so it is what a starved budget skips, but it is NOT the rank
+        // alone and a movement in it cannot be attributed to the sort by itself.
         Console.WriteLine();
         Console.WriteLine($"  {"prep ms (mean)",-15} {"snap",6} {"mask",6} {"shadow",6} {"zmap",6} {"detect",6} {"throt",6} {"plan",6} {"sort",6} {"presz",6} "
-            + $"{"sum",7} {"dirty cl",9} {"branch 1/2",11}");
+            + $"{"sum",7} {"qmaint",7} {"dirty cl",9} {"branch 1/2",11}");
         for (var a = 0; a < _telemetryIds.Length; a++)
         {
             double P(int k) => _prepSums[a, k] / _telemetryTicks;
@@ -127,7 +134,7 @@ public sealed partial class SimBridge
             }
 
             Console.WriteLine($"  {TelemetryNames[a],-15} {P(0),6:F3} {P(1),6:F3} {P(2),6:F3} {P(3),6:F3} {P(4),6:F3} {P(5),6:F3} {P(6),6:F3} {P(7),6:F3} "
-                + $"{P(8),6:F3} {sum,7:F3} {P(9),9:F0} {P(10),5:F2}/{P(11),-5:F2}");
+                + $"{P(8),6:F3} {sum,7:F3} {P(12),7:F4} {P(9),9:F0} {P(10),5:F2}/{P(11),-5:F2}");
         }
 
         // The engine's query tally: per tick, and as ratios of the window's sums rather than means of per-tick ratios.

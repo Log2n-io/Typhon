@@ -61,7 +61,9 @@ internal sealed unsafe partial class ArchetypeClusterState
     //   EnqueuePromotedAppliesBulk     — bulk append to PendingPromotedApplies (AabbRefresh's divert of promoted cells)
     //   EnqueueRepairNominationsBulk   — bulk append to the repair nomination list (ArchetypeClusterState.Repair.cs)
     //   RegisterPrepSliceCrossings     — a Prep slice filing its cell crossings under its own slice key
-    //   AllocateNewClusterLatched      — the repair path's cluster allocation; the twin of TryClaimSlotInCluster's slow path
+    //   AllocateNewClusterLatched      — both ClaimSlot overloads' new-cluster path (#842); the twin of TryClaimSlotInCluster's slow path. NOT the repair
+    //                                    path, which this line named until #582 face 2: repair allocates through AllocateEmptyClusterForCell and takes no
+    //                                    latch at all. A wrong entry here is worse than a missing one — this list is what the next reader reasons from
     //   EnsureClusterVisibilityCapacity — GROWTH ONLY, behind a double-checked length compare; the fold itself never takes it. Serializing growers against
     //                                    each other is not the whole fix — see NoteClusterBorn for why a fold must also re-read the array reference after
     //                                    its CAS — but it is the half that stops two growers dropping each other's copy.
@@ -259,6 +261,23 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     internal static Action<ArchetypeClusterState, long> PrepQueueProbe;
 
+    /// <summary>
+    /// Test hook: invoked by both <see cref="ClaimSlot(ref ChunkAccessor{PersistentStore}, ChangeSet, long)"/> overloads immediately after they read
+    /// <see cref="FreeClusterHead"/> and before they use the value. Null in production; the call is a null test.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>It exists to make one specific regression deterministic.</b> #842 was a double read of <see cref="FreeClusterHead"/>: the overloads tested
+    /// the field and then re-read it for the value, so a peer that filled the cluster and stored <c>-1</c> between the two left the loser claiming into
+    /// cluster <c>-1</c>. That is a timing race, and a stress test reproduces it about three times in forty — a rate at which a green run is no evidence.
+    /// A probe that performs the peer's store at exactly the vulnerable instant turns it into a single deterministic case.</para>
+    /// <para><b>Unconditional, not <c>[Conditional("DEBUG")]</c>, and that is the point.</b> The merge gate runs Release; a Debug-only seam would leave the
+    /// guarding test passing there without executing the thing it guards, which is the same false green <c>NotePrepSliceRun</c>'s own remark warns about.
+    /// The cost is a static load and a not-taken branch against a claim that already does a volatile read, a chunk-address resolve, a CAS loop in the fold
+    /// and a CAS to take the slot. It is a MUTABLE static, so the JIT cannot fold the load away the way it folds a readonly gate: the cost is permanent,
+    /// not merely cheap, and that is the honest price of the determinism.</para>
+    /// </remarks>
+    internal static Action<ArchetypeClusterState> ClaimSlotHeadReadProbe;
+
     /// <summary>Test-visible count of <c>PrepSlice</c> items executed, process-wide. Proves a fixture exercised the sliced path, not the atomic one.</summary>
     internal static int PrepSlicesRun;
 
@@ -416,6 +435,71 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <summary>Dirty-bits snapshot for this fence tick, set by Prep, mutated atomically by Migrate (slot bit flips), read by Finalize for AABB + WAL.
     /// On branch path 1 this is the local occupancy-only spatialBits buffer; on path 2 it's the real <c>ClusterDirtyBitmap.Snapshot()</c> result.</summary>
     internal long[] FenceDirtyBits;
+
+    /// <summary>
+    /// Did Prep publish a change list this tick? The single place the meaning of a null <see cref="FenceDirtyBits"/> is written down (#963).
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Why this exists.</b> Null is the representation for THREE different facts, decided in two files, and before this every reader re-derived
+    /// which one it meant from context:</para>
+    /// <list type="bullet">
+    ///   <item>the archetype had no work at all this tick (branch 0), so Prep published nothing;</item>
+    ///   <item>it is <see cref="SpatialBarrierOnly"/> on the clean branch (branch 1), where a change list is not built because nothing on that path
+    ///         reads one (#939);</item>
+    ///   <item>it had no migrations to execute, so <c>PreSizeMigrationBuffers</c> did not allocate a buffer nothing would have read.</item>
+    /// </list>
+    /// <para><b>What a caller may conclude, and what it may not.</b> False means "there is no per-cluster change list to read or slice this tick" — that
+    /// and nothing more. It does NOT mean the archetype is idle, that no cluster changed, or that the AABB refresh has nothing to do: on the barrier-only
+    /// path the refresh is driven by <see cref="ClusterProcessBitmap"/> and is entirely independent of this. A caller that needs "did anything change"
+    /// must ask the bitmap, not this.</para>
+    /// <para><b>Deliberately not consulted by <see cref="ClusterNeedsAabbRecompute"/></b>, which needs the ARRAY rather than its presence — it reads the
+    /// per-cluster word and falls through to the other signals when there is none, so a boolean would lose the distinction it depends on.</para>
+    /// </remarks>
+    internal bool FenceChangeListPublished => FenceDirtyBits != null;
+
+    /// <summary>
+    /// The branch-1 change list, retained across ticks and reused instead of reallocated (#963).
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Why only branch 1.</b> On branch 2 the array is <c>ClusterDirtyBitmap.Snapshot()</c>'s result, and Finalize hands that same instance to the
+    /// NEXT tick as <see cref="PreviousTickDirtySnapshot"/>, which change-filtered dispatch reads while the next tick's systems run. Reusing it there would
+    /// rewrite what those systems are reading — the aliasing hazard `design/Runtime/11-prep-phase-optimisation.md` §7.3 records. Branch 1 has no such alias:
+    /// it sets <see cref="PreviousTickDirtySnapshot"/> to null, and <c>FinalizeArchetypeFenceHead</c> returns at its path-1 exit BEFORE the assignment that
+    /// would publish it. Nothing holds the branch-1 array past the tick that used it.</para>
+    /// <para><b>Why this is a strict win rather than a trade.</b> <c>new long[n]</c> already pays a zeroing pass — the CLR zeroes every array it hands out —
+    /// so renting and clearing costs the same memset, minus the allocation and minus the large-object-heap pressure it adds. At the SWG demo's x64 this array
+    /// is ~273 KB per archetype on every tick with a crossing, which is GC cost paid later as a pause rather than in the pre-size's own sub-span.</para>
+    /// </remarks>
+    private long[] _branch1ChangeListScratch;
+
+    /// <summary>
+    /// Hand out a zeroed branch-1 change list of at least <paramref name="upperBound"/> words, reusing the retained buffer when it is large enough.
+    /// </summary>
+    private long[] RentBranch1ChangeList(int upperBound)
+    {
+        Debug.Assert(FenceBranchPath == 1,
+            "the retained change list is only safe on branch 1 — branch 2's array is published to the next tick as PreviousTickDirtySnapshot");
+
+        var buf = _branch1ChangeListScratch;
+        if (buf == null || buf.Length < upperBound)
+        {
+            var newLen = buf?.Length ?? 0;
+            while (newLen < upperBound)
+            {
+                newLen = Math.Max(newLen * 2, upperBound);
+            }
+
+            // A fresh array is already zeroed, so the clear below is skipped for it.
+            buf = new long[newLen];
+            _branch1ChangeListScratch = buf;
+            return buf;
+        }
+
+        // Reused: the previous tick's Migrate phase left source bits cleared and destination bits set, so it must be zeroed before it is handed out again.
+        // A stale bit would make an untouched cluster read as dirty to ClusterNeedsAabbRecompute and cost a bound recompute that nothing asked for.
+        Array.Clear(buf, 0, buf.Length);
+        return buf;
+    }
 
     /// <summary>Popcount of dirty entries after occupancy-masking. Drives WAL chunk sizing in Finalize. Path 1 leaves this at 0.</summary>
     internal int FenceEntryCount;
@@ -597,9 +681,27 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         // FenceDirtyBits is per-cluster (one long word per cluster chunk id). Grow to at least the upper bound.
+        //
+        // Created here ONLY when this tick has migrations to execute (#939). The array exists for the Migrate phase — ExecuteMigrations clears the source
+        // bit and sets the destination one — and a tick with an empty drain prefix runs no Migrate slice at all, so allocating one manufactures a
+        // large-object-heap array that nothing ever reads. The barrier-only clean branch now publishes no change list, which is what makes this reachable:
+        // before it, every path arrived here with a non-null array and the branch was dead.
+        //
+        // ResetArchetypeFenceTickState nulls FenceDirtyBits at the top of EVERY Prep, so without the retained buffer below this allocated afresh on every
+        // tick with a migration — which, in a moving world, is most of them. RentBranch1ChangeList reuses one array per archetype instead (#963); it is a
+        // strict win rather than a trade, because `new long[n]` already pays the zeroing pass that Array.Clear pays, minus the allocation and the LOH churn.
+        //
+        // This does not weaken the pre-size guarantee, and MD-02 says why: pre-sizing is a performance measure, not the safety argument. The parallel path
+        // never touches the array directly, and the on-demand grow under _finalizeLock (ApplyDirtyBitDeltas, GrowFenceDirtyBitsForChunkId) is what makes an
+        // under-estimate survivable. "Not yet allocated" is the limiting case of an under-estimate and takes the same path.
         if (FenceDirtyBits == null)
         {
-            FenceDirtyBits = new long[upperBound];
+            // Only when this tick has migrations to execute (#939): the array exists for the Migrate phase, and a tick with an empty drain prefix runs no
+            // Migrate slice at all, so handing one out manufactures a buffer nothing reads.
+            if (PendingMigrationCount > 0)
+            {
+                FenceDirtyBits = RentBranch1ChangeList(upperBound);
+            }
         }
         else if (FenceDirtyBits.Length < upperBound)
         {
@@ -1586,6 +1688,24 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     internal void NoteClusterBorn(int clusterChunkId, long bornTsn)
     {
+        // Name the caller's mistake rather than letting it surface as an IndexOutOfRangeException from the fold below. That exception was read for three
+        // weeks as "the visibility array had not grown to cover the cluster" (#807) — a theory the code refutes, since the array only ever grows and is
+        // sized for clusterChunkId + 1 on the next line. The real defect was a negative id produced one frame up (#842). An out-of-range index here is
+        // always the caller's, so it should say so; the array access bounds-checks anyway, so this replaces an implicit throw rather than adding a check.
+        // Mirrored onto NoteClusterDied, which needs it for a different reason: RecoveryApplier passes a chunk id decoded out of a WAL buffer, so that
+        // side takes untrusted input rather than an already-validated slot.
+        //
+        // int.MaxValue is rejected with the negatives, and not because such a cluster could exist: `clusterChunkId + 1` OVERFLOWS to int.MinValue on the
+        // next line, so the capacity call would be asked for a negative length, return without growing, and leave the index to fault anyway — past a guard
+        // whose whole purpose is to name the cause. A large-but-representable id is deliberately NOT rejected: sizing to it is a grow, not an error.
+        if (clusterChunkId < 0 || clusterChunkId == int.MaxValue)
+        {
+            ThrowHelper.ThrowInvalidOp(
+                $"Archetype {ArchetypeId}: NoteClusterBorn was given cluster id {clusterChunkId}. A negative id means the CALLER resolved its cluster "
+                + "more than once and lost the value to a concurrent peer — the shape of #842, where both ClaimSlot overloads tested FreeClusterHead and "
+                + "then re-read it, so a peer filling the cluster stored -1 between the two. Fix the caller; this method's own array only ever grows.");
+        }
+
         EnsureClusterVisibilityCapacity(clusterChunkId + 1);
 
         // CAS rather than a plain store, because two claimants can be folding into the SAME cluster at once — #708 records that Transient spawns commit
@@ -1694,6 +1814,18 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     internal void NoteClusterDied(int clusterChunkId, long diedTsn)
     {
+        // The mirror of NoteClusterBorn's precondition, and this side is the one with untrusted input: RecoveryApplier decodes the chunk id out of a WAL
+        // record buffer, so a truncated or corrupt record reaches here as an arbitrary int. Unguarded it lands as the same IndexOutOfRangeException from
+        // inside the fold that #807 spent weeks reading as a capacity problem. int.MaxValue joins the negatives — see NoteClusterBorn for why `+ 1` makes
+        // it the same case.
+        if (clusterChunkId < 0 || clusterChunkId == int.MaxValue)
+        {
+            ThrowHelper.ThrowInvalidOp(
+                $"Archetype {ArchetypeId}: NoteClusterDied was given cluster id {clusterChunkId}. Either a caller resolved its cluster twice (see "
+                + "NoteClusterBorn and #842) or a decoded WAL record carried a bad chunk id. This method's own array only ever grows, so the index is "
+                + "never this method's to fix.");
+        }
+
         EnsureClusterVisibilityCapacity(clusterChunkId + 1);
 
         // CAS, and the same post-CAS array re-read as NoteClusterBorn — see there. A lost update on this side under-records the watermark, which admits
@@ -2206,7 +2338,18 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <summary>Monotonic counter, incremented by <see cref="AddToActiveList"/> and <see cref="RemoveFromActiveList"/>.
     /// Consumed by <see cref="TierClusterIndex.RebuildIfStale"/> to short-circuit when no cluster has been added or removed since the last rebuild. Issue #231.
     /// </summary>
-    public int ClusterSetVersion { get; private set; }
+    private int _clusterSetVersion;
+
+    /// <summary>
+    /// Bumped by <see cref="AddToActiveList"/> and <see cref="RemoveFromActiveList"/>; read by <c>TierClusterIndex.RebuildIfStale</c> as a staleness hint.
+    /// </summary>
+    /// <remarks>
+    /// <b>Interlocked, because a lost update is silent and permanent.</b> It was a plain <c>++</c> on both writers. Two spawns racing there lose one
+    /// increment, the version lands back on a value <c>TierClusterIndex</c> has already recorded as its own, and <c>RebuildIfStale</c> then skips a rebuild
+    /// it needed — serving a stale tier list for the rest of the run rather than for a tick. The read is an acquire so a reader that sees the new version
+    /// also sees the list change that caused it.
+    /// </remarks>
+    public int ClusterSetVersion => Volatile.Read(ref _clusterSetVersion);
 
     /// <summary>Lazily-allocated per-archetype tier index (issue #231). Built on demand by <c>TyphonRuntime.OnParallelQueryPrepare</c> the first time a
     /// tier-filtered system runs against this archetype. Subsequent rebuilds are version-guarded and usually no-ops.</summary>
@@ -2612,6 +2755,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // the loser passes the test and takes -1 as its cluster id, and NoteClusterBorn indexes an array at -1. The exception is the mild outcome — the
         // address for chunk -1 has already been computed by then, and only the throw stops a CAS into the word one chunk below chunk 0.
         var clusterId = Volatile.Read(ref FreeClusterHead);
+        ClaimSlotHeadReadProbe?.Invoke(this);   // a peer filling this cluster stores -1 here — see the probe's remark and #842
         if (clusterId >= 0)
         {
             var clusterBase = accessor.GetChunkAddress(clusterId, true);
@@ -2660,6 +2804,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     {
         // One read — see the PersistentStore overload and #842.
         var clusterId = Volatile.Read(ref FreeClusterHead);
+        ClaimSlotHeadReadProbe?.Invoke(this);   // see the PersistentStore overload
         if (clusterId >= 0)
         {
             var clusterBase = accessor.GetChunkAddress(clusterId, true);
@@ -3118,7 +3263,9 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         ref readonly var cfg = ref grid.Config;
         var flat = cfg.GridDepth == 1 || float.IsPositiveInfinity(box.MinZ) || float.IsNegativeInfinity(box.MaxZ);
-        var density = DensityTargetRatio(grid.GetCell(cellKey).EntityCount, BitOperations.PopCount(Layout.FullMask), flat, cfg.ClusterTargetPackingSlack);
+        var slotsPerCluster = BitOperations.PopCount(Layout.FullMask);
+        var density = DensityTargetRatio(PackingPopulationInCell(CellClusterPool, grid, cellKey, slotsPerCluster), slotsPerCluster, flat,
+            cfg.ClusterTargetPackingSlack);
         var ratio = density > 0f ? MathF.Max(density, cfg.ClusterTargetExtentRatio) : cfg.ClusterTargetExtentRatio;
         var limit = ratio * cfg.GrowthCapSlack * cfg.CellSize;
 
@@ -4056,6 +4203,147 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal bool ClusterAabbsWriteLanded(int stamp) => Volatile.Read(ref _clusterAabbsGrowth) == stamp;
 
     /// <summary>
+    /// Odd while <see cref="EnsureClusterWriteBookkeepingCapacityLocked"/> copies the write-bookkeeping quartet into larger arrays, even otherwise: bumped
+    /// once before the copy and once after the last publish.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Why.</b> <c>ClusterRef</c> flags a cluster from a user thread holding no latch — the migration slot bits and their destination hint, a shrink
+    /// mask, the process bit — while another transaction's commit can be growing all four arrays. A flag written into an array the grow has already copied is
+    /// lost: the crossing is never detected (CC-02), or the cluster's bound is never refreshed (CA-01), with every counter still balancing. Serialising the
+    /// growers on <c>_finalizeLock</c> closed grower-versus-grower; this closes writer-versus-grower (CA-04, issue #903).</para>
+    /// <para><b>Why a stamp rather than <see cref="NoteClusterBorn"/>'s re-read of the array reference.</b> That protocol confirms ONE array. A crossing is a
+    /// PAIR — the slot bits in <see cref="ClusterMigrationPendingSlots"/> and the destination in <see cref="ClusterMigrationDestCellKeys"/> — and the quartet
+    /// grows in lockstep under one latch, so a per-array re-read can leave the bits in the live array and the key in the abandoned one: a crossing pointed at
+    /// a stale cell. One stamp over the group is the faithful model, and unlike a re-read it also covers the plain store the hint is written with.</para>
+    /// <para><b>The protocol</b> is <see cref="_clusterAabbsGrowth"/>'s: take an even stamp, write into the arrays read after it, and keep the write only if
+    /// the stamp has not moved. Both sides fence between their two accesses — the writer's interlocked RMW, the grower's first bump — so either the copy
+    /// reads the write or the writer sees the bump. Every write under it is an OR, or a stomp of an entry the fence clears once a tick, so a redo repeats
+    /// what the first attempt did rather than adding to it.</para>
+    /// <para>The fence's own writers need none of this, for the reason <see cref="_clusterAabbsGrowth"/> gives: nothing grows these arrays while a fence
+    /// phase runs (<see cref="ThrowIfGrowingInsideMigrateSlice"/>), and <see cref="ClearAabbRefreshBookkeeping"/> is single-threaded.</para>
+    /// </remarks>
+    private int _writeBookkeepingGrowth;
+
+    /// <summary>Test seam: runs inside the quartet's grow after the copy and before the publish, with <see cref="_writeBookkeepingGrowth"/> odd.</summary>
+    /// <summary>
+    /// Test seam fired by <see cref="PromoteCellHalf"/> after it has retired every linear back-pointer and before it re-issues tree handles — the window
+    /// a concurrent spawn must not be able to observe (#940).
+    /// </summary>
+    internal Action PromoteRetiredProbe;
+
+    /// <summary>
+    /// Test seam fired by the spawn commit immediately before it asks <see cref="IsClusterIndexed"/>. Paired with <see cref="PromoteRetiredProbe"/> it puts
+    /// a spawner provably inside that read while a promotion holds the window open, which is the interleaving #940 is about — without it a fixture can only
+    /// hope the two overlap, and a test that merely hopes passes just as well against the defect.
+    /// </summary>
+    internal Action SpawnIndexReadProbe;
+
+    internal Action WriteBookkeepingGrowCopiedProbe;
+
+    /// <summary>Test seam: runs when a flag write finds a grow in flight, before it waits the grow out.</summary>
+    internal Action WriteBookkeepingWaitProbe;
+
+    /// <summary>Test seam: runs once a flag write holds an even stamp, before its writes.</summary>
+    internal Action WriteBookkeepingStampedProbe;
+
+    /// <summary>The even growth stamp a lock-free write to the write-bookkeeping quartet starts from, once any grow in flight has published.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal int BeginWriteBookkeepingWrite()
+    {
+        var stamp = Volatile.Read(ref _writeBookkeepingGrowth);
+        return (stamp & 1) == 0 ? stamp : WaitOutWriteBookkeepingGrow();
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private int WaitOutWriteBookkeepingGrow()
+    {
+        WriteBookkeepingWaitProbe?.Invoke();
+        var spin = new SpinWait();
+        int stamp;
+        while (((stamp = Volatile.Read(ref _writeBookkeepingGrowth)) & 1) != 0)
+        {
+            spin.SpinOnce();
+        }
+
+        return stamp;
+    }
+
+    /// <summary>
+    /// True when no grow of the write-bookkeeping quartet began since <paramref name="stamp"/>, so a write made since into arrays read after it is in the
+    /// live ones.
+    /// </summary>
+    /// <remarks>
+    /// Call it after an INTERLOCKED write: that write's full fence is what stops the store being buffered past this acquire load, which orders nothing
+    /// before it — StoreLoad is the one reordering x64 permits, and arm64 permits the rest as well. A helper whose writes end in a PLAIN store must
+    /// therefore put the interlocked one last (see <see cref="FlagMigration"/>), and one that wrote nothing at all needs no fence: there is no store that
+    /// could be left behind in an abandoned array.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal bool WriteBookkeepingWriteLanded(int stamp) => Volatile.Read(ref _writeBookkeepingGrowth) == stamp;
+
+    /// <summary>
+    /// Flag a crossing on <paramref name="clusterChunkId"/>: stomp <paramref name="destCellKey"/> into <see cref="ClusterMigrationDestCellKeys"/>, then OR
+    /// <paramref name="slotBits"/> into <see cref="ClusterMigrationPendingSlots"/> — both in the same generation of the arrays (CA-04).
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The hint is written FIRST, and that order is load-bearing.</b> The re-check is an acquire load, which does not order a preceding plain store
+    /// after it. With the OR first, the key's store could still sit in the store buffer when the re-check passes, and then land in an array the grow had
+    /// already abandoned: the bits live, the hint stale — the very split this protocol exists to prevent. Writing the key before the OR puts it behind that
+    /// OR's full fence, so one re-check covers both.</para>
+    /// <para>The destination is a HINT the drain re-derives from the entity's position (CC-02); the bit is what must not be lost.</para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void FlagMigration(int clusterChunkId, ulong slotBits, int destCellKey)
+    {
+        int stamp;
+        do
+        {
+            stamp = BeginWriteBookkeepingWrite();
+            WriteBookkeepingStampedProbe?.Invoke();
+            Volatile.Read(ref ClusterMigrationDestCellKeys)[clusterChunkId] = destCellKey;
+            Interlocked.Or(ref Volatile.Read(ref ClusterMigrationPendingSlots)[clusterChunkId], slotBits);
+        }
+        while (!WriteBookkeepingWriteLanded(stamp));
+    }
+
+    /// <summary>
+    /// Set <paramref name="clusterChunkId"/>'s bit in <see cref="ClusterProcessBitmap"/> — the signal the AABB refresh consumes (CA-02, CA-04).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void SetClusterProcessBit(int clusterChunkId)
+    {
+        var wordIdx = clusterChunkId >> 6;
+        var bit = 1L << (clusterChunkId & 63);
+        int stamp;
+        do
+        {
+            stamp = BeginWriteBookkeepingWrite();
+            WriteBookkeepingStampedProbe?.Invoke();
+            Interlocked.Or(ref Volatile.Read(ref ClusterProcessBitmap)[wordIdx], bit);
+        }
+        while (!WriteBookkeepingWriteLanded(stamp));
+    }
+
+    /// <summary>OR <paramref name="mask"/> into <paramref name="clusterChunkId"/>'s <see cref="ClusterShrinkPendingAxes"/> entry (CA-04).</summary>
+    /// <remarks>
+    /// A mask already set returns without writing anything, and so without an interlocked fence. That is sound for the reason
+    /// <see cref="WriteBookkeepingWriteLanded"/> gives: a write that never happened cannot be stranded in an abandoned array, and the bits that were
+    /// already there are what the grow's copy carries forward.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void FlagShrinkAxes(int clusterChunkId, byte mask)
+    {
+        int stamp;
+        do
+        {
+            stamp = BeginWriteBookkeepingWrite();
+            WriteBookkeepingStampedProbe?.Invoke();
+            InterlockedOrShrinkAxes(Volatile.Read(ref ClusterShrinkPendingAxes), clusterChunkId, mask);
+        }
+        while (!WriteBookkeepingWriteLanded(stamp));
+    }
+
+    /// <summary>
     /// Grow <see cref="ClusterSpatialIndexSlot"/> to hold at least <paramref name="requiredLength"/> entries, initializing new slots to <c>-1</c> (not in
     /// the per-cell index). Issue #230.
     /// </summary>
@@ -4153,58 +4441,78 @@ internal sealed unsafe partial class ArchetypeClusterState
     {
         AssertFinalizeLockHeld(nameof(EnsureClusterWriteBookkeepingCapacityLocked));
         Debug.Assert(!InPrepSlice, "a Prep slice must not grow the per-cluster arrays another slice is reading (#886)");
+
         // ClusterProcessBitmap: 1 bit per cluster → (requiredLength + 63) / 64 long words.
         var requiredWords = (requiredLength + 63) >> 6;
-        if (ClusterProcessBitmap == null)
+
+        // Nothing to grow: return BEFORE the stamp moves, as EnsureClusterAabbsCapacityLocked does. Every fresh cluster calls this method
+        // (AddClusterToPerCellIndexLocked), and a stamp bumped on a no-op would make every concurrent flagger redo its writes for nothing.
+        if (ClusterProcessBitmap != null && ClusterProcessBitmap.Length >= requiredWords
+            && ClusterMigrationPendingSlots != null && ClusterMigrationPendingSlots.Length >= requiredLength)
         {
-            Volatile.Write(ref ClusterProcessBitmap, new long[Math.Max(1, requiredWords)]);
+            return;
         }
-        else if (ClusterProcessBitmap.Length < requiredWords)
+
+        // Odd for the whole copy: a lock-free flag whose write the copy may have missed sees the stamp move and redoes it in the new arrays (CA-04).
+        Interlocked.Increment(ref _writeBookkeepingGrowth);
+        try
         {
-            var newLen = Math.Max(ClusterProcessBitmap.Length, 1);
-            while (newLen < requiredWords)
+            if (ClusterProcessBitmap == null)
             {
-                newLen *= 2;
+                Volatile.Write(ref ClusterProcessBitmap, new long[Math.Max(1, requiredWords)]);
+            }
+            else if (ClusterProcessBitmap.Length < requiredWords)
+            {
+                var newLen = Math.Max(ClusterProcessBitmap.Length, 1);
+                while (newLen < requiredWords)
+                {
+                    newLen *= 2;
+                }
+
+                var grownBitmap = new long[newLen];
+                Array.Copy(ClusterProcessBitmap, grownBitmap, ClusterProcessBitmap.Length);
+                Volatile.Write(ref ClusterProcessBitmap, grownBitmap);
             }
 
-            var grownBitmap = new long[newLen];
-            Array.Copy(ClusterProcessBitmap, grownBitmap, ClusterProcessBitmap.Length);
-            Volatile.Write(ref ClusterProcessBitmap, grownBitmap);
-        }
+            // Per-cluster arrays sized 1:1 with clusterChunkId range.
+            if (ClusterMigrationPendingSlots == null)
+            {
+                var initial = Math.Max(16, requiredLength);
+                var seededKeys = new int[initial];
+                Array.Fill(seededKeys, -1);
+                Volatile.Write(ref ClusterMigrationDestCellKeys, seededKeys);
+                Volatile.Write(ref ClusterShrinkPendingAxes, new byte[initial]);
+                // Published LAST: it is the array the lock-free fast path length-checks, so every sibling array must already be visible behind it.
+                Volatile.Write(ref ClusterMigrationPendingSlots, new ulong[initial]);
+                return;
+            }
+            if (ClusterMigrationPendingSlots.Length >= requiredLength)
+            {
+                return;
+            }
+            var newClusterLen = Math.Max(ClusterMigrationPendingSlots.Length, 1);
+            while (newClusterLen < requiredLength)
+            {
+                newClusterLen *= 2;
+            }
 
-        // Per-cluster arrays sized 1:1 with clusterChunkId range.
-        if (ClusterMigrationPendingSlots == null)
-        {
-            var initial = Math.Max(16, requiredLength);
-            var seededKeys = new int[initial];
-            Array.Fill(seededKeys, -1);
-            Volatile.Write(ref ClusterMigrationDestCellKeys, seededKeys);
-            Volatile.Write(ref ClusterShrinkPendingAxes, new byte[initial]);
-            // Published LAST: it is the array the lock-free fast path length-checks, so every sibling array must already be visible behind it.
-            Volatile.Write(ref ClusterMigrationPendingSlots, new ulong[initial]);
-            return;
+            var oldLen = ClusterMigrationPendingSlots.Length;
+            var grownSlots = new ulong[newClusterLen];
+            Array.Copy(ClusterMigrationPendingSlots, grownSlots, oldLen);
+            var grownKeys = new int[newClusterLen];
+            Array.Copy(ClusterMigrationDestCellKeys, grownKeys, oldLen);
+            Array.Fill(grownKeys, -1, oldLen, newClusterLen - oldLen);
+            var grownAxes = new byte[newClusterLen];
+            Array.Copy(ClusterShrinkPendingAxes, grownAxes, oldLen);
+            WriteBookkeepingGrowCopiedProbe?.Invoke();
+            Volatile.Write(ref ClusterMigrationDestCellKeys, grownKeys);
+            Volatile.Write(ref ClusterShrinkPendingAxes, grownAxes);
+            Volatile.Write(ref ClusterMigrationPendingSlots, grownSlots);
         }
-        if (ClusterMigrationPendingSlots.Length >= requiredLength)
+        finally
         {
-            return;
+            Interlocked.Increment(ref _writeBookkeepingGrowth);
         }
-        var newClusterLen = Math.Max(ClusterMigrationPendingSlots.Length, 1);
-        while (newClusterLen < requiredLength)
-        {
-            newClusterLen *= 2;
-        }
-
-        var oldLen = ClusterMigrationPendingSlots.Length;
-        var grownSlots = new ulong[newClusterLen];
-        Array.Copy(ClusterMigrationPendingSlots, grownSlots, oldLen);
-        var grownKeys = new int[newClusterLen];
-        Array.Copy(ClusterMigrationDestCellKeys, grownKeys, oldLen);
-        Array.Fill(grownKeys, -1, oldLen, newClusterLen - oldLen);
-        var grownAxes = new byte[newClusterLen];
-        Array.Copy(ClusterShrinkPendingAxes, grownAxes, oldLen);
-        Volatile.Write(ref ClusterMigrationDestCellKeys, grownKeys);
-        Volatile.Write(ref ClusterShrinkPendingAxes, grownAxes);
-        Volatile.Write(ref ClusterMigrationPendingSlots, grownSlots);
     }
 
     /// <summary>
@@ -4896,7 +5204,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // change rather than per cluster — clusters of one cell are adjacent in both branches' iteration order often enough that the cache hits far more
         // than it misses, and a miss is one CellState load, one root and a handful of multiplies. `flat` is a property of the field, not of the cluster:
         // every cluster of this archetype packs in the same number of dimensions.
-        var targets = new CellTargetResolver(grid, cellSize, driftTargetExtent, repairExtent, BitOperations.PopCount(Layout.FullMask),
+        var targets = new CellTargetResolver(grid, CellClusterPool, cellSize, driftTargetExtent, repairExtent, BitOperations.PopCount(Layout.FullMask),
             SpatialSlot.HasSpatialIndex && SpatialSlot.FieldInfo.FieldType is SpatialFieldType.AABB2F or SpatialFieldType.BSphere2F or SpatialFieldType.AABB2D
                 or SpatialFieldType.BSphere2D,
             DriftTargetBoost);
@@ -5779,6 +6087,43 @@ internal sealed unsafe partial class ArchetypeClusterState
         slack <= 0f ? 0f : DensityTargetFromBound(PackingBoundRatio(entitiesInCell, slotsPerCluster, flat), slack);
 
     /// <summary>
+    /// A/B switch restoring the pre-#927 behaviour: the packing bound reads <c>CellState.EntityCount</c>, which sums every archetype sharing the cell.
+    /// </summary>
+    /// <remarks>
+    /// Static and mutable for the same reason as <see cref="DeferMigrateClusterFlags"/>: a perf claim here has to be a same-binary switch with interleaved
+    /// pairs, because two builds differ in JIT codegen as well as in the line under test.
+    /// </remarks>
+    internal static bool GridWidePackingBound;
+
+    /// <summary>
+    /// The population the packing bound is computed against — this ARCHETYPE's entities in the cell, not the grid-wide sum (#927).
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The defect.</b> <c>CellState.EntityCount</c> totals every archetype sharing the cell, so a minority archetype is judged against a tiling of
+    /// entities it does not own. Measured on SWG Tatooine x16 at 1 024 m: the engine's bound was 0.29x the Player archetype's own and 0.85x Creature's, and
+    /// the drift gate kept firing on player clusters that no packing could satisfy. <c>CellRepairQueue.Score</c> had already stopped using
+    /// <c>EntityCount</c> for this reason; the bound never did.</para>
+    /// <para><b>Why clusters rather than a new entity counter.</b> The bound is a RATIO — <c>slotsPerCluster / E</c> — and this archetype's own cluster count
+    /// in the cell is already maintained at O(1) by <see cref="CellClusterPool"/>, at the same sites that bump <c>EntityCount</c>. Substituting
+    /// <c>clusters x slotsPerCluster</c> for <c>E</c> gives <c>(1 / clusters)^(1/d)</c> and needs no new counter, no new maintenance site and no extra cache
+    /// line. The alternative — a per-archetype, per-cell entity population maintained at every claim and release — is what measured 2-7 % slower.</para>
+    /// <para><b>What it costs in accuracy, stated rather than hidden.</b> Cluster count over-estimates the population when clusters are partly full
+    /// (measured occupancy 81-94 %), which under-estimates <c>fill</c> and makes the bound TIGHTER than the truth. That is the conservative direction for
+    /// correctness — a tighter bound asks for more maintenance, never less — but it is the expensive direction for the tick, which is why this ships behind
+    /// <see cref="GridWidePackingBound"/> and was measured before adoption.</para>
+    /// </remarks>
+    internal static int PackingPopulationInCell(CellClusterPool pool, SpatialGrid grid, int cellKey, int slotsPerCluster)
+    {
+        if (GridWidePackingBound || pool == null)
+        {
+            return grid.GetCell(cellKey).EntityCount;
+        }
+
+        var clusters = pool.GetClusterCount(cellKey);
+        return clusters <= 0 ? 0 : clusters * slotsPerCluster;
+    }
+
+    /// <summary>
     /// <see cref="DensityTargetRatio"/> for a caller that already holds the cell's <see cref="PackingBoundRatio"/> — the AABB refresh's per-cell memo, which
     /// needs both readings and must not take the root twice (#911 O2).
     /// </summary>
@@ -5908,6 +6253,12 @@ internal sealed unsafe partial class ArchetypeClusterState
     private struct CellTargetResolver
     {
         private readonly SpatialGrid _grid;
+
+        /// <summary>
+        /// This archetype's own cell-to-clusters map, so the packing bound is computed from its own population rather than the grid-wide sum (#927).
+        /// </summary>
+        private readonly CellClusterPool _pool;
+
         private readonly float _cellSize;
         private readonly float _driftFloor;
         private readonly float _repairFloor;
@@ -5939,9 +6290,11 @@ internal sealed unsafe partial class ArchetypeClusterState
         /// </remarks>
         internal float PackingBound;
 
-        internal CellTargetResolver(SpatialGrid grid, float cellSize, float driftFloor, float repairFloor, int slotsPerCluster, bool flat, float boost)
+        internal CellTargetResolver(SpatialGrid grid, CellClusterPool pool, float cellSize, float driftFloor, float repairFloor, int slotsPerCluster,
+            bool flat, float boost)
         {
             _grid = grid;
+            _pool = pool;
             _cellSize = cellSize;
             _driftFloor = driftFloor;
             _repairFloor = repairFloor;
@@ -5971,7 +6324,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
             // One root per cell change, feeding both readings (#911 O2). The bound is pure geometry and is published even in constant mode, where the GATES
             // ignore it — a tightness reading is not a tuning decision and has no reason to go dark because the targets were pinned to constants.
-            var bound = PackingBoundRatio(_grid.GetCell(cellKey).EntityCount, _slotsPerCluster, _flat);
+            var bound = PackingBoundRatio(PackingPopulationInCell(_pool, _grid, cellKey, _slotsPerCluster), _slotsPerCluster, _flat);
             PackingBound = bound;
             var density = DensityTargetFromBound(bound, _slack);
             if (density <= 0f)
@@ -6334,6 +6687,15 @@ internal sealed unsafe partial class ArchetypeClusterState
         var tree = isStatic ? slot.StaticTree : slot.DynamicTree;
         if (tree != null)
         {
+            // Idempotent, as the linear branch below already is (#940). A spawn that read "not indexed" while promotion had the back-pointers retired
+            // arrives here for a cluster the tree already holds; Add's duplicate guard would throw out of the middle of its commit. Updating with the live
+            // box is what the caller wanted in either case — the box it passes is the one to publish.
+            if (!SpatialRTree<TransientStore>.IsNullHandle(backPointers[clusterChunkId]))
+            {
+                tree.UpdateAt(clusterChunkId, in aabb, out _);
+                return;
+            }
+
             tree.Add(clusterChunkId, in aabb);
             TyphonEvent.EmitSpatialCellIndexAdd(cellKey, backPointers[clusterChunkId], clusterChunkId, tree.ClusterCount);
             return;
@@ -6426,6 +6788,10 @@ internal sealed unsafe partial class ArchetypeClusterState
         {
             ClusterSpatialIndexSlot[linear.ClusterIds[i]] = SpatialRTree<TransientStore>.NullHandle;
         }
+
+        // The window #940 is about: every back-pointer reads as retired, no tree is published yet, and this method holds _finalizeLock throughout. A spawn
+        // that answers "is this cluster indexed" without that latch sees a lie here.
+        PromoteRetiredProbe?.Invoke();
 
         for (var i = 0; i < linear.ClusterCount; i++)
         {
@@ -6859,17 +7225,86 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
-    /// <see cref="UpdateClusterInPerCellIndex"/> for the SPAWN path, which runs on user threads with no latch and only ever widens. A linear half is
-    /// widened by per-axis CAS that survives a concurrent latched grow (<see cref="CellSpatialIndex.WidenAt"/>); a promoted half is written under
-    /// <c>_finalizeLock</c>, because <c>PC-01</c> makes the tree single-writer by the caller's discipline and a user thread has none of the fence's.
-    /// The fence's own callers keep <see cref="UpdateClusterInPerCellIndex"/>: they are exclusive by construction and may also shrink.
+    /// Can a cell half of this archetype be holding a <see cref="CellClusterTree"/>? If not, <see cref="ClusterSpatialIndexSlot"/> is never transiently
+    /// retired and the unlatched reads below are safe (#940).
     /// </summary>
     /// <remarks>
-    /// A promotion that lands between this method's read of the linear half and its widen leaves the widen in the linear half the tree was built
-    /// from; the fence's next AabbRefresh of the (dirty) cluster republishes the bound. Tolerated for the same reason CR-02 tolerates a stale box:
-    /// one tick of a too-tight leaf is a slower query, never a wrong cell.
+    /// <see cref="PromotedCellCount"/> is tested as well as the gate, because <c>ForceCellHalfStructure</c> switches a half in place with the gate off — an
+    /// instrument the crossover benchmark uses. Testing the gate alone would leave exactly that configuration on the unlatched path.
+    /// </remarks>
+    private bool CellTreesPossible => CellTreePromoteThreshold != int.MaxValue || Volatile.Read(ref PromotedCellCount) > 0;
+
+    /// <summary>
+    /// Is this cluster already carried by its cell's per-cell index? Answered under <c>_finalizeLock</c> when a promotion could be in flight (#940).
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Why the latch.</b> <see cref="PromoteCellHalf"/> retires every linear slot index to <c>NullHandle</c> and only then re-issues packed tree
+    /// handles into the same array, so a reader crossing that window sees "not indexed" for a cluster that is indexed. The spawn commit acts on that answer
+    /// by resetting the cluster's <see cref="ClusterAabbs"/> entry to <c>Empty</c> — discarding concurrent spawners' widening — and then adding it to the
+    /// cell again, which the tree's duplicate guard turns into an exception thrown out of the middle of a commit.</para>
+    /// <para>Outside that window the answer is monotone: a cluster that is indexed stays indexed until it leaves the cell, so a caller that finds no tree
+    /// possible needs no latch at all and pays one predictable branch.</para>
+    /// </remarks>
+    internal bool IsClusterIndexed(int clusterChunkId)
+    {
+        var backPointers = Volatile.Read(ref ClusterSpatialIndexSlot);
+        if (backPointers == null || (uint)clusterChunkId >= (uint)backPointers.Length)
+        {
+            return false;
+        }
+
+        if (!CellTreesPossible)
+        {
+            return backPointers[clusterChunkId] >= 0;
+        }
+
+        ref var ctx = ref Unsafe.NullRef<WaitContext>();
+        _finalizeLock.Enter(ref ctx);
+        try
+        {
+            // Re-read under the latch: a promotion that ran between the fast-path load above and here has republished the array.
+            var live = ClusterSpatialIndexSlot;
+            return live != null && (uint)clusterChunkId < (uint)live.Length && live[clusterChunkId] >= 0;
+        }
+        finally
+        {
+            _finalizeLock.Exit();
+        }
+    }
+
+    /// <summary>
+    /// Widen a cluster's entry in its cell's per-cell index. Taken under <c>_finalizeLock</c> for the WHOLE body when a promotion could be in flight, not
+    /// merely for its tree branch (#940).
+    /// </summary>
+    /// <remarks>
+    /// The old shape latched only the tree branch, so a widen could read "no tree" before the publish and then read a back-pointer that promotion had
+    /// already replaced with a packed tree handle — <c>leafChunkId * 32 + slotIndex</c> — and hand it to <see cref="CellSpatialIndex.WidenAt"/> as a linear
+    /// slot. That widens an unrelated cluster's entry, or indexes past the linear capacity. The other half of the same straddle drops the widen entirely
+    /// (the back-pointer reads as retired, or the linear half has been nulled by the publish), which leaves the cell's box tighter than the cluster's until
+    /// the next refresh — an SQ-01 false negative, and silent. CA-02 is explicit that too tight is the dangerous direction.
     /// </remarks>
     internal void WidenClusterInPerCellIndex(int clusterChunkId, int cellKey, in ClusterSpatialAabb aabb)
+    {
+        if (!CellTreesPossible)
+        {
+            WidenClusterInPerCellIndexCore(clusterChunkId, cellKey, in aabb);
+            return;
+        }
+
+        ref var ctx = ref Unsafe.NullRef<WaitContext>();
+        _finalizeLock.Enter(ref ctx);
+        try
+        {
+            WidenClusterInPerCellIndexCore(clusterChunkId, cellKey, in aabb);
+        }
+        finally
+        {
+            _finalizeLock.Exit();
+        }
+    }
+
+    /// <inheritdoc cref="WidenClusterInPerCellIndex"/>
+    private void WidenClusterInPerCellIndexCore(int clusterChunkId, int cellKey, in ClusterSpatialAabb aabb)
     {
         // The spawn path has already raised ClusterReach by the entity's own overhang (RaiseClusterReachForSpawn). Not by this box: it is the whole
         // cluster's, and a spawn into a named outlier would fold that outlier's reach into every query until the next fence.
@@ -6889,17 +7324,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         var tree = isStatic ? slot.StaticTree : slot.DynamicTree;
         if (tree != null)
         {
-            ref var treeCtx = ref Unsafe.NullRef<WaitContext>();
-            _finalizeLock.Enter(ref treeCtx);
-            try
-            {
-                tree.UpdateAt(clusterChunkId, in aabb, out _);
-            }
-            finally
-            {
-                _finalizeLock.Exit();
-            }
-
+            // No latch here: the caller holds it whenever a tree can exist. PaddedFinalizeLock is not re-entrant, so taking it again would deadlock.
+            tree.UpdateAt(clusterChunkId, in aabb, out _);
             return;
         }
 
@@ -7310,18 +7736,32 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     public void AddToActiveList(int chunkId)
     {
-        if (ActiveClusterCount >= ActiveClusterIds.Length)
+        var n = ActiveClusterCount;
+        var ids = ActiveClusterIds;
+        if (n >= ids.Length)
         {
-            Array.Resize(ref ActiveClusterIds, ActiveClusterIds.Length * 2);
+            // RELEASE 1, and it is NOT redundant with the count release below. A reader that acquires the OLD count and then loads the NEW array derives no
+            // ordering from that release at all, yet it walks entries Array.Copy wrote with plain stores — so on arm64 it can read them before they have
+            // propagated. Array.Resize cannot carry this store: the `ref` assignment inside it is plain, which is why the grow is written out by hand.
+            var grown = new int[ids.Length * 2];
+            Array.Copy(ids, grown, n);
+            Volatile.Write(ref ActiveClusterIds, grown);
+            ids = grown;
         }
 
-        // The array store above is a plain store, deliberately: the release below is what orders it. A Volatile.Write cannot sink a preceding store past
-        // itself, so a reader that ACQUIRES this count is guaranteed to see the grown array. Caching the array in a local first — the obvious way to write
-        // this — is what must not be done: it widens the writer's own (array, count) window and produced an IndexOutOfRange in parallel spawn.
-        ActiveClusterIds[ActiveClusterCount] = chunkId;
-        Volatile.Write(ref ActiveClusterCount, ActiveClusterCount + 1);
+        // Holding the array in a local is safe HERE, and the distinction matters because doing it was a regression once (#582): that version cached the
+        // array BEFORE the resize and appended after, so the store landed in the copy Array.Resize had already abandoned. Reassigning `ids` to the grown
+        // array is what closes that.
+        //
+        // It is also safe against a sibling grower, but NOT for the reason one would reach for first: _finalizeLock does not cover this. The repair path
+        // allocates through AllocateEmptyClusterForCell with no latch at all, and FinishArchetypeFencePrep — which reaches it — is dispatched as a parallel
+        // ArchetypePrep work item, not only from the serial tail. What actually holds is narrower and stronger: Prep work items are ONE PER ARCHETYPE, so
+        // two appenders never share an ArchetypeClusterState, and user-thread structural mutation is excluded for the fence's duration by EW-01's window
+        // (FenceWindow.Open) rather than by any lock. Readers are the unserialised side, which is what the two releases above are for.
+        ids[n] = chunkId;
+        Volatile.Write(ref ActiveClusterCount, n + 1);   // RELEASE 2 — the linearization point
         // Issue #231: any change to the active cluster set invalidates the tier index.
-        ClusterSetVersion++;
+        Interlocked.Increment(ref _clusterSetVersion);
         // Issue #233: ensure dormancy arrays cover the new chunkId, initialize to Active/0.
         if (SleepStates != null)
         {
@@ -7373,7 +7813,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 }
 
                 // Issue #231: any change to the active cluster set invalidates the tier index.
-                ClusterSetVersion++;
+                Interlocked.Increment(ref _clusterSetVersion);
                 return;
             }
         }

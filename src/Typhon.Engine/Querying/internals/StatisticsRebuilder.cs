@@ -99,8 +99,14 @@ internal static class StatisticsRebuilder
     {
         var layout = clusterState.Layout;
         int interval = Math.Max(1, clusterInterval);
+
+        // CLUSTERWALK-02: one pair read, hoisted out of both loops. This reader is the widest exposure of the three — it runs on the Typhon-Statistics
+        // BACKGROUND thread on a timer, so unlike every DAG worker no tick phase bounds when it can overlap a spawn or a destroy. It previously read the
+        // count afresh on every loop iteration and indexed the array with it.
+        var activeIds = clusterState.ReadActiveClusterList(out var activeCount);
+
         // Upper bound rather than an exact count — it only scales sampled counts back up, and the same bound already backs EcsQuery's cluster selectivity.
-        int estimatedTotal = clusterState.ActiveClusterCount * layout.ClusterSize;
+        int estimatedTotal = activeCount * layout.ClusterSize;
 
         for (int s = 0; s < ixSlots.Length; s++)
         {
@@ -115,9 +121,9 @@ internal static class StatisticsRebuilder
             int compSize = layout.ComponentSize(ixSlot.Slot);
             int compOffset = layout.ComponentOffset(ixSlot.Slot);
 
-            for (int c = 0; c < clusterState.ActiveClusterCount; c += interval)
+            for (int c = 0; c < activeCount; c += interval)
             {
-                int clusterChunkId = clusterState.ActiveClusterIds[c];
+                int clusterChunkId = activeIds[c];
                 ulong occupancy = *(ulong*)primaryAccessor.GetChunkAddress(clusterChunkId);
                 if (occupancy == 0)
                 {

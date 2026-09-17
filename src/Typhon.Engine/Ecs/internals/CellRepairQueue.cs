@@ -420,6 +420,54 @@ internal sealed class CellRepairQueue
     /// <summary>The degradation recorded for a queued cell, or <c>0</c> when it is not queued. Drives the safety valve's threshold test.</summary>
     internal float DegradationOf(int cellKey) => _candidates.TryGetValue(cellKey, out var candidate) ? candidate.Degradation : 0f;
 
+    /// <summary>Whether the candidate set is at its hard cap, so the next admission has to evict one (<c>AC-11.8</c>).</summary>
+    internal bool IsAtCapacity => _candidates.Count >= _maxCells;
+
+    /// <summary>
+    /// The BEST-scoring candidate whose degradation reaches <paramref name="criticalRatio"/>, found without ranking (#949) — the same cell the ranked
+    /// scan would have hoisted, chosen by an O(n) maximum instead of an O(n log n) sort.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Best-scoring, not merely qualifying, and the difference was measured.</b> The first version returned whichever critical candidate the
+    /// dictionary yielded first. The ranked path hoists the first critical cell in RANK order, which is the highest-scoring one, and
+    /// <c>Score = degradation x tierWeight x clusterCount x ageFactor</c> — so an arbitrary pick can land on a cell with one cluster, which
+    /// <c>RepairOneCell</c> declines outright (a partition of one cannot be improved) and which therefore spends the tick's single valve admission on
+    /// nothing. On SWG Tatooine x16 that cost Creature 5 % of its repaired entities and 5 % of its units against the ranked arm, and turned a run-to-run
+    /// spread of 0.7 entities into one of 5.8.</para>
+    /// <para>Scoring every critical candidate is O(n) and the sort it replaces is O(n log n), so the saving this exists for survives: what is skipped is
+    /// the ORDER over the whole queue, not the choice among the cells the valve may take.</para>
+    /// </remarks>
+    internal bool TryFindCritical(float criticalRatio, SpatialGrid grid, ArchetypeClusterState state, long tickNumber, out int cellKey)
+    {
+        cellKey = 0;
+        if (criticalRatio <= 0f)
+        {
+            return false;
+        }
+
+        var found = false;
+        var bestScore = 0f;
+        foreach (var pair in _candidates)
+        {
+            // Copied out because Score takes its candidate by `in` and a KeyValuePair's Value is a property, so it has no referenceable location (CS8156).
+            var candidate = pair.Value;
+            if (candidate.Degradation < criticalRatio)
+            {
+                continue;
+            }
+
+            var score = Score(pair.Key, in candidate, grid, state, tickNumber);
+            if (!found || score > bestScore)
+            {
+                bestScore = score;
+                cellKey = pair.Key;
+                found = true;
+            }
+        }
+
+        return found;
+    }
+
     /// <summary>The worst degradation nominated for a cooling cell since its repair, or <c>0</c> when it is not cooling or nothing nominated it.</summary>
     internal float HeldDegradationOf(int cellKey) => _cooling.TryGetValue(cellKey, out var held) ? held : 0f;
 

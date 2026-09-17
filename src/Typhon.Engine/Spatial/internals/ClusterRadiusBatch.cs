@@ -521,7 +521,7 @@ internal static unsafe class ClusterRadiusBatch
         private int CollectTreeHits(CellClusterTree tree, scoped ReadOnlySpan<double> coords)
         {
             int count = 0;
-            var e = tree.Query(coords, 0);
+            var e = tree.Query(coords);
             try
             {
                 while (e.MoveNext())

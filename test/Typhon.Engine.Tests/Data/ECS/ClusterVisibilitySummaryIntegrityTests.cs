@@ -1,7 +1,7 @@
+using System;
 using System.Collections.Generic;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
-using Typhon.Engine.Internals;
 
 namespace Typhon.Engine.Tests;
 
@@ -264,17 +264,224 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
             (claimed, _) = cs.ClaimSlot(ref accessor, null, incoming);
 
             // Nothing between the claim and this read. If the fold happened after the publishing store, the summary is still `settled` here.
-            Assert.That(cs.ClusterMaxBornTsn[claimed], Is.GreaterThanOrEqualTo(incoming),
-                "the claim must fold the incoming BornTSN into the cluster summary BEFORE it publishes the occupancy bit");
-            Assert.That(cs.IsClusterFullyVisibleAt(claimed, incoming - 1), Is.False,
-                "a reader whose snapshot predates the claimed entity must be denied the whole-cluster shortcut the instant the slot exists");
-            Assert.That(cs.IsClusterFullyVisibleAt(claimed, incoming), Is.True,
-                "GENUINENESS: a reader at or past the incoming TSN must still get the shortcut — the gate must be bounded, not merely switched off");
+            AssertBoundedBeforePublish(cs.ClusterMaxBornTsn[claimed], cs.IsClusterFullyVisibleAt(claimed, incoming - 1),
+                cs.IsClusterFullyVisibleAt(claimed, incoming), incoming);
         }
         finally
         {
             accessor.Dispose();
         }
+    }
+
+    private const string ClusterVis01Marker = "CLUSTERVIS-01";
+
+    /// <summary>
+    /// Clause-specific substrings of the three assertions below, so each mutant proves it tripped the clause it targets.
+    /// </summary>
+    /// <remarks>
+    /// Matching on <see cref="ClusterVis01Marker"/> alone would not: all three messages carry it, so a mutant aimed at clause 3 that in fact tripped clause 1
+    /// would be indistinguishable from one that worked. That is the same failure <c>RuleMutants.AssertDetects</c> exists to exclude one level up — "it failed"
+    /// is not evidence of "it failed for this reason" — and it is cheap to close, since the messages already differ.
+    /// </remarks>
+    private const string BoundBeforePublishMarker = "BEFORE it publishes the occupancy bit";
+
+    /// <inheritdoc cref="BoundBeforePublishMarker"/>
+    private const string GateIsBoundedMarker = "GENUINENESS";
+
+    /// <summary>
+    /// The verifier's own assertions, taken as VALUES so the mutant below drives this exact path rather than a copy of it that could drift from it.
+    /// </summary>
+    /// <remarks>
+    /// <b>The third clause requires the caller to fold exactly <paramref name="incoming"/>, and is NOT a general property of CLUSTERVIS-01.</b> A cluster
+    /// whose bound was raised by migration can legally sit above anything committed — <see cref="ArchetypeClusterState.NoteClusterBorn"/>'s own remark says
+    /// so, and calls the overshoot conservative — and such a cluster fails this clause while the rule is perfectly intact. It is written down because the
+    /// failure it produces reads as a regression rather than as a stale assumption, and whoever inherits it would have no way to tell the difference.
+    /// <b>Do not relax it to <c>&gt;=</c>:</b> that readmits a gate which is merely switched off, which is the one thing the clause exists to exclude. A
+    /// caller that cannot fold exactly should assert against its own expected bound instead of loosening this one.
+    /// </remarks>
+    private static void AssertBoundedBeforePublish(long summaryAtClaim, bool visibleBeforeIncoming, bool visibleAtIncoming, long incoming)
+    {
+        Assert.That(summaryAtClaim, Is.GreaterThanOrEqualTo(incoming),
+            $"{ClusterVis01Marker}: the claim must fold the incoming BornTSN into the cluster summary BEFORE it publishes the occupancy bit");
+        Assert.That(visibleBeforeIncoming, Is.False,
+            $"{ClusterVis01Marker}: a reader whose snapshot predates the claimed entity must be denied the whole-cluster shortcut the instant the slot exists");
+        Assert.That(visibleAtIncoming, Is.True,
+            $"{ClusterVis01Marker}: GENUINENESS — a reader at or past the incoming TSN must still get the shortcut, so the gate is bounded rather than off");
+    }
+
+    /// <summary>
+    /// The state a caller-side fold leaves behind: the occupancy bit published while the summary still holds what it held before the claim.
+    /// </summary>
+    /// <remarks>
+    /// CLUSTERVIS-01 had a verifier and no mutant, so nothing showed that verifier could fail — which is the gap the rule-coverage audit lists and the
+    /// reason the fixture's own remark ("5 300 tests pass with the fold on either side of the publish") is worth distrusting until something demonstrates
+    /// the assertion rejects the wrong side.
+    /// </remarks>
+    [Test]
+    [RuleMutant("CLUSTERVIS-01")]
+    public void AFoldAfterThePublishingStore_IsRejected()
+    {
+        using var dbe = SetupEngine();
+        Populate(dbe);
+
+        var cs = ClusterStateOf(dbe);
+        var head = cs.FreeClusterHead;
+        Assert.That(head, Is.GreaterThanOrEqualTo(0), "PRECONDITION: the claim below must take the existing-cluster path");
+
+        var settled = cs.ClusterMaxBornTsn[head];
+        var incoming = settled + 1_000;
+
+        using var epoch = EpochGuard.Enter(dbe.EpochManager);
+        var accessor = cs.ClusterSegment.CreateChunkAccessor();
+        try
+        {
+            var (claimed, _) = cs.ClaimSlot(ref accessor, null, incoming);
+
+            // Roll the REAL summary back to its pre-claim value. That is precisely the state a caller-side fold leaves behind — bit published, summary
+            // unmoved — so the helper is driven by engine state a violating implementation would actually produce, rather than by fabricated scalars that
+            // would only prove NUnit rejects one number against another. The slot is left orphaned, so this test must not run the integrity audit.
+            cs.ClusterMaxBornTsn[claimed] = settled;
+
+            // Marker is clause 1's own text, not the shared rule id: this mutant must be shown to trip the ordering clause specifically.
+            RuleMutants.AssertDetects("CLUSTERVIS-01", BoundBeforePublishMarker, () =>
+                AssertBoundedBeforePublish(cs.ClusterMaxBornTsn[claimed], cs.IsClusterFullyVisibleAt(claimed, incoming - 1),
+                    cs.IsClusterFullyVisibleAt(claimed, incoming), incoming));
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// A recorded DEATH denies the whole-cluster shortcut even when the born bound is intact — the clause a rolled-back summary cannot reach.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Why a second mutant, and why this clause specifically.</b> Clause 2 is derivable from clause 1: if <c>maxBorn &gt;= incoming</c> then it
+    /// exceeds <c>incoming - 1</c>, so no state satisfies the first and fails the second — a mutant for it would be unreachable. Clause 3 is different in
+    /// kind: it fails in states where both others pass, so it needs its own.</para>
+    /// <para><b>Why the DIED watermark rather than an overshooting born bound.</b> An overshoot would also trip clause 3, but
+    /// <see cref="ArchetypeClusterState.NoteClusterBorn"/>'s own remark calls overshoot legal and conservative — migration folds a high-water mark that no
+    /// spawn moves. A mutant built on it would prove the verifier OVER-STRICT rather than genuine, which is the failure mode a mutant exists to exclude.</para>
+    /// </remarks>
+    [Test]
+    [RuleMutant("CLUSTERVIS-01")]
+    public void ARecordedDeathStillDenyingTheShortcut_IsRejected()
+    {
+        using var dbe = SetupEngine();
+        Populate(dbe);
+
+        var cs = ClusterStateOf(dbe);
+        var head = cs.FreeClusterHead;
+        Assert.That(head, Is.GreaterThanOrEqualTo(0), "PRECONDITION: the claim below must take the existing-cluster path");
+
+        var incoming = cs.ClusterMaxBornTsn[head] + 1_000;
+
+        using var epoch = EpochGuard.Enter(dbe.EpochManager);
+        var accessor = cs.ClusterSegment.CreateChunkAccessor();
+        try
+        {
+            var (claimed, _) = cs.ClaimSlot(ref accessor, null, incoming);
+            cs.ClusterMaxDiedTsn[claimed] = long.MaxValue;   // a death nothing can have reached: the gate must deny every reader, including this one
+
+            // Marker is clause 3's own text. Matching the shared rule id would have accepted a failure of clause 1 — which is exactly what this mutant must
+            // NOT be, since clause 1 is already covered and a born bound left intact is the whole point of reaching this clause.
+            RuleMutants.AssertDetects("CLUSTERVIS-01", GateIsBoundedMarker, () =>
+                AssertBoundedBeforePublish(cs.ClusterMaxBornTsn[claimed], cs.IsClusterFullyVisibleAt(claimed, incoming - 1),
+                    cs.IsClusterFullyVisibleAt(claimed, incoming), incoming));
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+    }
+
+    // ── A peer emptying the free-cluster head mid-claim (#842, the regression #807 was filed against) ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A claim that reads <see cref="ArchetypeClusterState.FreeClusterHead"/> must use the value it read, even when a peer empties the head immediately
+    /// afterwards — never re-resolve it and claim into cluster <c>-1</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Why a probe rather than threads.</b> This is #842: both overloads tested the field and then re-read it for the value, and a peer filling
+    /// the cluster stores <c>-1</c> between the two. Raced, it reproduced about three times in forty — a rate at which a green run proves nothing, which is
+    /// exactly how the bug stayed open through two issues. <see cref="ArchetypeClusterState.ClaimSlotHeadReadProbe"/> performs the peer's store at the one
+    /// instant that matters, so the case is deterministic.</para>
+    /// <para><b>What failure looks like if it regresses.</b> The second read returns <c>-1</c>, and <c>NoteClusterBorn</c> rejects it by name. Before the
+    /// precondition added alongside this test it was an <c>IndexOutOfRangeException</c>, which reads as "the visibility array had not grown" — the theory
+    /// #807 was filed on and which cost the better part of a month.</para>
+    /// </remarks>
+    [Test]
+    [VerifiesRule("CLUSTERVIS-01")]
+    public void APeerEmptyingTheFreeClusterHead_DoesNotMakeTheClaimResolveItTwice()
+    {
+        using var dbe = SetupEngine();
+        Populate(dbe);
+
+        var cs = ClusterStateOf(dbe);
+        Assert.That(cs.FreeClusterHead, Is.GreaterThanOrEqualTo(0),
+            "PRECONDITION: the claim must take the existing-cluster path, or the probe below fires on a path that never reads the head");
+
+        var headBeforeClaim = cs.FreeClusterHead;
+        var fired = 0;
+
+        using var epoch = EpochGuard.Enter(dbe.EpochManager);
+        var accessor = cs.ClusterSegment.CreateChunkAccessor();
+        try
+        {
+            // Assigned INSIDE the try. This probe mutates engine state, so a throw between the assignment and the finally would leave every later claim in
+            // the process emptying its own free-cluster head. The read-only precedent in CleanBranchChangeListTests can afford a looser shape; this cannot.
+            ArchetypeClusterState.ClaimSlotHeadReadProbe = state =>
+            {
+                // Archetype-filtered, because the hook is process-wide. An unfiltered store would empty the head of every other archetype in this process,
+                // and counting fires would catch the stray one only after it had already done so.
+                if (state.ArchetypeId != cs.ArchetypeId)
+                {
+                    return;
+                }
+
+                fired++;
+                state.FreeClusterHead = -1;   // the peer that just filled this cluster
+            };
+
+            var (claimed, slot) = cs.ClaimSlot(ref accessor, null, 10_000);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(fired, Is.EqualTo(1), "PRECONDITION: the probe must have fired, or this test asserts nothing about the claim path");
+                Assert.That(claimed, Is.EqualTo(headBeforeClaim),
+                    "PRECONDITION: the claim must have used the head it read. Falling through to a fresh allocation satisfies the assertion below without "
+                    + "the single-read value ever being used, which would make this test pass while guarding nothing");
+                Assert.That(claimed, Is.GreaterThanOrEqualTo(0),
+                    $"{ClusterVis01Marker}: the claim resolved FreeClusterHead a second time and took the peer's -1 — the #842 defect, which reaches "
+                    + "NoteClusterBorn as a negative cluster id and corrupts the occupancy word one chunk below chunk 0 when the throw does not stop it");
+                Assert.That(slot, Is.GreaterThanOrEqualTo(0), "the claim must still yield a real slot");
+            });
+        }
+        finally
+        {
+            accessor.Dispose();
+            ArchetypeClusterState.ClaimSlotHeadReadProbe = null;
+        }
+    }
+
+    /// <summary>
+    /// <c>NoteClusterBorn</c> names a negative cluster id instead of surfacing it as an out-of-range index from deep inside the fold.
+    /// </summary>
+    [Test]
+    public void ANegativeClusterId_IsRejectedByName()
+    {
+        // No Populate: this is a pure argument check, and 80 entities across two transactions to obtain an ArchetypeId for a message is dead weight.
+        using var dbe = SetupEngine();
+        var cs = ClusterStateOf(dbe);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => cs.NoteClusterBorn(-1, 10_000));
+        Assert.That(ex.Message, Does.Contain("resolved its cluster").And.Contains("#842"),
+            "the message must name the caller-side cause; an IndexOutOfRangeException here reads as a grow problem and sent #807 after the wrong theory");
+
+        // int.MaxValue is the same case with a different arithmetic route: `+ 1` overflows to int.MinValue and walks past a `< 0` guard.
+        Assert.That(Assert.Throws<InvalidOperationException>(() => cs.NoteClusterBorn(int.MaxValue, 10_000)).Message, Does.Contain("only ever grows"));
+        Assert.That(Assert.Throws<InvalidOperationException>(() => cs.NoteClusterDied(-1, 10_000)).Message, Does.Contain("NoteClusterDied"));
     }
 
     // ── The conservative direction is a legal state, not a finding ────────────────────────────────────────────────────────────────────────────────────────

@@ -124,7 +124,7 @@ unsafe class BroadphaseCrossoverSweepTests
         Span<double> coords = stackalloc double[6];
         CellClusterTree.QueryToCoords(minX, minY, float.NegativeInfinity, maxX, maxY, float.PositiveInfinity, coords);
         int checksum = 0;
-        foreach (var r in tree.Query(coords, 0))
+        foreach (var r in tree.Query(coords))
         {
             checksum += (int)r.PayloadId;
         }
@@ -265,7 +265,7 @@ unsafe class BroadphaseCrossoverSweepTests
         Span<double> coords = stackalloc double[6];
         CellClusterTree.QueryToCoords(minX, minY, float.NegativeInfinity, maxX, maxY, float.PositiveInfinity, coords);
         var hits = new HashSet<int>();
-        foreach (var r in tree.Query(coords, 0))
+        foreach (var r in tree.Query(coords))
         {
             hits.Add((int)r.PayloadId);
         }

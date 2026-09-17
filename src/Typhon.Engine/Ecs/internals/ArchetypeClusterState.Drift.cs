@@ -341,12 +341,17 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// without the bit it never visits the cluster at all — a destroy there stays invisible exactly as it is today. Closing that needs the bit, and the bit
     /// costs what the paragraph above describes; it is a separate decision, not a side effect of this one.</para>
     /// </remarks>
+    /// <remarks>
+    /// The write goes under the quartet's growth stamp (CA-04): this runs on a user thread holding no latch — <c>Transaction.Destroy</c> reaches it through
+    /// <c>ReleaseSlot</c> — so another transaction's commit can be growing the array underneath it, and an unstamped OR would leave the mask in the copy the
+    /// grow abandons. The bounds test stays outside the stamp: it asks whether this archetype has the array at all, which a grow only ever makes truer.
+    /// </remarks>
     internal void FlagClusterShrinkAxesOnly(int chunkId)
     {
-        var shrink = ClusterShrinkPendingAxes;
+        var shrink = Volatile.Read(ref ClusterShrinkPendingAxes);
         if (shrink != null && (uint)chunkId < (uint)shrink.Length)
         {
-            InterlockedOrShrinkAxes(shrink, chunkId, AllShrinkAxes);
+            FlagShrinkAxes(chunkId, AllShrinkAxes);
         }
     }
 

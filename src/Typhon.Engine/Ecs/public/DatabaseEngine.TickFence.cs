@@ -1377,6 +1377,48 @@ public partial class DatabaseEngine
         }
     }
 
+    /// <summary>
+    /// The clean branch's change list: one occupancy word per active cluster that carries a signal. Built only for archetypes whose spatial writes do NOT
+    /// all go through the barrier, because those are the ones whose crossings <c>DetectClusterMigrations</c> still has to find by scanning (#939).
+    /// </summary>
+    private static unsafe void BuildLegacyScanChangeList(ArchetypeClusterState clusterState, long[] spatialBits,
+        ref ChunkAccessor<PersistentStore> accessorLocal)
+    {
+        // Only the clusters that CARRY A SIGNAL, not every active cluster.
+        //
+        // This loop used to read the occupancy word of every active cluster and copy it in wholesale, which manufactured a dirty set the size
+        // of the population on a tick where, by construction, the dirty bitmap was EMPTY. Everything downstream then treated a settled world
+        // as a fully-moving one: DetectClusterMigrations scanned every live slot, and the AABB refresh re-derived every bound. Measured on a
+        // 128-entity, 8-cluster fixture, a tick with no writes at all walked 128 of 128 entity slots.
+        //
+        // The branch's own justification is narrower than what it did. It exists because "WriteSpatial-only callers may have moved positions
+        // without setting the dirty bitmap" — and WriteSpatial is not silent: it sets the process bit when the bound grew or a crossing was
+        // flagged (ClusterRef.cs:405), and MaybeGrowAndFlagShrink sets ClusterShrinkPendingAxes when an extreme moved inward
+        // (ClusterRef.cs:455). The remaining case — a WriteSpatial that moves a non-extreme entity within the existing bound — changes
+        // neither the bound nor the cell, so there is nothing for this pass to re-derive.
+        //
+        // ClusterNeedsAabbRecompute is the SAME predicate the refresh itself uses, deliberately shared rather than restated: FenceDirtyBits is
+        // null on this branch (cleared at the top of Prep, published at its end), so the helper falls through to exactly the shrink-flag and
+        // process-bit tests named above. Two copies of this rule would be two things to keep in step.
+        for (var ai = 0; ai < clusterState.ActiveClusterCount; ai++)
+        {
+            var chId = clusterState.ActiveClusterIds[ai];
+            if (chId < 0 || chId >= spatialBits.Length)
+            {
+                continue;
+            }
+
+            if (!clusterState.ClusterNeedsAabbRecompute(chId))
+            {
+                continue;
+            }
+
+            var occB = accessorLocal.GetChunkAddress(chId);
+            var occ = *(ulong*)occB;
+            spatialBits[chId] = (long)occ;
+        }
+    }
+
     /// <inheritdoc cref="PrepareArchetypeFence"/>
     private unsafe bool PrepareArchetypeFenceCore(ArchetypeMetadata meta, long tickNumber, ChangeSet changeSet)
     {
@@ -1480,41 +1522,30 @@ public partial class DatabaseEngine
                         // Timed as ② and ⑤, which PrepMaskTicks' summary already said the clean branch was: untimed, a barrier-only archetype reported an
                         // empty Prep split while its walk ran.
                         var rebuildStart = Stopwatch.GetTimestamp();
-                        var wordCount = clusterState.PrimarySegmentCapacity;
-                        var spatialBits = new long[Math.Max(wordCount, 1)];
 
-                        // Only the clusters that CARRY A SIGNAL, not every active cluster.
+                        // ── A barrier-only archetype builds no change list at all, because nothing on this path would read one (#939) ─────────────────
                         //
-                        // This loop used to read the occupancy word of every active cluster and copy it in wholesale, which manufactured a dirty set the size
-                        // of the population on a tick where, by construction, the dirty bitmap was EMPTY. Everything downstream then treated a settled world
-                        // as a fully-moving one: DetectClusterMigrations scanned every live slot, and the AABB refresh re-derived every bound. Measured on a
-                        // 128-entity, 8-cluster fixture, a tick with no writes at all walked 128 of 128 entity slots.
+                        // The walk below exists to hand DetectClusterMigrations a set of live slots to scan. A barrier-only archetype never reaches that
+                        // scan: DetectClusterMigrationsRange returns at its step-(b) guard, because SetSpatialBarrierOnly is the caller's guarantee that
+                        // every spatial write went through WriteSpatial and step (a)'s drain of ClusterMigrationPendingSlots is therefore exhaustive. The
+                        // array is not read by the AABB refresh either: for a barrier-only archetype RecomputeDirtyClusterAabbsSlice takes its BITMAP arm,
+                        // iterating ClusterProcessBitmap, and never consults a change list. (It is the non-barrier arm that gates on
+                        // ClusterNeedsAabbRecompute — that helper's own remark says "used only by the ActiveClusterIds (non-barrier) arm".)
                         //
-                        // The branch's own justification is narrower than what it did. It exists because "WriteSpatial-only callers may have moved positions
-                        // without setting the dirty bitmap" — and WriteSpatial is not silent: it sets the process bit when the bound grew or a crossing was
-                        // flagged (ClusterRef.cs:405), and MaybeGrowAndFlagShrink sets ClusterShrinkPendingAxes when an extreme moved inward
-                        // (ClusterRef.cs:455). The remaining case — a WriteSpatial that moves a non-extreme entity within the existing bound — changes
-                        // neither the bound nor the cell, so there is nothing for this pass to re-derive.
+                        // Which makes the equivalence a one-liner: the walk below writes a word only where ClusterNeedsAabbRecompute is true, and the
+                        // process bit is one of that predicate's three signals — so the clusters the refresh visits are the process-bitmap set with or
+                        // without the array. Same clusters re-derived; only the array recording them is gone.
                         //
-                        // ClusterNeedsAabbRecompute is the SAME predicate the refresh itself uses, deliberately shared rather than restated: FenceDirtyBits is
-                        // null on this branch (cleared at the top of Prep, published at its end), so the helper falls through to exactly the shrink-flag and
-                        // process-bit tests named above. Two copies of this rule would be two things to keep in step.
-                        for (var ai = 0; ai < clusterState.ActiveClusterCount; ai++)
+                        // Removed per archetype per tick: a long[PrimarySegmentCapacity] on the large-object heap (≥256 KB for Creature at the SWG demo's
+                        // x64), a walk of every active cluster, an occupancy read through the page cache for each one carrying a signal, and the
+                        // Array.Resize the pre-size then ran to add its own slack on top of it.
+                        long[] spatialBits = null;
+                        if (!clusterState.SpatialBarrierOnly)
                         {
-                            var chId = clusterState.ActiveClusterIds[ai];
-                            if (chId < 0 || chId >= spatialBits.Length)
-                            {
-                                continue;
-                            }
+                            var wordCount = clusterState.PrimarySegmentCapacity;
+                            spatialBits = new long[Math.Max(wordCount, 1)];
 
-                            if (!clusterState.ClusterNeedsAabbRecompute(chId))
-                            {
-                                continue;
-                            }
-
-                            var occB = accessorLocal.GetChunkAddress(chId);
-                            var occ = *(ulong*)occB;
-                            spatialBits[chId] = (long)occ;
+                            BuildLegacyScanChangeList(clusterState, spatialBits, ref accessorLocal);
                         }
 
                         var detectStart = Stopwatch.GetTimestamp();
@@ -1759,7 +1790,7 @@ public partial class DatabaseEngine
 
             cs.FinalizeHeadRan = false;
             cs.FinalizeSliceable = false;
-            if (workerCount < 2 || cs.FenceBranchPath != 2 || cs.FenceDirtyBits == null
+            if (workerCount < 2 || cs.FenceBranchPath != 2 || !cs.FenceChangeListPublished
                 || FenceWorkPlan.CountPopulatedRanges(cs.FenceDirtyBits, FenceWorkPlan.FinalizeSliceWords) < FinalizeSliceMinRanges)
             {
                 continue;
