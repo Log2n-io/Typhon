@@ -73,16 +73,26 @@ volumetry rather than fidelity, and the numbers below say which is which.
 Because the planet does not grow with the population, everything gets denser, and a fixed 192 m interest radius finds
 proportionally more. That is the whole difficulty of this workload:
 
-| `--pop` | Interest queries per tick | Hits per query | Aggro queries per tick | Allocated per tick |
-|---|---|---|---|---|
-| 1 | 1 536 | 15.6 | 1 078 | 77 KB |
-| 4 | 6 144 | 40.6 | 4 166 | 199 KB |
-| 16 | 24 576 | 152.9 | 15 253 | 508 KB |
-| 64 | 98 304 | 599.5 | 51 957 | 1.83 MB |
-| 128 | 196 608 | 1 177.4 | 95 419 | 3.39 MB |
+`Awareness` issues **four interest queries per player** — one per queried archetype (structures, creatures, city NPCs,
+players), because the engine's cluster query is per-archetype and a real interest set is assembled from several object
+types the same way. So the interest column below is exactly four times the player count.
 
-At `--pop 64` that is **59 million entity hits a tick**, 590 million a second. GC stays out of the way throughout: 6
+| `--pop` | Players | Interest queries per tick | Hits per query | Aggro queries per tick | Allocated per tick |
+|---|---|---|---|---|---|
+| 1 | 320 | 1 280 | 15.6 | 898 | 77 KB |
+| 4 | 1 280 | 5 120 | 40.6 | 3 472 | 199 KB |
+| 16 | 5 120 | 20 480 | 152.9 | 12 711 | 508 KB |
+| 64 | 20 480 | 81 920 | 599.5 | 43 298 | 1.83 MB |
+| 128 | 40 960 | 163 840 | 1 177.4 | 79 516 | 3.39 MB |
+
+At `--pop 64` that is **49.1 million entity hits a tick**, 491 million a second. GC stays out of the way throughout: 6
 gen0, 3 gen1 and 1 gen2 collection over a 24 s run, 11.3 ms of pause in total — 0.05 % of the run.
+
+> **Note.** An earlier revision of this table reported every query and hit count 1.2× too high. `DrainStats()` is called
+> once after the run and therefore covers warm *and* measured ticks, while the per-tick figures divide by the measured
+> ticks alone — at the default `--warm 40 --ticks 200` that is a uniform 240/200 inflation. The counts above are the
+> corrected ones; `--warm 0` reproduces them directly. The hits-per-query column is a ratio and was never affected, and
+> neither were any of the timings, which come from the per-tick samples rather than the drained counters.
 
 ## Where the world comes from
 
@@ -290,7 +300,7 @@ These are deliberate, and each one is a thing the workload does *not* currently 
   cooldown has expired issues its own 75 m query for players, where a player-side model would issue one per firing
   player, and any player in range damages every creature in range, up to four shooters each.
 - **`Awareness` counts hits by default.** A real interest system builds each player's list and diffs it against last
-  tick's to send enter/leave. Writing hits out costs about 2.8 ns each, which at `--pop 64`'s 59 million hits a tick
+  tick's to send enter/leave. Writing hits out costs about 2.8 ns each, which at `--pop 64`'s 49.1 million hits a tick
   would dominate everything measured here — so the numbers above are for a caller that counts. `--awareness-api fill`
   writes into a scratch buffer and throws it away; the engine's own `SpatialInterestSystem` produces real deltas and this
   demo does not use it yet.
