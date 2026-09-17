@@ -20,6 +20,12 @@ public static class ProtocolConstants
     /// <summary>Largest <c>HELLO</c> message, in bytes: the first message's own limit, before <c>limits.clientMessageBytes</c> applies.</summary>
     public const int HelloMaxBytes = 16 * 1024;
 
+    /// <summary>
+    /// Largest <c>WELCOME</c> a client reads: the one inbound message it cannot bound with <c>limits.frameBytes</c>, because those
+    /// limits arrive inside it (03 § 10).
+    /// </summary>
+    public const int WelcomeMaxBytes = 1024 * 1024;
+
     /// <summary>Largest <c>HELLO</c> token, in UTF-8 bytes.</summary>
     public const int TokenMaxBytes = 8 * 1024;
 
@@ -95,6 +101,12 @@ public static class CloseCodes
 
     /// <summary>The application's admission hook rejected the connection's credentials.</summary>
     public const ushort AuthenticationRejected = 4003;
+
+    /// <summary>
+    /// The client refused the stream for a fault it cannot report as a WebSocket code — a browser may not send 1002, 1007 or 1009
+    /// (03 § 10). It sends <c>BYE 4004</c> and closes with <see cref="Normal"/>.
+    /// </summary>
+    public const ushort ClientRefusedTheStream = 4004;
 
     /// <summary>The first code of the application range, <c>4100–4999</c>.</summary>
     public const ushort FirstApplicationCode = 4100;

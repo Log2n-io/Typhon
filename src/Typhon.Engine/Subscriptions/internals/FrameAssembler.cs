@@ -1,0 +1,1125 @@
+using System;
+using System.Numerics;
+using System.Runtime.InteropServices;
+using System.Threading;
+using Typhon.Protocol;
+
+namespace Typhon.Engine.Internals;
+
+/// <summary>Which of an <c>ENTITIES</c> block's four sub-lists a record belongs to (03 § 5).</summary>
+internal enum FrameListKind
+{
+    /// <summary>A full enter: the position, the <c>onEnter</c> body and every group, with no mask.</summary>
+    Enter = 0,
+
+    /// <summary>A motion segment.</summary>
+    Segment = 1,
+
+    /// <summary>A state record: a mask and the bodies of the groups it names.</summary>
+    State = 2,
+
+    /// <summary>A leave. Last in its block, and applied last in the frame.</summary>
+    Leave = 3,
+}
+
+/// <summary>
+/// One worker's scratch for a tick of S2b: the four sub-lists per archetype, the sort's ping-pong partner, and the buffer a frame is encoded into.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Per worker, so nothing here is shared and nothing here is synchronized</b> — the same property <see cref="HitArena"/> and <see cref="RecordArena"/>
+/// rest on. A session belongs to exactly one chunk for the whole of its assembly, and the lists are rewound between sessions rather than between ticks.
+/// </para>
+/// <para>
+/// <b>Native, and grown by doubling, so the steady state allocates nothing managed</b> (SUB-07). The one managed array is the radix histogram, which is
+/// reached through a <see cref="Span{T}"/> and never through a pointer.
+/// </para>
+/// </remarks>
+internal sealed unsafe class FrameWorkerScratch : IDisposable
+{
+    private struct RecordList
+    {
+        public FrameRecord* Items;
+        public int Count;
+        public int Capacity;
+    }
+
+    private readonly int[] _histogram = new int[RecordSorter.HistogramSlots];
+    private RecordList[] _lists = [];
+    private RecordList _enterCandidates;
+    private FrameRecord* _sortScratch;
+    private int _sortCapacity;
+    private byte* _bytes;
+    private int _byteCapacity;
+    private bool _disposed;
+
+    /// <summary>Native bytes this scratch holds, for the owner's resource accounting.</summary>
+    public long EstimatedBytes
+    {
+        get
+        {
+            var bytes = (long)_byteCapacity + ((long)_sortCapacity * sizeof(FrameRecord)) + ((long)_enterCandidates.Capacity * sizeof(FrameRecord));
+            for (var i = 0; i < _lists.Length; i++)
+            {
+                bytes += (long)_lists[i].Capacity * sizeof(FrameRecord);
+            }
+
+            return bytes;
+        }
+    }
+
+    /// <summary>Rewinds every list for one session's assembly, growing the list table to <paramref name="archetypes"/> archetypes if it has to.</summary>
+    /// <param name="archetypes">How many replicated archetypes the runtime holds.</param>
+    public void BeginSession(int archetypes)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (_lists.Length < archetypes * 4)
+        {
+            Array.Resize(ref _lists, archetypes * 4);
+        }
+
+        for (var i = 0; i < _lists.Length; i++)
+        {
+            _lists[i].Count = 0;
+        }
+
+        _enterCandidates.Count = 0;
+    }
+
+    /// <summary>How many records one archetype's sub-list holds.</summary>
+    /// <param name="archetype">The archetype's plan index.</param>
+    /// <param name="kind">The sub-list.</param>
+    /// <returns>The count.</returns>
+    public int Count(int archetype, FrameListKind kind) => _lists[(archetype * 4) + (int)kind].Count;
+
+    /// <summary>One archetype's sub-list, as the encoder reads it.</summary>
+    /// <param name="archetype">The archetype's plan index.</param>
+    /// <param name="kind">The sub-list.</param>
+    /// <returns>The records.</returns>
+    public ReadOnlySpan<FrameRecord> List(int archetype, FrameListKind kind)
+    {
+        ref var list = ref _lists[(archetype * 4) + (int)kind];
+        return new ReadOnlySpan<FrameRecord>(list.Items, list.Count);
+    }
+
+    /// <summary>The enter candidates gathered so far, across every archetype — the list the enter budget ranks and cuts.</summary>
+    public Span<FrameRecord> EnterCandidates => new(_enterCandidates.Items, _enterCandidates.Count);
+
+    /// <summary>Appends a record to one archetype's sub-list.</summary>
+    /// <param name="archetype">The archetype's plan index.</param>
+    /// <param name="kind">The sub-list.</param>
+    /// <param name="record">The record.</param>
+    public void Add(int archetype, FrameListKind kind, in FrameRecord record) => Append(ref _lists[(archetype * 4) + (int)kind], in record);
+
+    /// <summary>Appends an enter candidate to the flat staging list the budget selects from.</summary>
+    /// <param name="record">The candidate.</param>
+    public void AddEnterCandidate(in FrameRecord record) => Append(ref _enterCandidates, in record);
+
+    /// <summary>Sorts one archetype's sub-list ascending by netId.</summary>
+    /// <param name="archetype">The archetype's plan index.</param>
+    /// <param name="kind">The sub-list.</param>
+    public void SortByNetId(int archetype, FrameListKind kind)
+    {
+        ref var list = ref _lists[(archetype * 4) + (int)kind];
+        if (list.Count < 2)
+        {
+            return;
+        }
+
+        EnsureSortScratch(list.Count);
+        RecordSorter.SortByNetId(new Span<FrameRecord>(list.Items, list.Count), new Span<FrameRecord>(_sortScratch, list.Count), _histogram);
+    }
+
+    /// <summary>Sorts the enter candidates ascending by the budget's rank, netId breaking ties.</summary>
+    public void SortCandidatesByRank()
+    {
+        if (_enterCandidates.Count < 2)
+        {
+            return;
+        }
+
+        EnsureSortScratch(_enterCandidates.Count);
+        RecordSorter.SortByRank(EnterCandidates, new Span<FrameRecord>(_sortScratch, _enterCandidates.Count), _histogram);
+    }
+
+    /// <summary>The frame buffer, at least <paramref name="byteCount"/> long.</summary>
+    /// <param name="byteCount">The upper bound the frame can occupy.</param>
+    /// <returns>The buffer.</returns>
+    public Span<byte> Bytes(int byteCount)
+    {
+        if (byteCount > _byteCapacity)
+        {
+            var capacity = _byteCapacity == 0 ? 8192 : _byteCapacity;
+            while (capacity < byteCount)
+            {
+                capacity *= 2;
+            }
+
+            _bytes = (byte*)NativeMemory.Realloc(_bytes, (nuint)capacity);
+            _byteCapacity = capacity;
+        }
+
+        return new Span<byte>(_bytes, byteCount);
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        for (var i = 0; i < _lists.Length; i++)
+        {
+            NativeMemory.Free(_lists[i].Items);
+        }
+
+        _lists = [];
+        NativeMemory.Free(_enterCandidates.Items);
+        NativeMemory.Free(_sortScratch);
+        NativeMemory.Free(_bytes);
+        _enterCandidates = default;
+        _sortScratch = null;
+        _bytes = null;
+        _sortCapacity = 0;
+        _byteCapacity = 0;
+    }
+
+    private static void Append(ref RecordList list, in FrameRecord record)
+    {
+        if (list.Count == list.Capacity)
+        {
+            var capacity = list.Capacity == 0 ? 64 : list.Capacity * 2;
+            list.Items = (FrameRecord*)NativeMemory.Realloc(list.Items, (nuint)capacity * (nuint)sizeof(FrameRecord));
+            list.Capacity = capacity;
+        }
+
+        list.Items[list.Count++] = record;
+    }
+
+    private void EnsureSortScratch(int count)
+    {
+        if (count <= _sortCapacity)
+        {
+            return;
+        }
+
+        var capacity = _sortCapacity == 0 ? 64 : _sortCapacity;
+        while (capacity < count)
+        {
+            capacity *= 2;
+        }
+
+        _sortScratch = (FrameRecord*)NativeMemory.Realloc(_sortScratch, (nuint)capacity * (nuint)sizeof(FrameRecord));
+        _sortCapacity = capacity;
+    }
+}
+
+/// <summary>
+/// Everything one session's frames need between ticks: what it knows, where its baseline is, and whether its view has finished filling.
+/// </summary>
+/// <remarks>
+/// A managed object per session <i>slot</i>, kept for the life of the runtime and reset when the slot is handed to a new session, so a connect storm neither
+/// allocates a known-set per connection nor churns the resource graph. The native halves — the table's entries and the hand-off's counters — live where
+/// their own contracts put them.
+/// </remarks>
+internal sealed class SessionFrameState
+{
+    /// <summary>Creates the state of one session slot.</summary>
+    /// <param name="known">The slot's known-set, created once and reused across the sessions that occupy the slot.</param>
+    public SessionFrameState(KnownSet known)
+    {
+        ArgumentNullException.ThrowIfNull(known);
+        Known = known;
+    }
+
+    /// <summary>What this session has been told exists.</summary>
+    public KnownSet Known { get; }
+
+    /// <summary>The generation of the session currently occupying the slot; a change is a new session and resets everything below.</summary>
+    public ushort Generation { get; private set; }
+
+    /// <summary>
+    /// The tick of the last frame <b>produced</b> for this session (02 § 5). A group whose tick beats it is carried by the next frame; nothing else is.
+    /// </summary>
+    public long Baseline { get; set; }
+
+    /// <summary>The profile the session was bound to when its last frame was built. A change is a <c>RESET</c>.</summary>
+    public string Profile { get; set; }
+
+    /// <summary>Whether the next frame must carry <c>RESET</c> and refill the view from nothing.</summary>
+    public bool PendingReset { get; set; }
+
+    /// <summary>Whether the initial fill under the enter budget has completed — the <c>VIEW_COMPLETE</c> flag.</summary>
+    public bool ViewComplete { get; set; }
+
+    /// <summary>Enter candidates the budget deferred on the last frame. Zero is what completes the view.</summary>
+    public int DeferredEnters { get; set; }
+
+    /// <summary>The focus the enter budget ranks by, in quantized position codes; see <see cref="FrameAssembler.SetFocus"/>.</summary>
+    public uint FocusX { get; set; }
+
+    /// <summary>The focus's second axis.</summary>
+    public uint FocusY { get; set; }
+
+    /// <summary>Whether a focus has been declared at all. Without one the budget selects in hit order.</summary>
+    public bool HasFocus { get; set; }
+
+    /// <summary>Frames produced for the session currently in the slot.</summary>
+    public long FramesProduced { get; set; }
+
+    /// <summary>Rebinds the slot to a new session: the known-set is emptied and every per-session number starts again.</summary>
+    /// <param name="generation">The new session's generation.</param>
+    public void RebindTo(ushort generation)
+    {
+        Generation = generation;
+        Known.Clear();
+        Baseline = 0;
+        Profile = null;
+        PendingReset = false;
+        ViewComplete = false;
+        DeferredEnters = 0;
+        HasFocus = false;
+        FramesProduced = 0;
+    }
+}
+
+/// <summary>
+/// S2b — turns one session's hits into a <c>TICK</c> message, and hands it to the send side through the sequence protocol (SUB-04).
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>What it holds per session:</b> a <see cref="KnownSet"/> (what the client has been told exists), a baseline tick (what it has been told about them),
+/// a <see cref="SessionSendState"/> (the hand-off's four counters and two frame slots), and four booleans — the pending reset, the view-complete latch, the
+/// deferred-enter count and the profile the last frame was built against. Nothing else: records are absolute, so there is no per-entity value memory
+/// anywhere (SUB-03).
+/// </para>
+/// <para>
+/// <b>Each frame is built in six steps, and the order is the rule.</b> Gather the hits into sub-lists; select the enters the budget allows; sweep the
+/// known-set for what the hits did not reach; sort; encode; publish. Only then is the known-set mutated and the baseline advanced — <b>after</b> the frame
+/// is published, never before. A frame that cannot be produced (no slot, no block) therefore leaves the session exactly as it was, and its next frame
+/// carries the union: that is SUB-03, and building the commit as a separate step is how it is made true rather than hoped for.
+/// </para>
+/// <para>
+/// <b>Bytes come from the replication block, never from S1's arena.</b> The arena holds the records of the tick that produced them; a session skipped for K
+/// ticks needs everything since its baseline, which only the per-entity state carries. Choosing groups by <c>GroupTicks[g] &gt; baseline</c> against the hot
+/// entry's stored bodies is the same code for K = 1 and for K = 50, so the skipped path is the path, not a rarely-exercised variant of it.
+/// </para>
+/// <para>
+/// <b>Thread safety.</b> <see cref="BeginTick"/> is single-threaded and runs before the dispatch — it is where a session's state is created, rebound and
+/// profile-checked, so no worker ever touches the resource graph. <see cref="ExecuteChunk"/> runs on pool workers over a disjoint slice of the tick's
+/// sessions, each owning its scratch and its sessions' state outright.
+/// </para>
+/// </remarks>
+internal sealed unsafe class FrameAssembler : IDisposable
+{
+    private readonly SubscriptionsOptions _options;
+    private readonly CompiledProjectionPlan[] _plans;
+    private readonly ArchetypeEncodePlan[] _encodePlans;
+    private readonly SessionTable _sessions;
+    private readonly IMemoryAllocator _allocator;
+    private readonly IResource _parent;
+    private readonly SessionFrameState[] _states;
+    private readonly int _maxFrameBytes;
+
+    private PinnedMemoryBlock _sendBlock;
+    private SessionSendState* _sendStates;
+    private FrameWorkerScratch[] _workers = [];
+    private InterestPass _interest;
+    private long _tick;
+    private int _tickSessionCount;
+
+    private long _framesProduced;
+    private long _framesSkipped;
+    private long _bytesEncoded;
+    private long _recordsEncoded;
+    private long _entersDeferred;
+    private long _oversizeSkips;
+    private bool _disposed;
+
+    /// <summary>Builds the assembler and everything a frame is made of: the pool, the per-slot hand-off counters and the per-archetype encoding constants.</summary>
+    /// <param name="id">Resource id prefix for the pool and the per-session tables.</param>
+    /// <param name="parent">Resource-graph parent.</param>
+    /// <param name="allocator">Engine allocator.</param>
+    /// <param name="options">The operator's replication options.</param>
+    /// <param name="plans">One compiled plan per replicated archetype, in declaration order.</param>
+    /// <param name="catalog">The emitted catalog, which is where an archetype's canonical WIRE index comes from.</param>
+    /// <param name="sessions">The session table, read for each session's bound profile.</param>
+    public FrameAssembler(string id, IResource parent, IMemoryAllocator allocator, SubscriptionsOptions options, CompiledProjectionPlan[] plans,
+        Catalog catalog, SessionTable sessions)
+    {
+        ArgumentNullException.ThrowIfNull(id);
+        ArgumentNullException.ThrowIfNull(parent);
+        ArgumentNullException.ThrowIfNull(allocator);
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(plans);
+        ArgumentNullException.ThrowIfNull(sessions);
+
+        _options = options;
+        _plans = plans;
+        _sessions = sessions;
+        _allocator = allocator;
+        _parent = parent;
+        _states = new SessionFrameState[options.MaxSessions];
+        _encodePlans = BuildEncodePlans(plans, catalog);
+
+        // The ceiling a frame is measured against: the operator's, but never above what the pool can serve — a frame larger than the largest size class
+        // would be refused by the pool anyway, and refusing it here is what turns "the pool said no" into a number that names the reason.
+        _maxFrameBytes = Math.Min(options.FrameBytes, FramePool.LargestClassBytes);
+
+        Pool = new FramePool($"{id}.Pool", parent, allocator, options);
+        _sendBlock = allocator.AllocatePinned($"{id}.SendStates", parent, options.MaxSessions * SessionSendState.Bytes, true, 64);
+        _sendStates = (SessionSendState*)_sendBlock.DataAsPointer;
+    }
+
+    /// <summary>The frame pool every published frame's bytes come from.</summary>
+    public FramePool Pool { get; }
+
+    /// <summary>The durability gate a send pump reads before it sends anything (P1-14b writes it).</summary>
+    public FramePublicationGate Gate { get; } = new();
+
+    /// <summary>Frames published since the runtime started.</summary>
+    public long FramesProduced => Volatile.Read(ref _framesProduced);
+
+    /// <summary>Sessions skipped: no free frame slot, no block from the pool, or a frame above the ceiling.</summary>
+    public long FramesSkipped => Volatile.Read(ref _framesSkipped);
+
+    /// <summary>Bytes of frame published.</summary>
+    public long BytesEncoded => Volatile.Read(ref _bytesEncoded);
+
+    /// <summary>Records published, across every kind.</summary>
+    public long RecordsEncoded => Volatile.Read(ref _recordsEncoded);
+
+    /// <summary>Enter candidates the per-frame budget deferred to a later frame.</summary>
+    public long EntersDeferred => Volatile.Read(ref _entersDeferred);
+
+    /// <summary>Frames the ceiling refused, which the pool would have refused too.</summary>
+    public long OversizeSkips => Volatile.Read(ref _oversizeSkips);
+
+    /// <summary>
+    /// <b>Test seam, and a deliberate one.</b> Advances a skipped session's baseline as though its frame had been produced — the exact violation SUB-03
+    /// forbids — so the rule's verifier can be shown to reject it. It mirrors <c>SubscriptionsContext.FaultGateForTest</c>; nothing in production sets it.
+    /// </summary>
+    internal bool BaselineAdvancesOnSkipForTest;
+
+    /// <summary>The per-slot hand-off state, which a send pump claims frames through.</summary>
+    /// <param name="slot">The session table row.</param>
+    /// <returns>The state.</returns>
+    public SessionSendState* SendStateOf(int slot) => (SessionSendState*)((byte*)_sendStates + ((long)slot * SessionSendState.Bytes));
+
+    /// <summary>One session's frame state, or <see langword="null"/> when the slot has never produced a frame.</summary>
+    /// <param name="session">The session.</param>
+    /// <returns>The state.</returns>
+    public SessionFrameState StateOf(SessionId session)
+    {
+        var slot = session.Slot;
+        return (uint)slot < (uint)_states.Length ? _states[slot] : null;
+    }
+
+    /// <summary>The archetype encoding constants, parallel to the runtime's plans.</summary>
+    /// <param name="archetype">The plan index.</param>
+    /// <returns>The encoding constants.</returns>
+    public ArchetypeEncodePlan EncodePlanOf(int archetype) => _encodePlans[archetype];
+
+    /// <summary>
+    /// Declares the point the enter budget ranks a session's deferred entities against — "nearest first" (01 § 4).
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="x">The focus's first axis, as a quantized position code of the archetype's <c>pos</c> codec.</param>
+    /// <param name="y">The focus's second axis. A three-axis archetype is ranked on its first two: a ranking does not need the third, and a session's focus
+    /// is one point for archetypes whose codecs need not agree on a third axis at all.</param>
+    /// <remarks>
+    /// <para>
+    /// The ranking is in QUANTIZED CODE SPACE, not in metres, because that is the only position a replication block holds: the enter cache and the motion
+    /// segment both store <c>p0</c> as the wire's codes, and converting them back per candidate to rank them would be arithmetic with no effect on the
+    /// order. A code distance is monotone in the real one for a single archetype's codec, which is all a ranking needs.
+    /// </para>
+    /// <para>
+    /// <b>Phase 1 declares no focus of its own.</b> A <c>World</c> observer has no origin — its region is the archetype — so this stays unset and the budget
+    /// selects in hit order, which is the honest behaviour for an interest that has no notion of near. Phase 2's sphere and region observers carry a distance
+    /// per hit (<see cref="HitArena"/>'s remarks), and that per-hit distance replaces this per-session approximation.
+    /// </para>
+    /// </remarks>
+    public void SetFocus(SessionId session, uint x, uint y)
+    {
+        var state = StateOf(session);
+        if (state == null)
+        {
+            return;
+        }
+
+        state.FocusX = x;
+        state.FocusY = y;
+        state.HasFocus = true;
+    }
+
+    /// <summary>
+    /// The stage's prologue: binds this tick's interest output, creates or rebinds the state of every session in the partition, and returns the chunk count.
+    /// </summary>
+    /// <param name="interest">S2a's output for this tick.</param>
+    /// <param name="tickNumber">The tick.</param>
+    /// <param name="workerCount">Worker-pool width.</param>
+    /// <returns>Chunks the stage should dispatch.</returns>
+    /// <remarks>
+    /// Single-threaded, before the dispatch. Creating a session's known-set here rather than on a worker is what keeps the resource graph off the parallel
+    /// path — a node registers under its parent, and two workers registering at once would race a structure that has no reason to be concurrent.
+    /// </remarks>
+    public int BeginTick(InterestPass interest, long tickNumber, int workerCount)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        _interest = interest;
+        _tick = tickNumber;
+        _tickSessionCount = interest?.TickSessionCount ?? 0;
+        if (_tickSessionCount == 0)
+        {
+            return 0;
+        }
+
+        var workers = Math.Max(1, workerCount);
+        EnsureWorkers(workers);
+
+        for (var i = 0; i < _tickSessionCount; i++)
+        {
+            PrepareSession(interest.SessionAt(i));
+        }
+
+        return Math.Min(workers, _tickSessionCount);
+    }
+
+    /// <summary>Assembles, encodes and publishes a frame for each session this chunk owns.</summary>
+    /// <param name="chunkIndex">The chunk, which is also the index of the scratch it uses.</param>
+    /// <param name="chunkCount">How many chunks the stage dispatched.</param>
+    public void ExecuteChunk(int chunkIndex, int chunkCount)
+    {
+        if (chunkCount <= 0 || (uint)chunkIndex >= (uint)_workers.Length || _interest == null)
+        {
+            return;
+        }
+
+        var scratch = _workers[chunkIndex];
+        var start = (int)((long)chunkIndex * _tickSessionCount / chunkCount);
+        var end = (int)((long)(chunkIndex + 1) * _tickSessionCount / chunkCount);
+
+        for (var i = start; i < end; i++)
+        {
+            Assemble(i, scratch);
+        }
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+
+        for (var i = 0; i < _workers.Length; i++)
+        {
+            _workers[i]?.Dispose();
+        }
+
+        _workers = [];
+
+        // The counters and the slots go FIRST, and nothing here reads them. Their buffer is a child of the resource parent, which may already have been
+        // torn down by the time this runs; and a block still sitting in a slot needs no return, because the pool is about to free the slabs it was carved
+        // from. Walking the slots to hand them back would be bookkeeping paid for with a read of memory that may no longer exist.
+        _sendStates = null;
+        _sendBlock?.Dispose();
+        _sendBlock = null;
+
+        for (var slot = 0; slot < _states.Length; slot++)
+        {
+            _states[slot]?.Known.Dispose();
+            _states[slot] = null;
+        }
+
+        Pool.Dispose();
+    }
+
+    // ── The prologue ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    private void PrepareSession(SessionId session)
+    {
+        var slot = session.Slot;
+        if ((uint)slot >= (uint)_states.Length)
+        {
+            return;
+        }
+
+        var state = _states[slot];
+        if (state == null)
+        {
+            state = new SessionFrameState(new KnownSet($"Known-{slot}", _parent, _allocator));
+            _states[slot] = state;
+        }
+
+        if (state.Generation != session.Generation)
+        {
+            // A new session in the slot. Its hand-off counters start again too: the table only re-leases a row once every frame it produced has drained,
+            // so nothing is in flight to be orphaned by the reset.
+            state.RebindTo(session.Generation);
+            SessionSendState.Initialize(SendStateOf(slot));
+        }
+
+        var profile = _sessions.ProfileName(session);
+        if (!string.Equals(profile, state.Profile, StringComparison.Ordinal))
+        {
+            // A profile switch: the view the client holds describes an interest that no longer exists, so the next frame tells it to clear the store and
+            // refills from nothing (03 § 5). The first frame of a session takes this path too, but its RESET costs a client with an empty store nothing.
+            state.Profile = profile;
+            state.PendingReset = state.FramesProduced > 0;
+        }
+    }
+
+    // ── One session's frame ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    private void Assemble(int index, FrameWorkerScratch scratch)
+    {
+        var session = _interest.SessionAt(index);
+        var state = StateOf(session);
+        if (state == null || state.Generation != session.Generation)
+        {
+            return;
+        }
+
+        var send = SendStateOf(session.Slot);
+        if (!send->TryBeginFrame(out var sequence, out var recycled))
+        {
+            // K frames are already outstanding: skip, never queue. Nothing here mutates the known-set or the baseline, which is what makes the next frame
+            // this session does receive carry the union of everything it missed (SUB-03).
+            NoteSkip(state);
+            return;
+        }
+
+        scratch.BeginSession(_plans.Length);
+
+        var flags = TickFlags.None;
+        if (state.PendingReset)
+        {
+            state.Known.Clear();
+            state.ViewComplete = false;
+            state.DeferredEnters = 0;
+            flags |= TickFlags.Reset;
+        }
+
+        var stamp = (ushort)_tick;
+        var touched = Gather(index, state, scratch, stamp, out var staleLeaves, out var pending);
+        var deferred = SelectEnters(state, scratch);
+        Sweep(state, scratch, stamp, touched + staleLeaves);
+
+        var records = SortAndCount(scratch);
+
+        // The view is complete when nothing the session's interest reached is still owed to it — neither an enter the budget deferred nor a hit the engine
+        // could not describe yet. The second half is not pedantry: a cluster that gained its replication block this tick is projected from the next one, so a
+        // brand-new session's first tick legitimately has hits and no records, and calling that a complete view would tell the client its world was empty.
+        var owed = deferred + pending;
+        var completed = owed == 0 && !state.ViewComplete;
+        if (records == 0 && (flags & TickFlags.Reset) == 0 && !completed)
+        {
+            // Nothing to say. The frame slot is given back rather than spent on a header, and the keepalive that a silent session still owes its client is
+            // the send pump's business (P1-14b), not the assembler's.
+            send->AbandonFrame(sequence);
+            ReturnIfValid(recycled);
+            NoteSkip(state);
+            return;
+        }
+
+        if (completed)
+        {
+            state.ViewComplete = true;
+        }
+
+        if (state.ViewComplete)
+        {
+            flags |= TickFlags.ViewComplete;
+        }
+
+        var bound = UpperBound(scratch);
+        var buffer = scratch.Bytes(bound);
+        var writer = new WireWriter(buffer);
+        EntitiesEncoder.WriteHeader(ref writer, (uint)_tick, flags);
+        for (var a = 0; a < _plans.Length; a++)
+        {
+            if (scratch.Count(a, FrameListKind.Enter) == 0 && scratch.Count(a, FrameListKind.Segment) == 0 && scratch.Count(a, FrameListKind.State) == 0
+                && scratch.Count(a, FrameListKind.Leave) == 0)
+            {
+                continue;
+            }
+
+            EntitiesEncoder.WriteEntities(ref writer, _encodePlans[a], scratch.List(a, FrameListKind.Enter), scratch.List(a, FrameListKind.Segment),
+                scratch.List(a, FrameListKind.State), scratch.List(a, FrameListKind.Leave));
+        }
+
+        var length = writer.Position;
+        if (length > _maxFrameBytes)
+        {
+            Interlocked.Increment(ref _oversizeSkips);
+            send->AbandonFrame(sequence);
+            ReturnIfValid(recycled);
+            NoteSkip(state);
+            return;
+        }
+
+        var block = recycled;
+        if (!Pool.TryRentOrKeep(length, ref block, out var previous))
+        {
+            // The pool's budget binds. The block handed over by TryBeginFrame is this caller's from that moment, so an abandoned encode owes it back.
+            ReturnIfValid(block);
+            send->AbandonFrame(sequence);
+            NoteSkip(state);
+            return;
+        }
+
+        ReturnIfValid(previous);
+        buffer[..length].CopyTo(new Span<byte>(block.Bytes, block.Capacity));
+
+        // PUBLISH — every byte of the frame is written above this line, and the release inside PublishFrame is what makes them visible (SUB-04).
+        send->PublishFrame(sequence, block, length, _tick);
+
+        // COMMIT, and only now. The known-set and the baseline move because a frame that carries them exists; had anything above failed, the session would
+        // have been left exactly as it was and its next frame would carry the same union (SUB-03).
+        Commit(state, scratch, stamp);
+        state.Baseline = _tick;
+
+        // Cleared HERE and not where the flag was read, so a reset that could not be published is still owed. The known-set was emptied above either way,
+        // which is the right pairing: a client that never received the RESET still holds a store this session can no longer describe, and the next frame it
+        // does receive has to tell it to clear.
+        state.PendingReset = false;
+        state.DeferredEnters = owed;
+        state.FramesProduced++;
+
+        Interlocked.Increment(ref _framesProduced);
+        Interlocked.Add(ref _bytesEncoded, length);
+        Interlocked.Add(ref _recordsEncoded, records);
+        if (deferred > 0)
+        {
+            Interlocked.Add(ref _entersDeferred, deferred);
+        }
+    }
+
+    /// <summary>
+    /// Walks the session's hits: a known entity contributes the groups that changed after its baseline, an unknown one an enter candidate, and one whose
+    /// generation moved on a leave.
+    /// </summary>
+    /// <returns>How many known-and-current entries the hits reached, which is what lets the leave sweep be skipped when nothing left.</returns>
+    private int Gather(int index, SessionFrameState state, FrameWorkerScratch scratch, ushort stamp, out int staleLeaves, out int pending)
+    {
+        var known = state.Known;
+        var baseline = (uint)state.Baseline;
+        var runs = _interest.HitsOf(index);
+        var touched = 0;
+        staleLeaves = 0;
+        pending = 0;
+
+        for (var r = 0; r < runs.Length; r++)
+        {
+            ref readonly var run = ref runs[r];
+            if (run.Block == 0 || (run.Flags & InterestRunFlags.NoBlock) != 0)
+            {
+                // The cluster had no replication block when its hits were recorded; the blocks step created one and the next tick's interest marks it. There
+                // is nothing to read here, and inventing an enter from the columns would be the per-session re-encode this design exists to avoid. The hits
+                // are counted as owed, so the frame does not claim a complete view over entities it has not described.
+                pending += run.HitCount;
+                continue;
+            }
+
+            var archetype = run.ArchetypeIndex;
+            if (archetype >= _plans.Length)
+            {
+                continue;
+            }
+
+            var plan = _encodePlans[archetype];
+            var slots = run.Slots;
+            while (slots != 0)
+            {
+                var slot = BitOperations.TrailingZeroCount(slots);
+                slots &= slots - 1;
+
+                var hot = (ReplicationHotEntry*)plan.Hot(run.Block, slot);
+                var netId = hot->NetId;
+                if (netId == NetIdAllocator.NoNetId)
+                {
+                    // S1 could not name the entity this tick — its worker's identity lease ran dry, or the block was rented after the mask was read. It is
+                    // still watched, so the next tick names it and this session sees it enter then; until then it is owed.
+                    pending++;
+                    continue;
+                }
+
+                var probe = known.Probe(netId, hot->Generation, out var entry);
+                if (probe == KnownProbe.Unknown)
+                {
+                    scratch.AddEnterCandidate(new FrameRecord
+                    {
+                        NetId = netId,
+                        Rank = Rank(state, plan, run.Block, slot),
+                        Block = run.Block,
+                        Slot = (ushort)slot,
+                        Archetype = (ushort)archetype,
+                    });
+                    continue;
+                }
+
+                if (probe == KnownProbe.Stale)
+                {
+                    // The identity was reissued while this session was not being sent (02 § 5). The leave goes out now and the reuse enters in the session's
+                    // NEXT frame, so no frame ever carries both for one netId (03 § 10).
+                    scratch.Add(archetype, FrameListKind.Leave, new FrameRecord { NetId = netId, Archetype = (ushort)archetype });
+                    staleLeaves++;
+                    continue;
+                }
+
+                entry->SeenStamp = stamp;
+                touched++;
+
+                if (plan.Moving && hot->GroupTicks[plan.MotionTickSlot] > baseline)
+                {
+                    scratch.Add(archetype, FrameListKind.Segment, new FrameRecord
+                    {
+                        NetId = netId,
+                        Block = run.Block,
+                        Slot = (ushort)slot,
+                        Archetype = (ushort)archetype,
+                    });
+                }
+
+                var mask = 0;
+                var full = (entry->Flags & KnownFlags.NeedsFull) != 0;
+                for (var g = 0; g < plan.GroupCount; g++)
+                {
+                    if (full || hot->GroupTicks[plan.GroupTickSlot[g]] > baseline)
+                    {
+                        mask |= 1 << g;
+                    }
+                }
+
+                if (mask != 0)
+                {
+                    scratch.Add(archetype, FrameListKind.State, new FrameRecord
+                    {
+                        NetId = netId,
+                        Block = run.Block,
+                        Slot = (ushort)slot,
+                        GroupMask = (byte)mask,
+                        Archetype = (ushort)archetype,
+                    });
+                }
+            }
+        }
+
+        return touched;
+    }
+
+    /// <summary>
+    /// Applies the per-frame enter budget: the candidates it allows are moved into their archetypes' enter lists, and the rest wait for a later frame.
+    /// </summary>
+    /// <returns>How many candidates were deferred.</returns>
+    private int SelectEnters(SessionFrameState state, FrameWorkerScratch scratch)
+    {
+        var candidates = scratch.EnterCandidates;
+        var budget = Math.Max(1, _options.EnterBudgetPerFrame);
+        var take = candidates.Length;
+        if (take > budget)
+        {
+            // Only when the budget actually binds. Ranking a list that fits costs a pass for an order nothing would use, and the fill of a small view is
+            // exactly the case where the budget never binds.
+            scratch.SortCandidatesByRank();
+            candidates = scratch.EnterCandidates;
+            take = budget;
+        }
+
+        for (var i = 0; i < take; i++)
+        {
+            scratch.Add(candidates[i].Archetype, FrameListKind.Enter, in candidates[i]);
+        }
+
+        return candidates.Length - take;
+    }
+
+    /// <summary>Finds the entities this session knows that its hits did not reach: its leaves.</summary>
+    private static void Sweep(SessionFrameState state, FrameWorkerScratch scratch, ushort stamp, int accountedFor)
+    {
+        var known = state.Known;
+        if (accountedFor >= known.KnownCount)
+        {
+            // Every entry the table holds was reached by a hit or is already leaving, so nothing can be missing. The steady state takes this branch, which
+            // is what keeps a 10 000-entity view from walking its whole table every tick to discover that nobody left.
+            return;
+        }
+
+        var enumerator = known.GetEnumerator();
+        while (enumerator.MoveNext())
+        {
+            var entry = enumerator.Current;
+            if (entry->SeenStamp == stamp)
+            {
+                continue;
+            }
+
+            scratch.Add(entry->Archetype, FrameListKind.Leave, new FrameRecord { NetId = entry->NetId, Archetype = entry->Archetype });
+        }
+    }
+
+    private int SortAndCount(FrameWorkerScratch scratch)
+    {
+        var records = 0;
+        for (var a = 0; a < _plans.Length; a++)
+        {
+            for (var k = 0; k < 4; k++)
+            {
+                var kind = (FrameListKind)k;
+                var count = scratch.Count(a, kind);
+                if (count == 0)
+                {
+                    continue;
+                }
+
+                scratch.SortByNetId(a, kind);
+                records += count;
+            }
+        }
+
+        return records;
+    }
+
+    /// <summary>
+    /// Applies to the known-set what the published frame told the client: the enters it carried are now known, and the leaves it carried are forgotten.
+    /// </summary>
+    private void Commit(SessionFrameState state, FrameWorkerScratch scratch, ushort stamp)
+    {
+        var known = state.Known;
+        for (var a = 0; a < _plans.Length; a++)
+        {
+            var plan = _encodePlans[a];
+            var enters = scratch.List(a, FrameListKind.Enter);
+            for (var i = 0; i < enters.Length; i++)
+            {
+                ref readonly var record = ref enters[i];
+                var hot = (ReplicationHotEntry*)plan.Hot(record.Block, record.Slot);
+
+                // One source in Phase 1 — a World observer — so the bit is 1. The mask exists because an entity reached through several sources is known
+                // once and leaves when the last of them stops reaching it (02 § 5); Phase 2's observers are what set the other seven.
+                if (known.AddSource(record.NetId, hot->Generation, 1, stamp, out var entry) != KnownAdd.Stale)
+                {
+                    entry->Archetype = (ushort)a;
+                    entry->Flags &= ~KnownFlags.NeedsFull;
+                }
+            }
+
+            // A state record that carried every group is what SUB-11's "resend everything" asks for, so the flag that asked for it is cleared by the frame
+            // that answered it — not by the gather, which runs before anything is known to have been sent.
+            var states = scratch.List(a, FrameListKind.State);
+            for (var i = 0; i < states.Length; i++)
+            {
+                if (known.Probe(states[i].NetId, 0, out var entry) != KnownProbe.Unknown)
+                {
+                    entry->Flags &= ~KnownFlags.NeedsFull;
+                }
+            }
+
+            var leaves = scratch.List(a, FrameListKind.Leave);
+            for (var i = 0; i < leaves.Length; i++)
+            {
+                known.Remove(leaves[i].NetId);
+            }
+        }
+    }
+
+    private int UpperBound(FrameWorkerScratch scratch)
+    {
+        var bound = EntitiesEncoder.MaxHeaderBytes;
+        for (var a = 0; a < _plans.Length; a++)
+        {
+            var enters = scratch.Count(a, FrameListKind.Enter);
+            var segments = scratch.Count(a, FrameListKind.Segment);
+            var states = scratch.Count(a, FrameListKind.State);
+            var leaves = scratch.Count(a, FrameListKind.Leave);
+            if (enters == 0 && segments == 0 && states == 0 && leaves == 0)
+            {
+                continue;
+            }
+
+            var plan = _encodePlans[a];
+            bound += EntitiesEncoder.MaxBlockOverheadBytes
+                + (enters * plan.MaxEnterBytes)
+                + (segments * plan.MaxSegmentBytes)
+                + (states * plan.MaxStateBytes)
+                + (leaves * EntitiesEncoder.MaxGapBytes);
+        }
+
+        return bound;
+    }
+
+    /// <summary>The enter budget's ranking key: the code-space distance from the session's focus, saturating, or zero when it declared none.</summary>
+    private static uint Rank(SessionFrameState state, ArchetypeEncodePlan plan, nint block, int slot)
+    {
+        if (!state.HasFocus || !plan.HasPosition || plan.PositionAxisBytes == 0)
+        {
+            return 0;
+        }
+
+        // The quantized p0 an enter record would carry, read from wherever this archetype keeps it: the hot entry's segment for a mover, the cold entry's
+        // enter cache for a static position. Ranking reads the same bytes the wire will, so a candidate cannot be ranked against a position it is not sent.
+        var source = plan.Moving
+            ? plan.Hot(block, slot) + plan.Layout.SegmentOffsetInHotEntry
+            : plan.Cold(block, slot) + plan.Layout.EnterPositionOffsetInColdEntry;
+
+        var bytes = plan.PositionAxisBytes;
+        var x = ReadCode(source, bytes);
+        var y = ReadCode(source + bytes, bytes);
+        var dx = (double)x - state.FocusX;
+        var dy = (double)y - state.FocusY;
+        var distance = Math.Sqrt((dx * dx) + (dy * dy));
+        return distance >= uint.MaxValue ? uint.MaxValue : (uint)distance;
+    }
+
+    private static uint ReadCode(byte* at, int bytes)
+    {
+        var code = 0u;
+        for (var i = 0; i < bytes; i++)
+        {
+            code |= (uint)at[i] << (8 * i);
+        }
+
+        return code;
+    }
+
+    private void NoteSkip(SessionFrameState state)
+    {
+        if (BaselineAdvancesOnSkipForTest)
+        {
+            // The mutant: a baseline that moves on a tick whose frame was never produced. Every group stamped at or before it is then invisible to every
+            // later frame, and the session diverges permanently — which is exactly what SUB-03's verifier has to catch.
+            state.Baseline = _tick;
+        }
+
+        Interlocked.Increment(ref _framesSkipped);
+    }
+
+    private void ReturnIfValid(in FrameBlock block)
+    {
+        if (block.IsValid)
+        {
+            Pool.Return(block);
+        }
+    }
+
+    private void EnsureWorkers(int workers)
+    {
+        if (_workers.Length >= workers)
+        {
+            return;
+        }
+
+        var grown = new FrameWorkerScratch[workers];
+        Array.Copy(_workers, grown, _workers.Length);
+        for (var i = _workers.Length; i < workers; i++)
+        {
+            grown[i] = new FrameWorkerScratch();
+        }
+
+        _workers = grown;
+    }
+
+    // ── Encoding constants ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    private static ArchetypeEncodePlan[] BuildEncodePlans(CompiledProjectionPlan[] plans, Catalog catalog)
+    {
+        var encodePlans = new ArchetypeEncodePlan[plans.Length];
+        for (var i = 0; i < plans.Length; i++)
+        {
+            var plan = plans[i];
+            var layout = plan.BlockLayout;
+            var moving = plan.Position is { Moving: true };
+            var axisBytes = plan.Position != null ? plan.Position.Pos.Bits / 8 : 0;
+
+            var groups = new ArchetypeEncodePlan.SectionWalk[plan.Groups.Length];
+            var tickSlots = new int[plan.Groups.Length];
+            var at = 0;
+            for (var g = 0; g < plan.Groups.Length; g++)
+            {
+                groups[g] = Walk(plan.Fields, plan.Groups[g].Section, at);
+                tickSlots[g] = plan.Groups[g].TickSlot;
+                at += plan.Groups[g].Section.MaxBodyBytes;
+            }
+
+            var enterPosBytes = moving ? layout.SegmentBytes : layout.EnterPositionBytes;
+            encodePlans[i] = new ArchetypeEncodePlan
+            {
+                WireIndex = WireIndexOf(catalog, plan.Name, i),
+                Layout = layout,
+                HasPosition = plan.Position != null,
+                Moving = moving,
+                PositionAxisBytes = axisBytes,
+                GroupCount = plan.Groups.Length,
+                GroupTickSlot = tickSlots,
+                MotionTickSlot = moving ? 0 : -1,
+                OnEnter = Walk(plan.Fields, plan.OnEnter, 0),
+                Groups = groups,
+                MaxEnterBytes = EntitiesEncoder.MaxGapBytes + enterPosBytes + layout.EnterBodyBytes + plan.MaxStateBodyBytes,
+                MaxSegmentBytes = EntitiesEncoder.MaxGapBytes + layout.SegmentBytes,
+                MaxStateBytes = EntitiesEncoder.MaxGapBytes + 1 + plan.MaxStateBodyBytes,
+            };
+        }
+
+        return encodePlans;
+    }
+
+    /// <summary>
+    /// The canonical wire index of an archetype, which is the catalog's and not the plan's own position.
+    /// </summary>
+    /// <remarks>
+    /// A plan's index is declaration order; the catalog canonicalizes by name, so the two agree only by accident. Falling back to the plan index when no
+    /// catalog is supplied is what lets a fixture drive the encoder without building one, and a production runtime always has one.
+    /// </remarks>
+    private static int WireIndexOf(Catalog catalog, string name, int fallback)
+    {
+        var archetypes = catalog?.Archetypes;
+        if (archetypes == null)
+        {
+            return fallback;
+        }
+
+        for (var i = 0; i < archetypes.Length; i++)
+        {
+            if (string.Equals(archetypes[i].Name, name, StringComparison.Ordinal))
+            {
+                return i;
+            }
+        }
+
+        return fallback;
+    }
+
+    private static ArchetypeEncodePlan.SectionWalk Walk(CompiledField[] fields, in CompiledSection section, int offset)
+    {
+        var aligned = section.FieldCount - section.PackedCount;
+        var widths = new int[aligned];
+        var fixedBytes = section.PackBytes;
+        var variable = false;
+        for (var i = 0; i < aligned; i++)
+        {
+            ref readonly var field = ref fields[section.FirstField + section.PackedCount + i];
+            var width = field.CodecKind is CodecKind.Varu or CodecKind.Vari or CodecKind.EntityRef ? 0 : field.MaxBodyBytes;
+            widths[i] = width;
+            variable |= width == 0;
+            fixedBytes += width;
+        }
+
+        return new ArchetypeEncodePlan.SectionWalk
+        {
+            FixedBytes = variable ? -1 : fixedBytes,
+            PackBytes = section.PackBytes,
+            FieldBytes = widths,
+            Offset = offset,
+            MaxBytes = section.MaxBodyBytes,
+        };
+    }
+}

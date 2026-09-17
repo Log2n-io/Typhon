@@ -17,8 +17,9 @@ namespace Typhon.Client;
 /// decode allocates, and only when such a field changes.
 /// </para>
 /// <para>
-/// <b>Motion</b> keeps the latest segment per slot (position, velocity per tick, start tick, epoch). A renderer that interpolates keeps its own history; a
-/// bot or an oracle needs only the latest.
+/// <b>Motion</b> is a ring of the last <see cref="SegmentHistory"/> segments per slot — position, velocity per tick, start tick, epoch — in one contiguous
+/// record (see <see cref="SegmentRing"/>). The ring is what lets render time, which trails the newest frame by the render delay, still find the segment in
+/// force when several have arrived since; <see cref="MotionEvaluator"/> reads it.
 /// </para>
 /// </remarks>
 public sealed class ArchetypeStore
@@ -31,10 +32,13 @@ public sealed class ArchetypeStore
     private int[] _pendingFree;
     private int _pendingFreeCount;
 
-    internal ArchetypeStore(ArchetypePlan plan)
+    internal ArchetypeStore(ArchetypePlan plan, int segmentHistory)
     {
         Plan = plan;
         Dims = plan.Position?.Dims ?? 0;
+        Moving = plan.Position?.Moving ?? false;
+        Linear = plan.Position?.Linear ?? false;
+        Segments = new SegmentRing(Dims, segmentHistory);
         Numbers = new double[plan.Fields.Length][];
         Texts = new string[plan.Fields.Length][];
         BytesColumns = new byte[plan.Fields.Length][][];
@@ -46,6 +50,21 @@ public sealed class ArchetypeStore
 
     /// <summary>Position dimensions: 0 when the archetype is not spatial, else 2 or 3.</summary>
     public int Dims { get; }
+
+    /// <summary>Whether segments are replicated (<c>motion</c>) rather than one position sent on enter (<c>static</c>).</summary>
+    public bool Moving { get; }
+
+    /// <summary>Whether segments carry a velocity and are extrapolated; otherwise they are samples, interpolated between.</summary>
+    public bool Linear { get; }
+
+    /// <summary>The motion segments: per slot, a ring of the last <see cref="SegmentHistory"/>.</summary>
+    public SegmentRing Segments { get; }
+
+    /// <summary>Segments kept per slot; see <see cref="SegmentRing.DepthFor"/>.</summary>
+    public int SegmentHistory => Segments.Depth;
+
+    /// <summary>Doubles per slot an evaluation writes: <c>p[Dims] v[Dims]</c>.</summary>
+    public int MotionStride => Segments.Stride;
 
     /// <summary>Slots allocated.</summary>
     public int Capacity { get; private set; }
@@ -67,18 +86,6 @@ public sealed class ArchetypeStore
 
     /// <summary>Per field ordinal: the bytes per slot, or <see langword="null"/> for a non-bytes field.</summary>
     public byte[][][] BytesColumns { get; }
-
-    /// <summary>The latest segment's start position, <c>capacity × Dims</c>.</summary>
-    public double[] Position { get; private set; } = [];
-
-    /// <summary>The latest segment's velocity per tick, <c>capacity × Dims</c>; zero for a static or none-model archetype.</summary>
-    public double[] Velocity { get; private set; } = [];
-
-    /// <summary>The latest segment's absolute start tick per slot.</summary>
-    public uint[] T0 { get; private set; } = [];
-
-    /// <summary>The latest segment's epoch per slot.</summary>
-    public byte[] Epoch { get; private set; } = [];
 
     /// <summary>Slots that entered this frame, in <c>[0, EnteredCount)</c>.</summary>
     public int[] Entered { get; private set; } = [];
@@ -108,6 +115,31 @@ public sealed class ArchetypeStore
     /// <param name="slot">The slot.</param>
     /// <returns><see langword="true"/> when occupied.</returns>
     public bool IsLive(int slot) => (uint)slot < (uint)Capacity && _liveIndex[slot] >= 0;
+
+    /// <summary>The newest segment's ring entry of a slot.</summary>
+    /// <param name="slot">The slot.</param>
+    /// <returns>The entry index.</returns>
+    public int HeadEntry(int slot) => Segments.Head(slot);
+
+    /// <summary>The newest segment's start position.</summary>
+    /// <param name="slot">The slot.</param>
+    /// <returns><see cref="Dims"/> doubles.</returns>
+    public ReadOnlySpan<double> HeadPosition(int slot) => Segments.Position(slot, Segments.Head(slot));
+
+    /// <summary>The newest segment's velocity per tick; zero for a static or <c>none</c>-model archetype.</summary>
+    /// <param name="slot">The slot.</param>
+    /// <returns><see cref="Dims"/> doubles.</returns>
+    public ReadOnlySpan<double> HeadVelocity(int slot) => Segments.Velocity(slot, Segments.Head(slot));
+
+    /// <summary>The newest segment's absolute start tick.</summary>
+    /// <param name="slot">The slot.</param>
+    /// <returns>The tick.</returns>
+    public uint HeadT0(int slot) => Segments.T0(slot, Segments.Head(slot));
+
+    /// <summary>The newest segment's motion epoch.</summary>
+    /// <param name="slot">The slot.</param>
+    /// <returns>The epoch.</returns>
+    public byte HeadEpoch(int slot) => Segments.Epoch(slot, Segments.Head(slot));
 
     internal void BeginFrame()
     {
@@ -159,10 +191,7 @@ public sealed class ArchetypeStore
 
         if (Dims > 0)
         {
-            Array.Clear(Position, slot * Dims, Dims);
-            Array.Clear(Velocity, slot * Dims, Dims);
-            T0[slot] = 0;
-            Epoch[slot] = 0;
+            Segments.Clear(slot);
         }
 
         Entered[EnteredCount++] = slot;
@@ -199,22 +228,13 @@ public sealed class ArchetypeStore
         Moved[slot] |= moved;
     }
 
-    internal void WriteSegment(int slot, ReadOnlySpan<double> position, ReadOnlySpan<double> velocity, uint t0, byte epoch)
-    {
-        position.CopyTo(Position.AsSpan(slot * Dims, Dims));
-        var v = Velocity.AsSpan(slot * Dims, Dims);
-        if (velocity.IsEmpty)
-        {
-            v.Clear();
-        }
-        else
-        {
-            velocity.CopyTo(v);
-        }
+    /// <summary>Makes a segment the slot's only one: the position an entity enters with.</summary>
+    internal void ResetMotion(int slot, ReadOnlySpan<double> position, ReadOnlySpan<double> velocity, uint t0, byte epoch) =>
+        Segments.Reset(slot, position, velocity, t0, epoch);
 
-        T0[slot] = t0;
-        Epoch[slot] = epoch;
-    }
+    /// <summary>Appends a segment to the slot's ring, keeping the older ones render time may still need.</summary>
+    internal void PushSegment(int slot, ReadOnlySpan<double> position, ReadOnlySpan<double> velocity, uint t0, byte epoch) =>
+        Segments.Push(slot, position, velocity, t0, epoch);
 
     internal void Clear()
     {
@@ -262,14 +282,7 @@ public sealed class ArchetypeStore
             }
         }
 
-        if (Dims > 0)
-        {
-            Position = Resize(Position, capacity * Dims);
-            Velocity = Resize(Velocity, capacity * Dims);
-            T0 = Resize(T0, capacity);
-            Epoch = Resize(Epoch, capacity);
-        }
-
+        Segments.Resize(capacity);
         Entered = Resize(Entered, capacity);
         Updated = Resize(Updated, capacity);
         UpdateMask = Resize(UpdateMask, capacity);

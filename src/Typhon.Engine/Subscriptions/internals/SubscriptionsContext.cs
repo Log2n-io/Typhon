@@ -24,6 +24,7 @@ namespace Typhon.Engine.Internals;
 internal sealed class SubscriptionsContext
 {
     private DagScheduler _scheduler;
+    private SubscriptionsRuntime _subscriptions;
 
     // Padded, and not merely out of habit: this is incremented per chunk per worker, while the ordering-journal fields below are read by the driver. Left as a
     // bare int it shares their cache line, so every worker's increment bounces a line the driver is reading — the one shape the ≥64 B rule exists to stop.
@@ -56,6 +57,24 @@ internal sealed class SubscriptionsContext
     {
         ArgumentNullException.ThrowIfNull(scheduler);
         _scheduler = scheduler;
+    }
+
+    /// <summary>
+    /// Everything replication owns for the life of the runtime: the compiled plan, the catalog, the session table and the pools.
+    /// <see langword="null"/> until <c>Start</c> has built it.
+    /// </summary>
+    /// <remarks>
+    /// <b>The one field this file gains, and the reason it gains only one</b> (09-phase1-build-plan § 4). This context is tick-scoped and shared by every
+    /// stage of the track; everything a stage needs to reach at tick time hangs off <see cref="SubscriptionsRuntime"/>, which every later slice extends
+    /// instead of extending this class. Read through a volatile load because it is published from the thread that calls <c>Start</c> and read by workers.
+    /// </remarks>
+    public SubscriptionsRuntime Subscriptions => Volatile.Read(ref _subscriptions);
+
+    /// <summary>Publishes the replication state to the stages. Called once, from <see cref="TyphonRuntime.Start"/>, before the workers exist.</summary>
+    internal void AttachSubscriptions(SubscriptionsRuntime subscriptions)
+    {
+        ArgumentNullException.ThrowIfNull(subscriptions);
+        Volatile.Write(ref _subscriptions, subscriptions);
     }
 
     /// <summary>

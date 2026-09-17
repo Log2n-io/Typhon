@@ -10,6 +10,11 @@ export const ProtocolConstants = {
   webSocketSubprotocol: 'typhon.2',
   /** Largest `HELLO` message, in bytes: the first message's own limit, before `limits.clientMessageBytes` applies. */
   helloMaxBytes: 16 * 1024,
+  /**
+   * Largest `WELCOME` a client reads: the one inbound message it cannot bound with `limits.frameBytes`, since those
+   * limits arrive inside it (§ 10).
+   */
+  welcomeMaxBytes: 1024 * 1024,
   tokenMaxBytes: 8 * 1024,
   sessionKindMaxBytes: 32,
   helloPayloadMaxBytes: 256,
@@ -108,6 +113,12 @@ export const CloseCode = {
   NoAcknowledgement: 4001,
   HelloTimeout: 4002,
   AuthenticationRejected: 4003,
+  /**
+   * The client refused the stream for a fault it cannot report as a WebSocket code — a browser may not send 1002, 1007
+   * or 1009 (§ 10). It sends `BYE 4004`, closes with {@link CloseCode.Normal} and reports the real code to the
+   * application. A server never sends it.
+   */
+  ClientRefusedTheStream: 4004,
   FirstApplicationCode: 4100,
   LastApplicationCode: 4999,
 } as const;

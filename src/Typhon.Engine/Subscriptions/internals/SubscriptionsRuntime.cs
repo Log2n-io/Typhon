@@ -1,0 +1,479 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading;
+using Typhon.Protocol;
+
+namespace Typhon.Engine.Internals;
+
+/// <summary>
+/// Everything engine-owned replication holds for the life of a runtime: the compiled plan, the catalog a client negotiates against, the session table, the
+/// pools and the per-archetype replication state. Built once at <see cref="TyphonRuntime.Start"/>, torn down once at <see cref="TyphonRuntime.Dispose"/>.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>This is where a later slice adds its field, not <see cref="SubscriptionsContext"/></b> (09-phase1-build-plan § 4). The context is tick-scoped and shared
+/// by every stage; it holds this object through one field and nothing else. Without that boundary, eight independently-built slices would each add a member to
+/// one file and every merge would conflict over it.
+/// </para>
+/// <para>
+/// <b>It is also where the replication state is first constructed in production.</b> <see cref="ArchetypeReplicationState"/>,
+/// <see cref="ReplicationBlockPool"/> and <see cref="ReplicationDirectory"/> were complete, tested primitives that nothing outside a test ever built, so
+/// <see cref="ArchetypeClusterState.ReplicationState"/> was null everywhere and the ECS drain hook could not run. Attaching one state per replicated archetype
+/// here is what makes that hook reachable.
+/// </para>
+/// <para>
+/// <b>Nothing is built when nothing is declared.</b> A runtime whose application never touched <see cref="TyphonRuntime.Subscriptions"/> gets an inactive
+/// instance: no plan, no catalog, no session table — which is a 544 KiB allocation at the default <see cref="SubscriptionsOptions.MaxSessions"/> — and no
+/// block pool. An unused subsystem costs a database exactly nothing.
+/// </para>
+/// <para>
+/// <b>Thread safety.</b> Built on the thread that calls <c>Start</c>, before the scheduler's workers exist, and disposed after they have been joined. Between
+/// those two points every member here is read-only; the mutable state lives inside the objects it owns, each with its own contract.
+/// </para>
+/// <para>
+/// <b>It is also the connection layer's <see cref="ISubscriptionsHost"/>, and the only one in production.</b> The interface is implemented EXPLICITLY,
+/// member by member, because two of its names mean something else here: the host's <c>Sessions</c> is the application's
+/// <see cref="SubscriptionsSessions"/> — declared kinds and the admission hook — while this object's <see cref="Sessions"/> is the native
+/// <see cref="SessionTable"/>. Implicit implementation would have forced one of the two to be renamed for the other's benefit. Everything a connection reads is
+/// either immutable after <c>Start</c> (the catalog, its hash, the metric flag) or a published counter (the three tick values); none of it is a session row,
+/// which is what <c>SUB-05</c> reserves for the tick.
+/// </para>
+/// </remarks>
+internal sealed class SubscriptionsRuntime : ISubscriptionsHost, IDisposable
+{
+    /// <summary>Microseconds per <see cref="Stopwatch"/> tick, resolved once: the conversion on the <c>PONG</c> path, which a transport thread runs.</summary>
+    private static readonly double MicrosecondsPerStopwatchTick = 1_000_000.0 / Stopwatch.Frequency;
+
+    private ArchetypeReplicationState[] _replicationStates = [];
+    private SessionTable _sessions;
+    private IngressRingPool _ingressRings;
+    private SubscriptionsIngress _ingress;
+    private FrameAssembler _frames;
+    private bool _disposed;
+
+    // ── the tick state a transport thread reads ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // Written once per tick by the tick driver (TyphonRuntime.OnTickStartInternal) and read by whichever thread happens to be answering a HELLO or a PING.
+    // Three volatile writes and no allocation, which is the whole cost of making WELCOME and PONG tell the truth about where the server is. SUB-05 allows
+    // exactly this: numbers published atomically by the tick, read by a transport thread, never a session row and never a managed reference.
+    //
+    // The origin is a Stopwatch timestamp rather than a microsecond count, because "how far into the tick" has to ADVANCE between ticks — a published count
+    // would read the same value for the whole tick and place every round trip at the tick boundary.
+    private long _tickOriginTimestamp;
+    private uint _currentTick;
+    private uint _tickPeriodUs;
+
+    // COMMANDS messages that arrived well-formed and in state with nowhere to go. P1-05 turns this into a write into the session's ingress ring.
+    private long _commandMessagesDropped;
+
+    /// <summary>
+    /// Compiles the declarations, builds the catalog and attaches the per-archetype replication state — or does nothing at all when nothing was declared.
+    /// </summary>
+    /// <param name="engine">The engine whose archetypes, layouts and spatial grid the declarations resolve against.</param>
+    /// <param name="registry">The frozen registry.</param>
+    /// <param name="options">The runtime's options: the tick rate the codecs are sized against, and the replication options.</param>
+    /// <param name="parent">Resource-graph parent for the pools and the session table — the scheduler, as the identity allocator's already is.</param>
+    /// <param name="netIds">The database's identity allocator, shared by every replicated archetype and owned by the runtime, not by this object.</param>
+    /// <param name="systemNames">The scheduled systems' names, in schedule order: the labels of the built-in per-system metric.</param>
+    /// <exception cref="InvalidOperationException">A declaration cannot be compiled, or names something the engine does not hold.</exception>
+    /// <exception cref="CatalogException">The declarations produce a catalog that breaks a wire rule.</exception>
+    public SubscriptionsRuntime(DatabaseEngine engine, SubscriptionsRegistry registry, RuntimeOptions options, IResource parent, NetIdAllocator netIds,
+        IReadOnlyList<string> systemNames)
+    {
+        ArgumentNullException.ThrowIfNull(engine);
+        ArgumentNullException.ThrowIfNull(registry);
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(parent);
+        ArgumentNullException.ThrowIfNull(netIds);
+
+        Registry = registry;
+        Options = registry.Options;
+        NetIds = netIds;
+
+        if (!HasDeclarations(registry))
+        {
+            Plans = [];
+            return;
+        }
+
+        // ORDER IS THE POINT, and it is the reverse of Dispose's. Each step consumes the one above it: the plan resolves the declarations against the engine's
+        // layouts, the catalog is emitted from the plan, and the replication state is carved to the block layout the plan computed. Anything that throws part
+        // way leaves a half-built object behind, so the whole of it unwinds through Dispose rather than through a partially-initialised field.
+        try
+        {
+            NominalTickPeriodSeconds = 1.0 / Math.Max(1, options.BaseTickRate);
+            NominalTickPeriodUs = (uint)Math.Round(1_000_000.0 / Math.Max(1, options.BaseTickRate), MidpointRounding.AwayFromZero);
+
+            // From the detector rather than from BaseTickRate / MinTickRateHz: that ratio only FILTERS the fixed ladder, so the real ceiling is the ladder's
+            // last surviving entry — at most 6 (finding F1). A vel codec derived from the ratio over-sizes every segment on a runtime whose ratio exceeds it.
+            // A second detector instance is not a second copy of that arithmetic: the ladder stays in one place, which is what the exposed property is for.
+            LargestTickMultiplier = new OverloadDetector(options.Overload, options.BaseTickRate).MaxTickMultiplier;
+
+            Plans = ProjectionCompiler.Compile(registry, engine, NominalTickPeriodSeconds, LargestTickMultiplier);
+
+            Catalog = CatalogBuilder.Build(registry, Plans, CatalogBuilder.DefaultAppName, appRevision: 0, (int)NominalTickPeriodUs, systemNames);
+
+            _sessions = new SessionTable("Subscriptions.Sessions", parent, engine.MemoryAllocator, Options, registry.Sessions.SessionEvents);
+            _replicationStates = AttachReplicationStates(engine, parent, netIds);
+
+            // S2a (P1-12). Built after the states because it holds them, and after the session table because the table's open rows are its per-tick input. It
+            // resolves every profile to plan indices here, so the tick path never looks an archetype up by Type.
+            Interest = new InterestPass(engine, Plans, _replicationStates, registry, _sessions);
+
+            // S2b (P1-13b). It owns the frame pool, the per-session known-sets and the per-slot hand-off counters, so a frame's whole lifetime — gathered,
+            // encoded, published, released — lives behind one field here rather than spread across the tick-scoped context.
+            _frames = new FrameAssembler("Subscriptions.Frames", parent, engine.MemoryAllocator, Options, Plans, Catalog.Canonical, _sessions);
+
+            // Ingress (P1-05). The command registry is bound from the CATALOG, so the decode follows what the client negotiated against rather than a second
+            // reading of the declarations; the ring pool is created here because a ring's lifetime is a session's, and sessions live in the table above it.
+            CommandTypes = CommandRegistry.Build(registry, CatalogPlan.Compile(Catalog.Canonical));
+            _ingressRings = new IngressRingPool("Subscriptions.IngressRings", parent, engine.MemoryAllocator, Options);
+            _ingress = new SubscriptionsIngress(_sessions, registry, CommandTypes, new CommandTypeBuffers(CommandTypes, Options.MaxSessions), _ingressRings,
+                Options.MaxSessions);
+            Commands = new SubscriptionsCommands(_ingress);
+
+            // Before the first tick publishes anything, so a client that completes its handshake between Start and the first tick is told the period rather
+            // than zero. The tick number and the origin stay zero until a tick runs, which is what they truthfully are.
+            _tickPeriodUs = NominalTickPeriodUs;
+            IsActive = true;
+
+            // Last, and it escapes `this` deliberately: the acceptor holds the host and nothing else, so nothing it could touch is still half-built. Built
+            // here rather than on demand so a transport can be started against a runtime whose acceptor identity never changes.
+            Acceptor = new SubscriptionAcceptor(this);
+        }
+        catch
+        {
+            Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Whether anything was declared, and therefore whether anything was built.</summary>
+    public bool IsActive { get; }
+
+    /// <summary>The declarations this was built from.</summary>
+    public SubscriptionsRegistry Registry { get; }
+
+    /// <summary>The operator's replication options.</summary>
+    public SubscriptionsOptions Options { get; }
+
+    /// <summary>One compiled plan per replicated archetype, in declaration order. Empty on an inactive runtime.</summary>
+    public CompiledProjectionPlan[] Plans { get; } = [];
+
+    /// <summary>
+    /// The catalog, its canonical bytes and their digest — what <c>WELCOME</c> carries, built exactly once. <see langword="null"/> on an inactive runtime.
+    /// </summary>
+    /// <remarks>
+    /// One object holding all three, from <see cref="CatalogSerializer.Export"/>, so the bytes a client receives and the hash it offers back cannot come to
+    /// describe two different declarations. Nothing on the tick path reads it: it is handed to a connection at <c>HELLO</c> and never rebuilt.
+    /// </remarks>
+    public CatalogExport Catalog { get; }
+
+    /// <summary>The session table. <see langword="null"/> on an inactive runtime, where it would be a 544 KiB allocation for nobody.</summary>
+    public SessionTable Sessions => _sessions;
+
+    /// <summary>The database's network identities, shared by every replicated archetype. Used here, owned by <see cref="TyphonRuntime"/>.</summary>
+    public NetIdAllocator NetIds { get; }
+
+    /// <summary>Every command type a client may send, bound to the application's structs. <see langword="null"/> on an inactive runtime.</summary>
+    public CommandRegistry CommandTypes { get; }
+
+    /// <summary>
+    /// The inbound path: a session's ring, the transport-side decode, and the Engine-Pre drain that turns it into the tick's typed buffers.
+    /// <see langword="null"/> on an inactive runtime.
+    /// </summary>
+    public SubscriptionsIngress Ingress => _ingress;
+
+    /// <summary>
+    /// What an application system reads and answers commands through. <see langword="null"/> on an inactive runtime.
+    /// </summary>
+    /// <remarks>
+    /// The <c>ctx.Subscriptions</c> sugar of <c>design/Subscriptions/01-model.md § 7</c> is one property on <c>TickContext</c> that a later slice adds; this
+    /// is the object it will return, and a system can hold it directly in the meantime because it is created at <c>Start</c> and never replaced.
+    /// </remarks>
+    public SubscriptionsCommands Commands { get; }
+
+    /// <summary>The per-archetype replication state, parallel to <see cref="Plans"/>. Empty on an inactive runtime.</summary>
+    public ArchetypeReplicationState[] ReplicationStates => _replicationStates;
+
+    /// <summary>
+    /// S2a: the pass that turns each session's declared interest into hits and marks the hit entities watched. <see langword="null"/> on an inactive runtime.
+    /// </summary>
+    /// <remarks>
+    /// The one field P1-12 adds here, per <c>09-phase1-build-plan § 4</c>: everything the interest stage reaches at tick time hangs off this object, so the
+    /// tick-scoped <see cref="SubscriptionsContext"/> stays frozen and the slices built beside this one do not meet in it.
+    /// </remarks>
+    public InterestPass Interest { get; }
+
+    /// <summary>
+    /// S2b: the pass that turns each session's hits into a <c>TICK</c> message and hands it to the send side. <see langword="null"/> on an inactive runtime.
+    /// </summary>
+    /// <remarks>
+    /// The one field P1-13b adds here, for the reason the class remarks give: everything the frame stage reaches at tick time hangs off this object, so the
+    /// tick-scoped <see cref="SubscriptionsContext"/> stays frozen and the slices built beside this one do not meet in it.
+    /// </remarks>
+    public FrameAssembler Frames => _frames;
+
+    /// <summary>The nominal tick period in seconds, <c>1 / BaseTickRate</c> — what the velocity codecs were sized against.</summary>
+    public double NominalTickPeriodSeconds { get; }
+
+    /// <summary>The same period in microseconds: what the catalog declares, and what the published period is a multiple of under overload dilation.</summary>
+    public uint NominalTickPeriodUs { get; } = 1;
+
+    /// <summary>
+    /// The acceptor every transport reaches replication through. <see langword="null"/> on an inactive runtime, which therefore accepts nothing.
+    /// </summary>
+    public ISubscriptionAcceptor Acceptor { get; }
+
+    /// <summary>
+    /// <c>COMMANDS</c> messages received with no ingress path to take them — an inactive runtime, which has no session table and therefore no rings.
+    /// </summary>
+    /// <remarks>
+    /// Counted rather than ignored, and it should stay at zero: a session cannot exist without a session table, so a message arriving here at all means a
+    /// connection outlived the runtime that admitted it. A client sending a well-formed, in-state message is never disconnected for it.
+    /// </remarks>
+    public long CommandMessagesDropped => Volatile.Read(ref _commandMessagesDropped);
+
+    /// <summary>The largest tick multiplier the runtime may fall back to, from <see cref="OverloadDetector.MaxTickMultiplier"/>.</summary>
+    public int LargestTickMultiplier { get; } = 1;
+
+    /// <summary>Whether this object would hand a transport a connection: it was built with declarations, and it has not been disposed.</summary>
+    public bool IsAccepting => IsActive && !Volatile.Read(ref _disposed);
+
+    // ── ISubscriptionsHost — explicitly, see the class remarks ──────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <inheritdoc />
+    SubscriptionsSessions ISubscriptionsHost.Sessions => Registry.Sessions;
+
+    /// <inheritdoc />
+    SessionTable ISubscriptionsHost.SessionTable => _sessions;
+
+    /// <inheritdoc />
+    byte[] ISubscriptionsHost.CatalogJson => Catalog?.Utf8;
+
+    /// <inheritdoc />
+    ulong ISubscriptionsHost.CatalogHash => Catalog?.Hash ?? 0;
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Read off the emitted catalog rather than off the registry's declarations, because the catalog carries the built-in metrics too: an application that
+    /// declares none still publishes tick and per-system figures, and a <c>STATS</c> capability refused on the strength of the registry would deny a client
+    /// the eleven built-ins it was entitled to.
+    /// </remarks>
+    bool ISubscriptionsHost.HasMetrics => Catalog?.Canonical?.Metrics is { Length: > 0 };
+
+    /// <inheritdoc />
+    bool ISubscriptionsHost.IsAccepting => IsAccepting;
+
+    /// <inheritdoc />
+    uint ISubscriptionsHost.CurrentTick => Volatile.Read(ref _currentTick);
+
+    /// <inheritdoc />
+    uint ISubscriptionsHost.TickPeriodUs => Volatile.Read(ref _tickPeriodUs);
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Derived at the moment it is asked for, from the timestamp the tick published — the only shape that can answer the question. It is NOT clamped to the
+    /// period: a tick that ran long genuinely is further into itself than its nominal period, and reporting the period back would hide exactly the overrun a
+    /// client uses this value to notice.
+    /// </remarks>
+    uint ISubscriptionsHost.MicrosecondsIntoTick
+    {
+        get
+        {
+            var origin = Volatile.Read(ref _tickOriginTimestamp);
+            if (origin == 0)
+            {
+                // No tick has started yet: the honest answer is "at its beginning", not a duration measured from the process's own epoch.
+                return 0;
+            }
+
+            var elapsed = Stopwatch.GetTimestamp() - origin;
+            if (elapsed <= 0)
+            {
+                return 0;
+            }
+
+            var microseconds = elapsed * MicrosecondsPerStopwatchTick;
+            return microseconds >= uint.MaxValue ? uint.MaxValue : (uint)microseconds;
+        }
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Straight into the session's ingress ring (P1-05). A <see cref="WireFormatException"/> out of the decode is deliberately not caught here: the connection
+    /// is what turns it into the close code the protocol names, and swallowing it would leave a malformed client connected.
+    /// </remarks>
+    void ISubscriptionsHost.OnCommands(SessionId session, ReadOnlySpan<byte> message)
+    {
+        var ingress = _ingress;
+        if (ingress == null)
+        {
+            Interlocked.Increment(ref _commandMessagesDropped);
+            return;
+        }
+
+        ingress.OnCommands(session, message);
+    }
+
+    /// <summary>
+    /// Publishes where the tick is, for the transport threads that answer <c>WELCOME</c> and <c>PONG</c>.
+    /// </summary>
+    /// <param name="tickNumber">The tick about to run. Truncated to the wire's <c>u32</c>, which wraps after 2³² ticks — 1.4 years at 100 Hz.</param>
+    /// <param name="tickOriginTimestamp">The <see cref="Stopwatch"/> timestamp the tick started at; the driver already took it for its delta time.</param>
+    /// <param name="tickMultiplier">The overload multiplier this tick was scheduled at, so the published period is the dilated one, not the nominal.</param>
+    /// <remarks>
+    /// <para>
+    /// Called once per tick on the tick driver, before any worker wakes. Three volatile writes, no allocation, no lock — and nothing at all on a runtime whose
+    /// application declared no subscriptions, which is what "an unused subsystem costs a database exactly nothing" has to mean on the tick path as well.
+    /// </para>
+    /// <para>
+    /// <b>The origin is published before the tick number, and a reader can still straddle the pair.</b> Both orders leave the same one-tick worst case — an old
+    /// number against a new origin reads as a tick that started just now, a new number against an old origin as one that started a period ago — so the origin
+    /// goes first and the tick number, which NAMES the interval, becomes visible last. A client's clock is a min-offset estimator over many samples
+    /// (<c>design/Subscriptions/05-sdks.md</c>), so one straddled <c>PONG</c> is filtered rather than believed.
+    /// </para>
+    /// </remarks>
+    internal void PublishTickState(long tickNumber, long tickOriginTimestamp, int tickMultiplier)
+    {
+        if (!IsActive)
+        {
+            return;
+        }
+
+        Volatile.Write(ref _tickOriginTimestamp, tickOriginTimestamp);
+        Volatile.Write(ref _tickPeriodUs, NominalTickPeriodUs * (uint)Math.Max(1, tickMultiplier));
+        Volatile.Write(ref _currentTick, (uint)tickNumber);
+    }
+
+    /// <summary>The replication state of a replicated archetype, or <see langword="null"/> when it is not replicated.</summary>
+    /// <param name="archetypeCatalogId">The archetype's process-global catalog id.</param>
+    /// <returns>The state, or <see langword="null"/>.</returns>
+    public ArchetypeReplicationState StateOf(ushort archetypeCatalogId)
+    {
+        for (var i = 0; i < Plans.Length; i++)
+        {
+            if (Plans[i].ArchetypeCatalogId == archetypeCatalogId)
+            {
+                return _replicationStates[i];
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>The compiled plan of a replicated archetype by its wire name, or <see langword="null"/>.</summary>
+    /// <param name="name">The archetype's wire name.</param>
+    /// <returns>The plan, or <see langword="null"/>.</returns>
+    public CompiledProjectionPlan PlanNamed(string name)
+    {
+        foreach (var plan in Plans)
+        {
+            if (string.Equals(plan.Name, name, StringComparison.Ordinal))
+            {
+                return plan;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Builds one replication state per replicated archetype and publishes it to that archetype's cluster state.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ArchetypeReplicationState.AttachTo"/> rather than a raw field assignment: it remembers the attachment so disposal clears the ECS's own
+    /// reference, and the ECS holds that reference through a cluster drain that must never throw.
+    /// </remarks>
+    private ArchetypeReplicationState[] AttachReplicationStates(DatabaseEngine engine, IResource parent, NetIdAllocator netIds)
+    {
+        var states = new ArchetypeReplicationState[Plans.Length];
+
+        // Assigned to the field as they are created rather than at the end: a throw half way through has to reach Dispose with the states already built, or
+        // their pools' native slabs and their registry nodes outlive the runtime that failed to start.
+        _replicationStates = states;
+        for (var i = 0; i < Plans.Length; i++)
+        {
+            var plan = Plans[i];
+            var clusterState = ClusterStateOf(engine, plan);
+            states[i] = new ArchetypeReplicationState($"Subscriptions.Replication.{plan.Name}", parent, engine.MemoryAllocator, plan.BlockLayout, Options,
+                netIds);
+
+            // The motion rule's teleport threshold and its heartbeat are both expressed in ticks, so the state carries the nominal period rather than
+            // assuming one: a 10 Hz runtime left at the default would get a threshold six times too tight and a heartbeat six times too long.
+            states[i].TickPeriodSeconds = NominalTickPeriodSeconds;
+            states[i].AttachTo(clusterState);
+        }
+
+        return states;
+    }
+
+    private static ArchetypeClusterState ClusterStateOf(DatabaseEngine engine, CompiledProjectionPlan plan)
+    {
+        var states = engine._archetypeStates;
+        var clusterState = states != null && plan.ArchetypeCatalogId < states.Length ? states[plan.ArchetypeCatalogId]?.ClusterState : null;
+        if (clusterState == null)
+        {
+            throw new InvalidOperationException(
+                $"Archetype '{plan.Name}' is replicated and this engine holds no cluster state for it. Replication follows entities through their clusters, " +
+                "so the archetype has to be cluster-backed and initialised — call DatabaseEngine.InitializeArchetypes before TyphonRuntime.Start().");
+        }
+
+        return clusterState;
+    }
+
+    /// <summary>Whether the application declared anything at all. Nothing declared means nothing built.</summary>
+    private static bool HasDeclarations(SubscriptionsRegistry registry) =>
+        registry.Archetypes.Count > 0
+        || registry.Profiles.Count > 0
+        || registry.Commands.Count > 0
+        || registry.Events.Count > 0
+        || registry.Metrics.Count > 0
+        || registry.Sessions.DeclaredKinds.Count > 0;
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// <para>
+    /// <b>The reverse of construction, and it is load-bearing.</b> Each replication state detaches itself from its cluster state before it frees its
+    /// directory and returns its pool's slabs, so no drain that runs afterwards can reach freed native memory. The session table goes last because a session
+    /// row outlives the blocks it was watching, never the other way round.
+    /// </para>
+    /// <para>
+    /// <b>The identity allocator is not touched.</b> It is shared with nothing here and owned by <see cref="TyphonRuntime"/>, whose tick end drains its
+    /// quarantine — disposing it from this object would free it while a tick past the shutdown check could still reach it.
+    /// </para>
+    /// </remarks>
+    public void Dispose()
+    {
+        if (Volatile.Read(ref _disposed))
+        {
+            return;
+        }
+
+        // Published, not merely assigned: a transport thread reads it through IsAccepting to stop taking connections, and that read is on another core.
+        Volatile.Write(ref _disposed, true);
+
+        // Disposed, not cleared. A disposed state refuses every call that could reach its freed memory, and keeping the array intact leaves the pool counters
+        // and the drain-fault count readable afterwards — which is what a shutdown leak is diagnosed from, and what this slice's teardown test asserts on.
+        var states = _replicationStates;
+        for (var i = 0; i < states.Length; i++)
+        {
+            states[i]?.Dispose();
+        }
+
+        // Disposed and KEPT, where it used to be nulled. A transport thread can be inside a HELLO while this runs, and the table is built for exactly that —
+        // it latches, waits for the callers already inside and then answers every later call as it would for a slot that is gone. Nulling the field instead
+        // turned that designed-for race into a NullReferenceException on a network thread, which is the one outcome neither side can do anything about.
+        _sessions?.Dispose();
+
+        // After the table, and in this order for the same reason as the states above: the table is what stops new sessions reaching a ring, so the rings go
+        // once nothing can take one. The ingress drops its rows first, so the pool's Dispose frees slabs no row still names.
+        _ingress?.Dispose();
+        _ingressRings?.Dispose();
+
+        // Last of all: a frame block outlives the session that produced it only until its send completes, and the assembler returns every block a slot
+        // still names before it frees the pool's slabs.
+        _frames?.Dispose();
+    }
+}

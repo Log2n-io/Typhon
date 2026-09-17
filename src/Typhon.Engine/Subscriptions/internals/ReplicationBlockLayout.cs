@@ -37,13 +37,21 @@ internal struct ReplicationBlockHeader
 }
 
 /// <summary>
-/// Per-entity replication state read on every hit by the per-session passes. Exactly one cache line, which is the binding constraint of AC-5 — the passes
-/// must never pull cold data into L1.
+/// Per-entity replication state read on every hit by the per-session passes, in its <b>baseline</b> shape: a 2D archetype whose motion segment fits 14 B and
+/// whose state body fits 16 B. One cache line, which is what AC-5 asks of such an archetype.
 /// </summary>
 /// <remarks>
-/// <see cref="MotionSegment"/> and <see cref="PackedState"/> are reserved byte regions whose interior encoding is defined by the projection pass, not here.
-/// Their <i>sizes</i> are the contract this type fixes: the motion segment carries a pre-encoded <c>p0</c> (u24 × 2), <c>v</c> (i16 × 2), <c>t0</c> (u16)
-/// and an epoch byte; the packed state carries the archetype's declared state fields.
+/// <para>
+/// <b>This struct is the baseline, not the contract.</b> The two byte regions below are sized <i>per archetype</i> by
+/// <see cref="ReplicationBlockLayout"/> from the compiled plan — a 3D position or a wide state body makes the entry larger, and the layout rounds it to the
+/// next whole cache line. The sizes here are the ones a 2D SWG-shaped archetype produces, kept as a declared type so the fixed head has a name and a
+/// verifiable offset table; an archetype whose regions differ is carved by the layout's strides and never by <c>sizeof</c> of this type.
+/// </para>
+/// <para>
+/// <see cref="MotionSegment"/> and <see cref="PackedState"/> are reserved byte regions whose interior encoding is defined by the projection pass, not here:
+/// the motion segment carries a pre-encoded <c>p0</c> (u24 × dims), <c>v</c> (dims × the derived velocity width), <c>t0</c> (u16) and an epoch byte; the
+/// packed state carries the archetype's declared state fields.
+/// </para>
 /// </remarks>
 [StructLayout(LayoutKind.Sequential, Size = 64)]
 internal unsafe struct ReplicationHotEntry
@@ -71,11 +79,12 @@ internal unsafe struct ReplicationHotEntry
 }
 
 /// <summary>
-/// Per-entity replication state read only by the projection pass, never on the per-hit path. Half a cache line, per AC-5.
+/// Per-entity replication state read only by the projection pass, never on the per-hit path, in its <b>baseline</b> shape. Half a cache line, per AC-5.
 /// </summary>
 /// <remarks>
-/// As with <see cref="ReplicationHotEntry"/>, the byte regions here fix sizes rather than interior encodings: <see cref="PrevQuantizedPosition"/> holds the
-/// previous quantized position and <see cref="RunStart"/> the run start pair <c>(p_s, t_s)</c>.
+/// As with <see cref="ReplicationHotEntry"/> this is the 2D baseline and not the contract: <see cref="ReplicationBlockLayout"/> sizes the two regions from
+/// the compiled plan. <see cref="PrevQuantizedPosition"/> holds the previous quantized position (<c>dims × 3</c> B) and <see cref="RunStart"/> the run start
+/// pair <c>(p_s, t_s)</c> — the same quantized position plus a <c>u32</c> tick, rounded to four bytes.
 /// </remarks>
 [StructLayout(LayoutKind.Sequential, Size = 32)]
 internal unsafe struct ReplicationColdEntry
@@ -100,8 +109,9 @@ internal unsafe struct ReplicationColdEntry
 /// of <c>(hot, cold)</c> pairs would pull 96 B into L1 for every 64 B actually read, which is the whole reason this type exists.
 /// </para>
 /// <para>
-/// Block size is fixed per archetype, because <c>N</c> and the declared groups are fixed at <c>Start</c>. That is what lets the pool keep one free list of
-/// identical blocks with no size classes and no fragmentation.
+/// Block size is fixed per archetype, because <c>N</c>, the position and the declared groups are all fixed at <c>Start</c>. That is what lets the pool keep
+/// one free list of identical blocks with no size classes and no fragmentation — and what lets the entry strides be sized from the compiled plan instead of
+/// frozen at a struct declaration: a 3D position or a wide state body grows the hot entry to two lines for that archetype alone.
 /// </para>
 /// </remarks>
 internal readonly struct ReplicationBlockLayout
@@ -109,16 +119,51 @@ internal readonly struct ReplicationBlockLayout
     /// <summary>Size of the block header, and therefore the offset of the first hot entry. One cache line.</summary>
     public const int HeaderSize = 64;
 
-    /// <summary>Size of one hot entry. Fixed by AC-5 at one cache line.</summary>
+    /// <summary>The hot entry's stride granularity, and the stride a baseline archetype lands on. AC-5's "≤ 64 B hot per watched entity".</summary>
     public const int HotEntrySize = 64;
 
-    /// <summary>Size of one cold entry. Fixed by AC-5 at half a cache line.</summary>
+    /// <summary>The cold entry's stride granularity, and the stride a baseline archetype lands on.</summary>
     public const int ColdEntrySize = 32;
 
-    /// <summary>Creates the layout for an archetype whose clusters hold <paramref name="slotCount"/> entities.</summary>
+    /// <summary>
+    /// The hot entry's fixed head, ahead of the two per-archetype regions: <c>EntityId</c> (8) + <c>netId</c> (4) + generation (2) + flags (2) +
+    /// <c>GroupTicks[4]</c> (16). Every archetype pays exactly this much before its segment and its state.
+    /// </summary>
+    public const int HotFixedBytes = 32;
+
+    /// <summary>
+    /// The cold entry's fixed head: the last-watched tick. It sits <i>after</i> the two regions, as <see cref="ReplicationColdEntry"/> lays it out.
+    /// </summary>
+    public const int ColdFixedBytes = 4;
+
+    /// <summary>The baseline motion segment: a 2D <c>p0</c> (u24 × 2), a 2D <c>v</c> (i16 × 2), <c>t0</c> and an epoch byte.</summary>
+    public const int BaselineSegmentBytes = 14;
+
+    /// <summary>The baseline packed state body — <see cref="ReplicationHotEntry.PackedState"/>.</summary>
+    public const int BaselinePackedStateBytes = 16;
+
+    /// <summary>The baseline previous quantized position: 2D at 24 bits per axis.</summary>
+    public const int BaselinePrevPositionBytes = 6;
+
+    /// <summary>The baseline run start <c>(p_s, t_s)</c>: a 2D quantized position plus a <c>u32</c> tick, rounded to four bytes.</summary>
+    public const int BaselineRunStartBytes = 12;
+
+    /// <summary>
+    /// Creates the baseline layout for an archetype whose clusters hold <paramref name="slotCount"/> entities: a 64 B hot entry and a 32 B cold one.
+    /// </summary>
     /// <param name="slotCount">The archetype's cluster slot count, <c>N</c>.</param>
     /// <param name="ownerEntrySize">Bytes per owner entry, or <c>0</c> when the archetype declares no owner fields.</param>
+    /// <remarks>
+    /// For a plan-sized layout use <see cref="ForArchetype"/>. This overload is what a fixture or a non-projecting caller wants: the shape
+    /// <see cref="ReplicationHotEntry"/> and <see cref="ReplicationColdEntry"/> declare.
+    /// </remarks>
     public ReplicationBlockLayout(int slotCount, int ownerEntrySize = 0)
+        : this(slotCount, BaselineSegmentBytes, BaselinePackedStateBytes, BaselinePrevPositionBytes, BaselineRunStartBytes, ownerEntrySize, 0, 0)
+    {
+    }
+
+    private ReplicationBlockLayout(int slotCount, int segmentBytes, int packedStateBytes, int prevPositionBytes, int runStartBytes, int ownerEntrySize,
+        int enterPositionBytes, int enterBodyBytes)
     {
         // A zero or negative slot count yields a block with no entries, which the pool would happily carve and hand out forever; a negative owner entry size
         // shrinks the block below its own regions. Both are construction-time mistakes, so they fail here rather than as arithmetic nonsense later.
@@ -132,23 +177,130 @@ internal readonly struct ReplicationBlockLayout
             throw new ArgumentOutOfRangeException(nameof(ownerEntrySize), ownerEntrySize, "Owner entry size cannot be negative; use 0 for no owner fields");
         }
 
+        ArgumentOutOfRangeException.ThrowIfNegative(segmentBytes);
+        ArgumentOutOfRangeException.ThrowIfNegative(packedStateBytes);
+        ArgumentOutOfRangeException.ThrowIfNegative(prevPositionBytes);
+        ArgumentOutOfRangeException.ThrowIfNegative(runStartBytes);
+        ArgumentOutOfRangeException.ThrowIfNegative(enterPositionBytes);
+        ArgumentOutOfRangeException.ThrowIfNegative(enterBodyBytes);
+
         SlotCount = slotCount;
         OwnerEntrySize = ownerEntrySize;
+        SegmentBytes = segmentBytes;
+        PackedStateBytes = packedStateBytes;
+        PrevPositionBytes = prevPositionBytes;
+        RunStartBytes = runStartBytes;
+        EnterPositionBytes = enterPositionBytes;
+        EnterBodyBytes = enterBodyBytes;
+
+        // The strides are the whole point of sizing here rather than in a struct declaration: an entry that straddles two cache lines costs the per-hit passes
+        // a second line on every read, so the stride is rounded UP to whole lines rather than packed. An archetype whose regions fit one line keeps AC-5's
+        // 64 B; one that does not pays 128 B knowingly, and the layout is where that becomes visible.
+        HotStride = RoundUpTo(HotFixedBytes + segmentBytes + packedStateBytes, HotEntrySize);
+        ColdStride = RoundUpTo(ColdFixedBytes + prevPositionBytes + runStartBytes + enterPositionBytes + enterBodyBytes, ColdEntrySize);
 
         // Computed once. These are fixed for the archetype's lifetime and are read on paths that become per-cluster and then per-hit, so recomputing a
         // multiply-and-add on every access is work with a known answer.
         HotOffset = HeaderSize;
-        ColdOffset = HotOffset + (slotCount * HotEntrySize);
-        OwnerOffset = ColdOffset + (slotCount * ColdEntrySize);
+        ColdOffset = HotOffset + (slotCount * HotStride);
+        OwnerOffset = ColdOffset + (slotCount * ColdStride);
         BlockSize = OwnerOffset + (slotCount * ownerEntrySize);
         BlockStride = (BlockSize + 63) & ~63;
     }
+
+    /// <summary>
+    /// Creates the layout an archetype's compiled plan asks for: the fixed fields plus <i>this</i> archetype's motion segment, state body, previous position
+    /// and run start, each rounded to its entry's stride granularity.
+    /// </summary>
+    /// <param name="slotCount">The archetype's cluster slot count, <c>N</c>.</param>
+    /// <param name="segmentBytes">Bytes of one pre-encoded motion segment, or <c>0</c> when the archetype does not move.</param>
+    /// <param name="packedStateBytes">Bytes of the widest state body the archetype's public groups can produce.</param>
+    /// <param name="prevPositionBytes">Bytes of one quantized position, or <c>0</c> when the archetype does not move.</param>
+    /// <param name="runStartBytes">Bytes of the run start pair <c>(p_s, t_s)</c>, or <c>0</c> when the archetype does not move.</param>
+    /// <param name="ownerEntrySize">Bytes per owner entry, or <c>0</c> when the archetype declares no owner fields.</param>
+    /// <param name="enterPositionBytes">
+    /// Bytes of the quantized position an enter record carries for an archetype that reserves no motion segment — a <c>static</c> position — or <c>0</c>.
+    /// </param>
+    /// <param name="enterBodyBytes">Bytes of the widest <c>onEnter</c> body the archetype can produce, or <c>0</c> when it declares no <c>onEnter</c> field.</param>
+    /// <returns>The layout.</returns>
+    /// <remarks>
+    /// <b>It sizes; it refuses nothing.</b> A 3D archetype with four <c>varu</c> state fields needs 18 B of segment and 20 B of state, which is 70 B of hot
+    /// entry — a legal declaration that the fixed 64 B shape would have silently overrun. The answer is a 128 B stride, not a refusal.
+    /// </remarks>
+    public static ReplicationBlockLayout ForArchetype(int slotCount, int segmentBytes, int packedStateBytes, int prevPositionBytes, int runStartBytes,
+        int ownerEntrySize, int enterPositionBytes = 0, int enterBodyBytes = 0) =>
+        new(slotCount, segmentBytes, packedStateBytes, prevPositionBytes, runStartBytes, ownerEntrySize, enterPositionBytes, enterBodyBytes);
 
     /// <summary>The archetype's cluster slot count, <c>N</c>.</summary>
     public int SlotCount { get; }
 
     /// <summary>Bytes per owner entry; <c>0</c> when the archetype declares no owner fields.</summary>
     public int OwnerEntrySize { get; }
+
+    /// <summary>Bytes this archetype's pre-encoded motion segment reserves in every hot entry.</summary>
+    public int SegmentBytes { get; }
+
+    /// <summary>Bytes this archetype's state body reserves in every hot entry.</summary>
+    public int PackedStateBytes { get; }
+
+    /// <summary>Bytes the previous quantized position reserves in every cold entry.</summary>
+    public int PrevPositionBytes { get; }
+
+    /// <summary>Bytes the run start pair reserves in every cold entry.</summary>
+    public int RunStartBytes { get; }
+
+    /// <summary>
+    /// Bytes the enter cache's position reserves in every cold entry: a <c>static</c> archetype's quantized <c>p0</c>, which no motion segment holds.
+    /// </summary>
+    public int EnterPositionBytes { get; }
+
+    /// <summary>Bytes the enter cache's <c>onEnter</c> body reserves in every cold entry, zero-padded to the section's widest form.</summary>
+    public int EnterBodyBytes { get; }
+
+    /// <summary>
+    /// The enter cache: the two pieces of an enter record that neither the hot entry nor a state record ever carries, kept per entity so a session that
+    /// was not there when the entity was first projected can still be sent one.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>It is in the COLD entry, and that is the hot/cold split's own criterion applied.</b> Both pieces are read exactly once per session per entity —
+    /// on the frame that first tells that session the entity exists — and never on the per-hit path, which is what the cold entry is for. Putting them in
+    /// the hot entry would widen the line every frame reads for every hit in order to serve a read that happens once.
+    /// </para>
+    /// <para>
+    /// <b>It is free for the archetypes this phase serves.</b> A 2D mover reserves 6 B of previous position, 12 B of run start and 4 B of tick — 22 of a
+    /// 32 B cold stride — so an <c>onEnter</c> body up to 10 B costs no byte at all. A static archetype reserves neither previous position nor run start,
+    /// and its position plus body fit the same stride.
+    /// </para>
+    /// </remarks>
+    public int EnterBytes => EnterPositionBytes + EnterBodyBytes;
+
+    /// <summary>Distance between consecutive hot entries: the fixed head plus this archetype's regions, rounded up to whole cache lines.</summary>
+    public int HotStride { get; }
+
+    /// <summary>Distance between consecutive cold entries: the fixed head plus this archetype's regions, rounded up to 32 B.</summary>
+    public int ColdStride { get; }
+
+    /// <summary>Byte offset of the motion segment inside one hot entry.</summary>
+    public int SegmentOffsetInHotEntry => HotFixedBytes;
+
+    /// <summary>Byte offset of the packed state body inside one hot entry.</summary>
+    public int PackedStateOffsetInHotEntry => HotFixedBytes + SegmentBytes;
+
+    /// <summary>Byte offset of the previous quantized position inside one cold entry.</summary>
+    public int PrevPositionOffsetInColdEntry => 0;
+
+    /// <summary>Byte offset of the run start pair inside one cold entry.</summary>
+    public int RunStartOffsetInColdEntry => PrevPositionBytes;
+
+    /// <summary>Byte offset of the last-watched tick inside one cold entry.</summary>
+    public int LastWatchedTickOffsetInColdEntry => PrevPositionBytes + RunStartBytes;
+
+    /// <summary>Byte offset of the enter cache's static position inside one cold entry.</summary>
+    public int EnterPositionOffsetInColdEntry => PrevPositionBytes + RunStartBytes + ColdFixedBytes;
+
+    /// <summary>Byte offset of the enter cache's <c>onEnter</c> body inside one cold entry.</summary>
+    public int EnterBodyOffsetInColdEntry => EnterPositionOffsetInColdEntry + EnterPositionBytes;
 
     /// <summary>Byte offset of <c>hot[0]</c> from the start of the block.</summary>
     public int HotOffset { get; }
@@ -171,4 +323,6 @@ internal readonly struct ReplicationBlockLayout
     /// exactly that reason. The stride costs at most 63 B per block (1.5 % at <c>N = 21</c>) and buys a line-aligned hot region in every block.
     /// </remarks>
     public int BlockStride { get; }
+
+    private static int RoundUpTo(int value, int granularity) => (value + granularity - 1) / granularity * granularity;
 }

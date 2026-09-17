@@ -164,3 +164,43 @@ export {
   type PongMessage,
   type WelcomeMessage,
 } from './protocol/messages.js';
+
+export {
+  Connection,
+  ConnectionState,
+  type CatalogCache,
+  type ConnectionClose,
+  type ConnectionHandlers,
+  type ConnectionOptions,
+  type SessionInfo,
+} from './net/connection.js';
+export {
+  SocketState,
+  systemTimers,
+  systemWebSocket,
+  type SocketCloseEvent,
+  type SocketMessageEvent,
+  type TimerApi,
+  type TimerHandle,
+  type WebSocketFactory,
+  type WebSocketLike,
+} from './net/socket.js';
+export { PingScheduler, type PingOptions } from './net/ping.js';
+export {
+  Backoff,
+  ReconnectingClient,
+  reconnectRule,
+  ReconnectRule,
+  type BackoffOptions,
+  type ReconnectingClientOptions,
+} from './net/reconnect.js';
+export { forEachMessage, replayStream, StreamRecorder, type FrameConsumer } from './net/recorder.js';
+export { CommandQueue, CommandRefused, type CommandQueueOptions } from './commands/queue.js';
+export {
+  createClientRegion,
+  REGION_MAX_VERTICES,
+  REGION_MIN_VERTICES,
+  REGION_RATE,
+  RegionSender,
+  type RegionOptions,
+} from './interest/region.js';

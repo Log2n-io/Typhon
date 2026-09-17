@@ -127,7 +127,8 @@ public sealed class FrameApplier
 
         if (_archetype.Dims > 0)
         {
-            _archetype.WriteSegment(slot, position, velocity, t0, epoch);
+            // An enter is the entity's first segment: the ring starts again from it, so nothing of the slot's previous occupant can be evaluated.
+            _archetype.ResetMotion(slot, position, velocity, t0, epoch);
         }
 
         _slot = slot;
@@ -143,7 +144,7 @@ public sealed class FrameApplier
             return;
         }
 
-        _archetype.WriteSegment(slot, position, velocity, t0, epoch);
+        _archetype.PushSegment(slot, position, velocity, t0, epoch);
         _archetype.MarkUpdated(slot, 0, moved: true);
     }
 

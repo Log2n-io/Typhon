@@ -32,15 +32,21 @@ public sealed class WorldStore
     /// Largest netId accepted. netIds are dense on the server, so the map is a flat array of at most this many entries; a corrupt id beyond it counts as an
     /// anomaly instead of allocating.
     /// </param>
-    public WorldStore(CatalogPlan plan, uint maxNetId = 1 << 22)
+    /// <param name="maxRenderDelayMs">
+    /// The largest render delay motion will be evaluated at, which sizes every archetype's segment ring against the catalog's tick period (see
+    /// <see cref="SegmentRing.DepthFor"/>). The default is the <see cref="Clock"/>'s own default ceiling; pass the clock's <see cref="Clock.MaxDelayMs"/> when
+    /// it was built with another one.
+    /// </param>
+    public WorldStore(CatalogPlan plan, uint maxNetId = 1 << 22, double maxRenderDelayMs = SegmentRing.DefaultMaxRenderDelayMs)
     {
         ArgumentNullException.ThrowIfNull(plan);
         Plan = plan;
         MaxNetId = maxNetId;
+        SegmentHistory = SegmentRing.DepthFor(plan.Catalog.Tick.PeriodUs, maxRenderDelayMs);
         Archetypes = new ArchetypeStore[plan.Archetypes.Length];
         for (var i = 0; i < Archetypes.Length; i++)
         {
-            Archetypes[i] = new ArchetypeStore(plan.Archetypes[i]);
+            Archetypes[i] = new ArchetypeStore(plan.Archetypes[i], SegmentHistory);
         }
 
         Self = new SelfState();
@@ -68,6 +74,9 @@ public sealed class WorldStore
 
     /// <summary>The largest netId the map accepts.</summary>
     public uint MaxNetId { get; }
+
+    /// <summary>Segments every archetype's ring keeps per slot, from the catalog's tick period and the render delay the store was sized for.</summary>
+    public int SegmentHistory { get; }
 
     /// <summary>The stores, by archetype index.</summary>
     public ArchetypeStore[] Archetypes { get; }

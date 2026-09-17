@@ -37,8 +37,16 @@ internal static class SubscriptionsDagBuilder
     /// <summary>Name of the engine-internal Subscriptions DAG, declared on the Engine-Subscriptions track.</summary>
     private const string DagName = "Subscriptions";
 
+    /// <summary>Name of the ingress DAG, declared on the Engine-Pre track.</summary>
+    private const string IngressDagName = "SubscriptionsIngress";
+
     public static void DeclareSubscriptionsDag(RuntimeSchedule schedule, DatabaseEngine engine)
     {
+        // Engine-Pre, and it is the whole of that track's content (RuntimeSchedule.cs:38 names it as this drain's home). It is a DAG of its own rather than a
+        // stage of the one below, because the two run at opposite ends of the tick: ingress has to be BEFORE the application's track, so a command applies in
+        // the tick it arrived for, and replication has to be AFTER the fence, so it computes on committed state.
+        schedule.EnginePreTrack.DeclareDag(IngressDagName).Add(new SubscriptionsIngressExecSystem());
+
         var dag = schedule.EngineSubscriptionsTrack.DeclareDag(DagName);
         dag.Add(new SubscriptionsInterestExecSystem(engine));
         dag.Add(new SubscriptionsProjectExecSystem(engine));

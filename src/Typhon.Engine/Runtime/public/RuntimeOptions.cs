@@ -128,6 +128,17 @@ public class RuntimeOptions
     public bool AdaptiveFenceCost { get; set; } = true;
 
     /// <summary>
+    /// Memory and policy rails for engine-owned replication — the pools, the per-session ceilings and the skip thresholds. Always present with defaults;
+    /// a runtime with no session connected pays nothing for it.
+    /// </summary>
+    /// <remarks>
+    /// It lives here rather than on <see cref="TyphonOptions"/> because replication rides the tick: every budget below is spent by the subscriptions track,
+    /// which the runtime dispatches, and none of it is database state. What an application <i>declares</i> — projections, profiles, commands — goes to
+    /// <see cref="TyphonRuntime.Subscriptions"/> instead; this is the operator's half of the same subsystem.
+    /// </remarks>
+    public SubscriptionsOptions Subscriptions { get; set; } = new();
+
+    /// <summary>
     /// Resolves the effective worker count, applying the auto-detect formula if <see cref="WorkerCount"/> is -1.
     /// </summary>
     internal int ResolveWorkerCount() => WorkerCount == -1 ? Math.Max(1, Environment.ProcessorCount - 4) : WorkerCount;

@@ -16,4 +16,10 @@
         <ProjectReference Include="..\Typhon.Protocol\Typhon.Protocol.csproj" />
     </ItemGroup>
 
+    <ItemGroup>
+        <!-- Entering and releasing slots is the applier's business, not an application's; the motion tests drive it the way the TypeScript SDK's vitest twins
+             drive their public `WorldStore.enter`, so they need the same reach. -->
+        <InternalsVisibleTo Include="Typhon.Client.Tests" />
+    </ItemGroup>
+
 </Project>

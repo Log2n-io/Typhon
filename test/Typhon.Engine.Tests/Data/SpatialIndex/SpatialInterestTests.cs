@@ -1,4 +1,8 @@
-﻿using System;
+﻿// CS0618 (SpatialObserverHandle is obsolete) — this fixture is the deprecated surface's own regression suite, kept green until the surface itself
+// goes (design/Subscriptions/README.md Q9, Phase 1). A deprecation that made its own tests unbuildable would delete the coverage rather than the API.
+#pragma warning disable CS0618
+
+using System;
 using System.Collections.Generic;
 using System.Numerics;
 using Microsoft.Extensions.DependencyInjection;

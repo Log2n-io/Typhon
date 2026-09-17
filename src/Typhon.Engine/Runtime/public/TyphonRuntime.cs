@@ -56,6 +56,15 @@ public sealed partial class TyphonRuntime : IDisposable
     // because it is a resource-graph node and needs a parent.
     private readonly NetIdAllocator _netIds;
 
+    // What the application declares about replication: projections, profiles, sessions, commands, events and metrics. Holds no tick-time state of its own —
+    // Start compiles it, and from then on it is frozen and the compiled plan is what the track reads.
+    private readonly SubscriptionsRegistry _subscriptions;
+
+    // What those declarations became: the compiled plan, the catalog WELCOME carries, the session table, the pools and the per-archetype replication state.
+    // Built at Start because compiling needs the engine's archetypes initialised, and disposed with the runtime. Every later replication field belongs on IT,
+    // not here and not on the tick context — see SubscriptionsRuntime's remarks.
+    private SubscriptionsRuntime _subscriptionsRuntime;
+
     /// <summary>The replication track's tick-scoped context. Internal: the session count is written by ingress, and tests read its ordering journal.</summary>
     internal SubscriptionsContext SubscriptionsContextForTest => _subscriptionsContext;
 
@@ -281,6 +290,7 @@ public sealed partial class TyphonRuntime : IDisposable
         // Parented under the scheduler, not under engine.Parent. The scheduler is always present, whereas a runtime built against an engine with no resource
         // parent would otherwise throw here — during EVERY runtime construction, for a subsystem nothing has switched on yet.
         _netIds = new NetIdAllocator("Subscriptions.NetIds", scheduler);
+        _subscriptions = new SubscriptionsRegistry(options.Subscriptions);
         _logger = logger ?? NullLogger.Instance;
         _systemTransactions = new Transaction[scheduler.AllSystemCount];
         _systemViews = new ViewBase[scheduler.AllSystemCount];
@@ -346,10 +356,90 @@ public sealed partial class TyphonRuntime : IDisposable
     // Lifecycle
     // ═══════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// What clients may see, send and hear: projections, interest profiles, session kinds, commands, events and metrics. Configure it before
+    /// <see cref="Start"/>; afterwards it is frozen and every declaring call throws.
+    /// </summary>
+    /// <remarks>
+    /// <b>Replication belongs to the runtime, not to <see cref="DatabaseEngine"/>, because it rides the tick.</b> The declarations here are compiled exactly
+    /// once, at <see cref="Start"/>, into the plan the subscriptions track walks and the catalog clients negotiate against — which is why a late declaration
+    /// is refused loudly rather than silently ignored: it would be a declaration no client had ever been told about.
+    /// </remarks>
+    public SubscriptionsRegistry Subscriptions => _subscriptions;
+
+    /// <summary>
+    /// The acceptor a transport hands its connections to. <see langword="null"/> before <see cref="Start"/>, and on a runtime whose application declared no
+    /// subscriptions.
+    /// </summary>
+    /// <remarks>
+    /// <b>Internal on purpose, and the choice is about P1-08 rather than about this slice.</b> The interfaces it is used through —
+    /// <see cref="ISubscriptionTransport"/>, <see cref="ISubscriptionAcceptor"/>, <see cref="ISubscriptionLink"/> — are public already, because a transport is
+    /// a thing an application writes. How a transport is REGISTERED is a different question: the built-in TCP transport (P1-07) lives in this assembly and
+    /// needs nothing public, while <c>Typhon.Subscriptions.AspNetCore</c> (P1-08) is a separate package that has to answer it together with its DI surface
+    /// (<c>AddTyphonSubscriptions</c> / <c>MapTyphonSubscriptions</c>, design/Subscriptions/04-transport.md § 5). Publishing a shape here would pre-empt that
+    /// decision in the one direction that cannot be taken back.
+    /// </remarks>
+    internal ISubscriptionAcceptor SubscriptionAcceptor => _subscriptionsRuntime?.Acceptor;
+
+    /// <summary>
+    /// Starts <paramref name="transport"/> against this runtime's replication.
+    /// </summary>
+    /// <param name="transport">The listener. It is started once and handed the acceptor; stopping it is the caller's, through its own <c>StopAsync</c>.</param>
+    /// <exception cref="InvalidOperationException">The runtime has not started, or it declares no subscriptions.</exception>
+    /// <remarks>
+    /// Both refusals are loud, and deliberately: a transport bound to a runtime that can never admit anyone is a listener that accepts connections and closes
+    /// every one of them, which reads to an operator as a network fault rather than as a missing declaration.
+    /// </remarks>
+    internal void StartSubscriptionTransport(ISubscriptionTransport transport)
+    {
+        ArgumentNullException.ThrowIfNull(transport);
+
+        if (_subscriptionsRuntime == null)
+        {
+            throw new InvalidOperationException(
+                "A subscription transport can only be started after TyphonRuntime.Start(): the catalog a client negotiates against is compiled there.");
+        }
+
+        var acceptor = _subscriptionsRuntime.Acceptor;
+        if (acceptor == null)
+        {
+            throw new InvalidOperationException(
+                "This runtime declares no subscriptions, so it has no catalog, no session table and nothing to admit a client to. Declare at least one " +
+                "archetype, profile or session kind on TyphonRuntime.Subscriptions before Start().");
+        }
+
+        transport.Start(acceptor);
+    }
+
     /// <summary>Starts the scheduler (worker threads + tick driver).</summary>
     public void Start()
     {
+        // Before the scheduler, deliberately: compiling the declarations can refuse the configuration, and refusing it on a runtime whose workers have not yet
+        // started leaves nothing to unwind. Building here rather than in the constructor is equally deliberate — resolving a projection reads the engine's
+        // archetype layouts and its spatial grid, and an application configures both between Create and Start.
+        _subscriptions.Freeze();
+        if (_subscriptionsRuntime == null)
+        {
+            var built = new SubscriptionsRuntime(Engine, _subscriptions, Options, Scheduler, _netIds, SystemNames());
+            _subscriptionsRuntime = built;
+
+            // Published to the stages before a worker exists to read it: Scheduler.Start is what creates them, and starting a thread is itself a barrier.
+            _subscriptionsContext.AttachSubscriptions(built);
+        }
+
         Scheduler.Start();
+    }
+
+    /// <summary>The scheduled systems' names, in schedule order — the labels of the built-in per-system metric the catalog declares.</summary>
+    private string[] SystemNames()
+    {
+        var names = new string[Scheduler.AllSystemCount];
+        for (var i = 0; i < names.Length; i++)
+        {
+            names[i] = Scheduler.Systems[i]?.Name;
+        }
+
+        return names;
     }
 
     /// <summary>
@@ -412,6 +502,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 Entities = PooledEntityList.Empty,
                 TierBudgetMetrics = _previousTickMetrics,
                 SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
+                Subscriptions = _subscriptionsRuntime?.Commands,
                 // Runs on whichever thread called Shutdown()/FatalStop() — no worker slot belongs to it (#860).
                 WorkerId = TickContext.NonWorkerId,
                 ChunkCount = 1
@@ -427,6 +518,12 @@ public sealed partial class TyphonRuntime : IDisposable
     public void Dispose()
     {
         Scheduler.Dispose();
+
+        // AFTER the scheduler too, and for the same reason as the identity allocator below, only harder: the replication state hands the ECS a reference the
+        // cluster-drain hook calls, and its directory holds raw pointers into the block pool's native slabs. Tearing it down while a tick could still reach
+        // it is a use-after-free rather than a disposed-object exception. Shutdown() is not the place either — neither it nor FatalStop is a quiescence
+        // point; Scheduler.Dispose is the line that joins the workers and stops the timer thread.
+        _subscriptionsRuntime?.Dispose();
 
         // AFTER the scheduler, not before. A tick already past the shutdown check keeps dispatching on the timer thread, and every tick ends by draining this
         // allocator's quarantine — so disposing it first opens a window where that drain runs against a disposed object. Scheduler.Dispose joins the workers
@@ -1608,7 +1705,8 @@ public sealed partial class TyphonRuntime : IDisposable
             ChunkIndex = chunkIndex,
             ChunkCount = totalChunks,
             TierBudgetMetrics = _previousTickMetrics,
-            SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid)
+            SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
+            Subscriptions = _subscriptionsRuntime?.Commands
         };
         ctx.DebugValidateWorkerId(Scheduler.WorkerSlotCount, sys.Name);
 
@@ -1739,6 +1837,7 @@ public sealed partial class TyphonRuntime : IDisposable
             ClusterIds = clusterIdArray,
             TierBudgetMetrics = _previousTickMetrics,
             SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
+            Subscriptions = _subscriptionsRuntime?.Commands,
             WorkerId = workerId,
             ChunkIndex = chunkIndex,
             ChunkCount = totalChunks
@@ -1882,6 +1981,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 ClusterIds = clusterIdArray,
                 TierBudgetMetrics = _previousTickMetrics,
                 SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
+                Subscriptions = _subscriptionsRuntime?.Commands,
                 WorkerId = workerId,
                 ChunkIndex = chunkIndex,
                 ChunkCount = totalChunks
@@ -1951,6 +2051,11 @@ public sealed partial class TyphonRuntime : IDisposable
         _currentDeltaTime = _previousTickTimestamp > 0 ? (float)((now - _previousTickTimestamp) / (double)Stopwatch.Frequency) : 0f;
         _previousTickTimestamp = now;
 
+        // Where the tick is, for the transport threads that answer WELCOME and PONG: the tick number, the period it is running at, and the instant it began.
+        // Here rather than from a timer of replication's own, because this is the statement that already knows all three — `now` is the tick's origin, and it
+        // has just been taken. Three volatile writes, no allocation, and nothing at all when the application declared no subscriptions.
+        _subscriptionsRuntime?.PublishTickState(scheduler.CurrentTickNumber, now, scheduler.CurrentTickMultiplier);
+
         // Every checkerboard system starts the tick at phase 0 (CB-02). A system that failed in its Red phase starts no Black phase, and its cleanup has left
         // phase 1 behind; kept, it would make this tick's first prepare serve the previous tick's Black list and skip Red.
         Array.Clear(_checkerboardPhase);
@@ -1982,6 +2087,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 Entities = PooledEntityList.Empty,
                 TierBudgetMetrics = _previousTickMetrics,
                 SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
+                Subscriptions = _subscriptionsRuntime?.Commands,
                 // Runs on the tick thread before any worker wakes — no worker slot belongs to it (#860).
                 WorkerId = TickContext.NonWorkerId,
                 ChunkCount = 1
@@ -2630,6 +2736,7 @@ public sealed partial class TyphonRuntime : IDisposable
             ConsumedQueues = _systemConsumedQueues[sysIdx],
             TierBudgetMetrics = _previousTickMetrics,
             SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
+            Subscriptions = _subscriptionsRuntime?.Commands,
             WorkerId = workerId,
             // Single-invocation system: one chunk, index 0. Left at the default 0 before #860, which made the documented slicing formula
             // (start = ChunkIndex * len / ChunkCount) divide by zero for any non-chunked system that used it.

@@ -1,3 +1,8 @@
+// CS0618 (SpatialObserverHandle is obsolete) — file-wide, deliberately. This file IS the implementation the handle names, deprecated with it in Phase 1 of
+// engine-owned replication (design/Subscriptions/README.md Q9). Deprecating the public surface is the point of Q9; making its own implementation unbuildable
+// is not, and removing the attribute to quiet the build would throw away the whole signal. The suppression goes when the surface does.
+#pragma warning disable CS0618
+
 using System;
 using System.Buffers;
 using System.Numerics;

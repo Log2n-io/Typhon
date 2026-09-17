@@ -6,7 +6,12 @@ namespace Typhon.Engine;
 /// <summary>
 /// Opaque handle to a registered spatial observer. Validated via generation counter to detect use-after-destroy.
 /// </summary>
+/// <remarks>
+/// <b>Deprecated in Phase 1 of engine-owned replication</b> (<c>design/Subscriptions/README.md</c> Q9, decided 2026-09-17), together with
+/// <see cref="SpatialObserverSet"/> it belongs to. It is kept compiling, and will be removed with the interest system behind it once no caller is left.
+/// </remarks>
 [PublicAPI]
+[Obsolete(SpatialObserverSet.DeprecationMessage)]
 public readonly struct SpatialObserverHandle : IEquatable<SpatialObserverHandle>
 {
     internal readonly int Index;

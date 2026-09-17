@@ -21,13 +21,14 @@ namespace Typhon.Engine.Internals;
 /// <c>foundation/04-public-spatial-api.md</c> makes the dispatcher enter the scope for every chunked callback.
 /// </para>
 /// <para>
-/// <b>That resolves open item 4 of <c>foundation/03 § 6</c> only for a READ-ONLY stage, which is what these are today.</b> The stages run on pool workers
-/// that never enrol, inside an open EW-01 window on both fence paths, so their <c>FenceThreadDepth</c> is zero — and <c>ExclusiveWindow.NoteMutation</c>
-/// throws for exactly that combination. Every call site of it is a mutation of a fence-owned structure (a cluster B+Tree, the EntityMap, a per-cell index),
-/// so the first stage body that writes one will throw at the mutation site rather than corrupt it. S2a's job is described as "marks the hit entities
-/// watched": if marking ever touches an index rather than replication's own blocks, that stage must take <c>FenceWindow.EnterWorker()</c> around its chunk,
-/// as <c>FencePhaseExecSystemBase</c> does. The guard failing loudly is the design working; the point is that it is a live constraint on Phase 1, not a
-/// question that has been closed.
+/// <b>Open item 4 of <c>foundation/03 § 6</c> is now answered for S2a as well, and it was answered by a test.</b> The stages run on pool workers that never
+/// enrol, inside an open EW-01 window on both fence paths, so their <c>FenceThreadDepth</c> is zero — and <c>ExclusiveWindow.NoteMutation</c> throws for
+/// exactly that combination. Every call site of it is a mutation of a fence-owned structure (a cluster B+Tree, the EntityMap, a per-cell index). S2a's job is
+/// described as "marks the hit entities watched", and what marking turned out to touch is the replication block's own header word and nothing else, so it
+/// reaches no such site: <c>InterestEpochScopeTests</c> runs the stage at eight workers with <c>EnableParallelFence</c> on and reads zero violations off an
+/// engine whose fence DID mutate a guarded structure in the same window. No enrolment is taken, and taking one would have made the stage a legal writer of
+/// fence-owned structures for the length of its chunk — the licence EW-01 exists to withhold. A stage body that later writes an index must take
+/// <c>FenceWindow.EnterWorker()</c> as <c>FencePhaseExecSystemBase</c> does, and the guard failing loudly is what will say so.
 /// </para>
 /// </remarks>
 internal abstract class SubscriptionsExecSystemBase : ChunkedCallbackSystem<SubscriptionsContext>
@@ -137,9 +138,24 @@ internal abstract class SubscriptionsExecSystemBase : ChunkedCallbackSystem<Subs
 /// S2a — resolves each session's interest into hits and marks the hit entities watched. The critical path's first stage, and the DAG's root.
 /// </summary>
 /// <remarks>
-/// Its <c>Prepare</c> also carries the track's PROLOGUE once that exists (apply moves parked by the fence, free idle blocks, grow the directory) —
-/// serial work the scheduler already runs single-threaded before dispatch, which is why <c>foundation/03 § 2.5</c> puts it there instead of in a system
-/// of its own.
+/// <para>
+/// The work itself is <see cref="InterestPass"/>, which hangs off <see cref="SubscriptionsRuntime"/>; this class is the stage that dispatches it. Its
+/// <c>Prepare</c> carries the track's PROLOGUE — serial work the scheduler already runs single-threaded before dispatch, which is why
+/// <c>foundation/03 § 2.5</c> puts it there instead of in a system of its own that would cost a whole barrier. Today the prologue clears the watched masks
+/// this pass set last tick and partitions the tick's sessions; freeing idle blocks and splicing the parked moves join it in P1-11.
+/// </para>
+/// <para>
+/// <b>The chunk count is the pass's, not <see cref="SubscriptionsExecSystemBase.SessionChunks"/>.</b> The two agree today, and they stop agreeing the moment
+/// a session is open without a profile bound: such a session has no interest to resolve, and dispatching a chunk for it would be a wake cycle spent on
+/// nothing.
+/// </para>
+/// <para>
+/// <b>It takes the epoch scope from its base and no fence enrolment</b> — open item 4 of <c>foundation/03 § 6</c>, answered with a test rather than an
+/// argument. <see cref="InterestPass"/> reads cluster occupancy words and writes replication's own block headers and arenas; it reaches no
+/// <see cref="ExclusiveWindow.NoteMutation"/> call site, and <c>InterestEpochScopeTests</c> asserts zero violations at eight workers with the parallel fence
+/// on, against a tick that did mutate a guarded structure inside the same window. Enrolling anyway would have been the cheap answer and the wrong one: it
+/// would have made this stage a legal writer of fence-owned structures for the length of its chunk, which is exactly the licence EW-01 exists to withhold.
+/// </para>
 /// </remarks>
 internal sealed class SubscriptionsInterestExecSystem : SubscriptionsExecSystemBase
 {
@@ -149,19 +165,37 @@ internal sealed class SubscriptionsInterestExecSystem : SubscriptionsExecSystemB
         .Name("SubscriptionsInterest")
         .ChunkedParallel(1);
 
-    protected override int PrepareChunks(SubscriptionsContext ctx) => SessionChunks(ctx);
+    protected override int PrepareChunks(SubscriptionsContext ctx)
+    {
+        var interest = ctx.Subscriptions?.Interest;
+        return interest == null ? 0 : interest.BeginTick(ctx.TickNumber, ctx.WorkerCount);
+    }
 
-    protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount) { }
+    protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount)
+        => ctx.Subscriptions?.Interest?.ExecuteChunk(chunkIndex, chunkCount);
 }
 
 /// <summary>
 /// S1 — projects and compares the watched entities' declared fields, encoding each changed record once for every session that will receive it.
 /// </summary>
 /// <remarks>
-/// Partitioned over WATCHED BLOCKS, which is SUB-13 in the dispatch itself: an archetype far larger than what clients see costs what they see. Until blocks are
-/// attached by the interest stage there are none, so this prepares zero chunks and skips cleanly — successors still fan out.
+/// <para>
+/// Partitioned over WATCHED BLOCKS, which is SUB-13 in the dispatch itself: an archetype far larger than what clients see costs what they see. With no
+/// session looking at anything there is no block, so this prepares zero chunks and skips cleanly — successors still fan out.
+/// </para>
+/// <para>
+/// <b>Its <c>Prepare</c> is also the track's blocks step</b> (<c>foundation/03 § 2.5</c>): serial work the scheduler already runs single-threaded before the
+/// dispatch, so it costs no barrier of its own. Three things happen there — last tick's released identities go back to the allocator and the leases refill,
+/// the record arenas rewind, and the blocks the interest stage marked are gathered into one indexable partition per archetype.
+/// </para>
+/// <para>
+/// <b>The gather resolves each block's archetype with a directory probe, and that is a seam worth naming.</b> The interest stage lists the blocks it claimed
+/// per worker, flat across archetypes, so the archetype is recovered here by asking each directory whether it names that chunk id. It is one probe for a
+/// single-archetype runtime and averages half the archetype count otherwise — cheap for Phase 1's scales, and removable outright the moment the interest
+/// stage's watched-block entry carries the archetype index it already knows.
+/// </para>
 /// </remarks>
-internal sealed class SubscriptionsProjectExecSystem : SubscriptionsExecSystemBase
+internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecSystemBase
 {
     public SubscriptionsProjectExecSystem(DatabaseEngine engine) : base(engine) { }
 
@@ -170,9 +204,198 @@ internal sealed class SubscriptionsProjectExecSystem : SubscriptionsExecSystemBa
         .After("SubscriptionsInterest")
         .ChunkedParallel(1);
 
-    protected override int PrepareChunks(SubscriptionsContext ctx) => 0;
+    protected override int PrepareChunks(SubscriptionsContext ctx)
+    {
+        var subs = ctx.Subscriptions;
+        var states = subs?.ReplicationStates;
+        if (states == null || states.Length == 0)
+        {
+            return 0;
+        }
 
-    protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount) { }
+        // The tick number is the claim stamp a block's watched list is keyed on, and zero is what a freshly rented block already reads as. A runtime's first
+        // tick is 1, so this only ever declines a synthetic tick 0.
+        var tick = (uint)ctx.TickNumber;
+        if (tick == 0)
+        {
+            return 0;
+        }
+
+        var interest = subs.Interest;
+        var blocks = interest != null ? interest.WatchedBlockCount : WatchedBlocks(states);
+        if (blocks == 0)
+        {
+            return 0;
+        }
+
+        var chunks = Math.Min(Math.Max(1, ctx.WorkerCount), blocks);
+
+        // The gather comes FIRST, because the identity leases are sized from the watched slots it produces. Refilling before the partition exists would size
+        // the very first tick's leases from nothing and defer most of an initial fill by a tick for no reason.
+        if (interest != null)
+        {
+            Gather(interest, states, tick);
+        }
+
+        for (var i = 0; i < states.Length; i++)
+        {
+            states[i].BeginProjectTick(chunks);
+        }
+
+        return chunks;
+    }
+
+    protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount)
+    {
+        var subs = ctx.Subscriptions;
+        if (subs == null)
+        {
+            return;
+        }
+
+        var tick = (uint)ctx.TickNumber;
+        var plans = subs.Plans;
+        var states = subs.ReplicationStates;
+        for (var a = 0; a < plans.Length && a < states.Length; a++)
+        {
+            ProjectArchetype(plans[a], a, states[a], chunkIndex, chunkCount, tick);
+        }
+    }
+
+    private static void ProjectArchetype(CompiledProjectionPlan plan, int archetypeIndex, ArchetypeReplicationState state, int chunkIndex, int chunkCount,
+        uint tick)
+    {
+        var list = state.WatchedBlocks;
+        var count = list.Count;
+        var clusterState = state.ClusterState;
+        if (count == 0 || chunkIndex >= count || clusterState == null)
+        {
+            return;
+        }
+
+        // Both stores, because a mixed archetype keeps its transient components in a second segment whose clusters share the persistent layout exactly —
+        // the same pair ClusterRef resolves a column through. One accessor per chunk per archetype, not one per block.
+        var persistent = clusterState.ClusterSegment;
+        var transient = clusterState.TransientSegment;
+        var persistentAccessor = persistent != null ? persistent.CreateChunkAccessor() : default;
+        var transientAccessor = transient != null ? transient.CreateChunkAccessor() : default;
+        try
+        {
+            for (var i = chunkIndex; i < count; i += chunkCount)
+            {
+                var block = list[i];
+                var chunkId = block->ChunkId;
+                if (chunkId < 0)
+                {
+                    // The block was released between the mark and here — a cluster that drained. Nothing describes it any more, so there is nothing to read.
+                    continue;
+                }
+
+                var clusterBase = persistent != null ? persistentAccessor.GetChunkAddress(chunkId) : transientAccessor.GetChunkAddress(chunkId);
+                var transientBase = persistent != null && transient != null ? transientAccessor.GetChunkAddress(chunkId) : null;
+                ProjectionPass.ProjectBlock(plan, archetypeIndex, state, chunkIndex, block, clusterBase, transientBase, tick);
+            }
+        }
+        finally
+        {
+            persistentAccessor.Dispose();
+            transientAccessor.Dispose();
+        }
+    }
+
+    private static int WatchedBlocks(ArchetypeReplicationState[] states)
+    {
+        var total = 0;
+        for (var i = 0; i < states.Length; i++)
+        {
+            total += states[i].WatchedBlocks.Count;
+        }
+
+        return total;
+    }
+
+    /// <summary>
+    /// The blocks step: creates a block for every newly watched cluster, then gathers the interest stage's per-worker watched-block lists into one indexable
+    /// partition per archetype.
+    /// </summary>
+    /// <remarks>
+    /// The two halves are in this order because the partition is SIZED from the directory — at most one listing per block that exists — so a cluster that
+    /// gained its block after the sizing would have nowhere to be listed. The blocks created here carry no watched bit and are therefore not listed this
+    /// tick; the interest stage marks them on the next one, which is the only place a watched bit is ever set. See <see cref="CreateNewBlocks"/>.
+    /// </remarks>
+    private static void Gather(InterestPass interest, ArchetypeReplicationState[] states, uint tick)
+    {
+        CreateNewBlocks(interest, states);
+
+        for (var i = 0; i < states.Length; i++)
+        {
+            states[i].BeginWatchedBlocks(tick);
+        }
+
+        for (var w = 0; w < interest.ArenaCount; w++)
+        {
+            var watched = interest.Arena(w).WatchedBlocks;
+            for (var i = 0; i < watched.Count; i++)
+            {
+                var block = (ReplicationBlockHeader*)watched[i];
+                var chunkId = block->ChunkId;
+                if (chunkId < 0)
+                {
+                    continue;
+                }
+
+                for (var a = 0; a < states.Length; a++)
+                {
+                    if (states[a].Directory.TryGetBlock(chunkId, out var found) && found == block)
+                    {
+                        states[a].WatchedBlocks.Add(block);
+                        break;
+                    }
+                }
+            }
+        }
+
+    }
+
+    /// <summary>
+    /// Rents and registers a block for every cluster the interest stage hit and found none for. It sets <b>no</b> watched bit.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A fresh block leaves here with an empty mask, and that is the contract rather than an omission.</b> The interest stage owns the mask end to end: it
+    /// is the only writer of a watched bit, it claims a block by being the worker whose <c>Interlocked.Or</c> saw a previous value of zero, and it clears the
+    /// mask of the blocks it claimed at the next tick's prologue. A mask written here belongs to nobody — no worker ever claimed the block, so it never
+    /// reaches an interest arena's watched list, never has its mask cleared, and stays watched for the life of the block. The cost of not writing it is that
+    /// a newly watched cluster is projected from the following tick, which is one tick of latency on an entity nobody has ever been sent.
+    /// </para>
+    /// <para>
+    /// The pool already hands back a zeroed header, so this is a matter of not undoing that.
+    /// </para>
+    /// </remarks>
+    private static void CreateNewBlocks(InterestPass interest, ArchetypeReplicationState[] states)
+    {
+        for (var w = 0; w < interest.ArenaCount; w++)
+        {
+            var created = interest.Arena(w).NewBlocks;
+            for (var i = 0; i < created.Count; i++)
+            {
+                var archetype = HitArena.NewBlockArchetype(created[i]);
+                var chunkId = HitArena.NewBlockChunkId(created[i]);
+                if ((uint)archetype >= (uint)states.Length || chunkId < 0)
+                {
+                    continue;
+                }
+
+                // Already created by another worker's entry for the same cluster, or the pool's budget binds. Neither is an error: the cluster gets its block
+                // on a tick that has room for it, and a refusal is counted by the pool.
+                var state = states[archetype];
+                if (!state.Directory.TryGetBlock(chunkId, out _))
+                {
+                    state.TryAttachBlock(chunkId, out _);
+                }
+            }
+        }
+    }
 }
 
 /// <summary>
@@ -205,7 +428,19 @@ internal sealed class SubscriptionsEventsExecSystem : SubscriptionsExecSystemBas
 /// S2b — copies each session's changed records into its frame. The critical path's last stage.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Partitioned over sessions on the same partition as <c>Interest</c>, so a session's hit list is still in the worker's cache when its frame is assembled.
+/// </para>
+/// <para>
+/// <b>The chunk count is the assembler's, not <see cref="SubscriptionsExecSystemBase.SessionChunks"/>.</b> For the same reason the interest stage gives:
+/// the partition is over the sessions that HAVE interest to resolve, which is what <see cref="InterestPass.TickSessionCount"/> counts and what
+/// <see cref="InterestPass.HitsOf"/> is indexed by. Partitioning over the table's open rows instead would index the hit lists with the wrong numbers.
+/// </para>
+/// <para>
+/// <b>Its <c>Prepare</c> is the stage's prologue</b> (<c>foundation/03 § 2.5</c>): the serial half of S2b, where a session's known-set is created, a
+/// re-leased slot is rebound and a profile switch becomes the next frame's <c>RESET</c>. Doing it here rather than on a worker keeps the resource graph off
+/// the parallel path — a known-set registers under its parent, and two workers registering at once would race a structure with no reason to be concurrent.
+/// </para>
 /// </remarks>
 internal sealed class SubscriptionsFramesExecSystem : SubscriptionsExecSystemBase
 {
@@ -216,7 +451,13 @@ internal sealed class SubscriptionsFramesExecSystem : SubscriptionsExecSystemBas
         .AfterAll("SubscriptionsProject", "SubscriptionsEvents")
         .ChunkedParallel(1);
 
-    protected override int PrepareChunks(SubscriptionsContext ctx) => SessionChunks(ctx);
+    protected override int PrepareChunks(SubscriptionsContext ctx)
+    {
+        var subs = ctx.Subscriptions;
+        var frames = subs?.Frames;
+        return frames == null ? 0 : frames.BeginTick(subs.Interest, ctx.TickNumber, ctx.WorkerCount);
+    }
 
-    protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount) { }
+    protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount)
+        => ctx.Subscriptions?.Frames?.ExecuteChunk(chunkIndex, chunkCount);
 }

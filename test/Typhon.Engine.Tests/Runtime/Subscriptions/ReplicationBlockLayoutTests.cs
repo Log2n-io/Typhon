@@ -88,6 +88,84 @@ class ReplicationBlockLayoutTests
         }
     }
 
+    /// <summary>
+    /// The fixed head the baseline struct declares is the one the layout charges every archetype: 8 + 4 + 2 + 2 + 16 before either region starts.
+    /// </summary>
+    /// <remarks>
+    /// The two numbers have to agree or the layout's offsets address the wrong bytes of the struct it describes. Asserting the sum against
+    /// <c>Unsafe.SizeOf</c> is what ties the declaration to the arithmetic: adding a field to the head without moving <c>HotFixedBytes</c> fails here rather
+    /// than by writing a segment over a group tick.
+    /// </remarks>
+    [Test]
+    public void BaselineRegionsAddUpToTheDeclaredEntrySizes()
+    {
+        var baseline = new ReplicationBlockLayout(slotCount: 1);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(ReplicationBlockLayout.HotFixedBytes + ReplicationBlockLayout.BaselineSegmentBytes + ReplicationBlockLayout.BaselinePackedStateBytes,
+                Is.LessThanOrEqualTo(Unsafe.SizeOf<ReplicationHotEntry>()), "the baseline regions must fit the struct that declares them");
+            Assert.That(
+                ReplicationBlockLayout.ColdFixedBytes + ReplicationBlockLayout.BaselinePrevPositionBytes + ReplicationBlockLayout.BaselineRunStartBytes,
+                Is.LessThanOrEqualTo(Unsafe.SizeOf<ReplicationColdEntry>()));
+            Assert.That(baseline.HotStride, Is.EqualTo(ReplicationBlockLayout.HotEntrySize), "the baseline layout IS the struct's shape");
+            Assert.That(baseline.ColdStride, Is.EqualTo(ReplicationBlockLayout.ColdEntrySize));
+            Assert.That(baseline.SegmentOffsetInHotEntry, Is.EqualTo(ReplicationBlockLayout.HotFixedBytes));
+            Assert.That(baseline.PackedStateOffsetInHotEntry, Is.EqualTo(ReplicationBlockLayout.HotFixedBytes + ReplicationBlockLayout.BaselineSegmentBytes));
+            Assert.That(baseline.LastWatchedTickOffsetInColdEntry,
+                Is.EqualTo(ReplicationBlockLayout.BaselinePrevPositionBytes + ReplicationBlockLayout.BaselineRunStartBytes));
+        });
+    }
+
+    /// <summary>
+    /// An SWG-shaped 2D archetype still lands on AC-5's 64 B hot stride, and a 3D one with four <c>varu</c> state fields lands on 128 B.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// These are the two sides of the design change that made the entries plan-sized. The 2D case is the budget AC-5 states: a 13 B segment (u24 x 2, i16 x 2,
+    /// t0, epoch) and a 4 B state body sit inside one line with the 32 B head. The 3D case is what the fixed shape used to overrun silently — 18 B of segment
+    /// and 20 B of state is 70 B, so the archetype takes two lines, deliberately and visibly, rather than writing its state over the next entry.
+    /// </para>
+    /// <para>
+    /// The cold entry absorbs both: 3D costs it 9 + 16 + 4 = 29 B, still inside 32.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void HotStrideIsSizedByTheArchetypeAndRoundedToWholeLines()
+    {
+        var twoD = ReplicationBlockLayout.ForArchetype(slotCount: 21, segmentBytes: 13, packedStateBytes: 4, prevPositionBytes: 6, runStartBytes: 12,
+            ownerEntrySize: 0);
+        var threeD = ReplicationBlockLayout.ForArchetype(slotCount: 21, segmentBytes: 18, packedStateBytes: 20, prevPositionBytes: 9, runStartBytes: 16,
+            ownerEntrySize: 0);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(twoD.HotStride, Is.EqualTo(64), "32 + 13 + 4 = 49 B fits one cache line, which is AC-5's bound");
+            Assert.That(twoD.ColdStride, Is.EqualTo(32), "4 + 6 + 12 = 22 B fits half a line");
+            Assert.That(threeD.HotStride, Is.EqualTo(128), "32 + 18 + 20 = 70 B does not fit one line, so the archetype takes two");
+            Assert.That(threeD.ColdStride, Is.EqualTo(32), "4 + 9 + 16 = 29 B still fits half a line");
+            Assert.That(threeD.PackedStateOffsetInHotEntry, Is.EqualTo(50), "the state body starts after the head and the segment, wherever they end");
+            Assert.That(threeD.ColdOffset, Is.EqualTo(64 + (21 * 128)), "the cold region starts after the whole hot region, at the archetype's stride");
+            Assert.That(threeD.BlockSize, Is.EqualTo(64 + (21 * 128) + (21 * 32)));
+        });
+    }
+
+    /// <summary>The layout sizes and refuses nothing: a segment and a state body far past one line produce a bigger stride, never a throw.</summary>
+    [Test]
+    public void OversizedRegionsGrowTheStrideRatherThanFailing()
+    {
+        var wide = ReplicationBlockLayout.ForArchetype(slotCount: 4, segmentBytes: 21, packedStateBytes: 200, prevPositionBytes: 9, runStartBytes: 16,
+            ownerEntrySize: 0);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(wide.HotStride, Is.EqualTo(256), "32 + 21 + 200 = 253 rounds to four lines");
+            Assert.That(wide.HotStride % ReplicationBlockLayout.HotEntrySize, Is.Zero);
+            Assert.That(wide.ColdStride % ReplicationBlockLayout.ColdEntrySize, Is.Zero);
+            Assert.That(wide.BlockStride % 64, Is.Zero);
+        });
+    }
+
     /// <summary>An archetype declaring owner fields grows the block by exactly one owner entry per slot, and only at the end.</summary>
     [Test]
     public void OwnerEntriesExtendTheBlockWithoutMovingHotOrCold()

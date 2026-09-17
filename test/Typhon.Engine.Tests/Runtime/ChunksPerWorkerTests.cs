@@ -67,7 +67,7 @@ class ChunksPerWorkerTests : TestBase<ChunksPerWorkerTests>
         runtime.Shutdown();
 
         var parallelIdx = -1;
-        for (var i = 0; i < runtime.Scheduler.SystemCount; i++)
+        for (var i = 0; i < runtime.Scheduler.AllSystemCount; i++)
         {
             if (runtime.Scheduler.Systems[i].Name == "Parallel")
             {

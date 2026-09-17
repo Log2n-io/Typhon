@@ -23,6 +23,24 @@ internal sealed class OverloadDetector
     /// <summary>Current tick rate multiplier (1 = normal, 2+ = modulated).</summary>
     public int TickMultiplier => _allowedMultipliers[_multiplierIndex];
 
+    /// <summary>
+    /// The largest multiplier this detector may ever reach: the last entry of the allowed ladder, so at most 6 whatever the configuration.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Not <c>BaseTickRate / MinTickRateHz</c>.</b> That ratio only FILTERS the fixed ladder <c>[1, 2, 3, 4, 6]</c>; the ceiling is whatever entry
+    /// survives the filter, which a ratio of 10 or 60 does not raise past 6. Anything sizing itself against "the slowest rate the runtime may fall back to"
+    /// has to read this, not the ratio.
+    /// </para>
+    /// <para>
+    /// The caller with that need is the projection compiler: a <c>vel</c> codec carries a displacement per TICK, so its width is derived from the teleport
+    /// speed times the nominal period times this (design/Subscriptions/03-wire-protocol.md § 12 W5). Deriving it from the ratio instead over-sizes the codec
+    /// on every segment for every runtime whose ratio exceeds 6 — and reading it from here rather than recomputing the ladder arithmetic is the point: two
+    /// copies would drift the first time the ladder changes.
+    /// </para>
+    /// </remarks>
+    public int MaxTickMultiplier => _allowedMultipliers[_maxMultiplierIndex];
+
     // ── Read-only accessors for gauge emission (issue #289 follow-up) ─────────────
     /// <summary>Consecutive ticks above the overrun threshold. Reset on any deescalation tick.</summary>
     public int ConsecutiveOverrunTicks { get; private set; }

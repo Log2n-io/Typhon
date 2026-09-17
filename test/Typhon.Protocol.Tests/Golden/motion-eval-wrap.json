@@ -1,0 +1,339 @@
+{
+  "description": "Motion evaluated over the committed stream-motion replay, in the schema of motion-eval: after frame \u0060afterFrame\u0060, every live entity of the archetypes a case names, evaluated at renderTick \u002B renderFrac and rendered as IEEE bit strings. These are the two cases motion-eval says it cannot reach. The ring: a render time before the ring wrapped, one inside a ring entry that has been overwritten, one whose next sample is entry 0 reached from entry 7 (the modular step the wrap exists to exercise), one past the newest sample, and one older than the oldest segment the ring still holds \u2014 meaningful only once a wrap has thrown older segments away. The epoch: just before a teleport, between the two epochs\u0027 samples, and just after it, for a none-model Buoy and a linear Drone at once. Render time is split into an integer tick and a fraction in [0, 1) \u2014 never one float \u2014 so evaluation stays exact however long the server has been running (03 \u00A7 6), and \u0060epoch\u0060 is the motion epoch in force at renderTick. Entities are named by archetype and netId, never by slot, ordered by catalog archetype then ascending netId; \u0060position\u0060 and \u0060velocity\u0060 each carry \u0060dims\u0060 values in axis order. segmentHistory is the ring depth the vector was generated with.",
+  "catalog": "catalog-kitchen-sink",
+  "stream": "stream-motion",
+  "segmentHistory": 8,
+  "cases": [
+    {
+      "name": "before-the-wrap",
+      "afterFrame": 5,
+      "renderTick": 2003,
+      "renderFrac": "3fe0000000000000",
+      "archetypes": [
+        "Buoy"
+      ],
+      "entities": [
+        {
+          "archetype": "Buoy",
+          "netId": 10,
+          "epoch": 4,
+          "position": [
+            "400c000000000000",
+            "4009000000000000"
+          ],
+          "velocity": [
+            "3ff0000000000000",
+            "3ffc000000000000"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "inside-the-wrap",
+      "afterFrame": 16,
+      "renderTick": 2011,
+      "renderFrac": "3fe0000000000000",
+      "archetypes": [
+        "Buoy"
+      ],
+      "entities": [
+        {
+          "archetype": "Buoy",
+          "netId": 10,
+          "epoch": 4,
+          "position": [
+            "4027000000000000",
+            "4040900000000000"
+          ],
+          "velocity": [
+            "3ff0000000000000",
+            "4017000000000000"
+          ]
+        },
+        {
+          "archetype": "Buoy",
+          "netId": 11,
+          "epoch": 4,
+          "position": [
+            "4059000000000000",
+            "4069000000000000"
+          ],
+          "velocity": [
+            "0000000000000000",
+            "0000000000000000"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "across-the-ring-index-wrap",
+      "afterFrame": 16,
+      "renderTick": 2015,
+      "renderFrac": "3fe0000000000000",
+      "archetypes": [
+        "Buoy"
+      ],
+      "entities": [
+        {
+          "archetype": "Buoy",
+          "netId": 10,
+          "epoch": 4,
+          "position": [
+            "402f000000000000",
+            "404e100000000000"
+          ],
+          "velocity": [
+            "3ff0000000000000",
+            "401f000000000000"
+          ]
+        },
+        {
+          "archetype": "Buoy",
+          "netId": 11,
+          "epoch": 5,
+          "position": [
+            "407f600000000000",
+            "4082c80000000000"
+          ],
+          "velocity": [
+            "0000000000000000",
+            "0000000000000000"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "after-the-wrap",
+      "afterFrame": 16,
+      "renderTick": 2016,
+      "renderFrac": "3fd0000000000000",
+      "archetypes": [
+        "Buoy"
+      ],
+      "entities": [
+        {
+          "archetype": "Buoy",
+          "netId": 10,
+          "epoch": 4,
+          "position": [
+            "4030000000000000",
+            "4050000000000000"
+          ],
+          "velocity": [
+            "0000000000000000",
+            "0000000000000000"
+          ]
+        },
+        {
+          "archetype": "Buoy",
+          "netId": 11,
+          "epoch": 5,
+          "position": [
+            "407f600000000000",
+            "4082c80000000000"
+          ],
+          "velocity": [
+            "0000000000000000",
+            "0000000000000000"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "older-than-the-oldest-held",
+      "afterFrame": 16,
+      "renderTick": 2004,
+      "renderFrac": "0000000000000000",
+      "archetypes": [
+        "Buoy"
+      ],
+      "entities": [
+        {
+          "archetype": "Buoy",
+          "netId": 10,
+          "epoch": 4,
+          "position": [
+            "4022000000000000",
+            "4034400000000000"
+          ],
+          "velocity": [
+            "0000000000000000",
+            "0000000000000000"
+          ]
+        },
+        {
+          "archetype": "Buoy",
+          "netId": 11,
+          "epoch": 4,
+          "position": [
+            "4059000000000000",
+            "4069000000000000"
+          ],
+          "velocity": [
+            "0000000000000000",
+            "0000000000000000"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "just-before-the-epoch-change",
+      "afterFrame": 16,
+      "renderTick": 2012,
+      "renderFrac": "3fe0000000000000",
+      "archetypes": [
+        "Buoy",
+        "Drone"
+      ],
+      "entities": [
+        {
+          "archetype": "Buoy",
+          "netId": 10,
+          "epoch": 4,
+          "position": [
+            "4029000000000000",
+            "4043900000000000"
+          ],
+          "velocity": [
+            "3ff0000000000000",
+            "4019000000000000"
+          ]
+        },
+        {
+          "archetype": "Buoy",
+          "netId": 11,
+          "epoch": 4,
+          "position": [
+            "4059400000000000",
+            "4069000000000000"
+          ],
+          "velocity": [
+            "4000000000000000",
+            "0000000000000000"
+          ]
+        },
+        {
+          "archetype": "Drone",
+          "netId": 100,
+          "epoch": 1,
+          "position": [
+            "4024800000000000",
+            "4034000000000000",
+            "c03e200000000000"
+          ],
+          "velocity": [
+            "3fe0000000000000",
+            "0000000000000000",
+            "bfd0000000000000"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "between-the-two-epochs-samples",
+      "afterFrame": 16,
+      "renderTick": 2013,
+      "renderFrac": "3fe0000000000000",
+      "archetypes": [
+        "Buoy",
+        "Drone"
+      ],
+      "entities": [
+        {
+          "archetype": "Buoy",
+          "netId": 10,
+          "epoch": 4,
+          "position": [
+            "402b000000000000",
+            "4046d00000000000"
+          ],
+          "velocity": [
+            "3ff0000000000000",
+            "401b000000000000"
+          ]
+        },
+        {
+          "archetype": "Buoy",
+          "netId": 11,
+          "epoch": 4,
+          "position": [
+            "4059800000000000",
+            "4069000000000000"
+          ],
+          "velocity": [
+            "0000000000000000",
+            "0000000000000000"
+          ]
+        },
+        {
+          "archetype": "Drone",
+          "netId": 100,
+          "epoch": 1,
+          "position": [
+            "4024400000000000",
+            "4034000000000000",
+            "c03e300000000000"
+          ],
+          "velocity": [
+            "bfe8000000000000",
+            "0000000000000000",
+            "3fc0000000000000"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "just-after-the-epoch-change",
+      "afterFrame": 16,
+      "renderTick": 2014,
+      "renderFrac": "3fd0000000000000",
+      "archetypes": [
+        "Buoy",
+        "Drone"
+      ],
+      "entities": [
+        {
+          "archetype": "Buoy",
+          "netId": 10,
+          "epoch": 4,
+          "position": [
+            "402c800000000000",
+            "4049680000000000"
+          ],
+          "velocity": [
+            "3ff0000000000000",
+            "401d000000000000"
+          ]
+        },
+        {
+          "archetype": "Buoy",
+          "netId": 11,
+          "epoch": 5,
+          "position": [
+            "407f480000000000",
+            "4082c20000000000"
+          ],
+          "velocity": [
+            "4000000000000000",
+            "3ff0000000000000"
+          ]
+        },
+        {
+          "archetype": "Drone",
+          "netId": 100,
+          "epoch": 2,
+          "position": [
+            "c068fe0000000000",
+            "c043ff8000000000",
+            "4072c20000000000"
+          ],
+          "velocity": [
+            "3fd0000000000000",
+            "3f90000000000000",
+            "3fe0000000000000"
+          ]
+        }
+      ]
+    }
+  ]
+}

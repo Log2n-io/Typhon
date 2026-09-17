@@ -22,6 +22,9 @@ internal static class GoldenFiles
 
     internal static byte[] ReadBin(string name) => File.ReadAllBytes(Path.Combine(Directory(), name + ".bin"));
 
+    /// <summary>The committed expectation of a vector, for the few assertions that read it rather than regenerate it.</summary>
+    internal static JsonNode ReadJson(string name) => JsonNode.Parse(File.ReadAllText(Path.Combine(Directory(), name + ".json")));
+
     /// <summary>Asserts bytes and expectation equal the committed vector, or rewrites it under <c>TYPHON_UPDATE_GOLDEN=1</c>.</summary>
     internal static void Assert(string name, byte[] bytes, JsonObject expectation)
     {
@@ -135,10 +138,11 @@ internal static class StreamSnapshot
                 var entity = new JsonObject { ["netId"] = a.NetIds[slot] };
                 if (a.Dims > 0)
                 {
-                    entity["position"] = GoldenFiles.Bits(a.Position.AsSpan(slot * a.Dims, a.Dims));
-                    entity["velocity"] = GoldenFiles.Bits(a.Velocity.AsSpan(slot * a.Dims, a.Dims));
-                    entity["t0"] = a.T0[slot];
-                    entity["epoch"] = a.Epoch[slot];
+                    // The newest segment of the ring, which is what the TypeScript store renders too.
+                    entity["position"] = GoldenFiles.Bits(a.HeadPosition(slot));
+                    entity["velocity"] = GoldenFiles.Bits(a.HeadVelocity(slot));
+                    entity["t0"] = a.HeadT0(slot);
+                    entity["epoch"] = a.HeadEpoch(slot);
                 }
 
                 entity["fields"] = fields;

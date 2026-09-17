@@ -995,6 +995,16 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     public OverloadLevel CurrentOverloadLevel => _overloadDetector.CurrentLevel;
 
     /// <summary>
+    /// The multiplier the current tick's deadline was computed with: 1 normally, 2-6 while the runtime is dilating time under overload.
+    /// </summary>
+    /// <remarks>
+    /// Written by <see cref="ComputeAndRecordTelemetry"/> at the end of a tick, for the next one, and read on the same timer thread — so a plain field access
+    /// is the whole protocol. Replication reads it at tick start to publish the CURRENT tick period, which a client turns into its tick-to-time map: the
+    /// nominal period alone would make a dilated tick look like a dropped frame.
+    /// </remarks>
+    internal int CurrentTickMultiplier => _tickMultiplier;
+
+    /// <summary>
     /// Lost wakes that cost a worker its between-tick backstop (50 ms), since the scheduler was built: the backstop fired after a dispatch whose Set never
     /// reached the worker. Non-zero means the wake protocol is broken. Zero does not prove it is not: a lost wake that the next dispatch's Set rescues before
     /// the backstop fires leaves nothing to count, so at tick rates faster than the backstop most would go unseen. Per tick:
