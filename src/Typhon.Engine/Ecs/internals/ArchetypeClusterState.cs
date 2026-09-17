@@ -61,7 +61,9 @@ internal sealed unsafe partial class ArchetypeClusterState
     //   EnqueuePromotedAppliesBulk     — bulk append to PendingPromotedApplies (AabbRefresh's divert of promoted cells)
     //   EnqueueRepairNominationsBulk   — bulk append to the repair nomination list (ArchetypeClusterState.Repair.cs)
     //   RegisterPrepSliceCrossings     — a Prep slice filing its cell crossings under its own slice key
-    //   AllocateNewClusterLatched      — the repair path's cluster allocation; the twin of TryClaimSlotInCluster's slow path
+    //   AllocateNewClusterLatched      — both ClaimSlot overloads' new-cluster path (#842); the twin of TryClaimSlotInCluster's slow path. NOT the repair
+    //                                    path, which this line named until #582 face 2: repair allocates through AllocateEmptyClusterForCell and takes no
+    //                                    latch at all. A wrong entry here is worse than a missing one — this list is what the next reader reasons from
     //   EnsureClusterVisibilityCapacity — GROWTH ONLY, behind a double-checked length compare; the fold itself never takes it. Serializing growers against
     //                                    each other is not the whole fix — see NoteClusterBorn for why a fold must also re-read the array reference after
     //                                    its CAS — but it is the half that stops two growers dropping each other's copy.
@@ -2336,7 +2338,18 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <summary>Monotonic counter, incremented by <see cref="AddToActiveList"/> and <see cref="RemoveFromActiveList"/>.
     /// Consumed by <see cref="TierClusterIndex.RebuildIfStale"/> to short-circuit when no cluster has been added or removed since the last rebuild. Issue #231.
     /// </summary>
-    public int ClusterSetVersion { get; private set; }
+    private int _clusterSetVersion;
+
+    /// <summary>
+    /// Bumped by <see cref="AddToActiveList"/> and <see cref="RemoveFromActiveList"/>; read by <c>TierClusterIndex.RebuildIfStale</c> as a staleness hint.
+    /// </summary>
+    /// <remarks>
+    /// <b>Interlocked, because a lost update is silent and permanent.</b> It was a plain <c>++</c> on both writers. Two spawns racing there lose one
+    /// increment, the version lands back on a value <c>TierClusterIndex</c> has already recorded as its own, and <c>RebuildIfStale</c> then skips a rebuild
+    /// it needed — serving a stale tier list for the rest of the run rather than for a tick. The read is an acquire so a reader that sees the new version
+    /// also sees the list change that caused it.
+    /// </remarks>
+    public int ClusterSetVersion => Volatile.Read(ref _clusterSetVersion);
 
     /// <summary>Lazily-allocated per-archetype tier index (issue #231). Built on demand by <c>TyphonRuntime.OnParallelQueryPrepare</c> the first time a
     /// tier-filtered system runs against this archetype. Subsequent rebuilds are version-guarded and usually no-ops.</summary>
@@ -7723,18 +7736,32 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     public void AddToActiveList(int chunkId)
     {
-        if (ActiveClusterCount >= ActiveClusterIds.Length)
+        var n = ActiveClusterCount;
+        var ids = ActiveClusterIds;
+        if (n >= ids.Length)
         {
-            Array.Resize(ref ActiveClusterIds, ActiveClusterIds.Length * 2);
+            // RELEASE 1, and it is NOT redundant with the count release below. A reader that acquires the OLD count and then loads the NEW array derives no
+            // ordering from that release at all, yet it walks entries Array.Copy wrote with plain stores — so on arm64 it can read them before they have
+            // propagated. Array.Resize cannot carry this store: the `ref` assignment inside it is plain, which is why the grow is written out by hand.
+            var grown = new int[ids.Length * 2];
+            Array.Copy(ids, grown, n);
+            Volatile.Write(ref ActiveClusterIds, grown);
+            ids = grown;
         }
 
-        // The array store above is a plain store, deliberately: the release below is what orders it. A Volatile.Write cannot sink a preceding store past
-        // itself, so a reader that ACQUIRES this count is guaranteed to see the grown array. Caching the array in a local first — the obvious way to write
-        // this — is what must not be done: it widens the writer's own (array, count) window and produced an IndexOutOfRange in parallel spawn.
-        ActiveClusterIds[ActiveClusterCount] = chunkId;
-        Volatile.Write(ref ActiveClusterCount, ActiveClusterCount + 1);
+        // Holding the array in a local is safe HERE, and the distinction matters because doing it was a regression once (#582): that version cached the
+        // array BEFORE the resize and appended after, so the store landed in the copy Array.Resize had already abandoned. Reassigning `ids` to the grown
+        // array is what closes that.
+        //
+        // It is also safe against a sibling grower, but NOT for the reason one would reach for first: _finalizeLock does not cover this. The repair path
+        // allocates through AllocateEmptyClusterForCell with no latch at all, and FinishArchetypeFencePrep — which reaches it — is dispatched as a parallel
+        // ArchetypePrep work item, not only from the serial tail. What actually holds is narrower and stronger: Prep work items are ONE PER ARCHETYPE, so
+        // two appenders never share an ArchetypeClusterState, and user-thread structural mutation is excluded for the fence's duration by EW-01's window
+        // (FenceWindow.Open) rather than by any lock. Readers are the unserialised side, which is what the two releases above are for.
+        ids[n] = chunkId;
+        Volatile.Write(ref ActiveClusterCount, n + 1);   // RELEASE 2 — the linearization point
         // Issue #231: any change to the active cluster set invalidates the tier index.
-        ClusterSetVersion++;
+        Interlocked.Increment(ref _clusterSetVersion);
         // Issue #233: ensure dormancy arrays cover the new chunkId, initialize to Active/0.
         if (SleepStates != null)
         {
@@ -7786,7 +7813,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 }
 
                 // Issue #231: any change to the active cluster set invalidates the tier index.
-                ClusterSetVersion++;
+                Interlocked.Increment(ref _clusterSetVersion);
                 return;
             }
         }

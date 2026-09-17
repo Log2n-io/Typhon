@@ -1695,6 +1695,14 @@
     before any parallel system dispatch begins
   invariant Debug: Interlocked.CompareExchange(_rebuildInProgress, 1, 0) == 0
     asserts no concurrent Rebuild calls
+  invariant 🔴 the ClusterSetVersion a Rebuild records is the one it read BEFORE walking the cluster list, never a second read taken after.
+    Recorded after, a spawn landing mid-walk bumps the version, is absent from the list that rebuild produced, and is still covered by the
+    stamp written against it — so RebuildIfStale sees "unchanged" and skips the rebuild that would have picked it up, serving a tier list
+    missing that cluster for the rest of the process rather than for a tick. Captured first, the same interleaving leaves the stamp BEHIND
+    the live version, which costs one redundant rebuild and nothing else. The telemetry pair (OldVersion, NewVersion) uses that same captured
+    value, because two reads of the counter can now legitimately differ and would describe a window the rebuild did not cover.
+    This is NOT what making the counter Interlocked buys (CLUSTERWALK-02): that fixes lost updates between two writers, and the two failures
+    are easy to mistake for one — both end in a stale tier list that never self-corrects
   scope: TierClusterIndex.Rebuild, TierClusterIndex.RebuildIfStale, TyphonRuntime.BuildTierIndexesAtTickStart
   on_violation: parallel readers see partially-written tier arrays → torn reads, wrong cluster lists,
     clusters dispatched to wrong systems

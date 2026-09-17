@@ -305,16 +305,32 @@ applied synchronously inside `Commit()`, not at the fence.
   never loading the array before the count. That yields an array SHORTER than the count about to index it, and it needs no
         instruction reordering to fault — a plain interleaving suffices: read the length-16 array, let a concurrent spawn
         resize and bump the count to 17, read 17, index 16.
-  never a call site reading the pair directly. Every one goes through `TyphonRuntime.ReadActiveClusterList`, because the two
-        sites that already loaded count-first were right by ACCIDENT and nothing stopped the next one from being written
-        either way.
-  enforce `AddToActiveList` stores the grown array plainly and publishes the count with `Volatile.Write`; the release
-          cannot let the preceding array store sink past it, so acquiring the count guarantees seeing the array. Caching
-          either into a local first is what must NOT be done — it widens the writer's own window and reintroduces the fault.
+  never a call site OUTSIDE the fence window reading the pair directly. Every such reader goes through
+        `ArchetypeClusterState.ReadActiveClusterList` — `TyphonRuntime.ReadActiveClusterList` now only delegates to it — because the
+        sites that already loaded count-first were right by ACCIDENT and nothing stopped the next one from being written either way.
+        The exceptions are named rather than implied, because "every one" was false when this clause was first written and a rule that
+        overstates its reach gets discounted wholesale:
+          reopen / rebuild — `RebuildCellState`, `RebuildSpatialStateFromData`, `RebuildClusterAabbs` walk the pair directly and may,
+            because they run at open with no concurrent writer in existence
+          fence-phase passes — `DormancySweep`, `TransitionWakePendingToActive`, `RecomputeDirtyClusterAabbsSlice` likewise, because
+            EW-01's window excludes user-thread structural mutation for the fence's duration. Note the last of these is a PARALLEL slice,
+            not a serial pass: what makes it safe is the window, not single-threadedness, and it clamps its end to the live count anyway
+  enforce `AddToActiveList` publishes the GROWN ARRAY with `Volatile.Write`, then the count with `Volatile.Write` — TWO
+          releases, and the first is not redundant. A reader that acquires the OLD count and loads the NEW array derives no
+          ordering from the count release at all, yet it walks entries `Array.Copy` wrote with plain stores; that quadrant is
+          reachable and the array release is the only thing ordering it. `Array.Resize` cannot carry it — the `ref` assignment
+          inside it is a plain store — so the grow is written out by hand.
+          CORRECTED 2026-09-17: this clause said the grown array is stored PLAINLY and that holding it in a local is what must
+          not be done. Both were written against `Array.Resize`, where there is no local to hold; under the hand-written grow
+          the local is REQUIRED and is safe because it is reassigned to the grown array. What must not be done is narrower
+          than the old text claimed: caching the array ACROSS the resize and appending afterwards, which puts the append in the
+          copy `Array.Resize` abandoned — the regression `be05c594` fixed, and the reason this shape is spelled out.
   scope: ArchetypeClusterState.AddToActiveList / RemoveFromActiveList (writer), ArchetypeClusterState.ReadActiveClusterList
          (the one reader) and its callers — TyphonRuntime.ReadActiveClusterList, which now only delegates, and through it the
          dormancy promote, the checkerboard promote and the dispatch capture in OnParallelQueryPrepare (the chunk-partition sites
-         read that capture, never the pair: CD-02), plus EcsQuery.TryCountViaOccupancy
+         read that capture, never the pair: CD-02), plus EcsQuery.TryCountViaOccupancy, ClusterEnumerator.Create and
+         ClusterEnumerator.CreateScoped (reached from the PUBLIC ArchetypeAccessor.GetClusterEnumerator), TierClusterIndex and
+         StatisticsRebuilder — the last of these being the only reader on a thread no tick phase bounds
   on_violation: `IndexOutOfRangeException` out of the parallel-query prepare, on a worker thread. LOUD, which is the only
                 good thing about it.
   rationale: #582 face 2. Note what this rule does NOT give: it makes the pair CONSISTENT, not the walk SAFE. A walker
@@ -325,6 +341,12 @@ applied synchronously inside `Commit()`, not at the fence.
             does not work: a 40 000-add spin, about twelve resizes, landed inside the two-instruction window zero times in
             three runs, so a stress test would assert only that a safe order is safe. One case positively demonstrates the
             removed order producing `count > ids.Length` rather than merely asserting the new one does not.
+            NOT covered by any of them: that the array publication is a RELEASE rather than a plain store. All four assert
+            single-threaded observations after the fact — the element is present, the prior elements survived, the count is
+            within the array — and every one of those holds identically whether the array is published by `Volatile.Write`
+            or by `Array.Resize`'s plain `ref` assignment. The clause is upheld by the enforce text and by review, not by a
+            test, because x64 gives the same answer either way and the quadrant it protects needs a weak model to observe.
+            Reverting the hand-written grow to `Array.Resize` would leave all four cases green.
 
 ## Module: CLUSTERVIS — The per-cluster MVCC visibility summary (H1)
 

@@ -71,8 +71,17 @@ internal sealed class TierClusterIndex
             Array.Fill(_mergedCounts, -1);
 
             var cellMap = state.ClusterCellMap;
-            var activeIds = state.ActiveClusterIds;
-            int active = state.ActiveClusterCount;
+
+            // Read the version BEFORE the walk, and record THIS value at the end rather than re-reading it there. Recorded after, a spawn landing mid-walk
+            // bumps the version, is absent from the list this rebuild produced, and is nonetheless covered by the version stamped against it — so
+            // RebuildIfStale sees "unchanged" and skips the rebuild that would have picked it up, serving a tier list missing that cluster for the rest of
+            // the run. Captured first, the same interleaving leaves the stamp behind the live version, which merely costs one redundant rebuild. Making
+            // the counter Interlocked fixes lost updates; it does nothing about this, and the two were easy to mistake for one problem.
+            var versionAtWalk = state.ClusterSetVersion;
+
+            // CLUSTERWALK-02: count first, then the array, through the one reader. Loading the array first — which this did — pairs an old array with a
+            // count a concurrent spawn has already grown past.
+            var activeIds = state.ReadActiveClusterList(out var active);
             for (int i = 0; i < active; i++)
             {
                 int chunkId = activeIds[i];
@@ -115,7 +124,7 @@ internal sealed class TierClusterIndex
             }
 
             _lastGridTierVersion = grid.TierVersion;
-            _lastClusterSetVersion = state.ClusterSetVersion;
+            _lastClusterSetVersion = versionAtWalk;
             RebuildCount++;
 
             // Sum cluster counts across all tiers for the span payload.
@@ -126,7 +135,9 @@ internal sealed class TierClusterIndex
             }
 
             rebuildScope.ClusterCount = total;
-            rebuildScope.NewVersion = state.ClusterSetVersion;
+            // The same captured value, not a second Volatile.Read: two reads of a now-volatile counter can differ, which would make the telemetry pair
+            // (OldVersion, NewVersion) describe a window this rebuild did not actually cover.
+            rebuildScope.NewVersion = versionAtWalk;
         }
         finally
         {

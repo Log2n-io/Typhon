@@ -1153,9 +1153,12 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
             result._transientAccessor = transientSegment.CreateChunkAccessor();
             result._hasTransientAccessor = true;
         }
-        result._clusterIds = state.ActiveClusterIds;
+        // CLUSTERWALK-02: one pair read, count-acquired first. Reading the array here and the count on the next line was the forbidden quadrant — it needs
+        // no instruction reordering to fault, just a concurrent spawn resizing between the two lines. This is a PUBLIC entry point (ArchetypeAccessor
+        // .GetClusterEnumerator), so the walk it hands out is the one a consumer writes without knowing any of this.
+        result._clusterIds = state.ReadActiveClusterList(out var count);
         result._index = -1;
-        result._endIndex = state.ActiveClusterCount;
+        result._endIndex = count;
         return result;
     }
 
@@ -1179,9 +1182,12 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
             result._transientAccessor = transientSegment.CreateChunkAccessor();
             result._hasTransientAccessor = true;
         }
-        result._clusterIds = state.ActiveClusterIds;
+        // CLUSTERWALK-02, and the clamp is the point: the caller's range came from a count captured earlier, so pairing it with a freshly read array is
+        // only sound once the range is narrowed to what THIS array actually holds. Narrowing is the benign direction — a worker walks fewer clusters, never
+        // past the end. Widening would be the fault.
+        result._clusterIds = state.ReadActiveClusterList(out var count);
         result._index = startIndex - 1;
-        result._endIndex = endIndex;
+        result._endIndex = Math.Min(endIndex, count);
         return result;
     }
 
