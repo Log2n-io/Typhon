@@ -1,0 +1,185 @@
+{
+  "description": "COMMANDS against catalog-kitchen-sink: a ClientRegion quad at built-in index 0, then Steer at 16 twice, seq wrapping 65535 \u2192 0.",
+  "catalog": "catalog-kitchen-sink",
+  "inputs": [
+    {
+      "type": "ClientRegion",
+      "seq": 65534,
+      "values": {
+        "vertices": [
+          "c059000000000000",
+          "c059000000000000",
+          "4059000000000000",
+          "c059000000000000",
+          "4062c00000000000",
+          "4069000000000000",
+          "c062c00000000000",
+          "4069000000000000"
+        ],
+        "altitudeM": [
+          "4075e80000000000"
+        ],
+        "budgetKiBps": [
+          "4080000000000000"
+        ]
+      }
+    },
+    {
+      "type": "Steer",
+      "seq": 65535,
+      "values": {
+        "heading": [
+          "3ff4000000000000"
+        ],
+        "boost": [
+          "3ff0000000000000"
+        ],
+        "speed": [
+          "3fe8000000000000"
+        ],
+        "stance": [
+          "4000000000000000"
+        ],
+        "note": "676f"
+      }
+    },
+    {
+      "type": "Steer",
+      "seq": 0,
+      "values": {
+        "heading": [
+          "c008000000000000"
+        ],
+        "boost": [
+          "0000000000000000"
+        ],
+        "speed": [
+          "0000000000000000"
+        ],
+        "stance": [
+          "0000000000000000"
+        ],
+        "note": ""
+      }
+    }
+  ],
+  "clientTick": 69990,
+  "log": [
+    {
+      "call": "command",
+      "type": "ClientRegion",
+      "idx": 0,
+      "seq": 65534,
+      "clientTick": 69990
+    },
+    {
+      "call": "number",
+      "field": "altitudeM",
+      "values": [
+        "4075e80000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "budgetKiBps",
+      "values": [
+        "4080000000000000"
+      ]
+    },
+    {
+      "call": "list",
+      "field": "vertices",
+      "count": 4,
+      "values": [
+        "c059000000000000",
+        "c059000000000000",
+        "4059000000000000",
+        "c059000000000000",
+        "4062c00000000000",
+        "4069000000000000",
+        "c062c00000000000",
+        "4069000000000000"
+      ]
+    },
+    {
+      "call": "command",
+      "type": "Steer",
+      "idx": 16,
+      "seq": 65535,
+      "clientTick": 69990
+    },
+    {
+      "call": "number",
+      "field": "boost",
+      "values": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "stance",
+      "values": [
+        "4000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "heading",
+      "values": [
+        "3ff40714472653ef"
+      ]
+    },
+    {
+      "call": "text",
+      "field": "note",
+      "utf8": "676f"
+    },
+    {
+      "call": "number",
+      "field": "speed",
+      "values": [
+        "3fe7f7f7f7f7f7f8"
+      ]
+    },
+    {
+      "call": "command",
+      "type": "Steer",
+      "idx": 16,
+      "seq": 0,
+      "clientTick": 69990
+    },
+    {
+      "call": "number",
+      "field": "boost",
+      "values": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "stance",
+      "values": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "heading",
+      "values": [
+        "c007f4638c50fafb"
+      ]
+    },
+    {
+      "call": "text",
+      "field": "note",
+      "utf8": ""
+    },
+    {
+      "call": "number",
+      "field": "speed",
+      "values": [
+        "0000000000000000"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "description": "i8 at its extremes and zero.",
+  "codec": {
+    "t": "i8"
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "c060000000000000"
+      ],
+      "offset": 0,
+      "length": 1,
+      "decoded": [
+        "c060000000000000"
+      ]
+    },
+    {
+      "input": [
+        "0000000000000000"
+      ],
+      "offset": 1,
+      "length": 1,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "405fc00000000000"
+      ],
+      "offset": 2,
+      "length": 1,
+      "decoded": [
+        "405fc00000000000"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,80 @@
+{
+  "description": "unorm at 8 bits (W6): 0, 1, 0.5 \u2192 128, 1/255, over-range and NaN.",
+  "codec": {
+    "t": "unorm",
+    "bits": 8
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "0000000000000000"
+      ],
+      "offset": 0,
+      "length": 1,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3ff0000000000000"
+      ],
+      "offset": 1,
+      "length": 1,
+      "decoded": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3fe0000000000000"
+      ],
+      "offset": 2,
+      "length": 1,
+      "decoded": [
+        "3fe0101010101010"
+      ]
+    },
+    {
+      "input": [
+        "3f70101010101010"
+      ],
+      "offset": 3,
+      "length": 1,
+      "decoded": [
+        "3f70101010101010"
+      ]
+    },
+    {
+      "input": [
+        "3ff8000000000000"
+      ],
+      "offset": 4,
+      "length": 1,
+      "decoded": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "bfe0000000000000"
+      ],
+      "offset": 5,
+      "length": 1,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "nan"
+      ],
+      "offset": 6,
+      "length": 1,
+      "decoded": [
+        "0000000000000000"
+      ]
+    }
+  ]
+}

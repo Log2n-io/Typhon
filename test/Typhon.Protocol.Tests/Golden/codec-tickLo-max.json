@@ -1,0 +1,29 @@
+{
+  "description": "tickLo against the largest frame tick, 2\u00B3\u00B2 \u2212 1.",
+  "codec": {
+    "t": "tickLo"
+  },
+  "frameTick": 4294967295,
+  "cases": [
+    {
+      "input": [
+        "41efffffffe00000"
+      ],
+      "offset": 0,
+      "length": 2,
+      "decoded": [
+        "41efffffffe00000"
+      ]
+    },
+    {
+      "input": [
+        "41efffe000000000"
+      ],
+      "offset": 2,
+      "length": 2,
+      "decoded": [
+        "41efffe000000000"
+      ]
+    }
+  ]
+}

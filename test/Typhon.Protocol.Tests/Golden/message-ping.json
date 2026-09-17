@@ -1,0 +1,8 @@
+{
+  "description": "PING.",
+  "type": 132,
+  "message": {
+    "clientMs": 123456,
+    "lastAppliedTick": 69999
+  }
+}

@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <LangVersion>default</LangVersion>
+        <RootNamespace>Typhon.Client</RootNamespace>
+        <!-- XML doc file: the SDK is a product, raised to the engine's documentation bar (05-sdks § 3). -->
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <!-- Zero-warning policy, matching Typhon.Engine and Typhon.Profiler. -->
+        <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+        <!-- Packaged with the release work (07-delivery § 5), not before: release.yml packs every packable project. -->
+        <IsPackable>false</IsPackable>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\Typhon.Protocol\Typhon.Protocol.csproj" />
+    </ItemGroup>
+
+</Project>

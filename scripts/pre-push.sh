@@ -159,6 +159,18 @@ else
 fi
 suite_step "workbench suite (Release)" "$WORKBENCH" pre-push-workbench.trx
 
+# ── client SDKs (gate: subscriptions-sdk) ────────────────────────────────────────────────────────────────────────────
+CLIENT=test/Typhon.Client.Tests/Typhon.Client.Tests.csproj
+if [ "$BUILD" -eq 1 ]; then
+  step "build client tests (Release)" dotnet build "$CLIENT" -c Release
+fi
+suite_step "client suite (Release)" "$CLIENT" pre-push-client.trx
+if command -v npm >/dev/null 2>&1; then
+  step "TypeScript SDK check (gate: subscriptions-sdk)" bash -c 'cd src/Typhon.Client.TypeScript && npm ci --silent && npm run check'
+else
+  printf '\n\033[33m   SKIP\033[0m  TypeScript SDK check — Node is not installed; the gate runs it on subscriptions-sdk\n'
+fi
+
 echo ""
 if [ "$RC" -eq 0 ]; then
   printf '\033[32mAll gate-equivalent checks passed.\033[0m\n'

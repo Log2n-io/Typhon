@@ -1,0 +1,79 @@
+{
+  "description": "A section with packed fields 3 \u002B 6 \u002B 1 \u002B 24 bits (a 5-byte pack, padding zero) followed by a byte-aligned u8 (W12).",
+  "fields": [
+    {
+      "name": "a",
+      "codec": {
+        "t": "bits",
+        "n": 3
+      },
+      "bitOffset": 0
+    },
+    {
+      "name": "b",
+      "codec": {
+        "t": "bits",
+        "n": 6
+      },
+      "bitOffset": 3
+    },
+    {
+      "name": "c",
+      "codec": {
+        "t": "bool"
+      },
+      "bitOffset": 9
+    },
+    {
+      "name": "d",
+      "codec": {
+        "t": "bits",
+        "n": 24
+      },
+      "bitOffset": 10
+    },
+    {
+      "name": "e",
+      "codec": {
+        "t": "u8"
+      },
+      "bitOffset": -1
+    }
+  ],
+  "packBytes": 5,
+  "cases": [
+    {
+      "values": {
+        "a": "4014000000000000",
+        "b": "4045000000000000",
+        "c": "3ff0000000000000",
+        "d": "416579bde0000000",
+        "e": "401c000000000000"
+      },
+      "offset": 0,
+      "length": 6
+    },
+    {
+      "values": {
+        "a": "401c000000000000",
+        "b": "404f800000000000",
+        "c": "0000000000000000",
+        "d": "416fffffe0000000",
+        "e": "406fe00000000000"
+      },
+      "offset": 6,
+      "length": 6
+    },
+    {
+      "values": {
+        "a": "0000000000000000",
+        "b": "0000000000000000",
+        "c": "3ff0000000000000",
+        "d": "0000000000000000",
+        "e": "0000000000000000"
+      },
+      "offset": 12,
+      "length": 6
+    }
+  ]
+}

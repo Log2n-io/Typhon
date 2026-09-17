@@ -1,0 +1,9 @@
+{
+  "description": "PONG with usIntoTick 99 999, which a u16 could not hold (W31).",
+  "type": 3,
+  "message": {
+    "clientMs": 123456,
+    "tick": 70000,
+    "usIntoTick": 99999
+  }
+}

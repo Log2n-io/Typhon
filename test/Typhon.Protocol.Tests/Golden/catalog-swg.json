@@ -1,5 +1,5 @@
 {
-  "description": "The worked example from 03-wire-protocol \u00A7 4: quantized position with motion, a bit-packed enum, an enter-only field, one event, one command, one grid and one metric.",
-  "hash": "689b085895503760",
-  "byteCount": 1939
+  "description": "The worked example from 03-wire-protocol \u00A7 4 in its decided shape: moving positions, a packed enum, onEnter fields, ClientRegion.",
+  "hash": "39044b7a054f7f28",
+  "byteCount": 1972
 }

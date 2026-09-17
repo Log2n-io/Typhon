@@ -1,0 +1,159 @@
+{
+  "description": "f16 (W10): 65504, overflow to \u221E at 65520, subnormals and their carry, the tie 1 \u002B 2\u207B\u00B9\u00B9 to even, double rounding, NaN as 0x7E00.",
+  "codec": {
+    "t": "f16"
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "0000000000000000"
+      ],
+      "offset": 0,
+      "length": 2,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "8000000000000000"
+      ],
+      "offset": 2,
+      "length": 2,
+      "decoded": [
+        "8000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3ff0000000000000"
+      ],
+      "offset": 4,
+      "length": 2,
+      "decoded": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "40effc0000000000"
+      ],
+      "offset": 6,
+      "length": 2,
+      "decoded": [
+        "40effc0000000000"
+      ]
+    },
+    {
+      "input": [
+        "40effdffae147ae1"
+      ],
+      "offset": 8,
+      "length": 2,
+      "decoded": [
+        "40effc0000000000"
+      ]
+    },
+    {
+      "input": [
+        "40effe0000000000"
+      ],
+      "offset": 10,
+      "length": 2,
+      "decoded": [
+        "7ff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3e70000000000000"
+      ],
+      "offset": 12,
+      "length": 2,
+      "decoded": [
+        "3e70000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3e60000000000000"
+      ],
+      "offset": 14,
+      "length": 2,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3e78000000000000"
+      ],
+      "offset": 16,
+      "length": 2,
+      "decoded": [
+        "3e80000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3f0ffc0000000000"
+      ],
+      "offset": 18,
+      "length": 2,
+      "decoded": [
+        "3f10000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3ff0020000000000"
+      ],
+      "offset": 20,
+      "length": 2,
+      "decoded": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3ff0020000000001"
+      ],
+      "offset": 22,
+      "length": 2,
+      "decoded": [
+        "3ff0040000000000"
+      ]
+    },
+    {
+      "input": [
+        "7ff0000000000000"
+      ],
+      "offset": 24,
+      "length": 2,
+      "decoded": [
+        "7ff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "fff0000000000000"
+      ],
+      "offset": 26,
+      "length": 2,
+      "decoded": [
+        "fff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "nan"
+      ],
+      "offset": 28,
+      "length": 2,
+      "decoded": [
+        "nan"
+      ]
+    }
+  ]
+}

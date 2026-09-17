@@ -1,0 +1,14 @@
+{
+  "description": "HELLO with every optional field present.",
+  "type": 129,
+  "message": {
+    "major": 2,
+    "minor": 0,
+    "caps": 3,
+    "kind": "player",
+    "token": "6f70617175652d746f6b656e",
+    "resumeToken": "0102030405060708090a0b0c0d0e0f10",
+    "clientCatalogHash": "689b085895503760",
+    "helloPayload": "cafe"
+  }
+}

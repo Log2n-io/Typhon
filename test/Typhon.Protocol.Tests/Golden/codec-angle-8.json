@@ -1,0 +1,30 @@
+{
+  "description": "angle at 8 bits.",
+  "codec": {
+    "t": "angle",
+    "bits": 8
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "3ff0000000000000"
+      ],
+      "offset": 0,
+      "length": 1,
+      "decoded": [
+        "3ff019c501fbace3"
+      ]
+    },
+    {
+      "input": [
+        "c008000000000000"
+      ],
+      "offset": 1,
+      "length": 1,
+      "decoded": [
+        "c007f4638c50fafb"
+      ]
+    }
+  ]
+}

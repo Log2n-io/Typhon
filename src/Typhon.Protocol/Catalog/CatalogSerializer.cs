@@ -1,30 +1,39 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace Typhon.Protocol;
 
+/// <summary>A catalog ready to serve: its canonical form, the bytes <c>WELCOME</c> carries, and their digest, produced together.</summary>
+/// <param name="Canonical">The canonical catalog.</param>
+/// <param name="Utf8">Its canonical UTF-8 JSON.</param>
+/// <param name="Hash">The FNV-1a 64 digest of <paramref name="Utf8"/>.</param>
+public sealed record CatalogExport(Catalog Canonical, byte[] Utf8, ulong Hash);
+
 /// <summary>
-/// Turns a <see cref="Catalog"/> into the canonical bytes that travel in <c>WELCOME</c>, and into the digest a returning client offers back to skip them.
+/// Turns a <see cref="Catalog"/> into the canonical bytes that travel in <c>WELCOME</c>, into the digest a returning client offers back to skip them, and
+/// back from bytes into a catalog.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Canonical means declaration-order-independent.</b> <see cref="Canonicalize"/> sorts every named collection ordinally and then assigns each entry's
-/// <c>idx</c> from that order. Sorting alone would not be enough: <c>idx</c> is the <i>wire</i> index, so if it came from declaration order, reordering two
-/// archetypes in the application's registration code would change what the bytes mean while leaving the digest free to stay the same. Deriving the index from
-/// the sort makes both stable — reordering declarations changes neither the wire nor the hash, while renaming or adding a field changes both.
+/// <b>Canonical means declaration-order-independent.</b> <see cref="Canonicalize"/> sorts every named collection ordinally and assigns each entry's
+/// <c>idx</c> from that order — except built-in commands and metrics, whose indices are reserved and never move, so enabling one cannot renumber the
+/// application's entries (W27). Sorting alone would not be enough: <c>idx</c> is the <i>wire</i> index, so if it came from declaration order, reordering two
+/// archetypes in registration code would change what the bytes mean. A grid's archetype list is remapped along with the archetypes it names.
 /// </para>
 /// <para>
-/// <b>The digest folds the structure, not the JSON text.</b> <see cref="CanonicalHashBuilder"/> exists for exactly this: UTF-8 bytes so the value does not
-/// move between processes, fixed-width little-endian integers so it does not move between architectures, and an explicit end-of-entry separator so
-/// <c>("Ab", 1)</c> cannot collide with <c>("A", …)</c> by concatenation. Hashing the serialized text instead would make the digest hostage to serializer
-/// settings and to how a <c>double</c> happens to render, neither of which is part of the contract.
+/// <b>Field order is wire order (W11).</b> A record body is a concatenation of independently encoded sections — the onEnter section, then one per change
+/// group in canonical order — because a state record is assembled per session from group bodies encoded once. Within a section, packed fields come first
+/// (they share the section's leading pack, W12), then byte-aligned fields, each by ordinal name. The catalog's field array is exactly that order, so no client
+/// ever sorts.
 /// </para>
 /// <para>
-/// <b>Ordering of the enum table.</b> <see cref="Catalog.Enums"/> is a <see cref="Dictionary{TKey,TValue}"/> and canonicalization rebuilds it by inserting
-/// keys in ordinal order. That relies on the framework enumerating a dictionary in insertion order when nothing has been removed — true in practice, and the
-/// reason the digest does not depend on it: the fold sorts the keys itself.
+/// <b>The digest is FNV-1a 64 over the canonical bytes</b> (03-wire-protocol § 4). Hashing the bytes rather than folding the structure means nothing that
+/// reaches the wire can be left out of the digest by forgetting to fold it, and two catalogs that serialize identically cannot differ in digest. The price is
+/// that a change to how the serializer formats a value moves every digest once — one catalog resend per client, which the golden vectors make visible.
 /// </para>
 /// </remarks>
 public static class CatalogSerializer
@@ -32,25 +41,37 @@ public static class CatalogSerializer
     private static readonly JsonSerializerOptions CanonicalOptions = CatalogJsonContext.Default.Options;
 
     /// <summary>
-    /// Returns an equivalent catalog in canonical form: every named collection ordinally sorted, and every <c>idx</c> assigned from that order.
+    /// Validates <paramref name="catalog"/> and returns an equivalent catalog in canonical form: every named collection sorted, indices assigned, fields in
+    /// wire order.
     /// </summary>
     /// <param name="catalog">The catalog as the application declared it.</param>
-    /// <returns>A new catalog; the input is not modified.</returns>
+    /// <returns>A new catalog; the input is not modified, though leaf values (codecs, positions, label arrays) are shared with it.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="catalog"/> is <see langword="null"/>.</exception>
+    /// <exception cref="CatalogException">The catalog breaks a wire rule.</exception>
     public static Catalog Canonicalize(Catalog catalog)
     {
-        ArgumentNullException.ThrowIfNull(catalog);
+        CatalogValidator.Validate(catalog);
 
-        var archetypes = Sorted(catalog.Archetypes, static (a, b) => string.CompareOrdinal(a.Name, b.Name));
+        var declared = catalog.Archetypes ?? [];
+        var archetypes = Sorted(declared, static (a, b) => string.CompareOrdinal(a.Name, b.Name));
+        var canonicalIdxOfDeclared = new int[declared.Length];
+        for (var i = 0; i < declared.Length; i++)
+        {
+            canonicalIdxOfDeclared[i] = Array.IndexOf(archetypes, declared[i]);
+        }
+
         for (var i = 0; i < archetypes.Length; i++)
         {
             var a = archetypes[i];
+            var groups = SortedStrings(a.Groups);
             archetypes[i] = new CatalogArchetype
             {
                 Idx = i,
                 Name = a.Name,
-                Groups = SortedStrings(a.Groups),
-                Fields = SortedFields(a.Fields),
+                Groups = groups,
+                Position = a.Position,
+                Fields = SortedArchetypeFields(a.Fields, groups),
+                Owner = a.Owner == null ? null : CanonicalOwner(a.Owner),
             };
         }
 
@@ -58,25 +79,30 @@ public static class CatalogSerializer
         for (var i = 0; i < events.Length; i++)
         {
             var e = events[i];
-            events[i] = new CatalogEvent { Idx = i, Name = e.Name, Scope = e.Scope, Fields = SortedFields(e.Fields) };
+            events[i] = new CatalogEvent
+            {
+                Idx = ProtocolConstants.FirstAppEventIdx + i, Name = e.Name, Scope = e.Scope, Fields = SortedMessageFields(e.Fields),
+            };
         }
 
-        var commands = Sorted(catalog.Commands, static (a, b) => string.CompareOrdinal(a.Name, b.Name));
-        for (var i = 0; i < commands.Length; i++)
+        var commands = CanonicalCommands(catalog.Commands);
+        var metrics = CanonicalMetrics(catalog.Metrics);
+
+        var grids = new CatalogGrid[catalog.Grids?.Length ?? 0];
+        for (var i = 0; i < grids.Length; i++)
         {
-            var c = commands[i];
-            commands[i] = new CatalogCommand { Idx = i, Name = c.Name, Delivery = c.Delivery, Rate = c.Rate, Fields = SortedFields(c.Fields) };
+            var g = catalog.Grids[i];
+            var mapped = new int[g.Archetypes?.Length ?? 0];
+            for (var j = 0; j < mapped.Length; j++)
+            {
+                mapped[j] = canonicalIdxOfDeclared[g.Archetypes[j]];
+            }
+
+            grids[i] = new CatalogGrid { Origin = g.Origin, Cell = g.Cell, Dims = g.Dims, Archetypes = mapped };
         }
 
-        var metrics = Sorted(catalog.Metrics, static (a, b) => string.CompareOrdinal(a.Name, b.Name));
-        for (var i = 0; i < metrics.Length; i++)
-        {
-            var m = metrics[i];
-            metrics[i] = new CatalogMetric { Idx = i, Name = m.Name, Unit = m.Unit, Codec = m.Codec };
-        }
-
-        // Grids have no name to sort by, so they sort by the geometry that distinguishes them: origin first, then cell size.
-        var grids = Sorted(catalog.Grids, static (a, b) => CompareGrids(a, b));
+        // Grids have no name to sort by, so they sort by every field that distinguishes them; the validator refuses exact duplicates, so the order is total.
+        Array.Sort(grids, CompareGrids);
         for (var i = 0; i < grids.Length; i++)
         {
             var g = grids[i];
@@ -88,6 +114,8 @@ public static class CatalogSerializer
             Protocol = catalog.Protocol,
             App = catalog.App,
             Tick = catalog.Tick,
+            Limits = catalog.Limits,
+            SessionKinds = SortedStrings(catalog.SessionKinds),
             Archetypes = archetypes,
             Enums = SortedEnums(catalog.Enums),
             Events = events,
@@ -98,212 +126,213 @@ public static class CatalogSerializer
     }
 
     /// <summary>
+    /// Canonicalizes <paramref name="catalog"/> once and returns the canonical form, its bytes and their digest together — what a server serves, computed
+    /// in one pass so the bytes and the digest cannot describe two different declarations.
+    /// </summary>
+    /// <param name="catalog">The catalog as the application declared it.</param>
+    /// <returns>The export.</returns>
+    public static CatalogExport Export(Catalog catalog)
+    {
+        var canonical = Canonicalize(catalog);
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(canonical, CanonicalOptions);
+        return new CatalogExport(canonical, bytes, HashBytes(bytes));
+    }
+
+    /// <summary>
     /// Canonicalizes <paramref name="catalog"/> and serializes it to the UTF-8 bytes that travel in <c>WELCOME</c>: no insignificant whitespace, camelCase
     /// names, and defaulted parameters omitted.
     /// </summary>
     /// <param name="catalog">The catalog to serialize.</param>
     /// <returns>The canonical UTF-8 bytes.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="catalog"/> is <see langword="null"/>.</exception>
-    public static byte[] ToCanonicalUtf8(Catalog catalog) => JsonSerializer.SerializeToUtf8Bytes(Canonicalize(catalog), CanonicalOptions);
+    public static byte[] ToCanonicalUtf8(Catalog catalog) => Export(catalog).Utf8;
+
+    /// <summary>Canonicalizes <paramref name="catalog"/> and returns the digest of its canonical bytes, which a client presents to skip the catalog.</summary>
+    /// <param name="catalog">The catalog to digest.</param>
+    /// <returns>The digest; on the wire it travels as eight little-endian bytes (W20).</returns>
+    public static ulong ComputeHash(Catalog catalog) => Export(catalog).Hash;
+
+    /// <summary>The FNV-1a 64 digest of catalog bytes.</summary>
+    /// <param name="utf8">Canonical catalog bytes.</param>
+    /// <returns>The digest.</returns>
+    public static ulong HashBytes(ReadOnlySpan<byte> utf8)
+    {
+        var hash = CanonicalHashBuilder.Create();
+        hash.AddBytes(utf8);
+        return hash.Value;
+    }
 
     /// <summary>
-    /// Canonicalizes <paramref name="catalog"/> and returns its 64-bit FNV-1a digest as sixteen lower-case hex digits — the token a client presents to
-    /// skip the catalog on a later connection.
+    /// Parses catalog JSON received from a server, validates it, and refuses it unless it is canonical — indices, order and reserved ranges exactly as
+    /// <see cref="Canonicalize"/> would produce them. A decode plan built from a non-canonical catalog would silently map mask bits and indices to the
+    /// wrong fields, so this is a refusal at <c>WELCOME</c>, never a repair.
     /// </summary>
-    /// <param name="catalog">The catalog to digest.</param>
-    /// <returns>Sixteen hexadecimal characters.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="catalog"/> is <see langword="null"/>.</exception>
-    public static string ComputeHash(Catalog catalog)
+    /// <param name="utf8Json">The catalog bytes from <c>WELCOME</c>.</param>
+    /// <returns>The catalog.</returns>
+    /// <exception cref="CatalogException">The JSON is not a catalog, breaks a wire rule, or is not canonical.</exception>
+    public static Catalog FromUtf8(ReadOnlySpan<byte> utf8Json)
     {
-        var c = Canonicalize(catalog);
-        var hash = CanonicalHashBuilder.Create();
-
-        if (c.Protocol != null)
+        Catalog catalog;
+        try
         {
-            hash.AddInt32(c.Protocol.Major);
-            hash.AddInt32(c.Protocol.Minor);
+            catalog = JsonSerializer.Deserialize(utf8Json, CatalogJsonContext.Default.Catalog);
+        }
+        catch (JsonException ex)
+        {
+            throw new CatalogException([$"catalog JSON does not parse: {ex.Message}"]);
         }
 
-        hash.EndEntry();
-
-        if (c.App != null)
+        if (catalog == null)
         {
-            hash.AddUtf8(c.App.Name);
-            hash.AddInt32(c.App.Revision);
+            throw new CatalogException(["catalog JSON is null"]);
         }
 
-        hash.EndEntry();
-
-        if (c.Tick != null)
+        // Validates, then compares the parsed catalog's own serialization with its canonical one. Both go through the model, so a property a newer server
+        // adds is ignored on both sides rather than refused.
+        var canonical = ToCanonicalUtf8(catalog);
+        if (!JsonSerializer.SerializeToUtf8Bytes(catalog, CanonicalOptions).AsSpan().SequenceEqual(canonical))
         {
-            hash.AddInt32(c.Tick.PeriodUs);
-            hash.AddInt32(c.Tick.PingHz);
+            throw new CatalogException(["the catalog is not canonical: an index, an order or a reserved range differs from what canonicalization assigns"]);
         }
 
-        hash.EndEntry();
-
-        foreach (var a in c.Archetypes)
-        {
-            hash.AddInt32(a.Idx);
-            hash.AddUtf8(a.Name);
-            foreach (var g in a.Groups)
-            {
-                hash.AddUtf8(g);
-            }
-
-            hash.EndEntry();
-            FoldFields(ref hash, a.Fields);
-        }
-
-        foreach (var pair in SortedKeys(c.Enums))
-        {
-            hash.AddUtf8(pair);
-            foreach (var name in c.Enums[pair])
-            {
-                hash.AddUtf8(name);
-            }
-
-            hash.EndEntry();
-        }
-
-        foreach (var e in c.Events)
-        {
-            hash.AddInt32(e.Idx);
-            hash.AddUtf8(e.Name);
-            hash.AddUtf8(e.Scope);
-            hash.EndEntry();
-            FoldFields(ref hash, e.Fields);
-        }
-
-        foreach (var cmd in c.Commands)
-        {
-            hash.AddInt32(cmd.Idx);
-            hash.AddUtf8(cmd.Name);
-            hash.AddUtf8(cmd.Delivery);
-            if (cmd.Rate != null)
-            {
-                hash.AddInt32(cmd.Rate.PerSec);
-                hash.AddInt32(cmd.Rate.Burst);
-            }
-
-            hash.EndEntry();
-            FoldFields(ref hash, cmd.Fields);
-        }
-
-        foreach (var g in c.Grids)
-        {
-            hash.AddInt32(g.Idx);
-            FoldDoubles(ref hash, g.Origin);
-            FoldDouble(ref hash, g.Cell);
-            FoldInts(ref hash, g.Dims);
-            FoldInts(ref hash, g.Archetypes);
-            hash.EndEntry();
-        }
-
-        foreach (var m in c.Metrics)
-        {
-            hash.AddInt32(m.Idx);
-            hash.AddUtf8(m.Name);
-            hash.AddUtf8(m.Unit);
-            FoldCodec(ref hash, m.Codec);
-            hash.EndEntry();
-        }
-
-        return hash.ToHex();
+        return catalog;
     }
 
-    private static void FoldFields(ref CanonicalHashBuilder hash, CatalogField[] fields)
+    /// <summary>The digest's display form: sixteen lower-case hex digits, most significant first.</summary>
+    /// <param name="hash">The digest.</param>
+    /// <returns>The hex string.</returns>
+    public static string ToHex(ulong hash) => hash.ToString("x16", CultureInfo.InvariantCulture);
+
+    /// <summary>Writes the digest's wire form, eight little-endian bytes, into <paramref name="destination"/>.</summary>
+    /// <param name="hash">The digest.</param>
+    /// <param name="destination">At least eight bytes.</param>
+    public static void WriteHash(ulong hash, Span<byte> destination) => BinaryPrimitives.WriteUInt64LittleEndian(destination, hash);
+
+    /// <summary>Whether a codec kind is packed into its section's leading bit pack rather than byte-aligned (W12).</summary>
+    /// <param name="kind">The codec kind.</param>
+    /// <returns><see langword="true"/> for <c>bits</c> and <c>bool</c>.</returns>
+    public static bool IsPacked(CodecKind kind) => kind is CodecKind.Bits or CodecKind.Bool;
+
+    private static CatalogCommand[] CanonicalCommands(CatalogCommand[] declared)
     {
-        if (fields == null)
+        var apps = new List<CatalogCommand>();
+        var result = new List<CatalogCommand>();
+        foreach (var cmd in declared ?? [])
         {
-            return;
+            (BuiltInCommands.ReservedIdx(cmd.Name) >= 0 ? result : apps).Add(cmd);
         }
 
-        foreach (var f in fields)
+        apps.Sort(static (a, b) => string.CompareOrdinal(a.Name, b.Name));
+        for (var i = 0; i < result.Count; i++)
         {
-            hash.AddUtf8(f.Name);
-            hash.AddUtf8(f.Group);
-            hash.AddUtf8(f.Enum);
-            hash.AddUtf8(f.Smoothing);
-            FoldCodec(ref hash, f.Codec);
-            if (f.Motion != null)
+            result[i] = Copy(result[i], BuiltInCommands.ReservedIdx(result[i].Name));
+        }
+
+        for (var i = 0; i < apps.Count; i++)
+        {
+            result.Add(Copy(apps[i], ProtocolConstants.FirstAppCommandIdx + i));
+        }
+
+        result.Sort(static (a, b) => a.Idx.CompareTo(b.Idx));
+        return result.ToArray();
+
+        static CatalogCommand Copy(CatalogCommand c, int idx) =>
+            new() { Idx = idx, Name = c.Name, Delivery = c.Delivery, Rate = c.Rate, Fields = SortedMessageFields(c.Fields) };
+    }
+
+    private static CatalogMetric[] CanonicalMetrics(CatalogMetric[] declared)
+    {
+        var apps = new List<CatalogMetric>();
+        var result = new List<CatalogMetric>();
+        foreach (var m in declared ?? [])
+        {
+            var reserved = BuiltInMetrics.ReservedIdx(m.Name);
+            if (reserved >= 0)
             {
-                hash.AddUtf8(f.Motion.Velocity);
-                hash.AddUtf8(f.Motion.Model);
-                hash.AddUtf8(f.Motion.Discontinuity);
-                FoldDouble(ref hash, f.Motion.Tolerance);
+                result.Add(Copy(m, reserved));
             }
-
-            hash.EndEntry();
+            else
+            {
+                apps.Add(m);
+            }
         }
+
+        apps.Sort(static (a, b) => string.CompareOrdinal(a.Name, b.Name));
+        for (var i = 0; i < apps.Count; i++)
+        {
+            result.Add(Copy(apps[i], ProtocolConstants.FirstAppMetricIdx + i));
+        }
+
+        result.Sort(static (a, b) => a.Idx.CompareTo(b.Idx));
+        return result.ToArray();
+
+        static CatalogMetric Copy(CatalogMetric m, int idx) => new()
+        {
+            Idx = idx,
+            Name = m.Name,
+            Unit = m.Unit,
+            Codec = m.Codec,
+            Scope = m.Scope == CatalogMetric.ServerScope ? null : m.Scope,
+            Kind = m.Kind == CatalogMetric.GaugeKind ? null : m.Kind,
+            Labels = m.Labels,
+        };
     }
 
-    private static void FoldCodec(ref CanonicalHashBuilder hash, CatalogCodec codec)
+    private static CatalogOwner CanonicalOwner(CatalogOwner owner)
     {
-        if (codec == null)
-        {
-            return;
-        }
-
-        hash.AddInt32((int)codec.Kind);
-        hash.AddInt32(codec.Bits);
-        hash.AddInt32(codec.QuantaDiv);
-        hash.AddInt32(codec.N);
-        hash.AddInt32(codec.MaxBytes);
-        hash.AddInt32(codec.FixedBytes);
-        hash.AddUtf8(codec.Pack);
-        FoldDouble(ref hash, codec.Scale);
-        FoldDoubles(ref hash, codec.Min);
-        FoldDoubles(ref hash, codec.Max);
+        var groups = SortedStrings(owner.Groups);
+        return new CatalogOwner { Groups = groups, Fields = SortedArchetypeFields(owner.Fields, groups) };
     }
 
-    // Folded as raw IEEE bits rather than a rendered string: a double's text form depends on the formatter, and the digest must not.
-    private static void FoldDouble(ref CanonicalHashBuilder hash, double value) => hash.AddInt64(BitConverter.DoubleToInt64Bits(value));
+    private static CatalogField[] SortedArchetypeFields(CatalogField[] fields, string[] sortedGroups) =>
+        Sorted(fields, (a, b) =>
+        {
+            var bySection = Section(a, sortedGroups).CompareTo(Section(b, sortedGroups));
+            return bySection != 0 ? bySection : CompareWithinSection(a, b);
+        });
 
-    private static void FoldDoubles(ref CanonicalHashBuilder hash, double[] values)
+    private static CatalogField[] SortedMessageFields(CatalogField[] fields) => Sorted(fields, static (a, b) => CompareWithinSection(a, b));
+
+    // Section 0 is the onEnter section; group i is section i + 1.
+    private static int Section(CatalogField f, string[] sortedGroups) => f.OnEnter ? 0 : 1 + Array.IndexOf(sortedGroups, f.Group);
+
+    private static int CompareWithinSection(CatalogField a, CatalogField b)
     {
-        if (values == null)
-        {
-            return;
-        }
-
-        foreach (var v in values)
-        {
-            FoldDouble(ref hash, v);
-        }
-    }
-
-    private static void FoldInts(ref CanonicalHashBuilder hash, int[] values)
-    {
-        if (values == null)
-        {
-            return;
-        }
-
-        foreach (var v in values)
-        {
-            hash.AddInt32(v);
-        }
+        var byPacking = (IsPacked(a.Codec.Kind) ? 0 : 1).CompareTo(IsPacked(b.Codec.Kind) ? 0 : 1);
+        return byPacking != 0 ? byPacking : string.CompareOrdinal(a.Name, b.Name);
     }
 
     private static int CompareGrids(CatalogGrid a, CatalogGrid b)
     {
-        var ao = a.Origin ?? [];
-        var bo = b.Origin ?? [];
-        for (var i = 0; i < Math.Min(ao.Length, bo.Length); i++)
+        var c = CompareSequences(a.Origin ?? [], b.Origin ?? []);
+        if (c != 0)
         {
-            var c = ao[i].CompareTo(bo[i]);
+            return c;
+        }
+
+        c = a.Cell.CompareTo(b.Cell);
+        if (c != 0)
+        {
+            return c;
+        }
+
+        c = CompareSequences(a.Dims ?? [], b.Dims ?? []);
+        return c != 0 ? c : CompareSequences(a.Archetypes ?? [], b.Archetypes ?? []);
+    }
+
+    private static int CompareSequences<T>(T[] a, T[] b)
+        where T : IComparable<T>
+    {
+        for (var i = 0; i < Math.Min(a.Length, b.Length); i++)
+        {
+            var c = a[i].CompareTo(b[i]);
             if (c != 0)
             {
                 return c;
             }
         }
 
-        var byLength = ao.Length.CompareTo(bo.Length);
-        return byLength != 0 ? byLength : a.Cell.CompareTo(b.Cell);
+        return a.Length.CompareTo(b.Length);
     }
-
-    private static CatalogField[] SortedFields(CatalogField[] fields) => Sorted(fields, static (a, b) => string.CompareOrdinal(a.Name, b.Name));
 
     private static string[] SortedStrings(string[] values)
     {
@@ -319,6 +348,7 @@ public static class CatalogSerializer
         return copy;
     }
 
+    // Serialization enumerates a Dictionary in insertion order when nothing was removed, which is what makes this rebuild ordered.
     private static Dictionary<string, string[]> SortedEnums(Dictionary<string, string[]> enums)
     {
         var result = new Dictionary<string, string[]>(StringComparer.Ordinal);
@@ -327,25 +357,15 @@ public static class CatalogSerializer
             return result;
         }
 
-        foreach (var key in SortedKeys(enums))
+        var keys = new string[enums.Count];
+        enums.Keys.CopyTo(keys, 0);
+        Array.Sort(keys, StringComparer.Ordinal);
+        foreach (var key in keys)
         {
             result[key] = enums[key];
         }
 
         return result;
-    }
-
-    private static string[] SortedKeys(Dictionary<string, string[]> enums)
-    {
-        if (enums == null)
-        {
-            return [];
-        }
-
-        var keys = new string[enums.Count];
-        enums.Keys.CopyTo(keys, 0);
-        Array.Sort(keys, StringComparer.Ordinal);
-        return keys;
     }
 }
 

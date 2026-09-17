@@ -1,0 +1,56 @@
+{
+  "description": "quant at 24 bits, whose top byte \u2265 0x80 exercises the u24 path, up to the top code.",
+  "codec": {
+    "t": "quant",
+    "bits": 24,
+    "min": [
+      0
+    ],
+    "max": [
+      1
+    ]
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "0000000000000000"
+      ],
+      "offset": 0,
+      "length": 3,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3fe0000000000000"
+      ],
+      "offset": 3,
+      "length": 3,
+      "decoded": [
+        "3fe0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3feffffde7210be9"
+      ],
+      "offset": 6,
+      "length": 3,
+      "decoded": [
+        "3feffffde0000000"
+      ]
+    },
+    {
+      "input": [
+        "3ff0000000000000"
+      ],
+      "offset": 9,
+      "length": 3,
+      "decoded": [
+        "3fefffffe0000000"
+      ]
+    }
+  ]
+}

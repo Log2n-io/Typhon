@@ -1,0 +1,39 @@
+{
+  "description": "u8 at 0, 1, 255.",
+  "codec": {
+    "t": "u8"
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "0000000000000000"
+      ],
+      "offset": 0,
+      "length": 1,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3ff0000000000000"
+      ],
+      "offset": 1,
+      "length": 1,
+      "decoded": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "406fe00000000000"
+      ],
+      "offset": 2,
+      "length": 1,
+      "decoded": [
+        "406fe00000000000"
+      ]
+    }
+  ]
+}

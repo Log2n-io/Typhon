@@ -9,6 +9,7 @@
         <Project Path="src/Typhon.Analyzers/Typhon.Analyzers.csproj" />
         <Project Path="src/Typhon.Generators/Typhon.Generators.csproj" />
         <Project Path="src/Typhon.Generators.Consumer/Typhon.Generators.Consumer.csproj" />
+        <Project Path="src/Typhon.Client/Typhon.Client.csproj" />
         <Project Path="src/Typhon.Engine/Typhon.Engine.csproj" />
         <Project Path="src/Typhon.Protocol/Typhon.Protocol.csproj" />
         <Project Path="src/Typhon.Schema.Definition/Typhon.Schema.Definition.csproj" />
@@ -19,6 +20,7 @@
     <Folder Name="/test/">
         <Project Path="test/Typhon.Analyzers.Tests/Typhon.Analyzers.Tests.csproj" />
         <Project Path="test/Typhon.Benchmark/Typhon.Benchmark.csproj" />
+        <Project Path="test/Typhon.Client.Tests/Typhon.Client.Tests.csproj" />
         <Project Path="test/Typhon.CompetitiveBenchmark/Typhon.CompetitiveBenchmark.csproj" />
         <Project Path="test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj" />
         <Project Path="test/Typhon.Generators.Tests/Typhon.Generators.Tests.csproj" />

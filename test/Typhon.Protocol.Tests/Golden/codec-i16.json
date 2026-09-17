@@ -1,0 +1,39 @@
+{
+  "description": "i16 at its extremes.",
+  "codec": {
+    "t": "i16"
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "c0e0000000000000"
+      ],
+      "offset": 0,
+      "length": 2,
+      "decoded": [
+        "c0e0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "bff0000000000000"
+      ],
+      "offset": 2,
+      "length": 2,
+      "decoded": [
+        "bff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "40dfffc000000000"
+      ],
+      "offset": 4,
+      "length": 2,
+      "decoded": [
+        "40dfffc000000000"
+      ]
+    }
+  ]
+}

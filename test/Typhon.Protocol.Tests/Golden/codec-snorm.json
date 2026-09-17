@@ -1,0 +1,97 @@
+{
+  "description": "snorm at 8 bits (W6): \u00B11 exact, \u00B10.5/127 ties, clamp, NaN; the wire-only code \u2212128 decodes as \u22121.",
+  "codec": {
+    "t": "snorm",
+    "bits": 8
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "bff0000000000000"
+      ],
+      "offset": 0,
+      "length": 1,
+      "decoded": [
+        "bff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "0000000000000000"
+      ],
+      "offset": 1,
+      "length": 1,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3ff0000000000000"
+      ],
+      "offset": 2,
+      "length": 1,
+      "decoded": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3f70204081020408"
+      ],
+      "offset": 3,
+      "length": 1,
+      "decoded": [
+        "3f80204081020408"
+      ]
+    },
+    {
+      "input": [
+        "bf70204081020408"
+      ],
+      "offset": 4,
+      "length": 1,
+      "decoded": [
+        "bf80204081020408"
+      ]
+    },
+    {
+      "input": [
+        "3ff8000000000000"
+      ],
+      "offset": 5,
+      "length": 1,
+      "decoded": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "bff8000000000000"
+      ],
+      "offset": 6,
+      "length": 1,
+      "decoded": [
+        "bff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "nan"
+      ],
+      "offset": 7,
+      "length": 1,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "offset": 8,
+      "length": 1,
+      "decoded": [
+        "bff0000000000000"
+      ]
+    }
+  ]
+}

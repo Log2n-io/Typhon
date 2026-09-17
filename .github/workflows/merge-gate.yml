@@ -29,6 +29,7 @@ jobs:
       engine: ${{ steps.filter.outputs.engine }}
       workbench: ${{ steps.filter.outputs.workbench }}
       aux: ${{ steps.filter.outputs.aux }}
+      sdk: ${{ steps.filter.outputs.sdk }}
       tla: ${{ steps.filter.outputs.tla }}
       rules: ${{ steps.filter.outputs.rules }}
       # `[no-ut]` in the PR head commit message → skip the heavy aws-gate suites (self-declared small-fix bypass).
@@ -89,6 +90,17 @@ jobs:
               - 'tools/Typhon.Workbench.Fixtures/**'
               - 'Directory.Build.props'
               - 'Typhon.slnx'
+            # The client SDKs (05-sdks § 6): the .NET client's build closure, the TypeScript SDK, and the golden vectors both
+            # decode — a vector changed by a Protocol PR must re-run the decoders that consume it.
+            sdk:
+              - 'src/Typhon.Protocol/**'
+              - 'src/Typhon.Client/**'
+              - 'src/Typhon.Client.TypeScript/**'
+              - 'test/Typhon.Client.Tests/**'
+              - 'test/Typhon.Protocol.Tests/Golden/**'
+              - 'Directory.Build.props'
+              - 'Typhon.slnx'
+              - '.github/workflows/merge-gate.yml'
             tla:
               - 'src/Typhon.Engine/Durability/**'
               - 'rules/tla/**'
@@ -627,10 +639,9 @@ jobs:
   # ---- Suites that ran in NO job at all before #942. Free runner, never the billed c6id. ----
   #
   # Six real test suites existed that no workflow executed. That is not a coverage gap so much as unknown
-  # territory: a suite that has never run cannot be said to pass. Five run here. The sixth was Client.Tests,
-  # allow-listed against #205 while it covered the v1 reference client; both it and that client were deleted with
-  # Subscriptions v1, so the allow-list is now empty and v2's SDK suite arrives with the subscriptions-sdk job
-  # that gates it. If one of these is red, quarantine it against an issue — better than the suite being invisible.
+  # territory: a suite that has never run cannot be said to pass. Five run here. The sixth, Client.Tests, runs in
+  # subscriptions-sdk beside the TypeScript SDK, since both decode the same golden vectors. If one of these is red,
+  # quarantine it against an issue — better than the suite being invisible.
   aux-tests:
     needs: changes
     if: needs.changes.outputs.aux == 'true' && needs.changes.outputs.skip_ut != 'true'
@@ -672,9 +683,44 @@ jobs:
           path: TestResults/*.trx
           if-no-files-found: ignore
 
+  # ---- The client SDKs: the .NET client suite and the TypeScript SDK, both against the golden vectors. Free runner. ----
+  subscriptions-sdk:
+    needs: changes
+    if: needs.changes.outputs.sdk == 'true' && needs.changes.outputs.skip_ut != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Test — .NET client
+        run: |
+          dotnet test test/Typhon.Client.Tests/Typhon.Client.Tests.csproj -c Release --filter "TestCategory!=Quarantine" \
+            --logger "trx;LogFileName=Typhon.Client.Tests.trx" --results-directory TestResults
+
+      # typecheck + eslint + prettier + vitest, the vitest suites decoding the same golden vectors as the .NET client.
+      - name: Check — TypeScript SDK
+        working-directory: src/Typhon.Client.TypeScript
+        run: |
+          npm ci
+          npm run check
+
+      - name: Upload trx
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: subscriptions-sdk-trx
+          path: TestResults/*.trx
+          if-no-files-found: ignore
+
   # ---- The ONLY required check. Aggregates: skipped → pass, failure/cancelled → fail. ----
   gate:
-    needs: [changes, aws-gate, aws-gate-selfhosted, aux-tests, tla, rule-coverage, invariants, closing-keywords]
+    needs: [changes, aws-gate, aws-gate-selfhosted, aux-tests, subscriptions-sdk, tla, rule-coverage, invariants, closing-keywords]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -689,7 +735,8 @@ jobs:
           keywords='${{ needs.closing-keywords.result }}'
           # Hyphenated job names need bracket notation in an expression — `needs.aux-tests` parses as subtraction.
           auxt="${{ needs['aux-tests'].result }}"
-          echo "changes=$changes  aws-gate=$aws  aws-gate-selfhosted=$awssh  aux-tests=$auxt  tla=$tla  rule-coverage=$rules  invariants=$inv  closing-keywords=$keywords"
+          sdk="${{ needs['subscriptions-sdk'].result }}"
+          echo "changes=$changes  aws-gate=$aws  aws-gate-selfhosted=$awssh  aux-tests=$auxt  subscriptions-sdk=$sdk  tla=$tla  rule-coverage=$rules  invariants=$inv  closing-keywords=$keywords"
           fail=0
           # changes must succeed; the two aws-gate variants + tla may legitimately be 'skipped' (nothing relevant
           # changed, or the other runner variant is inactive), and closing-keywords is 'skipped' on push/dispatch.
@@ -699,6 +746,8 @@ jobs:
           case "$tla" in failure|cancelled) echo "tla failed"; fail=1 ;; esac
           # aux-tests is path-gated like tla, so 'skipped' is legitimate; a failure is not (#942).
           case "$auxt" in failure|cancelled) echo "aux-tests failed"; fail=1 ;; esac
+          # subscriptions-sdk is path-gated the same way.
+          case "$sdk" in failure|cancelled) echo "subscriptions-sdk failed"; fail=1 ;; esac
           # rule-coverage is path-gated like tla, so 'skipped' is legitimate; a REGRESSION is not (#703).
           case "$rules" in failure|cancelled) echo "rule-coverage audit failed"; fail=1 ;; esac
           # invariants has no `if:` guard — it runs on every event, so anything but success is a red gate.

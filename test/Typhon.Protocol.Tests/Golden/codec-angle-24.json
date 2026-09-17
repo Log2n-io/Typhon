@@ -1,0 +1,50 @@
+{
+  "description": "angle at 24 bits, and at the 2\u2075\u00B3 guard: a code of exactly 2\u2075\u00B3 wraps, the next representable is refused to 0.",
+  "codec": {
+    "t": "angle",
+    "bits": 24
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "3ff0000000000000"
+      ],
+      "offset": 0,
+      "length": 3,
+      "decoded": [
+        "3ff000000e4db24c"
+      ]
+    },
+    {
+      "input": [
+        "c00921fb54442d18"
+      ],
+      "offset": 3,
+      "length": 3,
+      "decoded": [
+        "c00921fb54442d18"
+      ]
+    },
+    {
+      "input": [
+        "41e921fb54442d18"
+      ],
+      "offset": 6,
+      "length": 3,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "41f921fb54442d18"
+      ],
+      "offset": 9,
+      "length": 3,
+      "decoded": [
+        "0000000000000000"
+      ]
+    }
+  ]
+}

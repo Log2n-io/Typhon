@@ -1,0 +1,443 @@
+{
+  "description": "ENTITIES for every position kind: static Beacon, none-model Buoy, linear 3D Drone with packs and every group, non-spatial Ledger with an unknown codec skipped by fixedBytes. Epoch 255, t0 low bits wrapping, netId gaps up to 200 000.",
+  "catalog": "catalog-kitchen-sink",
+  "log": [
+    {
+      "call": "beginTick",
+      "tick": 70000,
+      "flags": 1,
+      "periodUs": 0
+    },
+    {
+      "call": "beginEntities",
+      "archetype": "Beacon"
+    },
+    {
+      "call": "enter",
+      "netId": 3,
+      "position": [
+        "c0c0000000000000",
+        "40bfff8000000000"
+      ],
+      "velocity": [],
+      "t0": 0,
+      "epoch": 0
+    },
+    {
+      "call": "number",
+      "field": "channel",
+      "values": [
+        "401c000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "drift",
+      "values": [
+        "c008000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "strength",
+      "values": [
+        "3fe0000000000000"
+      ]
+    },
+    {
+      "call": "enter",
+      "netId": 4,
+      "position": [
+        "0000000000000000",
+        "0000000000000000"
+      ],
+      "velocity": [],
+      "t0": 0,
+      "epoch": 0
+    },
+    {
+      "call": "number",
+      "field": "channel",
+      "values": [
+        "406fe00000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "drift",
+      "values": [
+        "408f400000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "strength",
+      "values": [
+        "40effc0000000000"
+      ]
+    },
+    {
+      "call": "state",
+      "netId": 4,
+      "groupMask": 1
+    },
+    {
+      "call": "number",
+      "field": "drift",
+      "values": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "strength",
+      "values": [
+        "c002000000000000"
+      ]
+    },
+    {
+      "call": "leave",
+      "netId": 9
+    },
+    {
+      "call": "beginEntities",
+      "archetype": "Buoy"
+    },
+    {
+      "call": "enter",
+      "netId": 10,
+      "position": [
+        "4029000000000000",
+        "c01d000000000000"
+      ],
+      "velocity": [],
+      "t0": 69997,
+      "epoch": 255
+    },
+    {
+      "call": "number",
+      "field": "depth",
+      "values": [
+        "c028000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "reading",
+      "values": [
+        "c0f86a0000000000"
+      ]
+    },
+    {
+      "call": "segment",
+      "netId": 10,
+      "position": [
+        "402a000000000000",
+        "c01c000000000000"
+      ],
+      "velocity": [],
+      "t0": 70000,
+      "epoch": 0
+    },
+    {
+      "call": "segment",
+      "netId": 11,
+      "position": [
+        "4059000000000000",
+        "4059000000000000"
+      ],
+      "velocity": [],
+      "t0": 65535,
+      "epoch": 1
+    },
+    {
+      "call": "beginEntities",
+      "archetype": "Drone"
+    },
+    {
+      "call": "enter",
+      "netId": 100,
+      "position": [
+        "4024000000000000",
+        "4034000000000000",
+        "c03e000000000000"
+      ],
+      "velocity": [
+        "3fe0000000000000",
+        "0000000000000000",
+        "bfd0000000000000"
+      ],
+      "t0": 70000,
+      "epoch": 3
+    },
+    {
+      "call": "text",
+      "field": "label",
+      "utf8": "6472c3b46e652d31"
+    },
+    {
+      "call": "bytes",
+      "field": "serial",
+      "bytes": "deadbeef"
+    },
+    {
+      "call": "number",
+      "field": "armed",
+      "values": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "lights",
+      "values": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "stance",
+      "values": [
+        "4000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "heading",
+      "values": [
+        "bff8002b7a207af0"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "rotation",
+      "values": [
+        "0000000000000000",
+        "3fe337c225f4d41b",
+        "0000000000000000",
+        "3fe9962dc11ccf95"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "thrust",
+      "values": [
+        "3ff8000000000000",
+        "bfe0000000000000",
+        "404fc00000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "battery",
+      "values": [
+        "3febfffbfffbfffc"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "lastHit",
+      "values": [
+        "40f115c000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "target",
+      "values": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "temperature",
+      "values": [
+        "4035800000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "tilt",
+      "values": [
+        "bfe0204081020408"
+      ]
+    },
+    {
+      "call": "segment",
+      "netId": 100,
+      "position": [
+        "4025000000000000",
+        "4034000000000000",
+        "c03e400000000000"
+      ],
+      "velocity": [
+        "3fe0000000000000",
+        "0000000000000000",
+        "bfd0000000000000"
+      ],
+      "t0": 70000,
+      "epoch": 3
+    },
+    {
+      "call": "segment",
+      "netId": 101,
+      "position": [
+        "c090000000000000",
+        "404ffec000000000",
+        "408fffc000000000"
+      ],
+      "velocity": [
+        "3fefc00000000000",
+        "bfafc00000000000",
+        "0000000000000000"
+      ],
+      "t0": 4465,
+      "epoch": 0
+    },
+    {
+      "call": "state",
+      "netId": 101,
+      "groupMask": 5
+    },
+    {
+      "call": "number",
+      "field": "armed",
+      "values": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "lights",
+      "values": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "stance",
+      "values": [
+        "4000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "battery",
+      "values": [
+        "3febfffbfffbfffc"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "lastHit",
+      "values": [
+        "40f115c000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "target",
+      "values": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "temperature",
+      "values": [
+        "4035800000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "tilt",
+      "values": [
+        "bfe0204081020408"
+      ]
+    },
+    {
+      "call": "state",
+      "netId": 102,
+      "groupMask": 2
+    },
+    {
+      "call": "number",
+      "field": "heading",
+      "values": [
+        "bff8002b7a207af0"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "rotation",
+      "values": [
+        "0000000000000000",
+        "3fe337c225f4d41b",
+        "0000000000000000",
+        "3fe9962dc11ccf95"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "thrust",
+      "values": [
+        "3ff8000000000000",
+        "bfe0000000000000",
+        "404fc00000000000"
+      ]
+    },
+    {
+      "call": "leave",
+      "netId": 5
+    },
+    {
+      "call": "leave",
+      "netId": 6
+    },
+    {
+      "call": "leave",
+      "netId": 200000
+    },
+    {
+      "call": "beginEntities",
+      "archetype": "Ledger"
+    },
+    {
+      "call": "enter",
+      "netId": 7,
+      "position": [],
+      "velocity": [],
+      "t0": 0,
+      "epoch": 0
+    },
+    {
+      "call": "number",
+      "field": "owner",
+      "values": [
+        "41edcd6500000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "amount",
+      "values": [
+        "c060000000000000"
+      ]
+    },
+    {
+      "call": "state",
+      "netId": 7,
+      "groupMask": 1
+    },
+    {
+      "call": "number",
+      "field": "amount",
+      "values": [
+        "405fc00000000000"
+      ]
+    },
+    {
+      "call": "endTick"
+    }
+  ]
+}

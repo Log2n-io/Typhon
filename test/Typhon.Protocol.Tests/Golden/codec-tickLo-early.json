@@ -1,0 +1,36 @@
+{
+  "description": "tickLo against frame tick 100, before the first wrap: the rebuilt tick of a low code above the frame\u0027s wraps below 0.",
+  "codec": {
+    "t": "tickLo"
+  },
+  "frameTick": 100,
+  "cases": [
+    {
+      "input": [
+        "4059000000000000"
+      ],
+      "offset": 0,
+      "length": 2,
+      "decoded": [
+        "4059000000000000"
+      ]
+    },
+    {
+      "input": [
+        "0000000000000000"
+      ],
+      "offset": 2,
+      "length": 2,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "offset": 4,
+      "length": 2,
+      "decoded": [
+        "41efffffffe00000"
+      ]
+    }
+  ]
+}

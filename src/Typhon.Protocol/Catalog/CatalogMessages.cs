@@ -7,7 +7,7 @@ namespace Typhon.Protocol;
 /// </summary>
 public sealed class CatalogEvent
 {
-    /// <summary>The wire index, assigned by canonicalization from the ordinal sort of <see cref="Name"/>.</summary>
+    /// <summary>The wire index: built-in events keep their reserved index; application events are numbered from 16 in ordinal name order (W27).</summary>
     public int Idx { get; init; }
 
     /// <summary>The declared wire name.</summary>
@@ -16,7 +16,7 @@ public sealed class CatalogEvent
     /// <summary>How the event is routed — for example <c>interest</c> for everyone who can see its subject.</summary>
     public string Scope { get; init; }
 
-    /// <summary>The event's payload fields, in encode order.</summary>
+    /// <summary>The event's payload fields, in wire order once canonical.</summary>
     public CatalogField[] Fields { get; init; }
 }
 
@@ -41,20 +41,29 @@ public sealed class CatalogCommandRate
 /// </summary>
 public sealed class CatalogCommand
 {
-    /// <summary>The wire index, assigned by canonicalization from the ordinal sort of <see cref="Name"/>.</summary>
+    /// <summary>The <see cref="Delivery"/> that keeps every command, in order.</summary>
+    public const string QueuedDelivery = "queued";
+
+    /// <summary>The <see cref="Delivery"/> that coalesces to the newest command per session.</summary>
+    public const string LatestDelivery = "latest";
+
+    /// <summary>
+    /// The wire index: built-in commands keep their reserved index (<c>ClientRegion</c> 0, <c>SubscribeRequest</c> 1); application commands are numbered
+    /// from 16 in ordinal name order (W27).
+    /// </summary>
     public int Idx { get; init; }
 
     /// <summary>The declared wire name.</summary>
     public string Name { get; init; }
 
-    /// <summary>Delivery discipline: <c>queued</c> keeps every command in order, <c>latest</c> coalesces to the newest per session.</summary>
+    /// <summary>Delivery discipline: <see cref="QueuedDelivery"/> or <see cref="LatestDelivery"/>.</summary>
     public string Delivery { get; init; }
 
     /// <summary>The rate limit for this command type. Absent when the type is not rate-limited.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public CatalogCommandRate Rate { get; init; }
 
-    /// <summary>The command's payload fields, in encode order.</summary>
+    /// <summary>The command's payload fields, in wire order once canonical.</summary>
     public CatalogField[] Fields { get; init; }
 }
 
@@ -75,24 +84,48 @@ public sealed class CatalogGrid
     /// <summary>Cell counts per axis.</summary>
     public int[] Dims { get; init; }
 
-    /// <summary>The archetype indices placed on this grid.</summary>
+    /// <summary>The archetype indices counted on this grid, in the order an <c>AGG</c> cell lists their counts.</summary>
     public int[] Archetypes { get; init; }
 }
 
 /// <summary>
-/// A metric the server publishes in its statistics block.
+/// A metric the server publishes in its <c>STATS</c> block (W25).
 /// </summary>
 public sealed class CatalogMetric
 {
-    /// <summary>The wire index, assigned by canonicalization from the ordinal sort of <see cref="Name"/>.</summary>
+    /// <summary>The <see cref="Scope"/> of a metric encoded once for every subscriber.</summary>
+    public const string ServerScope = "server";
+
+    /// <summary>The <see cref="Scope"/> of a metric with a value per session.</summary>
+    public const string SessionScope = "session";
+
+    /// <summary>The <see cref="Kind"/> of a windowed value.</summary>
+    public const string GaugeKind = "gauge";
+
+    /// <summary>The <see cref="Kind"/> of a cumulative count, modulo 2³², so a missed emission loses nothing.</summary>
+    public const string CounterKind = "counter";
+
+    /// <summary>The wire index: built-in metrics keep their reserved index; application metrics are numbered from 32 in ordinal name order.</summary>
     public int Idx { get; init; }
 
-    /// <summary>The metric's dotted name, for example <c>tick.p99</c>.</summary>
+    /// <summary>The metric's dotted name, for example <c>typhon.tick.p99</c>. The <c>typhon.</c> prefix is reserved for built-ins.</summary>
     public string Name { get; init; }
 
     /// <summary>The unit the value is expressed in, for example <c>ms</c>.</summary>
     public string Unit { get; init; }
 
-    /// <summary>How the value is encoded.</summary>
+    /// <summary>How each value is encoded.</summary>
     public CatalogCodec Codec { get; init; }
+
+    /// <summary><see cref="SessionScope"/>, or absent for <see cref="ServerScope"/>.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string Scope { get; init; }
+
+    /// <summary><see cref="CounterKind"/>, or absent for <see cref="GaugeKind"/>.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string Kind { get; init; }
+
+    /// <summary>For a vector metric, one label per value, in wire order — the order is data and is never sorted. Absent for a scalar.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string[] Labels { get; init; }
 }

@@ -1,0 +1,39 @@
+{
+  "description": "entityRef is a varu netId; 0 is null.",
+  "codec": {
+    "t": "entityRef"
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "0000000000000000"
+      ],
+      "offset": 0,
+      "length": 1,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3ff0000000000000"
+      ],
+      "offset": 1,
+      "length": 1,
+      "decoded": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "4140000000000000"
+      ],
+      "offset": 2,
+      "length": 4,
+      "decoded": [
+        "4140000000000000"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,109 @@
+{
+  "description": "varu at every length edge: 127/128, 16383/16384, 2\u00B2\u00B9, 2\u00B2\u2078, and the 32-bit maximum.",
+  "codec": {
+    "t": "varu"
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "0000000000000000"
+      ],
+      "offset": 0,
+      "length": 1,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "405fc00000000000"
+      ],
+      "offset": 1,
+      "length": 1,
+      "decoded": [
+        "405fc00000000000"
+      ]
+    },
+    {
+      "input": [
+        "4060000000000000"
+      ],
+      "offset": 2,
+      "length": 2,
+      "decoded": [
+        "4060000000000000"
+      ]
+    },
+    {
+      "input": [
+        "40cfff8000000000"
+      ],
+      "offset": 4,
+      "length": 2,
+      "decoded": [
+        "40cfff8000000000"
+      ]
+    },
+    {
+      "input": [
+        "40d0000000000000"
+      ],
+      "offset": 6,
+      "length": 3,
+      "decoded": [
+        "40d0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "413fffff00000000"
+      ],
+      "offset": 9,
+      "length": 3,
+      "decoded": [
+        "413fffff00000000"
+      ]
+    },
+    {
+      "input": [
+        "4140000000000000"
+      ],
+      "offset": 12,
+      "length": 4,
+      "decoded": [
+        "4140000000000000"
+      ]
+    },
+    {
+      "input": [
+        "41affffffe000000"
+      ],
+      "offset": 16,
+      "length": 4,
+      "decoded": [
+        "41affffffe000000"
+      ]
+    },
+    {
+      "input": [
+        "41b0000000000000"
+      ],
+      "offset": 20,
+      "length": 5,
+      "decoded": [
+        "41b0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "41efffffffe00000"
+      ],
+      "offset": 25,
+      "length": 5,
+      "decoded": [
+        "41efffffffe00000"
+      ]
+    }
+  ]
+}

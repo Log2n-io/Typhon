@@ -1,0 +1,30 @@
+{
+  "description": "Decode-only: an over-long varu is accepted as long as it fits 32 bits in five bytes (03 \u00A7 2).",
+  "codec": {
+    "t": "varu"
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "offset": 0,
+      "length": 2,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "offset": 2,
+      "length": 5,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "offset": 7,
+      "length": 3,
+      "decoded": [
+        "405fc00000000000"
+      ]
+    }
+  ]
+}

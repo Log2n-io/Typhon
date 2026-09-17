@@ -1,0 +1,59 @@
+{
+  "description": "tickLo against frame tick 70000: past ticks within 2\u00B9\u2076, across the 16-bit wrap.",
+  "codec": {
+    "t": "tickLo"
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "40f1170000000000"
+      ],
+      "offset": 0,
+      "length": 2,
+      "decoded": [
+        "40f1170000000000"
+      ]
+    },
+    {
+      "input": [
+        "40f116f000000000"
+      ],
+      "offset": 2,
+      "length": 2,
+      "decoded": [
+        "40f116f000000000"
+      ]
+    },
+    {
+      "input": [
+        "40efffe000000000"
+      ],
+      "offset": 4,
+      "length": 2,
+      "decoded": [
+        "40efffe000000000"
+      ]
+    },
+    {
+      "input": [
+        "40f0000000000000"
+      ],
+      "offset": 6,
+      "length": 2,
+      "decoded": [
+        "40f0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "40b1710000000000"
+      ],
+      "offset": 8,
+      "length": 2,
+      "decoded": [
+        "40b1710000000000"
+      ]
+    }
+  ]
+}

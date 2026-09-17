@@ -1,0 +1,120 @@
+{
+  "description": "angle at 16 bits (W7): 0, \u22120, \u03C0 wraps to \u2212\u03C0, one step below \u03C0, 2\u03C0 to 0, ties \u00B1(n \u002B \u00BD), beyond 2\u2075\u00B3 to 0, NaN.",
+  "codec": {
+    "t": "angle",
+    "bits": 16
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "0000000000000000"
+      ],
+      "offset": 0,
+      "length": 2,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "8000000000000000"
+      ],
+      "offset": 2,
+      "length": 2,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "400921fb54442d18"
+      ],
+      "offset": 4,
+      "length": 2,
+      "decoded": [
+        "c00921fb54442d18"
+      ]
+    },
+    {
+      "input": [
+        "c00921fb54442d18"
+      ],
+      "offset": 6,
+      "length": 2,
+      "decoded": [
+        "c00921fb54442d18"
+      ]
+    },
+    {
+      "input": [
+        "400921c9104d8490"
+      ],
+      "offset": 8,
+      "length": 2,
+      "decoded": [
+        "400921c9104d8490"
+      ]
+    },
+    {
+      "input": [
+        "401921fb54442d18"
+      ],
+      "offset": 10,
+      "length": 2,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "4033d97c7f3321d2"
+      ],
+      "offset": 12,
+      "length": 2,
+      "decoded": [
+        "3fefffb3ed998d2a"
+      ]
+    },
+    {
+      "input": [
+        "3f2f6a7a2955385e"
+      ],
+      "offset": 14,
+      "length": 2,
+      "decoded": [
+        "3f32d97c7f3321d2"
+      ]
+    },
+    {
+      "input": [
+        "bf2f6a7a2955385e"
+      ],
+      "offset": 16,
+      "length": 2,
+      "decoded": [
+        "bf32d97c7f3321d2"
+      ]
+    },
+    {
+      "input": [
+        "7e37e43c8800759c"
+      ],
+      "offset": 18,
+      "length": 2,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "nan"
+      ],
+      "offset": 20,
+      "length": 2,
+      "decoded": [
+        "0000000000000000"
+      ]
+    }
+  ]
+}

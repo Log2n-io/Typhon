@@ -38,6 +38,13 @@
         "demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj"
       ],
       "runs_via": "merge-gate.yml (free runner)"
+    },
+    "subscriptions-sdk": {
+      "filters": ["sdk"],
+      "projects": [
+        "test/Typhon.Client.Tests/Typhon.Client.Tests.csproj"
+      ],
+      "runs_via": "merge-gate.yml (free runner)"
     }
   }
 }

@@ -1,0 +1,225 @@
+{
+  "description": "Every non-ENTITIES block in stream order, with PERIOD and OVERLOAD set: EVENTS (a list of 2, a UTF-8 chat, an empty list), SELF with both owner groups and lastSeq 65535, ACKS, SOURCES (applied and error), AGG with RESET, STATS (labelled, server and session), DEBUG (known and unknown sub-types), EXT, and an unknown block 0x42 skipped by its length.",
+  "catalog": "catalog-kitchen-sink",
+  "log": [
+    {
+      "call": "beginTick",
+      "tick": 70001,
+      "flags": 12,
+      "periodUs": 150000
+    },
+    {
+      "call": "event",
+      "type": "Ping",
+      "idx": 17
+    },
+    {
+      "call": "number",
+      "field": "loud",
+      "values": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "from",
+      "values": [
+        "4059000000000000"
+      ]
+    },
+    {
+      "call": "list",
+      "field": "path",
+      "count": 2,
+      "values": [
+        "3fe0000000000000",
+        "bfe0000000000000",
+        "40bf400000000000",
+        "c0bf400000000000"
+      ]
+    },
+    {
+      "call": "event",
+      "type": "Chat",
+      "idx": 16
+    },
+    {
+      "call": "text",
+      "field": "text",
+      "utf8": "68c3a96c6c6f20e29880"
+    },
+    {
+      "call": "event",
+      "type": "Ping",
+      "idx": 17
+    },
+    {
+      "call": "number",
+      "field": "loud",
+      "values": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "from",
+      "values": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "list",
+      "field": "path",
+      "count": 0,
+      "values": []
+    },
+    {
+      "call": "self",
+      "archetype": "Drone",
+      "netId": 100,
+      "lastSeq": 65535,
+      "ownerMask": 3
+    },
+    {
+      "call": "number",
+      "field": "fuel",
+      "values": [
+        "3fb99999a0000000"
+      ]
+    },
+    {
+      "call": "bytes",
+      "field": "manifest",
+      "bytes": "010203"
+    },
+    {
+      "call": "number",
+      "field": "vault",
+      "values": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "pin",
+      "values": [
+        "40b0e10000000000"
+      ]
+    },
+    {
+      "call": "ack",
+      "seq": 65534,
+      "reason": 3
+    },
+    {
+      "call": "ack",
+      "seq": 3,
+      "reason": 200
+    },
+    {
+      "call": "source",
+      "requestId": 1,
+      "status": 0,
+      "code": 0
+    },
+    {
+      "call": "source",
+      "requestId": 2,
+      "status": 1,
+      "code": 404
+    },
+    {
+      "call": "beginAggregate",
+      "grid": 0,
+      "reset": true
+    },
+    {
+      "call": "aggregateCell",
+      "cell": 0,
+      "counts": [
+        1,
+        0
+      ]
+    },
+    {
+      "call": "aggregateCell",
+      "cell": 17,
+      "counts": [
+        3,
+        400
+      ]
+    },
+    {
+      "call": "aggregateCell",
+      "cell": 255,
+      "counts": [
+        0,
+        9
+      ]
+    },
+    {
+      "call": "metric",
+      "name": "typhon.tick.p50",
+      "index": 0,
+      "value": "4011000000000000"
+    },
+    {
+      "call": "metric",
+      "name": "typhon.system.mean",
+      "index": 0,
+      "value": "3ff8000000000000"
+    },
+    {
+      "call": "metric",
+      "name": "typhon.system.mean",
+      "index": 1,
+      "value": "3fd0000000000000"
+    },
+    {
+      "call": "metric",
+      "name": "typhon.system.mean",
+      "index": 2,
+      "value": "4029000000000000"
+    },
+    {
+      "call": "metric",
+      "name": "app.load",
+      "index": 0,
+      "value": "3fe0101010101010"
+    },
+    {
+      "call": "metric",
+      "name": "typhon.session.skippedFrames",
+      "index": 0,
+      "value": "4008000000000000"
+    },
+    {
+      "call": "metric",
+      "name": "app.queue",
+      "index": 0,
+      "value": "401c000000000000"
+    },
+    {
+      "call": "debug",
+      "subType": 1,
+      "payload": "0102"
+    },
+    {
+      "call": "debug",
+      "subType": 153,
+      "payload": "ff"
+    },
+    {
+      "call": "ext",
+      "appTypeId": 300,
+      "payload": "abcd"
+    },
+    {
+      "call": "unknownBlock",
+      "blockType": 66
+    },
+    {
+      "call": "endTick"
+    }
+  ]
+}

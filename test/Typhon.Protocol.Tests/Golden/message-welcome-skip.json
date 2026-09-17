@@ -1,0 +1,15 @@
+{
+  "description": "WELCOME whose catalog is skipped because the client\u0027s hash matched (length 0), resume disabled.",
+  "type": 1,
+  "message": {
+    "major": 2,
+    "minor": 0,
+    "capsGranted": 0,
+    "sessionId": 7,
+    "resumeToken": "00000000000000000000000000000000",
+    "tick": 1,
+    "tickPeriodUs": 50000,
+    "catalogHash": "39044b7a054f7f28",
+    "catalogBytes": 0
+  }
+}

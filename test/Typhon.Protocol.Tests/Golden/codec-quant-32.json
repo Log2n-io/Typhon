@@ -1,0 +1,56 @@
+{
+  "description": "quant at 32 bits, codes \u2265 2\u00B3\u00B9, up to the top code.",
+  "codec": {
+    "t": "quant",
+    "bits": 32,
+    "min": [
+      -1000
+    ],
+    "max": [
+      1000
+    ]
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "0000000000000000"
+      ],
+      "offset": 0,
+      "length": 4,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "408f3feb851eb852"
+      ],
+      "offset": 4,
+      "length": 4,
+      "decoded": [
+        "408f3feb85148000"
+      ]
+    },
+    {
+      "input": [
+        "c08f400000000000"
+      ],
+      "offset": 8,
+      "length": 4,
+      "decoded": [
+        "c08f400000000000"
+      ]
+    },
+    {
+      "input": [
+        "408f400000000000"
+      ],
+      "offset": 12,
+      "length": 4,
+      "decoded": [
+        "408f3fffffc18000"
+      ]
+    }
+  ]
+}

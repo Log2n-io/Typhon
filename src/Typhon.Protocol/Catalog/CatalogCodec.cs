@@ -1,9 +1,10 @@
+using System;
 using System.Text.Json.Serialization;
 
 namespace Typhon.Protocol;
 
 /// <summary>
-/// The closed set of wire codecs. A client refuses at <c>WELCOME</c> a codec it does not know, unless the field declares
+/// The closed set of wire codecs (03-wire-protocol § 4). A client refuses at <c>WELCOME</c> a codec it does not know, unless the field declares
 /// <see cref="CatalogCodec.FixedBytes"/> and can therefore be skipped.
 /// </summary>
 /// <remarks>
@@ -13,165 +14,180 @@ namespace Typhon.Protocol;
 /// server with one interpreter and no build step.
 /// </para>
 /// <para>
-/// <b>Every member carries its wire token explicitly.</b> The tokens are the contract the TypeScript codec table is keyed by, so they are not left to a
-/// naming policy: <c>varu</c>, <c>unorm</c> and <c>snorm</c> are not the camelCase of any readable C# identifier, and a policy that silently produced
-/// <c>varU</c> would be a wire break no compiler could catch.
+/// <b>Every member has an explicit wire token</b> (<see cref="CodecTokens"/>): the tokens are the contract the TypeScript codec table is keyed by, so they are
+/// not left to a naming policy — <c>varu</c> and <c>unorm</c> are not the camelCase of any readable identifier. <see cref="Unknown"/> is what a token from a
+/// newer server parses to.
 /// </para>
 /// </remarks>
-[JsonConverter(typeof(JsonStringEnumConverter<CodecKind>))]
 public enum CodecKind
 {
-    /// <summary>One byte, or a single bit inside a <see cref="Bits"/> pack.</summary>
-    [JsonStringEnumMemberName("bool")]
+    /// <summary>A token this library does not know. Decodable only by skipping <see cref="CatalogCodec.FixedBytes"/>.</summary>
+    Unknown = 0,
+
+    /// <summary>A boolean: always one bit of its section's pack (W12).</summary>
     Bool,
 
     /// <summary>Unsigned 8-bit integer.</summary>
-    [JsonStringEnumMemberName("u8")]
     U8,
 
     /// <summary>Signed 8-bit integer.</summary>
-    [JsonStringEnumMemberName("i8")]
     I8,
 
-    /// <summary>Unsigned 16-bit integer.</summary>
-    [JsonStringEnumMemberName("u16")]
+    /// <summary>Unsigned 16-bit integer, little-endian.</summary>
     U16,
 
-    /// <summary>Signed 16-bit integer.</summary>
-    [JsonStringEnumMemberName("i16")]
+    /// <summary>Signed 16-bit integer, little-endian.</summary>
     I16,
 
-    /// <summary>Unsigned 32-bit integer.</summary>
-    [JsonStringEnumMemberName("u32")]
+    /// <summary>Unsigned 32-bit integer, little-endian.</summary>
     U32,
 
-    /// <summary>Signed 32-bit integer.</summary>
-    [JsonStringEnumMemberName("i32")]
+    /// <summary>Signed 32-bit integer, little-endian.</summary>
     I32,
 
-    /// <summary>Unsigned LEB-style varint, one to five bytes.</summary>
-    [JsonStringEnumMemberName("varu")]
+    /// <summary>Unsigned LEB128 varint, 1–5 bytes.</summary>
     Varu,
 
-    /// <summary>Zig-zag signed varint, one to five bytes.</summary>
-    [JsonStringEnumMemberName("vari")]
+    /// <summary>Zigzag-encoded signed LEB128 varint, 1–5 bytes.</summary>
     Vari,
 
-    /// <summary>IEEE 754 single.</summary>
-    [JsonStringEnumMemberName("f32")]
+    /// <summary>IEEE single.</summary>
     F32,
 
-    /// <summary>IEEE 754 half.</summary>
-    [JsonStringEnumMemberName("f16")]
+    /// <summary>IEEE half.</summary>
     F16,
 
-    /// <summary>Scalar quantized into <see cref="CatalogCodec.Bits"/> over [min, max]; decoding can never leave the range.</summary>
-    [JsonStringEnumMemberName("quant")]
+    /// <summary>A scalar quantized over [min, max) at <see cref="CatalogCodec.Bits"/> bits (W2).</summary>
     Quant,
 
-    /// <summary>Two-component position, quantized per axis over [min, max].</summary>
-    [JsonStringEnumMemberName("pos2")]
+    /// <summary>A 2D position, <see cref="Quant"/> per axis (W3).</summary>
     Pos2,
 
-    /// <summary>Three-component position, quantized per axis over [min, max].</summary>
-    [JsonStringEnumMemberName("pos3")]
+    /// <summary>A 3D position, <see cref="Quant"/> per axis (W3).</summary>
     Pos3,
 
-    /// <summary>Two-component vector at a fixed scale.</summary>
-    [JsonStringEnumMemberName("vec2")]
+    /// <summary>A signed 2D vector, <see cref="CatalogCodec.Scale"/> per step (W4).</summary>
     Vec2,
 
-    /// <summary>Three-component vector at a fixed scale.</summary>
-    [JsonStringEnumMemberName("vec3")]
+    /// <summary>A signed 3D vector, <see cref="CatalogCodec.Scale"/> per step (W4).</summary>
     Vec3,
 
-    /// <summary>Engine-maintained two-component motion: displacement per tick in position quanta divided by <see cref="CatalogCodec.QuantaDiv"/>.</summary>
-    [JsonStringEnumMemberName("vel2")]
+    /// <summary>Engine-measured 2D displacement per tick, in position steps ÷ <see cref="CatalogCodec.QuantaDiv"/> (W5). Only inside a position.</summary>
     Vel2,
 
-    /// <summary>Engine-maintained three-component motion, as <see cref="Vel2"/>.</summary>
-    [JsonStringEnumMemberName("vel3")]
+    /// <summary>Engine-measured 3D displacement per tick (W5). Only inside a position.</summary>
     Vel3,
 
-    /// <summary>Float in [0, 1] over <see cref="CatalogCodec.Bits"/>.</summary>
-    [JsonStringEnumMemberName("unorm")]
+    /// <summary>A value in [0, 1]: q / (2ᵇ − 1) (W6).</summary>
     Unorm,
 
-    /// <summary>Float in [-1, 1] over <see cref="CatalogCodec.Bits"/>.</summary>
-    [JsonStringEnumMemberName("snorm")]
+    /// <summary>A value in [−1, 1]: max(q / (2ᵇ⁻¹ − 1), −1) (W6).</summary>
     Snorm,
 
-    /// <summary>Radians over <see cref="CatalogCodec.Bits"/>.</summary>
-    [JsonStringEnumMemberName("angle")]
+    /// <summary>Radians in [−π, π), a two's-complement code (W7).</summary>
     Angle,
 
-    /// <summary>Quaternion, smallest-three in 32 bits.</summary>
-    [JsonStringEnumMemberName("quat3")]
+    /// <summary>A rotation, smallest-three in 32 bits (W8).</summary>
     Quat3,
 
-    /// <summary>Integer of <see cref="CatalogCodec.N"/> bits, LSB first, sharing a pack named by <see cref="CatalogCodec.Pack"/>.</summary>
-    [JsonStringEnumMemberName("bits")]
+    /// <summary>An unsigned integer of <see cref="CatalogCodec.N"/> ∈ [1, 24] bits, in its section's pack (W12).</summary>
     Bits,
 
-    /// <summary>Integer whose names are listed in the catalog's enum table.</summary>
-    [JsonStringEnumMemberName("enum")]
-    Enum,
-
-    /// <summary>A network identity as a varint; zero is null, and it may name an entity outside the session's view.</summary>
-    [JsonStringEnumMemberName("entityRef")]
+    /// <summary>A netId as <c>varu</c>; 0 is null.</summary>
     EntityRef,
 
-    /// <summary>Length-prefixed UTF-8, bounded by <see cref="CatalogCodec.MaxBytes"/>.</summary>
-    [JsonStringEnumMemberName("str")]
+    /// <summary>UTF-8 text: <c>varu</c> byte length, at most <see cref="CatalogCodec.MaxBytes"/>.</summary>
     Str,
 
     /// <summary>Exactly <see cref="CatalogCodec.N"/> raw bytes.</summary>
-    [JsonStringEnumMemberName("bytes")]
     Bytes,
 
-    /// <summary>Length-prefixed raw bytes, bounded by <see cref="CatalogCodec.MaxBytes"/>.</summary>
-    [JsonStringEnumMemberName("blob")]
+    /// <summary>Raw bytes: <c>varu</c> length, at most <see cref="CatalogCodec.MaxBytes"/>.</summary>
     Blob,
 
-    /// <summary>A tick as a varint relative to the frame's tick.</summary>
-    [JsonStringEnumMemberName("tickRel")]
-    TickRel,
-
-    /// <summary>An absolute tick carried as its low 16 bits; exact while it is less than 2^16 ticks old.</summary>
-    [JsonStringEnumMemberName("tickLo")]
+    /// <summary>An absolute past tick from its low 16 bits, rebuilt against the frame's tick (W9).</summary>
     TickLo,
+
+    /// <summary>
+    /// <see cref="CatalogCodec.MinCount"/>..<see cref="CatalogCodec.MaxCount"/> elements of <see cref="CatalogCodec.Of"/>: <c>varu count | element*</c> (W28).
+    /// </summary>
+    List,
 }
 
 /// <summary>
-/// One field's codec: a <see cref="CodecKind"/> plus the parameters that kind reads. Parameters left at their default are omitted from the canonical JSON.
+/// The wire tokens of <see cref="CodecKind"/>, in both directions.
+/// </summary>
+public static class CodecTokens
+{
+    private static readonly string[] Tokens =
+    [
+        "", "bool", "u8", "i8", "u16", "i16", "u32", "i32", "varu", "vari", "f32", "f16", "quant", "pos2", "pos3", "vec2", "vec3", "vel2", "vel3",
+        "unorm", "snorm", "angle", "quat3", "bits", "entityRef", "str", "bytes", "blob", "tickLo", "list",
+    ];
+
+    /// <summary>The token of <paramref name="kind"/>.</summary>
+    /// <param name="kind">A known kind.</param>
+    /// <returns>The token; the empty string for <see cref="CodecKind.Unknown"/>.</returns>
+    public static string ToToken(CodecKind kind) => (uint)kind < (uint)Tokens.Length ? Tokens[(int)kind] : string.Empty;
+
+    /// <summary>The kind a token names.</summary>
+    /// <param name="token">The token as it appears in a catalog.</param>
+    /// <returns>The kind, or <see cref="CodecKind.Unknown"/>.</returns>
+    public static CodecKind FromToken(string token)
+    {
+        for (var i = 1; i < Tokens.Length; i++)
+        {
+            if (string.Equals(Tokens[i], token, StringComparison.Ordinal))
+            {
+                return (CodecKind)i;
+            }
+        }
+
+        return CodecKind.Unknown;
+    }
+}
+
+/// <summary>
+/// A codec: a <see cref="CodecKind"/> and the parameters that kind reads. Parameters a kind does not read stay at their default and are not written.
 /// </summary>
 /// <remarks>
-/// Serialized as <c>{"t": "pos2", "min": [...], "max": [...], "bits": 24}</c>. Every parameter is optional because each kind reads only the ones that apply to
-/// it; a decoder that does not recognise <see cref="Kind"/> can still skip the field when <see cref="FixedBytes"/> says how wide it is.
+/// Nothing here names a CLR type or a storage offset. A decoder that does not recognise <see cref="Kind"/> can still skip the field when
+/// <see cref="FixedBytes"/> says how wide it is — which only a codec newer than this library carries.
 /// </remarks>
 public sealed class CatalogCodec
 {
-    /// <summary>The codec kind. Serialized as <c>t</c>, the name the TypeScript table is keyed by.</summary>
+    /// <summary>
+    /// The codec's wire token, serialized as <c>t</c> — the name the TypeScript table is keyed by. Kept as the token rather than the enum so a codec newer
+    /// than this library survives a parse and a re-serialization unchanged.
+    /// </summary>
     [JsonPropertyName("t")]
-    public CodecKind Kind { get; init; }
+    public string Type { get; init; }
 
-    /// <summary>Quantization width in bits, for the kinds that quantize.</summary>
+    /// <summary>The codec kind <see cref="Type"/> names; <see cref="CodecKind.Unknown"/> for a token this library does not know.</summary>
+    [JsonIgnore]
+    public CodecKind Kind
+    {
+        get => CodecTokens.FromToken(Type);
+        init => Type = CodecTokens.ToToken(value);
+    }
+
+    /// <summary>Width in bits for the quantizing kinds: 8, 16, 24 or 32.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public int Bits { get; init; }
 
-    /// <summary>Lower bound per axis, for <see cref="CodecKind.Quant"/>, <see cref="CodecKind.Pos2"/> and <see cref="CodecKind.Pos3"/>.</summary>
+    /// <summary>Lower bound per axis (inclusive): one value for <see cref="CodecKind.Quant"/>, two or three for a position.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public double[] Min { get; init; }
 
-    /// <summary>Upper bound per axis, paired with <see cref="Min"/>.</summary>
+    /// <summary>Upper bound per axis (exclusive), paired with <see cref="Min"/>.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public double[] Max { get; init; }
 
-    /// <summary>Fixed scale for <see cref="CodecKind.Vec2"/> and <see cref="CodecKind.Vec3"/>.</summary>
+    /// <summary>The size of one step, for <see cref="CodecKind.Vec2"/> and <see cref="CodecKind.Vec3"/>.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public double Scale { get; init; }
 
-    /// <summary>Divisor applied to position quanta for <see cref="CodecKind.Vel2"/> and <see cref="CodecKind.Vel3"/>.</summary>
+    /// <summary>Divisor applied to the position step, for <see cref="CodecKind.Vel2"/> and <see cref="CodecKind.Vel3"/>.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public int QuantaDiv { get; init; }
 
@@ -179,16 +195,25 @@ public sealed class CatalogCodec
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public int N { get; init; }
 
-    /// <summary>The name of the bit pack this field shares, for <see cref="CodecKind.Bits"/>.</summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public string Pack { get; init; }
-
     /// <summary>Upper bound on encoded length for <see cref="CodecKind.Str"/> and <see cref="CodecKind.Blob"/>.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public int MaxBytes { get; init; }
 
+    /// <summary>The element codec of a <see cref="CodecKind.List"/>.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public CatalogCodec Of { get; init; }
+
+    /// <summary>The fewest elements a <see cref="CodecKind.List"/> may carry.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int MinCount { get; init; }
+
+    /// <summary>The most elements a <see cref="CodecKind.List"/> may carry, at most 255.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int MaxCount { get; init; }
+
     /// <summary>
-    /// Wire width in bytes when it is fixed. Present so a client that does not know <see cref="Kind"/> can skip the field instead of refusing the catalog.
+    /// Wire width in bytes, declared only by a codec newer than the protocol minor a client may speak, so that client can skip the field instead of refusing
+    /// the catalog.
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public int FixedBytes { get; init; }

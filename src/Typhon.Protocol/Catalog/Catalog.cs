@@ -31,11 +31,26 @@ public sealed class CatalogApp
 /// </summary>
 public sealed class CatalogTick
 {
-    /// <summary>The server's tick period in microseconds, so a client can size its interpolation window.</summary>
+    /// <summary>The server's nominal tick period in microseconds; <c>PERIOD</c> in a frame reports the actual one under time dilation.</summary>
     public int PeriodUs { get; init; }
 
-    /// <summary>How often a client must send a liveness ping, in hertz.</summary>
+    /// <summary>How often a client must send <c>PING</c>, in hertz.</summary>
     public int PingHz { get; init; }
+}
+
+/// <summary>
+/// Server-wide ceilings a client acts on (W30). Everything else the server enforces stays out of the catalog.
+/// </summary>
+public sealed class CatalogLimits
+{
+    /// <summary>The largest server-to-client message, in bytes; a .NET or TCP client sizes its receive buffer once from it.</summary>
+    public int FrameBytes { get; init; }
+
+    /// <summary>The largest client-to-server message after <c>HELLO</c>, in bytes; the SDK batches <c>COMMANDS</c> under it or is closed with 1009.</summary>
+    public int ClientMessageBytes { get; init; }
+
+    /// <summary>How long a dropped session can be resumed, in milliseconds; the SDK chooses between resuming and a fresh connection from it.</summary>
+    public int ResumeGraceMs { get; init; }
 }
 
 /// <summary>
@@ -50,7 +65,7 @@ public sealed class CatalogTick
 /// <para>
 /// <b>Nothing in here describes server memory.</b> No CLR type name and no offset appears anywhere — not the field's offset within its component, nor the
 /// component's column offset within the cluster. A client decodes bytes; handing out the layout would couple the wire to storage and make renaming a C# type a
-/// wire break. <see cref="CatalogSerializer"/> asserts this rather than leaving it to review.
+/// wire break.
 /// </para>
 /// </remarks>
 public sealed class Catalog
@@ -64,21 +79,27 @@ public sealed class Catalog
     /// <summary>Tick timing.</summary>
     public CatalogTick Tick { get; init; }
 
+    /// <summary>Server-wide ceilings a client acts on.</summary>
+    public CatalogLimits Limits { get; init; }
+
+    /// <summary>The session kinds the application declares (W21). Informational: the engine never interprets a kind.</summary>
+    public string[] SessionKinds { get; init; }
+
     /// <summary>The replicated archetypes, ordered so that each one's position is its <see cref="CatalogArchetype.Idx"/>.</summary>
     public CatalogArchetype[] Archetypes { get; init; }
 
     /// <summary>Enum value names by enum name. A value's index in the array is the integer that travels.</summary>
     public Dictionary<string, string[]> Enums { get; init; }
 
-    /// <summary>The declared events.</summary>
+    /// <summary>The declared events, in index order.</summary>
     public CatalogEvent[] Events { get; init; }
 
-    /// <summary>The commands a client may send.</summary>
+    /// <summary>The commands a client may send, in index order.</summary>
     public CatalogCommand[] Commands { get; init; }
 
     /// <summary>The spatial grids.</summary>
     public CatalogGrid[] Grids { get; init; }
 
-    /// <summary>The metrics the server publishes.</summary>
+    /// <summary>The metrics the server publishes, in index order.</summary>
     public CatalogMetric[] Metrics { get; init; }
 }

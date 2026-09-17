@@ -1,0 +1,39 @@
+{
+  "description": "i32 at its extremes.",
+  "codec": {
+    "t": "i32"
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "c1e0000000000000"
+      ],
+      "offset": 0,
+      "length": 4,
+      "decoded": [
+        "c1e0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "bff0000000000000"
+      ],
+      "offset": 4,
+      "length": 4,
+      "decoded": [
+        "bff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "41dfffffffc00000"
+      ],
+      "offset": 8,
+      "length": 4,
+      "decoded": [
+        "41dfffffffc00000"
+      ]
+    }
+  ]
+}
