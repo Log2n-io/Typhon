@@ -86,6 +86,12 @@ public sealed class FrameApplier
             _store.Reset();
         }
 
+        // Ticks only advance within a session; a RESET is exempt, since a restarted server begins again low and its client keeps the store.
+        if ((flags & TickFlags.Reset) == 0 && _store.Frames > 0 && tick <= _store.Tick)
+        {
+            _store.Anomalies++;
+        }
+
         _store.Tick = tick;
         _store.Flags = flags;
         _store.PeriodUs = periodUs;

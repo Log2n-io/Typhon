@@ -219,15 +219,16 @@ public class FrameApplierTests
         applier.Apply(Frame(1, TickFlags.None, enters: netIds));
         var arrive = Frame(2, TickFlags.None, enters: churn, states: netIds, events: events);
         var depart = Frame(3, TickFlags.None, states: netIds, leaves: churn, events: events);
+        var tick = 3u;
         for (var i = 0; i < 3; i++)
         {
-            applier.Apply(arrive);
-            applier.Apply(depart);
+            applier.Apply(Retick(arrive, ++tick));
+            applier.Apply(Retick(depart, ++tick));
         }
 
         var before = GC.GetAllocatedBytesForCurrentThread();
-        applier.Apply(arrive);
-        applier.Apply(depart);
+        applier.Apply(Retick(arrive, ++tick));
+        applier.Apply(Retick(depart, ++tick));
         var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
 
         Assert.Multiple(() =>
@@ -235,6 +236,33 @@ public class FrameApplierTests
             Assert.That(allocated, Is.Zero);
             Assert.That(store.Anomalies, Is.Zero);
         });
+    }
+
+    /// <summary>A frame that repeats or goes back in tick is an anomaly unless it resets the store (a restarted server begins again low).</summary>
+    [Test]
+    public void ATickThatDoesNotAdvanceIsAnAnomalyUnlessTheFrameResets()
+    {
+        var store = new WorldStore(Plan);
+        var applier = new FrameApplier(store);
+        applier.Apply(Frame(5, TickFlags.None));
+        applier.Apply(Frame(5, TickFlags.None));
+        applier.Apply(Frame(4, TickFlags.None));
+        var afterRepeats = store.Anomalies;
+        applier.Apply(Frame(1, TickFlags.Reset));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(afterRepeats, Is.EqualTo(2));
+            Assert.That(store.Anomalies, Is.EqualTo(2), "a RESET frame may go back");
+            Assert.That(store.Tick, Is.EqualTo(1u));
+        });
+    }
+
+    // The tick sits right after the message type (03 § 3); rewriting it in place keeps the measured loop free of allocation.
+    private static byte[] Retick(byte[] frame, uint tick)
+    {
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(frame.AsSpan(1), tick);
+        return frame;
     }
 
     private static uint[] Range(uint first, int count)
