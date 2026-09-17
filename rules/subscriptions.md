@@ -4,14 +4,10 @@
 |-------|-------|
 | Status | Living |
 | Last Updated | 2026-09-16 |
-| Domain | Engine-owned replication (Subscriptions v2): per-entity replication state, its storage, and what bounds its cost |
+| Domain | Engine-owned replication: per-entity replication state, its storage, and what bounds its cost |
 
 > Invariants that keep replication cost tied to what clients are actually looking at, and keep per-entity
 > replication state attached to the entity it describes across every way an entity can move.
-
-> **Scope note.** These rules constrain engine-owned replication (v2). The v1 subscription server
-> (`SubscriptionServerOptions`, `TcpSubscriptionServer`, `SubscriptionOutputPhase`) is a separate transport
-> layer and is not covered here.
 
 ---
 
@@ -37,7 +33,7 @@
   note the gate is evaluated by EVERY stage, not by the DAG's root. `Events` is a parallel branch with no predecessor, so a root-only gate would leave it
     dispatching on an aborted tick. It is also read LIVE from the scheduler rather than snapshotted, because DispatchDeferredTracks walks Engine-Post and
     Engine-Subscriptions in one loop — a fence failure during Engine-Post latches after any per-tick reset has already run.
-  note the two clauses above are a PAIR, and the second exists because the first removed the signal publication used to key on. Publication shares v1's gate,
+  note the two clauses above are a PAIR, and the second exists because the first removed the signal publication used to key on. Publication is gated on
     `!tickAborted && !fenceFailed`; a stage throw latches neither (engine tracks are already exempt from the abort latch, and the no-stop clause skips the
     fence latch), so making replication non-terminal silently made every faulted tick publishable. `SubscriptionsContext.Faulted` restores the pairing.
     Without it the isolation fix would have traded a crash for a worse failure: frames half-produced by a faulted tick, published as though the tick had
@@ -73,7 +69,7 @@
   on_violation: a database holding a billion entities of a replicated type pays replication memory for all of
     them while a handful are in view — an estimated ~381 MB of directory alone at 1 B entities to track perhaps
     ~170 k watched clusters (0.4 % fill). The engine then cannot host a large replicated archetype at all, which
-    is the property v2 exists to provide.
+    is the property replication exists to provide.
   rationale: a cluster chunk id is a PERSISTED FILE ADDRESS, not a residency measure. Ids are handed out by the
     segment and freed only when a cluster truly drains — evicting a chunk's pages never releases its id. So a
     flat array indexed by chunk id costs what the DATABASE holds, and no cluster-count threshold fixes that;
@@ -123,7 +119,7 @@
     the process lifetime, which is why 16 bits suffice. A wrap needs 65 536 reuses of one identity.
   note the generation is bumped on RELEASE, not on the next allocate, so an entity that leaves and is never replaced
     still reads as gone to a session holding the old pair.
-  note defined in the design series at design/Subscriptions/V2/02-execution.md; it was cited by code before it was
+  note defined in the design series at design/Subscriptions/02-execution.md; it was cited by code before it was
     written down here, which neither rule gate can detect — check-rule-scopes.py validates scope symbols only, and
     audit-rule-coverage.py's UNKNOWN_RULE_ID inspects [VerifiesRule]/[RuleMutant] attributes only.
   verified: NetIdAllocatorTests.ReusingAnIdentityBumpsItsGeneration,

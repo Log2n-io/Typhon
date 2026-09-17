@@ -18,7 +18,6 @@ using System.Runtime.CompilerServices;
 // Added 2026-06-29: competitive benchmark harness needs InMemoryWalFileIO for zero-disk D0 CPU measurement
 // (same genuine internal reuse as Typhon.Benchmark — measures the commit path without WAL-writer disk noise).
 [assembly: InternalsVisibleTo("Typhon.CompetitiveBenchmark")]
-[assembly: InternalsVisibleTo("Typhon.Client.Tests")]
 [assembly: InternalsVisibleTo("Typhon.Engine.Tests")]
 // Added 2026-07-19 (#514 D1): archetype catalog ids are now engine-assigned (no author-set [Archetype(Id=N)]), so the Workbench controller tests resolve an
 // archetype's runtime id via Archetype<T>.Metadata instead of a hardcoded literal.

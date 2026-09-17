@@ -3,8 +3,8 @@ using JetBrains.Annotations;
 namespace Typhon.Engine;
 
 /// <summary>
-/// Operator configuration for engine-owned replication (Subscriptions v2). Distinct from <see cref="SubscriptionServerOptions"/>, which configures the
-/// v1 TCP transport — this type governs how much memory replication state may occupy, not how clients connect.
+/// Operator configuration for engine-owned replication. It governs how much memory replication state may occupy, not how clients connect — the transport
+/// carries its own options.
 /// </summary>
 /// <remarks>
 /// <para>

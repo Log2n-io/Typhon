@@ -412,46 +412,17 @@ A transaction can `Spawn` an entity and then immediately query — the query mus
 
 **Code:** [`src/Typhon.Engine/Subscriptions/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Subscriptions)
 
-Subscriptions are how Typhon ships view state to external clients (game clients, web dashboards, observer processes). The subscription layer reuses the same `ViewBase` infrastructure — a "published" view is just an `IView` with extra subscriber tracking.
+Subscriptions are how Typhon ships engine state to external clients — game clients, browsers, observer processes — and how those clients send typed commands back into the tick. The application declares what each archetype exposes and who sees what; the engine does per-client interest, change detection, quantized encoding, sessions and backpressure, in parallel on the worker pool. Clients decode against a catalog rather than C# type layouts, so renaming a type is not a wire break.
 
-### `PublishedView` and `PublishedViewRegistry`
+**Under construction — none of it is reachable from application code yet.** What exists in the engine today is the foundation:
 
-[`Subscriptions/public/PublishedView.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Subscriptions/public/PublishedView.cs), [`Subscriptions/public/PublishedViewRegistry.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Subscriptions/public/PublishedViewRegistry.cs)
+- **Replication state blocks** — native per-cluster storage sized by the *watched set*, not by the archetype, with a directory keyed by cluster chunk id and a hook in the fence's migration step.
+- **The Engine-Subscriptions track** — a built-in track between the tick fence and the flush. Compute runs after the fence, publish after the flush, skippable only together (rule `SUB-02`).
+- **Network identities** — process-global netIds, a released one quarantined for a tick before reuse so no frame carries both an identity's leave and its re-enter.
+- **Ingress rings** — per-session SPSC command rings over native memory, carved from a slab pool; a full ring drops and counts rather than blocking the transport thread.
 
-Two flavours:
+The view machinery documented in §5 above is unchanged, and replication reads the same `ViewRegistry` deltas. For the design see `claude/design/Subscriptions/`; for feature status, [feature-set/Subscriptions](../feature-set/Subscriptions/README.md).
 
-- **Shared** — one `ViewBase` instance for all subscribers; the delta is computed once and the serialized payload is memcpy'd to each client's send buffer.
-- **Per-client** — a `Func<ClientContext, ViewBase>` factory creates one View per subscriber (e.g., player-specific filtering).
-
-`PublishedViewRegistry` is the published-view catalog. Lookup by name (`Dictionary<string, PublishedView>`) or by `PublishedId` (`Dictionary<ushort, PublishedView>`). Iteration during the Output phase uses a copy-on-write snapshot. A `ViewBase` can only be published once and can't be both a system input and a published view (asserted at registration).
-
-### `ClientConnection` and the I/O pipeline
-
-[`Subscriptions/internals/ClientConnection.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Subscriptions/internals/ClientConnection.cs)
-
-One per connected TCP client. Holds:
-
-- `ClientContext` — public connection identity (connection ID + user data).
-- An SPSC `SendBuffer` — Output phase writes, I/O thread reads.
-- `Dictionary<ushort, ViewSubscriptionState> ViewStates` — per-View incremental sync state.
-- `HashSet<PublishedView> ActiveSubscriptions` — the current subscription set.
-- `_pendingSubscriptions` — atomic-swap slot for "I want to change my subscription set" requests from game systems.
-
-`SetSubscriptions(params PublishedView[])` is the client-API entry point — it `Interlocked.Exchange`s the pending set; the next tick's Output phase applies it.
-
-### `TcpSubscriptionServer` and `SubscriptionOutputPhase`
-
-[`TcpSubscriptionServer.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Subscriptions/internals/TcpSubscriptionServer.cs), [`SubscriptionOutputPhase.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Subscriptions/internals/SubscriptionOutputPhase.cs)
-
-The TCP listener spawns one accept loop and per-connection read tasks. The **Output phase** runs once per scheduler tick (after all systems complete) and walks each `ClientConnection`:
-
-1. Apply any pending subscription set changes (compute Subscribed/Unsubscribed events).
-2. For each `ActiveSubscriptions`: incrementally serialize the View's `ViewDelta` (or do a full snapshot via `EntitySnapshotReader` if the client is new or the view overflowed).
-3. Write the serialized payload into the client's `SendBuffer`.
-
-`SubscriptionServerOptions` defaults: TCP port 9000, send buffer 256 KB, backpressure warning at 75% fill, sync batch size 200, published-view buffer capacity 8192.
-
-This part of the engine is the smallest of the subsystems documented in this series — it's a thin shell on top of the view system. The interesting work happens in `ViewDeltaRingBuffer`, `ViewRegistry`, and the index maintainer that fills the ring buffers; subscriptions just consume the deltas.
 
 ---
 

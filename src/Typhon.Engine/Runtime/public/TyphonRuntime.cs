@@ -44,7 +44,7 @@ public sealed partial class TyphonRuntime : IDisposable
     private readonly LiveFenceCostModel _liveFenceCost;
     private readonly bool _parallelFenceEnabled;
 
-    // Engine-owned replication (Subscriptions v2, #955). The track is always declared — unlike the Fence DAG it has no alternative implementation, so
+    // Engine-owned replication (#955). The track is always declared — unlike the Fence DAG it has no alternative implementation, so
     // there is nothing to fall back to and no switch worth offering. With nothing subscribed its cost is the four gate checks, but only because
     // DispatchTrackMultiThreaded now returns before waking the pool for a track that drained inline; until that was fixed a declared-but-idle track cost
     // a full wake/barrier cycle every tick. The context is owned here rather than on DatabaseEngine because nothing in the engine touches v2; see
@@ -129,15 +129,6 @@ public sealed partial class TyphonRuntime : IDisposable
     // DeltaTime tracking
     private long _previousTickTimestamp;
     private float _currentDeltaTime;
-
-    // ═══════════════════════════════════════════════════════════════
-    // Subscription server
-    // ═══════════════════════════════════════════════════════════════
-
-    private readonly PublishedViewRegistry _publishedViewRegistry = new();
-    private readonly ClientConnectionManager _clientConnectionManager = new();
-    private SubscriptionOutputPhase _subscriptionOutputPhase;
-    private TcpSubscriptionServer _tcpServer;
 
     // ═══════════════════════════════════════════════════════════════
     // Lifecycle events
@@ -320,10 +311,6 @@ public sealed partial class TyphonRuntime : IDisposable
 
         ResolveChangeFilters(scheduler);
 
-        // Initialize subscription infrastructure
-        var subOptions = options.SubscriptionServer ?? new SubscriptionServerOptions();
-        _subscriptionOutputPhase = new SubscriptionOutputPhase(engine, _publishedViewRegistry, _clientConnectionManager, subOptions, logger);
-
         // Wire tick lifecycle hooks
         Scheduler.TickStartCallback = OnTickStartInternal;
         Scheduler.TickEndCallback = OnTickEndInternal;
@@ -332,17 +319,6 @@ public sealed partial class TyphonRuntime : IDisposable
         Scheduler.ParallelQueryPrepareCallback = OnParallelQueryPrepare;
         Scheduler.ParallelQueryChunkCallback = OnParallelQueryChunk;
         Scheduler.ParallelQueryCleanupCallback = OnParallelQueryCleanup;
-
-        // Wire subscription telemetry enrichment
-        Scheduler.TelemetryEnrichCallback = (ref t) =>
-        {
-            if (_subscriptionOutputPhase != null)
-            {
-                t.OutputPhaseMs = _subscriptionOutputPhase.LastOutputPhaseMs;
-                t.SubscriptionDeltasPushed = _subscriptionOutputPhase.LastDeltasPushed;
-                t.SubscriptionOverflowCount = _subscriptionOutputPhase.LastOverflowCount;
-            }
-        };
 
         // Wire profiler gauge snapshot — only when gauges are enabled, so the callback pointer stays null otherwise and the scheduler's
         // null-check is the only cost. See TyphonRuntime.GaugeSnapshot.cs for the collection + emit implementation.
@@ -370,18 +346,10 @@ public sealed partial class TyphonRuntime : IDisposable
     // Lifecycle
     // ═══════════════════════════════════════════════════════════════
 
-    /// <summary>Starts the scheduler (worker threads + tick driver) and the subscription server (if configured).</summary>
+    /// <summary>Starts the scheduler (worker threads + tick driver).</summary>
     public void Start()
     {
         Scheduler.Start();
-
-        // Start TCP subscription server if a port is configured
-        var subOptions = Options.SubscriptionServer;
-        if (subOptions != null && subOptions.Port > 0)
-        {
-            _tcpServer = new TcpSubscriptionServer(subOptions, _clientConnectionManager, _subscriptionOutputPhase, _logger);
-            _tcpServer.Start();
-        }
     }
 
     /// <summary>
@@ -431,9 +399,6 @@ public sealed partial class TyphonRuntime : IDisposable
         // No-op unless the profiler was self-wired by ProfilerBootstrap.TryStart.
         ProfilerBootstrap.BeginStop();
 
-        // Stop accepting new connections and flush remaining data
-        _tcpServer?.Shutdown();
-
         // Execute OnShutdown callback with a dedicated transaction
         if (runOnShutdown && OnShutdown != null)
         {
@@ -461,7 +426,6 @@ public sealed partial class TyphonRuntime : IDisposable
     /// <inheritdoc />
     public void Dispose()
     {
-        _tcpServer?.Dispose();
         Scheduler.Dispose();
 
         // AFTER the scheduler, not before. A tick already past the shutdown check keeps dispatching on the timer thread, and every tick ends by draining this
@@ -482,54 +446,6 @@ public sealed partial class TyphonRuntime : IDisposable
         // every host AND after the engine's shutdown teardown, so those events still reach the trace. Stopping it here
         // would precede the engine teardown and drop it. Shutdown() above only pre-warms the async CPU-sampler stop.
     }
-
-    // ═══════════════════════════════════════════════════════════════
-    // Subscription API
-    // ═══════════════════════════════════════════════════════════════
-
-    /// <summary>
-    /// Publish a shared View for client subscriptions. All subscribers see the same data; the delta is serialized once and memcpy'd.
-    /// </summary>
-    /// <remarks>
-    /// <para>The View must be a dedicated instance — it must NOT be used as a system input. Published Views are refreshed only during
-    /// the Output phase; using the same View as system input would consume ring buffer entries needed by subscriptions.</para>
-    /// </remarks>
-    /// <param name="name">Human-readable name clients use to identify this subscription.</param>
-    /// <param name="view">A dedicated ViewBase instance for subscriptions.</param>
-    /// <param name="priority">Subscription priority for overload throttling.</param>
-    /// <returns>The published View handle.</returns>
-    public PublishedView PublishView(string name, ViewBase view, SubscriptionPriority priority = SubscriptionPriority.Normal) =>
-        _publishedViewRegistry.RegisterShared(name, view, priority);
-
-    /// <summary>
-    /// Publish a per-client View factory. A new View is created per subscriber, parameterized by <see cref="ClientContext"/>.
-    /// </summary>
-    /// <param name="name">Human-readable name clients use to identify this subscription.</param>
-    /// <param name="factory">Factory that creates a View for each subscribing client.</param>
-    /// <param name="priority">Subscription priority for overload throttling.</param>
-    /// <returns>The published View handle.</returns>
-    public PublishedView PublishView(string name, Func<ClientContext, ViewBase> factory, SubscriptionPriority priority = SubscriptionPriority.Normal) =>
-        _publishedViewRegistry.RegisterPerClient(name, factory, priority);
-
-    /// <summary>
-    /// Set a client's subscription set. Replaces the previous set atomically. The transition is applied during the next tick's Output phase.
-    /// Looks up the connection by <see cref="ClientContext.ConnectionId"/> — the public client identity. If the connection has been
-    /// dropped between the caller obtaining the context and this call, the request is silently ignored (the next tick will see no
-    /// pending change for a disposed client anyway).
-    /// </summary>
-    /// <remarks>If called multiple times within a tick, the last call wins.</remarks>
-    public void SetSubscriptions(ClientContext client, params PublishedView[] views)
-    {
-        ArgumentNullException.ThrowIfNull(client);
-        var connection = _clientConnectionManager.Get(client.ConnectionId);
-        connection?.SetSubscriptions(views);
-    }
-
-    /// <summary>The published View registry (for diagnostics and testing).</summary>
-    public PublishedViewRegistry PublishedViews => _publishedViewRegistry;
-
-    /// <summary>The client connection manager (for diagnostics and testing).</summary>
-    internal ClientConnectionManager ClientConnections => _clientConnectionManager;
 
     // ═══════════════════════════════════════════════════════════════
     // Side-transaction factory
@@ -569,13 +485,6 @@ public sealed partial class TyphonRuntime : IDisposable
                 if (_systemViews[i] == null)
                 {
                     throw new InvalidOperationException($"System '{sys.Name}': InputFactory returned null. The View must be created before the runtime starts.");
-                }
-
-                if (_systemViews[i].IsPublished)
-                {
-                    throw new InvalidOperationException(
-                        $"System '{sys.Name}': Input View (ViewId={_systemViews[i].ViewId}) is already published for subscriptions. " +
-                        "Published Views must be separate instances from system input Views. Create a new View with the same query.");
                 }
 
                 _systemViews[i].IsSystemInput = true;
@@ -2328,33 +2237,14 @@ public sealed partial class TyphonRuntime : IDisposable
         LastTickOutcome = tickAborted ? scheduler.AbortedOutcome : fenceFailed 
             ? scheduler.FenceFailureOutcome : TickOutcome.ForSuccess(scheduler.CurrentTickNumber);
 
-        // #199: Output phase — subscription deltas.
-        // Runs AFTER WriteTickFence so that:
-        //   1. Ring buffer has ALL entries (commit-time + shadow-time) for correct View membership
-        //   2. PreviousTickDirtyBitmap has this tick's dirty chunks for Modified detection
-        //   3. All state is quiescent (no concurrent writers)
-        //
-        // Suppressed on an aborted tick (#567): publication is the ONE tick-end act carrying tick-wide "this was a good tick" semantics, so it is the only one
-        // of the three that may be skipped. The fence and the flush above ran unconditionally and must keep doing so — rule TP-01a.
-        // Suppressed on a fence failure for the same reason as on an abort, and with a sharper one: the output phase reads this tick's dirty bitmap and the
-        // ring buffer, and a fence that did not reach Finalize left neither of them complete. Publishing deltas from it would tell subscribers a story the
-        // WAL does not carry.
+        // Publication is the ONE tick-end act carrying tick-wide "this was a good tick" semantics, so it is the only one of the three that may be skipped on an
+        // aborted or fence-failed tick (#567) — the fence and the flush above ran unconditionally and must keep doing so, rule TP-01a.
         if (!tickAborted && !fenceFailed)
         {
-            InspectorPhase(TickPhase.OutputPhase, () =>
-            {
-                using var subSpan = TyphonEvent.BeginRuntimeSubscriptionOutputExecute(
-                    scheduler.CurrentTickNumber, (byte)Scheduler.CurrentOverloadLevel);
-                _subscriptionOutputPhase?.Execute(scheduler.CurrentTickNumber, Scheduler.CurrentOverloadLevel);
-                // Stats fields (clientCount, viewsRefreshed, deltasPushed, overflowCount) populated when Phase 9 wires per-tick subscription metrics back from
-                // SubscriptionOutputPhase.
-            });
-
-            // Subscriptions v2 publishes here, after the flush, under the same gate as the compute half PLUS the fault check — SUB-02 makes the two skippable
+            // Replication publishes here, after the flush, under the same gate as the compute half PLUS the fault check — SUB-02 makes the two skippable
             // together and only together. The extra condition exists because making a replication failure non-terminal (Track.FailureIsTerminal) removed the
             // signal this gate used to key on: a stage throw latches neither `tickAborted` nor `fenceFailed`, so without it a tick whose compute blew up would
-            // publish as though it had succeeded — moving every receiving session's baseline past records it was never sent. v1's output phase above
-            // keeps the original gate, because a replication fault says nothing about it.
+            // publish as though it had succeeded — moving every receiving session's baseline past records it was never sent.
             if (!_subscriptionsContext.Faulted)
             {
                 _subscriptionsContext.NotePublish();

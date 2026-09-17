@@ -35,7 +35,7 @@ public sealed class RuntimeSchedule
         _options = options ?? new RuntimeOptions();
 
         // Built-in tracks, in execution order. The three engine tracks carry the `engine` tag so tooling can hide them by default; Public is the app's track.
-        // Engine-Pre is empty initially — declared for symmetry, and it is where Subscriptions v2's ingress will land.
+        // Engine-Pre is empty initially — declared for symmetry, and it is where the Subscriptions ingress drain will land.
         //
         // Engine-Subscriptions is LAST, after Engine-Post, and that position is the ordering guarantee rather than a convention: a track is a barrier (PH-01),
         // so every fence phase has completed before replication's first stage starts, and DeclareTrack cannot place an app track after it.

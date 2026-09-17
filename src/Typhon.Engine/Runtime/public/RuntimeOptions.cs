@@ -61,12 +61,6 @@ public class RuntimeOptions
     public int TelemetryRingCapacity { get; set; } = 1024;
 
     /// <summary>
-    /// Subscription server configuration. Set to non-null to enable the TCP subscription server.
-    /// If null, no subscription server is started (subscriptions disabled).
-    /// </summary>
-    public SubscriptionServerOptions SubscriptionServer { get; set; }
-
-    /// <summary>
     /// Overload detection and response configuration. Always active with sensible defaults.
     /// </summary>
     public OverloadOptions Overload { get; set; } = new();

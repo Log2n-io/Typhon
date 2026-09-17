@@ -9,7 +9,7 @@ namespace Typhon.Engine.Internals;
 /// <remarks>
 /// <para>
 /// <b>Why the identity space is global.</b> The wire protocol states it outright — "entities are global dense u32 netIds"
-/// (<c>design/Subscriptions/V2/03-wire-protocol.md § 1</c>) — and two things depend on it. An <c>entityRef</c> is a bare netId that "may name an entity
+/// (<c>design/Subscriptions/03-wire-protocol.md § 1</c>) — and two things depend on it. An <c>entityRef</c> is a bare netId that "may name an entity
 /// outside the view", so it arrives with no archetype context to disambiguate it; and an event is encoded ONCE into a tick arena and memcpy'd into every
 /// matching session's block precisely "because netIds are global, the bytes are identical for every receiver" (§ 7). A per-archetype space breaks the second
 /// outright: the same number would mean different entities to different readers, so the shared bytes could not be shared. This was per-archetype until #955's

@@ -277,7 +277,7 @@ unsafe class IngressRingTests
 
     /// <summary>
     /// The real topology: one producer thread and one consumer thread, which is what the release/acquire pairs exist for. A ring that relied on x64 store
-    /// ordering — as v1's SendBuffer did — passes single-threaded tests and is still wrong on arm64, so this at least drives the concurrent path.
+    /// ordering — as the earlier send buffer did — passes single-threaded tests and is still wrong on arm64, so this at least drives the concurrent path.
     /// </summary>
     [Test]
     [CancelAfter(30_000)]

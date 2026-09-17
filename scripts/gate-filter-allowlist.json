@@ -3,13 +3,11 @@
     "Test suites deliberately not run by any merge-gate job (#942).",
     "Every entry needs a reason and an OPEN issue: an entry whose issue has closed is itself a violation,",
     "which is what stops this list becoming permanent. Same discipline as scripts/lint-test-suppressions.py.",
-    "A project with no test methods is not a suite and does not belong here — the checker classifies it out."
+    "A project with no test methods is not a suite and does not belong here — the checker classifies it out.",
+    "",
+    "Empty since Subscriptions v1 was deleted: the sole entry was test/Typhon.Client.Tests, which covered the v1",
+    "reference client. Both went together, so the exemption has nothing left to exempt. v2's SDK suite arrives with",
+    "the subscriptions-sdk job that gates it, not ahead of it."
   ],
-  "ungated": [
-    {
-      "project": "test/Typhon.Client.Tests/Typhon.Client.Tests.csproj",
-      "reason": "Gated by the subscriptions-sdk job, which lands with the Subscriptions v2 SDK code it gates (v2 Phase 1). Until then the suite covers Typhon.Client, which has no other consumer.",
-      "issue": 205
-    }
-  ]
+  "ungated": []
 }

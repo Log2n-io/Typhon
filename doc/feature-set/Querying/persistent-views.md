@@ -82,7 +82,7 @@ while (running)
 
 - Related feature: [Fluent Query API & Predicate Parsing](./fluent-query-api/README.md)
 - Also documented as: [Reactive Views (EcsView)](../Ecs/reactive-views.md) in the Ecs category — same feature, since `ToView()` is called on an `EcsQuery`; this page is canonical.
-- Sibling: [Published Views](../Subscriptions/published-views/README.md) — registers a View as a subscribable target for connected clients
+- Sibling: [Subscriptions](../Subscriptions/README.md) — replication of engine state to remote clients, from declared projections rather than from a view
 
 <!-- Deep dive: claude/overview/05-query.md §5.6 Persistent Views, §5.7 Delta Tracking, §5.8 View Registry -->
 <!-- Deep dive: claude/design/Querying/ViewSystem/README.md — full design series (overview, internals, view types, concurrency) -->

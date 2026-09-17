@@ -28,7 +28,7 @@ list — never touching clusters outside the filter. Adding `CellAmortize(N)` fu
 into `N` rotating buckets keyed by `tickNumber % N`, so the system sees `1/N` of its tier's clusters on
 any given tick; `TickContext.AmortizedDeltaTime` is scaled to `DeltaTime × N` so integration math (decay,
 drift, movement) stays correct across the longer effective step. A `View`'s own `WithTier(...)` filter
-applies the same cluster scoping independently, useful for published/subscription views; a system's
+applies the same cluster scoping independently; a system's
 filter and its input view's filter combine by bit-AND.
 
 ## 💻 Usage

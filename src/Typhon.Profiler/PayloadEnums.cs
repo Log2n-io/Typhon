@@ -60,8 +60,7 @@ public enum TickPhase : byte
     /// <summary>Write tick fence — dirty bitmap snapshot, shadow entry processing, spatial index update.</summary>
     WriteTickFence = 2,
 
-    /// <summary>Subscription output — refresh published Views, compute deltas, push to clients.</summary>
-    OutputPhase = 3,
+    // 3 was the subscription output phase, retired with the replication rewrite. The id is not reused.
 
     /// <summary>Tier index rebuild — rebuild per-archetype tier cluster indexes at tick start.</summary>
     TierIndexRebuild = 4,

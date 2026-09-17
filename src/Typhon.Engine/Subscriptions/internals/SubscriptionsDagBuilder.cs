@@ -11,7 +11,7 @@ namespace Typhon.Engine.Internals;
 /// clusters — run inside
 /// the following stage's single-threaded <c>Prepare</c>, where they cost a function call instead of a whole barrier; and <c>Events</c> runs as a parallel
 /// branch because it depends on neither interest nor projection. The critical path is <c>Interest → Project → Frames</c>
-/// (<c>design/Subscriptions/V2/foundation/03-subscriptions-track.md § 2.5</c>).
+/// (<c>design/Subscriptions/foundation/03-subscriptions-track.md § 2.5</c>).
 /// </para>
 /// <para>
 /// <b>Declared unconditionally, unlike the Fence DAG.</b> <see cref="FenceDagBuilder"/> is called only when <c>RuntimeOptions.EnableParallelFence</c> is set,

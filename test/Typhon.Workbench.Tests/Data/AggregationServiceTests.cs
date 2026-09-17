@@ -432,7 +432,7 @@ public sealed class AggregationServiceTests
             new PostTickSummary
             {
                 TickNumber = 1, _reserved = 0,
-                WriteTickFenceUs = 1f, WalFlushUs = 2f, SubscriptionOutputUs = 3f,
+                WriteTickFenceUs = 1f, WalFlushUs = 2f,
                 TierIndexRebuildUs = 4f, DormancySweepUs = 5f, TierBudgetUs = 6f,
             },
         });
@@ -679,7 +679,7 @@ public sealed class AggregationServiceTests
                 pRows[i] = new PostTickSummary
                 {
                     TickNumber = rows[i].tick, _reserved = 0,
-                    WriteTickFenceUs = 0, WalFlushUs = rows[i].walFlushUs, SubscriptionOutputUs = 0,
+                    WriteTickFenceUs = 0, WalFlushUs = rows[i].walFlushUs,
                     TierIndexRebuildUs = 0, DormancySweepUs = 0, TierBudgetUs = 0,
                 };
             }

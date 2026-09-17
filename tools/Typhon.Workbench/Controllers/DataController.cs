@@ -616,7 +616,6 @@ public sealed class DataController : WorkbenchControllerBase
                 "walFlush" => r.WalFlushUs,
                 "writeTickFence" => r.WriteTickFenceUs,
                 "tierBudget" => r.TierBudgetUs,
-                "subscriptionOutput" => r.SubscriptionOutputUs,
                 "tierIndexRebuild" => r.TierIndexRebuildUs,
                 "dormancySweep" => r.DormancySweepUs,
                 _ => float.NaN,

@@ -49,7 +49,7 @@ internal readonly struct IngressRingLease
 /// <remarks>
 /// <para>
 /// <b>Why slabs rather than one allocation per session.</b> Every ring must be <b>native</b> memory the engine frees deterministically: a pointer into a GC
-/// array is the one thing this path may never hold (v1's <c>SendBuffer</c> used the pinned object heap, and the POH stops the GC <i>moving</i> an array, not
+/// array is the one thing this path may never hold (an earlier send buffer used the pinned object heap, and the POH stops the GC <i>moving</i> an array, not
 /// <i>freeing</i> it — the SWG x64 <c>0x80131506</c> crash). One slab backing many rings makes that ownership single and obvious: the slab is a resource
 /// child, <c>base.Dispose</c> frees it, and no ring owns anything.
 /// </para>

@@ -330,8 +330,7 @@ Compile-time stripped in RELEASE; active in DEBUG to catch declaration drift.
     doc had the order backwards with nothing in the rule database to contradict it.
   note AMENDED by SUB-02 (`rules/subscriptions.md`, #955): "output" splits into replication COMPUTE, which runs after the
     fence and before the flush on the Engine-Subscriptions track, and replication PUBLISH, which runs after the flush.
-    The three-step ordering above is unchanged for v1's output phase; SUB-02 is the four-step form that supersedes it
-    once v1 is removed (design/Subscriptions/V2/06-v1-to-v2.md).
+    That four-step form is the only reading: nothing remains that runs "output" as a single post-flush step.
   verified: SubscriptionsTrackTests.NormalTick_RunsFenceThenComputeThenFlushThenPublish [VerifiesRule]
 
 ### TP-01a: The fence and the flush are mandatory on EVERY tick `[fatal][silent]` (issue #567)
@@ -354,7 +353,7 @@ Compile-time stripped in RELEASE; active in DEBUG to catch declaration drift.
     engine relied on the fence being unconditional but nothing said so, and the request was reasonable from outside.
     Recorded so a future "abort the tick" variant cannot re-derive the same wrong conclusion. See
     design/Runtime/08-strict-tick-abort.md §"Why the fence must still run".
-  note the skippable "output" step is BOTH halves of replication once SUB-02 applies — compute and publish are skipped
+  note the skippable "output" step is BOTH halves of replication and nothing else — compute and publish are skipped
     together and only together. Engine-tagged systems are exempt from the scheduler's tick-abort guard, which is what
     makes the fence run on an aborted tick, so the replication track does NOT inherit the suppression: it opts out
     itself, in every stage's ShouldRun.

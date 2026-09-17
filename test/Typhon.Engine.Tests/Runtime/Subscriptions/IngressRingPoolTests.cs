@@ -17,7 +17,7 @@ namespace Typhon.Engine.Tests;
 /// </para>
 /// <para>
 /// The memory is real allocator memory rather than a fixture array, for the reason <c>IngressRingTests</c> gives: "not a GC object" is itself part of the
-/// contract, and v1's pinned-object-heap buffer is the verified negative precedent.
+/// contract, and the earlier pinned-object-heap buffer is the verified negative precedent.
 /// </para>
 /// </remarks>
 [TestFixture]

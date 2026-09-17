@@ -626,10 +626,10 @@ jobs:
   # ---- Suites that ran in NO job at all before #942. Free runner, never the billed c6id. ----
   #
   # Six real test suites existed that no workflow executed. That is not a coverage gap so much as unknown
-  # territory: a suite that has never run cannot be said to pass, and one of them (Client.Tests) is where
-  # Subscriptions v2's SDK work gets verified. Client.Tests stays allow-listed until the subscriptions-sdk job
-  # lands with the code it gates (#205); the rest run here. If one of these is red, quarantine it against an
-  # issue — that is the mechanism, and it is better than the suite being invisible.
+  # territory: a suite that has never run cannot be said to pass. Five run here. The sixth was Client.Tests,
+  # allow-listed against #205 while it covered the v1 reference client; both it and that client were deleted with
+  # Subscriptions v1, so the allow-list is now empty and v2's SDK suite arrives with the subscriptions-sdk job
+  # that gates it. If one of these is red, quarantine it against an issue — better than the suite being invisible.
   aux-tests:
     needs: changes
     if: needs.changes.outputs.aux == 'true' && needs.changes.outputs.skip_ut != 'true'

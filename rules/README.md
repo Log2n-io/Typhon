@@ -125,7 +125,7 @@ Each file covers one domain. Rules are grouped by module within the domain.
 | [ecs.md](ecs.md) | Component schema identity, component-type identity, tick-fence dirty bitmaps | SCHEMA (StorageMode fixed per (name, revision); ComponentTypeId is a process-global in-memory handle), CLUSTERWALK, CLUSTERVIS, DIRTY (a spawn sets no dirty bit — `DIRTY-01`), STAGE (a cluster-backed non-Versioned spawn allocates no content chunk — `STAGE-01`), REAP (every deferred-cleanup queue has a production drain — `REAP-01`) |
 | [indexing.md](indexing.md) | Secondary-index ownership and scope, ordered index reads | Index Ownership & Scope (`IX-01..05`), Ordered Index Reads (`IXS-01..03`) |
 | [concurrency.md](concurrency.md) | UoW cancellation, structural holdoff, thread identity, MVCC snapshot retention, epoch pinning | Cooperative Cancellation ⊗ Structural Holdoff (`CX-01..04` — a coupled pair, see the module note), Thread Identity (`CX-05`), Snapshot Retention (`SNAP-01..02`), Epoch Pinning ⊗ Page Eviction (`EP-01`), SIGNAL (a permit is produced only when there is a consumer for it — `SIGNAL-01`) |
-| [subscriptions.md](subscriptions.md) | Engine-owned replication (Subscriptions v2) | Replication State Sizing (cost follows the watched set, never the archetype — `SUB-13`; no managed allocation in the steady state — `SUB-07`), Per-Entity State Lifetime (state follows its entity and never survives slot reuse — `SUB-09`, `[UNBUILT]`) |
+| [subscriptions.md](subscriptions.md) | Engine-owned replication | Replication State Sizing (cost follows the watched set, never the archetype — `SUB-13`; no managed allocation in the steady state — `SUB-07`), Per-Entity State Lifetime (state follows its entity and never survives slot reuse — `SUB-09`, `[UNBUILT]`) |
 
 ## Roadmap
 

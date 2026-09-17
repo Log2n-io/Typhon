@@ -10,7 +10,7 @@ description: 'A view is a query result you keep and refresh, and that reports wh
 
 Where a one-shot query is a snapshot answer, a view (`tx.Query<Unit>()…ToView()`) is a result set you hold: `Refresh(tx)` brings it up to date, `GetDelta()` returns the `Added` / `Removed` / `Modified` entity keys, and `ClearDelta()` resets for the next cycle. That delta is exactly what a reactive [system](xref:concept-system) or a UI needs.
 
-A view built on an [indexed](xref:concept-index) `WhereField` predicate updates **incrementally** — the engine moves only the entities that crossed the boundary. A view on a free `Where` is a **pull** view, recomputed on `Refresh`. Same delta either way; the difference is cost. A view is also the input a [`QuerySystem`](xref:concept-system) runs over, and what a [subscription](xref:concept-subscription) publishes to clients.
+A view built on an [indexed](xref:concept-index) `WhereField` predicate updates **incrementally** — the engine moves only the entities that crossed the boundary. A view on a free `Where` is a **pull** view, recomputed on `Refresh`. Same delta either way; the difference is cost. A view is also the input a [`QuerySystem`](xref:concept-system) runs over. [Subscriptions](xref:concept-subscription) replicate outward to remote clients from declared projections rather than from a view, though both read the same delta machinery.
 
 ## How it relates
 
@@ -26,4 +26,4 @@ A view built on an [indexed](xref:concept-index) `WhereField` predicate updates 
 ## Learn & use
 
 - **Narrative:** [Guide ch.4 §3 — live views](xref:guide-querying)
-- **Feature detail:** [reactive dispatch & change filters](xref:feature-runtime-reactive-dispatch-change-filters) · [published views](xref:feature-subscriptions-published-views-index)
+- **Feature detail:** [reactive dispatch & change filters](xref:feature-runtime-reactive-dispatch-change-filters) · [subscriptions](xref:feature-subscriptions-index)

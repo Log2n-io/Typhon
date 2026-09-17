@@ -487,46 +487,6 @@
           href: Storage/pluggable-storage-backend/transient-store.md
 - name: Subscriptions
   href: Subscriptions/README.md
-  items:
-    - name: 'Backpressure & Resync Recovery'
-      href: Subscriptions/backpressure-resync.md
-    - name: 'Client Connections & Lifecycle'
-      href: Subscriptions/client-connections.md
-    - name: Incremental Sync
-      href: Subscriptions/incremental-sync.md
-    - name: 'Subscription Priority & Overload Throttling'
-      href: Subscriptions/priority-overload-throttling.md
-    - name: Published/System-Input View Separation
-      href: Subscriptions/published-view-isolation.md
-    - name: 'Reference C# Client SDK'
-      href: Subscriptions/reference-client-sdk.md
-    - name: Subscription Server Configuration
-      href: Subscriptions/server-configuration.md
-    - name: 'Subscription Telemetry & Tracing'
-      href: Subscriptions/subscription-telemetry.md
-    - name: 'TCP Transport & Wire Format'
-      href: Subscriptions/wire-transport.md
-    - name: 'Per-Tick Delta Computation & Encoding'
-      href: Subscriptions/delta-computation/README.md
-      items:
-        - name: Component-Level Dirty Encoding (v1)
-          href: Subscriptions/delta-computation/delta-encoding-component-dirty.md
-        - name: Per-Field Dirty Encoding (v1.1)
-          href: Subscriptions/delta-computation/delta-encoding-per-field-dirty.md
-    - name: Published Views
-      href: Subscriptions/published-views/README.md
-      items:
-        - name: Per-client View Factories
-          href: Subscriptions/published-views/per-client-views.md
-        - name: Shared (World-State) Views
-          href: Subscriptions/published-views/shared-views.md
-    - name: Subscription Management (SetSubscriptions)
-      href: Subscriptions/subscription-management/README.md
-      items:
-        - name: Client-Initiated Subscriptions (v2)
-          href: Subscriptions/subscription-management/subscription-client-initiated.md
-        - name: Server-Driven Subscriptions (v1)
-          href: Subscriptions/subscription-management/subscription-server-driven.md
 - name: Transactions
   href: Transactions/README.md
   items:

@@ -583,7 +583,9 @@ public static class TraceFileCacheConstants
     /// spawn/destroy cohorts (#620) and the <c>lifecycle/*</c> track families. v16 caches must rebuild — they carry no lifecycle rows, and
     /// their source traces predate <c>EcsSpawnBatch</c>, so batch spawns in them were never recorded at all.
     /// </remarks>
-    public const ushort CurrentChunkerVersion = 17;
+    // 18: PostTickSummary lost its subscription-output field with the replication rewrite. The rows are read at a fixed stride, so an older cache would
+    // misparse rather than read a zero — the version bump is what forces those caches to be rebuilt instead.
+    public const ushort CurrentChunkerVersion = 18;
 
     /// <summary>Sidecar file extension, appended to the source path (e.g., <c>foo.typhon-trace</c> → <c>foo.typhon-trace-cache</c>).</summary>
     public const string CacheFileExtension = "-cache";

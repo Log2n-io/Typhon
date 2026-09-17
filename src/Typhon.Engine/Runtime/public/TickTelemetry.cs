@@ -41,15 +41,6 @@ public struct TickTelemetry
     /// <summary>Total entities processed across all systems this tick.</summary>
     public int TotalEntitiesProcessed;
 
-    /// <summary>Wall-clock duration of the subscription Output phase, in milliseconds. Zero if no subscriptions.</summary>
-    public float OutputPhaseMs;
-
-    /// <summary>Total entity deltas pushed to all clients this tick (Added + Modified + Removed across all Views).</summary>
-    public int SubscriptionDeltasPushed;
-
-    /// <summary>Number of send buffer overflows this tick (clients that missed deltas and need resync).</summary>
-    public int SubscriptionOverflowCount;
-
     /// <summary>Current overload response level for this tick.</summary>
     public OverloadLevel CurrentLevel;
 

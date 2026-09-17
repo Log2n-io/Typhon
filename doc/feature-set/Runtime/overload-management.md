@@ -80,7 +80,7 @@ var level = runtime.CurrentOverloadLevel; // OverloadLevel.Normal / SystemThrott
 ## 🔗 Related
 - Related feature: [Telemetry & Runtime Inspection](./telemetry-runtime-inspection.md)
 - Related feature: [Declarative System Scheduling](./declarative-system-scheduling.md)
-- Sibling: [Subscription Priority & Overload Throttling](../Subscriptions/priority-overload-throttling.md) — how the same overload signal reprioritizes View delivery to players.
+- Sibling: [Subscriptions](../Subscriptions/README.md) — how replication responds to this same overload signal is designed but not built yet.
 
 <!-- Deep dive: claude/design/Runtime/03-overload.md -->
 <!-- Deep dive: claude/overview/13-runtime.md — Overrun handling -->

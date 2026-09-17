@@ -16,17 +16,3 @@ internal ref partial struct RuntimeTransactionLifecycleEvent
 
 }
 
-/// <summary>Producer-side ref struct for <see cref="TraceEventKind.RuntimeSubscriptionOutputExecute"/>.</summary>
-[TraceEvent(TraceEventKind.RuntimeSubscriptionOutputExecute, EmitEncoder = true)]
-internal ref partial struct RuntimeSubscriptionOutputExecuteEvent
-{
-    [BeginParam]
-    public long Tick;
-    [BeginParam]
-    public byte Level;
-    public ushort ClientCount;
-    public ushort ViewsRefreshed;
-    public uint DeltasPushed;
-    public ushort OverflowCount;
-
-}

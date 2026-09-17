@@ -1,29 +1,25 @@
 ---
 uid: concept-subscription
 title: 'Subscription'
-description: 'A subscription publishes a view to remote consumers and streams its Added/Removed/Modified deltas over a transport, with per-subscription priority — the same view+delta machinery wired to the wire.'
+description: 'Engine state replicated outward to remote clients, with per-client interest and typed commands coming back. Under construction.'
 ---
 
 # Subscription
 
-> **In one line:** a [view](xref:concept-view) published to *remote* consumers, streaming its deltas over a transport.
+> **In one line:** engine state replicated outward to remote clients, and their typed commands drained back into the tick.
 
-When the consumer of a view is remote — a connected client, another process — a subscription publishes the view and pushes its `Added`/`Removed`/`Modified` deltas out as it refreshes, with per-subscription priority and overload throttling. It's the same view + delta machinery from [views](xref:concept-view), wired to a transport, so a client can mirror "the units near my camera" without re-querying.
+When the consumer of engine state is remote — a connected game client, a browser, another process — a subscription is what carries it there and keeps it current, so a client can mirror "the characters near my camera" without re-querying and without the application writing change detection, encoding or networking.
 
-You register a `PublishedView` (managed by a `PublishedViewRegistry`). Reach for it when you're building a server, not a single-process simulation.
+The application declares what each archetype exposes and who sees what. The engine does the rest: per-client interest, change detection, quantized encoding, sessions, backpressure, and an inbound path for typed commands that enter the tick and are validated by ordinary systems. Clients decode against a catalog rather than against C# type layouts, so renaming a type is not a wire break, and a browser is as much a client as a native one.
+
+> 🚧 **Under construction.** The foundation is in the engine — replication state sized by the watched set, a track between the tick fence and the flush, network identities, per-session ingress rings — but there is no public API yet. Track [#205](https://github.com/Log2n-io/Typhon/issues/205).
 
 ## How it relates
 
-- **[View](xref:concept-view)** — a subscription is a view published outward.
-- **[Query](xref:concept-query)** — the underlying question the view answers.
-- **[System](xref:concept-system)** — subscription output is driven at tick end, alongside the [tick](xref:concept-tick) lifecycle.
-
-## In the API
-
-- [`PublishedView`](xref:Typhon.Engine.PublishedView) — a view published to subscribers.
-- [`PublishedViewRegistry`](xref:Typhon.Engine.PublishedViewRegistry) — the registry that manages published views.
+- **[View](xref:concept-view)** — replication reads the same delta machinery, but from declared projections rather than from a published view.
+- **[Query](xref:concept-query)** — the underlying question a projection answers.
+- **[System](xref:concept-system)** — replication runs on its own engine track: compute after the [tick](xref:concept-tick) fence, publish after the flush.
 
 ## Learn & use
 
-- **Narrative:** [Guide ch.4 §4 — subscriptions](xref:guide-querying)
-- **Feature detail:** [subscriptions](xref:feature-subscriptions-index) · [published views](xref:feature-subscriptions-published-views-index) · [incremental sync](xref:feature-subscriptions-incremental-sync)
+- **Feature detail:** [subscriptions](xref:feature-subscriptions-index)

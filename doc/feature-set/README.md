@@ -32,7 +32,7 @@ description: 'Documentation for every feature in src/Typhon.Engine, tagged Publi
 | Spatial | R-Tree spatial indexing, spatial query predicates, trigger volumes, and cluster-based tiered simulation dispatch. | Mixed | [→](Spatial/README.md) |
 | Querying | The fluent query builder, execution planning, statistics, and incrementally-refreshed persistent Views. | Public | [→](Querying/README.md) |
 | Transactions | The three-tier execution model (Engine → UoW → Transaction) — durability modes/discipline, commit/rollback, conflict resolution. | Public | [→](Transactions/README.md) |
-| Subscriptions | Server-driven, View-based client state replication over TCP — published Views, delta encoding, wire transport. | Public | [→](Subscriptions/README.md) |
+| Subscriptions | Engine-owned replication: declared archetype state streamed to remote clients, typed commands drained back into the tick. Under construction. | Public | [→](Subscriptions/README.md) |
 | Runtime | The DAG-scheduled tick loop that dispatches systems — scheduling, system types, spatial-tier dispatch, overload management. | Public | [→](Runtime/README.md) |
 | Resources | The runtime resource graph tracking every engine resource's metrics, budgets, snapshots, and exhaustion handling. | Mixed | [→](Resources/README.md) |
 | Observability | Zero-overhead telemetry gating, distributed tracing, OpenTelemetry metrics export, and health/alerting. | Public | [→](Observability/README.md) |
@@ -193,24 +193,7 @@ Every Public feature, one line each — the application-facing surface, complete
 
 | Feature | Summary | Status | Level | Link |
 |---|---|---|---|---|
-| Published Views | Register a query View as a subscribable target via TyphonRuntime.PublishView, as either one shared instance for all clients or a per-client factory. | ✅ Implemented | 🟢 Start Here | [→](Subscriptions/published-views/README.md) |
-| &nbsp;&nbsp;↳ Shared Views | One View instance, refreshed and diffed once per tick, fanned out to every subscriber. | ✅ Implemented | 🔵 Core | [→](Subscriptions/published-views/shared-views.md) |
-| &nbsp;&nbsp;↳ Per-Client Views | A Func\<ClientContext, ViewBase\> that builds a fresh, parameterized View for each subscriber. | ✅ Implemented | 🔵 Core | [→](Subscriptions/published-views/per-client-views.md) |
-| Subscription Management (SetSubscriptions) | Atomic, idempotent, diff-based API to set a client's full subscription list each tick. | ✅ Implemented | 🟢 Start Here | [→](Subscriptions/subscription-management/README.md) |
-| &nbsp;&nbsp;↳ Server-Driven Subscriptions (v1) | Game code calls SetSubscriptions whenever game state changes; the runtime applies the diff-based transition on the next tick. | ✅ Implemented | 🔵 Core | [→](Subscriptions/subscription-management/subscription-server-driven.md) |
-| &nbsp;&nbsp;↳ Client-Initiated Subscriptions (v2) | Clients request their own subscription changes via an OnClientSubscriptionRequest callback, validated server-side before being applied. | 📋 Planned | 🟣 Advanced | [→](Subscriptions/subscription-management/subscription-client-initiated.md) |
-| Client Connections & Lifecycle | TCP listener thread accepts sockets and assigns each a ConnectionId; ClientContext is the only handle game code touches. | ✅ Implemented | 🔵 Core | [→](Subscriptions/client-connections.md) |
-| Per-Tick Delta Computation & Encoding | After WriteTickFence, the Output phase diffs published Views into Added/Removed/Modified and encodes only the changed component bytes. | ✅ Implemented | 🔵 Core | [→](Subscriptions/delta-computation/README.md) |
-| &nbsp;&nbsp;↳ Component-Level Dirty Encoding (v1) | Modified entities send full bytes for each component whose chunk was dirty this tick; unchanged components are omitted. | ✅ Implemented | 🔵 Core | [→](Subscriptions/delta-computation/delta-encoding-component-dirty.md) |
-| &nbsp;&nbsp;↳ Per-Field Dirty Encoding (v1.1) | Planned output-phase field diffing to shrink Modified payloads to only the bytes of fields that actually changed. | 📋 Planned | 🟣 Advanced | [→](Subscriptions/delta-computation/delta-encoding-per-field-dirty.md) |
-| Subscription Server Configuration | Tunable knobs for the TCP subscription listener: port, max clients, send buffer capacity, backpressure threshold, sync batch size, ring buffer capacity. | ✅ Implemented | 🔵 Core | [→](Subscriptions/server-configuration.md) |
-| Reference C# Client SDK | Typhon.Client connects over TCP, decodes TickDeltaMessages, and maintains a per-View local entity cache that application code reads directly. | ✅ Implemented | 🔵 Core | [→](Subscriptions/reference-client-sdk.md) |
-| Published/System-Input View Separation Guard | Runtime throws if a published View doubles as a system input (or vice versa), since the View's MPSC delta ring buffer can only have one consumer. | ✅ Implemented | 🟣 Advanced | [→](Subscriptions/published-view-isolation.md) |
-| TCP Transport & Wire Format | One length-prefixed, MemoryPack-serialized TickDeltaMessage per client per tick over TCP_NODELAY. | ✅ Implemented | 🟣 Advanced | [→](Subscriptions/wire-transport.md) |
-| Incremental Sync | New subscriptions to large Views sync in tick-sized batches instead of one giant first delta. | ✅ Implemented | 🟣 Advanced | [→](Subscriptions/incremental-sync.md) |
-| Backpressure & Resync Recovery | A full client send buffer drops one tick's delta and triggers an automatic full-state resync — never an unbounded queue. | ✅ Implemented | 🟣 Advanced | [→](Subscriptions/backpressure-resync.md) |
-| Subscription Priority & Overload Throttling | Critical/Normal/Low priority per published View; under overload Normal/Low Views are throttled while Critical Views always go out. | ✅ Implemented | 🟣 Advanced | [→](Subscriptions/priority-overload-throttling.md) |
-| Subscription Telemetry & Tracing | Per-tick OutputPhaseMs/DeltasPushed/OverflowCount counters plus a live per-tick Output-phase trace span. | 🚧 Partial | 🟣 Advanced | [→](Subscriptions/subscription-telemetry.md) |
+| Engine-owned replication | Declared archetype state streamed to remote clients with per-client interest, and typed commands drained back into the tick. Under construction — no public API yet. | 🚧 Partial | 🟣 Advanced | [→](Subscriptions/README.md) |
 
 ### Runtime
 

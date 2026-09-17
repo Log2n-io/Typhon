@@ -1365,12 +1365,11 @@ public sealed class IncrementalCacheBuilder : IDisposable
                 {
                     case TickPhase.WriteTickFence: _currentTickPostMarkers.WriteTickFenceUs += durationUs; break;
                     case TickPhase.UowFlush:        _currentTickPostMarkers.WalFlushUs += durationUs; break;
-                    case TickPhase.OutputPhase:     _currentTickPostMarkers.SubscriptionOutputUs += durationUs; break;
                     case TickPhase.TierIndexRebuild:_currentTickPostMarkers.TierIndexRebuildUs += durationUs; break;
                     case TickPhase.DormancySweep:   _currentTickPostMarkers.DormancySweepUs += durationUs; break;
                     // SystemDispatch is the system DAG itself — not part of the post-tick serial block.
                     default: _currentTickPostMarkersHasData = (_currentTickPostMarkers.WriteTickFenceUs + _currentTickPostMarkers.WalFlushUs
-                        + _currentTickPostMarkers.SubscriptionOutputUs + _currentTickPostMarkers.TierIndexRebuildUs
+                        + _currentTickPostMarkers.TierIndexRebuildUs
                         + _currentTickPostMarkers.DormancySweepUs) > 0; break;
                 }
                 break;

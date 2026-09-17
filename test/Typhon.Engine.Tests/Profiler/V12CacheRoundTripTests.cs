@@ -90,7 +90,7 @@ public sealed class V12CacheRoundTripTests
             new PostTickSummary
             {
                 TickNumber = 10, _reserved = 0,
-                WriteTickFenceUs = 12.5f, WalFlushUs = 100f, SubscriptionOutputUs = 5.2f,
+                WriteTickFenceUs = 12.5f, WalFlushUs = 100f,
                 TierIndexRebuildUs = 0f, DormancySweepUs = 1.1f, TierBudgetUs = 0f,
             },
         };

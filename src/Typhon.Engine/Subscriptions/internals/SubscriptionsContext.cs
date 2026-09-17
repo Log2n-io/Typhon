@@ -10,7 +10,7 @@ namespace Typhon.Engine.Internals;
 /// <remarks>
 /// <para>
 /// <b>Owned by the runtime, not by <see cref="DatabaseEngine"/> — unlike <see cref="FenceContext"/>.</b> The fence context lives on the engine because engine
-/// code (<c>DatabaseEngine.WriteTickFence</c>) populates and reads it. Nothing in <c>DatabaseEngine</c> touches Subscriptions v2: the track is declared by the
+/// code (<c>DatabaseEngine.WriteTickFence</c>) populates and reads it. Nothing in <c>DatabaseEngine</c> touches replication: the track is declared by the
 /// runtime, dispatched by the runtime, and gated on runtime state. Putting it on the engine would create a dependency that only points one way on paper.
 /// </para>
 /// <para>
@@ -37,7 +37,7 @@ internal sealed class SubscriptionsContext
 
     /// <summary>
     /// Sessions currently connected. Zero means the track costs exactly its <c>ShouldRun</c> check — "no session, no work"
-    /// (<c>design/Subscriptions/V2/01-model.md § 1</c>).
+    /// (<c>design/Subscriptions/01-model.md § 1</c>).
     /// </summary>
     /// <remarks>
     /// Written by the ingress half of the pipeline once sessions exist (#956 / #957). Until then it stays zero in every production path, which is why the track
@@ -135,8 +135,8 @@ internal sealed class SubscriptionsContext
     /// </summary>
     /// <remarks>
     /// Needed because making replication's failure NON-terminal (<see cref="Track.FailureIsTerminal"/>) removed the very signal publication used to key
-    /// on. A stage throw no longer latches <c>IsFenceFailed</c> and never latched <c>IsTickAborted</c>, so <c>!tickAborted &amp;&amp; !fenceFailed</c> —
-    /// the gate the publish half shares with v1's output phase — stays true for a tick whose compute blew up. SUB-02 requires compute and publish to be
+    /// on. A stage throw no longer latches <c>IsFenceFailed</c> and never latched <c>IsTickAborted</c>, so the publish gate
+    /// <c>!tickAborted &amp;&amp; !fenceFailed</c> stays true for a tick whose compute blew up. SUB-02 requires compute and publish to be
     /// skippable together and ONLY together, and without this flag the isolation fix would have quietly broken exactly that: frames half-produced by a
     /// faulted tick, published as if the tick had succeeded, moving every receiving session's baseline past records it was never sent.
     /// </remarks>

@@ -88,8 +88,6 @@ public class TyphonEventKindSuppressionTests
             Assert.That(TyphonEvent.IsKindSuppressed(TraceEventKind.EcsViewProcessEntry), Is.True, "EcsViewProcessEntry default-suppressed");
             Assert.That(TyphonEvent.IsKindSuppressed(TraceEventKind.EcsViewProcessEntryOr), Is.True, "EcsViewProcessEntryOr default-suppressed");
             Assert.That(TyphonEvent.IsKindSuppressed(TraceEventKind.DurabilityWalFrame), Is.True, "DurabilityWalFrame default-suppressed");
-            Assert.That(TyphonEvent.IsKindSuppressed(TraceEventKind.RuntimeSubscriptionSubscriber), Is.True, "RuntimeSubscriptionSubscriber default-suppressed");
-            Assert.That(TyphonEvent.IsKindSuppressed(TraceEventKind.RuntimeSubscriptionDeltaSerialize), Is.True, "RuntimeSubscriptionDeltaSerialize default-suppressed");
 
             // UoW state/deadline came OFF the deny-list — these are exactly the events an operator wants when diagnosing slow UoW.Flush.
             Assert.That(TyphonEvent.IsKindSuppressed(TraceEventKind.DurabilityUowState), Is.False, "DurabilityUowState reachable from JSON");

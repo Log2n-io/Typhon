@@ -21,7 +21,7 @@ namespace Typhon.Engine.Internals;
 /// </para>
 /// <para>
 /// <b>Native memory, never GC.</b> The buffer comes from <c>IMemoryAllocator.AllocatePinned</c> and is passed in as a pointer; this type frames and
-/// synchronises, it does not allocate or free. v1's <c>SendBuffer</c> used <c>GC.AllocateArray(pinned: true)</c>, and the pinned object heap stops the GC
+/// synchronises, it does not allocate or free. An earlier send buffer used <c>GC.AllocateArray(pinned: true)</c>, and the pinned object heap stops the GC
 /// <i>moving</i> an array, not <i>freeing</i> it — a pointer into one was the SWG x64 <c>Internal CLR error (0x80131506)</c> crash. Splitting ownership out
 /// also lets one slab back many rings, and lets a test hand in any block it likes.
 /// </para>
@@ -29,7 +29,7 @@ namespace Typhon.Engine.Internals;
 /// <b>Memory ordering, as named pairs, correct on arm64 and not merely on x64.</b> The producer writes the record bytes and then releases <c>_head</c>; the
 /// consumer acquires <c>_head</c> <b>once per drain</b> and then reads the bytes. The consumer releases <c>_tail</c> only after copying records out; the
 /// producer acquires <c>_tail</c> before deciding it has room. One acquire per drain rather than per record is the same economy EQ-02 prescribes — and
-/// EQ-02's warning applies here too, that a DAG completion barrier alone is not sufficient ordering on arm64. v1's <c>SendBuffer</c> used plain <c>int</c>
+/// EQ-02's warning applies here too, that a DAG completion barrier alone is not sufficient ordering on arm64. An earlier send buffer used plain <c>int</c>
 /// cursors and called them "naturally atomic on x64"; that is the verified negative precedent this replaces.
 /// </para>
 /// <para>

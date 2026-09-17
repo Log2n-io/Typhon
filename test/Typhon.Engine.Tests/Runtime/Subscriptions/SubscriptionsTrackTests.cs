@@ -243,7 +243,7 @@ class SubscriptionsTrackTests : TestBase<SubscriptionsTrackTests>
             Assert.That(runtime.Scheduler.IsTickAborted, Is.False, "nor a tick abort — engine tracks are already exempt from that latch");
             Assert.That(runtime.LastTickOutcome.Succeeded, Is.True, "the rest of the tick is unharmed: the fence ran and the flush ran");
 
-            // The other half of the same rule, and the hole that isolating the failure opened. Publication shares v1's `!tickAborted && !fenceFailed` gate,
+            // The other half of the same rule, and the hole that isolating the failure opened. Publication uses the `!tickAborted && !fenceFailed` gate,
             // and a stage throw now latches neither — so without the fault flag a tick whose compute blew up would publish as though it had succeeded.
             Assert.That(ctx.Faulted, Is.True, "the stage throw must be recorded");
             Assert.That(ctx.ComputeSeq, Is.Zero, "the gate threw before stamping, so no stage completed its compute");

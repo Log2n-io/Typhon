@@ -145,9 +145,13 @@ A view gives you:
 
 ---
 
-## 4. Subscriptions — pushing views to clients
+## 4. Subscriptions — pushing state to clients
 
-When the consumer of a view is remote (a connected client, another process), **subscriptions** publish a view and stream its deltas out. You register a `PublishedView`; the engine pushes Added/Removed/Modified to subscribers as the view refreshes, with per-subscription priority. It's the same view + delta machinery from §3, wired to a transport — so a client can mirror "the characters near my camera" without re-querying. The surface lives in `Subscriptions/` (`PublishedView`, `PublishedViewRegistry`); reach for it when you're building a server, not a single-process sim.
+When the consumer is remote (a connected game client, a browser, another process), **subscriptions** are what carry engine state there and keep it current, so a client can mirror "the characters near my camera" without re-querying.
+
+You declare what each archetype exposes and who sees what; the engine handles per-client interest, change detection, encoding, sessions and backpressure, plus an inbound path for typed commands that enter the tick and are validated by ordinary systems. Clients decode against a catalog rather than C# type layouts, so browsers and native clients share one wire.
+
+> 🚧 **Under construction — no public API yet.** Track [#205](https://github.com/Log2n-io/Typhon/issues/205). Everything in §3 above is unaffected.
 
 ---
 
@@ -172,4 +176,4 @@ You can now find data (one-shot) and observe it (live views). The last big piece
 
 **Concepts:** [Query](../key-concepts/query.md) · [View](../key-concepts/view.md) · [Subscription](../key-concepts/subscription.md) · [Snapshot isolation](../key-concepts/snapshot-isolation.md) · [PointInTimeAccessor](../key-concepts/point-in-time-accessor.md).
 
-**Exact calls:** `tx.Query<TArch>()` / `tx.QueryExact<TArch>()` → `EcsQuery` · `With` / `Without` / `Exclude` / `Enabled` / `Disabled` · `Where` (broad) vs `WhereField` (indexed) · `WhereNearby` / `WhereInAABB` / `WhereRay` · `OrderByField` / `OrderByFieldDescending` / `Skip` / `Take` · `Execute` / `ExecuteOrdered` / `Count` / `Any` / `foreach` · `ToView` → `EcsView` (`Contains` / `Refresh` / `GetDelta` / `ClearDelta`) · `PublishedView` (subscriptions).
+**Exact calls:** `tx.Query<TArch>()` / `tx.QueryExact<TArch>()` → `EcsQuery` · `With` / `Without` / `Exclude` / `Enabled` / `Disabled` · `Where` (broad) vs `WhereField` (indexed) · `WhereNearby` / `WhereInAABB` / `WhereRay` · `OrderByField` / `OrderByFieldDescending` / `Skip` / `Take` · `Execute` / `ExecuteOrdered` / `Count` / `Any` / `foreach` · `ToView` → `EcsView` (`Contains` / `Refresh` / `GetDelta` / `ClearDelta`).

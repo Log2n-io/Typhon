@@ -145,7 +145,7 @@ public struct SystemArchetypeTouchSummary
 /// <summary>
 /// Per-tick post-tick serial markers in <see cref="CacheSectionId.PostTickSummaries"/>. One row per tick, capturing the duration of each <see cref="TickPhase"/>
 /// region that runs after the system DAG completes — wraps the existing <c>InspectorPhase</c> blocks in <c>TyphonRuntime.OnTickEndInternal</c>. Zero µs means
-/// the phase ran with no measurable work (e.g. no subscriptions active for <see cref="SubscriptionOutputUs"/>).
+/// the phase ran with no measurable work.
 /// </summary>
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
 public struct PostTickSummary
@@ -161,9 +161,6 @@ public struct PostTickSummary
 
     /// <summary>Duration in µs of <see cref="TickPhase.UowFlush"/>. Includes <c>WaitForDurable</c> on the WAL fsync — typically the largest "where did my tick go" surprise.</summary>
     public float WalFlushUs;
-
-    /// <summary>Duration in µs of <see cref="TickPhase.OutputPhase"/>. Refresh published Views, compute deltas, push via TCP.</summary>
-    public float SubscriptionOutputUs;
 
     /// <summary>Duration in µs of <see cref="TickPhase.TierIndexRebuild"/>. Rebuild per-archetype tier cluster indexes at tick start (rolled into post-tick for now per design §10).</summary>
     public float TierIndexRebuildUs;
