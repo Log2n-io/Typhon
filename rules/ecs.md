@@ -310,11 +310,22 @@ applied synchronously inside `Commit()`, not at the fence.
         sites that already loaded count-first were right by ACCIDENT and nothing stopped the next one from being written either way.
         The exceptions are named rather than implied, because "every one" was false when this clause was first written and a rule that
         overstates its reach gets discounted wholesale:
-          reopen / rebuild — `RebuildCellState`, `RebuildSpatialStateFromData`, `RebuildClusterAabbs` walk the pair directly and may,
-            because they run at open with no concurrent writer in existence
-          fence-phase passes — `DormancySweep`, `TransitionWakePendingToActive`, `RecomputeDirtyClusterAabbsSlice` likewise, because
-            EW-01's window excludes user-thread structural mutation for the fence's duration. Note the last of these is a PARALLEL slice,
-            not a serial pass: what makes it safe is the window, not single-threadedness, and it clamps its end to the live count anyway
+          reopen / rebuild — `RebuildCellState`, `RebuildSpatialStateFromData`, `RebuildClusterAabbs` and
+            `DatabaseEngine.RebuildClusterEntityMapEntries` walk the pair directly and may, because they run at open or on the crash-rebuild
+            path, with no concurrent writer in existence
+          fence-phase passes — `DormancySweep`, `TransitionWakePendingToActive`, `RecomputeDirtyClusterAabbsSlice`,
+            `DatabaseEngine.SyncTransientSegmentToActive` and `DatabaseEngine.BuildLegacyScanChangeList` likewise, because
+            EW-01's window excludes user-thread structural mutation for the fence's duration. Note that `RecomputeDirtyClusterAabbsSlice` is a
+            PARALLEL slice, not a serial pass: what makes it safe is the window, not single-threadedness, and it clamps its end to the live count anyway
+        CORRECTED 2026-09-17: this clause was FALSE when first written, at `EcsQuery.ScanClusterSoa` and `EcsQuery.ScanPerArchetypeBTreeSelective`.
+        Both read the pair directly with plain loads, re-reading the count every iteration, on a query path that is neither reopen/rebuild nor
+        fence-phase — so neither exception covered them. Count-first is the safe ORDER and x64 does not reorder loads, so they could not fault there;
+        on arm64 the two plain loads may be satisfied out of order and reach the (new count, old array) quadrant this rule exists to remove. Both now
+        hoist one `ReadActiveClusterList` out of the loop. Three further sites were exempt but UNNAMED, which is the same failure in a quieter form:
+        the list above was written from the sites the fixing commit happened to touch, not from an enumeration of every reader. The enumeration is
+        mechanical — `grep -rn ActiveClusterIds src/Typhon.Engine` outside `ArchetypeClusterState.cs` must return only comments, this rule's named
+        exceptions, and null-guards that never index (`EcsQuery.TryCountViaOccupancy` tests the field for null before calling the reader, which cannot
+        tear) — and that is the check, not a reviewer's memory.
   enforce `AddToActiveList` publishes the GROWN ARRAY with `Volatile.Write`, then the count with `Volatile.Write` — TWO
           releases, and the first is not redundant. A reader that acquires the OLD count and loads the NEW array derives no
           ordering from the count release at all, yet it walks entries `Array.Copy` wrote with plain stores; that quadrant is
@@ -328,7 +339,8 @@ applied synchronously inside `Commit()`, not at the fence.
   scope: ArchetypeClusterState.AddToActiveList / RemoveFromActiveList (writer), ArchetypeClusterState.ReadActiveClusterList
          (the one reader) and its callers — TyphonRuntime.ReadActiveClusterList, which now only delegates, and through it the
          dormancy promote, the checkerboard promote and the dispatch capture in OnParallelQueryPrepare (the chunk-partition sites
-         read that capture, never the pair: CD-02), plus EcsQuery.TryCountViaOccupancy, ClusterEnumerator.Create and
+         read that capture, never the pair: CD-02), plus EcsQuery.TryCountViaOccupancy, EcsQuery.ScanClusterSoa and
+         EcsQuery.ScanPerArchetypeBTreeSelective (the last two hoist it out of their scan loop), ClusterEnumerator.Create and
          ClusterEnumerator.CreateScoped (reached from the PUBLIC ArchetypeAccessor.GetClusterEnumerator), TierClusterIndex and
          StatisticsRebuilder — the last of these being the only reader on a thread no tick phase bounds
   on_violation: `IndexOutOfRangeException` out of the parallel-query prepare, on a worker thread. LOUD, which is the only

@@ -1743,9 +1743,13 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
             var clusterSize = layout.ClusterSize;
 
-            for (var c = 0; c < clusterState.ActiveClusterCount; c++)
+            // CLUSTERWALK-02: count first, then the array, through the one reader, hoisted out of the loop. The plain per-iteration loads this replaced
+            // are ordered on x64 but not on arm64, where they can pair a grown count with the array it grew from and index past its end. Freezing the
+            // list for the scan changes no result: AddToActiveList only APPENDS, and a cluster born mid-scan holds nothing visible at this snapshot.
+            var activeIds = clusterState.ReadActiveClusterList(out var activeCount);
+            for (var c = 0; c < activeCount; c++)
             {
-                var clusterChunkId = clusterState.ActiveClusterIds[c];
+                var clusterChunkId = activeIds[c];
 
                 // Zone map pruning: skip cluster if any predicate's range doesn't overlap the cluster's [min, max].
                 // Iterates fields to find zone maps, then checks matching evaluators — avoids ref-type array allocation.
@@ -2194,12 +2198,15 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             var visAccessor = visState != null ? visState.EntityMap.Segment.CreateChunkAccessor() : default;
 
             // Step 2: For each active cluster with matches, verify ALL evaluators on matched entities
+            // CLUSTERWALK-02: one count-first read through the one reader, hoisted out of the loop — see ScanClusterSoa for why the per-iteration
+            // plain loads this replaced are safe on x64 and not on arm64.
+            var activeIds = clusterState.ReadActiveClusterList(out var activeCount);
             var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
             try
             {
-                for (var c = 0; c < clusterState.ActiveClusterCount; c++)
+                for (var c = 0; c < activeCount; c++)
                 {
-                    var clusterChunkId = clusterState.ActiveClusterIds[c];
+                    var clusterChunkId = activeIds[c];
                     var candidateBits = matchBitsArr[clusterChunkId];
                     if (candidateBits == 0)
                     {
