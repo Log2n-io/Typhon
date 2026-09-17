@@ -1,0 +1,222 @@
+:root {
+  --panel-bg: rgba(24, 22, 20, 0.82);
+  --panel-fg: #eee6d8;
+  --muted: #b3a894;
+  --accent: #f0b43c;
+  --border: rgba(255, 240, 210, 0.14);
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    sans-serif;
+  font-size: 12px;
+  color: var(--panel-fg);
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #d4c7b3;
+}
+
+.app {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.viewport,
+.viewport-canvas,
+.viewport-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.viewport-canvas {
+  display: block;
+  outline: none;
+  touch-action: none;
+}
+
+.viewport-overlay {
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.labels {
+  position: absolute;
+  inset: 0;
+}
+
+.label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  white-space: nowrap;
+  translate: -50% -100%;
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.9),
+    0 0 6px rgba(0, 0, 0, 0.6);
+  will-change: transform;
+}
+
+.label-city {
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff4dc;
+  letter-spacing: 0.04em;
+}
+
+.label-poi {
+  font-size: 12px;
+  color: #ffd9b0;
+  font-style: italic;
+}
+
+.label-selection {
+  font-size: 12px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+
+.panel {
+  position: absolute;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+.toolbar {
+  top: 10px;
+  left: 10px;
+  width: 300px;
+  max-height: calc(100% - 20px);
+  overflow-y: auto;
+}
+
+.toolbar-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+
+.toolbar section {
+  margin-top: 8px;
+}
+
+.toolbar h3 {
+  margin: 0 0 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.row {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.row.wrap {
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+button {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--panel-fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 7px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+button.active {
+  background: rgba(240, 180, 60, 0.3);
+  border-color: var(--accent);
+}
+
+.slider {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
+  color: var(--muted);
+}
+
+.hint {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.hud {
+  top: 10px;
+  right: 10px;
+  width: 270px;
+}
+
+.hud-title {
+  font-weight: 700;
+  color: var(--accent);
+  margin: 2px 0 3px;
+}
+
+.hud table,
+.inspector table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 6px;
+}
+
+.hud td,
+.inspector td,
+.hud th {
+  padding: 1px 2px;
+}
+
+.hud td:last-child,
+.inspector td:last-child {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-layers th {
+  text-align: right;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.hud-layers td {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-layers td:first-child {
+  text-align: left;
+}
+
+.inspector {
+  right: 10px;
+  bottom: 10px;
+  width: 270px;
+}
