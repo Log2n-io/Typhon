@@ -32,6 +32,7 @@
       "projects": [
         "test/Typhon.Analyzers.Tests/Typhon.Analyzers.Tests.csproj",
         "test/Typhon.Generators.Tests/Typhon.Generators.Tests.csproj",
+        "test/Typhon.Protocol.Tests/Typhon.Protocol.Tests.csproj",
         "test/Typhon.Shell.Tests/Typhon.Shell.Tests.csproj",
         "test/Typhon.Samples.Swg.Tests/Typhon.Samples.Swg.Tests.csproj",
         "demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj"

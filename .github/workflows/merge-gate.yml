@@ -78,6 +78,7 @@ jobs:
               - 'samples/Typhon.Samples.Swg/**'
               - 'test/Typhon.Analyzers.Tests/**'
               - 'test/Typhon.Generators.Tests/**'
+              - 'test/Typhon.Protocol.Tests/**'
               - 'test/Typhon.Shell.Tests/**'
               - 'test/Typhon.Shell.Tests.SchemaFixture/**'
               - 'test/Typhon.Samples.Swg.Tests/**'
@@ -643,13 +644,14 @@ jobs:
 
       # One step, all five: a per-project step would stop at the first failure and hide the rest, and the whole
       # point is to learn the state of suites nobody has run. `rc` accumulates so every project reports.
-      - name: Test — analyzers, generators, shell, samples, anthill harness
+      - name: Test — analyzers, generators, protocol, shell, samples, anthill harness
         run: |
           set -uo pipefail
           rc=0
           for proj in \
             test/Typhon.Analyzers.Tests/Typhon.Analyzers.Tests.csproj \
             test/Typhon.Generators.Tests/Typhon.Generators.Tests.csproj \
+            test/Typhon.Protocol.Tests/Typhon.Protocol.Tests.csproj \
             test/Typhon.Shell.Tests/Typhon.Shell.Tests.csproj \
             test/Typhon.Samples.Swg.Tests/Typhon.Samples.Swg.Tests.csproj \
             demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj ; do
