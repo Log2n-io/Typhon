@@ -59,10 +59,12 @@ internal sealed class NetIdAllocator : ResourceNode, IMemoryResource
 
     private uint _freeHead = FreeListEnd;
 
-    // Quarantine, threaded through the same _nextFree links and spliced onto the free list in O(1) by DrainQuarantine. A tail pointer is what makes that
-    // splice constant-time rather than a walk.
-    private uint _quarantineHead = FreeListEnd;
-    private uint _quarantineTail = FreeListEnd;
+    // Quarantine, as a ring of per-tick buckets (D1). A release joins the current bucket; DrainQuarantine rotates the ring and splices the bucket that is now
+    // the oldest onto the free list, so an identity is held for exactly as many ticks as there are buckets. Each bucket is a head/tail pair threaded through
+    // the same _nextFree links, which keeps both the append and the splice constant-time.
+    private readonly uint[] _bucketHeads;
+    private readonly uint[] _bucketTails;
+    private int _currentBucket;
     private int _quarantineCount;
 
     private uint _highWaterMark;
@@ -74,7 +76,18 @@ internal sealed class NetIdAllocator : ResourceNode, IMemoryResource
     /// <param name="id">Stable resource id.</param>
     /// <param name="parent">Resource-graph parent, typically the runtime node.</param>
     /// <param name="initialCapacity">Identities addressable before the first growth.</param>
-    public NetIdAllocator(string id, IResource parent, int initialCapacity = 256)
+    /// <param name="quarantineTicks">
+    /// How many ticks a released identity is held before it can be reissued. One is the minimum that keeps a leave and an enter out of the same frame;
+    /// <c>SubscriptionsOptions.CloseAfterSkips + 1</c> is what the runtime passes, so no identity can be reused while a session that might still be holding
+    /// it is alive (D1).
+    /// </param>
+    /// <remarks>
+    /// <b>Why the window is the skip window and not one tick.</b> A session skipped for K ticks receives its next frame with everything that happened since
+    /// its baseline, and a one-tick hold lets an identity be released on tick N and reissued on N+1 — so that one frame can carry the leave of the old holder
+    /// and the enter of the new one for the same number, with no ordering the client can recover. Holding for the whole window a session may be skipped for
+    /// makes that impossible by construction: an identity cannot be reissued while any session could still owe a frame naming its previous holder.
+    /// </remarks>
+    public NetIdAllocator(string id, IResource parent, int initialCapacity = 256, int quarantineTicks = 1)
         : base(Require(id, nameof(id)), ResourceType.Node, Require(parent, nameof(parent)))
     {
         if (initialCapacity <= 0)
@@ -82,9 +95,18 @@ internal sealed class NetIdAllocator : ResourceNode, IMemoryResource
             throw new ArgumentOutOfRangeException(nameof(initialCapacity), initialCapacity, "Initial capacity must be positive");
         }
 
+        ArgumentOutOfRangeException.ThrowIfLessThan(quarantineTicks, 1);
+
         // +1 so index 0 exists and stays reserved, keeping netId usable directly as an array index.
         _generations = new ushort[initialCapacity + 1];
         _nextFree = new uint[initialCapacity + 1];
+        _bucketHeads = new uint[quarantineTicks];
+        _bucketTails = new uint[quarantineTicks];
+        for (var i = 0; i < quarantineTicks; i++)
+        {
+            _bucketHeads[i] = FreeListEnd;
+            _bucketTails[i] = FreeListEnd;
+        }
     }
 
     /// <summary>Argument validation usable from a base-constructor argument, where a statement cannot run.</summary>
@@ -97,8 +119,11 @@ internal sealed class NetIdAllocator : ResourceNode, IMemoryResource
     /// <summary>Identities currently allocated.</summary>
     public int LiveCount => _liveCount;
 
-    /// <summary>Identities released this tick and not yet reissuable. Drained by <see cref="DrainQuarantine"/>.</summary>
+    /// <summary>Identities released and not yet reissuable, across every bucket of the quarantine ring.</summary>
     public int QuarantinedCount => _quarantineCount;
+
+    /// <summary>How many ticks a released identity is held before it can be reissued.</summary>
+    public int QuarantineTicks => _bucketHeads.Length;
 
     /// <summary>Largest identity ever handed out. Tracks the PEAK watched count, and never falls.</summary>
     public uint HighWaterMark => _highWaterMark;
@@ -201,19 +226,20 @@ internal sealed class NetIdAllocator : ResourceNode, IMemoryResource
                 _generations[netId]++;
             }
 
-            // Appended to the quarantine's tail, not pushed onto the free list. FIFO within the quarantine is incidental — every entry becomes reissuable at
-            // the same moment — but a tail pointer is what lets DrainQuarantine splice in O(1).
+            // Appended to the CURRENT bucket's tail, not pushed onto the free list. FIFO within a bucket is incidental — every entry in one becomes
+            // reissuable at the same moment — but a tail pointer is what lets the drain splice in O(1).
             _nextFree[netId] = FreeListEnd;
-            if (_quarantineTail == FreeListEnd)
+            var bucket = _currentBucket;
+            if (_bucketTails[bucket] == FreeListEnd)
             {
-                _quarantineHead = netId;
+                _bucketHeads[bucket] = netId;
             }
             else
             {
-                _nextFree[_quarantineTail] = netId;
+                _nextFree[_bucketTails[bucket]] = netId;
             }
 
-            _quarantineTail = netId;
+            _bucketTails[bucket] = netId;
             _quarantineCount++;
             _liveCount--;
         }
@@ -240,21 +266,49 @@ internal sealed class NetIdAllocator : ResourceNode, IMemoryResource
             // the shutdown check still dispatching, so a throw here surfaces to the host as a fence failure on a tick that was merely being torn down — the
             // exact shape of the disposed-signal bug SchedulerDisposeRaceTests was written for. Allocate and Release keep their guards: they run only when the
             // track has work, so reaching them after disposal is genuine misuse worth hearing about.
-            if (_disposed || _quarantineHead == FreeListEnd)
+            if (_disposed)
             {
                 return;
             }
 
-            _nextFree[_quarantineTail] = _freeHead;
-            _freeHead = _quarantineHead;
-            _quarantineHead = FreeListEnd;
-            _quarantineTail = FreeListEnd;
-            _quarantineCount = 0;
+            // Rotate first: the bucket the cursor lands on is the one filled a full ring ago, and it becomes this tick's bucket once it has been emptied.
+            _currentBucket = _currentBucket + 1 == _bucketHeads.Length ? 0 : _currentBucket + 1;
+
+            var head = _bucketHeads[_currentBucket];
+            if (head == FreeListEnd)
+            {
+                return;
+            }
+
+            _quarantineCount -= CountOf(head);
+            _nextFree[_bucketTails[_currentBucket]] = _freeHead;
+            _freeHead = head;
+            _bucketHeads[_currentBucket] = FreeListEnd;
+            _bucketTails[_currentBucket] = FreeListEnd;
         }
         finally
         {
             _affinity.Exit();
         }
+    }
+
+    /// <summary>How many identities a bucket's chain holds, walked only when that bucket is being spliced out.</summary>
+    /// <param name="head">The bucket's first identity.</param>
+    /// <returns>The count.</returns>
+    /// <remarks>
+    /// A walk rather than a per-bucket counter because the count exists only for telemetry and for the tests that assert nothing leaks, while a counter would
+    /// have to be kept correct on every release. The chain being walked is the one about to be spliced onto the free list, so its cache lines are wanted
+    /// anyway.
+    /// </remarks>
+    private int CountOf(uint head)
+    {
+        var count = 0;
+        for (var at = head; at != FreeListEnd; at = _nextFree[at])
+        {
+            count++;
+        }
+
+        return count;
     }
 
     /// <summary>

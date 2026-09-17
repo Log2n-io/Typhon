@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Typhon.Protocol;
@@ -207,6 +208,18 @@ internal sealed class FakeSubscriptionsHost : ISubscriptionsHost
 
     /// <inheritdoc />
     public void OnCommands(SessionId session, ReadOnlySpan<byte> message) => CommandMessages++;
+
+    /// <summary>The link each session was bound to, and null once it was unbound — what a test asserts the send side would have found.</summary>
+    public Dictionary<SessionId, ISubscriptionLink> BoundLinks { get; } = [];
+
+    /// <summary>The newest applied tick each session reported, so a test can see the ping reach the send state's stand-in.</summary>
+    public Dictionary<SessionId, uint> AppliedTicks { get; } = [];
+
+    /// <inheritdoc />
+    public void BindSessionLink(SessionId session, ISubscriptionLink link) => BoundLinks[session] = link;
+
+    /// <inheritdoc />
+    public void NoteSessionPing(SessionId session, uint appliedTick) => AppliedTicks[session] = appliedTick;
 }
 
 /// <summary>

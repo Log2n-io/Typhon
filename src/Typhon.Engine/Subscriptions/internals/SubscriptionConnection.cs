@@ -61,6 +61,24 @@ internal interface ISubscriptionsHost
     uint MicrosecondsIntoTick { get; }
 
     /// <summary>
+    /// Binds a session's slot to the link its frames leave on, and unbinds it when the session ends.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="link">Its link, or <see langword="null"/> to unbind.</param>
+    /// <remarks>
+    /// The connection owns the link and the session table owns the row; the send side needs both, and this is the one place they meet. Passing
+    /// <see langword="null"/> is how a closing connection stops the pump reaching a link it is about to dispose.
+    /// </remarks>
+    void BindSessionLink(SessionId session, ISubscriptionLink link);
+
+    /// <summary>
+    /// Records that a session was heard from, so the tick can tell a quiet client from a gone one.
+    /// </summary>
+    /// <param name="session">The session whose <c>PING</c> arrived.</param>
+    /// <param name="appliedTick">The newest tick the client reports it has applied.</param>
+    void NoteSessionPing(SessionId session, uint appliedTick);
+
+    /// <summary>
     /// Hands a validated <c>COMMANDS</c> message to ingress.
     /// </summary>
     /// <param name="session">Whose commands they are.</param>
@@ -417,6 +435,10 @@ internal sealed class SubscriptionConnection : ISubscriptionConnection, IDisposa
 
         _session = session;
 
+        // Before WELCOME, so no frame can be produced for a session whose link the pump cannot find. The row is already published at this point, which is what
+        // makes the binding safe to read from a pump thread.
+        _host.BindSessionLink(session, _link);
+
         var row = _host.SessionTable.Row(session);
         _clientMessageBytes = row.ClientMessageBytes;
         _capsGranted = GrantCaps(hello.Caps, row.Flags);
@@ -515,6 +537,7 @@ internal sealed class SubscriptionConnection : ISubscriptionConnection, IDisposa
             case MessageTypes.Ping:
                 var ping = PingMessage.Parse(message);
                 Volatile.Write(ref _lastAppliedTick, ping.LastAppliedTick);
+                _host.NoteSessionPing(_session, ping.LastAppliedTick);
                 SendPong(ping.ClientMs);
                 break;
 
@@ -620,6 +643,9 @@ internal sealed class SubscriptionConnection : ISubscriptionConnection, IDisposa
     {
         if (_session.IsValid)
         {
+            // Unbound first: the pump must stop finding this link before the row starts closing, or a send could still be started against a link the close
+            // path is about to dispose.
+            _host.BindSessionLink(_session, null);
             _host.SessionTable.RequestClose(_session, reason, code);
         }
     }

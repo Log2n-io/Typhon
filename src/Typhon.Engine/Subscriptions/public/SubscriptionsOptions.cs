@@ -130,6 +130,11 @@ public sealed class SubscriptionsOptions
     /// It also sets how long a released network identity is quarantined before it can be reissued: this many ticks plus one, so no identity can be reused
     /// while a session that might still be holding it is alive.
     /// </para>
+    /// <para>
+    /// <b>It must be at least one.</b> Zero would read as "never close a lagging session", and the quarantine would then be sized from a skip window with no
+    /// bound at all — a session could be skipped for a thousand ticks while an identity it still holds was reissued after two, which is the leave-then-enter
+    /// collision SUB-06 exists to prevent. A runtime built with zero refuses to start rather than replicating something subtly wrong.
+    /// </para>
     /// </remarks>
     public int CloseAfterSkips { get; init; } = 50;
 
@@ -142,6 +147,23 @@ public sealed class SubscriptionsOptions
     /// quarter of a second while costing eight tiny messages per session per second.
     /// </remarks>
     public int PingHz { get; init; } = 4;
+
+    /// <summary>
+    /// What the lag-skip bound allows for a round trip, in milliseconds, since the wire gives the server no way to measure one. Default: 250.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The bound is <c>producedTick − ackedTick &gt; max(5, ⌈(this + PING period) / tick⌉ + 2)</c>. The design writes the first term as the measured round
+    /// trip, but <c>PING.clientMs</c> is opaque to the server and echoed back unread, so it is the client that measures the round trip and no message carries
+    /// the result back. Naming the allowance rather than pretending to a measurement is the honest form of that gap.
+    /// </para>
+    /// <para>
+    /// 250 ms is chosen to cover an intercontinental round trip with margin, not from any one application's numbers: too small and a distant but healthy
+    /// client is skipped for the distance alone; too large and a genuinely stalled client keeps its slot for seconds. Operators serving one region only should
+    /// lower it.
+    /// </para>
+    /// </remarks>
+    public int LagSkipRttAllowanceMs { get; init; } = 250;
 
     /// <summary>
     /// The most full enter records one session may receive in one frame. Default: 500.

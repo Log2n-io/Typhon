@@ -23,7 +23,8 @@
   never publish for a tick whose compute faulted — a stage throw suppresses publication exactly as an abort or a fence failure does
   scope: TyphonRuntime.OnTickEndInternal, DagScheduler.DispatchDeferredTracks, RuntimeSchedule.EngineSubscriptionsTrack,
     SubscriptionsContext.ShouldTrackRun, SubscriptionsExecSystemBase.ShouldRun,
-    Track.FailureIsTerminal, DagScheduler.RecordEngineTrackFailure
+    Track.FailureIsTerminal, DagScheduler.RecordEngineTrackFailure,
+    SendPump.PublishAndWake, SendPump.DiscardProduced, SubscriptionsRuntime.PublishFrames, SubscriptionsRuntime.DiscardFrames
   on_violation: computing for an aborted tick reads structures a partly-run fence left incomplete, and publishing from it tells a session a story the WAL
     does not carry. Suppressing publish alone is worse than either: the frames were produced, so the per-entity state has already advanced, and every
     session's baseline is now ahead of what it was actually sent — which no later frame corrects, because records describe the present rather than a delta.
@@ -47,14 +48,19 @@
   note the serial and parallel fence paths dispatch the track identically, and both hold an EW-01 window across it. On the serial path the window opened
     inside `DatabaseEngine.WriteTickFence` closes when that returns, so `OnTickEndInternal` opens its own around the fence AND the dispatch;
     `ExclusiveWindow` keeps a depth rather than a flag, so the two nest.
+  invariant [a tick produced frames ∧ it did not publish] → every session that produced one is closed with 1011
+  note the discard clause is the other half of the gate, and it exists because a frame is produced BEFORE the tick is known to be publishable. A frame
+    describing a tick that never becomes durable can never be sent — the committed-tick gate refuses it forever — so the session holding it fills its K slots
+    and stalls, while its client's baseline is already ahead of what the WAL can prove. Closing is the only outcome that does not silently diverge. It is
+    reached from four places, which are the four ways a tick can fail to publish: an abort, a fence failure, a faulted replication stage, and a flush that
+    threw (the last one from inside the flush phase, because the publication gate below it is never reached).
   verified: SubscriptionsTrackTests.NormalTick_RunsFenceThenComputeThenFlushThenPublish,
     SubscriptionsTrackTests.AbortedTick_StillFencesAndFlushes_ButNeitherComputesNorPublishes,
-    SubscriptionsTrackTests.AStageThatThrows_DoesNotStopTheEngine
-  [UNBUILT] Two clauses state intent rather than behaviour, and are called out so a reader does not mistake the `verified:` above for the whole rule.
-    (1) FENCE FAILURE is verified only for the abort case; inducing a fence-phase throw needs a seam no test has yet, and the code path is shared with the
+    SubscriptionsTrackTests.AStageThatThrows_DoesNotStopTheEngine,
+    SendPumpTests.NoFrameIsSentBeforeItsTickIsCommitted
+  [UNBUILT] One clause states intent rather than behaviour, and is called out so a reader does not mistake the `verified:` above for the whole rule.
+    FENCE FAILURE is verified only for the abort case; inducing a fence-phase throw needs a seam no test has yet, and the code path is shared with the
     abort (both read the same two latches), so the risk is a shared-path assumption rather than an untested branch.
-    (2) "A flush that throws after frames were produced closes every session" cannot be built until sessions exist (#956 / #957) — there is nothing to close.
-    The flush stamp is already taken in a `finally` so a throwing flush is observable when that verifier can be written.
 
 ---
 
@@ -192,10 +198,11 @@
 
 ### SUB-06: A reused network identity is observed as leave-then-enter `[fatal][silent]`
   invariant ∀ netId n reused by a different entity: generation(n) changes between the two holders
-  invariant [Release(n) in tick T] → [generation(n) incremented] → [n quarantined] → [n reachable by Allocate no earlier than T+1]
+  invariant [Release(n) in tick T] → [generation(n) incremented] → [n quarantined] → [n reachable by Allocate no earlier than T + quarantineTicks]
+  invariant quarantineTicks = SubscriptionsOptions.CloseAfterSkips + 1 — the whole window a session may be skipped for, plus the release's own tick
   invariant the identity space is GLOBAL: a netId names at most one live entity across the whole database, never one per archetype
   never one netId held by two live entities at the same time
-  never reissue an identity in the tick it was released
+  never reissue an identity before its quarantine window has passed
   never a Release of an identity that is already free or quarantined (it would thread the list to itself, after which every
     Allocate returns that same identity and LiveCount runs negative)
   scope: NetIdAllocator.Allocate, NetIdAllocator.Release, NetIdAllocator.DrainQuarantine, NetIdAllocator.GenerationOf,
@@ -208,11 +215,20 @@
     the process lifetime, which is why 16 bits suffice. A wrap needs 65 536 reuses of one identity.
   note the generation is bumped on RELEASE, not on the next allocate, so an entity that leaves and is never replaced
     still reads as gone to a session holding the old pair.
+  note the window is the SKIP window and not one tick (D1, design/Subscriptions/02-execution.md § 5). One tick keeps a leave and an enter out of the same
+    frame of a session that receives every tick. It does not keep them out of the same frame of a SKIPPED session, which receives everything since its
+    baseline in one message: an identity released at N and reissued at N+1 reaches such a session as a leave and an enter for the same number, in one frame,
+    in an order it cannot recover. The alternatives considered and rejected were putting the generation on the wire beside every netId (a byte per record,
+    for a case that never happens), splitting a skipped session's frame at reuse boundaries (the assembler would need a per-identity history it does not
+    keep), and tick-stamping events (the same cost, on the block that can least afford it).
+  note the quarantine is a RING of per-tick buckets rather than one list, so the hold costs one rotation per tick regardless of its width: a release joins
+    the current bucket, and the drain splices the bucket filled a full ring ago onto the free list.
   note defined in the design series at design/Subscriptions/02-execution.md; it was cited by code before it was
     written down here, which neither rule gate can detect — check-rule-scopes.py validates scope symbols only, and
     audit-rule-coverage.py's UNKNOWN_RULE_ID inspects [VerifiesRule]/[RuleMutant] attributes only.
   verified: NetIdAllocatorTests.ReusingAnIdentityBumpsItsGeneration,
-    NetIdAllocatorTests.ReleasingTheSameIdentityTwiceIsRejected
+    NetIdAllocatorTests.ReleasingTheSameIdentityTwiceIsRejected,
+    NetIdAllocatorTests.AReleasedIdentityIsHeldForTheSkipWindow
 
 ### SUB-09: State follows its entity, and never survives slot reuse `[fatal][silent][UNBUILT]`
   invariant ∀ watched entity e: the hot/cold entry describing e is reachable from e's CURRENT (cluster, slot)

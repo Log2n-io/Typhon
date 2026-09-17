@@ -265,6 +265,40 @@ public sealed class SubscriptionsCommands
     public ReadOnlySpan<SessionEvent> SessionEvents => _ingress.Sessions.Events.AsSpan();
 
     /// <summary>
+    /// Asks something of a session: the profile it is bound to, the observers it carries, the entity it controls, its budget, or a kick.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="worker">
+    /// Which worker's segment to stage on: the tick context's worker index inside a chunked parallel system, and 0 on the tick driver or in a serial one.
+    /// </param>
+    /// <returns>A builder whose calls are recorded and applied by the next tick's prologue.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>This is how a session gets a profile</b>, and without one it receives nothing: interest is gathered per profile, so a session bound to none is not
+    /// in any tick's session set. The natural place to call it is the <see cref="SessionEvents"/> loop, on the <c>Opened</c> event.
+    /// </para>
+    /// <para>
+    /// <b>Nothing happens immediately.</b> A session row belongs to the tick (SUB-05); the calls are appended to a per-worker segment and applied
+    /// single-threaded at the start of the next tick, before interest is gathered. That is what makes it safe to call from any system on any worker.
+    /// </para>
+    /// <para>
+    /// <b>One worker per segment, and an out-of-range index is refused rather than clamped.</b> A segment's append is unsynchronized — that is what makes it
+    /// free — so two threads sharing one loses records, duplicates them, or throws out of an <c>Array.Resize</c>. Clamping a too-large index onto the last
+    /// segment would silently arrange exactly that, so it throws instead: a system that passes the wrong index learns immediately rather than corrupting a
+    /// neighbour's list under load.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="worker"/> is negative, or at or above the worker count this tick dispatched.
+    /// </exception>
+    public SessionRequest Session(SessionId session, int worker = 0)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(worker);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(worker, _ingress.Requests.WorkerCount);
+        return _ingress.Requests.Request(worker, session);
+    }
+
+    /// <summary>
     /// This tick's commands of one type.
     /// </summary>
     /// <typeparam name="T">The command's struct, as the application declared it.</typeparam>

@@ -179,6 +179,10 @@ internal sealed class SubscriptionsIngress : IDisposable
         Commands = commands;
         Buffers = buffers;
         NetIds = new NetIdEntityIndex();
+
+        // One segment per worker, sized at the first BeginTick. It is created here rather than by the runtime because its lifetime is the ingress's: a
+        // request is made by an application system during a tick and applied by the next tick's prologue, which is the same span this object is alive for.
+        Requests = new SessionRequestLog(1);
     }
 
     /// <summary>The bound command types.</summary>
@@ -189,6 +193,17 @@ internal sealed class SubscriptionsIngress : IDisposable
 
     /// <summary>Which entity each network identity names, so a command's <c>entityRef</c> can be resolved.</summary>
     public NetIdEntityIndex NetIds { get; }
+
+    /// <summary>
+    /// What application systems ask of a session — its profile, its observers, the entity it controls — staged per worker and applied by the next tick.
+    /// </summary>
+    /// <remarks>
+    /// <b>Why it is staged and not applied where it is asked.</b> A system runs on a worker, and a session row belongs to the tick (SUB-05). Writing the row
+    /// from a system would put a second writer on it; recording the intent costs a bounded append and lets one thread apply the batch at a point where nothing
+    /// else is reading. It is also what makes "bind the profile in the Opened handler" work: the handler runs during the tick, the binding takes effect at the
+    /// start of the next one, before interest is gathered.
+    /// </remarks>
+    public SessionRequestLog Requests { get; }
 
     /// <summary>The session table, so the public surface can check an identity before answering about it.</summary>
     public SessionTable Sessions => _sessions;
@@ -340,6 +355,11 @@ internal sealed class SubscriptionsIngress : IDisposable
         // Closes a transport thread asked for become real closes, then this tick's lifecycle batch is published — both before any application system runs,
         // which is what lets an app react to an Opened or a Closed with an ordinary transaction in the same tick (foundation/05 § 4.2).
         _sessions.ApplyPendingCloses();
+
+        // What last tick's systems asked for, applied before the table publishes this tick's open set — so a profile bound in an Opened handler is in force
+        // for the first interest pass that can see the session, rather than one tick later.
+        Requests.Apply(_sessions);
+
         _sessions.BeginTick();
 
         foreach (ref readonly var e in _sessions.Events)
@@ -367,6 +387,7 @@ internal sealed class SubscriptionsIngress : IDisposable
         }
 
         Buffers.BeginTick(ctx.TickNumber, workers);
+        Requests.EnsureWorkers(workers);
         return Math.Min(workers, _tickSessionCount);
     }
 

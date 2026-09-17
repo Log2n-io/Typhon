@@ -222,7 +222,17 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
         }
 
         var interest = subs.Interest;
-        var blocks = interest != null ? interest.WatchedBlockCount : WatchedBlocks(states);
+
+        // Block creation comes BEFORE the "nothing is watched" exit, and the order is the whole of why the pipeline runs at all. A cluster becomes watchable
+        // by having a block, and the interest stage lists the clusters it hit that had none; skipping the stage because no block is watched yet would mean the
+        // first block is never created, so nothing is ever watched — a runtime that projects nothing, forever, with no error anywhere. The list is produced by
+        // the interest stage and does not depend on the watched count, so there is nothing to gain by deferring it.
+        if (interest != null)
+        {
+            CreateNewBlocks(interest, states);
+        }
+
+        var blocks = interest?.WatchedBlockCount ?? WatchedBlocks(states);
         if (blocks == 0)
         {
             return 0;
@@ -315,18 +325,16 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
     }
 
     /// <summary>
-    /// The blocks step: creates a block for every newly watched cluster, then gathers the interest stage's per-worker watched-block lists into one indexable
-    /// partition per archetype.
+    /// The second half of the blocks step: gathers the interest stage's per-worker watched-block lists into one indexable partition per archetype.
     /// </summary>
     /// <remarks>
-    /// The two halves are in this order because the partition is SIZED from the directory — at most one listing per block that exists — so a cluster that
-    /// gained its block after the sizing would have nowhere to be listed. The blocks created here carry no watched bit and are therefore not listed this
-    /// tick; the interest stage marks them on the next one, which is the only place a watched bit is ever set. See <see cref="CreateNewBlocks"/>.
+    /// <see cref="CreateNewBlocks"/> runs before this, at the top of <c>PrepareChunks</c>, and the separation matters: the partition is SIZED from the
+    /// directory — at most one listing per block that exists — so a cluster that gained its block after the sizing would have nowhere to be listed. A block
+    /// created this tick carries no watched bit and is therefore not listed until the interest stage marks it on the next one, which is the only place a
+    /// watched bit is ever set.
     /// </remarks>
     private static void Gather(InterestPass interest, ArchetypeReplicationState[] states, uint tick)
     {
-        CreateNewBlocks(interest, states);
-
         for (var i = 0; i < states.Length; i++)
         {
             states[i].BeginWatchedBlocks(tick);

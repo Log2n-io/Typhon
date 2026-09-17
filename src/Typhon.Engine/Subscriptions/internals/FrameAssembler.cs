@@ -45,6 +45,8 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
     }
 
     private readonly int[] _histogram = new int[RecordSorter.HistogramSlots];
+    private SessionId[] _ready = new SessionId[32];
+    private int _readyCount;
     private RecordList[] _lists = [];
     private RecordList _enterCandidates;
     private FrameRecord* _sortScratch;
@@ -115,6 +117,36 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
     /// <summary>Appends an enter candidate to the flat staging list the budget selects from.</summary>
     /// <param name="record">The candidate.</param>
     public void AddEnterCandidate(in FrameRecord record) => Append(ref _enterCandidates, in record);
+
+    /// <summary>The sessions this worker published a frame for this tick, in the order it published them.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Worker-local, and that is the point.</b> A published frame has to reach a send pump, and the obvious way — one shared queue the workers push onto —
+    /// would put an atomic on the publication of every frame of every session. A list per worker costs nothing during the tick, and the tick driver walks all
+    /// of them afterwards on one thread, which is where the hand-off to the pumps belongs anyway: it is gated on the flush, and the flush is the driver's.
+    /// </para>
+    /// <para>
+    /// <b>The whole identity, not the slot.</b> A row can close, drain and be re-leased to a new connection between the publication and the driver's walk —
+    /// leasing is transport-callable (SUB-05) — so a bare slot names whoever happens to occupy it by then. Carrying the generation makes every use of this
+    /// list generation-exact: the pump wakes the session that produced the frame, and a discard closes that session and not its successor.
+    /// </para>
+    /// </remarks>
+    public ReadOnlySpan<SessionId> Ready => new(_ready, 0, _readyCount);
+
+    /// <summary>Notes that a frame was published for a session.</summary>
+    /// <param name="session">The session, generation included.</param>
+    public void AddReady(SessionId session)
+    {
+        if (_readyCount == _ready.Length)
+        {
+            Array.Resize(ref _ready, _ready.Length * 2);
+        }
+
+        _ready[_readyCount++] = session;
+    }
+
+    /// <summary>Empties the ready list, once the driver has handed it to the pumps.</summary>
+    public void ClearReady() => _readyCount = 0;
 
     /// <summary>Sorts one archetype's sub-list ascending by netId.</summary>
     /// <param name="archetype">The archetype's plan index.</param>
@@ -271,6 +303,18 @@ internal sealed class SessionFrameState
     /// <summary>Frames produced for the session currently in the slot.</summary>
     public long FramesProduced { get; set; }
 
+    /// <summary>
+    /// Rate classes this session has been dropped because it could not keep up: 0 serves every tick, 1 every other, 2 one in four.
+    /// </summary>
+    /// <remarks>
+    /// Tick-owned, like every other field here — the pump never writes it. It is read by <see cref="SkipPolicy.ProducesOnTick"/> at the top of the session's
+    /// assembly, which is why a drop costs the encode of nothing at all rather than the encode of a frame that is then thrown away.
+    /// </remarks>
+    public int DegradeLevel { get; set; }
+
+    /// <summary>Frames produced since the degrade level last changed, which is what earns a class back.</summary>
+    public long FramesSinceDegrade { get; set; }
+
     /// <summary>Rebinds the slot to a new session: the known-set is emptied and every per-session number starts again.</summary>
     /// <param name="generation">The new session's generation.</param>
     public void RebindTo(ushort generation)
@@ -284,6 +328,8 @@ internal sealed class SessionFrameState
         DeferredEnters = 0;
         HasFocus = false;
         FramesProduced = 0;
+        DegradeLevel = 0;
+        FramesSinceDegrade = 0;
     }
 }
 
@@ -324,6 +370,8 @@ internal sealed unsafe class FrameAssembler : IDisposable
     private readonly IResource _parent;
     private readonly SessionFrameState[] _states;
     private readonly int _maxFrameBytes;
+    private readonly int _lagBoundTicks;
+    private readonly int _silenceBoundTicks;
 
     private PinnedMemoryBlock _sendBlock;
     private SessionSendState* _sendStates;
@@ -338,6 +386,9 @@ internal sealed unsafe class FrameAssembler : IDisposable
     private long _recordsEncoded;
     private long _entersDeferred;
     private long _oversizeSkips;
+    private long _sessionsDegraded;
+    private long _sessionsClosedLagging;
+    private long _sessionsClosedSilent;
     private bool _disposed;
 
     /// <summary>Builds the assembler and everything a frame is made of: the pool, the per-slot hand-off counters and the per-archetype encoding constants.</summary>
@@ -348,8 +399,9 @@ internal sealed unsafe class FrameAssembler : IDisposable
     /// <param name="plans">One compiled plan per replicated archetype, in declaration order.</param>
     /// <param name="catalog">The emitted catalog, which is where an archetype's canonical WIRE index comes from.</param>
     /// <param name="sessions">The session table, read for each session's bound profile.</param>
+    /// <param name="tickPeriodUs">The nominal tick period, which the lag and silence bounds are expressed in ticks of.</param>
     public FrameAssembler(string id, IResource parent, IMemoryAllocator allocator, SubscriptionsOptions options, CompiledProjectionPlan[] plans,
-        Catalog catalog, SessionTable sessions)
+        Catalog catalog, SessionTable sessions, uint tickPeriodUs)
     {
         ArgumentNullException.ThrowIfNull(id);
         ArgumentNullException.ThrowIfNull(parent);
@@ -365,6 +417,8 @@ internal sealed unsafe class FrameAssembler : IDisposable
         _parent = parent;
         _states = new SessionFrameState[options.MaxSessions];
         _encodePlans = BuildEncodePlans(plans, catalog);
+        _lagBoundTicks = SkipPolicy.LagBoundTicks(options, tickPeriodUs);
+        _silenceBoundTicks = SkipPolicy.SilenceBoundTicks(options, tickPeriodUs);
 
         // The ceiling a frame is measured against: the operator's, but never above what the pool can serve — a frame larger than the largest size class
         // would be refused by the pool anyway, and refusing it here is what turns "the pool said no" into a number that names the reason.
@@ -398,6 +452,15 @@ internal sealed unsafe class FrameAssembler : IDisposable
 
     /// <summary>Frames the ceiling refused, which the pool would have refused too.</summary>
     public long OversizeSkips => Volatile.Read(ref _oversizeSkips);
+
+    /// <summary>Times a session was dropped a rate class for a run of skips.</summary>
+    public long SessionsDegraded => Volatile.Read(ref _sessionsDegraded);
+
+    /// <summary>Sessions closed with 1013 for a skip run past <see cref="SubscriptionsOptions.CloseAfterSkips"/>.</summary>
+    public long SessionsClosedLagging => Volatile.Read(ref _sessionsClosedLagging);
+
+    /// <summary>Sessions closed with 4001 for having stopped sending <c>PING</c>.</summary>
+    public long SessionsClosedSilent => Volatile.Read(ref _sessionsClosedSilent);
 
     /// <summary>
     /// <b>Test seam, and a deliberate one.</b> Advances a skipped session's baseline as though its frame had been produced — the exact violation SUB-03
@@ -473,6 +536,11 @@ internal sealed unsafe class FrameAssembler : IDisposable
 
         _interest = interest;
         _tick = tickNumber;
+
+        // Before the early return, because the sweep is about sessions that are NOT being served: one whose interest produced nothing this tick still has to
+        // be degraded, closed for a skip run, or closed for silence. Keying it off the interest list would exempt exactly the sessions it exists to catch.
+        SweepSkipPolicy();
+
         _tickSessionCount = interest?.TickSessionCount ?? 0;
         if (_tickSessionCount == 0)
         {
@@ -484,7 +552,7 @@ internal sealed unsafe class FrameAssembler : IDisposable
 
         for (var i = 0; i < _tickSessionCount; i++)
         {
-            PrepareSession(interest.SessionAt(i));
+            PrepareSession(interest!.SessionAt(i));
         }
 
         return Math.Min(workers, _tickSessionCount);
@@ -507,6 +575,27 @@ internal sealed unsafe class FrameAssembler : IDisposable
         for (var i = start; i < end; i++)
         {
             Assemble(i, scratch);
+        }
+    }
+
+    /// <summary>How many worker scratches exist, and therefore how many ready lists a driver has to walk.</summary>
+    public int WorkerCount => _workers.Length;
+
+    /// <summary>The session slots one worker published a frame for this tick.</summary>
+    /// <param name="worker">The worker, below <see cref="WorkerCount"/>.</param>
+    /// <returns>The slots, in publication order.</returns>
+    public ReadOnlySpan<SessionId> ReadyOf(int worker)
+    {
+        var scratch = _workers[worker];
+        return scratch == null ? default : scratch.Ready;
+    }
+
+    /// <summary>Empties every worker's ready list. Called by the tick driver once it has handed them on.</summary>
+    public void ClearReady()
+    {
+        for (var i = 0; i < _workers.Length; i++)
+        {
+            _workers[i]?.ClearReady();
         }
     }
 
@@ -545,14 +634,80 @@ internal sealed unsafe class FrameAssembler : IDisposable
 
     // ── The prologue ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-    private void PrepareSession(SessionId session)
+    /// <summary>
+    /// Reads every open session's skip run and last-heard-from mark against the operator's thresholds, degrading and closing where they are crossed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>On the tick thread, walking the table.</b> The session table's open list is the tick's to read, and closing is the tick's to do — which is why this
+    /// is here and not in the send pump, where the same decision would need the table's synchronisation and would violate SUB-05's single-writer rule.
+    /// </para>
+    /// <para>
+    /// <b>Closes are requested, not applied.</b> <see cref="SessionTable.RequestClose"/> latches the code and the reason; the table applies it at its own
+    /// pending-close point, so a session closed here is still a legal, drained row for the rest of this tick.
+    /// </para>
+    /// </remarks>
+    private void SweepSkipPolicy()
     {
-        var slot = session.Slot;
-        if ((uint)slot >= (uint)_states.Length)
+        var sessions = _sessions.GetEnumerator();
+        while (sessions.MoveNext())
         {
-            return;
-        }
+            var session = sessions.Current;
+            var slot = session.Slot;
+            if ((uint)slot >= (uint)_states.Length)
+            {
+                continue;
+            }
 
+            var state = BindSlot(slot, session);
+            var send = SendStateOf(slot);
+
+            // Silence first: a client that has stopped talking is gone whatever its skip run says, and 4001 tells its SDK to reconnect rather than to back off
+            // as 1013 would.
+            var heardFrom = send->PingTick;
+            if (heardFrom > 0 && _tick - heardFrom > _silenceBoundTicks)
+            {
+                _sessions.RequestClose(session, SessionCloseReason.Unacknowledged, CloseCodes.NoAcknowledgement);
+                Interlocked.Increment(ref _sessionsClosedSilent);
+                continue;
+            }
+
+            var skipRun = send->SkipRun;
+            if (SkipPolicy.Evaluate(skipRun, _options) == SkipVerdict.Close)
+            {
+                _sessions.RequestClose(session, SessionCloseReason.Lagging, CloseCodes.TryAgainLater);
+                Interlocked.Increment(ref _sessionsClosedLagging);
+                continue;
+            }
+
+            if (SkipPolicy.ShouldDegrade(skipRun, state.DegradeLevel, _options))
+            {
+                state.DegradeLevel++;
+                state.FramesSinceDegrade = 0;
+                Interlocked.Increment(ref _sessionsDegraded);
+            }
+            else if (state.DegradeLevel > 0 && state.FramesSinceDegrade >= SkipPolicy.RecoveryFrames)
+            {
+                state.DegradeLevel--;
+                state.FramesSinceDegrade = 0;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The frame state of a slot, created or rebound to <paramref name="session"/> if it is not already.
+    /// </summary>
+    /// <param name="slot">The session table row.</param>
+    /// <param name="session">Who occupies it.</param>
+    /// <returns>The state, bound to this session's generation.</returns>
+    /// <remarks>
+    /// <b>Called from the sweep, which walks every open session, rather than only from the interest partition.</b> A session bound to no profile — or to one
+    /// whose observers reach nothing — never appears in a tick's session set, so binding it there left it with no state, and the sweep's generation check then
+    /// skipped it: it could be neither degraded, nor closed for a skip run, nor closed for silence. It held its slot, its known-set and its ingress ring until
+    /// the process ended, which is exactly the case the silence bound exists to catch.
+    /// </remarks>
+    private SessionFrameState BindSlot(int slot, SessionId session)
+    {
         var state = _states[slot];
         if (state == null)
         {
@@ -562,12 +717,23 @@ internal sealed unsafe class FrameAssembler : IDisposable
 
         if (state.Generation != session.Generation)
         {
-            // A new session in the slot. Its hand-off counters start again too: the table only re-leases a row once every frame it produced has drained,
-            // so nothing is in flight to be orphaned by the reset.
+            // A new session in the slot. The hand-off counters were zeroed when the link was bound, on the admitting thread, so nothing is reset here: the
+            // table only re-leases a row once every frame it produced has drained, and zeroing them now would race the PING that can already be arriving.
             state.RebindTo(session.Generation);
-            SessionSendState.Initialize(SendStateOf(slot));
         }
 
+        return state;
+    }
+
+    private void PrepareSession(SessionId session)
+    {
+        var slot = session.Slot;
+        if ((uint)slot >= (uint)_states.Length)
+        {
+            return;
+        }
+
+        var state = BindSlot(slot, session);
         var profile = _sessions.ProfileName(session);
         if (!string.Equals(profile, state.Profile, StringComparison.Ordinal))
         {
@@ -590,6 +756,25 @@ internal sealed unsafe class FrameAssembler : IDisposable
         }
 
         var send = SendStateOf(session.Slot);
+
+        // The two producer-side skips, before a slot is claimed so a skipped session costs neither a sequence nor a block. Both leave the known-set and the
+        // baseline exactly as they were, which is what makes the next frame carry the union of everything the session missed (SUB-03).
+        if (!SkipPolicy.ProducesOnTick(state.DegradeLevel, _tick))
+        {
+            send->NoteSkipped();
+            NoteSkip(state);
+            return;
+        }
+
+        if (SkipPolicy.AcknowledgementLag(send->ProducedTick, send->AckedTick) > _lagBoundTicks)
+        {
+            // The client has told us, through its PING, that it is further behind than a round trip and a ping period can explain. Producing for it would
+            // encode bytes it will not reach before the next frame supersedes them.
+            send->NoteSkipped();
+            NoteSkip(state);
+            return;
+        }
+
         if (!send->TryBeginFrame(out var sequence, out var recycled))
         {
             // K frames are already outstanding: skip, never queue. Nothing here mutates the known-set or the baseline, which is what makes the next frame
@@ -694,6 +879,10 @@ internal sealed unsafe class FrameAssembler : IDisposable
         state.PendingReset = false;
         state.DeferredEnters = owed;
         state.FramesProduced++;
+        state.FramesSinceDegrade++;
+
+        // The send pump learns about this frame from here: worker-local, no atomic, and drained by the tick driver after the flush.
+        scratch.AddReady(session);
 
         Interlocked.Increment(ref _framesProduced);
         Interlocked.Add(ref _bytesEncoded, length);

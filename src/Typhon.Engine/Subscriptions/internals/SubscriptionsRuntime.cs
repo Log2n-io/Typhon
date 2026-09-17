@@ -40,16 +40,17 @@ namespace Typhon.Engine.Internals;
 /// which is what <c>SUB-05</c> reserves for the tick.
 /// </para>
 /// </remarks>
-internal sealed class SubscriptionsRuntime : ISubscriptionsHost, IDisposable
+internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposable
 {
     /// <summary>Microseconds per <see cref="Stopwatch"/> tick, resolved once: the conversion on the <c>PONG</c> path, which a transport thread runs.</summary>
     private static readonly double MicrosecondsPerStopwatchTick = 1_000_000.0 / Stopwatch.Frequency;
 
     private ArchetypeReplicationState[] _replicationStates = [];
-    private SessionTable _sessions;
-    private IngressRingPool _ingressRings;
-    private SubscriptionsIngress _ingress;
-    private FrameAssembler _frames;
+    private readonly SessionTable _sessions;
+    private readonly IngressRingPool _ingressRings;
+    private readonly SubscriptionsIngress _ingress;
+    private readonly FrameAssembler _frames;
+    private readonly SendPump _sendPump;
     private bool _disposed;
 
     // ── the tick state a transport thread reads ─────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -97,6 +98,16 @@ internal sealed class SubscriptionsRuntime : ISubscriptionsHost, IDisposable
             return;
         }
 
+        if (Options.CloseAfterSkips < 1)
+        {
+            // Refused rather than clamped. Zero reads as "never close a lagging session", and the netId quarantine is sized from this window (D1): with no
+            // bound on how long a session may be skipped, an identity it still holds could be reissued while its next frame is still owed, which is the
+            // leave-then-enter collision in one frame that SUB-06 exists to prevent.
+            throw new InvalidOperationException(
+                $"SubscriptionsOptions.CloseAfterSkips is {Options.CloseAfterSkips}. It bounds how long a session may be skipped before it is closed, and the "
+                + "network-identity quarantine is sized from it, so it must be at least 1.");
+        }
+
         // ORDER IS THE POINT, and it is the reverse of Dispose's. Each step consumes the one above it: the plan resolves the declarations against the engine's
         // layouts, the catalog is emitted from the plan, and the replication state is carved to the block layout the plan computed. Anything that throws part
         // way leaves a half-built object behind, so the whole of it unwinds through Dispose rather than through a partially-initialised field.
@@ -123,7 +134,12 @@ internal sealed class SubscriptionsRuntime : ISubscriptionsHost, IDisposable
 
             // S2b (P1-13b). It owns the frame pool, the per-session known-sets and the per-slot hand-off counters, so a frame's whole lifetime — gathered,
             // encoded, published, released — lives behind one field here rather than spread across the tick-scoped context.
-            _frames = new FrameAssembler("Subscriptions.Frames", parent, engine.MemoryAllocator, Options, Plans, Catalog.Canonical, _sessions);
+            _frames = new FrameAssembler("Subscriptions.Frames", parent, engine.MemoryAllocator, Options, Plans, Catalog.Canonical, _sessions,
+                NominalTickPeriodUs);
+
+            // The send side (P1-14b). It holds no memory of its own beyond one view and one work item per slot; what it carries is the rule that a frame
+            // leaves the engine only after the tick that produced it has flushed.
+            _sendPump = new SendPump(_sessions, _frames, Options.MaxSessions);
 
             // Ingress (P1-05). The command registry is bound from the CATALOG, so the decode follows what the client negotiated against rather than a second
             // reading of the declarations; the ring pool is created here because a ring's lifetime is a session's, and sessions live in the table above it.
@@ -215,6 +231,9 @@ internal sealed class SubscriptionsRuntime : ISubscriptionsHost, IDisposable
     /// </remarks>
     public FrameAssembler Frames => _frames;
 
+    /// <summary>The send side: what carries a published frame to a link.</summary>
+    public SendPump SendPump => _sendPump;
+
     /// <summary>The nominal tick period in seconds, <c>1 / BaseTickRate</c> — what the velocity codecs were sized against.</summary>
     public double NominalTickPeriodSeconds { get; }
 
@@ -305,6 +324,54 @@ internal sealed class SubscriptionsRuntime : ISubscriptionsHost, IDisposable
     /// Straight into the session's ingress ring (P1-05). A <see cref="WireFormatException"/> out of the decode is deliberately not caught here: the connection
     /// is what turns it into the close code the protocol names, and swallowing it would leave a malformed client connected.
     /// </remarks>
+    void ISubscriptionsHost.BindSessionLink(SessionId session, ISubscriptionLink link)
+    {
+        if (link == null)
+        {
+            _sendPump?.DetachLink(session);
+            return;
+        }
+
+        // The hand-off counters are zeroed HERE, on the admitting thread, before the client can send anything and before any tick prepares the slot. Doing it
+        // in the tick's prologue instead put a second writer on the send-side line: the link is bound before WELCOME, so a PING can be calling NotePing while
+        // the tick is clearing the whole struct — which is not a shape SUB-05's allow-list permits, however benign a lost first acknowledgement is.
+        var frames = _frames;
+        if (frames != null && session.IsValid && session.Slot < Options.MaxSessions)
+        {
+            var send = frames.SendStateOf(session.Slot);
+            SessionSendState.Initialize(send);
+
+            // Silence is measured from the handshake, not from the first PING: a client that completes HELLO and then says nothing must be closed on the same
+            // schedule as one that stops mid-session, and a zero here would exempt it forever.
+            send->NotePing(Volatile.Read(ref _currentTick));
+        }
+
+        _sendPump?.AttachLink(session, link);
+    }
+
+    /// <inheritdoc />
+    void ISubscriptionsHost.NoteSessionPing(SessionId session, uint appliedTick)
+    {
+        var frames = _frames;
+        if (frames == null || !session.IsValid || session.Slot >= Options.MaxSessions)
+        {
+            return;
+        }
+
+        // The slot must still name THIS session. A late PING from a socket whose session has closed would otherwise land its acknowledgement and its
+        // heard-from mark on whoever holds the slot now, suppressing that session's lag skip and its silence close — the one transport-side entry point that
+        // did not validate what every other one does.
+        if (_sessions == null || _sessions.IdAt(session.Slot) != session)
+        {
+            return;
+        }
+
+        var send = frames.SendStateOf(session.Slot);
+        send->NotePing(Volatile.Read(ref _currentTick));
+        send->ReportAppliedTick(appliedTick);
+    }
+
+    /// <inheritdoc />
     void ISubscriptionsHost.OnCommands(SessionId session, ReadOnlySpan<byte> message)
     {
         var ingress = _ingress;
@@ -474,6 +541,28 @@ internal sealed class SubscriptionsRuntime : ISubscriptionsHost, IDisposable
 
         // Last of all: a frame block outlives the session that produced it only until its send completes, and the assembler returns every block a slot
         // still names before it frees the pool's slabs.
+        // Before the assembler, because a running pump holds a pointer into the assembler's frame pool for the duration of one send. Its Dispose quiesces.
+        _sendPump?.Dispose();
+
         _frames?.Dispose();
     }
+
+    /// <summary>
+    /// Releases the tick as durable and starts the send of every frame it produced.
+    /// </summary>
+    /// <param name="tick">The tick whose unit of work has flushed.</param>
+    /// <remarks>
+    /// Called by the tick driver at the publication gate, after the flush and only on a tick that earned publication — SUB-02's whole content in one call.
+    /// </remarks>
+    internal void PublishFrames(long tick) => _sendPump?.PublishAndWake(tick);
+
+    /// <summary>
+    /// Throws away what the tick produced, closing every session that produced a frame.
+    /// </summary>
+    /// <returns>How many sessions were closed.</returns>
+    /// <remarks>
+    /// The other half of the gate: a tick that aborted, failed its fence, faulted a replication stage or failed its flush has frames in slots that can never
+    /// be sent, and the clients holding their baselines have to be told so.
+    /// </remarks>
+    internal int DiscardFrames() => _sendPump?.DiscardProduced() ?? 0;
 }

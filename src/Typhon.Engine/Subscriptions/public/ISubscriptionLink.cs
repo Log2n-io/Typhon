@@ -36,6 +36,12 @@ public interface ISubscriptionLink
     /// <b>Back-pressure belongs here.</b> A link that completes the task as soon as the bytes reach a kernel buffer tells the engine a slow client is keeping
     /// up, and the lag skip then has nothing to see; that is why the TCP transport bounds its send buffer and the WebSocket adapter caps kernel queueing. A
     /// failure is reported by faulting the task, never by throwing synchronously after the message was partly written.
+    /// <para>
+    /// <b>A faulted task also means the bytes are released.</b> Completing and faulting are the same promise about <paramref name="message"/>: once the task
+    /// has ended, whichever way, the link no longer reads it. The engine frees the slot on both paths — it has no third state to hold it in — so a link that
+    /// faulted while a write was still reading the buffer would be handing one buffer to two writers. A link that cannot guarantee this must not fault until
+    /// its write has finished.
+    /// </para>
     /// </remarks>
     ValueTask SendAsync(ReadOnlyMemory<byte> message, CancellationToken ct);
 

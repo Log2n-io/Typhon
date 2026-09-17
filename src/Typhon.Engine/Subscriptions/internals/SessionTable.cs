@@ -1326,7 +1326,7 @@ internal sealed unsafe class SessionTable : IDisposable
     /// <summary>The identity occupying a slot right now, or <see cref="SessionId.None"/>.</summary>
     /// <param name="slot">The slot.</param>
     /// <returns>The identity.</returns>
-    private SessionId IdAt(int slot)
+    internal SessionId IdAt(int slot)
     {
         var rows = _rows;
         return rows == null ? SessionId.None : SessionId.FromValue(GateId(Volatile.Read(ref (rows + slot)->Gate)));

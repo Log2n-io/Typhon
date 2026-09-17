@@ -289,7 +289,9 @@ public sealed partial class TyphonRuntime : IDisposable
 
         // Parented under the scheduler, not under engine.Parent. The scheduler is always present, whereas a runtime built against an engine with no resource
         // parent would otherwise throw here — during EVERY runtime construction, for a subsystem nothing has switched on yet.
-        _netIds = new NetIdAllocator("Subscriptions.NetIds", scheduler);
+        // The quarantine spans the whole window a session may be skipped for, plus the tick of the release itself (D1): an identity must not be reissued
+        // while any session could still owe a frame that names its previous holder.
+        _netIds = new NetIdAllocator("Subscriptions.NetIds", scheduler, quarantineTicks: Math.Max(1, options.Subscriptions.CloseAfterSkips) + 1);
         _subscriptions = new SubscriptionsRegistry(options.Subscriptions);
         _logger = logger ?? NullLogger.Instance;
         _systemTransactions = new Transaction[scheduler.AllSystemCount];
@@ -368,16 +370,24 @@ public sealed partial class TyphonRuntime : IDisposable
     public SubscriptionsRegistry Subscriptions => _subscriptions;
 
     /// <summary>
+    /// The canonical catalog this runtime compiled, as UTF-8 JSON. Empty before <c>Start</c>, and on a runtime that declares nothing.
+    /// </summary>
+    /// <remarks>
+    /// Exactly the bytes <c>WELCOME</c> carries, which is the point: a host serving them at <c>/typhon/catalog.json</c> for build-time codegen and for tools
+    /// must not be serving a second rendering of the same declarations, because the hash a client echoes is computed over these bytes. Never mutated after
+    /// <c>Start</c>, so it is handed out directly rather than copied.
+    /// </remarks>
+    public ReadOnlyMemory<byte> SubscriptionsCatalogJson => _subscriptionsRuntime?.Catalog?.Utf8;
+
+    /// <summary>
     /// The acceptor a transport hands its connections to. <see langword="null"/> before <see cref="Start"/>, and on a runtime whose application declared no
     /// subscriptions.
     /// </summary>
     /// <remarks>
-    /// <b>Internal on purpose, and the choice is about P1-08 rather than about this slice.</b> The interfaces it is used through —
-    /// <see cref="ISubscriptionTransport"/>, <see cref="ISubscriptionAcceptor"/>, <see cref="ISubscriptionLink"/> — are public already, because a transport is
-    /// a thing an application writes. How a transport is REGISTERED is a different question: the built-in TCP transport (P1-07) lives in this assembly and
-    /// needs nothing public, while <c>Typhon.Subscriptions.AspNetCore</c> (P1-08) is a separate package that has to answer it together with its DI surface
-    /// (<c>AddTyphonSubscriptions</c> / <c>MapTyphonSubscriptions</c>, design/Subscriptions/04-transport.md § 5). Publishing a shape here would pre-empt that
-    /// decision in the one direction that cannot be taken back.
+    /// <b>Public since P1-08, which is the slice that had to answer it.</b> The interfaces it is used through — <see cref="ISubscriptionTransport"/>,
+    /// <see cref="ISubscriptionAcceptor"/>, <see cref="ISubscriptionLink"/> — were public already, because a transport is a thing an application writes;
+    /// <c>Typhon.Subscriptions.AspNetCore</c> is a separate assembly and has to be able to register one. The shape is the smallest that works: hand the
+    /// listener over, it is started once and given the acceptor, and stopping it stays the caller's through its own <c>StopAsync</c>.
     /// </remarks>
     internal ISubscriptionAcceptor SubscriptionAcceptor => _subscriptionsRuntime?.Acceptor;
 
@@ -390,7 +400,7 @@ public sealed partial class TyphonRuntime : IDisposable
     /// Both refusals are loud, and deliberately: a transport bound to a runtime that can never admit anyone is a listener that accepts connections and closes
     /// every one of them, which reads to an operator as a network fault rather than as a missing declaration.
     /// </remarks>
-    internal void StartSubscriptionTransport(ISubscriptionTransport transport)
+    public void StartSubscriptionTransport(ISubscriptionTransport transport)
     {
         ArgumentNullException.ThrowIfNull(transport);
 
@@ -2315,6 +2325,13 @@ public sealed partial class TyphonRuntime : IDisposable
             {
                 _currentUow?.Flush();
             }
+            catch (Exception)
+            {
+                // SUB-02's fourth clause, at the only point it can be observed: the flush throws out of this phase and the publication gate below is never
+                // reached, so the frames this tick produced would sit in their slots forever. Every session that produced one is closed here instead.
+                _subscriptionsRuntime?.DiscardFrames();
+                throw;
+            }
             finally
             {
                 _currentUow?.Dispose();
@@ -2354,9 +2371,26 @@ public sealed partial class TyphonRuntime : IDisposable
             if (!_subscriptionsContext.Faulted)
             {
                 _subscriptionsContext.NotePublish();
+
+                // The frames themselves leave here, and nowhere else. Releasing the committed tick is what makes them sendable, and it happens after the
+                // flush above because a frame must never tell a session a story the WAL does not carry (SUB-02).
+                _subscriptionsRuntime?.PublishFrames(scheduler.CurrentTickNumber);
+            }
+            else
+            {
+                // A replication stage faulted after frames were produced. They describe a tick that will never be published, so they can never be sent —
+                // and the sessions holding them would fill their slots and stall. Closing them is SUB-02's fourth clause.
+                _subscriptionsRuntime?.DiscardFrames();
             }
         }
-        else if (!_tickAbortedNotified)
+        else
+        {
+            // Aborted or fence-failed: same reasoning as the faulted case above, and it has to happen on every such tick rather than only on the first, since
+            // each one can have produced frames of its own.
+            _subscriptionsRuntime?.DiscardFrames();
+        }
+
+        if ((tickAborted || fenceFailed) && !_tickAbortedNotified)
         {
             // One event for both verdicts: a host that reacts to OnTickAborted by stopping the runtime wants to do exactly that here too, and
             // TickOutcome.Reason tells the two apart.

@@ -185,6 +185,7 @@ internal unsafe struct SessionSendState
 
     [FieldOffset(SendLineOffset)] private long _sentSeq;
     [FieldOffset(SendLineOffset + 8)] private long _ackedTick;
+    [FieldOffset(SendLineOffset + 16)] private long _pingTick;
 
     // --- the slots ---
 
@@ -216,6 +217,9 @@ internal unsafe struct SessionSendState
 
     /// <summary>The newest tick the client has reported applied, from its <c>PING</c>. Zero until the first one arrives.</summary>
     public long AckedTick => Volatile.Read(ref _ackedTick);
+
+    /// <summary>The server tick at which this session was last heard from. Seeded when the slot is bound, so silence is measured from the handshake.</summary>
+    public long PingTick => Volatile.Read(ref _pingTick);
 
     /// <summary>Clears a state to its initial values. Call once, before any thread can reach it.</summary>
     /// <param name="state">The state to clear, in memory the caller owns.</param>
@@ -405,6 +409,23 @@ internal unsafe struct SessionSendState
         if (tick > Volatile.Read(ref _ackedTick))
         {
             Volatile.Write(ref _ackedTick, tick);
+        }
+    }
+
+    /// <summary>
+    /// Records that the session was heard from on this tick. Called by the link thread from <c>PING</c>, and once by the tick when the slot is bound.
+    /// </summary>
+    /// <param name="tick">The server tick at the moment the message arrived.</param>
+    /// <remarks>
+    /// Monotonic, one word, written atomically by one thread at a time — the same shape as <see cref="ReportAppliedTick"/> and on SUB-05's allow-list for the
+    /// same reason. The tick reads it to close a session that has stopped talking (4001), which needs a last-heard-from mark that survives a session producing
+    /// no frames at all: <see cref="AckedTick"/> cannot serve, because a client with nothing to apply never moves it.
+    /// </remarks>
+    public void NotePing(long tick)
+    {
+        if (tick > Volatile.Read(ref _pingTick))
+        {
+            Volatile.Write(ref _pingTick, tick);
         }
     }
 

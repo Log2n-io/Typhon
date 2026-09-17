@@ -25,7 +25,8 @@ class NetIdAllocatorTests
     [TearDown]
     public void TearDown() => _registry?.Dispose();
 
-    private NetIdAllocator NewAllocator(int initialCapacity = 256) => new("NetIds", _registry.Runtime, initialCapacity);
+    private NetIdAllocator NewAllocator(int initialCapacity = 256, int quarantineTicks = 1)
+        => new("NetIds", _registry.Runtime, initialCapacity, quarantineTicks);
 
     [Test]
     public void AFreshAllocatorIssuesIdentitiesFromOneAndNeverZero()
@@ -396,5 +397,70 @@ class NetIdAllocatorTests
         var reissued = new HashSet<uint> { allocator.Allocate(), allocator.Allocate() };
 
         Assert.That(reissued, Is.EquivalentTo(early.GetRange(0, 2)), "both quarantined identities must survive growth and come back");
+    }
+
+    /// <summary>
+    /// D1: an identity released at tick N is held for the whole window a session may be skipped for, not for one tick.
+    /// </summary>
+    /// <remarks>
+    /// The one-tick hold keeps a leave and an enter out of the same FRAME. It does not keep them out of the same frame of a SKIPPED session, which receives
+    /// everything since its baseline in one message: with a one-tick hold, an identity released at N and reissued at N+1 reaches such a session as a leave and
+    /// an enter for the same number, in one frame, with no ordering it can recover. Holding for the skip-close window makes that unrepresentable.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-06")]
+    public void AReleasedIdentityIsHeldForTheSkipWindow()
+    {
+        const int Window = 5;
+        using var allocator = NewAllocator(quarantineTicks: Window);
+
+        var identity = allocator.Allocate();
+        allocator.Release(identity);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(allocator.QuarantineTicks, Is.EqualTo(Window));
+
+            for (var tick = 1; tick < Window; tick++)
+            {
+                allocator.DrainQuarantine();
+                Assert.That(allocator.QuarantinedCount, Is.EqualTo(1), $"still held {tick} tick(s) after the release");
+                Assert.That(allocator.Allocate(), Is.Not.EqualTo(identity), $"reissued {tick} tick(s) into a {Window}-tick window");
+            }
+
+            allocator.DrainQuarantine();
+            Assert.That(allocator.QuarantinedCount, Is.Zero, "the window has passed");
+            Assert.That(allocator.Allocate(), Is.EqualTo(identity), "and the identity is reissuable again, rather than lost");
+        });
+    }
+
+    /// <summary>Releases spread across the window come back on their own schedule, so the ring cannot bunch them or drop one.</summary>
+    [Test]
+    public void EachTicksReleasesComeBackOnTheirOwnSchedule()
+    {
+        const int Window = 3;
+        using var allocator = NewAllocator(quarantineTicks: Window);
+
+        var first = allocator.Allocate();
+        var second = allocator.Allocate();
+
+        allocator.Release(first);
+        allocator.DrainQuarantine();
+        allocator.Release(second);
+
+        for (var tick = 0; tick < Window - 1; tick++)
+        {
+            allocator.DrainQuarantine();
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(allocator.QuarantinedCount, Is.EqualTo(1), "the second release is still inside its own window");
+            Assert.That(allocator.Allocate(), Is.EqualTo(first), "the first release has served its window and comes back first");
+
+            allocator.DrainQuarantine();
+            Assert.That(allocator.QuarantinedCount, Is.Zero);
+            Assert.That(allocator.Allocate(), Is.EqualTo(second));
+        });
     }
 }

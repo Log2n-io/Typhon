@@ -162,7 +162,7 @@ internal sealed class SessionRequestSegment
 /// </remarks>
 internal sealed class SessionRequestLog
 {
-    private readonly SessionRequestSegment[] _segments;
+    private SessionRequestSegment[] _segments;
     private ReplicationThreadAffinity _affinity;
 
     /// <summary>Creates the log.</summary>
@@ -180,6 +180,31 @@ internal sealed class SessionRequestLog
 
     /// <summary>How many segments there are.</summary>
     public int WorkerCount => _segments.Length;
+
+    /// <summary>
+    /// Grows the log to one segment per worker, keeping the segments it already has.
+    /// </summary>
+    /// <param name="workerCount">How many workers this tick dispatches.</param>
+    /// <remarks>
+    /// Called from the tick's prologue, single-threaded and before any system runs, so the array is never resized under a worker holding a segment. It only
+    /// ever grows: a tick dispatched narrower than the last one leaves the spare segments alone rather than reallocating the whole table.
+    /// </remarks>
+    public void EnsureWorkers(int workerCount)
+    {
+        if (workerCount <= _segments.Length)
+        {
+            return;
+        }
+
+        var grown = new SessionRequestSegment[workerCount];
+        Array.Copy(_segments, grown, _segments.Length);
+        for (var i = _segments.Length; i < workerCount; i++)
+        {
+            grown[i] = new SessionRequestSegment();
+        }
+
+        _segments = grown;
+    }
 
     /// <summary>Requests recorded this tick, across every segment.</summary>
     public int Count
