@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <LangVersion>default</LangVersion>
+        <RootNamespace>Typhon.Subscriptions.AspNetCore</RootNamespace>
+        <!-- A library, not an application: the Web SDK is used for the ASP.NET Core framework reference only. -->
+        <OutputType>Library</OutputType>
+        <IsPackable>false</IsPackable>
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+        <!-- No launch profile, no wwwroot, no implicit static files: this project only adds endpoints to somebody else's host. -->
+        <EnableDefaultContentItems>false</EnableDefaultContentItems>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\Typhon.Engine\Typhon.Engine.csproj" />
+        <!-- Direct, because the engine references it with PrivateAssets="all": the close codes and the subprotocol name are this package's own vocabulary. -->
+        <ProjectReference Include="..\Typhon.Protocol\Typhon.Protocol.csproj" />
+        <PackageReference Include="JetBrains.Annotations" Version="2026.2.0" PrivateAssets="all" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <InternalsVisibleTo Include="Typhon.Subscriptions.AspNetCore.Tests" />
+    </ItemGroup>
+
+</Project>

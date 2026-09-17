@@ -48,6 +48,10 @@ jobs:
             engine:
               - 'src/Typhon.Engine/**'
               - 'src/Typhon.Protocol/**'
+              # The engine suite reaches Typhon.Client: MotionSegmentTests feeds the segments the engine produces through
+              # the client's evaluator, so the two motion halves are pinned to one another (P1-10). Missed when that
+              # reference was added, which is exactly the drift this block exists to catch.
+              - 'src/Typhon.Client/**'
               - 'src/Typhon.Profiler/**'
               - 'src/Typhon.Schema.Definition/**'
               - 'src/Typhon.Analyzers/**'
@@ -74,6 +78,10 @@ jobs:
               - 'src/Typhon.Schema.Definition/**'
               - 'src/Typhon.Profiler/**'
               - 'src/Typhon.Protocol/**'
+              # The browser's door (P1-08). It runs here rather than with the SDKs because its build closure is the
+              # whole engine, and gating it on `sdk` would make the SDK job run on every engine change.
+              - 'src/Typhon.Subscriptions.AspNetCore/**'
+              - 'test/Typhon.Subscriptions.AspNetCore.Tests/**'
               - 'src/Typhon.Shell/**'
               - 'src/Typhon.Shell.Extensibility/**'
               - 'samples/Typhon.Samples.Swg/**'
@@ -655,7 +663,7 @@ jobs:
 
       # One step, all five: a per-project step would stop at the first failure and hide the rest, and the whole
       # point is to learn the state of suites nobody has run. `rc` accumulates so every project reports.
-      - name: Test — analyzers, generators, protocol, shell, samples, anthill harness
+      - name: Test — analyzers, generators, protocol, shell, samples, websocket adapter, anthill harness
         run: |
           set -uo pipefail
           rc=0
@@ -665,6 +673,7 @@ jobs:
             test/Typhon.Protocol.Tests/Typhon.Protocol.Tests.csproj \
             test/Typhon.Shell.Tests/Typhon.Shell.Tests.csproj \
             test/Typhon.Samples.Swg.Tests/Typhon.Samples.Swg.Tests.csproj \
+            test/Typhon.Subscriptions.AspNetCore.Tests/Typhon.Subscriptions.AspNetCore.Tests.csproj \
             demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj ; do
             name=$(basename "$proj" .csproj)
             echo "::group::${name}"

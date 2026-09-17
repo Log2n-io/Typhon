@@ -165,6 +165,14 @@ if [ "$BUILD" -eq 1 ]; then
   step "build client tests (Release)" dotnet build "$CLIENT" -c Release
 fi
 suite_step "client suite (Release)" "$CLIENT" pre-push-client.trx
+
+# The browser's door (gate: aux-tests). It runs locally because a WebSocket endpoint that stopped accepting is invisible
+# to every engine suite, which is the shape of gap #774 was about.
+WSADAPTER=test/Typhon.Subscriptions.AspNetCore.Tests/Typhon.Subscriptions.AspNetCore.Tests.csproj
+if [ "$BUILD" -eq 1 ]; then
+  step "build websocket adapter tests (Release)" dotnet build "$WSADAPTER" -c Release
+fi
+suite_step "websocket adapter suite (Release)" "$WSADAPTER" pre-push-ws-adapter.trx
 if command -v npm >/dev/null 2>&1; then
   step "TypeScript SDK check (gate: subscriptions-sdk)" bash -c 'cd src/Typhon.Client.TypeScript && npm ci --silent && npm run check'
 else

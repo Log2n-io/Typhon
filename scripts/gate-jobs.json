@@ -12,7 +12,10 @@
   ],
   "jobs": {
     "aws-gate": {
-      "filters": ["engine", "workbench"],
+      "filters": [
+        "engine",
+        "workbench"
+      ],
       "projects": [
         "test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj",
         "test/Typhon.Workbench.Tests/Typhon.Workbench.Tests.csproj"
@@ -20,7 +23,10 @@
       "runs_via": "bench/aws/ci.sky.yaml"
     },
     "aws-gate-selfhosted": {
-      "filters": ["engine", "workbench"],
+      "filters": [
+        "engine",
+        "workbench"
+      ],
       "projects": [
         "test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj",
         "test/Typhon.Workbench.Tests/Typhon.Workbench.Tests.csproj"
@@ -28,19 +34,24 @@
       "runs_via": "bench/aws/run-gate.sh"
     },
     "aux-tests": {
-      "filters": ["aux"],
+      "filters": [
+        "aux"
+      ],
       "projects": [
         "test/Typhon.Analyzers.Tests/Typhon.Analyzers.Tests.csproj",
         "test/Typhon.Generators.Tests/Typhon.Generators.Tests.csproj",
         "test/Typhon.Protocol.Tests/Typhon.Protocol.Tests.csproj",
         "test/Typhon.Shell.Tests/Typhon.Shell.Tests.csproj",
         "test/Typhon.Samples.Swg.Tests/Typhon.Samples.Swg.Tests.csproj",
-        "demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj"
+        "demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj",
+        "test/Typhon.Subscriptions.AspNetCore.Tests/Typhon.Subscriptions.AspNetCore.Tests.csproj"
       ],
       "runs_via": "merge-gate.yml (free runner)"
     },
     "subscriptions-sdk": {
-      "filters": ["sdk"],
+      "filters": [
+        "sdk"
+      ],
       "projects": [
         "test/Typhon.Client.Tests/Typhon.Client.Tests.csproj"
       ],

@@ -12,6 +12,7 @@
         <Project Path="src/Typhon.Client/Typhon.Client.csproj" />
         <Project Path="src/Typhon.Engine/Typhon.Engine.csproj" />
         <Project Path="src/Typhon.Protocol/Typhon.Protocol.csproj" />
+        <Project Path="src/Typhon.Subscriptions.AspNetCore/Typhon.Subscriptions.AspNetCore.csproj" />
         <Project Path="src/Typhon.Schema.Definition/Typhon.Schema.Definition.csproj" />
         <Project Path="src/Typhon.Shell/Typhon.Shell.csproj" />
         <Project Path="src/Typhon.Shell.Extensibility/Typhon.Shell.Extensibility.csproj" />
@@ -28,6 +29,7 @@
         <Project Path="test/Typhon.IOProfileRunner/Typhon.IOProfileRunner.csproj" />
         <Project Path="test/Typhon.MonitoringDemo/Typhon.MonitoringDemo.csproj" />
         <Project Path="test/Typhon.Samples.Swg.Tests/Typhon.Samples.Swg.Tests.csproj" />
+        <Project Path="test/Typhon.Subscriptions.AspNetCore.Tests/Typhon.Subscriptions.AspNetCore.Tests.csproj" />
         <Project Path="test/Typhon.Shell.Tests/Typhon.Shell.Tests.csproj" />
         <Project Path="test/Typhon.Workbench.Tests/Typhon.Workbench.Tests.csproj" />
     </Folder>
