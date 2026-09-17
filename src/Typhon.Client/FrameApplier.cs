@@ -19,16 +19,23 @@ public interface IEventHandler : IFieldSink
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Apply order (03-wire-protocol § 5).</b> Enters, segments and state records apply as they are decoded; <c>SOURCES</c>, <c>SELF</c>, <c>ACKS</c>,
-/// <c>EVENTS</c> and <c>AGG</c> as they come; leaves are collected and applied when the frame ends, so an event naming an entity that leaves in the same
-/// frame still finds it. A <c>RESET</c> frame clears the store before anything in it applies.
+/// <b>Apply order (03-wire-protocol § 5), whatever order the blocks travel in.</b> A first pass applies every block but <c>EVENTS</c> — enters, segments
+/// and state records as they are decoded, then <c>SOURCES</c>, <c>SELF</c>, <c>ACKS</c> and <c>AGG</c> as they come — and collects the leaves; a second
+/// pass reads the <c>EVENTS</c> blocks alone; the leaves apply last. An event therefore sees every enter and update of its frame, and every entity that
+/// leaves in it (and this frame's aggregates, which § 5 orders after the leaves but nothing can observe in between). A <c>RESET</c> frame clears the store
+/// before anything in it applies.
+/// </para>
+/// <para>
+/// <b>netId reuse (03 § 10).</b> A frame never carries an enter and a leave for one netId, so an enter for a live netId replaces its holder and counts as
+/// an anomaly, and a leave applies to whatever holds its netId once the frame's enters are in — provided the holder belongs to the leave's archetype, as a
+/// segment or a state record must; otherwise the leave is an anomaly and changes nothing.
 /// </para>
 /// <para>
 /// <b>No allocation in steady state.</b> The applier is the decoder's sink, so decoded numbers land in the store's arrays without an intermediate value; the
 /// only allocations are text and bytes fields that change, and store growth.
 /// </para>
 /// </remarks>
-public sealed class FrameApplier : ITickSink
+public sealed class FrameApplier
 {
     private enum Target
     {
@@ -41,9 +48,8 @@ public sealed class FrameApplier : ITickSink
     private readonly WorldStore _store;
     private readonly IEventHandler _events;
     private uint[] _leaves = new uint[64];
+    private int[] _leaveArchetypes = new int[64];
     private int _leaveCount;
-    private uint[] _enteredThisFrame = new uint[64];
-    private int _enteredThisFrameCount;
     private Target _target;
     private ArchetypeStore _archetype;
     private AggregateGrid _aggregate;
@@ -62,14 +68,17 @@ public sealed class FrameApplier : ITickSink
     /// <summary>Decodes and applies one <c>TICK</c> message.</summary>
     /// <param name="message">The whole message, type byte included.</param>
     /// <exception cref="WireFormatException">The message is malformed; the store may hold part of the frame and the session must be closed.</exception>
+    /// <remarks>An exception thrown by the event handler propagates the same way: the frame is partly applied, and the session must be closed.</remarks>
     public void Apply(ReadOnlySpan<byte> message)
     {
-        var self = this;
-        TickReader.Read(message, _store.Plan, ref self);
+        var pass = new Pass(this, events: false);
+        TickReader.Read(message, _store.Plan, ref pass, TickBlocks.AllButEvents);
+        pass = new Pass(this, events: true);
+        TickReader.Read(message, _store.Plan, ref pass, TickBlocks.Events);
+        ApplyLeaves();
     }
 
-    /// <inheritdoc />
-    public void BeginTick(uint tick, TickFlags flags, uint periodUs)
+    private void BeginTick(uint tick, TickFlags flags, uint periodUs)
     {
         _store.BeginFrame();
         if ((flags & TickFlags.Reset) != 0)
@@ -81,23 +90,20 @@ public sealed class FrameApplier : ITickSink
         _store.Flags = flags;
         _store.PeriodUs = periodUs;
         _leaveCount = 0;
-        _enteredThisFrameCount = 0;
         _target = Target.None;
     }
 
-    /// <inheritdoc />
-    public void BeginEntities(ArchetypePlan archetype)
+    private void BeginEntities(ArchetypePlan archetype)
     {
         _archetype = _store.Archetypes[archetype.Idx];
         _target = Target.None;
     }
 
-    /// <inheritdoc />
-    public void Enter(uint netId, scoped ReadOnlySpan<double> position, scoped ReadOnlySpan<double> velocity, uint t0, byte epoch)
+    private void Enter(uint netId, scoped ReadOnlySpan<double> position, scoped ReadOnlySpan<double> velocity, uint t0, byte epoch)
     {
         if (_store.TryLocate(netId, out var oldArchetype, out var oldSlot))
         {
-            // The server reused a live identity: the enter replaces the old entity, and a leave for it later in this frame belongs to the replaced one.
+            // A frame never carries a netId's leave and its reuse (03 § 10), so this holder was never released: the enter replaces it.
             _store.Archetypes[oldArchetype].Release(oldSlot, immediate: false);
             _store.Unmap(netId);
             _store.Anomalies++;
@@ -118,13 +124,11 @@ public sealed class FrameApplier : ITickSink
             _archetype.WriteSegment(slot, position, velocity, t0, epoch);
         }
 
-        Remember(ref _enteredThisFrame, ref _enteredThisFrameCount, netId);
         _slot = slot;
         _target = Target.Entity;
     }
 
-    /// <inheritdoc />
-    public void Segment(uint netId, scoped ReadOnlySpan<double> position, scoped ReadOnlySpan<double> velocity, uint t0, byte epoch)
+    private void Segment(uint netId, scoped ReadOnlySpan<double> position, scoped ReadOnlySpan<double> velocity, uint t0, byte epoch)
     {
         _target = Target.None;
         if (!_store.TryLocate(netId, out var archetype, out var slot) || archetype != _archetype.Plan.Idx)
@@ -137,8 +141,7 @@ public sealed class FrameApplier : ITickSink
         _archetype.MarkUpdated(slot, 0, moved: true);
     }
 
-    /// <inheritdoc />
-    public void State(uint netId, byte groupMask)
+    private void State(uint netId, byte groupMask)
     {
         if (!_store.TryLocate(netId, out var archetype, out var slot) || archetype != _archetype.Plan.Idx)
         {
@@ -152,35 +155,36 @@ public sealed class FrameApplier : ITickSink
         _target = Target.Entity;
     }
 
-    /// <inheritdoc />
-    public void Leave(uint netId)
+    private void Leave(uint netId)
     {
         _target = Target.None;
-        Remember(ref _leaves, ref _leaveCount, netId);
+        if (_leaveCount == _leaves.Length)
+        {
+            Array.Resize(ref _leaves, _leaves.Length * 2);
+            Array.Resize(ref _leaveArchetypes, _leaves.Length);
+        }
+
+        _leaves[_leaveCount] = netId;
+        _leaveArchetypes[_leaveCount++] = _archetype.Plan.Idx;
     }
 
-    /// <inheritdoc />
-    public void Event(MessagePlan type)
+    private void Event(MessagePlan type)
     {
         _target = Target.Event;
         _events?.Event(type);
     }
 
-    /// <inheritdoc />
-    public void Self(ArchetypePlan archetype, uint netId, ushort lastSeq, byte ownerMask)
+    private void Self(ArchetypePlan archetype, uint netId, ushort lastSeq, byte ownerMask)
     {
         _store.Self.Receive(archetype, netId, lastSeq, ownerMask);
         _target = Target.Self;
     }
 
-    /// <inheritdoc />
-    public void Ack(ushort seq, byte reason) => _store.Acks.Add((seq, reason));
+    private void Ack(ushort seq, byte reason) => _store.Acks.Add((seq, reason));
 
-    /// <inheritdoc />
-    public void Source(ushort requestId, byte status, ushort code) => _store.Sources.Add((requestId, status, code));
+    private void Source(ushort requestId, byte status, ushort code) => _store.Sources.Add((requestId, status, code));
 
-    /// <inheritdoc />
-    public void BeginAggregate(CatalogGrid grid, bool reset)
+    private void BeginAggregate(CatalogGrid grid, bool reset)
     {
         _target = Target.None;
         if (reset)
@@ -191,8 +195,7 @@ public sealed class FrameApplier : ITickSink
         _aggregate = _store.Aggregates[grid.Idx];
     }
 
-    /// <inheritdoc />
-    public void AggregateCell(uint cell, scoped ReadOnlySpan<uint> counts)
+    private void AggregateCell(uint cell, scoped ReadOnlySpan<uint> counts)
     {
         if (cell >= (uint)_aggregate.CellCount)
         {
@@ -203,43 +206,27 @@ public sealed class FrameApplier : ITickSink
         _aggregate.Set(cell, counts);
     }
 
-    /// <inheritdoc />
-    public void Metric(MetricPlan metric, int valueIndex, double value)
+    private void Metric(MetricPlan metric, int valueIndex, double value)
     {
         var list = metric.Session ? _store.Plan.SessionMetrics : _store.Plan.ServerMetrics;
         var values = metric.Session ? _store.SessionMetricValues : _store.ServerMetricValues;
         values[Array.IndexOf(list, metric)][valueIndex] = value;
     }
 
-    /// <inheritdoc />
-    public void Debug(byte subType, scoped ReadOnlySpan<byte> payload) => _target = Target.None;
+    private void Debug(byte subType, scoped ReadOnlySpan<byte> payload) => _target = Target.None;
 
-    /// <inheritdoc />
-    public void Ext(uint appTypeId, scoped ReadOnlySpan<byte> payload) => _target = Target.None;
+    private void Ext(uint appTypeId, scoped ReadOnlySpan<byte> payload) => _target = Target.None;
 
-    /// <inheritdoc />
-    public void UnknownBlock(byte blockType) => _target = Target.None;
+    private void UnknownBlock(byte blockType) => _target = Target.None;
 
-    /// <inheritdoc />
-    public void EndTick()
+    private void ApplyLeaves()
     {
         for (var i = 0; i < _leaveCount; i++)
         {
             var netId = _leaves[i];
-            if (!_store.TryLocate(netId, out var archetype, out var slot))
+            if (!_store.TryLocate(netId, out var archetype, out var slot) || archetype != _leaveArchetypes[i])
             {
-                // Replaced by an enter in this same frame, or never held.
-                if (Array.IndexOf(_enteredThisFrame, netId, 0, _enteredThisFrameCount) < 0)
-                {
-                    _store.Anomalies++;
-                }
-
-                continue;
-            }
-
-            if (Array.IndexOf(_enteredThisFrame, netId, 0, _enteredThisFrameCount) >= 0)
-            {
-                // The netId's live holder entered this frame; the leave belongs to the identity it replaced.
+                _store.Anomalies++;
                 continue;
             }
 
@@ -251,8 +238,7 @@ public sealed class FrameApplier : ITickSink
         _store.Frames++;
     }
 
-    /// <inheritdoc />
-    public void Number(FieldPlan field, scoped ReadOnlySpan<double> components)
+    private void Number(FieldPlan field, scoped ReadOnlySpan<double> components)
     {
         switch (_target)
         {
@@ -268,8 +254,7 @@ public sealed class FrameApplier : ITickSink
         }
     }
 
-    /// <inheritdoc />
-    public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8)
+    private void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8)
     {
         switch (_target)
         {
@@ -285,8 +270,7 @@ public sealed class FrameApplier : ITickSink
         }
     }
 
-    /// <inheritdoc />
-    public void Bytes(FieldPlan field, scoped ReadOnlySpan<byte> bytes)
+    private void Bytes(FieldPlan field, scoped ReadOnlySpan<byte> bytes)
     {
         switch (_target)
         {
@@ -302,8 +286,7 @@ public sealed class FrameApplier : ITickSink
         }
     }
 
-    /// <inheritdoc />
-    public void List(FieldPlan field, int count, scoped ReadOnlySpan<double> components)
+    private void List(FieldPlan field, int count, scoped ReadOnlySpan<double> components)
     {
         // Lists are event and command fields only (the catalog validator refuses them on archetypes).
         if (_target == Target.Event)
@@ -312,14 +295,74 @@ public sealed class FrameApplier : ITickSink
         }
     }
 
-    private static void Remember(ref uint[] buffer, ref int count, uint netId)
+    /// <summary>
+    /// The sink of one read: every block but <c>EVENTS</c>, or <c>EVENTS</c> alone. A struct, so the reader's calls stay direct and nothing allocates; and
+    /// private, so no caller can read a frame into the store without the second pass and the leaves.
+    /// </summary>
+    private readonly struct Pass : ITickSink
     {
-        if (count == buffer.Length)
+        private readonly FrameApplier _applier;
+        private readonly bool _events;
+
+        public Pass(FrameApplier applier, bool events)
         {
-            Array.Resize(ref buffer, buffer.Length * 2);
+            _applier = applier;
+            _events = events;
         }
 
-        buffer[count++] = netId;
+        public void BeginTick(uint tick, TickFlags flags, uint periodUs)
+        {
+            if (_events)
+            {
+                _applier._target = Target.None;
+            }
+            else
+            {
+                _applier.BeginTick(tick, flags, periodUs);
+            }
+        }
+
+        public void BeginEntities(ArchetypePlan archetype) => _applier.BeginEntities(archetype);
+
+        public void Enter(uint netId, scoped ReadOnlySpan<double> position, scoped ReadOnlySpan<double> velocity, uint t0, byte epoch) =>
+            _applier.Enter(netId, position, velocity, t0, epoch);
+
+        public void Segment(uint netId, scoped ReadOnlySpan<double> position, scoped ReadOnlySpan<double> velocity, uint t0, byte epoch) =>
+            _applier.Segment(netId, position, velocity, t0, epoch);
+
+        public void State(uint netId, byte groupMask) => _applier.State(netId, groupMask);
+
+        public void Leave(uint netId) => _applier.Leave(netId);
+
+        public void Event(MessagePlan type) => _applier.Event(type);
+
+        public void Self(ArchetypePlan archetype, uint netId, ushort lastSeq, byte ownerMask) => _applier.Self(archetype, netId, lastSeq, ownerMask);
+
+        public void Ack(ushort seq, byte reason) => _applier.Ack(seq, reason);
+
+        public void Source(ushort requestId, byte status, ushort code) => _applier.Source(requestId, status, code);
+
+        public void BeginAggregate(CatalogGrid grid, bool reset) => _applier.BeginAggregate(grid, reset);
+
+        public void AggregateCell(uint cell, scoped ReadOnlySpan<uint> counts) => _applier.AggregateCell(cell, counts);
+
+        public void Metric(MetricPlan metric, int valueIndex, double value) => _applier.Metric(metric, valueIndex, value);
+
+        public void Debug(byte subType, scoped ReadOnlySpan<byte> payload) => _applier.Debug(subType, payload);
+
+        public void Ext(uint appTypeId, scoped ReadOnlySpan<byte> payload) => _applier.Ext(appTypeId, payload);
+
+        public void UnknownBlock(byte blockType) => _applier.UnknownBlock(blockType);
+
+        public void EndTick() => _applier._target = Target.None;
+
+        public void Number(FieldPlan field, scoped ReadOnlySpan<double> components) => _applier.Number(field, components);
+
+        public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8) => _applier.Text(field, utf8);
+
+        public void Bytes(FieldPlan field, scoped ReadOnlySpan<byte> bytes) => _applier.Bytes(field, bytes);
+
+        public void List(FieldPlan field, int count, scoped ReadOnlySpan<double> components) => _applier.List(field, count, components);
     }
 
     // A text field that changes allocates its new string: the one allocation a decode makes, and only for a field that travelled. An empty text reuses

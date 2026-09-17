@@ -1,0 +1,50 @@
+{
+  "description": "unorm at 24 bits: 0, 1, the tie at 0.5, one step.",
+  "codec": {
+    "t": "unorm",
+    "bits": 24
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "0000000000000000"
+      ],
+      "offset": 0,
+      "length": 3,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3ff0000000000000"
+      ],
+      "offset": 3,
+      "length": 3,
+      "decoded": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3fe0000000000000"
+      ],
+      "offset": 6,
+      "length": 3,
+      "decoded": [
+        "3fe0000010000010"
+      ]
+    },
+    {
+      "input": [
+        "3e70000010000010"
+      ],
+      "offset": 9,
+      "length": 3,
+      "decoded": [
+        "3e70000010000010"
+      ]
+    }
+  ]
+}

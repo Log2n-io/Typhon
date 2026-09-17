@@ -220,7 +220,8 @@ public sealed class SelfState
 
     internal void Receive(ArchetypePlan archetype, uint netId, ushort lastSeq, byte ownerMask)
     {
-        if (Archetype != archetype)
+        // Owner values belong to one entity (W17): a control change starts from nothing, and SUB-11 resends every owner group in its frame.
+        if (Archetype != archetype || NetId != netId)
         {
             Archetype = archetype;
             Numbers = new double[archetype.OwnerFields.Length][];

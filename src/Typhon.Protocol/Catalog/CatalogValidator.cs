@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Text;
 
 namespace Typhon.Protocol;
@@ -102,7 +103,7 @@ public static class CatalogValidator
             }
 
             CheckStrings($"enum '{name}'", names, int.MaxValue, problems);
-            if (names is { Length: 0 })
+            if (names is null or { Length: 0 })
             {
                 problems.Add($"enum '{name}' has no names");
             }
@@ -431,6 +432,11 @@ public static class CatalogValidator
             problems.Add($"{where}: the '{ProtocolConstants.BuiltInMetricPrefix}' prefix is reserved for built-in metrics");
         }
 
+        if (m.Unit == null)
+        {
+            problems.Add($"{where}: unit is missing");
+        }
+
         if (m.Scope is not (null or CatalogMetric.ServerScope or CatalogMetric.SessionScope))
         {
             problems.Add($"{where}: scope must be 'server' or 'session'");
@@ -468,6 +474,7 @@ public static class CatalogValidator
 
     private static void CheckGrids(CatalogGrid[] grids, int archetypeCount, List<string> problems)
     {
+        var shapes = new Dictionary<string, int>(StringComparer.Ordinal);
         for (var i = 0; i < grids.Length; i++)
         {
             var g = grids[i];
@@ -524,17 +531,22 @@ public static class CatalogValidator
                 }
             }
 
-            for (var j = 0; j < i; j++)
+            // A structural key per grid, so a catalog of many grids costs linear time: a client validates what a server sends, before any limit applies.
+            var key = new StringBuilder().Append(Key(g.Cell));
+            foreach (var o in g.Origin ?? [])
             {
-                var o = grids[j];
-                if (o != null && o.Cell.Equals(g.Cell) && Same(o.Origin, g.Origin) && Same(o.Dims, g.Dims) && Same(o.Archetypes, g.Archetypes))
-                {
-                    problems.Add($"{where} duplicates grid {j}");
-                }
+                key.Append('|').Append(Key(o));
+            }
+
+            key.Append('#').AppendJoin(',', g.Dims ?? []).Append('#').AppendJoin(',', g.Archetypes ?? []);
+            if (!shapes.TryAdd(key.ToString(), i))
+            {
+                problems.Add($"{where} duplicates grid {shapes[key.ToString()]}");
             }
         }
 
-        static bool Same<T>(T[] a, T[] b) => (a ?? []).AsSpan().SequenceEqual(b ?? []);
+        // Round-trip formatting, with -0 folded into 0 so the key matches double equality.
+        static string Key(double x) => (x == 0 ? 0 : x).ToString("R", CultureInfo.InvariantCulture);
     }
 
     private static void CheckCodec(string at, CatalogCodec codec, int maxBytes, List<string> problems)

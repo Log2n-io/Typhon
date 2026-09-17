@@ -117,7 +117,7 @@ public class GoldenTickTests
             {
                 ["from"] = FieldValue.Of(100), ["path"] = FieldValue.Of(0.5, -0.5, 8000, -8000), ["loud"] = FieldValue.Of(1),
             }),
-            (Plan.EventByName("Chat"), new RecordValues { ["text"] = FieldValue.Of("héllo ☀") }),
+            (Plan.EventByName("Chat"), new RecordValues { ["text"] = FieldValue.Of("héllo ☀"), ["attachment"] = new FieldValue { Bytes = [0xCA, 0xFE] } }),
             (Plan.EventByName("Ping"), new RecordValues
             {
                 ["from"] = FieldValue.Of(0), ["path"] = new FieldValue { Numbers = [] }, ["loud"] = FieldValue.Of(0),

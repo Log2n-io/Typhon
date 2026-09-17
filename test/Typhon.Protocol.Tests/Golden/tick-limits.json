@@ -1,5 +1,5 @@
 {
-  "description": "Against catalog-wide: archetype indices 128 and 129 and event index 135 as two-byte varints; netId gaps at the varint edges 127/128 and 16383/16384 and a netId of 2\u00B3\u00B2 \u2212 1; a state record with mask 0xFF over 32 fields, a u8 enum at 255 and a varu enum at 128.",
+  "description": "Against catalog-wide: archetype index 127 as a one-byte varint, 128 and 254 and event index 135 as two-byte varints; leave gaps at the varint edges 127/128 and 16383/16384 and a netId of 2\u00B3\u00B2 \u2212 1; a state record with mask 0xFF over 32 fields, a u8 enum at 255 and a varu enum at 128.",
   "catalog": "catalog-wide",
   "log": [
     {
@@ -10,47 +10,19 @@
     },
     {
       "call": "beginEntities",
+      "archetype": "A127"
+    },
+    {
+      "call": "enter",
+      "netId": 2,
+      "position": [],
+      "velocity": [],
+      "t0": 0,
+      "epoch": 0
+    },
+    {
+      "call": "beginEntities",
       "archetype": "A128"
-    },
-    {
-      "call": "enter",
-      "netId": 127,
-      "position": [],
-      "velocity": [],
-      "t0": 0,
-      "epoch": 0
-    },
-    {
-      "call": "enter",
-      "netId": 256,
-      "position": [],
-      "velocity": [],
-      "t0": 0,
-      "epoch": 0
-    },
-    {
-      "call": "enter",
-      "netId": 16640,
-      "position": [],
-      "velocity": [],
-      "t0": 0,
-      "epoch": 0
-    },
-    {
-      "call": "enter",
-      "netId": 33025,
-      "position": [],
-      "velocity": [],
-      "t0": 0,
-      "epoch": 0
-    },
-    {
-      "call": "enter",
-      "netId": 4294967295,
-      "position": [],
-      "velocity": [],
-      "t0": 0,
-      "epoch": 0
     },
     {
       "call": "leave",
@@ -74,7 +46,7 @@
     },
     {
       "call": "beginEntities",
-      "archetype": "A129"
+      "archetype": "A254"
     },
     {
       "call": "enter",

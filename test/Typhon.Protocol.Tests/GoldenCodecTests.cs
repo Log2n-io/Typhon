@@ -85,11 +85,26 @@ public class GoldenCodecTests
             new CatalogCodec { Kind = CodecKind.Vec2, Scale = 0.5, Bits = 8 }, V(0, 0), V(0.25, -0.25), V(1000, -1000), V(Nan, 63.5), Raw(0x80, 0x80));
         Vector("codec-vec3", "vec3 with scale 0.001 at 16 bits.",
             new CatalogCodec { Kind = CodecKind.Vec3, Scale = 0.001, Bits = 16 }, V(1, -1, 0.0005), V(32.767, -32.768, 0));
+        Vector("codec-vec2-24", "vec2 with scale 0.25 at 24 bits: sign extension of an i24, the symmetric clamp ±(2²³ − 1), a tie, and the wire-only code "
+            + "−2²³ decoding as −(2²³ − 1).",
+            new CatalogCodec { Kind = CodecKind.Vec2, Scale = 0.25, Bits = 24 }, V(0, -0.25), V(1e9, -1e9), V(0.125, -0.125),
+            Raw(0x00, 0x00, 0x80, 0xFF, 0xFF, 0xFF));
+        Vector("codec-vec3-32", "vec3 with scale 0.001 at 32 bits: the clamp ±(2³¹ − 1), and the wire-only code −2³¹ decoding as −(2³¹ − 1).",
+            new CatalogCodec { Kind = CodecKind.Vec3, Scale = 0.001, Bits = 32 }, V(1, -1, 0.0005), V(1e12, -1e12, 0),
+            Raw(0x00, 0x00, 0x00, 0x80, 0xFF, 0xFF, 0xFF, 0x7F, 0x01, 0x00, 0x00, 0x00));
         Vector("codec-unorm", "unorm at 8 bits (W6): 0, 1, 0.5 → 128, 1/255, over-range and NaN.",
             new CatalogCodec { Kind = CodecKind.Unorm, Bits = 8 }, S(0), S(1), S(0.5), S(1.0 / 255), S(1.5), S(-0.5), S(Nan));
         Vector("codec-unorm-16", "unorm at 16 bits.", new CatalogCodec { Kind = CodecKind.Unorm, Bits = 16 }, S(0.25), S(1));
+        Vector("codec-unorm-24", "unorm at 24 bits: 0, 1, the tie at 0.5, one step.", new CatalogCodec { Kind = CodecKind.Unorm, Bits = 24 },
+            S(0), S(1), S(0.5), S(1.0 / 16777215));
+        Vector("codec-unorm-32", "unorm at 32 bits, codes ≥ 2³¹: 1, 0.5, one step.", new CatalogCodec { Kind = CodecKind.Unorm, Bits = 32 },
+            S(1), S(0.5), S(1.0 / 4294967295));
         Vector("codec-snorm", "snorm at 8 bits (W6): ±1 exact, ±0.5/127 ties, clamp, NaN; the wire-only code −128 decodes as −1.",
             new CatalogCodec { Kind = CodecKind.Snorm, Bits = 8 }, S(-1), S(0), S(1), S(0.5 / 127), S(-0.5 / 127), S(1.5), S(-1.5), S(Nan), Raw(0x80));
+        Vector("codec-snorm-24", "snorm at 24 bits: sign extension of an i24, ±1, a tie, and the wire-only code −2²³ decoding as −1.",
+            new CatalogCodec { Kind = CodecKind.Snorm, Bits = 24 }, S(-1), S(1), S(-0.5 / 8388607), Raw(0x00, 0x00, 0x80), Raw(0xFF, 0xFF, 0xFF));
+        Vector("codec-snorm-32", "snorm at 32 bits: ±1, a quarter, and the wire-only code −2³¹ decoding as −1.",
+            new CatalogCodec { Kind = CodecKind.Snorm, Bits = 32 }, S(-1), S(1), S(0.25), Raw(0x00, 0x00, 0x00, 0x80));
         Vector("codec-angle", "angle at 16 bits (W7): 0, −0, π wraps to −π, one step below π, 2π to 0, ties ±(n + ½), beyond 2⁵³ to 0, NaN.",
             new CatalogCodec { Kind = CodecKind.Angle, Bits = 16 },
             S(0), S(-0.0), S(Math.PI), S(-Math.PI), S(Math.PI - WireMath.Tau / 65536), S(WireMath.Tau), S(3 * WireMath.Tau + 1),
@@ -143,6 +158,36 @@ public class GoldenCodecTests
         cases.Add(EncodeCase(ref w, creature.Vel, FrameTick, Raw(0x00, 0x80, 0xFF, 0xFF)));
         Finish("codec-vel2", "vel2 as catalog-swg declares it: 16 bits, quantaDiv 16 — sign extension at 16 bits, the clamp, a tie, and −32768.", creature.Vel,
             cases, w.Written.ToArray(), FrameTick, new JsonObject { ["positionStep"] = Golden.Bits(swgStep) });
+
+        var wide = CatalogPlan.Compile(CatalogSerializer.Canonicalize(new Catalog
+        {
+            Protocol = new CatalogProtocolVersion { Major = 2 }, App = new CatalogApp { Name = "Vel24" }, Tick = new CatalogTick { PeriodUs = 1, PingHz = 1 },
+            Limits = new CatalogLimits { FrameBytes = 1 << 20, ClientMessageBytes = 1024 },
+            Archetypes =
+            [
+                new CatalogArchetype
+                {
+                    Name = "M", Groups = [], Fields = [],
+                    Position = new CatalogPosition
+                    {
+                        Kind = CatalogPosition.MotionKind, Model = CatalogPosition.LinearModel, Pos = CatalogSamples.Pos2(),
+                        Vel = new CatalogCodec { Kind = CodecKind.Vel2, QuantaDiv = 16, Bits = 24 },
+                    },
+                },
+            ],
+        })).ArchetypeByName("M").Position;
+        var wideStep = wide.Vel.VelocityPositionStep;
+        cases = [];
+        w = new WireWriter(buffer);
+        foreach (var v in new[] { V(wideStep[0], -wideStep[1]), V(1e9, -1e9), V(wideStep[0] * 0.5 / 16, -wideStep[1] * 0.5 / 16) })
+        {
+            cases.Add(EncodeCase(ref w, wide.Vel, FrameTick, v));
+        }
+
+        cases.Add(EncodeCase(ref w, wide.Vel, FrameTick, Raw(0x00, 0x00, 0x80, 0xFF, 0xFF, 0xFF)));
+        Finish("codec-vel2-24", "vel2 at 24 bits, quantaDiv 16 (W5): sign extension of an i24 (0xFFFFFF is −1), the clamp ±(2²³ − 1), a tie, and the "
+            + "wire-only code −2²³ decoding as −(2²³ − 1).", wide.Vel, cases, w.Written.ToArray(), FrameTick,
+            new JsonObject { ["positionStep"] = Golden.Bits(wideStep) });
     }
 
     [Test]
@@ -163,6 +208,21 @@ public class GoldenCodecTests
         }
 
         Finish("codec-str", "str with maxBytes 16: empty, ASCII, multi-byte UTF-8, exactly at the cap.", str, cases, w.Written.ToArray());
+
+        w = new WireWriter(buffer);
+        cases = [];
+        foreach (var text in new[] { "\uFEFFhi", "hi\uFEFF" })
+        {
+            var start = w.Position;
+            w.WriteStr(text, 16);
+            cases.Add(new JsonObject
+            {
+                ["text"] = Golden.Hex(Encoding.UTF8.GetBytes(text)), ["offset"] = start, ["length"] = w.Position - start,
+            });
+        }
+
+        Finish("codec-str-bom", "str keeps a U+FEFF byte-order mark (EF BB BF) wherever it stands: a decoder must not strip a leading one.", str, cases,
+            w.Written.ToArray());
 
         w = new WireWriter(buffer);
         var blob = new FieldPlanBuilder(new CatalogCodec { Kind = CodecKind.Blob, MaxBytes = 200 }).Plan;
@@ -218,8 +278,8 @@ public class GoldenCodecTests
     }
 
     /// <summary>
-    /// W12: packed fields share the section's leading pack, least significant bit first — a value straddling a byte boundary, exactly eight bits, and a
-    /// 24-bit value at offset 7 that spans four bytes.
+    /// W12: packed fields share the section's leading pack, least significant bit first — a value straddling a byte boundary, a 24-bit value at offset 7
+    /// that spans four bytes, and a value past bit 31 in a fifth byte whose padding is zero.
     /// </summary>
     [Test]
     public void Packs()
@@ -227,10 +287,11 @@ public class GoldenCodecTests
         var fields = new[]
         {
             new CatalogField { Name = "a", Codec = new CatalogCodec { Kind = CodecKind.Bits, N = 3 } },
-            new CatalogField { Name = "b", Codec = new CatalogCodec { Kind = CodecKind.Bits, N = 6 } },
-            new CatalogField { Name = "c", Codec = new CatalogCodec { Kind = CodecKind.Bool } },
-            new CatalogField { Name = "d", Codec = new CatalogCodec { Kind = CodecKind.Bits, N = 24 } },
+            new CatalogField { Name = "b", Codec = new CatalogCodec { Kind = CodecKind.Bits, N = 4 } },
+            new CatalogField { Name = "c", Codec = new CatalogCodec { Kind = CodecKind.Bits, N = 24 } },
+            new CatalogField { Name = "d", Codec = new CatalogCodec { Kind = CodecKind.Bool } },
             new CatalogField { Name = "e", Codec = new CatalogCodec { Kind = CodecKind.U8 } },
+            new CatalogField { Name = "f", Codec = new CatalogCodec { Kind = CodecKind.Bits, N = 2 } },
         };
 
         var plan = CatalogPlan.Compile(CatalogSerializer.Canonicalize(new Catalog
@@ -242,9 +303,9 @@ public class GoldenCodecTests
 
         var sets = new[]
         {
-            new double[] { 5, 42, 1, 0xABCDEF, 7 },
-            new double[] { 7, 63, 0, 0xFFFFFF, 255 },
-            new double[] { 0, 0, 1, 0, 0 },
+            new double[] { 5, 9, 0xABCDEF, 1, 7, 2 },
+            new double[] { 7, 15, 0xFFFFFF, 0, 255, 3 },
+            new double[] { 0, 0, 0, 1, 0, 0 },
         };
 
         var buffer = new byte[64];
@@ -271,7 +332,8 @@ public class GoldenCodecTests
 
         Golden.Assert("section-packs", w.Written.ToArray(), new JsonObject
         {
-            ["description"] = "A section with packed fields 3 + 6 + 1 + 24 bits (a 5-byte pack, padding zero) followed by a byte-aligned u8 (W12).",
+            ["description"] = "A section with packed fields 3 + 4 + 24 + 1 + 2 bits — the 24-bit field at offset 7 spans four bytes; a 5-byte pack whose six "
+                + "padding bits are zero — followed by a byte-aligned u8 (W12).",
             ["fields"] = fieldJson,
             ["packBytes"] = plan.Body.PackBytes,
             ["cases"] = new JsonArray([.. cases]),

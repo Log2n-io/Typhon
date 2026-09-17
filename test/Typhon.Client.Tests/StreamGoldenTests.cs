@@ -27,7 +27,7 @@ public class StreamGoldenTests
         var frames = BuildFrames(plan);
 
         var store = new WorldStore(plan);
-        var recorder = new EventRecorder();
+        var recorder = new EventRecorder(store);
         var applier = new FrameApplier(store, recorder);
         var snapshots = new JsonArray();
         var stream = new List<byte>();
@@ -51,6 +51,9 @@ public class StreamGoldenTests
             Assert.That(second["events"]![0]!["fields"]!["from"]![0]!.GetValue<string>(), Is.EqualTo(GoldenFiles.Bits(101)),
                 "the event names Drone 101, which leaves in the same frame");
             Assert.That(Netids(second, "Drone"), Is.EqualTo(new uint[] { 100 }), "the leave applied after the event");
+            Assert.That(second["events"]![0]!["known"]!["from"]!.GetValue<bool>(), Is.True, "the event resolved Drone 101 before its leave");
+            Assert.That(third["events"]![1]!["known"]!["from"]!.GetValue<bool>(), Is.True, "an event resolves an enter whose block travels after it");
+            Assert.That(third["events"]![2]!["known"]!["from"]!.GetValue<bool>(), Is.False, "Drone 101 left a frame ago");
             Assert.That(Netids(third, "Ledger"), Is.EqualTo(new uint[] { 3, 7 }), "netId 3 came back as a Ledger a frame after it left as a Beacon");
             Assert.That(Netids(fourth, "Drone"), Is.Empty, "RESET cleared the replica");
             Assert.That(fourth["self"], Is.Null, "RESET cleared the owner state");
@@ -59,7 +62,9 @@ public class StreamGoldenTests
         GoldenFiles.Assert("stream-kitchen-sink", stream.ToArray(), new JsonObject
         {
             ["description"] = "Four TICK frames against catalog-kitchen-sink, each framed as u32 length + message, with the replica after each: RESET fill, "
-                + "updates with an event naming an entity that leaves in the same frame, netId reuse across archetypes, and a final RESET.",
+                + "updates with an event naming an entity that leaves in the same frame, netId reuse across archetypes a frame after its leave, events "
+                + "travelling before the ENTITIES block (text and bytes; an entityRef to an entering entity, known, and to a departed one, not), and a "
+                + "final RESET. An event's `known` records whether each entityRef field resolved in the store when the event applied.",
             ["catalog"] = "catalog-kitchen-sink",
             ["snapshots"] = snapshots,
         });
@@ -120,9 +125,19 @@ public class StreamGoldenTests
         TickWriter.WriteAggregate(ref w, plan.Grids[0], reset: false, [(1u, [0u, 0u]), (7u, [4u, 4u])]);
         frames.Add(w.Written.ToArray());
 
-        // Frame 3 — netId 3, released by the Beacon a frame ago, returns as a Ledger; a new Drone enters.
+        // Frame 3 — netId 3, released by the Beacon a frame ago, returns as a Ledger; a new Drone enters. The EVENTS block travels first: a Chat event with
+        // text and bytes, a Ping naming the entering Drone (known: events apply after enters) and one naming Drone 101, gone since frame 2 (unknown).
         w = new WireWriter(buffer);
         TickWriter.WriteHeader(ref w, 1002, TickFlags.None);
+        TickWriter.WriteEvents(ref w,
+        [
+            (plan.EventByName("Chat"), new RecordValues
+            {
+                ["text"] = new FieldValue { Text = "héllo \uFEFF☀" }, ["attachment"] = new FieldValue { Bytes = [0x00, 0xFF, 0x10] },
+            }),
+            (plan.EventByName("Ping"), new RecordValues { ["from"] = FieldValue.Of(102), ["path"] = FieldValue.Of(1, 1), ["loud"] = FieldValue.Of(0) }),
+            (plan.EventByName("Ping"), new RecordValues { ["from"] = FieldValue.Of(101), ["path"] = FieldValue.Of(1, 1), ["loud"] = FieldValue.Of(1) }),
+        ]);
         TickWriter.WriteEntities(ref w, 1002, drone, [DroneEnter(102, 1002)], [], [], []);
         TickWriter.WriteEntities(ref w, 1002, ledger, [new EnterRecord { NetId = 3, Values = LedgerValues(9, 5) }], [], [], []);
         frames.Add(w.Written.ToArray());

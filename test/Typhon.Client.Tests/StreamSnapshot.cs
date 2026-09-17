@@ -74,8 +74,9 @@ internal static class GoldenFiles
 }
 
 /// <summary>Records decoded events into JSON, in the implementation-neutral shape the stream vector uses.</summary>
-internal sealed class EventRecorder : IEventHandler
+internal sealed class EventRecorder(WorldStore store) : IEventHandler
 {
+    private JsonObject _event;
     private JsonObject _fields;
 
     internal JsonArray Events { get; } = [];
@@ -83,10 +84,20 @@ internal sealed class EventRecorder : IEventHandler
     public void Event(MessagePlan type)
     {
         _fields = new JsonObject();
-        Events.Add(new JsonObject { ["type"] = type.Name, ["fields"] = _fields });
+        _event = new JsonObject { ["type"] = type.Name, ["fields"] = _fields };
+        Events.Add(_event);
     }
 
-    public void Number(FieldPlan field, scoped ReadOnlySpan<double> components) => _fields[field.Name] = GoldenFiles.Bits(components);
+    // An entityRef also records whether the store resolves it at the moment the event applies: the apply order of 03 § 5, observable.
+    public void Number(FieldPlan field, scoped ReadOnlySpan<double> components)
+    {
+        _fields[field.Name] = GoldenFiles.Bits(components);
+        if (field.Kind == CodecKind.EntityRef)
+        {
+            var known = (JsonObject)(_event["known"] ??= new JsonObject());
+            known[field.Name] = store.TryLocate((uint)components[0], out _, out _);
+        }
+    }
 
     public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8) => _fields[field.Name] = GoldenFiles.Hex(utf8);
 

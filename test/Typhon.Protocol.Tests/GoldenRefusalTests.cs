@@ -54,6 +54,13 @@ public class GoldenRefusalTests
         Tick(cases, "sources-unknown-status", Block(BlockTypes.Sources, 0x01, 0x01, 0x00, 0x02));
         Tick(cases, "netid-gap-overflows-32-bits", Block(BlockTypes.Entities, ledger, 0x00, 0x00, 0x00, 0x02, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F, 0x00));
         Tick(cases, "not-a-tick", [MessageTypes.Welcome, 0, 0, 0, 0, 0], CloseCodes.ProtocolError);
+        var drone = (byte)Kitchen.ArchetypeByName("Drone").Idx;
+        // Drone has two owner groups, so ownerMask bit 2 names none.
+        Tick(cases, "self-owner-mask-unknown-group", Block(BlockTypes.Self, drone, 0x01, 0x00, 0x00, 0x04));
+        Tick(cases, "debug-sub-block-overrun", Block(BlockTypes.Debug, 0x01, 0x05, 0xAA));
+        Tick(cases, "period-truncated", [MessageTypes.Tick, 0x70, 0x11, 0x01, 0x00, (byte)TickFlags.Period, 0x01, 0x02]);
+        byte[] emptyLedger = [BlockTypes.Entities, 0x05, ledger, 0x00, 0x00, 0x00, 0x00];
+        Tick(cases, "entities-block-twice-for-one-archetype", [MessageTypes.Tick, 0x70, 0x11, 0x01, 0x00, 0x00, .. emptyLedger, .. emptyLedger]);
 
         var steer = (byte)Kitchen.CommandByName("Steer").Idx;
         Commands(cases, "commands-count-zero", [MessageTypes.Commands, 0, 0, 0, 0, 0x00]);
@@ -65,6 +72,16 @@ public class GoldenRefusalTests
         var kind33 = new byte[33];
         kind33.AsSpan().Fill((byte)'k');
         Message(cases, "hello-kind-over-cap", MessageTypes.Hello, [MessageTypes.Hello, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, .. kind33]);
+        // A token of 8193 bytes (varu 0x81 0x40), one over the cap, then a complete rest of the message: only the cap refuses it.
+        var token = new byte[8193];
+        token.AsSpan().Fill((byte)'t');
+        Message(cases, "hello-token-over-cap", MessageTypes.Hello,
+            [MessageTypes.Hello, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x81, 0x40, .. token, .. new byte[24], 0x00]);
+        var reason124 = new byte[124];
+        reason124.AsSpan().Fill((byte)'r');
+        Message(cases, "kick-reason-over-cap", MessageTypes.Kick, [MessageTypes.Kick, 0xE8, 0x03, 0x7C, .. reason124]);
+        // minor, caps, sessionId, resumeToken, tick, period and hash (42 bytes), then a catalog length of 10 with nothing after it.
+        Message(cases, "welcome-catalog-length-overrun", MessageTypes.Welcome, [MessageTypes.Welcome, 0x02, 0x00, .. new byte[42], 0x0A]);
         Message(cases, "bye-browser-invalid-code", MessageTypes.Bye, [MessageTypes.Bye, 0xE9, 0x03]);
         Message(cases, "ping-trailing-byte", MessageTypes.Ping, [MessageTypes.Ping, 0, 0, 0, 0, 0, 0, 0, 0, 0xEE]);
         Message(cases, "wrong-message-type", MessageTypes.Pong, [MessageTypes.Ping, 0, 0, 0, 0, 0, 0, 0, 0], CloseCodes.ProtocolError);
@@ -143,6 +160,12 @@ public class GoldenRefusalTests
             {
                 case MessageTypes.Hello:
                     HelloMessage.Parse(b);
+                    break;
+                case MessageTypes.Welcome:
+                    WelcomeMessage.Parse(b);
+                    break;
+                case MessageTypes.Kick:
+                    KickMessage.Parse(b);
                     break;
                 case MessageTypes.Bye:
                     ByeMessage.Parse(b);

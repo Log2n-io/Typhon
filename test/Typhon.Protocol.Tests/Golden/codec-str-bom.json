@@ -1,0 +1,20 @@
+{
+  "description": "str keeps a U\u002BFEFF byte-order mark (EF BB BF) wherever it stands: a decoder must not strip a leading one.",
+  "codec": {
+    "t": "str",
+    "maxBytes": 16
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "text": "efbbbf6869",
+      "offset": 0,
+      "length": 6
+    },
+    {
+      "text": "6869efbbbf",
+      "offset": 6,
+      "length": 6
+    }
+  ]
+}

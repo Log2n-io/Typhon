@@ -1,5 +1,5 @@
 {
-  "description": "Four TICK frames against catalog-kitchen-sink, each framed as u32 length \u002B message, with the replica after each: RESET fill, updates with an event naming an entity that leaves in the same frame, netId reuse across archetypes, and a final RESET.",
+  "description": "Four TICK frames against catalog-kitchen-sink, each framed as u32 length \u002B message, with the replica after each: RESET fill, updates with an event naming an entity that leaves in the same frame, netId reuse across archetypes a frame after its leave, events travelling before the ENTITIES block (text and bytes; an entityRef to an entering entity, known, and to a departed one, not), and a final RESET. An event\u0027s \u0060known\u0060 records whether each entityRef field resolved in the store when the event applied.",
   "catalog": "catalog-kitchen-sink",
   "snapshots": [
     {
@@ -494,6 +494,9 @@
                 "0000000000000000"
               ]
             }
+          },
+          "known": {
+            "from": true
           }
         }
       ],
@@ -794,7 +797,57 @@
           "left": []
         }
       },
-      "events": [],
+      "events": [
+        {
+          "type": "Chat",
+          "fields": {
+            "attachment": "00ff10",
+            "text": "68c3a96c6c6f20efbbbfe29880"
+          }
+        },
+        {
+          "type": "Ping",
+          "fields": {
+            "loud": [
+              "0000000000000000"
+            ],
+            "from": [
+              "4059800000000000"
+            ],
+            "path": {
+              "count": 1,
+              "values": [
+                "3ff0000000000000",
+                "3ff0000000000000"
+              ]
+            }
+          },
+          "known": {
+            "from": true
+          }
+        },
+        {
+          "type": "Ping",
+          "fields": {
+            "loud": [
+              "3ff0000000000000"
+            ],
+            "from": [
+              "4059400000000000"
+            ],
+            "path": {
+              "count": 1,
+              "values": [
+                "3ff0000000000000",
+                "3ff0000000000000"
+              ]
+            }
+          },
+          "known": {
+            "from": false
+          }
+        }
+      ],
       "self": {
         "archetype": "Drone",
         "netId": 100,

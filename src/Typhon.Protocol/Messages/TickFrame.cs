@@ -64,9 +64,23 @@ public static class SourceStatus
     public const byte Error = 1;
 }
 
+/// <summary>Which blocks of a <c>TICK</c> a <see cref="TickReader"/> hands to its sink.</summary>
+[Flags]
+public enum TickBlocks
+{
+    /// <summary>The <c>EVENTS</c> blocks.</summary>
+    Events = 1,
+
+    /// <summary>Every block but <c>EVENTS</c>, unknown types included.</summary>
+    AllButEvents = 2,
+
+    /// <summary>Every block.</summary>
+    All = Events | AllButEvents,
+}
+
 /// <summary>
-/// Receives a decoded <c>TICK</c>, block by block, in stream order. Field values arrive through the <see cref="IFieldSink"/> members between the record
-/// call that opened them and the next record call.
+/// Receives a decoded <c>TICK</c>, block by block, in stream order — the blocks <see cref="TickReader.Read{TSink}"/> was asked for. Field values arrive
+/// through the <see cref="IFieldSink"/> members between the record call that opened them and the next record call.
 /// </summary>
 public interface ITickSink : IFieldSink
 {
@@ -172,8 +186,12 @@ public static class TickReader
     /// <param name="message">The whole message.</param>
     /// <param name="plan">The session's compiled catalog.</param>
     /// <param name="sink">Receives the frame.</param>
+    /// <param name="blocks">
+    /// Which blocks reach the sink; the others are skipped by their length, unread. A store reads a frame twice — every block but <c>EVENTS</c>, then
+    /// <c>EVENTS</c> alone — to apply § 5's order whatever order the blocks travel in.
+    /// </param>
     /// <exception cref="WireFormatException">The message is malformed.</exception>
-    public static void Read<TSink>(ReadOnlySpan<byte> message, CatalogPlan plan, ref TSink sink)
+    public static void Read<TSink>(ReadOnlySpan<byte> message, CatalogPlan plan, ref TSink sink, TickBlocks blocks = TickBlocks.All)
         where TSink : ITickSink, allows ref struct
     {
         var reader = new WireReader(message);
@@ -187,15 +205,23 @@ public static class TickReader
         var periodUs = (flags & TickFlags.Period) != 0 ? reader.ReadU32() : 0;
         sink.BeginTick(tick, flags, periodUs);
 
+        // One ENTITIES block per archetype (03 § 10): a record in one block for an entity entering in another would apply out of order.
+        Span<ulong> seenArchetypes = stackalloc ulong[(ProtocolConstants.MaxArchetypes + 63) / 64];
+        seenArchetypes.Clear();
         while (!reader.IsAtEnd)
         {
             var type = reader.ReadU8();
             var length = reader.ReadVaruAtMost(reader.Remaining, "block length");
             var block = reader.Slice(length);
+            if ((blocks & (type == BlockTypes.Events ? TickBlocks.Events : TickBlocks.AllButEvents)) == 0)
+            {
+                continue;
+            }
+
             switch (type)
             {
                 case BlockTypes.Entities:
-                    ReadEntities(ref block, plan, tick, ref sink);
+                    ReadEntities(ref block, plan, tick, seenArchetypes, ref sink);
                     break;
                 case BlockTypes.Events:
                     ReadEvents(ref block, plan, tick, ref sink);
@@ -258,10 +284,18 @@ public static class TickReader
         sink.EndTick();
     }
 
-    private static void ReadEntities<TSink>(ref WireReader r, CatalogPlan plan, uint tick, ref TSink sink)
+    private static void ReadEntities<TSink>(ref WireReader r, CatalogPlan plan, uint tick, scoped Span<ulong> seenArchetypes, ref TSink sink)
         where TSink : ITickSink, allows ref struct
     {
         var archetype = plan.Archetype(r.ReadVaruAtMost(int.MaxValue, "archetype index"));
+        ref var seen = ref seenArchetypes[archetype.Idx >> 6];
+        var bit = 1UL << (archetype.Idx & 63);
+        if ((seen & bit) != 0)
+        {
+            throw WireFormatException.Malformed($"a second ENTITIES block for archetype '{archetype.Name}'");
+        }
+
+        seen |= bit;
         var position = archetype.Position;
         sink.BeginEntities(archetype);
         Span<double> p = stackalloc double[3];

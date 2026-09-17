@@ -1,0 +1,55 @@
+{
+  "description": "vec2 with scale 0.25 at 24 bits: sign extension of an i24, the symmetric clamp \u00B1(2\u00B2\u00B3 \u2212 1), a tie, and the wire-only code \u22122\u00B2\u00B3 decoding as \u2212(2\u00B2\u00B3 \u2212 1).",
+  "codec": {
+    "t": "vec2",
+    "bits": 24,
+    "scale": 0.25
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "0000000000000000",
+        "bfd0000000000000"
+      ],
+      "offset": 0,
+      "length": 6,
+      "decoded": [
+        "0000000000000000",
+        "bfd0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "41cdcd6500000000",
+        "c1cdcd6500000000"
+      ],
+      "offset": 6,
+      "length": 6,
+      "decoded": [
+        "413fffffc0000000",
+        "c13fffffc0000000"
+      ]
+    },
+    {
+      "input": [
+        "3fc0000000000000",
+        "bfc0000000000000"
+      ],
+      "offset": 12,
+      "length": 6,
+      "decoded": [
+        "3fd0000000000000",
+        "bfd0000000000000"
+      ]
+    },
+    {
+      "offset": 18,
+      "length": 6,
+      "decoded": [
+        "c13fffffc0000000",
+        "bfd0000000000000"
+      ]
+    }
+  ]
+}

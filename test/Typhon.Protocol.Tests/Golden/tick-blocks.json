@@ -44,6 +44,11 @@
       "idx": 16
     },
     {
+      "call": "bytes",
+      "field": "attachment",
+      "bytes": "cafe"
+    },
+    {
       "call": "text",
       "field": "text",
       "utf8": "68c3a96c6c6f20e29880"

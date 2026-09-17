@@ -225,7 +225,11 @@ internal static class CatalogSamples
             {
                 Name = "Chat",
                 Scope = "known",
-                Fields = [new CatalogField { Name = "text", Codec = new CatalogCodec { Kind = CodecKind.Str, MaxBytes = 128 } }],
+                Fields =
+                [
+                    new CatalogField { Name = "text", Codec = new CatalogCodec { Kind = CodecKind.Str, MaxBytes = 128 } },
+                    new CatalogField { Name = "attachment", Codec = new CatalogCodec { Kind = CodecKind.Blob, MaxBytes = 32 } },
+                ],
             },
         ],
         Commands =

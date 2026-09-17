@@ -1,5 +1,5 @@
 {
-  "description": "130 archetypes and 120 events, so indices reach 129 and 135; A129 has 8 groups and 32 fields, a u8 enum of 256 names and a varu enum of 300.",
-  "hash": "d5aad33cbc5267b4",
-  "byteCount": 18089
+  "description": "255 archetypes and 120 events, so indices reach 254 and 135; A254 has 8 groups and 32 fields, a u8 enum of 256 names and a varu enum of 300.",
+  "hash": "a08e2c9605f36bac",
+  "byteCount": 24339
 }

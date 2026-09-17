@@ -1,0 +1,48 @@
+{
+  "description": "vec3 with scale 0.001 at 32 bits: the clamp \u00B1(2\u00B3\u00B9 \u2212 1), and the wire-only code \u22122\u00B3\u00B9 decoding as \u2212(2\u00B3\u00B9 \u2212 1).",
+  "codec": {
+    "t": "vec3",
+    "bits": 32,
+    "scale": 0.001
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "3ff0000000000000",
+        "bff0000000000000",
+        "3f40624dd2f1a9fc"
+      ],
+      "offset": 0,
+      "length": 12,
+      "decoded": [
+        "3ff0000000000000",
+        "bff0000000000000",
+        "3f50624dd2f1a9fc"
+      ]
+    },
+    {
+      "input": [
+        "426d1a94a2000000",
+        "c26d1a94a2000000",
+        "0000000000000000"
+      ],
+      "offset": 12,
+      "length": 12,
+      "decoded": [
+        "4140624dd2d0e560",
+        "c140624dd2d0e560",
+        "0000000000000000"
+      ]
+    },
+    {
+      "offset": 24,
+      "length": 12,
+      "decoded": [
+        "c140624dd2d0e560",
+        "4140624dd2d0e560",
+        "3f50624dd2f1a9fc"
+      ]
+    }
+  ]
+}

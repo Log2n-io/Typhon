@@ -199,6 +199,39 @@ public class CatalogValidatorTests
             Grids = [new CatalogGrid { Origin = [0, 0], Cell = 1, Dims = [100_000, 100_000], Archetypes = [0] }],
         }, "cells");
 
+    [Test]
+    public void AMetricNeedsAUnit() =>
+        AssertBreaks(c => new Catalog
+        {
+            Protocol = c.Protocol, App = c.App, Tick = c.Tick, Limits = c.Limits, Archetypes = c.Archetypes, Enums = c.Enums, Events = c.Events,
+            Commands = c.Commands, Grids = c.Grids,
+            Metrics = [new CatalogMetric { Name = "app.depth", Codec = new CatalogCodec { Kind = CodecKind.U8 } }],
+        }, "unit is missing");
+
+    [Test]
+    public void AnEnumNeedsItsNames()
+    {
+        AssertBreaks(c =>
+        {
+            c.Enums["Empty"] = null;
+            return c;
+        }, "has no names");
+    }
+
+    /// <summary>A grid at −0 duplicates the same grid at 0, as double equality says.</summary>
+    [Test]
+    public void AGridDuplicateAtNegativeZeroIsRefused() =>
+        AssertBreaks(c => new Catalog
+        {
+            Protocol = c.Protocol, App = c.App, Tick = c.Tick, Limits = c.Limits, Archetypes = c.Archetypes, Enums = c.Enums, Events = c.Events,
+            Commands = c.Commands, Metrics = c.Metrics,
+            Grids =
+            [
+                new CatalogGrid { Origin = [0, 0], Cell = 64, Dims = [4, 4], Archetypes = [0] },
+                new CatalogGrid { Origin = [-0.0, 0], Cell = 64, Dims = [4, 4], Archetypes = [0] },
+            ],
+        }, "duplicates grid");
+
     private static void AssertBreaks(Func<Catalog, Catalog> mutate, string expectedFragment, Func<Catalog> sample = null)
     {
         var broken = mutate((sample ?? CatalogSamples.Swg)());
