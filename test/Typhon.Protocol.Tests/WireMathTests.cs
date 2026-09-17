@@ -40,6 +40,43 @@ public class WireMathTests
         });
     }
 
+    /// <summary>
+    /// AC-12's encoder property: a value inside a quantizer's range decodes within half a step of itself — ties aside, the error bound W1 moves out of
+    /// the cross-language comparison (which is bit-exact) and into the encoder.
+    /// </summary>
+    [Test]
+    public void EveryQuantizerDecodesWithinHalfAStep()
+    {
+        var rng = new Random(1212);
+        var worst = 0.0;
+        for (var i = 0; i < 50_000; i++)
+        {
+            var bits = 8 << rng.Next(0, 3);
+            var min = -rng.NextDouble() * 1000;
+            var max = rng.NextDouble() * 1000 + 1;
+            var step = WireMath.QuantStep(min, max, bits);
+            var v = min + rng.NextDouble() * (max - min - step / 2);
+            worst = Math.Max(worst, Math.Abs(WireMath.DecodeQuant(WireMath.EncodeQuant(v, min, max, bits), min, max, bits) - v) / step);
+
+            var u = rng.NextDouble();
+            worst = Math.Max(worst, Math.Abs(WireMath.DecodeUnorm(WireMath.EncodeUnorm(u, bits), bits) - u) * (WireMath.Pow2(bits) - 1));
+
+            var s = rng.NextDouble() * 2 - 1;
+            worst = Math.Max(worst, Math.Abs(WireMath.DecodeSnorm(WireMath.EncodeSnorm(s, bits), bits) - s) * (WireMath.Pow2(bits - 1) - 1));
+
+            var scale = rng.NextDouble() + 0.001;
+            var x = (rng.NextDouble() * 2 - 1) * WireMath.SymmetricLimit(bits) * scale;
+            worst = Math.Max(worst, Math.Abs(WireMath.DecodeVec(WireMath.EncodeVec(x, scale, bits), scale, bits) - x) / scale);
+
+            var theta = (rng.NextDouble() * 2 - 1) * Math.PI;
+            var decoded = WireMath.DecodeAngle(WireMath.EncodeAngle(theta, bits), bits);
+            var error = Math.Abs(decoded - theta);
+            worst = Math.Max(worst, Math.Min(error, WireMath.Tau - error) * WireMath.Pow2(bits) / WireMath.Tau);
+        }
+
+        Assert.That(worst, Is.LessThanOrEqualTo(0.5 + 1e-6), "in units of one step");
+    }
+
     /// <summary>A dyadic step survives a float32 narrowing: decode, narrow, re-encode returns the original code.</summary>
     [Test]
     public void ADyadicQuantStepRoundTripsThroughFloat32()
