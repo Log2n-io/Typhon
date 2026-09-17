@@ -1,6 +1,7 @@
-import { evaluateSlot, MOTION_STRIDE, WorldStore, type WorldSchema } from '@typhondb/client';
+import { evaluateSlot, MAX_MOTION_STRIDE, WorldStore, type WorldSchema } from '@typhondb/client';
 import { describe, expect, it } from 'vitest';
 import { MotionTracker, quantizePosition } from '../src/data/mock/motion-rule';
+import { TICK_PERIOD_MS } from '../src/data/swg-schema';
 
 /** Drives one entity along `path(tick)` and returns the ticks at which a segment was emitted. */
 function run(path: (tick: number) => [number, number], ticks: number): { emitted: number[]; tracker: MotionTracker } {
@@ -54,7 +55,8 @@ describe('mock motion rule (engine § 4)', () => {
     // than the newest one. A path that turns every few ticks emits segments close together: the store's ring must
     // still hold the one render time needs.
     const schema: WorldSchema = {
-      archetypes: [{ index: 0, name: 'M', position: 'motion', groups: ['enter', 'motion'], fields: [] }],
+      tickPeriodUs: TICK_PERIOD_MS * 1000,
+      archetypes: [{ index: 0, name: 'M', position: { kind: 'motion', dims: 2 }, groups: [], fields: [] }],
     };
     const world = new WorldStore(schema);
     const store = world.archetypes[0];
@@ -67,9 +69,9 @@ describe('mock motion rule (engine § 4)', () => {
     truth.push([quantizePosition(x), quantizePosition(z)]);
     world.beginFrame(0);
     const slot = world.enter(0, 1);
-    store.resetMotion(slot, tracker.p0x[0], tracker.p0z[0], 0, 0, 0, 0);
+    store.resetMotion(slot, [tracker.p0x[0], tracker.p0z[0]], [0, 0], 0, 0);
 
-    const out = new Float64Array(MOTION_STRIDE);
+    const out = new Float64Array(MAX_MOTION_STRIDE);
     const delay = 3;
     let worst = 0;
     for (let t = 1; t <= 600; t++) {
@@ -84,10 +86,8 @@ describe('mock motion rule (engine § 4)', () => {
       if (tracker.step(0, x, z, t)) {
         store.pushSegment(
           slot,
-          tracker.p0x[0],
-          tracker.p0z[0],
-          tracker.vx[0],
-          tracker.vz[0],
+          [tracker.p0x[0], tracker.p0z[0]],
+          [tracker.vx[0], tracker.vz[0]],
           tracker.t0[0],
           tracker.epoch[0],
         );

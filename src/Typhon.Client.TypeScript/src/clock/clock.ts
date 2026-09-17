@@ -47,7 +47,7 @@ export class Clock {
   private readonly initialPeriodMs: number;
   private readonly initialDelayMs: number;
   private readonly minDelayMs: number;
-  private readonly maxDelayMs: number;
+  private readonly delayCeilingMs: number;
   private readonly windowMs: number;
   private readonly maxRateAdjust: number;
   private readonly snapMs: number;
@@ -81,13 +81,18 @@ export class Clock {
     this.initialPeriodMs = options.tickPeriodMs;
     this.pendingPeriodMs = options.tickPeriodMs;
     this.minDelayMs = options.minDelayMs ?? 150;
-    this.maxDelayMs = options.maxDelayMs ?? 300;
-    this.initialDelayMs = clamp(options.initialDelayMs ?? 200, this.minDelayMs, this.maxDelayMs);
+    this.delayCeilingMs = options.maxDelayMs ?? 300;
+    this.initialDelayMs = clamp(options.initialDelayMs ?? 200, this.minDelayMs, this.delayCeilingMs);
     this.delayMs = this.initialDelayMs;
     this.windowMs = options.windowMs ?? 2000;
     this.maxRateAdjust = options.maxRateAdjust ?? 0.05;
     this.snapMs = options.snapMs ?? 1000;
     this.maxExtrapolationMs = options.maxExtrapolationMs ?? 1000;
+  }
+
+  /** The largest render delay this clock applies, in milliseconds: a store's segment ring must span it. */
+  get maxDelayMs(): number {
+    return this.delayCeilingMs;
   }
 
   /** Current render delay in milliseconds. */
@@ -156,7 +161,7 @@ export class Clock {
     this.pieceCount++;
   }
 
-  /** Forgets every frame, sample and period change (a reconnection): the next frame re-anchors, the next update snaps. */
+  /** Forgets every frame, sample and period change (a reconnection): the next frame re-anchors, next update snaps. */
   reset(): void {
     this.newestTick = -1;
     this.started = false;
@@ -269,7 +274,7 @@ export class Clock {
 
     // Nearest-rank 95th percentile.
     const p95 = s[Math.ceil(n * 0.95) - 1]!;
-    this.delayMs = clamp(this.tickPeriodMs + p95, this.minDelayMs, this.maxDelayMs);
+    this.delayMs = clamp(this.tickPeriodMs + p95, this.minDelayMs, this.delayCeilingMs);
   }
 }
 

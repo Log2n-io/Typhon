@@ -4,6 +4,7 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "lib": ["ES2022"],
+    "types": [],
     "strict": true,
     "exactOptionalPropertyTypes": true,
     "noUncheckedIndexedAccess": true,
@@ -19,5 +20,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src", "test", "vitest.config.ts"]
+  "include": ["src"]
 }

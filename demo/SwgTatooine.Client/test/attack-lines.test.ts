@@ -35,7 +35,7 @@ describe('AttackLines (NullEngine)', () => {
     world.beginFrame(1);
     const store = world.archetypeStore(Archetype.Creature);
     for (const netId of [1, 2]) {
-      store.resetMotion(world.enter(Archetype.Creature, netId), netId * 10, 0, 0, 0, 1, 0);
+      store.resetMotion(world.enter(Archetype.Creature, netId), [netId * 10, 0], [0, 0], 1, 0);
     }
 
     const lines = new AttackLines(scene);

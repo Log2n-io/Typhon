@@ -40,11 +40,11 @@ function setup() {
   world.beginFrame(tick);
   const place = (netId: number, x: number, z: number): number => {
     const slot = world.enter(Archetype.Player, netId);
-    store.resetMotion(slot, x, z, 0, 0, 1, 0);
+    store.resetMotion(slot, [x, z], [0, 0], 1, 0);
     return slot;
   };
   const move = (slot: number, x: number, z: number): void => {
-    store.resetMotion(slot, x, z, 0, 0, 1, 0);
+    store.resetMotion(slot, [x, z], [0, 0], 1, 0);
   };
   const nextFrame = (): void => {
     world.beginFrame(++tick);

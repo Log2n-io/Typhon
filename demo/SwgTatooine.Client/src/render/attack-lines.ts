@@ -4,7 +4,7 @@ import { Vector2 } from '@babylonjs/core/Maths/math.vector';
 import { Mesh } from '@babylonjs/core/Meshes/mesh';
 import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData';
 import type { Scene } from '@babylonjs/core/scene';
-import { archetypeOf, evaluateSlot, MOTION_STRIDE, NOT_FOUND, slotOf, type WorldStore } from '@typhondb/client';
+import { archetypeOf, evaluateSlot, MAX_MOTION_STRIDE, NOT_FOUND, slotOf, type WorldStore } from '@typhondb/client';
 import type { EventSink } from '../data/source';
 import type { FrameView } from './entity-layer';
 import { PrefixUploader } from './prefix-upload';
@@ -47,7 +47,7 @@ export class AttackLines implements EventSink {
   private readonly styles = new Float32Array(INSTANCES * 2);
   private readonly endsUploader = new PrefixUploader(this.ends, 4);
   private readonly stylesUploader = new PrefixUploader(this.styles, 2);
-  private readonly endpoint = new Float64Array(MOTION_STRIDE);
+  private readonly endpoint = new Float64Array(MAX_MOTION_STRIDE);
   private readonly viewport = new Vector2(1, 1);
   private world: WorldStore | null = null;
 

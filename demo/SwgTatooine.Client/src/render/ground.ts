@@ -119,12 +119,12 @@ export class Ground {
       view.heatMask[3] ? 1 : 0,
     );
     this.selection.set(view.selectionX, view.selectionZ, view.hasSelection ? 1 : 0, 0);
-    const schema = grid.schema;
-    this.heatRect.set(schema.originX, schema.originZ, schema.dimsX * schema.cellM, schema.dimsZ * schema.cellM);
-    if (this.heat.width !== schema.dimsX || this.heat.height !== schema.dimsZ) {
+    const { origin, cell, dims } = grid.schema;
+    this.heatRect.set(origin[0], origin[1], dims[0] * cell, dims[1] * cell);
+    if (this.heat.width !== dims[0] || this.heat.height !== dims[1]) {
       // One texel per cell: the shader maps the grid's extent onto the whole texture.
       this.heat.dispose();
-      this.heat = new HeatmapTexture(this.scene, schema.dimsX, schema.dimsZ);
+      this.heat = new HeatmapTexture(this.scene, dims[0], dims[1]);
       this.material.setTexture('uHeat', this.heat.texture);
     }
 

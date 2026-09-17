@@ -709,6 +709,8 @@ jobs:
         run: |
           npm ci
           npm run check
+          # Node 22 has no Float16Array unless V8's flag is on; this suite compares the hand-written f16 (W10) with the native one over every pattern.
+          npm run test:f16-native
 
       - name: Upload trx
         if: always()

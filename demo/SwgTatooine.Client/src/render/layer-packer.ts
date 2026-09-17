@@ -1,4 +1,4 @@
-import { evaluateSlot, MOTION_STRIDE, type ArchetypeStore, type FieldArray } from '@typhondb/client';
+import { evaluateSlot, MAX_MOTION_STRIDE, type ArchetypeStore, type FieldArray } from '@typhondb/client';
 import { Archetype } from '../data/swg-schema';
 import { SELECTED_SPRITE_SCALE, type LayerStyle } from './styles';
 import { Band, chooseBand, packState, sphereInFrustum } from './view-math';
@@ -72,7 +72,7 @@ export class LayerPacker {
   private store: ArchetypeStore | null = null;
   private storeVersion = -1;
   private fields: FieldReaders = NO_FIELDS;
-  private readonly motion = new Float64Array(MOTION_STRIDE);
+  private readonly motion = new Float64Array(MAX_MOTION_STRIDE);
   /** Per slot: the entity whose state the slot arrays describe, its LOD band and its last heading. */
   private seenNetId = new Uint32Array(0);
   private band = new Uint8Array(0);

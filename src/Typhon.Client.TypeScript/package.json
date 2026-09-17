@@ -1,7 +1,7 @@
 {
   "name": "@typhondb/client",
   "version": "0.0.0",
-  "description": "TypeScript client SDK for Typhon Subscriptions v2: world store, motion segments, clock, aggregates.",
+  "description": "TypeScript client SDK for Typhon Subscriptions: wire protocol codec, catalog-driven decoding, world store, motion segments, clock, aggregates.",
   "license": "Apache-2.0",
   "type": "module",
   "sideEffects": false,
@@ -18,20 +18,22 @@
     "src"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "prepack": "npm run build",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p test",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
+    "test:f16-native": "vitest run test/f16-native.test.ts --execArgv=--js-float16array",
     "check": "npm run typecheck && npm run lint && npm run format:check && npm run test"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@types/node": "22.20.3",
     "eslint": "10.10.0",
     "prettier": "3.9.7",
     "typescript": "6.0.3",

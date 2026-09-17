@@ -2,6 +2,10 @@ import { archetypeOf, NOT_FOUND, slotOf, type AggregateGrid, type WorldStore } f
 import type { EventSink } from '../source';
 import { ENTER_HEADER, EVENT_RECORD, SEGMENT_RECORD, STATE_HEADER, TickFlags, type TickMessage } from './protocol';
 
+// A segment's start position and velocity, reused for every record.
+const p0 = new Float64Array(2);
+const v = new Float64Array(2);
+
 /**
  * Applies one mock frame to the SDK store, in the order a `typhon.2` decoder applies a `TICK`
  * (`03-wire-protocol.md` § 5): enters and updates of every archetype, then events, then leaves, then aggregates.
@@ -17,7 +21,8 @@ export function applyTick(world: WorldStore, grid: AggregateGrid, message: TickM
   for (const block of message.blocks) {
     const store = world.archetypeStore(block.archetype);
     const fieldCount = store.schema.fields.length;
-    const groups = store.schema.fields.map((f) => f.group);
+    // An entering field has no group (W15): no state record carries it.
+    const groups = store.schema.fields.map((f) => f.group ?? -1);
     // An enter may grow the store, which replaces every array: re-read them whenever the version moves.
     let version = store.version;
     let fields = store.schema.fields.map((_, f) => store.fieldAt(f));
@@ -33,15 +38,11 @@ export function applyTick(world: WorldStore, grid: AggregateGrid, message: TickM
       }
 
       if (store.hasPosition) {
-        store.resetMotion(
-          slot,
-          enters[o + 1],
-          enters[o + 2],
-          enters[o + 3],
-          enters[o + 4],
-          enters[o + 5],
-          enters[o + 6],
-        );
+        p0[0] = enters[o + 1];
+        p0[1] = enters[o + 2];
+        v[0] = enters[o + 3];
+        v[1] = enters[o + 4];
+        store.resetMotion(slot, p0, v, enters[o + 5], enters[o + 6]);
       }
 
       for (let f = 0; f < fieldCount; f++) {
@@ -58,15 +59,11 @@ export function applyTick(world: WorldStore, grid: AggregateGrid, message: TickM
         continue;
       }
 
-      store.pushSegment(
-        slotOf(location),
-        segments[o + 1],
-        segments[o + 2],
-        segments[o + 3],
-        segments[o + 4],
-        segments[o + 5],
-        segments[o + 6],
-      );
+      p0[0] = segments[o + 1];
+      p0[1] = segments[o + 2];
+      v[0] = segments[o + 3];
+      v[1] = segments[o + 4];
+      store.pushSegment(slotOf(location), p0, v, segments[o + 5], segments[o + 6]);
     }
 
     const states = block.states;
@@ -82,7 +79,7 @@ export function applyTick(world: WorldStore, grid: AggregateGrid, message: TickM
       const slot = slotOf(location);
       const mask = states[o + 1];
       for (let f = 0; f < fieldCount; f++) {
-        if (((mask >> groups[f]) & 1) === 1) {
+        if (groups[f] >= 0 && ((mask >> groups[f]) & 1) === 1) {
           fields[f][slot] = states[o + STATE_HEADER + f]!;
         }
       }

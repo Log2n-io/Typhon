@@ -10,7 +10,7 @@ import {
   Clock,
   epochAt,
   evaluateSlot,
-  MOTION_STRIDE,
+  MAX_MOTION_STRIDE,
   NOT_FOUND,
   slotOf,
   WorldStore,
@@ -118,7 +118,7 @@ export class ClientApp {
   private readonly frameJs = new Float64Array(FRAME_SAMPLES);
   private frameJsNext = 0;
   private frameJsCount = 0;
-  private readonly scratch = new Float64Array(MOTION_STRIDE);
+  private readonly scratch = new Float64Array(MAX_MOTION_STRIDE);
   private readonly sortScratch = new Float64Array(FRAME_SAMPLES);
   private readonly frameJsSummary = new Float64Array(2);
   /** The selection's evaluated planet position this frame, valid when {@link locateSelected} returned true. */

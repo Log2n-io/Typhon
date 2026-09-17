@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { AggregateGrid } from '../src/index.js';
 
 const grid = () =>
-  new AggregateGrid({ index: 0, originX: -8192, originZ: -8192, cellM: 256, dimsX: 64, dimsZ: 64, archetypes: [1, 2] });
+  new AggregateGrid({ index: 0, origin: [-8192, -8192], cell: 256, dims: [64, 64], archetypes: [1, 2] });
 
 const counts = (...values: number[]) => Uint32Array.from(values);
 
@@ -61,6 +61,34 @@ describe('AggregateGrid', () => {
     expect(g.wasReset).toBe(false);
   });
 
+  it('allocates nothing before its first cell, and reads as empty until then', () => {
+    const g = new AggregateGrid({ index: 0, origin: [0, 0], cell: 1, dims: [4096, 4096], archetypes: [0, 1, 2, 3] });
+    expect(g.cellCount).toBe(1 << 24);
+    expect(g.counts.length).toBe(0);
+    g.beginFrame();
+    g.reset();
+    expect(g.count(7, 3)).toBe(0);
+    expect(g.maxCount(3)).toBe(0);
+
+    const small = grid();
+    small.beginFrame();
+    small.setCell(1, counts(2, 3), 0);
+    expect(small.counts.length).toBe(64 * 64 * 2);
+  });
+
+  it('maps a three-axis grid row-major, axis 0 fastest', () => {
+    const g = new AggregateGrid({ index: 0, origin: [0, 10, -4], cell: 2, dims: [3, 4, 5], archetypes: [0] });
+    expect(g.cellCount).toBe(60);
+    expect(g.cellAt(0, 10, -4)).toBe(0);
+    // i = (2, 1, 3): 2 + 3 · (1 + 4 · 3)
+    expect(g.cellAt(5.9, 12, 2.5)).toBe(2 + 3 * (1 + 4 * 3));
+    expect(g.cellAt(0, 10, 6)).toBe(-1);
+    expect(g.cellAt(6, 10, -4)).toBe(-1);
+    g.beginFrame();
+    g.setCell(59, counts(9), 0);
+    expect(g.count(59, 0)).toBe(9);
+  });
+
   it('rejects bad input instead of storing garbage', () => {
     const g = grid();
     g.beginFrame();
@@ -71,8 +99,12 @@ describe('AggregateGrid', () => {
       g.setCell(0, counts(1), 0);
     }).toThrow();
     expect(
-      () =>
-        new AggregateGrid({ index: 1, originX: 0, originZ: 0, cellM: Number.NaN, dimsX: 4, dimsZ: 4, archetypes: [0] }),
+      () => new AggregateGrid({ index: 1, origin: [0, 0], cell: Number.NaN, dims: [4, 4], archetypes: [0] }),
+    ).toThrow();
+    expect(() => new AggregateGrid({ index: 1, origin: [0, 0], cell: 1, dims: [4, 4, 4], archetypes: [0] })).toThrow();
+    expect(() => new AggregateGrid({ index: 1, origin: [0], cell: 1, dims: [4], archetypes: [0] })).toThrow();
+    expect(
+      () => new AggregateGrid({ index: 1, origin: [0, 0], cell: 1, dims: [4097, 4096], archetypes: [0] }),
     ).toThrow();
   });
 });

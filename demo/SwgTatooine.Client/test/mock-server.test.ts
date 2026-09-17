@@ -2,7 +2,7 @@ import {
   AggregateGrid,
   archetypeOf,
   evaluateSlot,
-  MOTION_STRIDE,
+  MAX_MOTION_STRIDE,
   NOT_FOUND,
   slotOf,
   WorldStore,
@@ -66,7 +66,7 @@ function runOracle(server: MockServer, ticks: number, move: (t: number) => void)
       });
     },
   };
-  const position = new Float64Array(MOTION_STRIDE);
+  const position = new Float64Array(MAX_MOTION_STRIDE);
   const fields = new Float64Array(16);
   let worst = 0;
   let compared = 0;
@@ -155,14 +155,14 @@ describe('mock server → SDK store (a small differential oracle)', () => {
     const server = new MockServer(5, 1);
     server.setRegion(0, 0, 500);
     const { grid } = runOracle(server, 30, () => undefined);
-    const dims = AGG_GRID.dimsX;
+    const dims = AGG_GRID.dims[0];
     const nArch = AGG_GRID.archetypes.length;
     const expected = new Uint32Array(dims * dims * nArch);
     AGG_GRID.archetypes.forEach((archetype, slot) => {
       const set = server.world.sets[archetype];
       for (let i = 0; i < set.count; i++) {
-        const cx = Math.min(dims - 1, Math.max(0, Math.floor((set.x[i] - AGG_GRID.originX) / AGG_GRID.cellM)));
-        const cz = Math.min(dims - 1, Math.max(0, Math.floor((set.z[i] - AGG_GRID.originZ) / AGG_GRID.cellM)));
+        const cx = Math.min(dims - 1, Math.max(0, Math.floor((set.x[i] - AGG_GRID.origin[0]) / AGG_GRID.cell)));
+        const cz = Math.min(dims - 1, Math.max(0, Math.floor((set.z[i] - AGG_GRID.origin[1]) / AGG_GRID.cell)));
         expected[(cz * dims + cx) * nArch + slot]++;
       }
     });

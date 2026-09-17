@@ -9,7 +9,8 @@ export default defineConfig(
   {
     languageOptions: {
       parserOptions: {
-        projectService: true,
+        // src compiles against ES2022 alone (tsconfig.json); tests add the Node typings (test/tsconfig.json).
+        projectService: { allowDefaultProject: ['vitest.config.ts'] },
         tsconfigRootDir: import.meta.dirname,
       },
     },

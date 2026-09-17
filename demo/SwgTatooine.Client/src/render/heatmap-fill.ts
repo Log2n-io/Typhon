@@ -11,12 +11,13 @@ export function fillHeatmap(grid: AggregateGrid, out: Uint8Array, width: number,
     scale[a] = max > 0 ? 255 / Math.log1p(max) : 0;
   }
 
-  const cells = Math.min(width, grid.schema.dimsX);
-  const rows = Math.min(height, grid.schema.dimsZ);
+  const dimsX = grid.schema.dims[0];
+  const cells = Math.min(width, dimsX);
+  const rows = Math.min(height, grid.schema.dims[1]);
   out.fill(0);
   for (let z = 0; z < rows; z++) {
     for (let x = 0; x < cells; x++) {
-      const cell = z * grid.schema.dimsX + x;
+      const cell = z * dimsX + x;
       const texel = (z * width + x) * 4;
       for (let a = 0; a < channels; a++) {
         out[texel + a] = Math.round(Math.log1p(grid.count(cell, a)) * scale[a]);

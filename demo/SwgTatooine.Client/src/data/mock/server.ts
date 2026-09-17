@@ -24,6 +24,9 @@ import { buildWorld, type MockWorld } from './world';
  * moved → interest (enters, leaves) → projection → events → aggregate.
  */
 
+/** The group of an entering field (W15): it never changes while in view, so no state record carries it. */
+const NO_GROUP = 0xff;
+
 /** 64 m cells: fine enough for the simulation's 24 m aggro and 75 m weapon queries, and 4 × 4 of them make an AGG cell. */
 const BIN_M = 64;
 const AGG_EVERY_TICKS = TICK_HZ;
@@ -90,14 +93,14 @@ export class MockServer {
     this.bins = this.world.sets.map(() => new SpatialBins(BIN_M));
     this.trackers = this.world.sets.map((set) => new MotionTracker(set.count));
     this.fieldCounts = SWG_SCHEMA.archetypes.map((a) => a.fields.length);
-    this.fieldGroups = SWG_SCHEMA.archetypes.map((a) => Uint8Array.from(a.fields, (f) => f.group));
+    this.fieldGroups = SWG_SCHEMA.archetypes.map((a) => Uint8Array.from(a.fields, (f) => f.group ?? NO_GROUP));
     this.lastSent = this.world.sets.map((set, a) => new Float64Array(set.count * this.fieldCounts[a]));
     this.enteredAt = this.world.sets.map((set) => new Uint32Array(set.count));
     this.enters = this.world.sets.map(() => new RecordBuffer());
     this.segments = this.world.sets.map(() => new RecordBuffer());
     this.states = this.world.sets.map(() => new RecordBuffer());
     this.leaves = this.world.sets.map(() => new RecordBuffer());
-    const aggSize = AGG_GRID.dimsX * AGG_GRID.dimsZ * AGG_GRID.archetypes.length;
+    const aggSize = AGG_GRID.dims[0] * AGG_GRID.dims[1] * AGG_GRID.archetypes.length;
     this.aggLast = new Uint32Array(aggSize);
     this.aggCounts = new Uint32Array(aggSize);
   }
@@ -321,7 +324,7 @@ export class MockServer {
         this.projectFields(a, i, scratch);
         let mask = 0;
         for (let f = 0; f < nFields; f++) {
-          if (scratch[f] !== lastSent[i * nFields + f]) {
+          if (groups[f] !== NO_GROUP && scratch[f] !== lastSent[i * nFields + f]) {
             mask |= 1 << groups[f];
           }
         }
@@ -333,7 +336,8 @@ export class MockServer {
           d[o + 1] = mask;
           for (let f = 0; f < nFields; f++) {
             d[o + STATE_HEADER + f] = scratch[f];
-            if (((mask >> groups[f]) & 1) === 1) {
+            // An entering field has no group (NO_GROUP): never shift by it.
+            if (groups[f] !== NO_GROUP && ((mask >> groups[f]) & 1) === 1) {
               lastSent[i * nFields + f] = scratch[f];
             }
           }
@@ -392,10 +396,10 @@ export class MockServer {
    * visited, no game state consulted. Only changed cells are sent; all non-empty ones the first time.
    */
   private aggregate(): AggBlock {
-    const dims = AGG_GRID.dimsX;
+    const dims = AGG_GRID.dims[0];
     const nArch = AGG_GRID.archetypes.length;
     const counts = this.aggCounts;
-    const span = AGG_GRID.cellM / BIN_M;
+    const span = AGG_GRID.cell / BIN_M;
     for (let slot = 0; slot < nArch; slot++) {
       const bins = this.bins[AGG_GRID.archetypes[slot]];
       for (let cz = 0; cz < dims; cz++) {

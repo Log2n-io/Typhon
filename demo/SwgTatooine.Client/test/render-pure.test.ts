@@ -163,15 +163,7 @@ describe('PrefixUploader', () => {
 
 describe('fillHeatmap', () => {
   it('normalises each channel to its own maximum on a log scale, and clears the rest', () => {
-    const grid = new AggregateGrid({
-      index: 0,
-      originX: 0,
-      originZ: 0,
-      cellM: 1,
-      dimsX: 2,
-      dimsZ: 2,
-      archetypes: [7, 8],
-    });
+    const grid = new AggregateGrid({ index: 0, origin: [0, 0], cell: 1, dims: [2, 2], archetypes: [7, 8] });
     grid.beginFrame();
     grid.setCell(0, new Uint32Array([100, 0]), 0);
     grid.setCell(3, new Uint32Array([9, 2]), 0);

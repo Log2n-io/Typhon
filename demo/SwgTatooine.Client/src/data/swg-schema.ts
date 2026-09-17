@@ -17,26 +17,36 @@ export type ArchetypeIndex = (typeof Archetype)[keyof typeof Archetype];
 
 export const ARCHETYPE_COUNT = 5;
 
-/** Change groups, shared by every archetype (`01-model.md` § 2 default groups plus `vitals`). */
-export const Group = { Enter: 0, Motion: 1, State: 2, Vitals: 3 } as const;
-const GROUPS = ['enter', 'motion', 'state', 'vitals'];
+/**
+ * Change groups, shared by every archetype, in the catalog's canonical order (`03-wire-protocol.md` W14). Entering fields
+ * carry no group (W15: `onEnter`), and motion travels as segments, not as a group.
+ */
+export const Group = { State: 0, Vitals: 1 } as const;
+const GROUPS = ['state', 'vitals'];
+
+/** Ground positions: 2D on the wire, x and z in the world. */
+const MOVING = { kind: 'motion', dims: 2 } as const;
+
+/** Server tick period (10 Hz, Core3-faithful). */
+export const TICK_PERIOD_MS = 100;
 
 export const SWG_SCHEMA: WorldSchema = {
+  tickPeriodUs: TICK_PERIOD_MS * 1000,
   archetypes: [
     {
       index: Archetype.WorldObject,
       name: 'WorldObject',
-      position: 'static',
+      position: { kind: 'static', dims: 2 },
       groups: GROUPS,
-      fields: [{ name: 'kind', kind: 'u8', group: Group.Enter }],
+      fields: [{ name: 'kind', kind: 'u8' }],
     },
     {
       index: Archetype.CreatureLair,
       name: 'CreatureLair',
-      position: 'motion',
+      position: MOVING,
       groups: GROUPS,
       fields: [
-        { name: 'template', kind: 'u8', group: Group.Enter },
+        { name: 'template', kind: 'u8' },
         { name: 'missionId', kind: 'u8', group: Group.State },
         { name: 'hp', kind: 'f32', group: Group.Vitals },
       ],
@@ -44,10 +54,10 @@ export const SWG_SCHEMA: WorldSchema = {
     {
       index: Archetype.Creature,
       name: 'Creature',
-      position: 'motion',
+      position: MOVING,
       groups: GROUPS,
       fields: [
-        { name: 'template', kind: 'u8', group: Group.Enter },
+        { name: 'template', kind: 'u8' },
         { name: 'mode', kind: 'u8', group: Group.State },
         { name: 'target', kind: 'u32', group: Group.State },
         { name: 'hp', kind: 'f32', group: Group.Vitals },
@@ -56,14 +66,14 @@ export const SWG_SCHEMA: WorldSchema = {
     {
       index: Archetype.CityNpc,
       name: 'CityNpc',
-      position: 'motion',
+      position: MOVING,
       groups: GROUPS,
       fields: [{ name: 'mode', kind: 'u8', group: Group.State }],
     },
     {
       index: Archetype.Player,
       name: 'Player',
-      position: 'motion',
+      position: MOVING,
       groups: GROUPS,
       fields: [
         { name: 'activity', kind: 'u8', group: Group.State },
@@ -78,16 +88,12 @@ export const SWG_SCHEMA: WorldSchema = {
 /** The far tier: per-cell counts at 256 m over the whole planet. WorldObject is not counted (it never moves). */
 export const AGG_GRID: GridSchema = {
   index: 0,
-  originX: -8192,
-  originZ: -8192,
-  cellM: 256,
-  dimsX: 64,
-  dimsZ: 64,
+  // Axis 0 is world x, axis 1 world z.
+  origin: [-8192, -8192],
+  cell: 256,
+  dims: [64, 64],
   archetypes: [Archetype.CreatureLair, Archetype.Creature, Archetype.CityNpc, Archetype.Player],
 };
-
-/** Server tick period (10 Hz, Core3-faithful). */
-export const TICK_PERIOD_MS = 100;
 
 /** Position quantum: 24 bits over the 16 384 m planet (`03-wire-protocol.md` § 4). */
 export const POSITION_QUANTUM_M = 16384 / (1 << 24);
