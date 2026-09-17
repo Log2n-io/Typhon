@@ -5,6 +5,21 @@ namespace SwgTatooine;
 
 internal static class Program
 {
+    /// <summary>The port <c>--serve</c> names, or 0 when it is absent.</summary>
+    /// <param name="args">The command line.</param>
+    /// <returns>The port.</returns>
+    /// <remarks>Read here rather than in <see cref="CommandLine"/> because it selects a mode rather than configuring the simulation.</remarks>
+    private static int PortArgument(string[] args)
+    {
+        var at = Array.IndexOf(args, "--serve");
+        if (at < 0)
+        {
+            return 0;
+        }
+
+        return at + 1 < args.Length && int.TryParse(args[at + 1], out var port) && port is > 0 and <= 65535 ? port : 8080;
+    }
+
     private static int Main(string[] args)
     {
         var config = CommandLine.Parse(args);
@@ -21,6 +36,16 @@ internal static class Program
         sw.Stop();
 
         Console.WriteLine($"  world built in {sw.Elapsed.TotalSeconds:F1}s");
+
+        // `--serve <port>` turns the benchmark into a server: the same world and the same systems, ticking forever behind a WebSocket, with the browser
+        // client served beside it. It returns from here rather than falling through to the measurement report, which has nothing to say about a run with no
+        // end.
+        var servePort = PortArgument(args);
+        if (servePort > 0)
+        {
+            sim.ServeAsync(servePort, TatooineSim.DefaultClientRoot(AppContext.BaseDirectory)).GetAwaiter().GetResult();
+            return 0;
+        }
         Console.WriteLine($"  {sim.Census}");
         // Live cell count is only reachable through TickContext.SpatialGrid, so it is reported by the telemetry system
         // once the runtime is up rather than here.
