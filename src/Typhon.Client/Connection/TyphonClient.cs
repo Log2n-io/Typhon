@@ -35,6 +35,7 @@ public sealed class TyphonClient : IAsyncDisposable
 
     private IClientTransport _transport;
     private FrameApplier _applier;
+    private ushort _commandSeq;
     private Task _receiveLoop;
     private Task _pingLoop;
 
@@ -112,7 +113,13 @@ public sealed class TyphonClient : IAsyncDisposable
     {
         var welcome = await HandshakeAsync(ct).ConfigureAwait(false);
         _receiveLoop = Task.Run(() => ReceiveLoopAsync(_stopping.Token), CancellationToken.None);
-        _pingLoop = Task.Run(() => PingLoopAsync(_stopping.Token), CancellationToken.None);
+
+        // No loop when the host drives the cadence: see ClientOptions.PingHz. A thousand bots in one process would otherwise be a thousand timers.
+        if (_options.PingHz > 0)
+        {
+            _pingLoop = Task.Run(() => PingLoopAsync(_stopping.Token), CancellationToken.None);
+        }
+
         return welcome;
     }
 
@@ -133,6 +140,56 @@ public sealed class TyphonClient : IAsyncDisposable
         }
 
         return Store;
+    }
+
+    /// <summary>
+    /// Sends one <c>PING</c> carrying this client's newest applied tick.
+    /// </summary>
+    /// <param name="ct">Cancels the send.</param>
+    /// <returns>The send.</returns>
+    /// <remarks>
+    /// Public so a host running many clients can drive the cadence from one timer rather than from one per client. A client with a non-zero
+    /// <see cref="ClientOptions.PingHz"/> is already doing this on its own and does not need the call.
+    /// </remarks>
+    public async Task SendPingAsync(CancellationToken ct = default)
+    {
+        var transport = _transport;
+        if (transport is { IsConnected: true })
+        {
+            await transport.SendAsync(Encode(new PingMessage((uint)Environment.TickCount, LastAppliedTick).Write), ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Sends one command to the server.
+    /// </summary>
+    /// <param name="name">The command's catalog name — a built-in such as <c>ClientRegion</c>, or one the application declared.</param>
+    /// <param name="values">The command's fields, by name.</param>
+    /// <param name="ct">Cancels the send.</param>
+    /// <returns>The sequence the command was sent under, which an <c>ACKS</c> rejection would name.</returns>
+    /// <remarks>
+    /// One command per message today. Batching several into one <c>COMMANDS</c> is what the wire is shaped for and what a real client should do per frame;
+    /// nothing in Phase 1 sends enough commands for the difference to be measurable, and a batching API nobody exercises is a worse bet than an obvious one.
+    /// </remarks>
+    public async Task<ushort> SendCommandAsync(string name, RecordValues values, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(name);
+        ArgumentNullException.ThrowIfNull(values);
+
+        var plan = Plan?.CommandByName(name)
+            ?? throw new InvalidOperationException($"the catalog this session negotiated declares no command named '{name}'");
+
+        var transport = _transport;
+        if (transport is not { IsConnected: true })
+        {
+            return 0;
+        }
+
+        var seq = unchecked(++_commandSeq);
+        var tick = LastAppliedTick;
+        var message = Encode((ref WireWriter w) => CommandsMessage.Write(ref w, tick, [(plan, seq, values)]));
+        await transport.SendAsync(message, ct).ConfigureAwait(false);
+        return seq;
     }
 
     /// <summary>Sends a <c>BYE</c> and closes.</summary>

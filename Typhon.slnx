@@ -46,6 +46,7 @@
         <Project Path="demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj" />
         <Project Path="demo/SpaceBattle/SpaceBattle.csproj" />
         <Project Path="demo/SwgTatooine/SwgTatooine.csproj" />
+        <Project Path="demo/SwgTatooine.Bots/SwgTatooine.Bots.csproj" />
     </Folder>
     <Folder Name="/tools/">
         <Project Path="tools/Typhon.Workbench/Typhon.Workbench.csproj" />

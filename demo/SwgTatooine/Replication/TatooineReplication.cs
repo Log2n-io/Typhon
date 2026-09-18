@@ -29,6 +29,20 @@ public static class TatooineReplication
     /// <summary>The session kind a client names in <c>HELLO</c>.</summary>
     public const string GodKind = "god";
 
+    /// <summary>
+    /// A small-view profile: the populated parts of the world a player cares about, without the scenery.
+    /// </summary>
+    /// <remarks>
+    /// <b>A proxy for a player's view, not a player's view.</b> A real client watches a region around itself, which is a <c>Sphere</c> or <c>ClientRegion</c>
+    /// observer — Phase 1 resolves the <c>World</c> observer and refuses the others, so spatial interest cannot be measured yet. What this profile does give
+    /// is a session whose watched set is a fraction of the world's (players and city NPCs, ~1.5 k of ~16.7 k), which is the property that matters for asking
+    /// how per-session cost scales with view size. Anything measured through it should be read as "a session with a small view", never as "a player".
+    /// </remarks>
+    public const string PlayerProfile = "player-lite";
+
+    /// <summary>The session kind a small-view client names in <c>HELLO</c>.</summary>
+    public const string PlayerKind = "player";
+
     /// <summary>The fastest anything on Tatooine moves, in metres per second — a mounted player.</summary>
     /// <remarks>
     /// It sizes the motion codec: the teleport threshold is what separates "it moved" from "it was put somewhere else", and the velocity width is derived from
@@ -42,7 +56,7 @@ public static class TatooineReplication
     {
         ArgumentNullException.ThrowIfNull(subs);
 
-        subs.Sessions.Kinds(GodKind);
+        subs.Sessions.Kinds(GodKind, PlayerKind);
 
         subs.Archetype<Creature>(a => a
             .Motion(Creature.Bounds, m => m.Tolerance(0.05).Teleport(MaxSpeedMps))
@@ -75,6 +89,11 @@ public static class TatooineReplication
             .Of<Player>()
             .Of<CreatureLair>()
             .Of<WorldObject>());
+
+        subs.Profile(PlayerProfile, p => p
+            .World()
+            .Of<Player>()
+            .Of<CityNpc>());
     }
 
     /// <summary>
@@ -97,7 +116,8 @@ public static class TatooineReplication
         {
             if (e.Kind == SessionEventKind.Opened)
             {
-                subs.Session(e.Session).Profile(GodProfile);
+                // By kind, so one run can carry both shapes and a measurement can say which it measured.
+                subs.Session(e.Session).Profile(e.SessionKind == PlayerKind ? PlayerProfile : GodProfile);
             }
         }
     }

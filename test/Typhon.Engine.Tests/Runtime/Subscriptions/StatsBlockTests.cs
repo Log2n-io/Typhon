@@ -40,6 +40,74 @@ class StatsBlockTests : TestBase<StatsBlockTests>
 
     private DatabaseEngine SetupEngine() => ProjectionTestSchema.SetupEngine(ServiceProvider);
 
+    /// <summary>
+    /// <c>typhon.sessions</c> counts every open session, at a session count where a burst of handshakes overlaps the tick.
+    /// </summary>
+    /// <remarks>
+    /// The first AC-1 run had 110 sessions connected, served and granted statistics, and every block any of them received said the server held about 29. A
+    /// count that saturates is worse than one that is missing: an operator reads it as a real number and concludes the population is small.
+    /// </remarks>
+    [Test]
+    public void TheSessionCountIsEverySessionThatIsOpen()
+    {
+        const int Sessions = 110;
+
+        using var world = new StatsWorld(SetupEngine(), workerCount: 4);
+        var clients = new StatsClient[Sessions];
+        for (var i = 0; i < Sessions; i++)
+        {
+            clients[i] = world.Connect(Capabilities.Stats);
+        }
+
+        // The last-connected session is the one whose Opened event is most likely to still be in flight, so it is the one worth reading.
+        var last = clients[Sessions - 1];
+        Assert.That(last.AwaitBlock(), Is.True, "the last session to connect never received a STATS block");
+        Assert.That(last.AwaitBlock(), Is.True, "the last session received one block and then no more");
+
+        Assert.That(Scalar(last, "typhon.sessions"), Is.EqualTo(Sessions),
+            "the server reported a session count that is not the number of sessions it has open");
+    }
+
+    /// <summary>
+    /// Every session that asked for statistics receives the block, at a session count above the worker count.
+    /// </summary>
+    /// <remarks>
+    /// Found by the first AC-1 run and not by any fixture: 110 sessions against the demo each received exactly one <c>STATS</c> block, during the connect
+    /// ramp, and then none for the next eighty seconds, while frames kept flowing. Every fixture here ran one session against one worker, which is the one
+    /// shape the defect cannot appear in. A block that reaches a client once and then stops is worse than one that never arrives, because a statistics HUD
+    /// goes on displaying the first second of the run as though it were the current one.
+    /// </remarks>
+    [Test]
+    public void EverySessionReceivesTheBlockWhenSessionsOutnumberWorkers()
+    {
+        const int Sessions = 40;
+
+        using var world = new StatsWorld(SetupEngine(), workerCount: 4);
+        var clients = new StatsClient[Sessions];
+        for (var i = 0; i < Sessions; i++)
+        {
+            clients[i] = world.Connect(Capabilities.Stats);
+        }
+
+        // Two blocks, not one: the first can ride on the frame that completes the view, and what the AC-1 run showed is a session receiving that one and
+        // never another.
+        foreach (var client in clients)
+        {
+            Assert.That(client.AwaitBlock(), Is.True, "a session never received its first STATS block");
+        }
+
+        var missing = 0;
+        foreach (var client in clients)
+        {
+            if (!client.AwaitBlock())
+            {
+                missing++;
+            }
+        }
+
+        Assert.That(missing, Is.Zero, $"{missing} of {Sessions} sessions received one STATS block and then no more");
+    }
+
     /// <summary>Values arrive in catalog index order, and a labelled metric contributes one value per label.</summary>
     [Test]
     public void ValuesArriveInCatalogIndexOrder()
@@ -235,7 +303,7 @@ class StatsBlockTests : TestBase<StatsBlockTests>
         private readonly TyphonRuntime _runtime;
         private readonly ISubscriptionAcceptor _acceptor;
 
-        public StatsWorld(DatabaseEngine engine, int tickRateHz = TickRateHz)
+        public StatsWorld(DatabaseEngine engine, int tickRateHz = TickRateHz, int workerCount = 1, bool overridePeriod = true)
         {
             _engine = engine;
             Populate(engine);
@@ -258,7 +326,7 @@ class StatsBlockTests : TestBase<StatsBlockTests>
                         }
                     }
                 });
-            }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = tickRateHz });
+            }, new RuntimeOptions { WorkerCount = workerCount, BaseTickRate = tickRateHz });
 
             _runtime.Subscriptions.Sessions.Kinds("god");
             ProjectionTestSchema.DeclareCreature(_runtime.Subscriptions);
@@ -267,7 +335,10 @@ class StatsBlockTests : TestBase<StatsBlockTests>
             _runtime.Start();
 
             Subscriptions = _runtime.SubscriptionsContextForTest.Subscriptions;
-            Subscriptions.Stats.EmissionPeriodTicksForTest = 1;
+            if (overridePeriod)
+            {
+                Subscriptions.Stats.EmissionPeriodTicksForTest = 1;
+            }
 
             var transport = new CapturingTransport();
             _runtime.StartSubscriptionTransport(transport);

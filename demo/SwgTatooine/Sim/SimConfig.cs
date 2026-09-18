@@ -208,6 +208,9 @@ public sealed class SimConfig
     /// </remarks>
     public int SubscriptionsCollapseWorkUnits;
 
+    /// <summary><c>--subs-gather changed|full</c>: whether an up-to-date session is served from S1's change set or walks everything it watches.</summary>
+    public bool SubscriptionsChangedOnlyGather = true;
+
     /// <summary>
     /// Smallest entity count the runtime will give a parallel chunk. The engine default is 64.
     /// </summary>

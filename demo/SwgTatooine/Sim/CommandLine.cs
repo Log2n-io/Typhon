@@ -70,6 +70,13 @@ public static class CommandLine
             c.SplitAwareness = true;
         }
 
+        c.SubscriptionsChangedOnlyGather = Str(args, "--subs-gather", "changed") switch
+        {
+            "changed" => true,
+            "full" => false,
+            var other => throw new ArgumentException($"--subs-gather takes changed or full, not '{other}'"),
+        };
+
         c.SubscriptionsCollapseWorkUnits = Str(args, "--subs-pipeline", "staged") switch
         {
             "staged" => 0,

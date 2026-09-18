@@ -14,15 +14,17 @@ var endpoint = Arg("--endpoint") ?? "tcp://127.0.0.1:9100";
 var bots = int.Parse(Arg("--bots") ?? "100");
 var seconds = int.Parse(Arg("--seconds") ?? "60");
 var hz = int.Parse(Arg("--hz") ?? "4");
+var kind = Arg("--kind") ?? "god";
 
 var options = new BotSwarmOptions
 {
     Endpoint = new Uri(endpoint),
     Count = bots,
     TickHz = hz,
+    Kind = kind,
 };
 
-Console.WriteLine($"connecting {bots} bots to {endpoint} …");
+Console.WriteLine($"connecting {bots} {kind} bots to {endpoint} …");
 
 await using var swarm = new BotSwarm(options);
 using var stopping = new CancellationTokenSource(TimeSpan.FromSeconds(seconds));
@@ -47,8 +49,67 @@ while (!stopping.IsCancellationRequested)
         break;
     }
 
+    // The server's own numbers, as the server reported them to its clients (AC-1's track p99 is the headline).
     Console.WriteLine($"  t+{(DateTime.UtcNow - started).TotalSeconds,6:F0}s  connected {swarm.Connected,5}  "
-        + $"messages {swarm.MessagesReceived,10}  faults {swarm.Faults}");
+        + $"messages {swarm.MessagesReceived,10}  faults {swarm.Faults}  "
+        + $"frames {Frames()}  "
+        + $"stats {Blocks()}  "
+        + $"sessions {swarm.ServerMetric("typhon.sessions"),5:F0}  "
+        + $"track p99 {swarm.ServerMetric("typhon.subscriptions.track.p99"),7:F3} ms  "
+        + $"tick p99 {swarm.ServerMetric("typhon.tick.p99"),7:F3} ms");
+}
+
+// TICK frames applied across the population: a connected session that is never produced for looks healthy in every other number.
+string Frames()
+{
+    var (total, min, max, unserved) = swarm.Frames();
+    return $"{total,7} total {min}..{max}/session, {unserved} unserved, {swarm.RecordsPerFrame:F0} records/frame";
+}
+
+// STATS blocks received across the population: the count, not a value, because a value cannot tell "stopped sending" from "stopped moving".
+string Blocks()
+{
+    var (total, min, max, starved) = swarm.StatsBlocks();
+    return $"{total,6} total {min}..{max}/session, {starved} with none, {swarm.StatsGranted} granted";
+}
+
+// The measurement line: what fraction of a tick replication costs, at this session count and view shape. One line so a sweep is greppable.
+{
+    var systems = swarm.LabelledMetric("typhon.system.mean", 64);
+    double Mean(string name)
+    {
+        foreach (var (n, ms) in systems)
+        {
+            if (n == name)
+            {
+                return ms;
+            }
+        }
+
+        return 0;
+    }
+
+    var project = Mean("SubscriptionsProject");
+    var interest = Mean("SubscriptionsInterest");
+    var frames = Mean("SubscriptionsFrames");
+    var subs = project + interest + frames;
+    var tick = swarm.ServerMetric("typhon.tick.p50");
+    Console.WriteLine();
+    Console.WriteLine($"SWEEP kind={kind} sessions={bots} project={project:F3} interest={interest:F3} frames={frames:F3} "
+        + $"subs={subs:F3} tickP50={tick:F3} subsPct={(tick > 0 ? subs / tick * 100 : 0):F1} recPerFrame={swarm.RecordsPerFrame:F0}");
+}
+
+Console.WriteLine();
+Console.WriteLine("server systems by mean duration:");
+foreach (var (name, ms) in swarm.LabelledMetric("typhon.system.mean", 4))
+{
+    Console.WriteLine($"  {ms,8:F3} ms  {name}");
+}
+
+Console.WriteLine("live entities per archetype:");
+foreach (var (name, count) in swarm.LabelledMetric("typhon.archetype.entities", 8))
+{
+    Console.WriteLine($"  {count,9:N0}  {name}");
 }
 
 Console.WriteLine();

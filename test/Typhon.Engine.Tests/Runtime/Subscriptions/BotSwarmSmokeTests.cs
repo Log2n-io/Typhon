@@ -40,6 +40,88 @@ sealed class BotSwarmSmokeTests : TestBase<BotSwarmSmokeTests>
     private const int CreatureCount = 40;
     private const string Profile = "god-world";
 
+    /// <summary>
+    /// A session that stops talking is closed with 4001, and <b>its client is told</b>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The half that matters is the second one. A server that stops serving a silent session and leaves its socket open produces the worst failure a client
+    /// can have: everything it can see says it is connected — the socket is open, no close code arrived, no error was raised — and no data ever comes again.
+    /// It cannot even reconnect, because nothing told it to.
+    /// </para>
+    /// <para>
+    /// <b>Why this fixture exists at all.</b> The first 110-session load run showed ninety sessions frozen at eight frames each while the generator reported
+    /// them all healthy and connected. That was the generator's own fault — it connected a hundred and ten sessions over a two-second ramp without pinging
+    /// any of them, and 3 s / <c>PingHz</c> = 750 ms of silence is exactly eight ticks at 10 Hz, so the server was right to drop them. What the run could not
+    /// answer is whether the clients were ever told, because a load generator that manufactures the silence cannot also be trusted about the consequence.
+    /// This asks the question directly.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void ASilentSessionIsClosedAndItsClientIsTold()
+    {
+        var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        Populate(dbe);
+
+        // PingHz 30 puts the silence bound at 3 s / 30 = 100 ms, which is ten ticks here — long enough to be the real policy, short enough to be a test.
+        using var runtime = CreateRuntime(dbe, new SubscriptionsOptions { PingHz = 30 });
+        Declare(runtime.Subscriptions);
+        runtime.Start();
+
+        var transport = new TcpSubscriptionTransport(null);
+        runtime.StartSubscriptionTransport(transport);
+
+        ushort closeCode = 0;
+        var closed = new ManualResetEventSlim(false);
+
+        var client = new TyphonClient(new ClientOptions
+        {
+            Endpoint = new Uri($"tcp://127.0.0.1:{transport.BoundEndPoint.Port}/"),
+            Kind = "god",
+
+            // The point of the test: this client never pings.
+            PingHz = 0,
+            Reconnect = false,
+            HandshakeTimeout = TimeSpan.FromSeconds(15),
+        });
+
+        client.Disconnected += (code, _) =>
+        {
+            closeCode = code;
+            closed.Set();
+        };
+
+        try
+        {
+            Assert.That(client.ConnectAsync().Wait(TimeSpan.FromSeconds(20)), Is.True, "the client did not complete its handshake");
+
+            // Well past the silence bound, then a second window, so "was it dropped" and "was it told" are two separate readings rather than one inference.
+            Assert.That(closed.Wait(TimeSpan.FromSeconds(3)), Is.True.Or.False, "waiting, not asserting");
+            var framesAfterBound = client.Store?.Frames ?? 0;
+            Thread.Sleep(1000);
+            var framesLater = client.Store?.Frames ?? 0;
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(framesLater, Is.EqualTo(framesAfterBound), "the session is still being served, so the silence policy did not drop it and this "
+                    + "fixture is measuring something else");
+                Assert.That(closed.IsSet, Is.True,
+                    "the session was dropped for silence and its client was NEVER TOLD: the socket is still open, no close code arrived, and no frame will "
+                    + "ever come again. A client cannot even reconnect from this state, because nothing told it to.");
+                Assert.That(closeCode, Is.EqualTo(CloseCodes.NoAcknowledgement),
+                    "a session dropped for silence must close 4001, which is what tells an SDK to reconnect rather than to back off as 1013 does");
+                Assert.That(client.IsConnected, Is.False, "the client still believes it is connected");
+            });
+        }
+        finally
+        {
+            client.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(5));
+            transport.StopAsync().AsTask().Wait(TimeSpan.FromSeconds(10));
+            runtime.Shutdown();
+            closed.Dispose();
+        }
+    }
+
     /// <summary>Fifty sessions open, stay open for two hundred server ticks, and receive a world.</summary>
     [Test]
     public void FiftyBotsSurviveTwoHundredTicks()
@@ -190,7 +272,7 @@ sealed class BotSwarmSmokeTests : TestBase<BotSwarmSmokeTests>
 
     private static string Describe(Dictionary<ushort, int> disconnects) => string.Join(", ", Unexpected(disconnects));
 
-    private static TyphonRuntime CreateRuntime(DatabaseEngine dbe) => TyphonRuntime.Create(dbe, schedule =>
+    private static TyphonRuntime CreateRuntime(DatabaseEngine dbe, SubscriptionsOptions subscriptions = null) => TyphonRuntime.Create(dbe, schedule =>
     {
         schedule.PublicTrack.DeclareDag("Test").CallbackSystem("BindProfiles", ctx =>
         {
@@ -208,7 +290,7 @@ sealed class BotSwarmSmokeTests : TestBase<BotSwarmSmokeTests>
                 }
             }
         });
-    }, new RuntimeOptions { WorkerCount = 2, BaseTickRate = TickRateHz });
+    }, new RuntimeOptions { WorkerCount = 2, BaseTickRate = TickRateHz, Subscriptions = subscriptions ?? new SubscriptionsOptions() });
 
     private static void Declare(SubscriptionsRegistry subs)
     {

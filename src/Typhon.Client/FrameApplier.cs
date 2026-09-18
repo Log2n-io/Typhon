@@ -51,6 +51,9 @@ public sealed class FrameApplier
     private int[] _leaveArchetypes = new int[64];
     private int _leaveCount;
     private Target _target;
+
+    /// <summary>Set by the first metric of a frame, read and cleared at its end, so one frame counts as one block however many values it carried.</summary>
+    private bool _statsThisFrame;
     private ArchetypeStore _archetype;
     private AggregateGrid _aggregate;
     private int _slot;
@@ -215,6 +218,8 @@ public sealed class FrameApplier
 
     private void Metric(MetricPlan metric, int valueIndex, double value)
     {
+        _statsThisFrame = true;
+
         // MetricPlan.Offset, not a scan for the plan in its segment: the arrays are built from the same two lists in the same order (WorldStore's
         // constructor), so the position the plan carries IS the row, and finding it again per VALUE was quadratic in the metric count (F10).
         var values = metric.Session ? _store.SessionMetricValues : _store.ServerMetricValues;
@@ -332,15 +337,29 @@ public sealed class FrameApplier
 
         public void BeginEntities(ArchetypePlan archetype) => _applier.BeginEntities(archetype);
 
-        public void Enter(uint netId, scoped ReadOnlySpan<double> position, scoped ReadOnlySpan<double> velocity, uint t0, byte epoch) =>
+        public void Enter(uint netId, scoped ReadOnlySpan<double> position, scoped ReadOnlySpan<double> velocity, uint t0, byte epoch)
+        {
+            _applier._store.Records++;
             _applier.Enter(netId, position, velocity, t0, epoch);
+        }
 
-        public void Segment(uint netId, scoped ReadOnlySpan<double> position, scoped ReadOnlySpan<double> velocity, uint t0, byte epoch) =>
+        public void Segment(uint netId, scoped ReadOnlySpan<double> position, scoped ReadOnlySpan<double> velocity, uint t0, byte epoch)
+        {
+            _applier._store.Records++;
             _applier.Segment(netId, position, velocity, t0, epoch);
+        }
 
-        public void State(uint netId, byte groupMask) => _applier.State(netId, groupMask);
+        public void State(uint netId, byte groupMask)
+        {
+            _applier._store.Records++;
+            _applier.State(netId, groupMask);
+        }
 
-        public void Leave(uint netId) => _applier.Leave(netId);
+        public void Leave(uint netId)
+        {
+            _applier._store.Records++;
+            _applier.Leave(netId);
+        }
 
         public void Event(MessagePlan type) => _applier.Event(type);
 
@@ -362,7 +381,16 @@ public sealed class FrameApplier
 
         public void UnknownBlock(byte blockType) => _applier.UnknownBlock(blockType);
 
-        public void EndTick() => _applier._target = Target.None;
+        public void EndTick()
+        {
+            if (_applier._statsThisFrame)
+            {
+                _applier._statsThisFrame = false;
+                _applier._store.StatsBlocks++;
+            }
+
+            _applier._target = Target.None;
+        }
 
         public void Number(FieldPlan field, scoped ReadOnlySpan<double> components) => _applier.Number(field, components);
 

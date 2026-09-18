@@ -29,9 +29,17 @@ public sealed class ClientOptions
     /// How often <c>PING</c> carries this client's newest applied tick, in hertz.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// <b>Not optional, and not a keepalive.</b> The server's lag skip reads <c>lastAppliedTick</c> to decide whether this client is far enough behind that
     /// producing for it is waste, and a session that stops pinging is closed 4001. Four hertz is the catalog's own default; the server tells the client what
     /// it expects through <c>tick.pingHz</c>, and <see cref="TyphonClient"/> prefers that over this when the catalog names one.
+    /// </para>
+    /// <para>
+    /// <b>Zero means the host drives it</b> through <see cref="TyphonClient.SendPingAsync"/>, and the client starts no loop of its own. That is what a load
+    /// generator needs: a thousand clients each holding a timer is a thousand timer registrations and a thousand wakeups per period, where one shared timer
+    /// walking a list costs one. A host that sets zero and then never pings will have every one of its sessions closed 4001, which is correct and is the
+    /// symptom to look for.
+    /// </para>
     /// </remarks>
     public int PingHz { get; init; } = 4;
 
@@ -57,7 +65,7 @@ public sealed class ClientOptions
     internal void Validate()
     {
         ArgumentNullException.ThrowIfNull(Endpoint, nameof(Endpoint));
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(PingHz, nameof(PingHz));
+        ArgumentOutOfRangeException.ThrowIfNegative(PingHz, nameof(PingHz));
 
         if (HelloPayload != null && HelloPayload.Length > ProtocolConstants.HelloPayloadMaxBytes)
         {

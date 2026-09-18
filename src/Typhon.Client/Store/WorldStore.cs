@@ -114,6 +114,27 @@ public sealed class WorldStore
     /// <summary>Protocol inconsistencies absorbed instead of thrown.</summary>
     public long Anomalies { get; internal set; }
 
+    /// <summary>
+    /// Frames that carried a <c>STATS</c> block, which is how a client knows whether the server is still feeding it statistics.
+    /// </summary>
+    /// <remarks>
+    /// A block is emitted on a fixed cadence and rides on one frame; it is never retried. So "the numbers stopped changing" and "the numbers are changing
+    /// slowly" look identical from the values alone, and only a count of the blocks themselves tells them apart. That distinction is the whole reason this
+    /// counter exists: it was added after a 110-session run where the metric values sat still and there was no way to say whether the server had stopped
+    /// sending or had stopped moving.
+    /// </remarks>
+    public long StatsBlocks { get; internal set; }
+
+    /// <summary>
+    /// Entity records applied — enters, motion segments, state records and leaves — across every frame.
+    /// </summary>
+    /// <remarks>
+    /// Divided by frames and by the archetype's live count, this is the fraction of a watched world that actually CHANGES in a tick. That fraction is what
+    /// decides whether a per-session walk over everything watched is wasted work or the only honest way to find the changes, so it is worth a counter rather
+    /// than an inference from frame sizes.
+    /// </remarks>
+    public long Records { get; internal set; }
+
     /// <summary>Finds where an entity lives.</summary>
     /// <param name="netId">The entity.</param>
     /// <param name="archetype">Its archetype index.</param>

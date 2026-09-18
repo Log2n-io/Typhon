@@ -54,7 +54,11 @@ public sealed partial class TatooineSim
 
             // --subs-pipeline. Every other field of the options is left at its default: this is the one the A/B moves, and moving a second one would make the
             // two arms differ in more than the thing being measured.
-            Subscriptions = new SubscriptionsOptions { CollapseBelowWorkUnits = _config.SubscriptionsCollapseWorkUnits },
+            Subscriptions = new SubscriptionsOptions
+            {
+                CollapseBelowWorkUnits = _config.SubscriptionsCollapseWorkUnits,
+                ChangedOnlyGather = _config.SubscriptionsChangedOnlyGather,
+            },
         });
 
         // Before Start, because the catalog a client negotiates against is compiled there and the declarations are its source.
