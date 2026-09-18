@@ -30,6 +30,9 @@ namespace Typhon.Engine.Tests.Runtime.Subscriptions;
 class SendPumpTests : TestBase<SendPumpTests>
 {
     private const int TickRateHz = 100;
+
+    /// <summary>The nominal tick period of the engine's own default <c>BaseTickRate</c> of 60 Hz.</summary>
+    private const uint DefaultPeriodUs = 16_667;
     private const int CreatureCount = 8;
 
     private const string FirstProfile = "god-world";
@@ -92,30 +95,126 @@ class SendPumpTests : TestBase<SendPumpTests>
     [Test]
     public void TheDegradeLadderIsClimbedOneClassAtATime()
     {
-        var options = new SubscriptionsOptions();
+        // A stated bound rather than the default, so the ladder's mechanics are pinned by this test and the default's VALUE by the one below it. A fixture
+        // that asserted both broke on a policy decision that had nothing to do with the ladder.
+        var options = new SubscriptionsOptions { CloseStalledAfter = TimeSpan.FromMilliseconds(833) };
+        var degrade = SkipPolicy.DegradeBoundTicks(SkipPolicy.CloseBoundTicks(options, DefaultPeriodUs));
 
         Assert.Multiple(() =>
         {
-            Assert.That(SkipPolicy.ShouldDegrade(19, 0, options), Is.False);
-            Assert.That(SkipPolicy.ShouldDegrade(20, 0, options), Is.True);
-            Assert.That(SkipPolicy.ShouldDegrade(20, 1, options), Is.False, "a second class costs another 20 skips, not the same 20");
-            Assert.That(SkipPolicy.ShouldDegrade(40, 1, options), Is.True);
-            Assert.That(SkipPolicy.ShouldDegrade(1000, SkipPolicy.MaxDegradeLevel, options), Is.False, "the ladder has a top");
+            Assert.That(degrade, Is.EqualTo(20), "two fifths of the fifty ticks 833 ms converts to at 60 Hz");
+            Assert.That(SkipPolicy.ShouldDegrade(19, 0, degrade), Is.False);
+            Assert.That(SkipPolicy.ShouldDegrade(20, 0, degrade), Is.True);
+            Assert.That(SkipPolicy.ShouldDegrade(20, 1, degrade), Is.False, "a second class costs another 20 skips, not the same 20");
+            Assert.That(SkipPolicy.ShouldDegrade(40, 1, degrade), Is.True);
+            Assert.That(SkipPolicy.ShouldDegrade(1000, SkipPolicy.MaxDegradeLevel, degrade), Is.False, "the ladder has a top");
         });
     }
 
-    /// <summary>Fifty skips close the session, and anything below it is a skip rather than a close.</summary>
+    /// <summary>A run short of the bound is a skip; the bound itself is a close.</summary>
     [Test]
-    public void FiftySkipsCloseTheSession()
+    public void TheRunBelowTheBoundIsASkipAndTheBoundItselfIsAClose()
     {
-        var options = new SubscriptionsOptions();
+        var close = SkipPolicy.CloseBoundTicks(new SubscriptionsOptions { CloseStalledAfter = TimeSpan.FromMilliseconds(833) }, DefaultPeriodUs);
 
         Assert.Multiple(() =>
         {
-            Assert.That(SkipPolicy.Evaluate(0, options), Is.EqualTo(SkipVerdict.Produce));
-            Assert.That(SkipPolicy.Evaluate(49, options), Is.EqualTo(SkipVerdict.Skip));
-            Assert.That(SkipPolicy.Evaluate(50, options), Is.EqualTo(SkipVerdict.Close));
+            Assert.That(close, Is.EqualTo(50));
+            Assert.That(SkipPolicy.Evaluate(0, close), Is.EqualTo(SkipVerdict.Produce));
+            Assert.That(SkipPolicy.Evaluate(49, close), Is.EqualTo(SkipVerdict.Skip));
+            Assert.That(SkipPolicy.Evaluate(50, close), Is.EqualTo(SkipVerdict.Close));
         });
+    }
+
+    /// <summary>
+    /// The default stall bound is clearly separated from the silence bound, so 1013 and 4001 carry different information.
+    /// </summary>
+    /// <remarks>
+    /// <b>A client that is still sending <c>PING</c> is demonstrably alive</b>, and one that has gone quiet is not; giving them the same patience makes the
+    /// two close codes interchangeable, and 02 § 6 distinguishes them precisely so an SDK can reconnect on one and back off on the other. The tick count this
+    /// option replaced put them 83 ms apart at 60 Hz. The separation is asserted as a ratio rather than as two numbers so that changing the ping rate, which
+    /// moves the silence bound, cannot quietly collapse it.
+    /// </remarks>
+    [Test]
+    public void TheDefaultStallBoundIsWellClearOfTheSilenceBound()
+    {
+        var options = new SubscriptionsOptions();
+
+        foreach (var periodUs in new uint[] { 100_000, 16_667, 10_000 })
+        {
+            var close = SkipPolicy.CloseBoundTicks(options, periodUs);
+            var silence = SkipPolicy.SilenceBoundTicks(options, periodUs);
+
+            Assert.That(close, Is.GreaterThanOrEqualTo(silence * 2),
+                $"at {periodUs} µs the stall bound is {close} ticks against a silence bound of {silence}: a client that is still talking would be given "
+                + "barely more rope than one that has gone silent, and the two close codes would say the same thing");
+        }
+    }
+
+    /// <summary>
+    /// The stall bound is a duration, so it buys the same wall-clock patience at every tick rate.
+    /// </summary>
+    /// <remarks>
+    /// Read as a tick count it meant something different on every server: the same 50 was five seconds at 10 Hz and half a second at 100 Hz, so a fast
+    /// server shed clients that had missed five frames while a slow one waited out a client that was never coming back.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-15")]
+    public void TheStallBoundIsTheSameDurationAtEveryTickRate()
+    {
+        var options = new SubscriptionsOptions { CloseStalledAfter = TimeSpan.FromSeconds(1) };
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(SkipPolicy.CloseBoundTicks(options, 100_000), Is.EqualTo(10), "one second at 10 Hz");
+            Assert.That(SkipPolicy.CloseBoundTicks(options, 16_667), Is.EqualTo(60), "one second at 60 Hz");
+            Assert.That(SkipPolicy.CloseBoundTicks(options, 10_000), Is.EqualTo(100), "one second at 100 Hz");
+
+            // Rounded up: a duration that falls between two ticks is honoured by waiting the longer of them, never by closing early.
+            Assert.That(SkipPolicy.CloseBoundTicks(new SubscriptionsOptions { CloseStalledAfter = TimeSpan.FromMilliseconds(95) }, 10_000), Is.EqualTo(10));
+        });
+    }
+
+    /// <summary>
+    /// A bound too short to survive a fully degraded session is floored, and one that is not a duration at all is refused by the conversion.
+    /// </summary>
+    /// <remarks>
+    /// A session at the deepest rate class produces one frame in four, so its skip run legitimately reaches three between publishes. A close bound at or
+    /// below that closes a healthy session for having been degraded — the mitigation causing the outcome it exists to avert.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-15")]
+    public void AStallBoundTooShortForADegradedSessionIsFloored()
+    {
+        var degradedRunBetweenFrames = (1 << SkipPolicy.MaxDegradeLevel) - 1;
+
+        Assert.Multiple(() =>
+        {
+            // One second at 1 Hz is one tick; the floor is what keeps it above the run a degraded session reaches on its own.
+            var slow = SkipPolicy.CloseBoundTicks(new SubscriptionsOptions { CloseStalledAfter = TimeSpan.FromSeconds(1) }, 1_000_000);
+            Assert.That(slow, Is.EqualTo(SkipPolicy.MinimumCloseTicks));
+            Assert.That(slow, Is.GreaterThan(degradedRunBetweenFrames), "a fully degraded session must not be closed by its own rate class");
+
+            Assert.That(SkipPolicy.CloseBoundTicks(new SubscriptionsOptions { CloseStalledAfter = TimeSpan.Zero }, 16_667), Is.Zero,
+                "no bound at all is expressible here and refused by the runtime, rather than quietly turned into a bound nobody asked for");
+        });
+    }
+
+    /// <summary>Degradation always gets its turn: its bound is a fraction of the close bound and therefore always below it.</summary>
+    [Test]
+    public void DegradationAlwaysPrecedesTheClose()
+    {
+        foreach (var ms in new[] { 50, 100, 833, 2_000, 30_000 })
+        {
+            foreach (var periodUs in new uint[] { 1_000_000, 100_000, 16_667, 10_000, 1_000 })
+            {
+                var close = SkipPolicy.CloseBoundTicks(new SubscriptionsOptions { CloseStalledAfter = TimeSpan.FromMilliseconds(ms) }, periodUs);
+                var degrade = SkipPolicy.DegradeBoundTicks(close);
+
+                Assert.That(degrade, Is.GreaterThan(0).And.LessThan(close),
+                    $"at {ms} ms and {periodUs} µs a session would be closed without ever having been served less");
+            }
+        }
     }
 
     /// <summary>Silence is three ping periods, and never tighter than the lag bound, whatever the tick rate.</summary>

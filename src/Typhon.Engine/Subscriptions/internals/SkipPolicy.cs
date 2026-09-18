@@ -56,8 +56,31 @@ internal static class SkipPolicy
     public const int RecoveryFrames = 200;
 
     /// <summary>The deepest a session's rate class may be dropped: one frame in four.</summary>
-    /// <remarks>Beyond this the session is not a slow client but a dead one, and <see cref="SubscriptionsOptions.CloseAfterSkips"/> is the answer.</remarks>
+    /// <remarks>Beyond this the session is not a slow client but a dead one, and <see cref="SubscriptionsOptions.CloseStalledAfter"/> is the answer.</remarks>
     public const int MaxDegradeLevel = 2;
+
+    /// <summary>Degradation begins at <see cref="DegradeNumerator"/>/<see cref="DegradeDenominator"/> of the close bound.</summary>
+    /// <remarks>
+    /// <b>A fraction of the close bound, not a bound of its own.</b> What matters is that degradation gets several chances to work before the session is
+    /// closed, and two independently configured durations can be set so that it gets none - a degrade bound at or past the close bound means the session is
+    /// closed without ever having been served less. Deriving it makes that unreachable, and removes a knob whose only sensible values were fractions of
+    /// another knob.
+    /// </remarks>
+    public const int DegradeNumerator = 2;
+
+    /// <inheritdoc cref="DegradeNumerator"/>
+    public const int DegradeDenominator = 5;
+
+    /// <summary>
+    /// The floor of the close bound, in ticks.
+    /// </summary>
+    /// <remarks>
+    /// <b>A fully degraded session reaches a skip run of one less than its rate class on its own</b>, because that class produces one frame in four and the
+    /// three ticks between are skips like any other. A close bound at or below that would close a healthy session for having been degraded - the mitigation
+    /// causing the outcome it exists to avert. The floor is twice the deepest rate class, so the margin survives a tick landing badly. It binds only at slow
+    /// tick rates: at 1 Hz a 833 ms request converts to one tick and is floored to eight.
+    /// </remarks>
+    public const int MinimumCloseTicks = (1 << MaxDegradeLevel) * 2;
 
     /// <summary>
     /// How many ticks a session's acknowledgement may lag before it is skipped for lag.
@@ -103,16 +126,51 @@ internal static class SkipPolicy
         => degradeLevel <= 0 || (tick & ((1L << Math.Min(degradeLevel, MaxDegradeLevel)) - 1)) == 0;
 
     /// <summary>
-    /// Reads a session's skip run against the operator's two thresholds.
+    /// How many consecutive skips close a session.
     /// </summary>
-    /// <param name="skipRun">Consecutive ticks the session has been skipped.</param>
     /// <param name="options">The operator's rails.</param>
-    /// <returns>Whether the run has reached the degrade or the close threshold.</returns>
-    public static SkipVerdict Evaluate(int skipRun, SubscriptionsOptions options)
+    /// <param name="tickPeriodUs">The nominal tick period.</param>
+    /// <returns>The bound, never below <see cref="MinimumCloseTicks"/>; zero for a non-positive duration, which the runtime refuses.</returns>
+    /// <remarks>
+    /// Rounded up, like every other bound here: a duration that falls between two ticks is honoured by waiting the longer of them, never by closing early.
+    /// </remarks>
+    public static int CloseBoundTicks(SubscriptionsOptions options, uint tickPeriodUs)
     {
         ArgumentNullException.ThrowIfNull(options);
 
-        if (options.CloseAfterSkips > 0 && skipRun >= options.CloseAfterSkips)
+        var requested = (long)(options.CloseStalledAfter.TotalMilliseconds * 1000);
+        if (requested <= 0)
+        {
+            // "Never close" is expressible here and refused by the runtime, rather than clamped into a bound the operator did not ask for.
+            return 0;
+        }
+
+        var period = Math.Max(1u, tickPeriodUs);
+        var ticks = (int)Math.Min(int.MaxValue, (requested + period - 1) / period);
+        return Math.Max(MinimumCloseTicks, ticks);
+    }
+
+    /// <summary>
+    /// How many consecutive skips earn a session its first dropped rate class.
+    /// </summary>
+    /// <param name="closeBoundTicks">The close bound, from <see cref="CloseBoundTicks"/>.</param>
+    /// <returns>The bound, at least one tick whenever the close bound is positive.</returns>
+    public static int DegradeBoundTicks(int closeBoundTicks)
+        => closeBoundTicks <= 0 ? 0 : Math.Max(1, closeBoundTicks * DegradeNumerator / DegradeDenominator);
+
+    /// <summary>
+    /// Reads a session's skip run against the close threshold.
+    /// </summary>
+    /// <param name="skipRun">Consecutive ticks the session has been skipped.</param>
+    /// <param name="closeBoundTicks">The close bound, from <see cref="CloseBoundTicks"/>.</param>
+    /// <returns>Whether the run has reached the close threshold.</returns>
+    /// <remarks>
+    /// It takes the converted bound rather than the options, so that no caller can read a duration as though it were a tick count. That substitution is
+    /// exactly what made the old bound mean five seconds on one server and half a second on another.
+    /// </remarks>
+    public static SkipVerdict Evaluate(int skipRun, int closeBoundTicks)
+    {
+        if (closeBoundTicks > 0 && skipRun >= closeBoundTicks)
         {
             return SkipVerdict.Close;
         }
@@ -125,22 +183,20 @@ internal static class SkipPolicy
     /// </summary>
     /// <param name="skipRun">Consecutive ticks the session has been skipped.</param>
     /// <param name="degradeLevel">What it has been dropped already.</param>
-    /// <param name="options">The operator's rails.</param>
+    /// <param name="degradeBoundTicks">The degrade bound, from <see cref="DegradeBoundTicks"/>.</param>
     /// <returns><see langword="true"/> when the level should rise by one.</returns>
     /// <remarks>
-    /// The test is on a multiple of the threshold rather than on the threshold alone, so a session that stays stuck drops a second class after another 20
-    /// skips rather than dropping every class at once the moment it crosses the first line.
+    /// The test is on a multiple of the threshold rather than on the threshold alone, so a session that stays stuck drops a second class after another
+    /// interval rather than dropping every class at once the moment it crosses the first line.
     /// </remarks>
-    public static bool ShouldDegrade(int skipRun, int degradeLevel, SubscriptionsOptions options)
+    public static bool ShouldDegrade(int skipRun, int degradeLevel, int degradeBoundTicks)
     {
-        ArgumentNullException.ThrowIfNull(options);
-
-        if (options.DegradeAfterSkips <= 0 || degradeLevel >= MaxDegradeLevel)
+        if (degradeBoundTicks <= 0 || degradeLevel >= MaxDegradeLevel)
         {
             return false;
         }
 
-        return skipRun >= options.DegradeAfterSkips * (degradeLevel + 1);
+        return skipRun >= degradeBoundTicks * (degradeLevel + 1);
     }
 
     /// <summary>

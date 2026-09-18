@@ -5,12 +5,16 @@ using System.Threading.Tasks;
 
 // SwgTatooine.Bots — point a population of scripted god cameras at a running server and report what happened to them.
 //
-//   SwgTatooine.Bots --endpoint tcp://127.0.0.1:9100 --bots 100 --seconds 3600
+//   SwgTatooine.Bots --endpoint ws://127.0.0.1:9100/ws --bots 100 --seconds 3600
 //
 // The report is the product. A load generator that only prints "done" cannot distinguish a server that carried a hundred
 // sessions for an hour from one that shed them in the first minute and left the generator reconnecting.
+//
+// The default is a WEBSOCKET endpoint because that is what `SwgTatooine --serve <port>` listens on, and nothing else. A tcp://
+// default read plausibly and connected to nothing: the swarm printed its first line and exited zero, having measured a server it
+// never reached. The scheme and the port have to name what the server actually serves.
 
-var endpoint = Arg("--endpoint") ?? "tcp://127.0.0.1:9100";
+var endpoint = Arg("--endpoint") ?? "ws://127.0.0.1:9100/ws";
 var bots = int.Parse(Arg("--bots") ?? "100");
 var seconds = int.Parse(Arg("--seconds") ?? "60");
 var hz = int.Parse(Arg("--hz") ?? "4");
@@ -36,6 +40,21 @@ Console.CancelKeyPress += (_, e) =>
 
 var opened = await swarm.StartAsync(CancellationToken.None);
 Console.WriteLine($"opened {opened} of {bots} sessions");
+
+// A swarm that opened nothing has measured nothing, and every figure below it would be a well-formatted zero. It is reported as a
+// failure here rather than left to the reader, because the numbers that follow are the kind a reader trusts.
+if (opened == 0)
+{
+    Console.Error.WriteLine($"no session opened against {endpoint}. Check the scheme and the port: `SwgTatooine --serve <port>` "
+        + "listens for WEBSOCKET connections at ws://host:<port>/ws and for nothing else.");
+    return 2;
+}
+
+if (opened < bots)
+{
+    Console.Error.WriteLine($"only {opened} of {bots} sessions opened, so everything below is measured on a smaller population "
+        + "than was asked for.");
+}
 
 var started = DateTime.UtcNow;
 while (!stopping.IsCancellationRequested)

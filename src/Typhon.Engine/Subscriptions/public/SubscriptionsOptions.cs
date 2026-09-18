@@ -1,4 +1,5 @@
 using JetBrains.Annotations;
+using System;
 
 namespace Typhon.Engine;
 
@@ -108,35 +109,44 @@ public sealed class SubscriptionsOptions
     public long FramePoolBudgetBytes { get; init; } = 256L * 1024 * 1024;
 
     /// <summary>
-    /// Consecutive skipped frames after which a session is degraded — dropped a rate class, or given a smaller near radius. Default: 20.
+    /// How long a session may be stalled — denied a frame it had something to put in — before it is closed with "try again later". Default: 3 s.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// A skip is normal: a client whose link is momentarily busy misses a frame and converges on the next one. A <i>run</i> of skips is the signal that the
-    /// session is being served faster than it can consume, and the answer is to serve it less rather than to queue more. 20 is a fifth of the way to
-    /// <see cref="CloseAfterSkips"/>, so degradation has four more chances to work before the session is closed — the ratio is what matters here, not the
-    /// absolute number of ticks, which differs with every tick rate.
-    /// </remarks>
-    public int DegradeAfterSkips { get; init; } = 20;
-
-    /// <summary>
-    /// Consecutive skipped frames after which a session is closed with "try again later". Default: 50.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// A session this far behind is not going to catch up, and the memory it holds — a known-set, a frame slot, an ingress ring — is worth more to a client
-    /// that can keep up. Closing is the honest outcome: the close code tells the SDK to reconnect with backoff rather than to give up.
+    /// session is being served faster than it can consume, and the answer is to serve it less rather than to queue more — first a dropped rate class, two
+    /// fifths of the way here, then a close. A session this far behind is not going to catch up, and the memory it holds — a known-set, a frame slot, an
+    /// ingress ring — is worth more to a client that can keep up. The close code tells the SDK to reconnect with backoff rather than to give up.
     /// </para>
     /// <para>
-    /// It also sets how long a released network identity is quarantined before it can be reissued: this many ticks plus one, so no identity can be reused
-    /// while a session that might still be holding it is alive.
+    /// <b>A duration, not a tick count, because what it bounds is a duration.</b> At most two frames are ever outstanding for a session, so a stalled client
+    /// is at most two frames behind however long it stalls: the backlog does not grow, the client is simply stuck, and what the policy measures is how long.
+    /// Expressed in ticks it silently meant something different at every tick rate — the same 50 was 5 s at 10 Hz and half a second at 100 Hz, so a fast
+    /// server shed clients that had missed five frames.
     /// </para>
     /// <para>
-    /// <b>It must be at least one.</b> Zero would read as "never close a lagging session", and the quarantine would then be sized from a skip window with no
+    /// <b>Why three seconds.</b> It is four times the silence bound, which is <c>3 s / PingHz</c> and therefore 750 ms at the default ping rate, and the
+    /// separation is the point: a client still sending <c>PING</c> is demonstrably alive and has earned more patience than one that has gone quiet, so
+    /// the two policies must not close at nearly the same instant. The tick count this option replaced was 833 ms at 60 Hz — 83 ms apart from the
+    /// silence bound, which left 1013 and 4001 carrying the same information. What bounds it from below is measured rather than assumed: with a world
+    /// changing every tick and real sockets, the longest run of consecutive skips a HEALTHY session ever reached was ZERO, at 10, 50 and 110 sessions
+    /// and at both 10 Hz and 60 Hz, so there is no natural stall for this to cut into. What bounds it from above is the quarantine below, and the memory
+    /// a stuck session holds — at most two frames, a known-set and a ring — none of which is worth being impatient over when the close costs its client
+    /// a full reconnect and a fresh baseline.
+    /// </para>
+    /// <para>
+    /// It also sets how long a released network identity is quarantined before it can be reissued: the converted bound plus one tick, so no identity can be
+    /// reused while a session that might still be holding it is alive.
+    /// </para>
+    /// <para>
+    /// <b>It must be positive.</b> Zero or negative reads as "never close a stalled session", and the quarantine would then be sized from a window with no
     /// bound at all — a session could be skipped for a thousand ticks while an identity it still holds was reissued after two, which is the leave-then-enter
-    /// collision SUB-06 exists to prevent. A runtime built with zero refuses to start rather than replicating something subtly wrong.
+    /// collision SUB-06 exists to prevent. A runtime built with one refuses to start rather than replicating something subtly wrong. A positive value that
+    /// converts to very few ticks is floored rather than refused, because a bound below the skip run a fully degraded session reaches on its own would close
+    /// healthy sessions for having been degraded.
     /// </para>
     /// </remarks>
-    public int CloseAfterSkips { get; init; } = 50;
+    public TimeSpan CloseStalledAfter { get; init; } = TimeSpan.FromSeconds(3);
 
     /// <summary>
     /// How often a connected client must exchange a keepalive, in hertz. Default: 4.

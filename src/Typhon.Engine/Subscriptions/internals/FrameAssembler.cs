@@ -445,6 +445,8 @@ internal sealed unsafe class FrameAssembler : IDisposable
     private readonly int _maxFrameBytes;
     private readonly int _lagBoundTicks;
     private readonly int _silenceBoundTicks;
+    private readonly int _closeBoundTicks;
+    private readonly int _degradeBoundTicks;
 
     private PinnedMemoryBlock _sendBlock;
     private SessionSendState* _sendStates;
@@ -463,6 +465,7 @@ internal sealed unsafe class FrameAssembler : IDisposable
     private long _sessionsDegraded;
     private long _sessionsClosedLagging;
     private long _sessionsClosedSilent;
+    private int _longestSkipRun;
     private long _changedOnlyGathers;
     private long _fullGathers;
     private long _unprovenGathers;
@@ -496,6 +499,11 @@ internal sealed unsafe class FrameAssembler : IDisposable
         _encodePlans = BuildEncodePlans(plans, catalog);
         _lagBoundTicks = SkipPolicy.LagBoundTicks(options, tickPeriodUs);
         _silenceBoundTicks = SkipPolicy.SilenceBoundTicks(options, tickPeriodUs);
+
+        // Converted once, here, beside the other two. The policy takes tick counts and never the options, so a duration cannot be read as a tick count by
+        // a caller that does not know the tick rate - which is what the old bound was.
+        _closeBoundTicks = SkipPolicy.CloseBoundTicks(options, tickPeriodUs);
+        _degradeBoundTicks = SkipPolicy.DegradeBoundTicks(_closeBoundTicks);
 
         // The ceiling a frame is measured against: the operator's, but never above what the pool can serve — a frame larger than the largest size class
         // would be refused by the pool anyway, and refusing it here is what turns "the pool said no" into a number that names the reason.
@@ -546,8 +554,20 @@ internal sealed unsafe class FrameAssembler : IDisposable
     /// <summary>Times a session was dropped a rate class for a run of skips.</summary>
     public long SessionsDegraded => Volatile.Read(ref _sessionsDegraded);
 
-    /// <summary>Sessions closed with 1013 for a skip run past <see cref="SubscriptionsOptions.CloseAfterSkips"/>.</summary>
+    /// <summary>Sessions closed with 1013 for a skip run past <see cref="SubscriptionsOptions.CloseStalledAfter"/>.</summary>
     public long SessionsClosedLagging => Volatile.Read(ref _sessionsClosedLagging);
+
+    /// <summary>
+    /// The longest run of consecutive skips any session has reached since the runtime started, in ticks.
+    /// </summary>
+    /// <remarks>
+    /// <b>What <see cref="SubscriptionsOptions.CloseStalledAfter"/> has to clear.</b> A healthy client still stalls: a garbage collection, a throttled
+    /// browser tab, a frame that took long to apply, ordinary scheduler jitter. Each of those stops it draining for a while and the session's run climbs.
+    /// The close bound is only defensible if it sits above the tail of that distribution, and this is the only way to know where the tail is on a given
+    /// deployment — asking "how long may a client stall" in the abstract has no answer. Read it beside <see cref="SessionsClosedLagging"/>: a high-water
+    /// approaching the bound with no closures is a server about to start shedding clients that were doing nothing wrong.
+    /// </remarks>
+    public int LongestSkipRun => Volatile.Read(ref _longestSkipRun);
 
     /// <summary><b>Switch.</b> When false every session takes the full walk, which is what the fast path is measured against on one binary.</summary>
     internal bool ChangedOnlyGatherEnabled => _options.ChangedOnlyGather;
@@ -824,14 +844,22 @@ internal sealed unsafe class FrameAssembler : IDisposable
             }
 
             var skipRun = send->SkipRun;
-            if (SkipPolicy.Evaluate(skipRun, _options) == SkipVerdict.Close)
+
+            // The high-water mark, read where every session's run is already in hand. One compare per open session per tick, on the prologue rather than on
+            // the encode path, and it is what turns the close bound from a number somebody chose into one the deployment's own behaviour argues for.
+            if (skipRun > Volatile.Read(ref _longestSkipRun))
+            {
+                Volatile.Write(ref _longestSkipRun, skipRun);
+            }
+
+            if (SkipPolicy.Evaluate(skipRun, _closeBoundTicks) == SkipVerdict.Close)
             {
                 _sessions.RequestClose(session, SessionCloseReason.Lagging, CloseCodes.TryAgainLater);
                 Interlocked.Increment(ref _sessionsClosedLagging);
                 continue;
             }
 
-            if (SkipPolicy.ShouldDegrade(skipRun, state.DegradeLevel, _options))
+            if (SkipPolicy.ShouldDegrade(skipRun, state.DegradeLevel, _degradeBoundTicks))
             {
                 state.DegradeLevel++;
                 state.FramesSinceDegrade = 0;

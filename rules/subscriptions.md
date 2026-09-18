@@ -362,10 +362,20 @@
     goes quiet, is still behind
   invariant the last-heard-from mark distinguishes "never bound" from "bound on tick zero": tick zero is a real tick, and a mark that cannot
     say so exempts from the silence policy every session admitted in a server's first tick
-  never fold "the world was quiet" into the counter SkipPolicy.Evaluate reads: it degrades at 20 and closes with 1013 at 50, and 1013 means
-    "you cannot keep up"
+  invariant ∀ bound that names a DURATION — the stall close, the degrade, the lag allowance, the silence bound — the option carries the duration
+    and the engine converts it ONCE, at its own tick rate: no policy reads an operator's number as a tick count
+  invariant the converted stall bound exceeds the skip run a fully degraded session reaches on its own, (1 << MaxDegradeLevel) - 1, so that
+    degrading a session never becomes the reason it is closed
+  invariant the degrade bound is DERIVED from the stall bound and is strictly below it, so degradation always gets its turn
+  invariant the netId quarantine is sized from the SAME converted stall bound, at the same tick period: two conversions that round differently
+    are a SUB-06 hole with nothing in the code to mark it
+  never fold "the world was quiet" into the counter SkipPolicy.Evaluate reads: its subject is a client that cannot keep up, and it closes with
+    1013, which tells an SDK to back off
+  never express a time bound as a tick count in an option: 50 ticks is five seconds at 10 Hz and half a second at 100 Hz, and nothing at the
+    reading end can tell which was meant
   scope: SessionSendState.AbandonFrame, SessionSendState.AbandonIdleFrame, SessionSendState.NotePing, SessionSendState.PingStamp,
-    SkipPolicy.Evaluate, FrameAssembler.SweepSkipPolicy
+    SkipPolicy.Evaluate, SkipPolicy.CloseBoundTicks, SkipPolicy.DegradeBoundTicks, SkipPolicy.MinimumCloseTicks,
+    SubscriptionsOptions.CloseStalledAfter, SubscriptionsRuntime.NominalTickPeriodUsFor, FrameAssembler.SweepSkipPolicy
   on_violation: every session in a world that goes quiet for fifty ticks — half a second at 100 Hz — is closed, and the reason it is given is
     1013, which tells its SDK to back off as though the server were overloaded. Measured on 2026-09-18: fifty healthy sessions, 1 637 quiet
     ticks, zero real skips, all fifty closed. Its twin is quieter still: a session whose mark reads zero is never closed for silence at all,
@@ -373,9 +383,12 @@
   rationale: the two states are indistinguishable from the producer's side — a claimed sequence and no frame — which is how they came to share
     one counter. They are opposite conditions: one is a client that cannot take what it is offered, the other a client that was offered
     everything there was.
-  verified: FrameHandoffTests.AnIdleTickCostsASequenceButNotASkip and FrameHandoffTests.ASessionHeardFromOnTickZeroIsDistinguishableFromOneNeverBound,
-    with BotSwarmSmokeTests.FiftyBotsSurviveTwoHundredTicks as the end-to-end reading — it passed before the fix only because the sessions it
-    lost were never told, which is SUB-14.
+  verified: FrameHandoffTests.AnIdleTickCostsASequenceButNotASkip and FrameHandoffTests.ASessionHeardFromOnTickZeroIsDistinguishableFromOneNeverBound
+    for the two counters; SendPumpTests.TheStallBoundIsTheSameDurationAtEveryTickRate and SendPumpTests.AStallBoundTooShortForADegradedSessionIsFloored
+    for the conversion and its floor; SendPumpTests.DegradationAlwaysPrecedesTheClose across five durations and five tick rates. The end-to-end
+    readings are BotSwarmSmokeTests.FiftyBotsSurviveTwoHundredTicks — which passed before the fix only because the sessions it lost were never
+    told, which is SUB-14 — and BotSwarmSmokeTests.TheNaturalSkipRunOfHealthySessionsStaysFarBelowTheCloseBound, which measures the headroom
+    rather than asserting it from a number, and carries its own guard against measuring an idle server.
 
 ---
 

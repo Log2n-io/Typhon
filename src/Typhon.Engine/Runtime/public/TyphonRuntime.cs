@@ -289,9 +289,11 @@ public sealed partial class TyphonRuntime : IDisposable
 
         // Parented under the scheduler, not under engine.Parent. The scheduler is always present, whereas a runtime built against an engine with no resource
         // parent would otherwise throw here — during EVERY runtime construction, for a subsystem nothing has switched on yet.
-        // The quarantine spans the whole window a session may be skipped for, plus the tick of the release itself (D1): an identity must not be reissued
-        // while any session could still owe a frame that names its previous holder.
-        _netIds = new NetIdAllocator("Subscriptions.NetIds", scheduler, quarantineTicks: Math.Max(1, options.Subscriptions.CloseAfterSkips) + 1);
+        // The quarantine spans the whole window a session may be stalled for, plus the tick of the release itself (D1): an identity must not be reissued
+        // while any session could still owe a frame that names its previous holder. It is derived from the SAME conversion the frame assembler does, at this
+        // runtime's own tick rate, so the two cannot drift: a quarantine sized from a different number than the one that closes sessions is a SUB-06 hole.
+        var closeBoundTicks = SkipPolicy.CloseBoundTicks(options.Subscriptions, SubscriptionsRuntime.NominalTickPeriodUsFor(options.BaseTickRate));
+        _netIds = new NetIdAllocator("Subscriptions.NetIds", scheduler, quarantineTicks: Math.Max(1, closeBoundTicks) + 1);
         _subscriptions = new SubscriptionsRegistry(options.Subscriptions);
         _logger = logger ?? NullLogger.Instance;
         _systemTransactions = new Transaction[scheduler.AllSystemCount];

@@ -103,14 +103,15 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             return;
         }
 
-        if (Options.CloseAfterSkips < 1)
+        if (Options.CloseStalledAfter <= TimeSpan.Zero)
         {
-            // Refused rather than clamped. Zero reads as "never close a lagging session", and the netId quarantine is sized from this window (D1): with no
+            // Refused rather than clamped. Zero reads as "never close a stalled session", and the netId quarantine is sized from this window (D1): with no
             // bound on how long a session may be skipped, an identity it still holds could be reissued while its next frame is still owed, which is the
-            // leave-then-enter collision in one frame that SUB-06 exists to prevent.
+            // leave-then-enter collision in one frame that SUB-06 exists to prevent. A positive duration that converts to very few ticks is floored instead,
+            // because that is an operator asking for a short bound on a slow server rather than for no bound at all.
             throw new InvalidOperationException(
-                $"SubscriptionsOptions.CloseAfterSkips is {Options.CloseAfterSkips}. It bounds how long a session may be skipped before it is closed, and the "
-                + "network-identity quarantine is sized from it, so it must be at least 1.");
+                $"SubscriptionsOptions.CloseStalledAfter is {Options.CloseStalledAfter}. It bounds how long a session may be stalled before it is closed, and "
+                + "the network-identity quarantine is sized from it, so it must be positive.");
         }
 
         // ORDER IS THE POINT, and it is the reverse of Dispose's. Each step consumes the one above it: the plan resolves the declarations against the engine's
@@ -119,7 +120,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
         try
         {
             NominalTickPeriodSeconds = 1.0 / Math.Max(1, options.BaseTickRate);
-            NominalTickPeriodUs = (uint)Math.Round(1_000_000.0 / Math.Max(1, options.BaseTickRate), MidpointRounding.AwayFromZero);
+            NominalTickPeriodUs = NominalTickPeriodUsFor(options.BaseTickRate);
 
             // From the detector rather than from BaseTickRate / MinTickRateHz: that ratio only FILTERS the fixed ladder, so the real ceiling is the ladder's
             // last surviving entry — at most 6 (finding F1). A vel codec derived from the ratio over-sizes every segment on a runtime whose ratio exceeds it.
@@ -222,6 +223,19 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// The inbound path: a session's ring, the transport-side decode, and the Engine-Pre drain that turns it into the tick's typed buffers.
     /// <see langword="null"/> on an inactive runtime.
     /// </summary>
+    /// <summary>
+    /// The nominal tick period a base tick rate implies, in microseconds.
+    /// </summary>
+    /// <param name="baseTickRate">The runtime's base tick rate, in hertz.</param>
+    /// <returns>The period.</returns>
+    /// <remarks>
+    /// One formula, because more than one thing converts a duration into ticks with it: the frame assembler's stall, lag and silence bounds, and the netId
+    /// quarantine the runtime sizes before this object exists. A quarantine computed from a period that rounded differently than the close bound's would be
+    /// a SUB-06 hole that nothing in the code reads as one.
+    /// </remarks>
+    internal static uint NominalTickPeriodUsFor(int baseTickRate)
+        => (uint)Math.Round(1_000_000.0 / Math.Max(1, baseTickRate), MidpointRounding.AwayFromZero);
+
     public SubscriptionsIngress Ingress => _ingress;
 
     /// <summary>
