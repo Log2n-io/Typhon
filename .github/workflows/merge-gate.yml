@@ -510,6 +510,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/check-gate-filters.py
 
+      # AC-20's blueprint claim, mechanically. The demo is Typhon's worked example of an application declaring WHAT
+      # to replicate while the engine owns HOW; a hand-rolled varint or a socket in its replication code would mean
+      # the public surface was insufficient and nobody noticed. The internals allow-list is a ratchet rather than a
+      # ban because the honest state today is "partly clean" — the measurement code still needs cluster state — and
+      # a ban would have to be switched off, which proves nothing.
+      - name: The SWG blueprint is written against the public API (AC-20)
+        run: python3 scripts/check-blueprint-public-api.py
+
       # The lints are themselves tested: each check has a planted violation it must reject, including a planted
       # zero-test shard and the exact double-hyphen comment that shipped. A lint that has never rejected anything
       # is the same false green it exists to remove.

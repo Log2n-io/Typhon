@@ -30,12 +30,16 @@ using System.Runtime.CompilerServices;
 // ArchetypeClusterState is internal wholesale), and the whole point of the tool is to show the internal state
 // the public API deliberately hides. Genuine internal-implementation reuse; not refactorable to public.
 [assembly: InternalsVisibleTo("SpaceBattle")]
-// Added 2026-09-07 (#906): the SWG Tatooine simulation is a game-shaped spatial workload. Two needs, both genuine and
-// neither refactorable to today's public surface: (1) ClusterSpatialQuery is PUBLIC and its own XML doc states "the
-// caller must be inside an EpochGuard scope", but EpochGuard is internal — the documented precondition of a public API
-// cannot be satisfied from outside this assembly; (2) a ClusterSpatialQueryResult carries a raw entity id as a long and
-// EntityId.FromRaw is internal, so a caller cannot act on what a spatial query found. Both are public-API gaps rather
-// than internal-implementation reuse and are filed as such; this declaration should be removed when they close.
+// Added 2026-09-07 (#906); justification narrowed 2026-09-18 (#205, P1-23). The original two reasons are CLOSED:
+// ClusterSpatialQueryResult carries an EntityId rather than a raw long (#909), and Archetype<T>.CatalogId is public,
+// so the blueprint no longer needs EntityId.FromRaw. What remains is MEASUREMENT, not gameplay and not replication:
+// roughly 980 lines of work probes and the spatial census read ArchetypeClusterState directly, and the census is the
+// last EpochGuard caller in the demo. Those belong in SwgTatooine.Bench, which the architecture already names as the
+// only friend assembly; extracting them is the open half of P1-23 and this line goes with them.
+//
+// The debt cannot grow while it waits: scripts/check-blueprint-public-api.py ratchets the exact set of demo files
+// allowed to touch internals, and fails both when a new one appears AND when a listed one is cleaned without the
+// list being tightened. The demo's replication code is already clean and the same script asserts it.
 [assembly: InternalsVisibleTo("SwgTatooine")]
 // Re-added 2026-05-25 (#376 Stage-3 4A): the `with-queries` trace fixture must emit QueryPlan + phase SPAN
 // records, whose typed `EncodeTo` encoders are internal source-generated `[TraceEvent]` ref structs
