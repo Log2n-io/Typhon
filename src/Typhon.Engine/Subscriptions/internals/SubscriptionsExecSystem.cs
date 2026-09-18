@@ -117,6 +117,10 @@ internal abstract class SubscriptionsExecSystemBase : ChunkedCallbackSystem<Subs
         // error into a stage that quietly does nothing.
         var ctx = Context;
 
+        // Timed around the epoch guard as well as the work, because holding an epoch IS part of what a stage costs the engine — the deferred page eviction
+        // and view-buffer reclamation of EW-01 are bounded by how long the track holds one, and a measurement that excluded it would understate exactly the
+        // thing the collapse path changes.
+        var from = SubscriptionsTelemetry.Now();
         try
         {
             using (EpochGuard.Enter(Engine.EpochManager))
@@ -129,6 +133,12 @@ internal abstract class SubscriptionsExecSystemBase : ChunkedCallbackSystem<Subs
             ctx.NoteFault();
             throw;
         }
+        finally
+        {
+            // In a finally, so a stage that threw still reports what it spent before throwing. A tick that failed is the one whose cost is most worth
+            // knowing, and it is also the one a try-only timer silently drops.
+            ctx.Telemetry.NoteStage(ctx.TickNumber, Stage, from, SubscriptionsTelemetry.Now());
+        }
 
         ctx.NoteChunkExecuted();
     }
@@ -136,6 +146,9 @@ internal abstract class SubscriptionsExecSystemBase : ChunkedCallbackSystem<Subs
     // All three gates rethrow after stamping. The stamp is what lets publication be suppressed with the compute half (SUB-02); the rethrow is what keeps
     // the scheduler's own accounting — telemetry, SkipReason.Exception, successor fan-out, the host callback — exactly as it is for every other system.
     // Swallowing here would make a replication bug invisible instead of merely non-fatal.
+
+    /// <summary>Which member of the track this system is, for the per-stage breakdown. Identity, not a name — see <see cref="SubscriptionsTelemetry"/>.</summary>
+    protected abstract SubscriptionsStage Stage { get; }
 
     /// <summary>The stage's chunk count for this tick. Wrapped by <see cref="Prepare"/> so a throw is recorded before it propagates.</summary>
     protected abstract int PrepareChunks(SubscriptionsContext ctx);
@@ -206,6 +219,9 @@ internal sealed class SubscriptionsInterestExecSystem : SubscriptionsExecSystemB
         .Name("SubscriptionsInterest")
         .ChunkedParallel(1);
 
+    /// <inheritdoc />
+    protected override SubscriptionsStage Stage => SubscriptionsStage.Interest;
+
     protected override int PrepareChunks(SubscriptionsContext ctx) => Prologue(ctx);
 
     protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount) => Resolve(ctx, chunkIndex, chunkCount);
@@ -239,6 +255,9 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
         .Name("SubscriptionsProject")
         .After("SubscriptionsInterest")
         .ChunkedParallel(1);
+
+    /// <inheritdoc />
+    protected override SubscriptionsStage Stage => SubscriptionsStage.Project;
 
     protected override int PrepareChunks(SubscriptionsContext ctx) => BlocksStep(ctx);
 
@@ -478,6 +497,9 @@ internal sealed class SubscriptionsEventsExecSystem : SubscriptionsExecSystemBas
         .Name("SubscriptionsEvents")
         .ChunkedParallel(1);
 
+    /// <inheritdoc />
+    protected override SubscriptionsStage Stage => SubscriptionsStage.Events;
+
     protected override int PrepareChunks(SubscriptionsContext ctx) => PrepareDrain(ctx);
 
     protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount) => Drain(ctx, chunkIndex, chunkCount);
@@ -524,6 +546,9 @@ internal sealed class SubscriptionsFramesExecSystem : SubscriptionsExecSystemBas
         .Name("SubscriptionsFrames")
         .AfterAll("SubscriptionsProject", "SubscriptionsEvents")
         .ChunkedParallel(1);
+
+    /// <inheritdoc />
+    protected override SubscriptionsStage Stage => SubscriptionsStage.Frames;
 
     protected override int PrepareChunks(SubscriptionsContext ctx) => Prologue(ctx);
 

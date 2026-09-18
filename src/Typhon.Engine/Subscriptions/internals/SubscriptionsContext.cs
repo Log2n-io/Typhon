@@ -194,9 +194,18 @@ internal sealed class SubscriptionsContext
         Interlocked.CompareExchange(ref slot, seq, 0);
     }
 
+    /// <summary>
+    /// What the track cost, per tick and per stage. Never null: a stage times itself unconditionally, and a null check on the tick path is a branch that
+    /// exists only to be false.
+    /// </summary>
+    public SubscriptionsTelemetry Telemetry { get; } = new();
+
     /// <summary>Resets the per-tick state. Called on the TickDriver thread immediately before the track is dispatched.</summary>
     public void Reset(long tickNumber, int workerCount)
     {
+        // Before anything else: the record has to be open before the first worker can write to it, and this is the last single-threaded point there is.
+        Telemetry.BeginTick(tickNumber);
+
         TickNumber = tickNumber;
         WorkerCount = workerCount;
         Volatile.Write(ref _chunksExecuted.Value, 0);

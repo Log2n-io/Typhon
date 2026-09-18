@@ -90,8 +90,8 @@ internal sealed class StatsEncoder
     /// <summary>Per-system telemetry indices in the order <c>typhon.system.mean</c>'s labels name them; empty when the metric is not published.</summary>
     private readonly int[] _systemMeanIndices;
 
-    /// <summary>The scheduler indices of the replication track's own systems, whose summed duration is <c>typhon.subscriptions.track.p99</c>.</summary>
-    private readonly int[] _trackSystemIndices;
+    /// <summary>The track's own per-tick timing, which is what <c>typhon.subscriptions.track.p99</c> reports (P1-17).</summary>
+    private readonly SubscriptionsTelemetry _track;
 
     /// <summary>Per-archetype catalog ids in the order <c>typhon.archetype.entities</c>'s labels name them; empty when the metric is not published.</summary>
     private readonly ushort[] _archetypeCatalogIds;
@@ -121,9 +121,11 @@ internal sealed class StatsEncoder
     /// <param name="ingress">The inbound path, for a session's dropped-command counter.</param>
     /// <param name="systemNames">The scheduled systems' names in schedule order — the same list the catalog's labels were built from.</param>
     /// <param name="nominalTickPeriodUs">The nominal tick period, which sets the emission cadence and the per-second denominators.</param>
+    /// <param name="track">The replication track's own per-tick timing, which is what <c>typhon.subscriptions.track.p99</c> reports.</param>
     public StatsEncoder(CatalogPlan plan, SubscriptionsRegistry registry, DatabaseEngine engine, CompiledProjectionPlan[] plans, SessionTable sessions,
-        SendPump sendPump, SubscriptionsIngress ingress, IReadOnlyList<string> systemNames, uint nominalTickPeriodUs)
+        SendPump sendPump, SubscriptionsIngress ingress, IReadOnlyList<string> systemNames, uint nominalTickPeriodUs, SubscriptionsTelemetry track)
     {
+        ArgumentNullException.ThrowIfNull(track);
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(registry);
         ArgumentNullException.ThrowIfNull(engine);
@@ -161,7 +163,7 @@ internal sealed class StatsEncoder
         MaxBlockBytes = 1 + MaxVaruBytes + _serverBytes.Length + MaxSegmentBytes(plan.SessionMetrics);
 
         _systemMeanIndices = LabelledSystemIndices(plan, systemNames);
-        _trackSystemIndices = TrackSystemIndices(systemNames);
+        _track = track;
         _archetypeCatalogIds = LabelledArchetypeIds(plan, plans);
 
         // One sample per tick of the window, and the window is at most what the ring can still hold.
@@ -260,7 +262,7 @@ internal sealed class StatsEncoder
                     _serverValues[at] = TickPercentile(telemetry, tick, window, 0.99);
                     break;
                 case ServerSource.TrackP99:
-                    _serverValues[at] = TrackPercentile(telemetry, tick, window, 0.99);
+                    _serverValues[at] = TrackPercentile(tick, window, 0.99);
                     break;
                 case ServerSource.SystemMean:
                     SystemMeans(telemetry, tick, window, _serverValues.AsSpan(at, binding.ValueCount));
@@ -360,33 +362,20 @@ internal sealed class StatsEncoder
         return Percentile(_samples, count, q);
     }
 
-    private double TrackPercentile(TickTelemetryRing telemetry, long tick, int window, double q)
-    {
-        if (telemetry == null || _trackSystemIndices.Length == 0)
-        {
-            return 0;
-        }
-
-        var count = 0;
-        var oldest = telemetry.OldestAvailableTick;
-        var newest = telemetry.NewestTick;
-        for (var t = Math.Max(oldest, tick - window); t <= newest && count < _samples.Length; t++)
-        {
-            var systems = telemetry.GetSystemMetrics(t);
-            var sum = 0.0;
-            foreach (var index in _trackSystemIndices)
-            {
-                if ((uint)index < (uint)systems.Length)
-                {
-                    sum += systems[index].DurationUs;
-                }
-            }
-
-            _samples[count++] = sum / 1000.0;
-        }
-
-        return Percentile(_samples, count, q);
-    }
+    /// <summary>
+    /// A percentile of what the replication track itself cost, in milliseconds.
+    /// </summary>
+    /// <param name="tick">The newest tick to consider.</param>
+    /// <param name="window">How many ticks back to look.</param>
+    /// <param name="q">The percentile, in [0, 1].</param>
+    /// <returns>Milliseconds.</returns>
+    /// <remarks>
+    /// <b>This used to add up every scheduler system whose name began with "Subscriptions".</b> That was a real measurement of very nearly the right thing,
+    /// and it was wrong in two ways that could not be seen from its output: an application system named with the same prefix joined the engine's number, and
+    /// summing per-system durations counts a parallel stage once per worker, so the figure could exceed the tick it was measuring. The track now times
+    /// itself, and reports the SPAN from its first chunk to its last — which is what "what did replication cost this tick" means.
+    /// </remarks>
+    private double TrackPercentile(long tick, int window, double q) => _track.Percentile(tick, window, q, _samples) / 1000.0;
 
     private int FillTickSamples(TickTelemetryRing telemetry, long tick, int window)
     {
@@ -599,45 +588,6 @@ internal sealed class StatsEncoder
         return at == labels ? indices : [];
     }
 
-    /// <summary>The scheduler indices of the replication track's own systems, whose summed duration is the track's cost for a tick.</summary>
-    /// <remarks>
-    /// By name prefix, which is what the stages declare (<c>SubscriptionsInterest</c>, <c>SubscriptionsProject</c>, <c>SubscriptionsEvents</c>,
-    /// <c>SubscriptionsFrames</c>, and the ingress drain on Engine-Pre). P1-17 replaces this with the track's own telemetry; until then the scheduler's
-    /// per-system durations are a real measurement of the same thing and cost nothing to read.
-    /// </remarks>
-    private static int[] TrackSystemIndices(IReadOnlyList<string> systemNames)
-    {
-        if (systemNames == null)
-        {
-            return [];
-        }
-
-        var count = 0;
-        for (var i = 0; i < systemNames.Count; i++)
-        {
-            if (systemNames[i]?.StartsWith("Subscriptions", StringComparison.Ordinal) == true)
-            {
-                count++;
-            }
-        }
-
-        if (count == 0)
-        {
-            return [];
-        }
-
-        var indices = new int[count];
-        var at = 0;
-        for (var i = 0; i < systemNames.Count; i++)
-        {
-            if (systemNames[i]?.StartsWith("Subscriptions", StringComparison.Ordinal) == true)
-            {
-                indices[at++] = i;
-            }
-        }
-
-        return indices;
-    }
 
     /// <summary>The engine catalog id each label of <c>typhon.archetype.entities</c> names.</summary>
     /// <remarks>

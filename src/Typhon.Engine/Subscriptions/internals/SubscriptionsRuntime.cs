@@ -77,10 +77,15 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// <param name="parent">Resource-graph parent for the pools and the session table — the scheduler, as the identity allocator's already is.</param>
     /// <param name="netIds">The database's identity allocator, shared by every replicated archetype and owned by the runtime, not by this object.</param>
     /// <param name="systemNames">The scheduled systems' names, in schedule order: the labels of the built-in per-system metric.</param>
+    /// <param name="telemetry">
+    /// The track's own per-tick timing, which the stages write and <c>STATS</c> reads. Pass the one the tick context owns; a <see langword="null"/> makes a
+    /// private instance, which is right for a harness that drives the stages by hand — nothing writes to it, so the track metric honestly reads zero rather
+    /// than reporting another runtime's numbers.
+    /// </param>
     /// <exception cref="InvalidOperationException">A declaration cannot be compiled, or names something the engine does not hold.</exception>
     /// <exception cref="CatalogException">The declarations produce a catalog that breaks a wire rule.</exception>
     public SubscriptionsRuntime(DatabaseEngine engine, SubscriptionsRegistry registry, RuntimeOptions options, IResource parent, NetIdAllocator netIds,
-        IReadOnlyList<string> systemNames)
+        IReadOnlyList<string> systemNames, SubscriptionsTelemetry telemetry = null)
     {
         ArgumentNullException.ThrowIfNull(engine);
         ArgumentNullException.ThrowIfNull(registry);
@@ -153,7 +158,8 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             // STATS (P1-16). Last of the tick-path objects, because it reads across all of them — the session table's open count, the send pump's bytes, the
             // ingress rows' drop counters and the engine's per-archetype entity counts — and attached to the frame assembler rather than constructed by it,
             // which is what keeps the assembler ignorant of every source but the one interface it calls once a tick.
-            Stats = new StatsEncoder(CatalogPlan, registry, engine, Plans, _sessions, _sendPump, _ingress, systemNames, NominalTickPeriodUs);
+            Stats = new StatsEncoder(CatalogPlan, registry, engine, Plans, _sessions, _sendPump, _ingress, systemNames, NominalTickPeriodUs,
+                telemetry ?? new SubscriptionsTelemetry());
             _frames.AttachStats(Stats);
 
             // Before the first tick publishes anything, so a client that completes its handshake between Start and the first tick is told the period rather

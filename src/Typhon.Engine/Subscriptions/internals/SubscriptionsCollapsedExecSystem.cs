@@ -49,6 +49,16 @@ internal sealed class SubscriptionsCollapsedExecSystem : SubscriptionsExecSystem
     /// One chunk, always. The stages' own chunk counts are computed inside <see cref="ExecuteChunk"/>, because each depends on the stage before it having
     /// already RUN — the blocks step reads the lists the interest pass produced, not the ones its <c>Prepare</c> produced.
     /// </summary>
+    /// <summary>
+    /// The collapsed shape reports as one stage, not four.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not attributed across the four buckets. The whole point of collapsing is that the boundaries between the stages stop existing — there is
+    /// no dispatch between them to measure at — so splitting the span back into four would be inventing a breakdown the shape does not have. The track total
+    /// stays comparable across both shapes, which is what the A/B actually needs.
+    /// </remarks>
+    protected override SubscriptionsStage Stage => SubscriptionsStage.Collapsed;
+
     protected override int PrepareChunks(SubscriptionsContext ctx) => 1;
 
     protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount)
