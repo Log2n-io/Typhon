@@ -86,7 +86,8 @@ public sealed partial class TatooineSim
 
         // A session with no profile is in no tick's session set and receives nothing, so this is what turns a connection into a viewer. It runs on the public
         // track like any other system, which is the point: binding a session is application work, not engine work.
-        schedule.PublicTrack.DeclareDag("Replication").CallbackSystem("BindSessions", TatooineReplication.BindOpenedSessions);
+        schedule.PublicTrack.DeclareDag("Replication").CallbackSystem("BindSessions", TatooineReplication.BindOpenedSessions)
+            .CallbackSystem("PlaceSessions", TatooineReplication.PlacePlayerSessions);
     }
 
     /// <summary>Where the built browser client is expected, relative to the repository root.</summary>

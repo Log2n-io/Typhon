@@ -330,6 +330,41 @@
 
 ---
 
+## Module: Interest
+
+### SUB-16: A bounded observer watches what its region contains, and a session with no region watches nothing `[fatal][silent]`
+  invariant ∀ session s with a bounded observer of radius r centred at c, ∀ tick T: s's watched set is exactly the entities whose
+    position lies within r of c — no entity outside it is marked watched, and none inside it is left unmarked
+  invariant the region is resolved through the ENGINE's spatial index, never by testing the archetype's active-cluster list: a walk over
+    every cluster is the cost the observer exists to remove, and a second narrowphase written here is a second answer to a question the
+    engine already answers
+  invariant [s has never been placed] → s watches NOTHING. A default position is a legal world position, so "never placed" and "placed at
+    the origin" must be distinguishable, and the unplaced session is the one that sees nothing
+  invariant the walked region contains the hysteresis band: an entity between the enter and leave radii stays watched, or the band cannot
+    stop it being reported as a leave on the tick it crosses
+  invariant a session's region is fixed for the tick — every archetype it reaches is resolved around one centre, read once where the tick's
+    sessions are partitioned rather than per chunk
+  never resolve a declared region shape as though it were another: a profile whose observers have different shapes is a near/far tier, and
+    the tiers differ in budget, rate and record kind, so their union is a wrong answer rather than an approximation
+  never centre a region somewhere the declaration did not name — an observer that asked to follow an entity and got the session's viewpoint
+    instead is a silent substitution; refuse it while the follow is unbuilt
+  scope: InterestPass.WalkSphere, InterestPass.FlushSphereRun, InterestPass.CompileProfiles, SessionTable.SetViewpoint,
+    SessionTable.TryGetViewpoint, SubscriptionsCommands.Place, ArchetypeClusterState.QueryRadius
+  on_violation: the failure is in cost, not in correctness, and that is what makes it silent. A region resolved as the whole world still
+    sends every client a correct view; it simply costs what a whole-world view costs, and every per-session measurement taken through it
+    describes a client no game has. Measured before this existed: two hundred "player" sessions performed ~295 000 entity visits to deliver
+    ~13 000 records, 22 visits per record, and replication took 43.7 % of the tick. The reverse — a region resolved too small — is not
+    silent at all: the client is simply missing entities that are in front of it.
+  rationale: interest is the one term that multiplies by session count, so it is the only place where a wrong constant becomes a wrong
+    exponent. Everything else in the track is per-record or shared.
+  verified: SphereObserverTests.APlacedSessionWatchesTheDiscAroundItAndNothingElse, whose expectation is the arithmetic count of the grid
+    points inside the disc rather than a number recorded from a run; SphereObserverTests.TwoSessionsPlacedApartWatchDisjointSets, which is
+    what discriminates "bounded by the radius" from "bounded at all"; SphereObserverTests.AnUnplacedSessionWatchesNothing over a populated
+    origin, so the sentinel cannot be faked; SphereObserverTests.AWorldObserverOverTheSameEntitiesWatchesAllOfThem as the contrast the
+    narrowing is measured against; SubscriptionsRegistryTests.ASphereThatFollowsAnEntityIsRefusedUntilTheEngineSideFollowExists.
+
+---
+
 ## Module: Session Lifecycle
 
 ### SUB-14: A session the tick closes is told so before its link is closed `[fatal][silent]`

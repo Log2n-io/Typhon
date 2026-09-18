@@ -299,6 +299,34 @@ public sealed class SubscriptionsCommands
     }
 
     /// <summary>
+    /// Places a session's spatial observers for THIS tick.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="position">Where it is looking from, in world space.</param>
+    /// <returns><see langword="false"/> when the session is closing or gone.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>It applies now, unlike everything on <see cref="Session"/>.</b> A profile, a budget or the entity a session controls are configuration, and the
+    /// request log stages them so they take effect from a known boundary. A viewpoint is not configuration — it is this tick's position — and a tick of
+    /// latency on it means every session resolves its interest around where it was rather than where it is.
+    /// </para>
+    /// <para>
+    /// <b>Call it from an application system, once per session per tick, before the replication track runs.</b> A session with a <c>Sphere</c> observer that
+    /// has never been placed sees nothing at all: an unplaced session is nowhere, not at the origin, because a default position is a legal world position and
+    /// silently giving everyone a sphere around it is worse than giving them nothing.
+    /// </para>
+    /// </remarks>
+    public bool Place(SessionId session, Vector3D position) => _ingress.Sessions.SetViewpoint(session, position);
+
+    /// <summary>Every session that is open right now, for an application that has to touch all of them — placing their observers, most of it.</summary>
+    public OpenSessionView OpenSessions => new(_ingress.Sessions);
+
+    /// <summary>The kind a session named in its <c>HELLO</c>, or <see langword="null"/> when it is gone.</summary>
+    /// <param name="session">The session.</param>
+    /// <returns>The kind.</returns>
+    public string SessionKindOf(SessionId session) => _ingress.Sessions.SessionKind(session);
+
+    /// <summary>
     /// This tick's commands of one type.
     /// </summary>
     /// <typeparam name="T">The command's struct, as the application declared it.</typeparam>
@@ -383,5 +411,38 @@ public sealed class SubscriptionsCommands
         var row = _ingress.RowOf(session);
         lastSeq = row?.LastSeq ?? 0;
         return row is { HasLastSeq: true };
+    }
+}
+
+/// <summary>Every open session, as a <c>foreach</c> an application can write without the table being public.</summary>
+/// <remarks>
+/// A view rather than a copy: the sessions are walked straight out of the table's open list, so touching all of them costs no allocation. It is valid for
+/// the tick that produced it and must not be stored — a slot recycled between ticks would be walked as though it still held its previous occupant.
+/// </remarks>
+[PublicAPI]
+public readonly struct OpenSessionView
+{
+    private readonly SessionTable _table;
+
+    internal OpenSessionView(SessionTable table) => _table = table;
+
+    /// <summary>Walks the open sessions.</summary>
+    /// <returns>The enumerator.</returns>
+    public Enumerator GetEnumerator() => new(_table);
+
+    /// <summary>The cursor over the open sessions.</summary>
+    [PublicAPI]
+    public struct Enumerator
+    {
+        private SessionTable.OpenSessionEnumerator _inner;
+
+        internal Enumerator(SessionTable table) => _inner = table.GetEnumerator();
+
+        /// <summary>The session at the cursor.</summary>
+        public SessionId Current => _inner.Current;
+
+        /// <summary>Advances the cursor.</summary>
+        /// <returns><see langword="false"/> at the end.</returns>
+        public bool MoveNext() => _inner.MoveNext();
     }
 }

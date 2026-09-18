@@ -524,33 +524,47 @@ class SubscriptionsRegistryTests : TestBase<SubscriptionsRegistryTests>
         }
     }
 
-    /// <summary>The observer shapes Phase 2 builds are declarable today and refused at <c>Start</c>, with the phase named.</summary>
-    [TestCase(ObserverKind.Sphere)]
+    /// <summary>The observer shapes that are still unbuilt are declarable today and refused at <c>Start</c>, naming the shape.</summary>
     [TestCase(ObserverKind.ClientRegion)]
     [TestCase(ObserverKind.Aggregate)]
-    public void AnUnbuiltObserver_IsRefusedAtStartWithItsPhase(ObserverKind kind)
+    public void AnUnbuiltObserver_IsRefusedAtStart(ObserverKind kind)
     {
         using var runtime = CreateRuntime();
         runtime.Subscriptions.Profile("p", p =>
         {
-            switch (kind)
+            if (kind == ObserverKind.ClientRegion)
             {
-                case ObserverKind.Sphere:
-                    p.Sphere(192, leave: 208).AroundControlled().Of<SwgCreature>();
-                    break;
-                case ObserverKind.ClientRegion:
-                    p.ClientRegion(maxEdgeM: 4096).Of<SwgCreature>();
-                    break;
-                default:
-                    p.Aggregate(tileM: 256, rateHz: 1).Of<SwgCreature>();
-                    break;
+                p.ClientRegion(maxEdgeM: 4096).Of<SwgCreature>();
+            }
+            else
+            {
+                p.Aggregate(tileM: 256, rateHz: 1).Of<SwgCreature>();
             }
         });
 
         var ex = Assert.Throws<NotSupportedException>(runtime.Start);
 
-        Assert.That(ex.Message, Does.Contain("Phase 2"));
+        Assert.That(ex.Message, Does.Contain("later phase"));
         Assert.That(ex.Message, Does.Contain(kind.ToString()));
+    }
+
+    /// <summary>
+    /// A <c>Sphere</c> that asks to follow an entity is refused, rather than silently centred somewhere the declaration did not name.
+    /// </summary>
+    /// <remarks>
+    /// The sphere is centred on the session's viewpoint, which an application places each tick. Following an entity means the ENGINE resolving that entity's
+    /// position on the replication track, which is separate work — and a refusal is the only honest answer while it is missing, because the alternative is a
+    /// declaration whose stated centre is quietly ignored.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-16")]
+    public void ASphereThatFollowsAnEntityIsRefusedUntilTheEngineSideFollowExists()
+    {
+        using var runtime = CreateRuntime();
+        runtime.Subscriptions.Profile("p", p => p.Sphere(192, leave: 208).AroundControlled().Of<SwgCreature>());
+
+        var ex = Assert.Throws<NotSupportedException>(runtime.Start);
+        Assert.That(ex.Message, Does.Contain("viewpoint"));
     }
 
     /// <summary>A shared source is declarable today and refused at <c>Start</c> as Phase 4 work.</summary>

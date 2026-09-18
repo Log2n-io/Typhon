@@ -97,6 +97,19 @@ internal sealed unsafe class InterestPass
 
         /// <summary>Plan indices, deduplicated and in declaration order. Empty for a profile whose observers reach nothing.</summary>
         public int[] ArchetypeIndices { get; }
+
+        /// <summary>The shape every observer in this profile has. A profile mixing shapes is refused at compile time.</summary>
+        public ObserverKind Kind { get; init; }
+
+        /// <summary>
+        /// The radius a <see cref="ObserverKind.Sphere"/> profile queries at, in world units.
+        /// </summary>
+        /// <remarks>
+        /// It is the LEAVE radius when one was declared, not the enter radius. The watched set has to contain the hysteresis band or the band cannot do its
+        /// job: an entity between the two radii must stay watched so that it is not reported as a leave, and a query at the enter radius would drop it from
+        /// the walk entirely. Narrowing the band back down to "enter" for entities the session does not yet know is the refinement this defers.
+        /// </remarks>
+        public double QueryRadius { get; init; }
     }
 
     private readonly CompiledProjectionPlan[] _plans;
@@ -111,6 +124,8 @@ internal sealed unsafe class InterestPass
     private SessionId[] _tickSessions = [];
     private int[] _tickProfiles = [];
     private SessionHitRange[] _tickHits = [];
+    private Vector3D[] _tickViewpoints = [];
+    private bool[] _tickPlaced = [];
     private int _tickSessionCount;
     private long _tickNumber;
 
@@ -325,8 +340,15 @@ internal sealed unsafe class InterestPass
                 Array.Resize(ref _tickSessions, grown);
                 Array.Resize(ref _tickProfiles, grown);
                 Array.Resize(ref _tickHits, grown);
+                Array.Resize(ref _tickViewpoints, grown);
+                Array.Resize(ref _tickPlaced, grown);
             }
 
+            // Read HERE, single-threaded, rather than inside the chunk. The table's viewpoint slot is written by application systems on the tick thread and
+            // read by every worker; snapshotting it once at the partition point means the chunks read a private array instead of racing the table, and it
+            // also fixes the tick's answer — a session cannot resolve two archetypes around two different centres.
+            _tickPlaced[_tickSessionCount] = _sessions.TryGetViewpoint(session, out var viewpoint);
+            _tickViewpoints[_tickSessionCount] = viewpoint;
             _tickProfiles[_tickSessionCount] = profile;
             _tickHits[_tickSessionCount] = default;
             _tickSessions[_tickSessionCount++] = session;
@@ -359,13 +381,24 @@ internal sealed unsafe class InterestPass
 
         for (var i = start; i < end; i++)
         {
-            var archetypes = _profiles[_tickProfiles[i]].ArchetypeIndices;
+            var profile = _profiles[_tickProfiles[i]];
+            var archetypes = profile.ArchetypeIndices;
             var runStart = arena.RunCount;
             var sessionHits = 0;
 
+            if (profile.Kind == ObserverKind.Sphere && !_tickPlaced[i])
+            {
+                // Placed nowhere, so it sees nothing. Recording an empty window rather than skipping the session keeps the index space of this tick's
+                // partition intact, which is what Frames walks by the same index.
+                _tickHits[i] = new SessionHitRange(chunkIndex, runStart, 0, 0);
+                continue;
+            }
+
             for (var a = 0; a < archetypes.Length; a++)
             {
-                sessionHits += WalkArchetype(arena, archetypes[a], ref probes);
+                sessionHits += profile.Kind == ObserverKind.Sphere
+                    ? WalkSphere(arena, archetypes[a], _tickViewpoints[i], profile.QueryRadius, ref probes)
+                    : WalkArchetype(arena, archetypes[a], ref probes);
             }
 
             _tickHits[i] = new SessionHitRange(chunkIndex, runStart, arena.RunCount - runStart, sessionHits);
@@ -373,6 +406,92 @@ internal sealed unsafe class InterestPass
         }
 
         arena.Note(probes, hits, _fenceWindow.IsOpen);
+    }
+
+    /// <summary>
+    /// Resolves one archetype's interest for a session whose observer is a sphere, through the engine's own spatial index.
+    /// </summary>
+    /// <param name="arena">The worker's arena.</param>
+    /// <param name="archetypeIndex">The archetype's plan index.</param>
+    /// <param name="centre">The sphere's centre.</param>
+    /// <param name="radius">Its radius, in world units.</param>
+    /// <param name="probes">Directory probes, accumulated.</param>
+    /// <returns>Hits recorded.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>The narrowphase is the engine's, not a second one written here.</b> <c>ArchetypeClusterState.QueryRadius</c> already drives the per-cell cluster
+    /// index with the sphere's enclosing box and applies the distance test per entity, and it reports the cluster and the slot of every hit — which is
+    /// exactly the coordinate this pass records interest in. Writing a sphere test over the active-cluster list instead would be a second implementation of
+    /// the query the engine exists to provide, and it would be the slow one: it would visit every cluster of the archetype, which is the cost this observer
+    /// is here to remove.
+    /// </para>
+    /// <para>
+    /// <b>Hits arrive grouped by cluster, and the mask is accumulated per group.</b> The unit of interest is a run — a cluster plus the mask of slots inside
+    /// it — so the walk gathers a cluster's hit slots into one mask and flushes it when the cluster changes. The flush is written to be correct whatever
+    /// order the enumerator uses: a cluster revisited later simply produces a second run, which costs a little and reports the same set.
+    /// </para>
+    /// </remarks>
+    private int WalkSphere(HitArena arena, int archetypeIndex, Vector3D centre, double radius, ref long probes)
+    {
+        var clusterState = _clusterStates[archetypeIndex];
+        if (clusterState == null || clusterState.Grid == null)
+        {
+            return 0;
+        }
+
+        var hits = 0;
+        var currentChunk = -1;
+        var mask = 0UL;
+
+        foreach (var hit in clusterState.QueryRadius(clusterState.Grid, centre.X, centre.Y, centre.Z, radius))
+        {
+            if (hit.ClusterChunkId != currentChunk)
+            {
+                hits += FlushSphereRun(arena, archetypeIndex, currentChunk, mask, ref probes);
+                currentChunk = hit.ClusterChunkId;
+                mask = 0;
+            }
+
+            mask |= 1UL << hit.SlotIndex;
+        }
+
+        hits += FlushSphereRun(arena, archetypeIndex, currentChunk, mask, ref probes);
+        return hits;
+    }
+
+    /// <summary>Records one cluster's worth of sphere hits as a run, marking the slots watched.</summary>
+    /// <param name="arena">The worker's arena.</param>
+    /// <param name="archetypeIndex">The archetype's plan index.</param>
+    /// <param name="chunkId">The cluster, or -1 for "nothing accumulated yet".</param>
+    /// <param name="mask">The slots inside the sphere.</param>
+    /// <param name="probes">Directory probes, accumulated.</param>
+    /// <returns>Hits recorded.</returns>
+    private int FlushSphereRun(HitArena arena, int archetypeIndex, int chunkId, ulong mask, ref long probes)
+    {
+        if (chunkId < 0 || mask == 0)
+        {
+            return 0;
+        }
+
+        var directory = _states[archetypeIndex].Directory;
+        var stamp = (uint)_tickNumber;
+        probes++;
+
+        nint blockAddress = 0;
+        ushort flags = InterestRunFlags.None;
+        if (directory.TryGetBlock(chunkId, out var block))
+        {
+            blockAddress = (nint)block;
+            MarkWatched(arena, block, mask, stamp);
+        }
+        else
+        {
+            flags = InterestRunFlags.NoBlock;
+            arena.AddNewBlock(archetypeIndex, chunkId);
+        }
+
+        arena.AddRun(archetypeIndex, chunkId, blockAddress, mask, flags);
+        return BitOperations.PopCount(mask);
     }
 
     /// <summary>
@@ -530,16 +649,45 @@ internal sealed unsafe class InterestPass
         {
             var declaration = registry.Profiles[p];
             indices.Clear();
+            var kind = ObserverKind.World;
+            var queryRadius = 0d;
+            var first = true;
 
             foreach (var observer in declaration.Observers)
             {
-                if (observer.Kind != ObserverKind.World)
+                if (observer.Kind is not (ObserverKind.World or ObserverKind.Sphere))
                 {
-                    // Unreachable through TyphonRuntime, which freezes the registry and refuses every other kind with the phase that builds it. A pass built
-                    // directly against an unfrozen registry would otherwise treat a Sphere as a World, which is a wrong answer rather than a missing one.
+                    // Unreachable through TyphonRuntime, which freezes the registry and refuses these kinds with the phase that builds them. A pass built
+                    // directly against an unfrozen registry would otherwise treat a ClientRegion as a World, which is a wrong answer rather than a missing one.
                     throw new NotSupportedException(
-                        $"Profile '{declaration.Name}' declares a {observer.Kind} observer, which Phase 2 builds. Phase 1 resolves the World observer only.");
+                        $"Profile '{declaration.Name}' declares a {observer.Kind} observer, which a later phase builds. This one resolves World and Sphere.");
                 }
+
+                if (!first && observer.Kind != kind)
+                {
+                    // A profile whose observers have different shapes is a near/far tier, and the tiers differ in more than their region: they have separate
+                    // budgets, separate rates and separate record kinds. Resolving them as one union would be a quiet wrong answer, so it is refused until
+                    // the tiering that gives them meaning exists.
+                    throw new NotSupportedException(
+                        $"Profile '{declaration.Name}' mixes a {kind} observer with a {observer.Kind} one. A profile's observers must have one shape until "
+                        + "the near/far tiers that make a mixture meaningful are built.");
+                }
+
+                if (observer.Kind == ObserverKind.Sphere)
+                {
+                    if (!double.IsFinite(observer.Radius) || observer.Radius <= 0)
+                    {
+                        throw new InvalidOperationException(
+                            $"Profile '{declaration.Name}' declares a Sphere observer with radius {observer.Radius}. A sphere needs a positive radius.");
+                    }
+
+                    // The leave radius when there is one: the watched set must contain the hysteresis band, or an entity inside the band is dropped from the
+                    // walk and reported as a leave, which is the flapping the band exists to prevent.
+                    queryRadius = Math.Max(queryRadius, Math.Max(observer.Radius, observer.LeaveRadius));
+                }
+
+                kind = observer.Kind;
+                first = false;
 
                 foreach (var archetype in observer.Archetypes)
                 {
@@ -558,7 +706,7 @@ internal sealed unsafe class InterestPass
                 }
             }
 
-            profiles[p] = new CompiledProfile(declaration.Name, indices.ToArray());
+            profiles[p] = new CompiledProfile(declaration.Name, indices.ToArray()) { Kind = kind, QueryRadius = queryRadius };
         }
 
         return profiles;

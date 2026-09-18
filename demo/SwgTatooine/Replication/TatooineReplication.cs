@@ -1,4 +1,5 @@
 using System;
+using System.Numerics;
 
 namespace SwgTatooine.Replication;
 
@@ -42,6 +43,21 @@ public static class TatooineReplication
 
     /// <summary>The session kind a small-view client names in <c>HELLO</c>.</summary>
     public const string PlayerKind = "player";
+
+    /// <summary>How far a player sees, in metres.</summary>
+    /// <remarks>
+    /// Chosen as a plausible awareness range for a ground game at this world scale, not measured from anything: what it is here for is that a player's view
+    /// is a DISC rather than the world, and the exact figure only moves the constant. Tatooine's cells are 256 m, so a disc of this size spans a handful of
+    /// them and the cluster index has something to reject.
+    /// </remarks>
+    private const double PlayerRadiusM = 192d;
+
+    /// <summary>How far a player keeps seeing something it already saw, in metres.</summary>
+    /// <remarks>
+    /// The band between this and <see cref="PlayerRadiusM"/> is what stops an entity on the boundary entering and leaving on alternate ticks. Every
+    /// re-entry costs a full enter record, so thrash is bandwidth rather than merely noise.
+    /// </remarks>
+    private const double PlayerLeaveRadiusM = 208d;
 
     /// <summary>The fastest anything on Tatooine moves, in metres per second — a mounted player.</summary>
     /// <remarks>
@@ -91,9 +107,10 @@ public static class TatooineReplication
             .Of<WorldObject>());
 
         subs.Profile(PlayerProfile, p => p
-            .World()
+            .Sphere(PlayerRadiusM, PlayerLeaveRadiusM)
             .Of<Player>()
-            .Of<CityNpc>());
+            .Of<CityNpc>()
+            .Of<Creature>());
     }
 
     /// <summary>
@@ -119,6 +136,81 @@ public static class TatooineReplication
                 // By kind, so one run can carry both shapes and a measurement can say which it measured.
                 subs.Session(e.Session).Profile(e.SessionKind == PlayerKind ? PlayerProfile : GodProfile);
             }
+        }
+    }
+
+    /// <summary>
+    /// Places every player session's disc for this tick, spreading the sessions over the world's players.
+    /// </summary>
+    /// <param name="tick">The tick context of the system this is called from.</param>
+    /// <param name="viewpoints">Where the world's players are, this tick.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>Sessions are spread across DIFFERENT players on purpose.</b> Placing them all at one point would give every session the same disc, and identical
+    /// views are the one case the shared-frame path serves at the cost of one — so a measurement taken that way would report a per-session cost that no real
+    /// population has. Spreading them is what makes the numbers mean something.
+    /// </para>
+    /// <para>
+    /// A session with no viewpoint sees nothing at all, so this runs every tick for every open session rather than once at admission: the players move, and
+    /// a disc left where a player was is a view of somewhere they have left.
+    /// </para>
+    /// </remarks>
+    public static void PlacePlayerSessions(TickContext tick)
+    {
+        var subs = tick.Subscriptions;
+        var tx = tick.Transaction;
+        if (subs == null || tx == null)
+        {
+            return;
+        }
+
+        var accessor = tx.For<Player>();
+        var enumerator = accessor.GetClusterEnumerator();
+        var cluster = default(ClusterRef<Player>);
+        var occupancy = 0UL;
+        var haveCluster = false;
+
+        foreach (var session in subs.OpenSessions)
+        {
+            if (!string.Equals(subs.SessionKindOf(session), PlayerKind, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            // The next player in the walk, wrapping when the sessions outnumber them. Advancing the SAME walk across sessions is what spreads the discs:
+            // placing them all on one player would make every view identical, and identical views are the case the shared-frame path serves at the cost of
+            // one — a measurement taken that way reports a per-session cost no real population has.
+            while (occupancy == 0)
+            {
+                if (!enumerator.MoveNext())
+                {
+                    enumerator = accessor.GetClusterEnumerator();
+                    if (!enumerator.MoveNext())
+                    {
+                        // No players at all: nothing to place sessions on, and a session left unplaced correctly sees nothing.
+                        return;
+                    }
+                }
+
+                cluster = enumerator.Current;
+                occupancy = cluster.OccupancyBits;
+                haveCluster = true;
+            }
+
+            if (!haveCluster)
+            {
+                return;
+            }
+
+            var slot = BitOperations.TrailingZeroCount(occupancy);
+            occupancy &= occupancy - 1;
+
+#pragma warning disable TYPHON009
+            var placements = cluster.GetSpan(Player.Bounds);
+#pragma warning restore TYPHON009
+            ref readonly var placement = ref placements[slot];
+            var b = placement.Bounds;
+            subs.Place(session, new Vector3D((b.MinX + b.MaxX) * 0.5, (b.MinY + b.MaxY) * 0.5, 0d));
         }
     }
 }

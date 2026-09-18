@@ -346,11 +346,21 @@ public sealed class SubscriptionsRegistry
         {
             foreach (var observer in profile.Observers)
             {
-                if (observer.Kind != ObserverKind.World)
+                if (observer.Kind is not (ObserverKind.World or ObserverKind.Sphere))
                 {
                     throw new NotSupportedException(
-                        $"Profile '{profile.Name}' declares a {observer.Kind} observer, which Phase 2 builds. Phase 1 ships the World observer; the other " +
+                        $"Profile '{profile.Name}' declares a {observer.Kind} observer, which a later phase builds. World and Sphere ship; the other " +
                         "shapes are declarable now so the API does not grow verbs later.");
+                }
+
+                if (observer.Kind == ObserverKind.Sphere && (observer.BoundEntity != EntityId.Null || observer.FollowsControlled))
+                {
+                    // The sphere is centred on the session's viewpoint, which the application places on the tick. Following an entity means the ENGINE
+                    // resolving that entity's position on the replication track, which is a different piece of work; refusing it is better than silently
+                    // centring the sphere somewhere the declaration did not ask for.
+                    throw new NotSupportedException(
+                        $"Profile '{profile.Name}' declares a Sphere that follows an entity. Centre it with the session's viewpoint instead — an "
+                        + "application system calls Place(session, position) each tick — until the engine-side follow is built.");
                 }
 
                 if (observer.NearBudget != 0 || observer.FarTileM != 0)

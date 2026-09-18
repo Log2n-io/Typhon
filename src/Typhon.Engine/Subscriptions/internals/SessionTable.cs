@@ -91,6 +91,7 @@ internal sealed unsafe class SessionTable : IDisposable
     private readonly string[] _profileNames;
     private readonly string[] _closeReasons;
     private readonly object[] _appData;
+    private readonly SessionViewpoint[] _viewpoints;
     private readonly SessionLimits[] _declaredLimits;
 
     // Tick-side bookkeeping. Every one of these is driven by delivered events, never by scanning the table: the cost of a tick follows the sessions that
@@ -154,6 +155,7 @@ internal sealed unsafe class SessionTable : IDisposable
         _rows = (SessionRow*)(_memory.DataAsPointer + HeaderBytes);
         _freeIds = (uint*)(_memory.DataAsPointer + HeaderBytes + rowBytes);
 
+        _viewpoints = new SessionViewpoint[_capacity];
         _sessionKinds = new string[_capacity];
         _profileNames = new string[_capacity];
         _closeReasons = new string[_capacity];
@@ -361,6 +363,7 @@ internal sealed unsafe class SessionTable : IDisposable
             row->FrameBytes = Resolve(limits.FrameBytes, _options.FrameBytes);
             row->ClientMessageBytes = Resolve(limits.ClientMessageBytes, _options.ClientMessageBytes);
             row->Controlled = EntityId.Null;
+            _viewpoints[session.Slot] = default;
 
             _sessionKinds[slot] = sessionKind;
             _profileNames[slot] = null;
@@ -570,6 +573,68 @@ internal sealed unsafe class SessionTable : IDisposable
         {
             Exit();
         }
+    }
+
+    /// <summary>
+    /// Places a session's observer, for this tick.
+    /// </summary>
+    /// <param name="session">The identity.</param>
+    /// <param name="position">Where the session is looking from, in world space.</param>
+    /// <returns><see langword="false"/> when the session is gone.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>Applied immediately, not staged.</b> Everything else a session asks for is a configuration change — a profile, a budget, the entity it controls —
+    /// and those are staged by the request log and applied in the next tick's prologue, which is right for something that should be in force from a known
+    /// boundary. A viewpoint is not configuration: it is this tick's position, and a tick of latency on it means every session resolves its interest around
+    /// where it was, which at 12 m/s and 10 Hz is more than a metre of lag in the enter and leave decisions.
+    /// </para>
+    /// <para>
+    /// <b>Tick-side, one writer, which is what makes the plain store legal (SUB-05).</b> An application system writing this runs on the tick, before the
+    /// replication track reads it in the same tick. It is not on a transport thread's allow-list and must never be called from one.
+    /// </para>
+    /// </remarks>
+    public bool SetViewpoint(SessionId session, Vector3D position)
+    {
+        if (!TryEnter())
+        {
+            return false;
+        }
+
+        _affinity.Enter(nameof(SessionTable), nameof(SetViewpoint));
+        try
+        {
+            if (!TryGetRow(session, out _))
+            {
+                return false;
+            }
+
+            _viewpoints[session.Slot] = new SessionViewpoint(position, true);
+            return true;
+        }
+        finally
+        {
+            _affinity.Exit();
+            Exit();
+        }
+    }
+
+    /// <summary>
+    /// Reads a session's viewpoint.
+    /// </summary>
+    /// <param name="session">The identity.</param>
+    /// <param name="position">Where it is looking from.</param>
+    /// <returns><see langword="false"/> when the session has never been placed, which is what a spatial observer treats as "sees nothing yet".</returns>
+    public bool TryGetViewpoint(SessionId session, out Vector3D position)
+    {
+        if ((uint)session.Slot >= (uint)_capacity)
+        {
+            position = default;
+            return false;
+        }
+
+        var slot = _viewpoints[session.Slot];
+        position = slot.Position;
+        return slot.IsPlaced;
     }
 
     /// <summary>
@@ -1537,3 +1602,13 @@ internal readonly struct SessionRowView
     /// <summary>The identity, unpacked.</summary>
     public SessionId Session => SessionId.FromValue(IdValue);
 }
+
+/// <summary>Where a session's spatial observers are centred, and whether it has ever been placed.</summary>
+/// <param name="Position">The world-space centre.</param>
+/// <param name="IsPlaced">Whether an application has placed this session; a session that has not is not "at the origin", it is nowhere.</param>
+/// <remarks>
+/// The flag is the whole point. A default <see cref="Vector3D"/> is a legal world position, so a spatial observer that could not tell "never placed" from
+/// "placed at zero" would give every unplaced session a sphere around the origin — which in a world whose origin is populated is a large view nobody asked
+/// for, and in one whose origin is empty is an empty view that looks like a bug in the query.
+/// </remarks>
+internal readonly record struct SessionViewpoint(Vector3D Position, bool IsPlaced);
