@@ -272,6 +272,16 @@
     slot reuse inside a LIVING cluster, which the drain half does not cover. Until both exist this rule states
     intent for entity movement, and behaviour only for cluster drain.
   note the id is reserved rather than omitted so it is not mistaken for a deleted rule, per `rules/README.md`.
+  note (2026-09-18) the movement half's absence is now CHARACTERIZED rather than merely stated:
+    MigrationIdentityTests.ANetIdAcrossAClusterChange spawns one entity, moves it 4 000 m through `WriteSpatial`, runs the tick fence
+    and observes the netId change (54 -> 32 over clusters 1 -> 2). So an entity crossing a cluster boundary is currently published to
+    every watching session as a LEAVE and a full ENTER, costing an enter record per session per crossing and discarding the client's
+    interpolation state for it. The fixture asserts the current behaviour deliberately, so it goes red when the migration hook lands and
+    forces whoever builds it to come here, invert the assertion, drop `[UNBUILT]` and add a `verified:` line.
+  note the differential oracle does NOT cover this and was briefly believed to: `FrameHarness.RunTick` runs the replication track but not
+    the ECS tick fence, so until 2026-09-18 the oracle's teleports moved coordinates and nothing ever migrated. The fence is now called
+    per tick there, which makes the oracle exercise cluster change — but it still cannot see identity STABILITY, because it compares the
+    server's netIds against the client's and both agree whether an identity was carried across or reissued.
 
 ---
 

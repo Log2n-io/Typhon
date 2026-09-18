@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- SwgTatooine.Bots — the load generator M1-1 needs: scripted god cameras over Typhon.Client, many sessions per
+       process, one shared timer.
+
+       It references Typhon.Client and nothing else of the engine. That is the point rather than an accident: a load
+       generator holding engine internals would measure a path no real client takes, and the blueprint claim of AC-20
+       is the same argument one level down. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>SwgTatooine.Bots</AssemblyName>
+    <RootNamespace>SwgTatooine.Bots</RootNamespace>
+    <LangVersion>default</LangVersion>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Typhon.Client\Typhon.Client.csproj" />
+  </ItemGroup>
+</Project>

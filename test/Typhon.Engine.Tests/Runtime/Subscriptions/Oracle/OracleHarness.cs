@@ -178,6 +178,12 @@ internal sealed unsafe class OracleHarness : IDisposable
     {
         Workload.Step();
         _tick++;
+
+        // The ECS fence, which RunTick does not run: a spatial write MARKS an entity, and the cluster change happens here. Without it the workload's
+        // teleports moved coordinates and nothing ever migrated, so the oracle covered no cluster change at all while claiming to — the bug was invisible
+        // because both sides agreed about a world in which nothing had moved between clusters.
+        Engine.WriteTickFence(_tick);
+
         _harness.RunTick(_tick);
 
         for (var i = 0; i < _sessions.Length; i++)
@@ -201,6 +207,7 @@ internal sealed unsafe class OracleHarness : IDisposable
         for (var q = 0; q < QuietTicks; q++)
         {
             _tick++;
+            Engine.WriteTickFence(_tick);
             _harness.RunTick(_tick);
             foreach (var session in _sessions)
             {
