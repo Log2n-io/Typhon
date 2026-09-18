@@ -192,11 +192,23 @@ function render(applier: FrameApplier, events: LogEntry[]): LogEntry {
   };
 }
 
+/*
+ * Two kinds of vector share the `stream-` prefix and they are not interchangeable: a SNAPSHOT vector carries
+ * `{ catalog, snapshots }` and is read here, a CALL-LOG vector carries `{ catalogHash, frames }` and is read by
+ * golden-engine-stream.test.ts. The partition is stated rather than inferred, and the leftovers are asserted, so a new
+ * vector of either kind has to be classified by whoever adds it instead of being silently swept into the wrong reader
+ * — which is how `stream-engine` reached this glob and turned the whole suite red on an `undefined.bin`.
+ */
+const CALL_LOG_VECTORS = ['stream-engine'];
+
 describe('golden streams', () => {
-  const names = goldenNames('stream-');
+  const names = goldenNames('stream-').filter((n) => !CALL_LOG_VECTORS.includes(n));
 
   it('finds the stream vectors', () => {
     expect(names).toContain('stream-kitchen-sink');
+    for (const name of names) {
+      expect(goldenJson(name), `${name} is not a snapshot vector; classify it`).toHaveProperty('snapshots');
+    }
   });
 
   for (const name of names) {
