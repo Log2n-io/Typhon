@@ -354,6 +354,12 @@
     agree", which is what the rule is about. Falsifiability is proved by FrameAssemblerTests.ABaselineThatAdvancesOnASkippedTickIsDetected, which turns
     on the assembler's own `BaselineAdvancesOnSkipForTest` — the one move this rule forbids, applied to the production path — and requires the verifier's
     assertion to reject it.
+    Also DifferentialOracleTests.AClientsWorldIsTheServersAfterSeededChurn, the randomized form of the same claim: 200 ticks of seeded churn — spawns,
+    destroys, drifts below the motion tolerance, teleports across the world, writes to both change groups — at delivery rates of 0, 30, 60 and 90 %, with
+    the client's decoded world compared field for field against the engine's own state every 50 ticks. The scripted verifier above fixes one order; this
+    one covers orders nobody chose, which is where a baseline bug that depends on WHEN the skip fell would hide. Its own falsifiability is
+    DifferentialOracleTests.TheOracleDetectsABaselineThatAdvancesOnASkippedTick, the same production mutant, and DifferentialOracleTests asserts a floor on
+    how many entity comparisons it actually made — an oracle whose truth walk returned an empty set is green, fast and worthless, and has no other symptom.
 
 ---
 

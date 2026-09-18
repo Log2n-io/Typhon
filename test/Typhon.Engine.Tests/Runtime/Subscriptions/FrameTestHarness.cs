@@ -38,6 +38,9 @@ sealed unsafe class FrameHarness : IDisposable
     /// <summary>The engine whose clusters are projected.</summary>
     public DatabaseEngine Engine => _interest.Engine;
 
+    /// <summary>The interest half of the harness, for a fixture that has to read the cluster occupancy the track ran against.</summary>
+    public InterestHarness Interest => _interest;
+
     /// <summary>Everything replication owns.</summary>
     public SubscriptionsRuntime Subscriptions => _interest.Subscriptions;
 
