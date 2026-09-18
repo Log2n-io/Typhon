@@ -53,7 +53,11 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
     private int _sortCapacity;
     private byte* _bytes;
     private int _byteCapacity;
+    private int[] _shareKey = [];
     private bool _disposed;
+
+    /// <summary>This worker's cache of the last frame it encoded, so identical sessions copy rather than re-encode (P1-15).</summary>
+    public SharedFrameSet Shared { get; } = new();
 
     /// <summary>Native bytes this scratch holds, for the owner's resource accounting.</summary>
     public long EstimatedBytes
@@ -175,6 +179,33 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
         RecordSorter.SortByRank(EnterCandidates, new Span<FrameRecord>(_sortScratch, _enterCandidates.Count), _histogram);
     }
 
+    /// <summary>
+    /// The per-archetype record counts, as the cross-check half of the shared-frame key.
+    /// </summary>
+    /// <param name="archetypes">How many replicated archetypes the runtime holds.</param>
+    /// <returns>Four counts per archetype — enters, segments, states, leaves — in plan order.</returns>
+    /// <remarks>
+    /// Not the guarantee that two frames are identical; that comes from the construction argument in <see cref="SharedFrameSet"/>. This is what makes a
+    /// mistaken reuse implausible rather than merely unlikely, at the cost of one pass over the archetype table.
+    /// </remarks>
+    public ReadOnlySpan<int> ShareKey(int archetypes)
+    {
+        if (_shareKey.Length != archetypes * 4)
+        {
+            _shareKey = new int[archetypes * 4];
+        }
+
+        for (var a = 0; a < archetypes; a++)
+        {
+            _shareKey[(a * 4) + 0] = Count(a, FrameListKind.Enter);
+            _shareKey[(a * 4) + 1] = Count(a, FrameListKind.Segment);
+            _shareKey[(a * 4) + 2] = Count(a, FrameListKind.State);
+            _shareKey[(a * 4) + 3] = Count(a, FrameListKind.Leave);
+        }
+
+        return _shareKey;
+    }
+
     /// <summary>The frame buffer, at least <paramref name="byteCount"/> long.</summary>
     /// <param name="byteCount">The upper bound the frame can occupy.</param>
     /// <returns>The buffer.</returns>
@@ -204,6 +235,7 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
         }
 
         _disposed = true;
+        Shared.Dispose();
         for (var i = 0; i < _lists.Length; i++)
         {
             NativeMemory.Free(_lists[i].Items);
@@ -582,6 +614,13 @@ internal sealed unsafe class FrameAssembler : IDisposable
         _interest = interest;
         _tick = tickNumber;
 
+        // Drop every worker's cached encode. The tick is part of the share key as well, so this is belt and braces — but it is what keeps a cached pointer
+        // from outliving the buffer it points into if that key logic is ever changed, and it costs one flag per worker per tick.
+        for (var i = 0; i < _workers.Length; i++)
+        {
+            _workers[i]?.Shared.BeginTick();
+        }
+
         // Before the early return, because the sweep is about sessions that are NOT being served: one whose interest produced nothing this tick still has to
         // be degraded, closed for a skip run, or closed for silence. Keying it off the interest list would exempt exactly the sessions it exists to catch.
         SweepSkipPolicy();
@@ -630,6 +669,42 @@ internal sealed unsafe class FrameAssembler : IDisposable
 
     /// <summary>How many worker scratches exist, and therefore how many ready lists a driver has to walk.</summary>
     public int WorkerCount => _workers.Length;
+
+    /// <summary>
+    /// Frames this runtime actually encoded, across every worker. AC-1's numerator.
+    /// </summary>
+    /// <remarks>
+    /// Read against <see cref="FramesCopied"/>: 110 identical sessions on eight workers should encode eight times and copy 102, not encode 110. The counter
+    /// is what makes "one encode per tick for all of them" an assertion rather than something inferred from a timing.
+    /// </remarks>
+    public long FramesEncoded
+    {
+        get
+        {
+            var total = 0L;
+            for (var i = 0; i < _workers.Length; i++)
+            {
+                total += _workers[i]?.Shared.Encodes ?? 0;
+            }
+
+            return total;
+        }
+    }
+
+    /// <summary>Frames produced by copying an encode the same worker had already done this tick.</summary>
+    public long FramesCopied
+    {
+        get
+        {
+            var total = 0L;
+            for (var i = 0; i < _workers.Length; i++)
+            {
+                total += _workers[i]?.Shared.Copies ?? 0;
+            }
+
+            return total;
+        }
+    }
 
     /// <summary>The session slots one worker published a frame for this tick.</summary>
     /// <param name="worker">The worker, below <see cref="WorkerCount"/>.</param>
@@ -884,29 +959,58 @@ internal sealed unsafe class FrameAssembler : IDisposable
             flags |= TickFlags.ViewComplete;
         }
 
-        var bound = UpperBound(scratch) + (emitStats ? stats.MaxBlockBytes : 0);
-        var buffer = scratch.Bytes(bound);
-        var writer = new WireWriter(buffer);
-        EntitiesEncoder.WriteHeader(ref writer, (uint)_tick, flags);
-        for (var a = 0; a < _plans.Length; a++)
+        // ENCODE — or copy an encode this worker has already done (P1-15). "Shareable" means another session on this worker would have produced these same
+        // bytes: the same profile, the same baseline, a complete view and nothing owed. Everything the encoder reads is then identical for both, because the
+        // records come from the same hits against the same known-set content and the emit rule compares against the same baseline number.
+        //
+        // A STATS-carrying frame is never shareable: its session segment is this session's bytes/s, skipped frames and dropped commands, which is the one
+        // part of a frame that differs between two otherwise identical sessions.
+        //
+        // What is NOT shared is the gather above or the commit below. A shared frame tells N clients about the same enters and leaves, and every one of
+        // those N known-sets has to learn about them, or the next frame's emit rule is wrong for all but the first.
+        var shareable = owed == 0 && !emitStats && !state.PendingReset && state.ViewComplete && state.Profile != null;
+        var shareKey = shareable ? scratch.ShareKey(_plans.Length) : default;
+
+        int length;
+        Span<byte> buffer;
+        if (shareable && scratch.Shared.TryReuse(state.Profile, state.Baseline, _tick, flags, shareKey, out var cached))
         {
-            if (scratch.Count(a, FrameListKind.Enter) == 0 && scratch.Count(a, FrameListKind.Segment) == 0 && scratch.Count(a, FrameListKind.State) == 0
-                && scratch.Count(a, FrameListKind.Leave) == 0)
+            length = cached.Length;
+            buffer = scratch.Bytes(length);
+            cached.CopyTo(buffer);
+        }
+        else
+        {
+            var bound = UpperBound(scratch) + (emitStats ? stats.MaxBlockBytes : 0);
+            buffer = scratch.Bytes(bound);
+            var writer = new WireWriter(buffer);
+            EntitiesEncoder.WriteHeader(ref writer, (uint)_tick, flags);
+            for (var a = 0; a < _plans.Length; a++)
             {
-                continue;
+                if (scratch.Count(a, FrameListKind.Enter) == 0 && scratch.Count(a, FrameListKind.Segment) == 0 && scratch.Count(a, FrameListKind.State) == 0
+                    && scratch.Count(a, FrameListKind.Leave) == 0)
+                {
+                    continue;
+                }
+
+                EntitiesEncoder.WriteEntities(ref writer, _encodePlans[a], scratch.List(a, FrameListKind.Enter), scratch.List(a, FrameListKind.Segment),
+                    scratch.List(a, FrameListKind.State), scratch.List(a, FrameListKind.Leave));
             }
 
-            EntitiesEncoder.WriteEntities(ref writer, _encodePlans[a], scratch.List(a, FrameListKind.Enter), scratch.List(a, FrameListKind.Segment),
-                scratch.List(a, FrameListKind.State), scratch.List(a, FrameListKind.Leave));
+            // After the ENTITIES blocks (03 § 3 lists the block types, not an order, and a client decodes by type) and before the length is taken.
+            if (emitStats)
+            {
+                stats.WriteBlock(ref writer, session, state, _tick);
+            }
+
+            length = writer.Position;
+            scratch.Shared.NoteEncode();
+            if (shareable)
+            {
+                scratch.Shared.Store(state.Profile, state.Baseline, _tick, flags, shareKey, buffer[..length]);
+            }
         }
 
-        // After the ENTITIES blocks (03 § 3 lists the block types, not an order, and a client decodes by type) and before the length is taken.
-        if (emitStats)
-        {
-            stats.WriteBlock(ref writer, session, state, _tick);
-        }
-
-        var length = writer.Position;
         if (length > _maxFrameBytes)
         {
             Interlocked.Increment(ref _oversizeSkips);
