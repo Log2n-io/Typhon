@@ -36,6 +36,17 @@ public sealed class TyphonClient : IAsyncDisposable
     private IClientTransport _transport;
     private FrameApplier _applier;
     private ushort _commandSeq;
+
+    /// <summary>
+    /// The code of the last <c>KICK</c> this connection received, or zero.
+    /// </summary>
+    /// <remarks>
+    /// <b>TCP carries no close code, so without this every disconnect reads as 1001.</b> A FIN says the peer has gone and not why, which is why the protocol
+    /// sends a <c>KICK</c> ahead of the close carrying the real code (03 § 3). Reading only the transport's code collapses "you stopped acknowledging" (4001,
+    /// reconnect now), "the server is overloaded" (1013, back off) and "you spoke the protocol wrongly" (1002, do not come back) into one answer — and it is
+    /// the reconnect policy that then decides wrongly.
+    /// </remarks>
+    private ushort _kickCode;
     private Task _receiveLoop;
     private Task _pingLoop;
 
@@ -302,6 +313,9 @@ public sealed class TyphonClient : IAsyncDisposable
         ApplyWelcome(welcome);
         _options.Recorder?.Record(message);
         _policy.NoteConnected();
+
+        // A new connection has said nothing yet, so the previous one's close code must not decide this one's.
+        _kickCode = 0;
         Connects++;
         Connected?.Invoke(welcome);
         return welcome;
@@ -354,7 +368,10 @@ public sealed class TyphonClient : IAsyncDisposable
 
             if (message == null)
             {
-                if (!await HandleCloseAsync(_transport?.CloseCode ?? CloseCodes.GoingAway, ct).ConfigureAwait(false))
+                // A KICK outranks the transport's own code. The two agree where the transport has one (a WebSocket close frame carries the same number), and
+                // where it has none the KICK is the whole of what the server said.
+                var closeCode = _kickCode != 0 ? _kickCode : _transport?.CloseCode ?? CloseCodes.GoingAway;
+                if (!await HandleCloseAsync(closeCode, ct).ConfigureAwait(false))
                 {
                     return;
                 }
@@ -394,7 +411,12 @@ public sealed class TyphonClient : IAsyncDisposable
                 ApplyWelcome(WelcomeMessage.Parse(message));
                 break;
             case MessageTypes.Kick:
-                Kicked?.Invoke(KickMessage.Parse(message));
+                var kick = KickMessage.Parse(message);
+
+                // Kept for the close that is about to follow it. The server sends the KICK and then closes the link; this is the only place the real code is
+                // ever visible on a transport that has none of its own.
+                _kickCode = kick.Code;
+                Kicked?.Invoke(kick);
                 break;
             case MessageTypes.Pong:
                 break;
@@ -405,6 +427,18 @@ public sealed class TyphonClient : IAsyncDisposable
         }
     }
 
+    /// <summary>Closes and forgets the transport, so nothing reports a session that has ended as open.</summary>
+    /// <returns>The disposal.</returns>
+    private async Task DropTransportAsync()
+    {
+        var transport = _transport;
+        _transport = null;
+        if (transport != null)
+        {
+            await transport.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
     private async Task<bool> HandleCloseAsync(ushort code, CancellationToken ct)
     {
         var decision = _policy.Decide(code);
@@ -412,14 +446,14 @@ public sealed class TyphonClient : IAsyncDisposable
 
         if (decision != ReconnectDecision.Retry)
         {
+            // The session is over and nothing will reopen it, so the socket goes with it. Leaving it in place made IsConnected say a session was open for the
+            // rest of the process's life: Socket.Connected reports what the last I/O saw, and a peer's FIN does not change it — so a client that had been
+            // kicked, and knew it, still answered "connected" to everything that asked.
+            await DropTransportAsync().ConfigureAwait(false);
             return false;
         }
 
-        if (_transport != null)
-        {
-            await _transport.DisposeAsync().ConfigureAwait(false);
-            _transport = null;
-        }
+        await DropTransportAsync().ConfigureAwait(false);
 
         try
         {

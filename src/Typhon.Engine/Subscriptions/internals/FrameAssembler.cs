@@ -814,8 +814,9 @@ internal sealed unsafe class FrameAssembler : IDisposable
 
             // Silence first: a client that has stopped talking is gone whatever its skip run says, and 4001 tells its SDK to reconnect rather than to back off
             // as 1013 would.
-            var heardFrom = send->PingTick;
-            if (heardFrom > 0 && _tick - heardFrom > _silenceBoundTicks)
+            // The stamp is the tick plus one, so zero is "this slot was never bound" and every real tick — tick zero included — is a mark the sweep can use.
+            var heardFrom = send->PingStamp;
+            if (heardFrom > 0 && _tick - (heardFrom - 1) > _silenceBoundTicks)
             {
                 _sessions.RequestClose(session, SessionCloseReason.Unacknowledged, CloseCodes.NoAcknowledgement);
                 Interlocked.Increment(ref _sessionsClosedSilent);
@@ -1006,7 +1007,11 @@ internal sealed unsafe class FrameAssembler : IDisposable
         {
             // Nothing to say. The frame slot is given back rather than spent on a header, and the keepalive that a silent session still owes its client is
             // the send pump's business (P1-14b), not the assembler's.
-            send->AbandonFrame(sequence);
+            //
+            // It is given back WITHOUT counting a skip. A skip is back-pressure — K slots full, an acknowledgement too far behind, a pool that would not
+            // lend — and an idle world is none of those. Counting it here closed every session in a world quiet for fifty ticks, which is half a second at
+            // 100 Hz, and reported it as 1013 "you are lagging".
+            send->AbandonIdleFrame(sequence);
             ReturnIfValid(recycled);
             NoteSkip(state);
             return;

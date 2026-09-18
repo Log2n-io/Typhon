@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-09-17 |
+| Last Updated | 2026-09-18 |
 | Domain | Engine-owned replication: per-entity replication state, its storage, and what bounds its cost |
 
 > Invariants that keep replication cost tied to what clients are actually looking at, and keep per-entity
@@ -327,6 +327,55 @@
     runs the tick's guarded members and the transport path concurrently and requires the DEBUG re-entrancy guard never to fire.
     Falsifiability is proved by SessionWriterOwnershipTests.ARogueTransportThatWritesATickOwnedFieldIsDetected, which reaches an
     ordinary tick-side mutator from the transport thread and requires the verifier's own assertion to reject it.
+
+---
+
+## Module: Session Lifecycle
+
+### SUB-14: A session the tick closes is told so before its link is closed `[fatal][silent]`
+  invariant ∀ session s, ∀ close the TICK decided (silence, skip run, an unpublished tick, the application's Kick verb):
+    a KICK carrying the close code reaches s's link, and the link is closed after it — KICK, then close (03 § 3; on TCP, KICK then FIN)
+  invariant the KICK is sent by s's own send pump, never by the tick thread: the transport's one promise is at most one send in flight per
+    session, and a tick writing to a socket breaks both that and the rule that the tick does no I/O
+  invariant [the client itself started the close] → no KICK: the connection unbinds its link before asking the tick to close, and an absent
+    link is what tells the pump there is nobody to inform
+  invariant ∀ SDK: the close code it reports is the KICK's when one arrived, and the transport's only otherwise — TCP carries no code, so a
+    FIN alone says 1001 for every reason there is
+  never mark a row Closing and queue its Closed event as the whole of a close: the row is the engine's bookkeeping, and the client shares
+    none of it
+  never leave a transport bound after a terminal close: a socket whose peer has sent FIN still reports itself connected until the next write
+    fails, so an SDK that keeps it answers "connected" for a session that ended
+  scope: SessionTable.CloseCore, SubscriptionsIngress.BeginTick, SendPump.RequestKick, SendPump.TryKickAsync, SubscriptionConnection.Kick,
+    FrameAssembler.SweepSkipPolicy
+  on_violation: the worst state a client can be in. Everything it can observe says it is connected — the socket is open, no code arrived, no
+    error was raised — and no frame will ever come again. It cannot even reconnect, because nothing told it to. It is silent on the server
+    too: the close counters move, the session leaves the table, and an application that kicked a player is told it worked.
+  rationale: 02 § 6 and 05 § 1 already specify the message and the SDK's response to it; what was missing was any caller. The pump is the
+    right sender because it is already the single writer for the slot, so the KICK is simply the last message it sends.
+  verified: BotSwarmSmokeTests.ASilentSessionIsClosedAndItsClientIsTold — a client that never pings, asserting in one place that its frames
+    stopped, that a close arrived, that the code was 4001 rather than 1001, and that it no longer believes itself connected.
+
+### SUB-15: A skip run counts back-pressure only, and a mark of "never heard from" is not a tick `[fatal][silent]`
+  invariant ∀ session s, ∀ tick T: s's skip run advances only where the ENGINE denied s a frame it had something to put in — K slots full, an
+    acknowledgement further behind than the lag bound, a frame over the wire cap, a block the pool would not lend
+  invariant [s had nothing to say on T] → s's skip run is unchanged: neither advanced nor reset — a session genuinely behind, whose world then
+    goes quiet, is still behind
+  invariant the last-heard-from mark distinguishes "never bound" from "bound on tick zero": tick zero is a real tick, and a mark that cannot
+    say so exempts from the silence policy every session admitted in a server's first tick
+  never fold "the world was quiet" into the counter SkipPolicy.Evaluate reads: it degrades at 20 and closes with 1013 at 50, and 1013 means
+    "you cannot keep up"
+  scope: SessionSendState.AbandonFrame, SessionSendState.AbandonIdleFrame, SessionSendState.NotePing, SessionSendState.PingStamp,
+    SkipPolicy.Evaluate, FrameAssembler.SweepSkipPolicy
+  on_violation: every session in a world that goes quiet for fifty ticks — half a second at 100 Hz — is closed, and the reason it is given is
+    1013, which tells its SDK to back off as though the server were overloaded. Measured on 2026-09-18: fifty healthy sessions, 1 637 quiet
+    ticks, zero real skips, all fifty closed. Its twin is quieter still: a session whose mark reads zero is never closed for silence at all,
+    so a client that stops talking is served forever.
+  rationale: the two states are indistinguishable from the producer's side — a claimed sequence and no frame — which is how they came to share
+    one counter. They are opposite conditions: one is a client that cannot take what it is offered, the other a client that was offered
+    everything there was.
+  verified: FrameHandoffTests.AnIdleTickCostsASequenceButNotASkip and FrameHandoffTests.ASessionHeardFromOnTickZeroIsDistinguishableFromOneNeverBound,
+    with BotSwarmSmokeTests.FiftyBotsSurviveTwoHundredTicks as the end-to-end reading — it passed before the fix only because the sessions it
+    lost were never told, which is SUB-14.
 
 ---
 

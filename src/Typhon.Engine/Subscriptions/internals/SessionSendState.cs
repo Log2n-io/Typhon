@@ -220,8 +220,16 @@ internal unsafe struct SessionSendState
     /// <summary>The newest tick the client has reported applied, from its <c>PING</c>. Zero until the first one arrives.</summary>
     public long AckedTick => Volatile.Read(ref _ackedTick);
 
-    /// <summary>The server tick at which this session was last heard from. Seeded when the slot is bound, so silence is measured from the handshake.</summary>
-    public long PingTick => Volatile.Read(ref _pingTick);
+    /// <summary>
+    /// The server tick at which this session was last heard from, <b>plus one</b>. Seeded when the slot is bound, so silence is measured from the handshake.
+    /// </summary>
+    /// <remarks>
+    /// <b>Plus one, because tick zero is a real tick and zero has to mean "never".</b> Storing the tick itself made a session bound during tick zero —
+    /// every session on a server in its first tick, and every session in a fixture that connects right after <c>Start</c> — indistinguishable from a slot
+    /// that was never bound, and the silence sweep's <c>&gt; 0</c> guard then exempted it from the 4001 policy for the rest of its life. It was found by a
+    /// client that stopped pinging and was served forever.
+    /// </remarks>
+    public long PingStamp => Volatile.Read(ref _pingTick);
 
     /// <summary>
     /// What the handshake granted this session, so the producer can tell whether a capability-gated block — <c>STATS</c> today — belongs in its frames.
@@ -229,7 +237,7 @@ internal unsafe struct SessionSendState
     /// <remarks>
     /// The grant is the connection's (<c>SubscriptionConnection.GrantCaps</c>) and is therefore computed on a transport thread, while the only reader is the
     /// frame producer on the tick. One number written atomically by one thread and read by another is exactly what SUB-05 puts on its allow-list, and it is
-    /// the same shape as <see cref="AckedTick"/> and <see cref="PingTick"/>. It is written once per session, between the slot being bound and the first frame
+    /// the same shape as <see cref="AckedTick"/> and <see cref="PingStamp"/>. It is written once per session, between the slot being bound and the first frame
     /// being produced for it, and the zero <see cref="Initialize"/> leaves is the honest answer for a session whose <c>HELLO</c> has not been answered yet.
     /// </remarks>
     public Capabilities Caps => (Capabilities)(uint)Volatile.Read(ref _caps);
@@ -296,20 +304,45 @@ internal unsafe struct SessionSendState
     }
 
     /// <summary>
-    /// Gives back a sequence claimed by <see cref="TryBeginFrame"/> without publishing a frame for it.
+    /// Gives back a sequence claimed by <see cref="TryBeginFrame"/> without publishing a frame for it, and counts the tick as a skip.
     /// </summary>
     /// <param name="sequence">The sequence returned by the matching <see cref="TryBeginFrame"/>.</param>
     /// <remarks>
-    /// For an encode that produced nothing, or that could not rent a block. The block handed back by <see cref="TryBeginFrame"/> is still the caller's to
-    /// return; this only rolls the producer-private counter back so the slot is claimed again next tick.
+    /// For an encode the engine could not complete — a frame over the wire limit, a block the pool would not lend. The block handed back by
+    /// <see cref="TryBeginFrame"/> is still the caller's to return; this only rolls the producer-private counter back so the slot is claimed again next tick.
     /// </remarks>
     public void AbandonFrame(long sequence)
+    {
+        Rollback(sequence);
+        _skipRun++;
+    }
+
+    /// <summary>
+    /// Gives back a sequence claimed for a tick the session had nothing to say on, WITHOUT counting a skip.
+    /// </summary>
+    /// <param name="sequence">The sequence returned by the matching <see cref="TryBeginFrame"/>.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>An idle world is not back-pressure, and counting it as such closes healthy sessions.</b> <see cref="SkipRun"/> is what
+    /// <c>SkipPolicy.Evaluate</c> reads: it degrades a session's rate class at twenty and closes it with 1013 at fifty, and its whole subject is a client
+    /// that cannot keep up. A session that was served everything there was to serve is the opposite of that, and folding the two together closes every
+    /// session in a world that goes quiet for fifty ticks — half a second at 100 Hz.
+    /// </para>
+    /// <para>
+    /// The run is left where it stands rather than reset: a session genuinely behind, whose world then goes quiet for a tick, is still behind, and clearing
+    /// its run here would let it evade the policy one idle tick at a time.
+    /// </para>
+    /// </remarks>
+    public void AbandonIdleFrame(long sequence) => Rollback(sequence);
+
+    /// <summary>Rolls the producer-private sequence back so the slot is claimed again next tick.</summary>
+    /// <param name="sequence">The sequence just claimed.</param>
+    private void Rollback(long sequence)
     {
         Debug.Assert(_nextSeq == sequence + 1, "only the sequence just claimed can be abandoned");
         Debug.Assert(Volatile.Read(ref _readySeq) <= sequence, "a published frame cannot be abandoned");
 
         _nextSeq = sequence;
-        _skipRun++;
     }
 
     /// <summary>
@@ -440,9 +473,10 @@ internal unsafe struct SessionSendState
     /// </remarks>
     public void NotePing(long tick)
     {
-        if (tick > Volatile.Read(ref _pingTick))
+        var stamp = tick + 1;
+        if (stamp > Volatile.Read(ref _pingTick))
         {
-            Volatile.Write(ref _pingTick, tick);
+            Volatile.Write(ref _pingTick, stamp);
         }
     }
 

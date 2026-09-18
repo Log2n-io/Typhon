@@ -144,6 +144,7 @@ internal sealed class SubscriptionsIngress : IDisposable
     private readonly SessionTable _sessions;
     private readonly SubscriptionsRegistry _registry;
     private readonly IngressRingPool _pool;
+    private readonly SendPump _sendPump;
     private readonly Lock _rowLock = new();
 
     private readonly SessionIngress[] _rows;
@@ -163,8 +164,12 @@ internal sealed class SubscriptionsIngress : IDisposable
     /// <param name="buffers">This tick's typed buffers.</param>
     /// <param name="pool">Where a session's ring comes from.</param>
     /// <param name="maxSessions">The session table's width.</param>
+    /// <param name="sendPump">
+    /// The send side, so a close the tick performs reaches the client as a <c>KICK</c>. <see langword="null"/> in fixtures that exercise the drain alone,
+    /// where a close has no socket behind it.
+    /// </param>
     public SubscriptionsIngress(SessionTable sessions, SubscriptionsRegistry registry, CommandRegistry commands, CommandTypeBuffers buffers,
-        IngressRingPool pool, int maxSessions)
+        IngressRingPool pool, int maxSessions, SendPump sendPump = null)
     {
         ArgumentNullException.ThrowIfNull(sessions);
         ArgumentNullException.ThrowIfNull(registry);
@@ -175,6 +180,7 @@ internal sealed class SubscriptionsIngress : IDisposable
         _sessions = sessions;
         _registry = registry;
         _pool = pool;
+        _sendPump = sendPump;
         _rows = new SessionIngress[maxSessions];
         Commands = commands;
         Buffers = buffers;
@@ -367,6 +373,12 @@ internal sealed class SubscriptionsIngress : IDisposable
             if (e.Kind == SessionEventKind.Closed)
             {
                 _closing.Add(e.Session.Slot);
+
+                // The client is told here, once, for every reason a session ends — silence, a skip run, an unpublished tick, the application's Kick verb. The
+                // table's close marks the row and queues this event and does nothing else; without this line the socket stays open and no code ever arrives,
+                // which is the one failure a client cannot recover from because nothing tells it to reconnect. A close the client itself started has already
+                // unbound its link, and the pump answers false for it rather than sending a second goodbye.
+                _sendPump?.RequestKick(e.Session, e.CloseCode, _sessions.CloseDetail(e.Session));
             }
         }
 

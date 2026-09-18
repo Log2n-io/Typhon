@@ -58,6 +58,7 @@ sealed class BotSwarmSmokeTests : TestBase<BotSwarmSmokeTests>
     /// </para>
     /// </remarks>
     [Test]
+    [VerifiesRule("SUB-14")]
     public void ASilentSessionIsClosedAndItsClientIsTold()
     {
         var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);

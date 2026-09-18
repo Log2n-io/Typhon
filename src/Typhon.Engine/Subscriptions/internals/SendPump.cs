@@ -43,17 +43,22 @@ internal sealed class SendPump : IDisposable
     /// </remarks>
     private const int QuiesceTimeoutMs = 5000;
 
+    /// <summary>The widest a <c>KICK</c> can be: the type byte, the code, the reason's length prefix and the reason itself.</summary>
+    private const int KickBytes = 1 + 2 + 1 + ProtocolConstants.KickReasonMaxBytes;
+
     private readonly SessionTable _sessions;
     private readonly FrameAssembler _frames;
     private readonly ISubscriptionLink[] _links;
     private readonly NativeFrameMemoryManager[] _buffers;
     private readonly int[] _pumping;
     private readonly SessionPumpWorkItem[] _workItems;
+    private readonly PendingKick[] _kicks;
     private readonly CancellationTokenSource _stopping = new();
 
     private long _framesSent;
     private long _bytesSent;
     private long _sendFailures;
+    private long _kicksSent;
     private int _activePumps;
     private int _disposed;
 
@@ -73,6 +78,7 @@ internal sealed class SendPump : IDisposable
         _buffers = new NativeFrameMemoryManager[maxSessions];
         _pumping = new int[maxSessions];
         _workItems = new SessionPumpWorkItem[maxSessions];
+        _kicks = new PendingKick[maxSessions];
     }
 
     /// <summary>Frames handed to a link and completed.</summary>
@@ -83,6 +89,9 @@ internal sealed class SendPump : IDisposable
 
     /// <summary>Sends that faulted, each of which closed its session with 1011.</summary>
     public long SendFailures => Volatile.Read(ref _sendFailures);
+
+    /// <summary>Sessions the tick closed that were told so with a <c>KICK</c> before their link was closed.</summary>
+    public long KicksSent => Volatile.Read(ref _kicksSent);
 
     /// <summary>Pumps that had not come back when <see cref="Dispose"/> gave up waiting. Non-zero is a transport that does not honour a close.</summary>
     public int PumpsStillRunningAtDispose { get; private set; }
@@ -125,7 +134,47 @@ internal sealed class SendPump : IDisposable
         if (session.IsValid && (uint)session.Slot < (uint)_links.Length)
         {
             Volatile.Write(ref _links[session.Slot], null);
+            Volatile.Write(ref _kicks[session.Slot], null);
         }
+    }
+
+    /// <summary>
+    /// Records that a session the tick has closed must be told so, and wakes its pump to say it.
+    /// </summary>
+    /// <param name="session">The session, already <c>Closing</c> in the table.</param>
+    /// <param name="code">The close code, which the <c>KICK</c> and the link's own close both carry.</param>
+    /// <param name="reason">Why, truncated by the encoder. May be <see langword="null"/>.</param>
+    /// <returns><see langword="false"/> when there was nothing to tell — no link, or the slot no longer names this session.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>The tick decides, the pump speaks.</b> A close the engine started — silence, a skip run, the application's <c>Kick</c> verb, an unpublished tick —
+    /// is decided on the tick thread, which must not write to a socket. Sending it from there would also break the one promise
+    /// <see cref="ISubscriptionLink"/> makes to a transport: at most one send in flight per session. Latching it here and letting the session's own pump send
+    /// it keeps both — the pump is the single writer for the slot, and the <c>KICK</c> simply becomes the last message it sends.
+    /// </para>
+    /// <para>
+    /// <b>Without this, the close is silent.</b> The row is marked and a <c>Closed</c> event is queued, and nothing else happens: the socket stays open, no
+    /// code reaches the client, and no frame ever comes again. A client in that state cannot even reconnect, because nothing told it to.
+    /// </para>
+    /// </remarks>
+    public bool RequestKick(SessionId session, ushort code, string reason)
+    {
+        if (IsDisposed || !session.IsValid || (uint)session.Slot >= (uint)_kicks.Length)
+        {
+            return false;
+        }
+
+        if (Volatile.Read(ref _links[session.Slot]) == null)
+        {
+            // A close the CLIENT started, or a link that has already gone: the connection unbinds before it asks the tick to close, so an absent link here
+            // means the peer already knows. There is nobody to tell.
+            return false;
+        }
+
+        // Release, so the pump woken below sees the code and the reason, not just the reference.
+        Volatile.Write(ref _kicks[session.Slot], new PendingKick(session, code, reason));
+        Wake(session);
+        return true;
     }
 
     /// <summary>
@@ -247,6 +296,10 @@ internal sealed class SendPump : IDisposable
                 {
                 }
 
+                // After the frames, because a session that has a published frame and a close pending is owed both, in that order: the frame belongs to a tick
+                // the server already committed, and dropping it would leave the client's baseline short of what the engine proved it wrote.
+                await TryKickAsync(slot).ConfigureAwait(false);
+
                 // Clear, then look again. A frame published between the failed claim above and this store would otherwise wait for the next tick that
                 // produced for this session — which, for a session that is now idle, may never come.
                 Volatile.Write(ref _pumping[slot], 0);
@@ -278,6 +331,11 @@ internal sealed class SendPump : IDisposable
         if (IsDisposed || Volatile.Read(ref _links[slot]) == null)
         {
             return false;
+        }
+
+        if (Volatile.Read(ref _kicks[slot]) != null)
+        {
+            return true;
         }
 
         var session = _sessions.IdAt(slot);
@@ -399,6 +457,86 @@ internal sealed class SendPump : IDisposable
         }
     }
 
+    /// <summary>
+    /// Sends the close a session is owed, then closes its link.
+    /// </summary>
+    /// <param name="slot">The session table row.</param>
+    /// <returns>The send.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>The link is unbound before the <c>KICK</c> goes out, and that is what makes this the last message.</b> A tick running beside this one can still be
+    /// producing for the slot; clearing the link first means the frame it publishes finds nothing to send, rather than racing the close onto the same socket.
+    /// The compare-exchange is what keeps that from unbinding a link the slot's NEXT occupant has already attached.
+    /// </para>
+    /// <para>
+    /// <b>The message's bytes are this method's own allocation</b>, not a frame-pool block, so a row recycled while the send is in flight frees nothing this
+    /// is reading. That is also why no <c>BeginSend</c> is taken: the send counter exists to hold a POOL block alive, and there is no pool block here.
+    /// </para>
+    /// <para>
+    /// <b>The close happens whatever the send did.</b> A transport that faults on the <c>KICK</c> still owes its peer a close, and the two carry the same
+    /// code — which is the whole reason the protocol sends both (03 § 3: <c>KICK</c>, then close; on TCP, <c>KICK</c> then FIN).
+    /// </para>
+    /// </remarks>
+    private async ValueTask TryKickAsync(int slot)
+    {
+        var kick = Interlocked.Exchange(ref _kicks[slot], null);
+        if (kick == null)
+        {
+            return;
+        }
+
+        var link = Volatile.Read(ref _links[slot]);
+        if (link == null || _sessions.IdAt(slot) != kick.Session)
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref _links[slot], null, link) != link)
+        {
+            return;
+        }
+
+        var reason = KickMessage.TruncateUtf8(kick.Reason ?? string.Empty, ProtocolConstants.KickReasonMaxBytes);
+        var buffer = NativeFrameMemoryManager.Allocate(KickBytes);
+        try
+        {
+            var length = EncodeKick(buffer, kick.Code, reason);
+            await link.SendAsync(buffer.Memory[..length], _stopping.Token).ConfigureAwait(false);
+            Interlocked.Increment(ref _kicksSent);
+        }
+        catch (Exception)
+        {
+            // Recorded, not rethrown: this runs on a pool thread with nobody to catch it, and the close below is what the client actually needs.
+            Interlocked.Increment(ref _sendFailures);
+        }
+        finally
+        {
+            buffer.Release();
+        }
+
+        try
+        {
+            link.Close(kick.Code, reason);
+        }
+        catch (Exception)
+        {
+            // A transport whose close throws has already been told everything it is going to be told, and there is no caller to report it to.
+        }
+    }
+
+    /// <summary>Writes a <c>KICK</c> into a buffer and answers its length.</summary>
+    /// <param name="buffer">The allocation, at least <see cref="KickBytes"/> long.</param>
+    /// <param name="code">The close code.</param>
+    /// <param name="reason">The reason, already truncated.</param>
+    /// <returns>How many bytes were written.</returns>
+    /// <remarks>Separate from <see cref="TryKickAsync"/> because <c>WireWriter</c> is a <c>ref struct</c>, which no async method may hold a local of.</remarks>
+    private static int EncodeKick(NativeFrameMemoryManager buffer, ushort code, string reason)
+    {
+        var writer = new WireWriter(buffer.GetSpan());
+        new KickMessage(code, reason).Write(ref writer);
+        return writer.Position;
+    }
+
     /// <inheritdoc />
     public void Dispose()
     {
@@ -416,6 +554,9 @@ internal sealed class SendPump : IDisposable
         {
             var link = Volatile.Read(ref _links[i]);
             Volatile.Write(ref _links[i], null);
+
+            // A close the tick latched but no pump got to. The teardown's own close carries 1001, which is the truer answer at this point anyway.
+            Volatile.Write(ref _kicks[i], null);
             try
             {
                 link?.Close(CloseCodes.GoingAway, "server stopping");
@@ -469,3 +610,14 @@ internal sealed class SendPump : IDisposable
         public void Execute() => _ = _pump.PumpAsync(_slot);
     }
 }
+
+/// <summary>A close the tick decided, waiting for the session's own pump to send it.</summary>
+/// <param name="Session">Whose close it is, so a recycled slot cannot inherit it.</param>
+/// <param name="Code">The close code.</param>
+/// <param name="Reason">Why, untruncated; the encoder cuts it at a code-point boundary.</param>
+/// <remarks>
+/// A record rather than three slot-indexed arrays because the three values must become visible together — a pump that saw a new code beside the previous
+/// close's reason would tell a client something neither the tick nor the protocol ever said. One reference published with a release says all three at once,
+/// and a close is rare enough that the allocation is not worth avoiding.
+/// </remarks>
+internal sealed record PendingKick(SessionId Session, ushort Code, string Reason);

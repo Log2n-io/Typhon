@@ -783,6 +783,83 @@ unsafe class FrameHandoffTests
         }
     }
 
+    /// <summary>
+    /// A tick the session had nothing to say on gives its sequence back and does <b>not</b> advance the skip run.
+    /// </summary>
+    /// <remarks>
+    /// The two look identical from the producer's side — a claimed sequence, no frame — and treating them the same closed every healthy session in a world
+    /// that went quiet. <c>SkipRun</c> is read only by <c>SkipPolicy.Evaluate</c>, which degrades at twenty and closes with 1013 at fifty; 1013 means "you
+    /// cannot keep up", and a client that was served everything there was to serve is the opposite of that. Fifty quiet ticks is half a second at 100 Hz.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-15")]
+    public void AnIdleTickCostsASequenceButNotASkip()
+    {
+        var state = NewState();
+        var block = stackalloc byte[64];
+        try
+        {
+            SessionSendState.Initialize(state);
+
+            for (var i = 0; i < 60; i++)
+            {
+                Assert.That(state->TryBeginFrame(out var sequence, out _), Is.True, "an idle tick is not back-pressure, so the slot is always claimable");
+                state->AbandonIdleFrame(sequence);
+            }
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(state->SkipRun, Is.Zero, "sixty quiet ticks past the close threshold, and the session owes the policy nothing");
+                Assert.That(state->NextSequence, Is.Zero, "an idle tick consumes no sequence either");
+            });
+
+            // And a real skip still counts, from wherever the run stood: the two paths are separate, not one path silenced.
+            Assert.That(state->TryBeginFrame(out var claimed, out _), Is.True);
+            state->AbandonFrame(claimed);
+            Assert.That(state->SkipRun, Is.EqualTo(1), "back-pressure still advances the run");
+
+            Assert.That(state->TryBeginFrame(out var last, out _), Is.True);
+            state->PublishFrame(last, new FrameBlock(block, 64), 8, 1);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree(state);
+        }
+    }
+
+    /// <summary>
+    /// A session heard from on tick zero carries a mark, because the stamp is the tick plus one.
+    /// </summary>
+    /// <remarks>
+    /// Zero has to mean "this slot was never bound", and tick zero is a real tick — every session on a server in its first tick, and every session in a
+    /// fixture that connects straight after <c>Start</c>. Storing the tick itself made those two states identical, and the silence sweep's <c>&gt; 0</c>
+    /// guard then exempted such a session from the 4001 policy for the rest of its life: it stopped pinging and was served forever.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-15")]
+    public void ASessionHeardFromOnTickZeroIsDistinguishableFromOneNeverBound()
+    {
+        var state = NewState();
+        try
+        {
+            SessionSendState.Initialize(state);
+            Assert.That(state->PingStamp, Is.Zero, "nothing has been heard from this slot yet");
+
+            state->NotePing(0);
+            Assert.That(state->PingStamp, Is.EqualTo(1), "tick zero is a mark, and the stamp is the tick plus one");
+
+            state->NotePing(41);
+            Assert.That(state->PingStamp, Is.EqualTo(42));
+
+            state->NotePing(7);
+            Assert.That(state->PingStamp, Is.EqualTo(42), "the mark never moves backwards");
+        }
+        finally
+        {
+            NativeMemory.AlignedFree(state);
+        }
+    }
+
     [Test]
     public void TheAcknowledgedTickNeverMovesBackwards()
     {
