@@ -345,6 +345,17 @@ public sealed class MetricPlan
     /// <summary>Whether it belongs to the per-session segment.</summary>
     public bool Session { get; }
 
+    /// <summary>
+    /// Its position within its own segment — <see cref="CatalogPlan.ServerMetrics"/> or <see cref="CatalogPlan.SessionMetrics"/>, whichever
+    /// <see cref="Session"/> names. Not <see cref="Idx"/>: the wire indices interleave the two scopes and skip the built-ins a runtime does not publish.
+    /// </summary>
+    /// <remarks>
+    /// Assigned when the plan is compiled, because the alternative is what it replaced: a sink handed a <see cref="MetricPlan"/> per VALUE had to recover
+    /// its array with <c>Array.IndexOf</c>, which is a linear scan per sample and therefore quadratic in the metric count — on the one block whose whole
+    /// purpose is to grow that count.
+    /// </remarks>
+    public int Offset { get; internal set; }
+
     /// <summary>Values per emission: its label count, or 1 for a scalar.</summary>
     public int ValueCount { get; }
 
@@ -392,7 +403,8 @@ public sealed class CatalogPlan
             }
 
             previousIdx = m.Idx;
-            (m.Scope == CatalogMetric.SessionScope ? session : server).Add(new MetricPlan(m));
+            var segment = m.Scope == CatalogMetric.SessionScope ? session : server;
+            segment.Add(new MetricPlan(m) { Offset = segment.Count });
         }
 
         ServerMetrics = server.ToArray();

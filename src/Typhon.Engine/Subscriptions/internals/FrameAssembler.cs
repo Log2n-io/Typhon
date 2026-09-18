@@ -315,9 +315,36 @@ internal sealed class SessionFrameState
     /// <summary>Frames produced since the degrade level last changed, which is what earns a class back.</summary>
     public long FramesSinceDegrade { get; set; }
 
+    /// <summary>
+    /// Frames this session was skipped, cumulative — <c>typhon.session.skippedFrames</c>. Not <see cref="SessionSendState.SkipRun"/>, which is the CURRENT
+    /// run and is reset by every published frame; a counter has to survive the recovery it reports.
+    /// </summary>
+    public long FramesSkipped { get; set; }
+
+    /// <summary>
+    /// Bytes of frame published for this session, cumulative — what <c>typhon.session.outBytesPerSec</c> is differenced from.
+    /// </summary>
+    /// <remarks>
+    /// Bytes PUBLISHED rather than bytes sent: the producer owns this field, so counting here needs no synchronisation, while the send side's count would
+    /// have to be written by the pump and read by the tick. The two differ only by the frames a session was handed and never drained, which is at most
+    /// <see cref="SessionSendState.K"/> of them.
+    /// </remarks>
+    public long BytesPublished { get; set; }
+
+    /// <summary>The tick of the last <c>STATS</c> block written for this session, which sets the window its per-second value is divided by.</summary>
+    public long StatsTick { get; set; }
+
+    /// <summary><see cref="BytesPublished"/> as of that block, so the next one reports the window rather than the session's whole life.</summary>
+    public long StatsBytesMark { get; set; }
+
     /// <summary>Rebinds the slot to a new session: the known-set is emptied and every per-session number starts again.</summary>
     /// <param name="generation">The new session's generation.</param>
-    public void RebindTo(ushort generation)
+    /// <param name="tick">
+    /// The tick the slot is being bound at, which seeds the statistics window. Not zero: <c>typhon.session.outBytesPerSec</c> divides a window's bytes by
+    /// <c>tick − StatsTick</c>, so a zero here would divide the first block's bytes by the absolute tick number — a session joining a runtime at tick 130 of
+    /// a 10 Hz world would report its first second of traffic spread over thirteen.
+    /// </param>
+    public void RebindTo(ushort generation, long tick)
     {
         Generation = generation;
         Known.Clear();
@@ -330,6 +357,10 @@ internal sealed class SessionFrameState
         FramesProduced = 0;
         DegradeLevel = 0;
         FramesSinceDegrade = 0;
+        FramesSkipped = 0;
+        BytesPublished = 0;
+        StatsTick = tick;
+        StatsBytesMark = 0;
     }
 }
 
@@ -379,6 +410,7 @@ internal sealed unsafe class FrameAssembler : IDisposable
     private InterestPass _interest;
     private long _tick;
     private int _tickSessionCount;
+    private StatsEncoder _stats;
 
     private long _framesProduced;
     private long _framesSkipped;
@@ -431,6 +463,19 @@ internal sealed unsafe class FrameAssembler : IDisposable
 
     /// <summary>The frame pool every published frame's bytes come from.</summary>
     public FramePool Pool { get; }
+
+    /// <summary>
+    /// The <c>STATS</c> producer (P1-16), or <see langword="null"/> before it is attached and on a runtime that declares no metric.
+    /// </summary>
+    /// <remarks>
+    /// Attached after construction because it reads the send pump and the ingress path, both of which the runtime builds after this object. Published with a
+    /// release and read with an acquire: the write is on the thread that calls <c>Start</c>, the reads are on workers.
+    /// </remarks>
+    public StatsEncoder Stats => Volatile.Read(ref _stats);
+
+    /// <summary>Binds the <c>STATS</c> producer. Called once, from <c>SubscriptionsRuntime</c>'s constructor, before any worker exists.</summary>
+    /// <param name="stats">The producer.</param>
+    public void AttachStats(StatsEncoder stats) => Volatile.Write(ref _stats, stats);
 
     /// <summary>The durability gate a send pump reads before it sends anything (P1-14b writes it).</summary>
     public FramePublicationGate Gate { get; } = new();
@@ -549,6 +594,11 @@ internal sealed unsafe class FrameAssembler : IDisposable
 
         var workers = Math.Max(1, workerCount);
         EnsureWorkers(workers);
+
+        // The one encode of the tick's shared server segment (W25), here because this is the track's last single-threaded point before the chunks run: the
+        // dispatch that follows is the barrier that publishes the bytes to every worker that will copy them. Through the property, not the field, so the one
+        // acquire the field documents is the only way it is ever read.
+        Stats?.BeginTick(tickNumber);
 
         for (var i = 0; i < _tickSessionCount; i++)
         {
@@ -719,7 +769,7 @@ internal sealed unsafe class FrameAssembler : IDisposable
         {
             // A new session in the slot. The hand-off counters were zeroed when the link was bound, on the admitting thread, so nothing is reset here: the
             // table only re-leases a row once every frame it produced has drained, and zeroing them now would race the PING that can already be arriving.
-            state.RebindTo(session.Generation);
+            state.RebindTo(session.Generation, _tick);
         }
 
         return state;
@@ -806,7 +856,15 @@ internal sealed unsafe class FrameAssembler : IDisposable
         // brand-new session's first tick legitimately has hits and no records, and calling that a complete view would tell the client its world was empty.
         var owed = deferred + pending;
         var completed = owed == 0 && !state.ViewComplete;
-        if (records == 0 && (flags & TickFlags.Reset) == 0 && !completed)
+
+        // The STATS block is a reason to produce a frame in its own right (P1-16). Without this the block would ride only on ticks that happened to carry an
+        // entity record, so a quiet world — the very case a statistics HUD is watching — would receive one every few seconds or never.
+        // ACQUIRE, once, into a local: this runs on a worker and the encoder was published from the thread that called Start, which is exactly the ordering
+        // the field's property exists for. Reading it once also means the frame is built against one answer rather than two.
+        var stats = Stats;
+        var emitStats = stats != null && stats.IsEmissionTick && (send->Caps & Capabilities.Stats) != 0;
+
+        if (records == 0 && (flags & TickFlags.Reset) == 0 && !completed && !emitStats)
         {
             // Nothing to say. The frame slot is given back rather than spent on a header, and the keepalive that a silent session still owes its client is
             // the send pump's business (P1-14b), not the assembler's.
@@ -826,7 +884,7 @@ internal sealed unsafe class FrameAssembler : IDisposable
             flags |= TickFlags.ViewComplete;
         }
 
-        var bound = UpperBound(scratch);
+        var bound = UpperBound(scratch) + (emitStats ? stats.MaxBlockBytes : 0);
         var buffer = scratch.Bytes(bound);
         var writer = new WireWriter(buffer);
         EntitiesEncoder.WriteHeader(ref writer, (uint)_tick, flags);
@@ -840,6 +898,12 @@ internal sealed unsafe class FrameAssembler : IDisposable
 
             EntitiesEncoder.WriteEntities(ref writer, _encodePlans[a], scratch.List(a, FrameListKind.Enter), scratch.List(a, FrameListKind.Segment),
                 scratch.List(a, FrameListKind.State), scratch.List(a, FrameListKind.Leave));
+        }
+
+        // After the ENTITIES blocks (03 § 3 lists the block types, not an order, and a client decodes by type) and before the length is taken.
+        if (emitStats)
+        {
+            stats.WriteBlock(ref writer, session, state, _tick);
         }
 
         var length = writer.Position;
@@ -872,6 +936,16 @@ internal sealed unsafe class FrameAssembler : IDisposable
         // have been left exactly as it was and its next frame would carry the same union (SUB-03).
         Commit(state, scratch, stamp);
         state.Baseline = _tick;
+
+        // The window closes BEFORE this frame is counted, and the order is the whole of it: the block was encoded from the byte total as it stood on entry,
+        // so a mark taken after the addition would leave this frame's own bytes in neither window — reported by the block it rode on, because they were not
+        // yet counted, and excluded from the next, because the mark had swallowed them. Every second's largest frame would go missing from the rate.
+        if (emitStats)
+        {
+            StatsEncoder.NoteBlockPublished(state, _tick);
+        }
+
+        state.BytesPublished += length;
 
         // Cleared HERE and not where the flag was read, so a reset that could not be published is still owed. The known-set was emptied above either way,
         // which is the right pairing: a client that never received the RESET still holds a store this session can no longer describe, and the next frame it
@@ -1189,6 +1263,7 @@ internal sealed unsafe class FrameAssembler : IDisposable
             state.Baseline = _tick;
         }
 
+        state.FramesSkipped++;
         Interlocked.Increment(ref _framesSkipped);
     }
 

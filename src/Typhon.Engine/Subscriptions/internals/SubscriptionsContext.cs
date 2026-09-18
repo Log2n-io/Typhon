@@ -74,6 +74,12 @@ internal sealed class SubscriptionsContext
     internal void AttachSubscriptions(SubscriptionsRuntime subscriptions)
     {
         ArgumentNullException.ThrowIfNull(subscriptions);
+
+        // The telemetry ring, from the one object that already holds the scheduler. Every duration in a STATS block comes from it, and reaching it any other
+        // way would mean handing the scheduler to the replication runtime, which has no other use for it — AttachScheduler runs during runtime construction,
+        // strictly before this.
+        subscriptions.Stats?.AttachTelemetry(_scheduler?.Telemetry);
+
         Volatile.Write(ref _subscriptions, subscriptions);
     }
 

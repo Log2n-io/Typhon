@@ -143,11 +143,18 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
             // Ingress (P1-05). The command registry is bound from the CATALOG, so the decode follows what the client negotiated against rather than a second
             // reading of the declarations; the ring pool is created here because a ring's lifetime is a session's, and sessions live in the table above it.
-            CommandTypes = CommandRegistry.Build(registry, CatalogPlan.Compile(Catalog.Canonical));
+            CatalogPlan = CatalogPlan.Compile(Catalog.Canonical);
+            CommandTypes = CommandRegistry.Build(registry, CatalogPlan);
             _ingressRings = new IngressRingPool("Subscriptions.IngressRings", parent, engine.MemoryAllocator, Options);
             _ingress = new SubscriptionsIngress(_sessions, registry, CommandTypes, new CommandTypeBuffers(CommandTypes, Options.MaxSessions), _ingressRings,
                 Options.MaxSessions);
             Commands = new SubscriptionsCommands(_ingress);
+
+            // STATS (P1-16). Last of the tick-path objects, because it reads across all of them — the session table's open count, the send pump's bytes, the
+            // ingress rows' drop counters and the engine's per-archetype entity counts — and attached to the frame assembler rather than constructed by it,
+            // which is what keeps the assembler ignorant of every source but the one interface it calls once a tick.
+            Stats = new StatsEncoder(CatalogPlan, registry, engine, Plans, _sessions, _sendPump, _ingress, systemNames, NominalTickPeriodUs);
+            _frames.AttachStats(Stats);
 
             // Before the first tick publishes anything, so a client that completes its handshake between Start and the first tick is told the period rather
             // than zero. The tick number and the origin stay zero until a tick runs, which is what they truthfully are.
@@ -194,6 +201,16 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
     /// <summary>Every command type a client may send, bound to the application's structs. <see langword="null"/> on an inactive runtime.</summary>
     public CommandRegistry CommandTypes { get; }
+
+    /// <summary>
+    /// The catalog compiled into the plans both directions encode from, built once here. <see langword="null"/> on an inactive runtime.
+    /// </summary>
+    public CatalogPlan CatalogPlan { get; }
+
+    /// <summary>
+    /// The <c>STATS</c> producer: the once-a-second snapshot of every declared metric. <see langword="null"/> on an inactive runtime.
+    /// </summary>
+    public StatsEncoder Stats { get; }
 
     /// <summary>
     /// The inbound path: a session's ring, the transport-side decode, and the Engine-Pre drain that turns it into the tick's typed buffers.
@@ -347,6 +364,30 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
         }
 
         _sendPump?.AttachLink(session, link);
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Onto the slot's send-side line, where the producer reads it. It lands after <see cref="ISubscriptionsHost.BindSessionLink"/> has zeroed the struct —
+    /// the connection calls the two in that order on one thread — so the grant is never cleared by the slot's own initialisation.
+    /// </remarks>
+    void ISubscriptionsHost.NoteCapsGranted(SessionId session, Capabilities caps)
+    {
+        var frames = _frames;
+        if (frames == null || !session.IsValid || session.Slot >= Options.MaxSessions)
+        {
+            return;
+        }
+
+        // The slot must still name THIS session, for the reason NoteSessionPing gives: a HELLO that completes after its session has closed and its row has
+        // been re-leased would otherwise grant STATS to whoever holds the slot now — a session that never asked for the capability, and whose client closes
+        // 1002 when a block it did not negotiate arrives.
+        if (_sessions == null || _sessions.IdAt(session.Slot) != session)
+        {
+            return;
+        }
+
+        frames.SendStateOf(session.Slot)->NoteCapsGranted(caps);
     }
 
     /// <inheritdoc />

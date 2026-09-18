@@ -72,6 +72,17 @@ internal interface ISubscriptionsHost
     void BindSessionLink(SessionId session, ISubscriptionLink link);
 
     /// <summary>
+    /// Publishes what the handshake granted a session, so the tick can tell whether a capability-gated block belongs in its frames.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="caps">The granted set, already narrowed to requested ∩ known ∩ authorized.</param>
+    /// <remarks>
+    /// The grant is the connection's to compute and the producer's to read, and this is the one place they meet. Without it the tick would have to re-derive
+    /// a decision that depends on what the CLIENT asked for, which no amount of server-side state can recover.
+    /// </remarks>
+    void NoteCapsGranted(SessionId session, Capabilities caps);
+
+    /// <summary>
     /// Records that a session was heard from, so the tick can tell a quiet client from a gone one.
     /// </summary>
     /// <param name="session">The session whose <c>PING</c> arrived.</param>
@@ -442,6 +453,9 @@ internal sealed class SubscriptionConnection : ISubscriptionConnection, IDisposa
         var row = _host.SessionTable.Row(session);
         _clientMessageBytes = row.ClientMessageBytes;
         _capsGranted = GrantCaps(hello.Caps, row.Flags);
+
+        // Before the WELCOME, so a session cannot be served a frame for a tick between the client being told it has STATS and the producer knowing it.
+        _host.NoteCapsGranted(session, _capsGranted);
 
         SendWelcome(hello, (ushort)Math.Min(hello.Minor, ProtocolConstants.Minor));
     }

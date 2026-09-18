@@ -215,6 +215,16 @@ internal sealed class FakeSubscriptionsHost : ISubscriptionsHost
     /// <summary>The newest applied tick each session reported, so a test can see the ping reach the send state's stand-in.</summary>
     public Dictionary<SessionId, uint> AppliedTicks { get; } = [];
 
+    /// <summary>What the handshake granted each session, which is what decides whether its frames carry a <c>STATS</c> block.</summary>
+    /// <remarks>
+    /// Recorded rather than ignored: the grant is computed by the handshake — requested ∩ known ∩ authorized — and the only place a test can observe that
+    /// intersection is where the connection reports it. A fake that swallowed it would let a capability negotiated wrongly go unnoticed here.
+    /// </remarks>
+    public Dictionary<SessionId, Capabilities> GrantedCaps { get; } = [];
+
+    /// <inheritdoc />
+    public void NoteCapsGranted(SessionId session, Capabilities caps) => GrantedCaps[session] = caps;
+
     /// <inheritdoc />
     public void BindSessionLink(SessionId session, ISubscriptionLink link) => BoundLinks[session] = link;
 

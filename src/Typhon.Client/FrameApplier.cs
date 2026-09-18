@@ -215,9 +215,10 @@ public sealed class FrameApplier
 
     private void Metric(MetricPlan metric, int valueIndex, double value)
     {
-        var list = metric.Session ? _store.Plan.SessionMetrics : _store.Plan.ServerMetrics;
+        // MetricPlan.Offset, not a scan for the plan in its segment: the arrays are built from the same two lists in the same order (WorldStore's
+        // constructor), so the position the plan carries IS the row, and finding it again per VALUE was quadratic in the metric count (F10).
         var values = metric.Session ? _store.SessionMetricValues : _store.ServerMetricValues;
-        values[Array.IndexOf(list, metric)][valueIndex] = value;
+        values[metric.Offset][valueIndex] = value;
     }
 
     private void Debug(byte subType, scoped ReadOnlySpan<byte> payload) => _target = Target.None;

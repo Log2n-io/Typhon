@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 using System.Threading;
+using Typhon.Protocol;
 
 namespace Typhon.Engine.Internals;
 
@@ -186,6 +187,7 @@ internal unsafe struct SessionSendState
     [FieldOffset(SendLineOffset)] private long _sentSeq;
     [FieldOffset(SendLineOffset + 8)] private long _ackedTick;
     [FieldOffset(SendLineOffset + 16)] private long _pingTick;
+    [FieldOffset(SendLineOffset + 24)] private int _caps;
 
     // --- the slots ---
 
@@ -220,6 +222,21 @@ internal unsafe struct SessionSendState
 
     /// <summary>The server tick at which this session was last heard from. Seeded when the slot is bound, so silence is measured from the handshake.</summary>
     public long PingTick => Volatile.Read(ref _pingTick);
+
+    /// <summary>
+    /// What the handshake granted this session, so the producer can tell whether a capability-gated block — <c>STATS</c> today — belongs in its frames.
+    /// </summary>
+    /// <remarks>
+    /// The grant is the connection's (<c>SubscriptionConnection.GrantCaps</c>) and is therefore computed on a transport thread, while the only reader is the
+    /// frame producer on the tick. One number written atomically by one thread and read by another is exactly what SUB-05 puts on its allow-list, and it is
+    /// the same shape as <see cref="AckedTick"/> and <see cref="PingTick"/>. It is written once per session, between the slot being bound and the first frame
+    /// being produced for it, and the zero <see cref="Initialize"/> leaves is the honest answer for a session whose <c>HELLO</c> has not been answered yet.
+    /// </remarks>
+    public Capabilities Caps => (Capabilities)(uint)Volatile.Read(ref _caps);
+
+    /// <summary>Publishes the capabilities the handshake granted. Called by the connection thread, once, at <c>HELLO</c>.</summary>
+    /// <param name="caps">The granted set.</param>
+    public void NoteCapsGranted(Capabilities caps) => Volatile.Write(ref _caps, (int)(uint)caps);
 
     /// <summary>Clears a state to its initial values. Call once, before any thread can reach it.</summary>
     /// <param name="state">The state to clear, in memory the caller owns.</param>
