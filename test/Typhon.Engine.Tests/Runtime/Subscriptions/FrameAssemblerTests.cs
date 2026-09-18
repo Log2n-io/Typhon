@@ -45,13 +45,14 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
         subs.Profile(OtherProfile, p => p.World().Of<ProjCreature>().Of<ProjRock>());
     }
 
-    private static SubscriptionsOptions Options(int enterBudget = 500) =>
+    private static SubscriptionsOptions Options(int enterBudget = 500, bool changedOnlyGather = true) =>
         new()
         {
             MaxSessions = 64,
             StatePoolBudgetBytes = 64L * 1024 * 1024,
             FramePoolBudgetBytes = 64L * 1024 * 1024,
             EnterBudgetPerFrame = enterBudget,
+            ChangedOnlyGather = changedOnlyGather,
         };
 
     private FrameHarness Create(SubscriptionsOptions options = null) =>
@@ -137,11 +138,18 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
     /// The stale state is written into the session's known-set directly. A correct server cannot reach it — the netId quarantine is longer than a session may
     /// go without a frame — which is exactly why 02 § 5 calls this the defensive path, and why a test that waited for the engine to produce one would be
     /// waiting for a bug.
+    /// <para>
+    /// <b>Pinned to the full walk</b> (<c>ChangedOnlyGather = false</c>). The changed-only gather visits only the slots S1 reported as changed, and this
+    /// corruption is by construction something nothing reported: the entity is untouched, so its slot carries no bit and no probe reaches it. That is sound
+    /// where the state is reachable — a real reused identity bumps the hot entry's generation, which IS a change, so the slot is visited on the tick it
+    /// happens, and a session that missed that tick is by definition behind and takes the full walk anyway. What the fast path cannot do is discover a
+    /// corruption that nothing reported, which is what the defensive branch is for and what this fixture exercises.
+    /// </para>
     /// </remarks>
     [Test]
     public void AStaleGenerationLeavesInThisFrameAndEntersInTheNext()
     {
-        using var harness = Create();
+        using var harness = Create(Options(changedOnlyGather: false));
         SpawnCreatures(harness, 4);
         var session = harness.OpenSessions(1, Profile)[0];
 

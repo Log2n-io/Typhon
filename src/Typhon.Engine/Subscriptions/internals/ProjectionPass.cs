@@ -52,6 +52,9 @@ internal static unsafe class ProjectionPass
     /// <summary>The most change groups either side can declare — the wire's <c>u8</c> mask (W14).</summary>
     public const int MaxGroups = 8;
 
+    /// <summary>Length of <c>ReplicationHotEntry.GroupTicks</c>; the stamps the change mask reads.</summary>
+    private const int MaxGroupTicks = 4;
+
     /// <summary><see cref="ReplicationHotEntry.Flags"/> bits 0-7: the owner groups whose body changed this tick.</summary>
     public const int OwnerChangedMaskShift = 0;
 
@@ -95,6 +98,9 @@ internal static unsafe class ProjectionPass
         // makes the destroy path free: there is no destroy hook anywhere, and a slot that stopped being occupied is detected by this AND.
         var occupancy = *(ulong*)clusterBase & slotMask;
         var watched = block->WatchedMask & slotMask;
+
+        // Accumulated across the per-slot loop and published at the end; see ReplicationBlockHeader.ChangedSlots.
+        var changedSlots = 0UL;
         if (watched == 0)
         {
             return;
@@ -299,6 +305,19 @@ internal static unsafe class ProjectionPass
 
             SetLastWatchedTick(blockBytes, layout, slot, tick);
 
+            // The published change mask names every slot a session might need to visit, and that is BROADER than "a record was assembled here". A motion-only
+            // change stamps the motion tick through MotionTracker and assembles no state record at all, so a mask built from the record branches alone let the
+            // fast gather skip a moving entity and never send its segment — caught by the differential oracle as a position that drifted apart. Reading the
+            // stamps is the one test that covers every producer of a reason-to-send, including ones added later.
+            for (var g = 0; g < MaxGroupTicks; g++)
+            {
+                if (hot->GroupTicks[g] == tick)
+                {
+                    changedSlots |= 1UL << slot;
+                    break;
+                }
+            }
+
             // ── The records ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
             if (initialize)
             {
@@ -341,6 +360,7 @@ internal static unsafe class ProjectionPass
                     Length = (ushort)total,
                 });
                 records++;
+                changedSlots |= 1UL << slot;
             }
             else if (changed != 0)
             {
@@ -377,8 +397,15 @@ internal static unsafe class ProjectionPass
                     Length = (ushort)total,
                 });
                 records++;
+                changedSlots |= 1UL << slot;
             }
         }
+
+        // The change set, published for the frame stage (12 — the per-session walk). It is written unconditionally, including when it is zero: a block that
+        // was projected and changed nothing must say so, or a reader cannot tell "nothing changed here" from "not projected this tick" and would have to
+        // assume the worst. The tick is stored last, which is what makes the pair readable — see ChangedTick's remarks.
+        block->ChangedSlots = changedSlots;
+        block->ChangedTick = tick;
 
         // The watched mask is deliberately LEFT SET. It is the interest stage's, cleared by its own prologue at the start of the next tick, and the frame
         // stage still has to read it after this one has run — a pass that tidied up after itself would erase the very thing S2b is about to consult.

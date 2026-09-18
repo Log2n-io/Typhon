@@ -206,6 +206,122 @@ unsafe class SharedFrameTests : TestBase<SharedFrameTests>
         Assert.That(encodes, Is.All.EqualTo(1), "each tick must pay its own encode; a zero would mean a frame was reused from the previous tick");
     }
 
+    /// <summary>
+    /// AC-1's shape: a hundred and ten sessions on one profile, joined at different ticks, still encode once.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// AC-1's 0.3 ms target is only arithmetically reachable if 110 sessions cost one encode and 109 copies; at 110 encodes it is asking the engine to run
+    /// the codecs over the whole world a hundred and ten times in a third of a millisecond. So the first question to ask of a 30× miss is not "where is the
+    /// time" but "how many encodes was it", and the second is whether joining at different moments — which is what a real population does — is enough to
+    /// break the sharing.
+    /// </para>
+    /// <para>
+    /// The sessions here join on staggered ticks deliberately. Ten sessions opened in one breath is the easy case and the fixture above already covers it.
+    /// </para>
+    /// </remarks>
+    [TestCase(0, TestName = "ManySessionsEncodeOnce_JoinedTogether")]
+    [TestCase(8, TestName = "ManySessionsEncodeOnce_JoinedInCohortsOfEight")]
+    public void ManySessionsJoiningAtDifferentTimesStillEncodeOnce(int perCohort)
+    {
+        const int Sessions = 110;
+
+        using var harness = Create();
+        SpawnCreatures(harness, 12);
+
+        var sessions = new List<SessionId>(Sessions);
+        harness.PrimeBlocks();
+
+        var tick = 2L;
+        for (var i = 0; i < Sessions; i++)
+        {
+            sessions.AddRange(harness.OpenSessions(1, Profile));
+
+            // Every few joins, a tick: the population arrives spread over time the way a connecting fleet does.
+            if (perCohort > 0 && i % perCohort == perCohort - 1)
+            {
+                Settle(harness, sessions, tick, 1);
+                tick++;
+            }
+        }
+
+        // Everyone finishes filling and reaches the same baseline before the measurement.
+        Settle(harness, sessions, tick, 6);
+        tick += 6;
+
+        // Four consecutive productive ticks, because the question is not only how many encodes the first one costs but whether the population RE-CONVERGES.
+        // A transient split after a join is cheap; one that never heals is what turns AC-1's budget into a 30× miss.
+        var perTick = new List<long>();
+        long encoded = 0;
+        long copied = 0;
+        for (var i = 0; i < 4; i++)
+        {
+            DamageAll(harness, seed: 900 + i);
+            var before = (harness.Assembler.FramesEncoded, harness.Assembler.FramesCopied);
+            harness.RunTick(tick + i);
+            foreach (var session in sessions)
+            {
+                harness.Deliver(session);
+            }
+
+            encoded = harness.Assembler.FramesEncoded - before.FramesEncoded;
+            copied = harness.Assembler.FramesCopied - before.FramesCopied;
+            perTick.Add(encoded);
+        }
+
+        TestContext.Out.WriteLine($"encodes per tick: {string.Join(", ", perTick)}");
+
+        TestContext.Out.WriteLine($"{Sessions} sessions, cohorts of {(perCohort == 0 ? Sessions : perCohort)}: {encoded} encodes, {copied} copies");
+
+        Assert.That(encoded, Is.EqualTo(1),
+            $"{Sessions} sessions on one profile cost {encoded} encodes. AC-1's 0.3 ms budget assumes one, so this is where a 30× miss would come from.");
+        Assert.That(copied, Is.EqualTo(Sessions - 1), "every session after the first should have copied");
+    }
+
+    /// <summary>
+    /// How often the changed-only gather is actually taken, which is what decides whether it is worth anything.
+    /// </summary>
+    /// <remarks>
+    /// The fast path requires <c>Baseline == tick − 1</c>, and a session's baseline advances only on a tick it was PRODUCED for. A session with nothing to
+    /// say has its frame abandoned and its baseline left behind, so every silent tick costs the session its fast path on the tick after. A world quiet
+    /// enough to skip frames is therefore the world where the optimisation stops applying — which is the opposite of what one would assume, and the reason
+    /// this is measured rather than reasoned about.
+    /// </remarks>
+    [Test]
+    public void TheChangedOnlyGatherIsTakenInSteadyState()
+    {
+        using var harness = Create();
+        SpawnCreatures(harness, 40);
+        var sessions = harness.OpenSessions(8, Profile);
+
+        harness.PrimeBlocks();
+        Settle(harness, sessions, fromTick: 2, ticks: 4);
+
+        var before = (harness.Assembler.ChangedOnlyGathers, harness.Assembler.FullGathers, harness.Assembler.UnprovenGathers);
+        for (var tick = 6L; tick <= 25; tick++)
+        {
+            DamageAll(harness, seed: (int)(1000 + tick));
+            harness.RunTick(tick);
+            foreach (var session in sessions)
+            {
+                harness.Deliver(session);
+            }
+        }
+
+        var fast = harness.Assembler.ChangedOnlyGathers - before.ChangedOnlyGathers;
+        var full = harness.Assembler.FullGathers - before.FullGathers;
+        var unproven = harness.Assembler.UnprovenGathers - before.UnprovenGathers;
+        TestContext.Out.WriteLine($"changed-only {fast}, full {full}, unproven {unproven}");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(fast, Is.GreaterThan(full), $"the fast path was taken {fast} times against {full} full walks; in a steady state where every session "
+                + "is produced for every tick it should be the common case, and if it is not the baseline is not advancing as assumed");
+            Assert.That(unproven, Is.Zero, "a fast gather could not prove nothing had left and was redone — that is a double walk, and in a steady state "
+                + "with no churn it should never happen");
+        });
+    }
+
     // ── harness ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     private static void Declare(SubscriptionsRegistry subs)
@@ -221,7 +337,7 @@ unsafe class SharedFrameTests : TestBase<SharedFrameTests>
         nameof(SharedFrameTests),
         new SubscriptionsOptions
         {
-            MaxSessions = 128,
+            MaxSessions = 256,
             StatePoolBudgetBytes = 64L * 1024 * 1024,
             FramePoolBudgetBytes = 64L * 1024 * 1024,
             EnterBudgetPerFrame = enterBudget,

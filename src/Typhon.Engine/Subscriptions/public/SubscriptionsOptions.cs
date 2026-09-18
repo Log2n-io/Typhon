@@ -257,4 +257,14 @@ public sealed class SubscriptionsOptions
     /// </para>
     /// </remarks>
     public int CollapseBelowWorkUnits { get; init; }
+
+    /// <summary>
+    /// Whether a session that holds last tick's frame is served from the change set S1 published, instead of walking everything it watches.
+    /// </summary>
+    /// <remarks>
+    /// On by default, and off only to measure what it is worth: it is the same binary either way, which is the only honest way to compare (a second build
+    /// differs in code placement as well as in behaviour). A session that is behind, still filling, or resetting takes the full walk regardless — SUB-03
+    /// requires every group newer than its baseline, and one tick's change set does not contain them.
+    /// </remarks>
+    public bool ChangedOnlyGather { get; init; } = true;
 }

@@ -152,6 +152,12 @@ internal sealed unsafe class ReplicationBlockPool : ResourceNode, IMemoryResourc
 
             header->WatchedMask = 0;
             header->LastWatchedTick = 0;
+
+            // The change mask is stamped with the tick it describes and a reader ignores it when the stamps disagree, so a recycled block's stale pair is
+            // already inert. Zeroed anyway because this method initialises the header field by field rather than clearing it, and "inert unless the tick
+            // counter wraps" is a worse guarantee than "empty", for two stores on a path that runs once per block.
+            header->ChangedSlots = 0;
+            header->ChangedTick = 0;
             header->ChunkId = UnassignedChunkId;
             header->NextFree = FreeListEnd;
             header->PoolState = PoolStateRented;

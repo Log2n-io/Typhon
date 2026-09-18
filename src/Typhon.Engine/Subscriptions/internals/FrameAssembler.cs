@@ -311,6 +311,16 @@ internal sealed class SessionFrameState
     /// </summary>
     public long Baseline { get; set; }
 
+    /// <summary>
+    /// Forces the next frame to walk everything watched rather than only what changed.
+    /// </summary>
+    /// <remarks>
+    /// Set when this frame carried a <b>stale leave</b>: a reused identity leaves in one frame and the reuse enters in the NEXT (SUB-06, 03 § 10), and the
+    /// entity that must enter is by then unchanged — S1 stamped it on the tick the reuse happened, not on this one — so a gather that visits only changed
+    /// slots would never see it and the session would lose the entity permanently. The flag is the handover between the two frames.
+    /// </remarks>
+    public bool ForceFullGather { get; set; }
+
     /// <summary>The profile the session was bound to when its last frame was built. A change is a <c>RESET</c>.</summary>
     public string Profile { get; set; }
 
@@ -453,6 +463,9 @@ internal sealed unsafe class FrameAssembler : IDisposable
     private long _sessionsDegraded;
     private long _sessionsClosedLagging;
     private long _sessionsClosedSilent;
+    private long _changedOnlyGathers;
+    private long _fullGathers;
+    private long _unprovenGathers;
     private bool _disposed;
 
     /// <summary>Builds the assembler and everything a frame is made of: the pool, the per-slot hand-off counters and the per-archetype encoding constants.</summary>
@@ -535,6 +548,18 @@ internal sealed unsafe class FrameAssembler : IDisposable
 
     /// <summary>Sessions closed with 1013 for a skip run past <see cref="SubscriptionsOptions.CloseAfterSkips"/>.</summary>
     public long SessionsClosedLagging => Volatile.Read(ref _sessionsClosedLagging);
+
+    /// <summary><b>Switch.</b> When false every session takes the full walk, which is what the fast path is measured against on one binary.</summary>
+    internal bool ChangedOnlyGatherEnabled => _options.ChangedOnlyGather;
+
+    /// <summary>Gathers that visited only the slots S1 marked changed.</summary>
+    public long ChangedOnlyGathers => Volatile.Read(ref _changedOnlyGathers);
+
+    /// <summary>Gathers that walked every watched slot — a session behind by more than one tick, still filling, or resetting.</summary>
+    public long FullGathers => Volatile.Read(ref _fullGathers);
+
+    /// <summary>Fast gathers that could not prove nothing had left and were redone in full. Counted in both of the above.</summary>
+    public long UnprovenGathers => Volatile.Read(ref _unprovenGathers);
 
     /// <summary>Sessions closed with 4001 for having stopped sending <c>PING</c>.</summary>
     public long SessionsClosedSilent => Volatile.Read(ref _sessionsClosedSilent);
@@ -920,9 +945,47 @@ internal sealed unsafe class FrameAssembler : IDisposable
         }
 
         var stamp = (ushort)_tick;
-        var touched = Gather(index, state, scratch, stamp, out var staleLeaves, out var pending);
+        // ── Fast path (12 § 6, C-1) ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+        // A session that was produced for last tick and holds a complete view needs exactly this tick's changes, which S1 has already identified. Walking
+        // only those turns the per-session cost from O(entities watched) into O(entities changed) — measured at 4-15 % of the watched set.
+        //
+        // It is NOT taken when the session is behind: SUB-03 requires every group with groupTick > baseline, and a single tick's change set does not contain
+        // them. That session takes the walk below, unchanged, which is the invariant's backstop and the reason this is an optimisation rather than a new
+        // contract. `KnownFlags.NeedsFull` has no setter in Phase 1; whoever adds one (SUB-11's resend) must gate this too, because an unchanged entity
+        // carrying that flag would not be visited.
+        var changedOnly = ChangedOnlyGatherEnabled && state.Baseline == _tick - 1 && state.ViewComplete && !state.PendingReset && !state.ForceFullGather;
+        state.ForceFullGather = false;
+        var touched = Gather(index, state, scratch, stamp, changedOnly, out var staleLeaves, out var pending, out var hits);
+
+        // A reused identity leaves now and enters next frame, and next frame it will be unchanged — so the frame after a stale leave has to look at
+        // everything, not only at what moved.
+        if (staleLeaves > 0)
+        {
+            state.ForceFullGather = true;
+        }
+
+        if (changedOnly)
+        {
+            Interlocked.Increment(ref _changedOnlyGathers);
+
+            // The one thing the fast path cannot observe is a LEAVE, because it never looks at the slots that did not change and therefore stamps nothing.
+            // Sweep's own condition decides it instead, computed from run popcounts: if the hits reach at least as many entries as the table holds, once the
+            // enters it is about to gain and the stale identities it is about to drop are taken out, then every known entry was reached and nothing left.
+            // When that cannot be shown the walk is redone in full — rare, and cheaper than being wrong, whose failure mode is a silently diverged client.
+            if (hits - scratch.EnterCandidates.Length - staleLeaves < state.Known.KnownCount)
+            {
+                scratch.BeginSession(_plans.Length);
+                changedOnly = false;
+                Interlocked.Increment(ref _unprovenGathers);
+                touched = Gather(index, state, scratch, stamp, false, out staleLeaves, out pending, out hits);
+            }
+        }
         var deferred = SelectEnters(state, scratch);
-        Sweep(state, scratch, stamp, touched + staleLeaves);
+        if (!changedOnly)
+        {
+            Interlocked.Increment(ref _fullGathers);
+            Sweep(state, scratch, stamp, touched + staleLeaves);
+        }
 
         var records = SortAndCount(scratch);
 
@@ -1076,7 +1139,8 @@ internal sealed unsafe class FrameAssembler : IDisposable
     /// generation moved on a leave.
     /// </summary>
     /// <returns>How many known-and-current entries the hits reached, which is what lets the leave sweep be skipped when nothing left.</returns>
-    private int Gather(int index, SessionFrameState state, FrameWorkerScratch scratch, ushort stamp, out int staleLeaves, out int pending)
+    private int Gather(int index, SessionFrameState state, FrameWorkerScratch scratch, ushort stamp, bool changedOnly, out int staleLeaves, out int pending,
+        out int hits)
     {
         var known = state.Known;
         var baseline = (uint)state.Baseline;
@@ -1084,6 +1148,7 @@ internal sealed unsafe class FrameAssembler : IDisposable
         var touched = 0;
         staleLeaves = 0;
         pending = 0;
+        hits = 0;
 
         for (var r = 0; r < runs.Length; r++)
         {
@@ -1105,6 +1170,23 @@ internal sealed unsafe class FrameAssembler : IDisposable
 
             var plan = _encodePlans[archetype];
             var slots = run.Slots;
+
+            // The hit count comes from a popcount per RUN, not from counting the slots we visit, because the fast path deliberately visits only some of
+            // them and the "did anything leave" proof below needs the full number.
+            hits += BitOperations.PopCount(slots);
+
+            if (changedOnly)
+            {
+                // S1 published which slots produced a record this tick (ReplicationBlockHeader.ChangedSlots). Everything else in this block is a known
+                // entity whose every group compared equal, so it has nothing to say to a session that already has last tick's frame. A block whose stamp is
+                // not this tick is not trusted — it is visited in full, which is the safe direction.
+                var header = (ReplicationBlockHeader*)run.Block;
+                if (header->ChangedTick == (uint)_tick)
+                {
+                    slots &= header->ChangedSlots;
+                }
+            }
+
             while (slots != 0)
             {
                 var slot = BitOperations.TrailingZeroCount(slots);

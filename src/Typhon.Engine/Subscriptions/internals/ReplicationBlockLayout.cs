@@ -26,6 +26,27 @@ internal struct ReplicationBlockHeader
     public nint NextFree;
 
     /// <summary>
+    /// Bit <c>i</c> is set when slot <c>i</c> produced a record in the tick named by <see cref="ChangedTick"/> — an enter, or a group whose bytes differed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The projection pass already computes this and used to discard it.</b> S1 re-encodes every watched slot and compares against the stored copy —
+    /// there is no dirty bit to read, because <c>ClusterRef.GetSpan</c> and <c>WriteSpatial</c> signal nothing (SUB-10) — and assembles a record only for
+    /// slots whose comparison differed. Publishing the mask costs one store per block and turns that knowledge into something the frame stage can use
+    /// instead of rediscovering per session.
+    /// </para>
+    /// <para>
+    /// <b>Valid only for the tick it names.</b> A reader must test <see cref="ChangedTick"/> against its own tick before trusting a bit: a block not
+    /// projected this tick carries the previous tick's mask, and treating that as current would drop this tick's changes silently. Both fields live in the
+    /// header's existing padding — it is declared <c>Size = 64</c> and used 25 bytes — so nothing about the block's layout moves.
+    /// </para>
+    /// </remarks>
+    public ulong ChangedSlots;
+
+    /// <summary>The tick <see cref="ChangedSlots"/> describes. Any other tick means the mask is stale and must not be read.</summary>
+    public uint ChangedTick;
+
+    /// <summary>
     /// Whether the pool considers this block rented or free. Owned by <see cref="ReplicationBlockPool"/> alone.
     /// </summary>
     /// <remarks>
