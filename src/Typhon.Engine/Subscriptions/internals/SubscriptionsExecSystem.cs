@@ -35,10 +35,17 @@ internal abstract class SubscriptionsExecSystemBase : ChunkedCallbackSystem<Subs
 {
     protected readonly DatabaseEngine Engine;
 
-    protected SubscriptionsExecSystemBase(DatabaseEngine engine)
+    /// <summary>
+    /// The per-tick choice between the staged shape and the collapsed one, shared by every member of the track — see <see cref="RunsInThisShape"/>.
+    /// </summary>
+    protected readonly SubscriptionsPipelineShape Shape;
+
+    protected SubscriptionsExecSystemBase(DatabaseEngine engine, SubscriptionsPipelineShape shape)
     {
         ArgumentNullException.ThrowIfNull(engine);
+        ArgumentNullException.ThrowIfNull(shape);
         Engine = engine;
+        Shape = shape;
     }
 
     /// <summary>
@@ -60,6 +67,13 @@ internal abstract class SubscriptionsExecSystemBase : ChunkedCallbackSystem<Subs
                 throw new InvalidOperationException("Injected replication-stage fault (test only).");
             }
 
+            // The shape gate comes AFTER the fault gate on purpose: the injected fault is the only reachable "a stage threw" path while the bodies are what
+            // they are, and it must reach whichever shape is running, or the collapsed path would have no failure case to be tested against at all.
+            if (!RunsInThisShape(Shape.CollapsedFor(ctx)))
+            {
+                return false;
+            }
+
             // Stamped here rather than in Execute, so "compute happened" stays observable for a stage that clears its gate and then prepares zero chunks —
             // which is every stage whose payload has not been built yet. Gating off leaves the stamp at zero, which is exactly what SUB-02's aborted-tick
             // case asserts.
@@ -72,6 +86,17 @@ internal abstract class SubscriptionsExecSystemBase : ChunkedCallbackSystem<Subs
             throw;
         }
     }
+
+    /// <summary>
+    /// Whether this system belongs to the shape chosen for this tick. Staged by default; <see cref="SubscriptionsCollapsedExecSystem"/> inverts it.
+    /// </summary>
+    /// <remarks>
+    /// This is how "exactly one shape prepares chunks per tick" is enforced, and it is enforced at the <c>ShouldRun</c> gate rather than by returning zero
+    /// chunks from <c>Prepare</c>. The difference is not cosmetic: a stage's <c>Prepare</c> is where its serial half lives — the prologue, the blocks step,
+    /// the session rebind — so letting the losing shape prepare and then dispatch nothing would run every one of those twice per tick, once on each shape,
+    /// and the second run would see state the first had already advanced.
+    /// </remarks>
+    protected virtual bool RunsInThisShape(bool collapsed) => !collapsed;
 
     protected sealed override int Prepare(SubscriptionsContext ctx)
     {
@@ -159,20 +184,31 @@ internal abstract class SubscriptionsExecSystemBase : ChunkedCallbackSystem<Subs
 /// </remarks>
 internal sealed class SubscriptionsInterestExecSystem : SubscriptionsExecSystemBase
 {
-    public SubscriptionsInterestExecSystem(DatabaseEngine engine) : base(engine) { }
+    public SubscriptionsInterestExecSystem(DatabaseEngine engine, SubscriptionsPipelineShape shape) : base(engine, shape) { }
 
-    protected override void Configure(SystemBuilder<SubscriptionsContext> b) => b
-        .Name("SubscriptionsInterest")
-        .ChunkedParallel(1);
-
-    protected override int PrepareChunks(SubscriptionsContext ctx)
+    /// <summary>The stage's serial half — the prologue — and the chunk count it partitions the tick's sessions into.</summary>
+    /// <remarks>
+    /// Static, and called by <see cref="SubscriptionsCollapsedExecSystem"/> as well as by the dispatch below. The body reaches nothing but
+    /// <see cref="SubscriptionsContext"/>, so there is no instance state for the two shapes to disagree about — which is the whole reason the collapsed path
+    /// can be a second caller rather than a second implementation.
+    /// </remarks>
+    internal static int Prologue(SubscriptionsContext ctx)
     {
         var interest = ctx.Subscriptions?.Interest;
         return interest == null ? 0 : interest.BeginTick(ctx.TickNumber, ctx.WorkerCount);
     }
 
-    protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount)
+    /// <summary>The stage's parallel half, for one chunk of <paramref name="chunkCount"/>.</summary>
+    internal static void Resolve(SubscriptionsContext ctx, int chunkIndex, int chunkCount)
         => ctx.Subscriptions?.Interest?.ExecuteChunk(chunkIndex, chunkCount);
+
+    protected override void Configure(SystemBuilder<SubscriptionsContext> b) => b
+        .Name("SubscriptionsInterest")
+        .ChunkedParallel(1);
+
+    protected override int PrepareChunks(SubscriptionsContext ctx) => Prologue(ctx);
+
+    protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount) => Resolve(ctx, chunkIndex, chunkCount);
 }
 
 /// <summary>
@@ -197,14 +233,22 @@ internal sealed class SubscriptionsInterestExecSystem : SubscriptionsExecSystemB
 /// </remarks>
 internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecSystemBase
 {
-    public SubscriptionsProjectExecSystem(DatabaseEngine engine) : base(engine) { }
+    public SubscriptionsProjectExecSystem(DatabaseEngine engine, SubscriptionsPipelineShape shape) : base(engine, shape) { }
 
     protected override void Configure(SystemBuilder<SubscriptionsContext> b) => b
         .Name("SubscriptionsProject")
         .After("SubscriptionsInterest")
         .ChunkedParallel(1);
 
-    protected override int PrepareChunks(SubscriptionsContext ctx)
+    protected override int PrepareChunks(SubscriptionsContext ctx) => BlocksStep(ctx);
+
+    protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount) => Project(ctx, chunkIndex, chunkCount);
+
+    /// <summary>The stage's serial half — the blocks step — and the chunk count it partitions the watched blocks into.</summary>
+    /// <remarks>
+    /// Static and shared with <see cref="SubscriptionsCollapsedExecSystem"/>; see the note on <see cref="SubscriptionsInterestExecSystem.Prologue"/>.
+    /// </remarks>
+    internal static int BlocksStep(SubscriptionsContext ctx)
     {
         var subs = ctx.Subscriptions;
         var states = subs?.ReplicationStates;
@@ -255,7 +299,8 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
         return chunks;
     }
 
-    protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount)
+    /// <summary>The stage's parallel half, for one chunk of <paramref name="chunkCount"/>.</summary>
+    internal static void Project(SubscriptionsContext ctx, int chunkIndex, int chunkCount)
     {
         var subs = ctx.Subscriptions;
         if (subs == null)
@@ -421,15 +466,21 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
 /// </remarks>
 internal sealed class SubscriptionsEventsExecSystem : SubscriptionsExecSystemBase
 {
-    public SubscriptionsEventsExecSystem(DatabaseEngine engine) : base(engine) { }
+    public SubscriptionsEventsExecSystem(DatabaseEngine engine, SubscriptionsPipelineShape shape) : base(engine, shape) { }
+
+    /// <summary>The stage's serial half. Zero until replicated queues exist; shared with <see cref="SubscriptionsCollapsedExecSystem"/>.</summary>
+    internal static int PrepareDrain(SubscriptionsContext ctx) => 0;
+
+    /// <summary>The stage's parallel half, for one chunk of <paramref name="chunkCount"/>.</summary>
+    internal static void Drain(SubscriptionsContext ctx, int chunkIndex, int chunkCount) { }
 
     protected override void Configure(SystemBuilder<SubscriptionsContext> b) => b
         .Name("SubscriptionsEvents")
         .ChunkedParallel(1);
 
-    protected override int PrepareChunks(SubscriptionsContext ctx) => 0;
+    protected override int PrepareChunks(SubscriptionsContext ctx) => PrepareDrain(ctx);
 
-    protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount) { }
+    protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount) => Drain(ctx, chunkIndex, chunkCount);
 }
 
 /// <summary>
@@ -452,20 +503,29 @@ internal sealed class SubscriptionsEventsExecSystem : SubscriptionsExecSystemBas
 /// </remarks>
 internal sealed class SubscriptionsFramesExecSystem : SubscriptionsExecSystemBase
 {
-    public SubscriptionsFramesExecSystem(DatabaseEngine engine) : base(engine) { }
+    public SubscriptionsFramesExecSystem(DatabaseEngine engine, SubscriptionsPipelineShape shape) : base(engine, shape) { }
 
-    protected override void Configure(SystemBuilder<SubscriptionsContext> b) => b
-        .Name("SubscriptionsFrames")
-        .AfterAll("SubscriptionsProject", "SubscriptionsEvents")
-        .ChunkedParallel(1);
-
-    protected override int PrepareChunks(SubscriptionsContext ctx)
+    /// <summary>The stage's serial half — the session prologue — and the chunk count it partitions the tick's sessions into.</summary>
+    /// <remarks>
+    /// Static and shared with <see cref="SubscriptionsCollapsedExecSystem"/>; see the note on <see cref="SubscriptionsInterestExecSystem.Prologue"/>.
+    /// </remarks>
+    internal static int Prologue(SubscriptionsContext ctx)
     {
         var subs = ctx.Subscriptions;
         var frames = subs?.Frames;
         return frames == null ? 0 : frames.BeginTick(subs.Interest, ctx.TickNumber, ctx.WorkerCount);
     }
 
-    protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount)
+    /// <summary>The stage's parallel half, for one chunk of <paramref name="chunkCount"/>.</summary>
+    internal static void Assemble(SubscriptionsContext ctx, int chunkIndex, int chunkCount)
         => ctx.Subscriptions?.Frames?.ExecuteChunk(chunkIndex, chunkCount);
+
+    protected override void Configure(SystemBuilder<SubscriptionsContext> b) => b
+        .Name("SubscriptionsFrames")
+        .AfterAll("SubscriptionsProject", "SubscriptionsEvents")
+        .ChunkedParallel(1);
+
+    protected override int PrepareChunks(SubscriptionsContext ctx) => Prologue(ctx);
+
+    protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount) => Assemble(ctx, chunkIndex, chunkCount);
 }

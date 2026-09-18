@@ -70,6 +70,13 @@ public static class CommandLine
             c.SplitAwareness = true;
         }
 
+        c.SubscriptionsCollapseWorkUnits = Str(args, "--subs-pipeline", "staged") switch
+        {
+            "staged" => 0,
+            "collapsed" => int.MaxValue,
+            var other => throw new ArgumentException($"--subs-pipeline takes collapsed or staged, not '{other}'"),
+        };
+
         c.DatabaseDirectory = Str(args, "--db-dir", c.DatabaseDirectory);
         if (Array.IndexOf(args, "--serial-fence") >= 0)
         {

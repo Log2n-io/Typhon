@@ -27,6 +27,14 @@ namespace Typhon.Engine.Internals;
 /// a comment contradicted by the code beside it.
 /// </para>
 /// <para>
+/// <b>Two shapes are declared, and exactly one of them prepares chunks per tick.</b> D4 of <c>09-phase1-build-plan § 2</c>: below a measured amount of work the
+/// four staged systems are replaced by <see cref="SubscriptionsCollapsedExecSystem"/>, which runs the same stage bodies inline with no barrier between them.
+/// Both are members of the one DAG and both are gated on <see cref="SubscriptionsPipelineShape"/>, which decides once per tick; the losing shape's systems
+/// clear no gate, prepare nothing and complete inline, which is the same cost an idle track already pays. Declaring the collapsed system conditionally — at
+/// Build time, from the option — was the alternative, and it is the § 2.3 trap again in a new place: the threshold is measured per tick, not per runtime, so a
+/// runtime that fell below it after Build would find the shape it needed had never been declared.
+/// </para>
+/// <para>
 /// <b>No bundle returned, unlike <see cref="FenceDagBuilder"/>.</b> That one hands back its exec systems so the runtime can read post-dispatch state from them
 /// (<c>Finalize.HighestLsn</c>). These stages publish nothing the runtime reads — everything shared flows through <see cref="SubscriptionsContext"/> — so
 /// returning handles to them would be structure built against a need that does not exist yet.
@@ -47,10 +55,17 @@ internal static class SubscriptionsDagBuilder
         // the tick it arrived for, and replication has to be AFTER the fence, so it computes on committed state.
         schedule.EnginePreTrack.DeclareDag(IngressDagName).Add(new SubscriptionsIngressExecSystem());
 
+        // One selector for the whole track, so the five systems cannot disagree about the shape of a tick.
+        var shape = new SubscriptionsPipelineShape();
+
         var dag = schedule.EngineSubscriptionsTrack.DeclareDag(DagName);
-        dag.Add(new SubscriptionsInterestExecSystem(engine));
-        dag.Add(new SubscriptionsProjectExecSystem(engine));
-        dag.Add(new SubscriptionsEventsExecSystem(engine));
-        dag.Add(new SubscriptionsFramesExecSystem(engine));
+        dag.Add(new SubscriptionsInterestExecSystem(engine, shape));
+        dag.Add(new SubscriptionsProjectExecSystem(engine, shape));
+        dag.Add(new SubscriptionsEventsExecSystem(engine, shape));
+        dag.Add(new SubscriptionsFramesExecSystem(engine, shape));
+
+        // A root of its own, with no edge to any of the four above: it is their replacement, never their successor. Nothing orders it against them because
+        // they never run on the same tick.
+        dag.Add(new SubscriptionsCollapsedExecSystem(engine, shape));
     }
 }

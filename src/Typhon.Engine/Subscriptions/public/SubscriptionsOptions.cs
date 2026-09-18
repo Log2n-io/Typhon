@@ -232,4 +232,29 @@ public sealed class SubscriptionsOptions
     /// back and forth re-uses its blocks, short enough that a view moved on releases them in under a second at any normal tick rate.
     /// </remarks>
     public int IdleBlockTicks { get; init; } = 50;
+
+    /// <summary>
+    /// Below this much replication work — <c>connected sessions × watched blocks</c> — the pipeline runs as one dispatched system with no internal barriers
+    /// instead of as four. <b>Default: 0, which means never: the staged pipeline always runs.</b>
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The default is zero because the crossing point is a measurement nobody has taken yet.</b> The staged pipeline's critical path is three sequential
+    /// dispatches and a dispatch is a worker wake/barrier cycle — ≈ 0.1 ms measured, so ≈ 0.3 ms of scheduling before any replication work happens. Below
+    /// some amount of work those barriers cost more than the parallelism they buy, and the collapsed shape pays one dispatch instead of three. WHERE that
+    /// crossing point is depends on the worker count, the machine and the projection, and the only honest way to find it is to measure both shapes on the
+    /// same binary (<c>design/Subscriptions/09-phase1-build-plan.md</c>, Q-M1). A number shipped here before that measurement would be an engine default
+    /// derived from nothing, so this ships as an opt-in and the collapsed path stays unreachable until an operator or a benchmark names a value.
+    /// </para>
+    /// <para>
+    /// The unit is a product of two counts, not a time: it is the quantity the shape is chosen on, and it is deliberately coarse. The watched-block count is
+    /// the previous tick's, because this tick's is not known until the interest pass — one of the stages being shaped — has run.
+    /// </para>
+    /// <para>
+    /// Both shapes produce the same frames, byte for byte: the collapsed one runs the same stage bodies over the same chunk partition, serially, and a
+    /// differential test asserts it. So this is a performance knob and never a behavioural one, and <c>int.MaxValue</c> — collapse whatever the load — is a
+    /// legitimate setting for a small server, not an abuse of the option.
+    /// </para>
+    /// </remarks>
+    public int CollapseBelowWorkUnits { get; init; }
 }

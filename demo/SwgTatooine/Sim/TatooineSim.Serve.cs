@@ -51,6 +51,10 @@ public sealed partial class TatooineSim
             ParallelQueryMinChunkSize = _config.ParallelQueryMinChunkSize,
             CostBasedChunking = _config.CostBasedChunking,
             EnableParallelFence = _config.ParallelFence,
+
+            // --subs-pipeline. Every other field of the options is left at its default: this is the one the A/B moves, and moving a second one would make the
+            // two arms differ in more than the thing being measured.
+            Subscriptions = new SubscriptionsOptions { CollapseBelowWorkUnits = _config.SubscriptionsCollapseWorkUnits },
         });
 
         // Before Start, because the catalog a client negotiates against is compiled there and the declarations are its source.

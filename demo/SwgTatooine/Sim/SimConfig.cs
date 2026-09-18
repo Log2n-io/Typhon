@@ -197,6 +197,18 @@ public sealed class SimConfig
     public bool ParallelFence = true;
 
     /// <summary>
+    /// <c>--subs-pipeline collapsed|staged</c>: which shape the replication track runs in, as a value for
+    /// <c>SubscriptionsOptions.CollapseBelowWorkUnits</c>. <c>staged</c> is 0 (the engine default, four dispatched stages); <c>collapsed</c> is
+    /// <see cref="int.MaxValue"/> (one dispatched system, whatever the load).
+    /// </summary>
+    /// <remarks>
+    /// A same-binary switch, because the two shapes are an A/B and the repository's A/B rule requires both arms to be the same build — a threshold compiled
+    /// in would make them two. It is a demo knob and a measurement instrument; it says nothing about what the engine should default to, which is what the
+    /// measurement it enables is for. It reaches only the <c>serve</c> path, which is the only one that has sessions.
+    /// </remarks>
+    public int SubscriptionsCollapseWorkUnits;
+
+    /// <summary>
     /// Smallest entity count the runtime will give a parallel chunk. The engine default is 64.
     /// </summary>
     /// <remarks>
