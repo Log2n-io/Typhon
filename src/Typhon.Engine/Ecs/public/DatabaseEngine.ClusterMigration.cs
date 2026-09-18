@@ -1026,6 +1026,13 @@ public partial class DatabaseEngine
                     }
                 }
 
+                // 6b. Carry the entity's replication entry to the slot it arrived in (SUB-09's movement half). Beside the component copy because it
+                //     inherits that loop's ordering and its parallel split: slices are cut by destination cell, so no two workers write one destination.
+                //     An entity nobody watches has no block behind its cluster, so this is two branches for almost every move in a large archetype.
+                //     Without it the destination slot reads as a brand-new entity and every watching session is sent a leave and a full enter for
+                //     something that merely walked over a boundary, losing its netId and the client's interpolation state with it.
+                clusterState.ReplicationState?.MigrateEntry(srcChunkId, srcSlot, dstChunkId, dstSlot, chunkIndex);
+
                 var oldClusterLocation = srcChunkId * 64 + srcSlot;
                 var newClusterLocation = dstChunkId * 64 + dstSlot;
 

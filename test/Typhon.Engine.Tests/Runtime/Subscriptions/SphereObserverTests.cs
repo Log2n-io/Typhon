@@ -211,6 +211,11 @@ class SphereObserverTests : TestBase<SphereObserverTests>
     }
 
     /// <summary>A profile whose observers have different shapes is refused, rather than resolved as some union of them.</summary>
+    /// <remarks>
+    /// It builds ONE profile with two shapes on the same builder. An earlier version of this declared two SEPARATE profiles and asserted that nothing
+    /// threw, which tests the opposite of its own name: declaring a World profile beside a Sphere profile is ordinary and always worked, so that
+    /// assertion could only have failed if something unrelated broke.
+    /// </remarks>
     [Test]
     public void AProfileMixingObserverShapesIsRefused()
     {
@@ -220,10 +225,15 @@ class SphereObserverTests : TestBase<SphereObserverTests>
             () => InterestHarness.Create(dbe, subs =>
             {
                 ProjectionTestSchema.DeclareCreature(subs);
-                subs.Profile("mixed", p => p.World().Of<ProjCreature>());
-                subs.Profile("mixed2", p => p.Sphere(Radius).Of<ProjCreature>());
+                subs.Profile("mixed", p =>
+                {
+                    // Two observers on the SAME profile builder, which is what "mixing shapes" means.
+                    p.World().Of<ProjCreature>();
+                    p.Sphere(Radius).Of<ProjCreature>();
+                });
             }, nameof(AProfileMixingObserverShapesIsRefused)),
-            Throws.Nothing,
-            "two profiles of different shapes are fine; it is one profile with two shapes that has no meaning yet");
+            Throws.TypeOf<NotSupportedException>(),
+            "a profile with a World observer and a Sphere observer is a near/far tier, and the tiers differ in budget, rate and record kind — resolving "
+            + "them as one union would be a quiet wrong answer");
     }
 }

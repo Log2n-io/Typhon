@@ -103,6 +103,7 @@ export class TyphonSource implements DataSource {
   private region: RegionSender | null = null;
   private attack: MessagePlan | null = null;
   private pendingRegion: { x: number; z: number; radius: number } | null = null;
+  private lastSentRegion: { x: number; z: number; radius: number } | null = null;
   private paused = false;
   private ticks = 0;
   private lastTick = 0;
@@ -189,6 +190,9 @@ export class TyphonSource implements DataSource {
   dispose(): void {
     this.ping?.stop();
     this.client.stop();
+
+    // Cleared, because stats.running is derived from it: a disposed source reported itself as running for the rest of the page's life.
+    this.applier = null;
   }
 
   /** The god camera's disc, sent as the smallest quad that contains it (W28: a quad is the minimum footprint). */
@@ -200,6 +204,11 @@ export class TyphonSource implements DataSource {
   /** A live server does not pause; this only stops the client asking for a new region. */
   setPaused(paused: boolean): void {
     this.paused = paused;
+    if (!paused) {
+      // A region set DURING the pause was stored and never sent, because sendRegion returns early while paused — so the server kept serving the
+      // pre-pause disc until the camera happened to move again.
+      this.sendRegion();
+    }
   }
 
   private onWelcome(session: SessionInfo, connection: Connection): void {
@@ -219,8 +228,10 @@ export class TyphonSource implements DataSource {
             plan,
             send: (type, values) => this.commands?.enqueue(type, values),
             onRejected: () => {
-              // The server kept the previous region: only a different footprint is worth sending (§ 10).
-              this.pendingRegion = null;
+              // The server kept the previous region, so the NEXT identical request is the one not worth sending — which is a fact about what was last
+              // sent, not a reason to forget where the camera is. Clearing pendingRegion also zeroed the reported effective radius and made the
+              // altitude default unreachable for the rest of the session, because sendRegion bails when there is nothing pending.
+              this.lastSentRegion = this.pendingRegion;
             },
           });
     this.ping = new PingScheduler({
@@ -319,6 +330,14 @@ export class TyphonSource implements DataSource {
   }
 
   private wireBytesPerSec(): number {
+    // Pruned HERE as well as on arrival. Pruning only when a frame arrives means that when frames stop the window is never trimmed again and the rate
+    // freezes at the last second it saw — so a stalled session reads as a healthy one, which is the opposite of what the number is for.
+    const horizon = performance.now() - 1000;
+    while (this.byteTimes.length > 0 && this.byteTimes[0] < horizon) {
+      this.byteTimes.shift();
+      this.byteCounts.shift();
+    }
+
     let total = 0;
     for (const count of this.byteCounts) {
       total += count;
@@ -342,8 +361,11 @@ export class TyphonSource implements DataSource {
       simMs: value('typhon.tick.p50'),
       replicationMs: value('typhon.subscriptions.track.p99'),
       watched: applier.world.entityCount,
-      effectiveRadius: this.pendingRegion?.radius ?? 0,
-      worldEntities: value('typhon.sessions'),
+      effectiveRadius: this.lastSentRegion?.radius ?? this.pendingRegion?.radius ?? 0,
+
+      // typhon.archetype.entities, not typhon.sessions: the latter is how many clients are connected, which is not the world's population by any
+      // reading and was being shown to the HUD under that name.
+      worldEntities: value('typhon.archetype.entities'),
     };
   }
 }

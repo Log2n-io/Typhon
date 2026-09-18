@@ -120,6 +120,10 @@ internal sealed class HitArena
     /// </summary>
     public IReadOnlyList<long> NewBlocks => _newBlocks;
 
+    private int[] _sphereChunks = new int[16];
+    private ulong[] _sphereMasks = new ulong[16];
+    private int _sphereCount;
+
     /// <summary>The blocks this worker marked watched this tick.</summary>
     public IReadOnlyList<nint> WatchedBlocks => _watchedBlocks;
 
@@ -136,6 +140,61 @@ internal sealed class HitArena
         Hits = 0;
         ChunksInsideOpenWindow = 0;
     }
+
+    /// <summary>
+    /// Starts gathering one archetype's sphere hits for one session.
+    /// </summary>
+    /// <remarks>
+    /// <b>The scratch lives here because an arena is per worker.</b> A sphere query reports hits grouped by cluster only if the spatial index happens to
+    /// walk them that way, which is its property and not this pass's, so the hits are merged into one run per cluster before any of them is recorded. Holding
+    /// that merge state on the pass itself would be a buffer shared by every worker resolving a session at the same time; holding it on the arena gives each
+    /// worker its own, which is the same ownership every other buffer here has.
+    /// </remarks>
+    public void BeginSphere() => _sphereCount = 0;
+
+    /// <summary>Merges one sphere hit into the run for its cluster.</summary>
+    /// <param name="chunkId">The cluster the hit is in.</param>
+    /// <param name="slot">Its slot within the cluster.</param>
+    public void AddSphereHit(int chunkId, int slot)
+    {
+        if (chunkId < 0 || (uint)slot >= 64u)
+        {
+            return;
+        }
+
+        var bit = 1UL << slot;
+        for (var i = 0; i < _sphereCount; i++)
+        {
+            if (_sphereChunks[i] == chunkId)
+            {
+                _sphereMasks[i] |= bit;
+                return;
+            }
+        }
+
+        if (_sphereCount == _sphereChunks.Length)
+        {
+            Array.Resize(ref _sphereChunks, Math.Max(16, _sphereChunks.Length * 2));
+            Array.Resize(ref _sphereMasks, _sphereChunks.Length);
+        }
+
+        _sphereChunks[_sphereCount] = chunkId;
+        _sphereMasks[_sphereCount] = bit;
+        _sphereCount++;
+    }
+
+    /// <summary>How many distinct clusters the sphere reached.</summary>
+    public int SphereCount => _sphereCount;
+
+    /// <summary>The cluster of one gathered run.</summary>
+    /// <param name="index">Its position.</param>
+    /// <returns>The chunk id.</returns>
+    public int SphereChunk(int index) => _sphereChunks[index];
+
+    /// <summary>The slots of one gathered run.</summary>
+    /// <param name="index">Its position.</param>
+    /// <returns>The mask.</returns>
+    public ulong SphereMask(int index) => _sphereMasks[index];
 
     /// <summary>Records one cluster run.</summary>
     /// <param name="archetypeIndex">Index of the archetype's compiled plan.</param>

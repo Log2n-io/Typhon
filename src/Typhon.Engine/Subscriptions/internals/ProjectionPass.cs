@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -403,9 +404,14 @@ internal static unsafe class ProjectionPass
 
         // The change set, published for the frame stage (12 — the per-session walk). It is written unconditionally, including when it is zero: a block that
         // was projected and changed nothing must say so, or a reader cannot tell "nothing changed here" from "not projected this tick" and would have to
-        // assume the worst. The tick is stored last, which is what makes the pair readable — see ChangedTick's remarks.
+        // assume the worst.
+        //
+        // RELEASE on the tick, which is what makes the pair readable — see ChangedTick's remarks. Writing the tick "last" in program order proves nothing on
+        // its own: arm64 may commit the two plain stores in either order, and a reader that saw the new tick against the old mask would apply a stale change
+        // set to a live tick. The stage join between S1 and S2b happens to separate this writer from that reader today, but the pair is documented as
+        // self-describing and read as such, so it carries its own ordering. Free on x64, one stlr on arm64.
         block->ChangedSlots = changedSlots;
-        block->ChangedTick = tick;
+        Volatile.Write(ref block->ChangedTick, tick);
 
         // The watched mask is deliberately LEFT SET. It is the interest stage's, cleared by its own prologue at the start of the next tick, and the frame
         // stage still has to read it after this one has run — a pass that tidied up after itself would erase the very thing S2b is about to consult.

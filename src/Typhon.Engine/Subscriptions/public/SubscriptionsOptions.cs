@@ -269,12 +269,30 @@ public sealed class SubscriptionsOptions
     public int CollapseBelowWorkUnits { get; init; }
 
     /// <summary>
-    /// Whether a session that holds last tick's frame is served from the change set S1 published, instead of walking everything it watches.
+    /// Whether a session that holds last tick's frame is served from the change set S1 published, instead of walking everything it watches. Default: off.
     /// </summary>
     /// <remarks>
-    /// On by default, and off only to measure what it is worth: it is the same binary either way, which is the only honest way to compare (a second build
-    /// differs in code placement as well as in behaviour). A session that is behind, still filling, or resetting takes the full walk regardless — SUB-03
-    /// requires every group newer than its baseline, and one tick's change set does not contain them.
+    /// <para>
+    /// <b>OFF by default, because the path is UNSOUND as built.</b> The change mask is applied to a run before the known-set is probed, so a hit slot
+    /// that this session does not know AND that did not change this tick is never classified: it produces no enter record, and it still counts toward
+    /// the hit total that proves "nothing left the view" and skips the leave sweep. The session never receives that entity, and an unchanged entity
+    /// has nothing to change tomorrow either.
+    /// </para>
+    /// <para>
+    /// <b>Two ordinary states produce it, and neither involves an exotic observer.</b> An enter deferred by the per-frame budget is not recorded
+    /// anywhere and stays unknown, to be rediscovered by the next gather — the walk this mask cripples; and interest that moves onto a slot another
+    /// session keeps watched presents an entity that compared equal. It is self-limiting only when the session has nothing else to publish, because the
+    /// baseline then stalls and the next tick takes the full walk; a session with any other traffic keeps the fast path and never recovers.
+    /// </para>
+    /// <para>
+    /// It is kept rather than deleted because the measurement it was built for is real — 1.5-2.5x on the frame stage for whole-world views — and the
+    /// repair is known: probe the known-set over the UNMASKED run and apply the mask only to the record-emitting half, or carry a count of hits the fast
+    /// path could not classify and fail the proof on it. Turning it on today trades a silent, permanent divergence for that speed.
+    /// </para>
+    /// <para>
+    /// A session that is behind, still filling, or resetting takes the full walk regardless — SUB-03 requires every group newer than its baseline, and
+    /// one tick's change set does not contain them.
+    /// </para>
     /// </remarks>
-    public bool ChangedOnlyGather { get; init; } = true;
+    public bool ChangedOnlyGather { get; init; }
 }

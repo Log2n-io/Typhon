@@ -89,17 +89,21 @@ class StatsBlockTests : TestBase<StatsBlockTests>
             clients[i] = world.Connect(Capabilities.Stats);
         }
 
+        // ONE deadline for the population, not one per client. Forty clients at five seconds each bounds a regression at three and a half minutes of shard
+        // time, on a fixture whose passing run is under a second; the failure then reads as a hung shard rather than as this assertion.
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+
         // Two blocks, not one: the first can ride on the frame that completes the view, and what the AC-1 run showed is a session receiving that one and
         // never another.
         foreach (var client in clients)
         {
-            Assert.That(client.AwaitBlock(), Is.True, "a session never received its first STATS block");
+            Assert.That(client.AwaitBlock(deadline), Is.True, "a session never received its first STATS block");
         }
 
         var missing = 0;
         foreach (var client in clients)
         {
-            if (!client.AwaitBlock())
+            if (!client.AwaitBlock(deadline))
             {
                 missing++;
             }
@@ -420,10 +424,18 @@ class StatsBlockTests : TestBase<StatsBlockTests>
         public int StatsBlocks { get; private set; }
 
         /// <summary>Takes frames until one carries a <c>STATS</c> block, or the deadline passes.</summary>
-        public bool AwaitBlock()
+        public bool AwaitBlock() => AwaitBlock(DateTime.UtcNow.AddSeconds(5));
+
+        /// <summary>Waits for one more STATS block, against a deadline the CALLER owns.</summary>
+        /// <param name="deadline">When to give up, shared across a population.</param>
+        /// <remarks>
+        /// A per-call deadline is the right shape for one client and the wrong shape for forty. Forty clients waited on in a loop, each allowed five seconds,
+        /// is a fixture that takes over six minutes to report a regression instead of failing — and it is the shard's wall clock that pays, not this file's.
+        /// One deadline for the whole population fails on the first client that is late and bounds the fixture at what a passing run costs plus the slack.
+        /// </remarks>
+        public bool AwaitBlock(DateTime deadline)
         {
             var target = StatsBlocks + 1;
-            var deadline = DateTime.UtcNow.AddSeconds(5);
             while (DateTime.UtcNow < deadline && StatsBlocks < target)
             {
                 Apply(200);

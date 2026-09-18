@@ -96,6 +96,11 @@ sealed unsafe class FrameHarness : IDisposable
     /// <returns>The replica.</returns>
     public SessionReplica Replica(SessionId session) => _replicas[session.Value];
 
+    /// <summary>Drops a closed session's decoded replica, so a fixture that churns sessions does not retain one per cycle.</summary>
+    /// <param name="session">The session that has ended.</param>
+    /// <remarks>A session id is a slot plus a GENERATION, so a recycled slot never reuses its key and nothing here is overwritten by the next occupant.</remarks>
+    public void Forget(SessionId session) => _replicas.Remove(session.Value);
+
     /// <summary>The plan index of a replicated archetype, by wire name.</summary>
     /// <param name="name">The archetype's wire name.</param>
     /// <returns>The index.</returns>
@@ -253,6 +258,14 @@ sealed unsafe class FrameHarness : IDisposable
         var stamp = (uint)tick;
 
         _interest.CreateRequestedBlocks();
+
+        // The entries the fence's migration step parked because their destination had no block yet, placed now that the blocks above exist. This
+        // harness reimplements the track's blocks step by hand, so anything added there has to be added here too or the harness quietly tests a
+        // pipeline the runtime does not have — which is exactly how the migration hook first appeared to do nothing.
+        for (var a = 0; a < states.Length; a++)
+        {
+            states[a].DrainParkedEntries();
+        }
 
         for (var a = 0; a < states.Length; a++)
         {

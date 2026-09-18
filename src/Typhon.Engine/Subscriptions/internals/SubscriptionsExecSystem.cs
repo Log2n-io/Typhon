@@ -295,6 +295,15 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
             CreateNewBlocks(interest, states);
         }
 
+        // Entries the fence's migration step could not place, because their destination cluster had no block when the entity arrived in it. This runs
+        // AFTER the blocks above, which is the whole point: a cluster that became watched this tick now has somewhere for its arrivals to go. One that
+        // still has none is watched by nobody, so dropping its parked entries loses nothing — the entity is initialised from current values the first
+        // time somebody does watch it. Single-threaded here, and separated from the slices that filled the lists by the fence's own barrier.
+        for (var i = 0; i < states.Length; i++)
+        {
+            states[i]?.DrainParkedEntries();
+        }
+
         var blocks = interest?.WatchedBlockCount ?? WatchedBlocks(states);
         if (blocks == 0)
         {

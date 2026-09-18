@@ -140,6 +140,10 @@ class SendPumpTests : TestBase<SendPumpTests>
     {
         var options = new SubscriptionsOptions();
 
+        // Multiple, so a failure reports every tick rate rather than stopping at the first: the separation is a property of the pair of formulas, and
+        // knowing it holds at 10 Hz and fails at 100 is the useful output.
+        Assert.Multiple(() =>
+        {
         foreach (var periodUs in new uint[] { 100_000, 16_667, 10_000 })
         {
             var close = SkipPolicy.CloseBoundTicks(options, periodUs);
@@ -149,6 +153,7 @@ class SendPumpTests : TestBase<SendPumpTests>
                 $"at {periodUs} µs the stall bound is {close} ticks against a silence bound of {silence}: a client that is still talking would be given "
                 + "barely more rope than one that has gone silent, and the two close codes would say the same thing");
         }
+        });
     }
 
     /// <summary>
@@ -196,7 +201,7 @@ class SendPumpTests : TestBase<SendPumpTests>
             Assert.That(slow, Is.GreaterThan(degradedRunBetweenFrames), "a fully degraded session must not be closed by its own rate class");
 
             Assert.That(SkipPolicy.CloseBoundTicks(new SubscriptionsOptions { CloseStalledAfter = TimeSpan.Zero }, 16_667), Is.Zero,
-                "no bound at all is expressible here and refused by the runtime, rather than quietly turned into a bound nobody asked for");
+                "no bound at all is expressible here; the runtime is what refuses it, which SubscriptionsRuntimeTests covers");
         });
     }
 

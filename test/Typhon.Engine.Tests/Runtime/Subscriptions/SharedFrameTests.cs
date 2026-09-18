@@ -271,6 +271,13 @@ unsafe class SharedFrameTests : TestBase<SharedFrameTests>
 
         TestContext.Out.WriteLine($"encodes per tick: {string.Join(", ", perTick)}");
 
+        // Every tick AFTER the first, not just the last one. Asserting only the final value let a run of 110, 110, 110, 1 pass while printing the
+        // evidence of its own failure to the log; asserting all four is too strong, because cohorts that joined at different ticks legitimately hold
+        // different baselines on the first measured tick and cost one encode each — this fixture measured 13, 1, 1, 1. What the remarks actually claim
+        // is that the population RE-CONVERGES, so the assertion is that it has converged by the second tick and stays converged.
+        Assert.That(perTick.GetRange(1, perTick.Count - 1), Is.All.EqualTo(1),
+            "the population did not stay converged after its first tick; the per-tick encodes are printed above");
+
         TestContext.Out.WriteLine($"{Sessions} sessions, cohorts of {(perCohort == 0 ? Sessions : perCohort)}: {encoded} encodes, {copied} copies");
 
         Assert.That(encoded, Is.EqualTo(1),
@@ -290,7 +297,9 @@ unsafe class SharedFrameTests : TestBase<SharedFrameTests>
     [Test]
     public void TheChangedOnlyGatherIsTakenInSteadyState()
     {
-        using var harness = Create();
+        // Enabled explicitly: the option is OFF by default since the review of 2026-09-18 found the path unsound (see SubscriptionsOptions
+        // .ChangedOnlyGather). This fixture measures the path's BEHAVIOUR when it is on, which is still worth pinning for whoever repairs it.
+        using var harness = Create(changedOnlyGather: true);
         SpawnCreatures(harness, 40);
         var sessions = harness.OpenSessions(8, Profile);
 
@@ -315,8 +324,12 @@ unsafe class SharedFrameTests : TestBase<SharedFrameTests>
 
         Assert.Multiple(() =>
         {
-            Assert.That(fast, Is.GreaterThan(full), $"the fast path was taken {fast} times against {full} full walks; in a steady state where every session "
-                + "is produced for every tick it should be the common case, and if it is not the baseline is not advancing as assumed");
+            // A MAJORITY, not merely more. The remark claims the fast path is "the common case" in a steady state, and `fast > full` is satisfied by
+            // 81 against 79 — which would be the optimisation barely applying while the test reported it working. With the option off by default this
+            // fixture is the only coverage the path has, so the bound is the claim rather than a direction.
+            Assert.That(fast, Is.GreaterThan((fast + full) * 3 / 4),
+                $"the fast path was taken {fast} times against {full} full walks. In a steady state where every session holds last tick's frame it is "
+                + "supposed to be the common case, not merely the more frequent of two");
             Assert.That(unproven, Is.Zero, "a fast gather could not prove nothing had left and was redone — that is a double walk, and in a steady state "
                 + "with no churn it should never happen");
         });
@@ -331,7 +344,7 @@ unsafe class SharedFrameTests : TestBase<SharedFrameTests>
         subs.Profile(OtherProfile, p => p.World().Of<ProjCreature>());
     }
 
-    private FrameHarness Create(int enterBudget = 500) => FrameHarness.Create(
+    private FrameHarness Create(int enterBudget = 500, bool changedOnlyGather = false) => FrameHarness.Create(
         ProjectionTestSchema.SetupEngine(ServiceProvider),
         Declare,
         nameof(SharedFrameTests),
@@ -341,6 +354,7 @@ unsafe class SharedFrameTests : TestBase<SharedFrameTests>
             StatePoolBudgetBytes = 64L * 1024 * 1024,
             FramePoolBudgetBytes = 64L * 1024 * 1024,
             EnterBudgetPerFrame = enterBudget,
+            ChangedOnlyGather = changedOnlyGather,
         });
 
     /// <summary>Runs ticks and drains every session, so they all reach a complete view at the same baseline.</summary>

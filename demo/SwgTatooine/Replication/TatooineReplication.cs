@@ -164,53 +164,63 @@ public static class TatooineReplication
             return;
         }
 
+        // NOT disposed: the accessor comes from the TICK's transaction, which owns it and releases it. Disposing one taken from a transaction this
+        // method did not create tears down the cached EntityMap and chunk accessors mid-tick, which stops later systems reading.
         var accessor = tx.For<Player>();
-        var enumerator = accessor.GetClusterEnumerator();
-        var cluster = default(ClusterRef<Player>);
-        var occupancy = 0UL;
-        var haveCluster = false;
-
-        foreach (var session in subs.OpenSessions)
         {
-            if (!string.Equals(subs.SessionKindOf(session), PlayerKind, StringComparison.Ordinal))
-            {
-                continue;
-            }
+            var enumerator = accessor.GetClusterEnumerator();
+            var cluster = default(ClusterRef<Player>);
+            var occupancy = 0UL;
+            var wraps = 0;
 
-            // The next player in the walk, wrapping when the sessions outnumber them. Advancing the SAME walk across sessions is what spreads the discs:
-            // placing them all on one player would make every view identical, and identical views are the case the shared-frame path serves at the cost of
-            // one — a measurement taken that way reports a per-session cost no real population has.
-            while (occupancy == 0)
+            foreach (var session in subs.OpenSessions)
             {
-                if (!enumerator.MoveNext())
+                if (!string.Equals(subs.SessionKindOf(session), PlayerKind, StringComparison.Ordinal))
                 {
-                    enumerator = accessor.GetClusterEnumerator();
-                    if (!enumerator.MoveNext())
-                    {
-                        // No players at all: nothing to place sessions on, and a session left unplaced correctly sees nothing.
-                        return;
-                    }
+                    continue;
                 }
 
-                cluster = enumerator.Current;
-                occupancy = cluster.OccupancyBits;
-                haveCluster = true;
-            }
+                // The next player in the walk, wrapping when the sessions outnumber them. Advancing the SAME walk across sessions is what spreads the discs:
+                // placing them all on one player would make every view identical, and identical views are the case the shared-frame path serves at the cost
+                // of one — a measurement taken that way reports a per-session cost no real population has.
+                var found = false;
+                while (!found)
+                {
+                    while (occupancy == 0)
+                    {
+                        if (!enumerator.MoveNext())
+                        {
+                            // BOUNDED. The old form restarted the walk and only gave up when a FRESH enumerator yielded no cluster at all, so a population
+                            // whose clusters all happened to be empty — a cluster whose last occupant migrated out, before the drain releases it — spun this
+                            // loop forever on the tick path with no progress and nothing to report.
+                            if (++wraps > 1)
+                            {
+                                return;
+                            }
 
-            if (!haveCluster)
-            {
-                return;
-            }
+                            enumerator = accessor.GetClusterEnumerator();
+                            if (!enumerator.MoveNext())
+                            {
+                                return;
+                            }
+                        }
 
-            var slot = BitOperations.TrailingZeroCount(occupancy);
-            occupancy &= occupancy - 1;
+                        cluster = enumerator.Current;
+                        occupancy = cluster.OccupancyBits;
+                    }
+
+                    var slot = BitOperations.TrailingZeroCount(occupancy);
+                    occupancy &= occupancy - 1;
 
 #pragma warning disable TYPHON009
-            var placements = cluster.GetSpan(Player.Bounds);
+                    var placements = cluster.GetSpan(Player.Bounds);
 #pragma warning restore TYPHON009
-            ref readonly var placement = ref placements[slot];
-            var b = placement.Bounds;
-            subs.Place(session, new Vector3D((b.MinX + b.MaxX) * 0.5, (b.MinY + b.MaxY) * 0.5, 0d));
+                    ref readonly var placement = ref placements[slot];
+                    var b = placement.Bounds;
+                    subs.Place(session, new Vector3D((b.MinX + b.MaxX) * 0.5, (b.MinY + b.MaxY) * 0.5, 0d));
+                    found = true;
+                }
+            }
         }
     }
 }

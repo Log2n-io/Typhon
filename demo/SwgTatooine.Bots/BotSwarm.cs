@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Typhon.Client;
@@ -97,7 +98,17 @@ public sealed class BotSwarm : IAsyncDisposable
     }
 
     /// <summary>How many sessions were closed by the server or the transport, by close code.</summary>
-    public IReadOnlyDictionary<ushort, int> Disconnects => _disconnects;
+    /// <remarks>A snapshot: the live dictionary is written by every client's receive loop, so handing it out would hand out a race.</remarks>
+    public IReadOnlyDictionary<ushort, int> Disconnects
+    {
+        get
+        {
+            lock (_reportLock)
+            {
+                return new Dictionary<ushort, int>(_disconnects);
+            }
+        }
+    }
 
     /// <summary>Messages received across every session.</summary>
     public long MessagesReceived
@@ -115,7 +126,7 @@ public sealed class BotSwarm : IAsyncDisposable
     }
 
     /// <summary>Faults raised by any client's receive loop — a frame that could not be applied.</summary>
-    public int Faults { get; private set; }
+    public int Faults => Volatile.Read(ref _faults);
 
     /// <summary>
     /// A built-in server metric as the server last reported it, or <c>NaN</c> when nothing has carried one yet.
@@ -378,17 +389,25 @@ public sealed class BotSwarm : IAsyncDisposable
     public long Ticks { get; private set; }
 
     private readonly Dictionary<ushort, int> _disconnects = [];
+    private readonly Lock _reportLock = new();
+    private int _faults;
 
     /// <summary>Connects every bot and starts the shared driver.</summary>
     /// <param name="ct">Cancels the start.</param>
     /// <returns>How many sessions opened.</returns>
     public async Task<int> StartAsync(CancellationToken ct = default)
     {
+        // The ramp's own keepalive clock. Half the client ping period, so no session crosses the server's silence bound while its neighbours connect.
+        var rampPingPeriod = _options.TickHz > 0 ? TimeSpan.FromSeconds(0.5 / _options.TickHz) : TimeSpan.FromMilliseconds(125);
+        var rampPing = Stopwatch.StartNew();
+
         for (var i = 0; i < _options.Count; i++)
         {
             var bot = new Bot(i, _options);
             bot.Client.Disconnected += (code, _) => Note(code);
-            bot.Client.Fault += _ => Faults++;
+            // Interlocked, because Fault is raised from each client's OWN receive loop: with N bots these are N threads, and `Faults++` is a
+            // read-modify-write that silently loses updates. The report is the product here, so a counter that undercounts is the report lying.
+            bot.Client.Fault += _ => Interlocked.Increment(ref _faults);
 
             try
             {
@@ -408,9 +427,20 @@ public sealed class BotSwarm : IAsyncDisposable
                 await Task.Delay(_options.ConnectStagger, ct).ConfigureAwait(false);
             }
 
-            // Ping everyone already up, because the ramp is long enough to matter: a hundred sessions at this stagger take seconds, and a session that says
-            // nothing for seconds is a session the server is entitled to treat as gone. Without this the generator manufactures its own silence and then
-            // reports the server's reaction to it as a server defect.
+            // Ping everyone already up, because the ramp is long enough to matter: a hundred sessions at this stagger take seconds, and a session that
+            // says nothing for seconds is a session the server is entitled to treat as gone. Without this the generator manufactures its own silence and
+            // then reports the server's reaction to it as a server defect.
+            //
+            // ON A CADENCE, not after every connect. Pinging the whole population per connection is O(n squared) sends: at the thousand sessions this class
+            // is meant to reach that is half a million pings before a single measurement, which makes the generator the expensive thing its own remarks say
+            // it must not be. Half a ping period is frequent enough that nobody crosses the silence bound during the ramp.
+            var sinceRampPing = rampPing.Elapsed;
+            if (sinceRampPing < rampPingPeriod)
+            {
+                continue;
+            }
+
+            rampPing.Restart();
             foreach (var connected in _bots)
             {
                 try
@@ -453,7 +483,20 @@ public sealed class BotSwarm : IAsyncDisposable
         _stopping.Dispose();
     }
 
-    private void Note(ushort code) => _disconnects[code] = _disconnects.GetValueOrDefault(code) + 1;
+    /// <summary>Records one disconnect. Called from the disconnecting client's OWN receive loop, so with N bots this is N threads.</summary>
+    /// <param name="code">The close code.</param>
+    /// <remarks>
+    /// A <see cref="Dictionary{TKey, TValue}"/> written by several threads at once corrupts or throws, and this one is what the exit code reads and the
+    /// report prints — so an unsynchronised write here is the report lying rather than merely a race. The engine's own smoke fixture locks the same two
+    /// counters; this file did not inherit it.
+    /// </remarks>
+    private void Note(ushort code)
+    {
+        lock (_reportLock)
+        {
+            _disconnects[code] = _disconnects.GetValueOrDefault(code) + 1;
+        }
+    }
 
     private async Task DriveAsync(CancellationToken ct)
     {

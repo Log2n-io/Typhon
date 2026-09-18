@@ -352,10 +352,25 @@ public sealed class TyphonClient : IAsyncDisposable
     {
         while (!ct.IsCancellationRequested)
         {
+            // Read ONCE into a local. The retry path drops the transport before it re-handshakes, and a handshake that throws leaves the loop running
+            // with nothing to receive from: dereferencing the field here raised a NullReferenceException on every backoff cycle, which the catch below
+            // swallowed into a spurious Fault, and the null message below then manufactured a Disconnected with a close code no server ever sent. A host
+            // that counts those events — which is exactly what a load generator does — was handed a fabricated fault and disconnect per retry.
+            var transport = _transport;
+            if (transport == null)
+            {
+                if (!await HandleCloseAsync(CloseCodes.GoingAway, ct).ConfigureAwait(false))
+                {
+                    return;
+                }
+
+                continue;
+            }
+
             byte[] message = null;
             try
             {
-                message = await _transport.ReceiveAsync(ct).ConfigureAwait(false);
+                message = await transport.ReceiveAsync(ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {

@@ -940,7 +940,13 @@ internal sealed unsafe class FrameAssembler : IDisposable
         // baseline exactly as they were, which is what makes the next frame carry the union of everything the session missed (SUB-03).
         if (!SkipPolicy.ProducesOnTick(state.DegradeLevel, _tick))
         {
-            send->NoteSkipped();
+            // NOT counted toward the close bound. This tick is skipped because the ENGINE decided to serve this session less, which is the mitigation, not
+            // the symptom — counting it makes degradation the cause of the close it exists to avert. Nothing resets the run but a published frame, so a
+            // degraded session in a world with nothing to send accumulated a skip on every non-producing tick and a published frame on none of them: the run
+            // grew at 1 - 2^-level per tick with no ceiling and no recovery, because FramesSinceDegrade also advances only on a published frame. At 60 Hz and
+            // the default three-second bound that closed a level-1 session after six quiet seconds, with 1013 "you are lagging" — the same conflation
+            // SUB-15 forbids, reached through the rate class instead of through the idle abandon. Real back-pressure still counts: the K-slot claim below,
+            // the acknowledgement lag above it, and the pool refusals further down all advance the run on the ticks this session DOES produce on.
             NoteSkip(state);
             return;
         }
@@ -982,6 +988,10 @@ internal sealed unsafe class FrameAssembler : IDisposable
         // them. That session takes the walk below, unchanged, which is the invariant's backstop and the reason this is an optimisation rather than a new
         // contract. `KnownFlags.NeedsFull` has no setter in Phase 1; whoever adds one (SUB-11's resend) must gate this too, because an unchanged entity
         // carrying that flag would not be visited.
+        // SEE SubscriptionsOptions.ChangedOnlyGather, which is OFF by default because this path is unsound. The mask is applied before the known-set is
+        // probed, so a hit slot that is unknown to this session AND unchanged this tick is never classified: no enter is produced, and the slot still counts
+        // toward the proof below that skips Sweep. Two ordinary states produce it — an enter deferred by the per-frame budget, and interest that moves onto a
+        // slot somebody else keeps watched — and neither is visible from here.
         var changedOnly = ChangedOnlyGatherEnabled && state.Baseline == _tick - 1 && state.ViewComplete && !state.PendingReset && !state.ForceFullGather;
         state.ForceFullGather = false;
         var touched = Gather(index, state, scratch, stamp, changedOnly, out var staleLeaves, out var pending, out var hits);
@@ -1213,8 +1223,10 @@ internal sealed unsafe class FrameAssembler : IDisposable
                 // S1 published which slots produced a record this tick (ReplicationBlockHeader.ChangedSlots). Everything else in this block is a known
                 // entity whose every group compared equal, so it has nothing to say to a session that already has last tick's frame. A block whose stamp is
                 // not this tick is not trusted — it is visited in full, which is the safe direction.
+                // ACQUIRE on the tick, pairing with the release in ProjectionPass. The mask is only meaningful for the tick it names, so reading the
+                // name with a plain load would let the mask read sink above it on arm64 and pair this tick's number with the previous tick's bits.
                 var header = (ReplicationBlockHeader*)run.Block;
-                if (header->ChangedTick == (uint)_tick)
+                if (Volatile.Read(ref header->ChangedTick) == (uint)_tick)
                 {
                     slots &= header->ChangedSlots;
                 }

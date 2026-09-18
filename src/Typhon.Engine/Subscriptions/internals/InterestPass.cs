@@ -426,9 +426,12 @@ internal sealed unsafe class InterestPass
     /// is here to remove.
     /// </para>
     /// <para>
-    /// <b>Hits arrive grouped by cluster, and the mask is accumulated per group.</b> The unit of interest is a run — a cluster plus the mask of slots inside
-    /// it — so the walk gathers a cluster's hit slots into one mask and flushes it when the cluster changes. The flush is written to be correct whatever
-    /// order the enumerator uses: a cluster revisited later simply produces a second run, which costs a little and reports the same set.
+    /// <b>One run per cluster, whatever order the hits arrive in.</b> The unit of interest is a run — a cluster plus the mask of slots inside it — and the
+    /// walk accumulates every hit into the run for its cluster before any of them is recorded, rather than flushing when the cluster id changes. Flushing on
+    /// change would be correct only if the enumerator never revisited a cluster, which is a property of the spatial query rather than of this code, and it
+    /// would fail in a way nothing reports: a slot appearing in two runs is counted twice by the frame assembler's hit total, which is what the changed-only
+    /// gather proves "no leaves are outstanding" from — an over-count there makes the proof succeed when it should not and a leave is silently never sent.
+    /// The cluster count inside a sphere is small, so the linear scan that merges a hit into its run is cheaper than the stamp table that would replace it.
     /// </para>
     /// </remarks>
     private int WalkSphere(HitArena arena, int archetypeIndex, Vector3D centre, double radius, ref long probes)
@@ -439,23 +442,18 @@ internal sealed unsafe class InterestPass
             return 0;
         }
 
-        var hits = 0;
-        var currentChunk = -1;
-        var mask = 0UL;
-
+        arena.BeginSphere();
         foreach (var hit in clusterState.QueryRadius(clusterState.Grid, centre.X, centre.Y, centre.Z, radius))
         {
-            if (hit.ClusterChunkId != currentChunk)
-            {
-                hits += FlushSphereRun(arena, archetypeIndex, currentChunk, mask, ref probes);
-                currentChunk = hit.ClusterChunkId;
-                mask = 0;
-            }
-
-            mask |= 1UL << hit.SlotIndex;
+            arena.AddSphereHit(hit.ClusterChunkId, hit.SlotIndex);
         }
 
-        hits += FlushSphereRun(arena, archetypeIndex, currentChunk, mask, ref probes);
+        var hits = 0;
+        for (var i = 0; i < arena.SphereCount; i++)
+        {
+            hits += FlushSphereRun(arena, archetypeIndex, arena.SphereChunk(i), arena.SphereMask(i), ref probes);
+        }
+
         return hits;
     }
 

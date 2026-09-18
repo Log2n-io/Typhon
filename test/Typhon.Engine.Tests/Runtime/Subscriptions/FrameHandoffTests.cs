@@ -793,7 +793,7 @@ unsafe class FrameHandoffTests
     /// </remarks>
     [Test]
     [VerifiesRule("SUB-15")]
-    public void AnIdleTickCostsASequenceButNotASkip()
+    public void AnIdleTickCostsNeitherASequenceNorASkip()
     {
         var state = NewState();
         var block = stackalloc byte[64];
@@ -818,8 +818,10 @@ unsafe class FrameHandoffTests
             state->AbandonFrame(claimed);
             Assert.That(state->SkipRun, Is.EqualTo(1), "back-pressure still advances the run");
 
+            // And a published frame is what clears it — asserted rather than left as two statements of unexamined setup.
             Assert.That(state->TryBeginFrame(out var last, out _), Is.True);
             state->PublishFrame(last, new FrameBlock(block, 64), 8, 1);
+            Assert.That(state->SkipRun, Is.Zero, "a published frame is the only thing that resets the run, and it must");
         }
         finally
         {

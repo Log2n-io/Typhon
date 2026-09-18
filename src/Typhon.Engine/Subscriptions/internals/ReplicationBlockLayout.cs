@@ -44,6 +44,12 @@ internal struct ReplicationBlockHeader
     public ulong ChangedSlots;
 
     /// <summary>The tick <see cref="ChangedSlots"/> describes. Any other tick means the mask is stale and must not be read.</summary>
+    /// <remarks>
+    /// <b>Written with a release and read with an acquire</b>, because it is the name that makes the mask beside it trustworthy and the two are stored
+    /// separately. Program order alone does not order them on arm64, and either reordering is a silent wrong answer: a reader seeing the new tick against
+    /// the old bits applies a stale change set, and one seeing the old tick against the new bits takes a needless full walk. Both loads compile to plain
+    /// <c>mov</c> on x64.
+    /// </remarks>
     public uint ChangedTick;
 
     /// <summary>

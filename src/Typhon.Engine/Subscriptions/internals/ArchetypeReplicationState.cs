@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -38,6 +39,12 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     // ENTITIES block, which is an archetype's block; a watched block belongs to one archetype's directory; and a lease is spent initializing this
     // archetype's entries. They are created eagerly and reset per tick — none of them allocates once the watched set has stopped growing (SUB-07).
     private readonly WatchedBlockList _watchedBlocks = new();
+    private readonly Lock _parkLock = new();
+    private ParkedEntryList _parked;
+    private long _entriesMigrated;
+    private long _entriesParked;
+    private long _parkedDropped;
+    private long _migrationsAbandoned;
     private readonly RecordArenaSet _records = new();
     private readonly NetIdLeaseSet _netIdLeases = new();
 
@@ -201,6 +208,264 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// state of its own: the reference it compares against is the velocity the entity's current segment carries.
     /// </remarks>
     public long ShadowSegmentsEmitted => Volatile.Read(ref _shadowSegments);
+
+    /// <summary>
+    /// Carries a watched entity's replication entry from the slot it left to the slot it arrived in.
+    /// </summary>
+    /// <param name="srcChunkId">The cluster it left.</param>
+    /// <param name="srcSlot">The slot it left.</param>
+    /// <param name="dstChunkId">The cluster it arrived in.</param>
+    /// <param name="dstSlot">The slot it arrived in.</param>
+    /// <param name="worker">Unused; kept so the call site reads as the per-slice operation it is.</param>
+    /// <returns>What happened, for the counters and for the tests that have to tell "nothing to carry" from "carried".</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>SUB-09's movement half.</b> An entry is reachable from the entity's CURRENT cluster and slot or it is not reachable at all: leaving it behind means
+    /// the destination slot reads as a brand-new entity, which is published to every watching session as a leave and a full enter for something that merely
+    /// walked over a boundary. It costs an enter record per session per crossing and throws away the client's interpolation state — measured before this
+    /// existed as a netId changing from 54 to 32 across one 4 000 m move.
+    /// </para>
+    /// <para>
+    /// <b>Most moves carry nothing, and that is what keeps this cheap.</b> An entity nobody watches has no block behind its cluster, so the first lookup
+    /// fails and the call is two branches. In a large archetype that is almost every move.
+    /// </para>
+    /// <para>
+    /// <b>A destination with no block parks a COPY of the bytes, never a pointer to the source.</b> The source slot can be reused inside the same migration
+    /// step, so a pointer would be read after the bytes under it had become another entity's. The parked entry is written into its block by the replication
+    /// prologue, which is single-threaded and runs before anything reads the directory.
+    /// </para>
+    /// <para>
+    /// <b>Parking takes a lock, and the design's per-worker lists do not exist.</b> <c>08 § 4</c> proposes one list per migration slice precisely so that
+    /// nothing synchronises — but sizing those lists needs the slice count before the slices run, and the only place that knows it is inside the fence, which
+    /// would have to reach into replication to say so. The deviation is affordable because <b>parking is the rare branch of a rare branch</b>: it needs an
+    /// entity that is watched AND that moved into a cluster nobody was watching, so the lock is not on the path most moves take. Contention here would be a
+    /// signal worth acting on, and <see cref="EntriesParked"/> is what would show it.
+    /// </para>
+    /// <para>
+    /// The drain runs at a single-threaded point separated from the slices by the fence's own barrier, so the bytes a slice copied are published to it
+    /// without anything further on arm64 or x64.
+    /// </para>
+    /// </remarks>
+    public ReplicationMigrationOutcome MigrateEntry(int srcChunkId, int srcSlot, int dstChunkId, int dstSlot, int worker)
+    {
+        // TOTAL, because this one runs on the FENCE. Every other replication entry point is called from the replication track, which SUB-02 deliberately
+        // exempts from the tick's terminal latch — a defect in the newest subsystem degrades replication rather than stopping the database. Step 6b puts
+        // replication code on the fence, where that exemption does not apply: ExecuteMigrations has a finally and no catch, so anything thrown here
+        // latches IsFenceFailed and every later tick returns early. The reachable throw is a disposal cascade — this object's own _disposed is checked
+        // below, but Directory.TryGetBlock checks the DIRECTORY's, a different flag on a different object that Dispose clears later in the same
+        // sequence, so a slice already past the first check can still enter a disposed directory.
+        try
+        {
+            return MigrateEntryCore(srcChunkId, srcSlot, dstChunkId, dstSlot, worker);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The runtime is going away underneath a fence that is still in flight. Losing the entry costs the entity a leave and an enter to whoever is
+            // still watching, which is the behaviour this method exists to remove — but it is the safe direction, and nobody is watching a runtime that
+            // is being disposed.
+            Interlocked.Increment(ref _migrationsAbandoned);
+            return ReplicationMigrationOutcome.NothingToCarry;
+        }
+    }
+
+    /// <summary>The migration itself. See <see cref="MigrateEntry"/>, which is what makes it total.</summary>
+    /// <param name="srcChunkId">The cluster it left.</param>
+    /// <param name="srcSlot">The slot it left.</param>
+    /// <param name="dstChunkId">The cluster it arrived in.</param>
+    /// <param name="dstSlot">The slot it arrived in.</param>
+    /// <param name="worker">Unused; kept so the call site reads as the per-slice operation it is.</param>
+    /// <returns>What happened.</returns>
+    private ReplicationMigrationOutcome MigrateEntryCore(int srcChunkId, int srcSlot, int dstChunkId, int dstSlot, int worker)
+    {
+        if (_disposed || srcChunkId < 0 || dstChunkId < 0 || (uint)srcSlot >= (uint)Layout.SlotCount || (uint)dstSlot >= (uint)Layout.SlotCount)
+        {
+            return ReplicationMigrationOutcome.NothingToCarry;
+        }
+
+        if (!Directory.TryGetBlock(srcChunkId, out var source))
+        {
+            // Nobody watches the cluster it left, so there is no entry to carry. The destination will initialise one the first time it is projected.
+            return ReplicationMigrationOutcome.NothingToCarry;
+        }
+
+        var srcBytes = (byte*)source;
+        var hotSource = srcBytes + Layout.HotOffset + (srcSlot * Layout.HotStride);
+        var coldSource = srcBytes + Layout.ColdOffset + (srcSlot * Layout.ColdStride);
+
+        if (((ReplicationHotEntry*)hotSource)->NetId == 0)
+        {
+            // The cluster is watched but this slot never was: an entry with no identity describes nothing, and carrying it would only move zeroes.
+            return ReplicationMigrationOutcome.NothingToCarry;
+        }
+
+        if (Directory.TryGetBlock(dstChunkId, out var destination))
+        {
+            var dstBytes = (byte*)destination;
+            Unsafe.CopyBlockUnaligned(dstBytes + Layout.HotOffset + (dstSlot * Layout.HotStride), hotSource, (uint)Layout.HotStride);
+            Unsafe.CopyBlockUnaligned(dstBytes + Layout.ColdOffset + (dstSlot * Layout.ColdStride), coldSource, (uint)Layout.ColdStride);
+
+            // The owner region too. A slot's entry is hot + cold + owner, and carrying two thirds of it would leave the owner fields of whoever previously
+            // occupied the destination slot attached to the arriving entity — the SELF data a client is sent about the entity it controls.
+            if (Layout.OwnerEntrySize > 0)
+            {
+                Unsafe.CopyBlockUnaligned(
+                    dstBytes + Layout.OwnerOffset + (dstSlot * Layout.OwnerEntrySize),
+                    srcBytes + Layout.OwnerOffset + (srcSlot * Layout.OwnerEntrySize),
+                    (uint)Layout.OwnerEntrySize);
+            }
+
+            ClearEntry(srcBytes, srcSlot);
+            Interlocked.Increment(ref _entriesMigrated);
+            return ReplicationMigrationOutcome.Carried;
+        }
+
+        if (!Park(dstChunkId, dstSlot, hotSource, coldSource))
+        {
+            // Counted as a DROP, not a park. Reporting it as parked would break the one identity that reveals the disposal window happening at all:
+            // everything parked is either written by the drain or counted as dropped.
+            ClearEntry(srcBytes, srcSlot);
+            return ReplicationMigrationOutcome.NothingToCarry;
+        }
+
+        ClearEntry(srcBytes, srcSlot);
+        Interlocked.Increment(ref _entriesParked);
+        return ReplicationMigrationOutcome.Parked;
+    }
+
+    /// <summary>Zeroes a slot's entries, so the slot the entity left describes nothing rather than describing it twice.</summary>
+    /// <param name="blockBytes">The block.</param>
+    /// <param name="slot">The slot.</param>
+    /// <remarks>
+    /// Leaving the source populated is the failure this half of SUB-09 exists to prevent from the other direction: the next entity to take that slot would
+    /// inherit an identity, a baseline and a motion segment belonging to something else, and would be published under them.
+    /// </remarks>
+    private void ClearEntry(byte* blockBytes, int slot)
+    {
+        NativeMemory.Clear(blockBytes + Layout.HotOffset + (slot * Layout.HotStride), (nuint)Layout.HotStride);
+        NativeMemory.Clear(blockBytes + Layout.ColdOffset + (slot * Layout.ColdStride), (nuint)Layout.ColdStride);
+
+        // Including the owner region: a slot the entity left must describe NOTHING, and owner fields left behind would be inherited by the next occupant
+        // exactly as a stale identity would.
+        if (Layout.OwnerEntrySize > 0)
+        {
+            NativeMemory.Clear(blockBytes + Layout.OwnerOffset + (slot * Layout.OwnerEntrySize), (nuint)Layout.OwnerEntrySize);
+        }
+    }
+
+    /// <summary>Copies an entry aside until the prologue can create the block it belongs in.</summary>
+    /// <param name="chunkId">The destination cluster.</param>
+    /// <param name="slot">The destination slot.</param>
+    /// <param name="hot">The hot entry's bytes.</param>
+    /// <param name="cold">The cold entry's bytes.</param>
+    /// <returns><see langword="false"/> when the entry could not be kept, which makes it a DROP rather than a park.</returns>
+    private bool Park(int chunkId, int slot, byte* hot, byte* cold)
+    {
+        lock (_parkLock)
+        {
+            if (_disposed)
+            {
+                // Checked INSIDE the lock. MigrateEntry's guard is outside it and is a plain read, so a slice can win this lock after Dispose has already
+                // disposed and nulled the list — and constructing a fresh one here would allocate native memory whose only owner has just given up its
+                // field and will never run again. A leak rather than a use-after-free, and silent either way.
+                Interlocked.Increment(ref _parkedDropped);
+                return false;
+            }
+
+            _parked ??= new ParkedEntryList(Layout.HotStride + Layout.ColdStride);
+            return _parked.Add(chunkId, slot, hot, Layout.HotStride, cold, Layout.ColdStride);
+        }
+    }
+
+    /// <summary>
+    /// Writes every parked entry into the block it belongs in, creating nothing: a destination that still has no block drops its entry.
+    /// </summary>
+    /// <returns>How many entries were written.</returns>
+    /// <remarks>
+    /// Single-threaded, at the prologue, after the blocks step has created the blocks this tick's interest asked for. An entry whose destination STILL has no
+    /// block belongs to a cluster nobody watches, so there is nothing for it to be read out of and dropping it is correct rather than lossy — the entity will
+    /// be initialised from current values the first time somebody does watch it.
+    /// </remarks>
+    public int DrainParkedEntries()
+    {
+        // The SAME lock parking takes, and not because the two are expected to overlap — they are not: parking happens in the fence's migration slices
+        // and this runs at the track's blocks step, after the fence. The lock is here because what Read hands back is a raw pointer into the list's
+        // native buffer, and EnsureCapacity FREES that buffer when it grows. A park racing a drain would therefore not give this a stale count, it would
+        // give it an address that has been freed, and the copies below would read it. The ordering that prevents it is a property of where these two are
+        // called from, which nothing here enforces and nothing would notice being changed; the lock is uncontended at a single-threaded point, so it
+        // costs nothing to stop depending on it. It closes the same window against Dispose, which frees the buffer under this same lock.
+        lock (_parkLock)
+        {
+            return DrainLocked();
+        }
+    }
+
+    /// <summary>The drain itself, with <see cref="_parkLock"/> already held.</summary>
+    /// <returns>How many entries were written.</returns>
+    private int DrainLocked()
+    {
+        var list = _parked;
+        if (list == null || list.Count == 0)
+        {
+            return 0;
+        }
+
+        var written = 0;
+        for (var i = 0; i < list.Count; i++)
+        {
+            list.Read(i, out var chunkId, out var slot, out var bytes);
+
+            // The identity the entry describes, taken from the hot entry that was copied aside. It is compared with whoever occupies the destination NOW,
+            // because the chunk id was captured during the fence and a cluster that drained since then returns its id to a LIFO free list: the blocks step
+            // runs immediately before this and can hand a brand-new cluster that same id. Writing the entry then would attach one entity's identity, baseline
+            // and motion segment to another — SUB-09's "an entry inherited through a recycled chunk id", silent exactly as that rule's on_violation says.
+            // It is the same compare the read path already makes per slot, paid once per parked entry.
+            // KNOWN HAZARD, deliberately unguarded and recorded rather than closed. The chunk id was captured during the fence, and a cluster that
+            // drained since then returns its id to a LIFO free list — the blocks step runs immediately before this and could hand a brand-new cluster
+            // that same id, so this write would attach one entity's identity and baseline to another (SUB-09's "an entry inherited through a recycled
+            // chunk id"). Nobody has constructed the interleaving: it needs a destination cluster to receive a migrant AND be emptied in the same
+            // fence. The obvious guard — comparing the parked entry's EntityId with whoever occupies the destination slot — was tried and REVERTED:
+            // reading the cluster segment from here takes a chunk accessor inside the replication prologue and broke the track wholesale, dropping
+            // a bot swarm from about two hundred frames per session to one. Closing this needs a discriminator that does not touch the segment.
+            if ((uint)slot < (uint)Layout.SlotCount && Directory.TryGetBlock(chunkId, out var block))
+            {
+                var dstBytes = (byte*)block;
+                Unsafe.CopyBlockUnaligned(dstBytes + Layout.HotOffset + (slot * Layout.HotStride), bytes, (uint)Layout.HotStride);
+                Unsafe.CopyBlockUnaligned(dstBytes + Layout.ColdOffset + (slot * Layout.ColdStride), bytes + Layout.HotStride, (uint)Layout.ColdStride);
+                if (Layout.OwnerEntrySize > 0)
+                {
+                    Unsafe.CopyBlockUnaligned(
+                        dstBytes + Layout.OwnerOffset + (slot * Layout.OwnerEntrySize),
+                        bytes + Layout.HotStride + Layout.ColdStride,
+                        (uint)Layout.OwnerEntrySize);
+                }
+
+                written++;
+            }
+            else
+            {
+                Interlocked.Increment(ref _parkedDropped);
+            }
+        }
+
+        list.Clear();
+        return written;
+    }
+
+    /// <summary>Entries carried straight into a destination block that already existed.</summary>
+    public long EntriesMigrated => Volatile.Read(ref _entriesMigrated);
+
+    /// <summary>Entries copied aside because their destination had no block yet.</summary>
+    public long EntriesParked => Volatile.Read(ref _entriesParked);
+
+    /// <summary>Migrations abandoned because the runtime was being disposed under a fence still in flight. Non-zero is a teardown race, not data loss.</summary>
+    public long MigrationsAbandoned => Volatile.Read(ref _migrationsAbandoned);
+
+    /// <summary>Parked entries whose destination still had no block when the prologue ran, so they were dropped.</summary>
+    /// <remarks>
+    /// Not a defect: a destination nobody watches has nothing to read the entry out of, and the entity is initialised from current values the first time
+    /// somebody does watch it. It costs that entity one enter record, which is exactly what the migration hook saves in the case that DOES have a block.
+    /// </remarks>
+    public long ParkedDropped => Volatile.Read(ref _parkedDropped);
 
     /// <summary>
     /// Marks slot <paramref name="slot"/> of cluster <paramref name="chunkId"/> watched for this tick — the seam the interest stage reaches S1 through.
@@ -474,6 +739,13 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
         _watchedBlocks.Dispose();
         _records.Dispose();
         _netIdLeases.Dispose();
+
+        // The parked entries hold native memory of their own, and nothing else names it.
+        lock (_parkLock)
+        {
+            _parked?.Dispose();
+            _parked = null;
+        }
 
         // Detach FIRST. A resource-graph parent can dispose this node by cascade without the ECS knowing, and the ECS holds a raw reference through
         // ArchetypeClusterState.ReplicationState; leaving it set would point every later cluster drain at a disposed state.

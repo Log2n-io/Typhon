@@ -35,11 +35,12 @@ unsafe class MigrationIdentityTests : TestBase<MigrationIdentityTests>
     /// than in a reader's inference from <c>ProjectionPass</c>. When the migration hook lands, this fixture is where the change becomes visible.
     /// </remarks>
     [Test]
+    [VerifiesRule("SUB-09")]
     public void ANetIdAcrossAClusterChange()
     {
         using var harness = FrameHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), Declare, nameof(MigrationIdentityTests));
 
-        var entity = Spawn(harness, 0f, 0f);
+        Spawn(harness, 0f, 0f);
         var session = harness.OpenSessions(1, Profile)[0];
 
         harness.PrimeBlocks();
@@ -76,14 +77,119 @@ unsafe class MigrationIdentityTests : TestBase<MigrationIdentityTests>
 
         TestContext.Out.WriteLine($"netId before migration: {before[0]}, after: {after[0]}, cluster {clusterBefore} -> {clusterAfter}");
 
-        // CHARACTERIZATION, not an endorsement. Today the identity is released with the old cluster's slot and a fresh one is leased in the new cluster, so
-        // every session watching sees a leave and a full enter for an entity that merely walked over a boundary — and loses its interpolation state for it.
-        // That is SUB-09's unbuilt movement half (STILL MISSING item 1: the migration hook that carries the entry across, with per-worker parking when the
-        // destination has no block). This assertion is written the way the engine behaves so the gap is recorded rather than inferred, and so that the day
-        // the hook lands this fixture goes red and somebody has to come here and flip it.
-        Assert.That(after[0], Is.Not.EqualTo(before[0]),
-            "the entity KEPT its netId across a cluster change — which is what SUB-09's movement half is supposed to achieve. If the migration hook has "
-            + "landed, invert this assertion, drop the [UNBUILT] marker from SUB-09 and give it a verified: line.");
+        // SUB-09's movement half, asserted rather than characterized since 2026-09-18. Until the migration hook landed this fixture asserted the OPPOSITE
+        // and passed: the identity was released with the old cluster's slot and a fresh one leased in the new one, so every watching session was sent a leave
+        // and a full enter for an entity that had merely walked over a boundary, and threw away its interpolation state with the netId. It was written
+        // inverted on purpose so that the day the hook landed it would go red and force somebody here; it did, and this is that edit.
+        Assert.That(after[0], Is.EqualTo(before[0]),
+            "the entity was given a NEW netId for walking over a cluster boundary, so every session watching it saw a leave and a full enter for something "
+            + "that did not leave. The migration hook beside the component copy in ExecuteMigrations is what carries the entry across.");
+    }
+
+    /// <summary>
+    /// The identity survives because the ENTRY was carried, and the counters say which way it went.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why the outcome alone is not enough.</b> A netId that is the same before and after is also what you would see if the allocator happened to hand back
+    /// the identity it had just released — the free list is LIFO, so that is not a remote possibility, it is the likely one. Reading the migration counters
+    /// says the entry was carried rather than reissued, which is the claim SUB-09 actually makes.
+    /// </para>
+    /// <para>
+    /// It asserts the SUM of the two outcomes rather than one of them, because which applies depends on whether the destination cluster already had a block
+    /// when the fence ran — a scheduling detail of this fixture, not a property of the hook. What must hold is that exactly one entry moved and that none was
+    /// dropped for want of a destination.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-09")]
+    public void TheEntryIsCarriedAcrossRatherThanReissued()
+    {
+        using var harness = FrameHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), Declare, nameof(TheEntryIsCarriedAcrossRatherThanReissued));
+
+        Spawn(harness, 0f, 0f);
+        var session = harness.OpenSessions(1, Profile)[0];
+
+        harness.PrimeBlocks();
+        for (var tick = 2L; tick <= 4; tick++)
+        {
+            harness.RunTick(tick);
+            harness.Deliver(session);
+        }
+
+        var creatures = harness.PlanIndex(nameof(ProjCreature));
+        var state = harness.Subscriptions.ReplicationStates[creatures];
+
+        Assert.That(state.EntriesMigrated + state.EntriesParked, Is.Zero, "nothing has migrated yet, so the counters must be untouched");
+
+        MoveSpatial(harness, 4000f, 4000f);
+        harness.Engine.WriteTickFence(5);
+
+        for (var tick = 5L; tick <= 9; tick++)
+        {
+            harness.RunTick(tick);
+            harness.Deliver(session);
+        }
+
+        TestContext.Out.WriteLine($"migrated {state.EntriesMigrated}, parked {state.EntriesParked}, dropped {state.ParkedDropped}");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(state.EntriesMigrated + state.EntriesParked, Is.EqualTo(1),
+                "exactly one watched entity changed cluster, so exactly one entry should have been carried or parked");
+            Assert.That(state.ParkedDropped, Is.Zero,
+                "the destination was watched by the session that followed the entity there, so no parked entry should have been dropped");
+        });
+    }
+
+    /// <summary>
+    /// The slot the entity left describes nothing afterwards, so whoever takes it next is not published under its identity.
+    /// </summary>
+    /// <remarks>
+    /// This is the other direction of SUB-09, and it is the one that is silently WRONG rather than merely expensive: an entry left behind in the source slot
+    /// would be inherited by the next entity to occupy it, which would then be sent to every watching session carrying somebody else's netId, baseline and
+    /// motion segment. The read path's <c>EntityId</c> compare is the second line of defence; this asserts the first.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-09")]
+    public void TheSlotTheEntityLeftHoldsNoEntryAfterwards()
+    {
+        using var harness = FrameHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), Declare, nameof(TheSlotTheEntityLeftHoldsNoEntryAfterwards));
+
+        // TWO of them, so the source cluster still has an occupant after one leaves and its block is not released out from under the assertion.
+        Spawn(harness, 0f, 0f);
+        Spawn(harness, 2f, 2f);
+        var session = harness.OpenSessions(1, Profile)[0];
+
+        harness.PrimeBlocks();
+        for (var tick = 2L; tick <= 4; tick++)
+        {
+            harness.RunTick(tick);
+            harness.Deliver(session);
+        }
+
+        var creatures = harness.PlanIndex(nameof(ProjCreature));
+        var state = harness.Subscriptions.ReplicationStates[creatures];
+        var sourceCluster = ClusterOf(harness, creatures);
+
+        Assert.That(state.Directory.TryGetBlock(sourceCluster, out var block), Is.True, "the source cluster must be watched, or this test proves nothing");
+        var layout = state.Layout;
+        var hotBefore = (ReplicationHotEntry*)((byte*)block + layout.HotOffset);
+        var movedNetId = hotBefore->NetId;
+        Assert.That(movedNetId, Is.Not.Zero, "slot zero of the source cluster must hold the entity's entry before it moves");
+
+        MoveSpatial(harness, 4000f, 4000f, onlySlot: 0);
+        harness.Engine.WriteTickFence(5);
+
+        // Read the SOURCE block straight after the fence and before any tick can re-project it, so what is asserted is what the migration left behind.
+        Assert.That(state.Directory.TryGetBlock(sourceCluster, out var sourceAfter), Is.True, "the source block was released, so there is nothing to assert");
+        var hotAfter = (ReplicationHotEntry*)((byte*)sourceAfter + layout.HotOffset);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(hotAfter->NetId, Is.Zero, "the slot the entity left still holds an identity, which the next occupant would be published under");
+            Assert.That(hotAfter->Entity.RawValue, Is.Zero, "the slot the entity left still names it");
+        });
     }
 
     private static int ClusterOf(FrameHarness harness, int plan)
@@ -111,7 +217,7 @@ unsafe class MigrationIdentityTests : TestBase<MigrationIdentityTests>
     }
 
     /// <summary>Moves every live creature through <c>WriteSpatial</c>, the write path the spatial index sees.</summary>
-    private static void MoveSpatial(FrameHarness harness, float x, float y)
+    private static void MoveSpatial(FrameHarness harness, float x, float y, int onlySlot = -1)
     {
         using var tx = harness.Engine.CreateQuickTransaction();
         var accessor = tx.For<ProjCreature>();
@@ -124,6 +230,13 @@ unsafe class MigrationIdentityTests : TestBase<MigrationIdentityTests>
                 {
                     var slot = BitOperations.TrailingZeroCount(occupancy);
                     occupancy &= occupancy - 1;
+                    if (onlySlot >= 0 && slot != onlySlot)
+                    {
+                        // Moving ONE occupant is what leaves the source cluster alive: a cluster the last entity leaves is drained and its block released, so
+                        // a test that moved everything could never look at the slot the entity left.
+                        continue;
+                    }
+
                     cluster.WriteSpatial(
                         ProjCreature.Bounds,
                         slot,

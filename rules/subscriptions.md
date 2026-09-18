@@ -230,54 +230,59 @@
     NetIdAllocatorTests.ReleasingTheSameIdentityTwiceIsRejected,
     NetIdAllocatorTests.AReleasedIdentityIsHeldForTheSkipWindow
 
-### SUB-09: State follows its entity, and never survives slot reuse `[fatal][silent][UNBUILT]`
+### SUB-09: State follows its entity, and never survives slot reuse `[fatal][silent]`
   invariant ∀ watched entity e: the hot/cold entry describing e is reachable from e's CURRENT (cluster, slot)
+  invariant ∀ move of a watched e from (c1,s1) to (c2,s2): e's entry is written to (c2,s2) and (c1,s1) is CLEARED — the entry exists at exactly one
+    address, never at two and never at none
+  invariant [the destination cluster has no block when the move executes] → the entry is copied aside, BY VALUE, and written by the next
+    single-threaded point after the blocks step; never held as a pointer to the source, whose slot can be reused in the same step
   invariant ∀ chunk id c freed by a drain: [directory entry for c cleared] → [FreeChunk(c) returns the id]
+  invariant ∀ read of a slot's entry: the entry's EntityId is compared with the slot's, and a mismatch releases the identity and
+    re-initialises — this is what catches slot reuse inside a LIVING cluster, which no move hook can see
   never a directory entry naming a block whose cluster has been freed
   never an entry inherited by a different entity through slot reuse or a recycled chunk id
   scope: ReplicationDirectory.TryAdd, ReplicationDirectory.TryRemove, ReplicationBlockPool.TryRent,
     ReplicationBlockHeader.ChunkId, ReplicationHotEntry.Entity,
+    ArchetypeReplicationState.MigrateEntry, ArchetypeReplicationState.DrainParkedEntries, ParkedEntryList.Add,
     ArchetypeReplicationState.TryReleaseBlock, ArchetypeReplicationState.ReleaseBlockForDrain,
     ArchetypeReplicationState.AttachTo, ArchetypeClusterState.ReplicationState,
     ArchetypeClusterState.DrainPendingClusterFinalizations, ArchetypeClusterState.ReleaseSlot
   on_violation: hits into a cluster that inherited a recycled id find state describing the cluster that
     drained — a client is told about an entity that no longer exists, or told the wrong values for one that
-    does, with no error anywhere. Silent because every structure involved stays internally consistent.
+    does, with no error anywhere. Silent because every structure involved stays internally consistent. The movement half fails more cheaply
+    but just as quietly: an entry left behind makes the destination slot read as a brand-new entity, so every watching session is sent a
+    leave and a full enter for something that walked over a boundary, losing its netId and the client's interpolation state. Measured before
+    the hook existed: netId 54 became 32 across one 4 000 m move.
   requires: the engine's clear-at-drain convention for per-cluster side tables (`ResetClusterVisibility`
     requires every site freeing a cluster chunk to clear its side tables before the id is handed back)
-  [UNBUILT] Partly built. BUILT: the drain half. `ArchetypeClusterState.ReplicationState` is null-conditionally
-    released at all three sites where a cluster chunk id becomes reusable, each immediately after
-    `ResetClusterVisibility` and before `FreeChunk` — the deferred drain in `DrainPendingClusterFinalizations`,
-    and the inline branches of both `ReleaseSlot` overloads, reached through the shared `RetireClusterId` helper.
-    Coverage of the built half is complete for what can run, and is worth stating per site rather than per fence
-    mode: `ReplicationDrainHookTests` reaches the INLINE persistent site — a destroy commit passes no
-    `deferFinalize` (`Transaction.ECS.cs:2991`), so it finalizes at commit, not on the deferred path;
-    `ReplicationDrainHookParallelFenceTests` reaches the DEFERRED site through the dispatched `ArchetypeFinalize`
-    item, and provably so — the driver-slice path needs ≥ 2 populated dirty ranges (`TickFence.cs:1762-1763`) and
-    that geometry yields one, so it cannot be taken. The third site is unreachable (next NOTE).
-    No `verified:` field is claimed: this rule still covers entity MOVEMENT, which is unbuilt, and a `verified:`
-    naming tests that exercise only the drain half would report coverage the rule does not have.
-    NOTE the placement deviates from the design, deliberately: § 4 proposed a single call inside
-    `FinaliseEmptyClusterCellState`, but that method early-returns when the archetype has no grid, no
-    `ClusterCellMap`, or an unmapped cell, so a non-spatial or grid-less archetype would drain a cluster and
-    never release its block. The three call sites are the complete set instead.
-    NOTE the pure-Transient `ReleaseSlot` overload's site cannot fire for any replication scenario that exists:
+  rationale: the move hook sits beside the component copy in `ExecuteMigrations` because that loop already has both addresses, already runs
+    under the fence's ordering, and is already cut by destination cell so no two workers write one destination. Every kind of move —
+    crossing, relocation, repair — goes through it, so there is one site rather than three.
+  note (2026-09-18) the design's per-slice parked lists were NOT built, deliberately. `08 § 4` proposes one list per migration slice so that
+    parking synchronises nothing, but sizing them needs the slice count before the slices run and only the fence knows it. Parking takes a
+    lock on one list instead. It is affordable because parking is the rare branch of a rare branch — an entity that is watched AND that moved
+    into a cluster nobody was watching — so it is not on the path most moves take; `EntriesParked` is what would show it becoming one.
+  note a parked entry whose destination STILL has no block when the prologue runs is dropped, and that is correct rather than lossy: nobody
+    watches that cluster, so there is nothing to read the entry out of, and the entity is initialised from current values the first time
+    somebody does. `ParkedDropped` counts them.
+  note the `[UNBUILT]` marker was dropped on 2026-09-18 when the move hook landed. The rule's second historically-missing item, the
+    per-entry `EntityId` check on the read path, turned out to be present already (`ProjectionPass` compares `hot->Entity` with the slot's id,
+    releases the identity and re-initialises on mismatch) — the note claiming it missing was stale.
+  verified: MigrationIdentityTests.ANetIdAcrossAClusterChange, which asserted the OPPOSITE until the hook landed and was written inverted on
+    purpose so that it would go red and force the edit; MigrationIdentityTests.TheEntryIsCarriedAcrossRatherThanReissued, which reads the
+    migration counters because a netId that is unchanged is also what a LIFO allocator handing back what it just released would produce, so
+    the outcome alone does not discriminate; MigrationIdentityTests.TheSlotTheEntityLeftHoldsNoEntryAfterwards, which keeps a second occupant
+    in the source cluster so its block survives the move and the cleared slot can actually be read. The drain half keeps its earlier coverage:
+    `ReplicationDrainHookTests` reaches the INLINE persistent site (a destroy commit passes no `deferFinalize`, so it finalizes at commit) and
+    `ReplicationDrainHookParallelFenceTests` reaches the DEFERRED site through the dispatched `ArchetypeFinalize` item.
+  note the pure-Transient `ReleaseSlot` overload's site cannot fire for any replication scenario that exists:
     `[SpatialIndex]` is rejected on a Transient component (`DatabaseDefinitions.cs:369-372`), so a pure-Transient
     archetype is never spatial and never holds a watched cluster. The hook is kept as one null test, defensive
     against a future non-spatial replication mode, and is untested BY CONSTRUCTION rather than by omission.
-    STILL MISSING: (1) the migration hook beside the component-copy loop in
-    `DatabaseEngine.ClusterMigration.ExecuteMigrations` that carries an entry across a cluster change, with
-    per-worker parking when the destination has no block — blocked on the Subscriptions track (#955), whose
-    prologue is what drains the parked lists; (2) the per-entry `EntityId` check on the read path that catches
-    slot reuse inside a LIVING cluster, which the drain half does not cover. Until both exist this rule states
-    intent for entity movement, and behaviour only for cluster drain.
-  note the id is reserved rather than omitted so it is not mistaken for a deleted rule, per `rules/README.md`.
-  note (2026-09-18) the movement half's absence is now CHARACTERIZED rather than merely stated:
-    MigrationIdentityTests.ANetIdAcrossAClusterChange spawns one entity, moves it 4 000 m through `WriteSpatial`, runs the tick fence
-    and observes the netId change (54 -> 32 over clusters 1 -> 2). So an entity crossing a cluster boundary is currently published to
-    every watching session as a LEAVE and a full ENTER, costing an enter record per session per crossing and discarding the client's
-    interpolation state for it. The fixture asserts the current behaviour deliberately, so it goes red when the migration hook lands and
-    forces whoever builds it to come here, invert the assertion, drop `[UNBUILT]` and add a `verified:` line.
+  note the placement of the drain hooks deviates from the design, deliberately: § 4 proposed a single call inside
+    `FinaliseEmptyClusterCellState`, but that method early-returns when the archetype has no grid, no
+    `ClusterCellMap`, or an unmapped cell, so a non-spatial or grid-less archetype would drain a cluster and
+    never release its block. The three call sites are the complete set instead.
   note the differential oracle does NOT cover this and was briefly believed to: `FrameHarness.RunTick` runs the replication track but not
     the ECS tick fence, so until 2026-09-18 the oracle's teleports moved coordinates and nothing ever migrated. The fence is now called
     per tick there, which makes the oracle exercise cluster change — but it still cannot see identity STABILITY, because it compares the

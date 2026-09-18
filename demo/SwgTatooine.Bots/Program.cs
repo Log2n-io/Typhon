@@ -150,7 +150,19 @@ else
     }
 }
 
-return swarm.Disconnects.Count == 0 ? 0 : 1;
+// The verdict reads DELIVERY, not just disconnects. A run where every session connected, stayed connected and received no TICK frame at all used to exit
+// zero — which is the failure this file's own remarks name ("a connected session that is never produced for looks healthy in every other number") and then
+// did not check for. A driver that never fired, or a population that faulted its way through the run, exited zero too.
+var (framesTotal, _, _, unserved) = swarm.Frames();
+var healthy = swarm.Disconnects.Count == 0 && swarm.Faults == 0 && swarm.Ticks > 0 && framesTotal > 0 && unserved == 0;
+
+if (!healthy)
+{
+    Console.Error.WriteLine(
+        $"run NOT healthy: disconnects={swarm.Disconnects.Count} faults={swarm.Faults} driverTicks={swarm.Ticks} frames={framesTotal} unserved={unserved}");
+}
+
+return healthy ? 0 : 1;
 
 static string Describe(ushort code) => code switch
 {
