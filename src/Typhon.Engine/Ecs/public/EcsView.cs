@@ -22,6 +22,13 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
     internal override ushort QueriedArchetypeId => ArchetypeRegistry.GetMetadata<TArchetype>()?.ArchetypeId ?? ushort.MaxValue;
 
     private EcsQuery<TArchetype> _query;
+
+    /// <summary>
+    /// True while the retained query definition holds a borrowed <see cref="Transaction"/> — which, between operations, it never may (VIEW-01).
+    /// Exposed for the rule's verifier; the view itself never reads it.
+    /// </summary>
+    internal bool RetainedQueryHoldsATransaction => _query.HoldsTransaction;
+
     private readonly DatabaseEngine _dbe;
     // Null for pull/membership views by design; shared paths must use _dbe rather than assuming an indexed-field ComponentTable exists.
     private readonly ComponentTable _componentTable;

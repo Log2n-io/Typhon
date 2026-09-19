@@ -3,8 +3,8 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-08-17 |
-| Domain | Component schema identity, archetype registry, component-type identity, tick-fence dirty bitmaps, spawn payload staging |
+| Last Updated | 2026-09-19 |
+| Domain | Component schema identity, archetype registry, component-type identity, tick-fence dirty bitmaps, spawn payload staging, view lifetime |
 
 > Type-location: `Ecs/internals/ArchetypeRegistry.cs`, `Ecs/internals/ArchetypeMetadata.cs` (+ `ArchetypeEngineState`), `Ecs/public/DatabaseEngine.cs`
 > (`RegisterComponentFromAccessor`, the reopen schema-load path), `Schema.Definition/Attributes.cs` (`[Component]`).
@@ -598,3 +598,45 @@ live snapshot can reach it — which makes "later" a thing that has to actually 
             measures rounds rather than a total. EcsCleanupDrainTests.CleanupQueue_DrainsWithoutAnyExplicitCall guards
             the "reachable without a test calling it" clause, and Drain_LeavesNoOutstandingDirtyMarks_AtQuiesce guards
             the ChangeSet note above.
+
+## Module: VIEWLIFE — What a long-lived view may retain
+
+An `EcsView` outlives the `Transaction` that built it: a caller may construct the view in a scoped setup transaction,
+dispose it, and refresh against fresh transactions for the rest of the process. `Transaction` instances are pooled and
+reset on `Dispose`, so anything a view keeps past construction has to be something whose lifetime is the database's,
+not a lease's. `EcsView` holds its `EcsQuery` BY VALUE, which makes the query's transaction field the one place this is
+easy to get wrong — the copy is invisible at the call site and outlives everything the caller can see.
+
+### VIEW-01: A retained view query holds no transaction between operations `[correctness]`
+  invariant ∀ view V, at every point where V is not inside one of its own snapshot-dependent operations:
+            ¬V.RetainedQueryHoldsATransaction
+  invariant ∀ operation that needs an MVCC snapshot: it binds the transaction it was HANDED and releases it before
+            returning — `UpdateTransaction(tx)` → work → `DetachTransaction()` in a `finally`
+  never reading routing or catalog metadata through the retained query's transaction. `routing id → ArchetypeMetadata →
+        archetype id` is a property of the `DatabaseEngine`, not of any snapshot, so the view caches the engine (`_dbe`)
+        at construction and the mask test takes it explicitly
+  never rebinding at the top of `Refresh` and leaving it bound. That fixes the dereference and keeps the defect: the
+        view then retains the most recent refresher instead of the creator, and correctness rests on every future
+        `_tx` reader remembering to rebind first
+  enforce every `EcsView` constructor calls `EcsQuery.DetachTransaction` on its own copy — the creator's lease ends at
+          construction, not at first refresh
+  enforce the four snapshot-dependent view paths — `RefreshPull`, `RefreshFull`, `RefreshFullOr`, `PopulateInitialOr` —
+          bind and detach as a scoped borrow. The initial population in `ToPullView` / `ToIncrementalView` / `ToOrView`
+          runs on the CALLER's query copy, which legitimately holds the creator, and is not covered by this rule
+  scope: EcsView, EcsQuery.DetachTransaction, EcsQuery.UpdateTransaction, EcsQuery.HoldsTransaction,
+         EcsQuery.MaskTestPublicByRouting, EcsView.RefreshPull, EcsView.RefreshFull, EcsView.RefreshFullOr,
+         EcsView.PopulateInitialOr, EcsView.ProcessEntry, EcsView.ProcessEntryOr
+  on_violation: the view dereferences a pooled object outside its lease. Observed as a `NullReferenceException` on the
+                incremental drain when the creator stayed reset (#862), or as accidental correctness once the pool
+                re-issued that object. The blast radius on the routing path was bounded — the pool is owned by the
+                `DatabaseEngine`, so a recycled `Transaction` carries the same `DBE` and `GetMetaByRouting` answers the
+                same — but bounded is a property of that one lookup, not of the escape. Any future `_tx` read on a view
+                path inherits the escape and none of the bound.
+  rationale: #862, and ADR-042's statement that a view holds no transaction is what this makes checkable. The benchmark
+             `ViewFanOutProfile` had kept its creating transaction open for the whole run as a documented workaround,
+             which is how a lifetime defect becomes a house style.
+  verified: EcsViewCreatorTransactionLifetimeTests.RetainedQuery_HoldsNoTransaction_AcrossEveryViewShape [VerifiesRule]
+            — asserts the invariant itself on all three shapes, after construction AND after a refresh, which is what
+            the three regression tests beside it do NOT do: they assert the CONSEQUENCE (a view still refreshes once its
+            creator is gone) and would stay green against a fix that merely rebound at the top of `Refresh`.
+            Mutant_AQueryStillBoundToItsTransaction_IsReported is the mutant.
