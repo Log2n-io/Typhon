@@ -680,8 +680,16 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal readonly bool MaskTestPublic(ushort archetypeId) => MaskTest(archetypeId);
 
-    /// <summary>Public routing-id variant of <see cref="MaskTestPublic"/> for callers that hold an EntityId's routing id (e.g. <c>EcsView</c>).</summary>
-    internal readonly bool MaskTestPublicByRouting(ushort routingId) => MaskTestByRouting(routingId);
+    /// <summary>
+    /// Routing-id variant for long-lived callers such as <see cref="EcsView{TArchetype}"/>.
+    /// Routing metadata belongs to the database, not to a transaction snapshot; taking the engine explicitly avoids
+    /// dereferencing the pooled transaction that originally constructed this query after its lease has ended (#862).
+    /// </summary>
+    internal readonly bool MaskTestPublicByRouting(DatabaseEngine dbe, ushort routingId)
+    {
+        var meta = dbe.GetMetaByRouting(routingId);
+        return meta != null && MaskTest(meta.ArchetypeId);
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // OrderBy / Skip / Take
@@ -863,7 +871,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var engineState = _tx.DBE._archetypeStates[meta.ArchetypeId];
         var firstTable = engineState.SlotToComponentTable[0];
 
-        var view = new EcsView<TArchetype>(this, firstTable.DBE.MemoryAllocator, firstTable, bufferCapacity, _tx.TSN, callerFile, callerLine, callerMethod);
+        var view = new EcsView<TArchetype>(this, firstTable.DBE, firstTable.DBE.MemoryAllocator, firstTable, bufferCapacity, _tx.TSN, callerFile, callerLine,
+            callerMethod);
 
         // Subscribe BEFORE the initial scan, for the same reason ToIncrementalView registers before its population: a commit landing between
         // the two would otherwise reach neither the scan nor the buffer, and the entity would be missing until something unrelated forced a
@@ -959,6 +968,12 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
     /// <summary>Rebind this query to a different transaction (different TSN → different visibility).</summary>
     internal void UpdateTransaction(Transaction tx) => _tx = tx;
+
+    /// <summary>
+    /// Drop the borrowed transaction when this query definition is retained by a long-lived view. View paths rebind explicitly around
+    /// snapshot-dependent execution; keeping the creator lease here would let a pooled Transaction escape its lifetime (#862).
+    /// </summary>
+    internal void DetachTransaction() => _tx = null;
 
     /// <summary>Execute the query and collect matching entity IDs into a HashSet.</summary>
     public HashSet<EntityId> Execute(
