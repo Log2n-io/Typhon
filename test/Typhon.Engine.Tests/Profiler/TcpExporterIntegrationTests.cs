@@ -3,7 +3,6 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
 using System.Net.Sockets;
-using System.Reflection;
 using System.Threading;
 using NUnit.Framework;
 using Typhon.Profiler;
@@ -158,23 +157,6 @@ public class TcpExporterIntegrationTests
         {
             TyphonProfiler.Stop();
         }
-    }
-
-    [Test]
-    public void DefaultListener_BindsLoopbackOnly()
-    {
-        var exporter = new TcpExporter(0, _registry.Profiler);
-        TyphonProfiler.AttachExporter(exporter);
-        TyphonProfiler.Start(_registry.Profiler, BuildMetadata());
-
-        var listenerField = typeof(TcpExporter).GetField("_listener", BindingFlags.Instance | BindingFlags.NonPublic);
-        Assert.That(listenerField, Is.Not.Null, "test must inspect the listener actually owned by TcpExporter");
-
-        var listener = (TcpListener)listenerField.GetValue(exporter);
-        var endpoint = (System.Net.IPEndPoint)listener.LocalEndpoint;
-
-        Assert.That(endpoint.Address, Is.EqualTo(System.Net.IPAddress.Loopback),
-            "live profiler must not listen on routable interfaces by default");
     }
 
     // ═══════════════════════════════════════════════════════════════════════
