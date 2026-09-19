@@ -105,7 +105,7 @@ internal sealed class TcpExporter : ResourceNode, IProfilerExporter
         _compressedBuffer = new byte[LZ4Codec.MaximumOutputSize(TraceRecordBatchPool.MaxPayloadBytes)];
         _frameBuffer = new byte[LiveStreamProtocol.FrameHeaderSize + TraceBlockEncoder.BlockHeaderSize + _compressedBuffer.Length];
 
-        _listener = new TcpListener(IPAddress.Any, _port);
+        _listener = new TcpListener(IPAddress.Loopback, _port);
         _listener.Start(1);
 
         _acceptThread = new Thread(AcceptLoop)
