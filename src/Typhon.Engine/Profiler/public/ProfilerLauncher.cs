@@ -103,7 +103,7 @@ public static class ProfilerLauncher
         }
         if (config.LivePort >= 0)
         {
-            exporters.Add(new TcpExporter(config.LivePort, profilerParent, config.LiveWaitMs));
+            exporters.Add(new TcpExporter(config.LivePort, profilerParent, config.LiveWaitMs, config.BindAddress));
         }
         return exporters;
     }
