@@ -221,6 +221,34 @@ public static class TatooineReplication
                     + $"({(ic.SessionsTotal == 0 ? 0d : ic.SessionsCoherent * 100d / ic.SessionsTotal):F1} %)");
             }
 
+            // The cluster set's turnover, as opposed to the slot masks' — what an incremental candidate set would still have to pay for.
+            var rf = subs.RunFlow;
+            var reached = rf.FirstSeen + rf.Carried;
+            if (reached > 0)
+            {
+                Console.Error.WriteLine(
+                    $"  run flow (cumulative): {rf.FirstSeen} first seen, {rf.Carried} carried, {rf.Departed} departed; "
+                    + $"churn {(rf.FirstSeen + rf.Departed) * 100d / reached:F2} % of clusters reached");
+            }
+
+            // Only the cluster-granularity path fills this: it is the one that holds a cluster's box.
+            var cont = subs.ClusterContainment;
+            if (cont.Interior + cont.Boundary > 0)
+            {
+                Console.Error.WriteLine(
+                    $"  containment (cumulative): {cont.Interior} slots in clusters wholly inside the enter radius, {cont.Boundary} in clipped clusters "
+                    + $"({cont.Interior * 100d / (cont.Interior + cont.Boundary):F1} % need no per-entity test)");
+            }
+
+            // The ceiling on dirty-driven projection: what a trustworthy per-entity signal would leave S1 doing.
+            var ps = subs.ProjectionSlots;
+            if (ps.Addressed > 0)
+            {
+                Console.Error.WriteLine(
+                    $"  projection slots (cumulative): {ps.Changed} changed of {ps.Addressed} addressed "
+                    + $"({ps.Changed * 100d / ps.Addressed:F1} %), {ps.Addressed / (double)Math.Max(1L, ps.Changed):F1}x re-encode");
+            }
+
             var om = subs.ObserverMotion;
             if (om.Steps > 0)
             {

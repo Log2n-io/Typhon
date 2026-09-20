@@ -857,6 +857,81 @@ internal sealed unsafe class InterestPass
         }
     }
 
+    /// <summary>
+    /// How a session's CLUSTER set turns over, since start: clusters reached for the first time since the last published frame, clusters reached again,
+    /// and clusters no longer reached at all.
+    /// </summary>
+    /// <remarks>
+    /// <b>The coarser question in front of <see cref="InterestCoherence"/>.</b> That one asks whether a run's slot mask changed; this asks whether the
+    /// cluster was in the set at all. An incremental candidate set edits the clusters that move and keeps the rest, so the churn fraction here is what
+    /// such a scheme would still have to pay — and unlike whole-session coherence it does not collapse with the number of clusters a session holds.
+    /// </remarks>
+    public (long FirstSeen, long Carried, long Departed) RunFlow
+    {
+        get
+        {
+            long f = 0, c = 0, d = 0;
+            for (var w = 0; w < _arenas.Length; w++)
+            {
+                var r = _arenas[w].RunFlow;
+                f += r.FirstSeen;
+                c += r.Carried;
+                d += r.Departed;
+            }
+
+            return (f, c, d);
+        }
+    }
+
+    /// <summary>
+    /// Occupied slots in clusters lying wholly inside the enter radius, beside those in clusters the disc clips, since start.
+    /// </summary>
+    /// <remarks>
+    /// <b>The size of the interior/boundary split</b> ([15 § 3.4]): a cluster wholly inside the disc holds no entity the session may not take, so every
+    /// per-entity distance test against it is known to pass before it runs. Only populated on the cluster-granularity path, which is the one that holds
+    /// a cluster's box — the cell path holds entity boxes and cannot answer it. The ratio is a property of the geometry and transfers between the two.
+    /// </remarks>
+    public (long Interior, long Boundary) ClusterContainment
+    {
+        get
+        {
+            long i = 0, b = 0;
+            for (var w = 0; w < _arenas.Length; w++)
+            {
+                var c = _arenas[w].ClusterContainment;
+                i += c.Interior;
+                b += c.Boundary;
+            }
+
+            return (i, b);
+        }
+    }
+
+    /// <summary>Slots the projection pass addressed, and the subset it named as changed, since start — across every archetype.</summary>
+    /// <remarks>
+    /// <b>The ceiling on dirty-driven projection.</b> S1 re-encodes and byte-compares every watched slot because the ECS raises no per-entity signal a
+    /// projection may trust (SUB-10). The changed fraction is what a detector that could be trusted would leave it doing.
+    /// </remarks>
+    public (long Addressed, long Changed) ProjectionSlots
+    {
+        get
+        {
+            long a = 0, c = 0;
+            for (var i = 0; i < _states.Length; i++)
+            {
+                if (_states[i] == null)
+                {
+                    continue;
+                }
+
+                a += _states[i].SlotsProjected;
+                c += _states[i].ChangedSlotsPublished;
+            }
+
+            return (a, c);
+        }
+    }
+
     /// <summary>Interest cells the broad phase resolved last tick.</summary>
     public long CellsResolved => Volatile.Read(ref _cellsResolved);
 
@@ -1041,6 +1116,7 @@ internal sealed unsafe class InterestPass
                 }
 
                 arena.AddRun(archetype, (int)(view.KeyAt(e) & 0xFFFFFFFFL), 0, 0, 0, e, InterestRunFlags.Departed);
+                arena.NoteRunDeparted();
             }
         }
 
@@ -1443,6 +1519,10 @@ internal sealed unsafe class InterestPass
 
             var left = held & ~mask;
             arena.NoteRunCoherence(entered == 0 && left == 0);
+
+            // Held is the MASK, so a cluster the session reaches for the first time and one it has held all along are told apart by whether that mask is
+            // empty — a cluster in the view with no slots is one every occupant of which has already left, which is the departed case and not this one.
+            arena.NoteRunFlow(held != 0);
             _sessionEntered |= entered;
             _sessionLeft |= left;
             while (left != 0)

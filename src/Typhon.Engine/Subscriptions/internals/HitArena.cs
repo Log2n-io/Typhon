@@ -392,6 +392,13 @@ internal sealed class HitArena
             _pickSources[_pickCount] = i;
             _pickCount++;
             accepted++;
+
+            // The FARTHEST corner, against the closest point the acceptance test above used. A box is wholly inside the enter disc only when the corner
+            // diagonally opposite the viewpoint is, and that corner is the larger of the two gaps on each axis rather than the smaller. Measured here
+            // because this is the one place in the pass that holds a cluster's box; the cell path holds entity boxes and could not answer it.
+            var fx = Math.Max(Math.Abs(_clusterMinX[i] - cx), Math.Abs(_clusterMaxX[i] - cx));
+            var fy = Math.Max(Math.Abs(_clusterMinY[i] - cy), Math.Abs(_clusterMaxY[i] - cy));
+            NoteContainment(_clusterSlots[i], ((fx * fx) + (fy * fy)) <= enterSq);
         }
 
         ClusterCandidatesAccepted += accepted;
@@ -955,6 +962,73 @@ internal sealed class HitArena
         if (unchanged)
         {
             _runsUnchanged++;
+        }
+    }
+
+    // ── Run flow: how a session's cluster set turns over, as opposed to how its slot masks do ──────────────────────────────────────────────────────
+    //
+    // RunCoherence above answers "was this run's MASK what the view already held". This answers the coarser question in front of it: was this cluster
+    // in the session's set at all last time it published. The two are not the same number and the difference is the whole case for maintaining the
+    // candidate set incrementally rather than re-querying it — a set that turns over by a few clusters a tick can be edited, one that turns over by a
+    // third of itself cannot.
+    private long _runsFirstSeen;
+    private long _runsCarried;
+    private long _runsDeparted;
+
+    /// <summary>
+    /// Clusters a session reached for the first time since its last published frame, clusters it reached again, and clusters it stopped reaching
+    /// entirely. Cumulative since start.
+    /// </summary>
+    /// <remarks>
+    /// <b>What this bounds.</b> An incremental candidate set pays the cost of the clusters that CHANGE and keeps the rest for free, so
+    /// <c>(FirstSeen + Departed) / (FirstSeen + Carried)</c> is the fraction of per-session interest work such a scheme would still have to do. It is
+    /// deliberately measured against the published view rather than against last tick, because the view is what the incremental scheme would be
+    /// editing: a session skipped for three ticks must re-derive against the frame it actually sent, not against a tick it never told anyone about.
+    /// </remarks>
+    public (long FirstSeen, long Carried, long Departed) RunFlow => (_runsFirstSeen, _runsCarried, _runsDeparted);
+
+    /// <summary>Notes one cluster the session reached, and whether its view already held that cluster.</summary>
+    /// <param name="held"><see langword="true"/> when the session's last published frame already described this cluster.</param>
+    public void NoteRunFlow(bool held)
+    {
+        if (held)
+        {
+            _runsCarried++;
+        }
+        else
+        {
+            _runsFirstSeen++;
+        }
+    }
+
+    /// <summary>Notes one cluster the session stopped reaching entirely this tick.</summary>
+    public void NoteRunDeparted() => _runsDeparted++;
+
+    // ── The interior/boundary split, which 15 § 3.4 called "almost certainly right" and nobody measured ────────────────────────────────────────────
+    //
+    // A cluster whose box lies WHOLLY inside the enter radius cannot contain an entity the session may not take, so every per-entity distance test
+    // this pass runs against it is known in advance to pass. Only a cluster the disc CLIPS needs one. The ratio below is how much of the narrow phase
+    // that observation could delete, and it is a property of the geometry rather than of any arm: the same clusters intersect the same disc whichever
+    // granularity the pass then resolves at.
+    private long _interiorSlots;
+    private long _boundarySlots;
+
+    /// <summary>Occupied slots in clusters wholly inside the enter radius, beside those in clusters the disc clips. Cumulative since start.</summary>
+    public (long Interior, long Boundary) ClusterContainment => (_interiorSlots, _boundarySlots);
+
+    /// <summary>Notes one accepted cluster's containment.</summary>
+    /// <param name="slots">Its occupied slots.</param>
+    /// <param name="interior"><see langword="true"/> when its farthest corner is still inside the enter radius.</param>
+    public void NoteContainment(ulong slots, bool interior)
+    {
+        var n = BitOperations.PopCount(slots);
+        if (interior)
+        {
+            _interiorSlots += n;
+        }
+        else
+        {
+            _boundarySlots += n;
         }
     }
 

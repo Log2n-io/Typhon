@@ -388,6 +388,18 @@ public sealed class SubscriptionsCommands
     public (long RunsUnchanged, long RunsTotal, long SessionsCoherent, long SessionsTotal) InterestCoherence =>
         _ingress.Interest == null ? default : _ingress.Interest.InterestCoherence;
 
+    /// <summary>How a session's cluster set turns over: first seen since its last published frame, carried, and departed. Since start.</summary>
+    public (long FirstSeen, long Carried, long Departed) RunFlow =>
+        _ingress.Interest == null ? default : _ingress.Interest.RunFlow;
+
+    /// <summary>Occupied slots in clusters wholly inside the enter radius, beside those in clusters the disc clips. Cluster-granularity path only.</summary>
+    public (long Interior, long Boundary) ClusterContainment =>
+        _ingress.Interest == null ? default : _ingress.Interest.ClusterContainment;
+
+    /// <summary>Slots the projection addressed, and the subset it named as changed, since start.</summary>
+    public (long Addressed, long Changed) ProjectionSlots =>
+        _ingress.Interest == null ? default : _ingress.Interest.ProjectionSlots;
+
     /// <summary>
     /// How far the OBSERVERS moved: steps compared, total displacement in millimetres, and placed session-ticks seen.
     /// </summary>
