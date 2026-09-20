@@ -47,7 +47,7 @@ var runtime = TyphonRuntime.Create(engine, sched => { /* register systems */ }, 
 
 | Registration | Effect |
 |---|---|
-| `AddTyphonProfiler(resolved => resolved.MergedWith(ProfilerLaunchConfig.FromArgs(args)))` | CLI flags (`--trace`, `--live [port]`, `--live-wait <ms>`) override unset-only fields of the file/env config. |
+| `AddTyphonProfiler(resolved => resolved.MergedWith(ProfilerLaunchConfig.FromArgs(args)))` | CLI flags (`--trace`, `--live [port]`, `--bind-address <addr>`, `--live-wait <ms>`) override unset-only fields of the file/env config. An omitted `--bind-address` leaves a bind set in the file/env config intact — it does not reset the listener to loopback. |
 | `AddTyphonProfiler(resolved => resolved with { TraceFilePath = ComputePath() })` | Fully computed trace path, ignoring whatever the file/env supplied. |
 
 ## ⚠️ Guarantees & limits
