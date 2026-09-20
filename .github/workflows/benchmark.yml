@@ -50,15 +50,41 @@ jobs:
 
       - name: Run benchmark on z1d.metal
         run: |
-          sky launch bench/aws/benchmark.sky.yaml --down -y \
+          sky launch bench/aws/benchmark.sky.yaml -c typhon-benchmark-${{ github.run_id }} --down -y \
             --env PROFILE="$PROFILE" \
             --env RUN_ID=${{ github.run_id }}
 
-      # `--down` only fires on a normal exit. A step timeout or a cancelled run kills sky mid-flight and strands the VM,
-      # billing with nothing watching it. This runs on every path, including cancellation, and no-ops if it is already gone.
+      # `--down` sets AUTODOWN, which the skylet executes ON THE VM — it is not a teardown issued from this runner. So it
+      # needs ec2:TerminateInstances in the *instance role*, and it is silently a no-op when the VM cannot terminate
+      # itself: #971 scoped that away and left three c6id boxes running for hours. This step is the backstop, and it has
+      # to work without SkyPilot's cooperation — `sky down` needs sky's local state, which a cancelled or timed-out job
+      # may never have written, while the tag filter needs nothing but the API.
+      #
+      # It replaces `sky down -y <task name>`, which never matched anything: that name is the *task* name inside the
+      # .sky.yaml, while `sky launch` without `-c` generates a cluster called `sky-<hash>-<user>`. The step printed
+      # "Cluster(s) not found" on every run it ever made, including the ones it existed to protect. `-c` on the launch
+      # is what makes the name ours and this step able to name it.
       - name: Tear down the VM (always, including on timeout or cancel)
         if: always()
-        run: sky down -y typhon-benchmark || true
+        run: |
+          set -uo pipefail
+          CLUSTER='typhon-benchmark-${{ github.run_id }}'
+          # The API sweep runs FIRST, deliberately. It needs nothing but credentials, finishes in seconds, and works
+          # when sky's local state was never written (a launch killed between RunInstances and its bookkeeping).
+          # `sky down` needs that state and can take minutes, so on a cancellation it can eat the whole grace window
+          # and leave the box running. Terminating out from under sky is safe — it then finds the instances gone.
+          #
+          # Two exact tag values rather than one prefix glob: `<cluster>*` would also match a run whose id is this
+          # one with more digits, and killing a concurrent run's VM is a worse failure than missing one.
+          TAGF="Name=tag:skypilot-cluster-name,Values=${CLUSTER},${CLUSTER}-*"
+          STATEF="Name=instance-state-name,Values=pending,running,stopping,stopped"
+          Q='Reservations[].Instances[].InstanceId'
+          ids=$(aws ec2 describe-instances --region eu-west-1 --filters "$TAGF" "$STATEF" --query "$Q" --output text || true)
+          if [ -n "${ids:-}" ]; then
+            echo "::warning::terminating instances left for ${CLUSTER}: ${ids}"
+            aws ec2 terminate-instances --region eu-west-1 --instance-ids ${ids} >/dev/null || true
+          fi
+          timeout 120 sky down -y "$CLUSTER" || true
 
       - name: Pull results from S3
         if: always()

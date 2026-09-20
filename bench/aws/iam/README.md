@@ -21,7 +21,15 @@ IMDS at `169.254.169.254`: a `[Test]` method, an MSBuild target, an npm `postins
 terminating the persistent gate runner, snapshotting its EBS volume and sharing the snapshot to an outside
 account, and launching any instance type in any region. SkyPilot's documentation says the role's EC2 access is
 for instances that "create other EC2 nodes" when launching **nested clusters**; the gate never does that. The VM
-needs S3 for the `/outputs` mount, and `ec2:Describe*` for the provisioner. Nothing else.
+needs S3 for the `/outputs` mount, `ec2:Describe*` for the provisioner, and `ec2:TerminateInstances` **on itself**.
+
+> **That last one was missed, and it cost money.** This paragraph originally ended "Nothing else." `sky launch --down`
+> does not tear the cluster down from the GitHub runner — it sets *autodown*, which the skylet executes **on the VM**.
+> Strip terminate from the instance role and `--down` becomes a silent no-op: three `c6id.8xlarge` ran for hours on
+> 2026-09-20 before anyone looked at the console. `AutodownSelf` is conditioned on `ec2:ResourceTag/skypilot-cluster-name`
+> existing, which every SkyPilot instance carries and the persistent runner does not, so a VM can end itself and nothing
+> else. Verifying this change means checking that the instance is **gone**, not only that the job went green — the job
+> went green all three times.
 
 **`skypilot-min` granted `iam:AttachRolePolicy` on `role/skypilot-v1` with no condition on which policy**, next to
 `iam:PassRole` on the same role. Attach `AdministratorAccess` to `skypilot-v1`, launch an instance with that
@@ -112,6 +120,16 @@ and watching `aws-gate` succeed.
 A denial surfaces as an `AccessDenied` naming the action it wanted, either from `sky launch` on the runner (the
 user policy is short something) or from the VM's S3 mount (the instance role is). Read the action out of the
 error and add exactly that, rather than widening a resource back to `*`.
+
+**A green job is not the check.** The instance-role scoping passed a full gate run while leaving the VM alive, because
+nothing in the job's exit status depends on the VM going away. After any change here, confirm the box is gone:
+
+```bash
+aws ec2 describe-instances --region eu-west-1   --filters "Name=tag:skypilot-cluster-name,Values=typhon-*"             "Name=instance-state-name,Values=pending,running,stopping,stopped"   --query 'Reservations[].Instances[].[InstanceId,InstanceType,LaunchTime]' --output table
+```
+
+The workflows now also sweep by that tag in their `if: always()` teardown step, so a stranded instance needs both
+SkyPilot's autodown and the sweep to fail before it survives the job.
 
 ## Considered and not done
 
