@@ -18,6 +18,21 @@
       "Effect": "Allow",
       "Action": ["ec2:Describe*"],
       "Resource": "*"
+    },
+    {
+      "Sid": "AutodownSkypilotTaggedInstances",
+      "Effect": "Allow",
+      "Action": ["ec2:TerminateInstances"],
+      "Resource": "arn:aws:ec2:*:940864285707:instance/*",
+      "Condition": {
+        "StringLike": { "ec2:ResourceTag/skypilot-cluster-name": "*" }
+      }
+    },
+    {
+      "Sid": "NeverTouchThePersistentRunner",
+      "Effect": "Deny",
+      "Action": ["ec2:TerminateInstances", "ec2:StopInstances"],
+      "Resource": "arn:aws:ec2:*:940864285707:instance/i-0b7b66d9dd6f0c6b8"
     }
   ]
 }
