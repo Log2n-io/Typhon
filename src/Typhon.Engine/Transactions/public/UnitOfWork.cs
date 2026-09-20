@@ -171,11 +171,13 @@ public sealed class UnitOfWork : IDisposable
         // WAL is mandatory: signal the WAL writer to flush and wait for the durable LSN (M7 — through the IDurabilityLog seam).
         var log = _dbe.DurabilityLog;
         log.RequestFlush();
-        var currentLsn = log.LastAppendedLsn;
-        if (currentLsn > 0)
+        // #937: NOT LastAppendedLsn. That is the allocation frontier, and an abandoned or timed-out claim leaves LSNs in it that no
+        // frame will ever carry — on an idle engine this wait then runs to its deadline and throws out of Dispose.
+        var target = log.LastPublishedLsn;
+        if (target > 0)
         {
             var ctx = _deadline == Deadline.Infinite ? WaitContext.Null : WaitContext.FromDeadline(_deadline);
-            log.WaitForDurable(currentLsn, ref ctx);
+            log.WaitForDurable(target, ref ctx);
         }
 
         TransitionToWalDurable();
@@ -193,7 +195,8 @@ public sealed class UnitOfWork : IDisposable
 
         var log = _dbe.DurabilityLog;
         log.RequestFlush();
-        var currentLsn = log.LastAppendedLsn;
+        // #937: see Flush() — the allocation frontier is not a reachable durability target.
+        var currentLsn = log.LastPublishedLsn;
         if (currentLsn > 0)
         {
             _dbe.LogUowFlushStart(_uowId, _durabilityMode, currentLsn);
