@@ -56,6 +56,15 @@ internal struct FrameCounters
     /// <summary>LEAVE records the published frames carried.</summary>
     public long LeavesEmitted;
 
+    /// <summary>Identities the interest pass stopped reaching, whether or not a leave was emitted for them.</summary>
+    public long LeavesConsidered;
+
+    /// <summary>Leaves emitted because the netId had been reissued to another entity (SUB-06).</summary>
+    public long LeavesStale;
+
+    /// <summary>Leaves emitted by the known-set sweep: an entry this tick's hits did not reach.</summary>
+    public long LeavesSwept;
+
     /// <summary>Known-set size at the moment each frame committed, summed. Divide by <see cref="FramesProduced"/> for the mean.</summary>
     public long KnownTotal;
 
@@ -734,6 +743,9 @@ internal sealed unsafe class FrameAssembler : IDisposable
     private long _entersDeferred;
     private long _entersEmitted;
     private long _leavesEmitted;
+    private long _leavesConsidered;
+    private long _leavesStale;
+    private long _leavesSwept;
     private long _knownTotal;
     private long _owedTotal;
     private long _oversizeSkips;
@@ -859,6 +871,33 @@ internal sealed unsafe class FrameAssembler : IDisposable
     /// </remarks>
     public (long Entered, long Left, long Deferred) EnterFlow =>
         (Volatile.Read(ref _entersEmitted), Volatile.Read(ref _leavesEmitted), Volatile.Read(ref _entersDeferred));
+
+    /// <summary>Why the leaves were sent, split by the three paths that emit one, beside the identities the interest pass merely stopped reaching.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The three causes want three different fixes, and the split says which one is in front of you.</b> <c>Interest</c> is geometry: the observer no
+    /// longer reaches the entity. <c>Stale</c> is identity: the netId was reissued to something else, which every session holding it must be told about,
+    /// so a world that recycles identities quickly pays a leave and an enter per recycle per watching session whatever its entities are doing.
+    /// <c>Swept</c> is the non-incremental path's backstop and is near zero wherever the interest pass produces a difference.
+    /// </para>
+    /// <para>
+    /// <b><c>Considered</c> against <c>Interest</c> is the suppression rate</b>, which measures something different again: an identity dropped from one
+    /// cluster but read this tick in another has MOVED inside the view rather than left it. A high suppression rate is cluster migration; a low one is
+    /// entities genuinely crossing the observer's boundary.
+    /// </para>
+    /// </remarks>
+    public (long Considered, long Interest, long Stale, long Swept) LeaveCauses
+    {
+        get
+        {
+            var stale = Volatile.Read(ref _leavesStale);
+            var swept = Volatile.Read(ref _leavesSwept);
+
+            // Interest is DERIVED rather than counted: the three sites that append a LEAVE record are exhaustive, so what the frames carried minus the
+            // two named causes is the third by construction, and one fewer increment runs on the walk.
+            return (Volatile.Read(ref _leavesConsidered), Volatile.Read(ref _leavesEmitted) - stale - swept, stale, swept);
+        }
+    }
 
     /// <summary>Mean known-set size and mean outstanding slot debt over the frames that published.</summary>
     /// <remarks>
@@ -1293,6 +1332,9 @@ internal sealed unsafe class FrameAssembler : IDisposable
         Add(ref _entersDeferred, counters.EntersDeferred);
         Add(ref _entersEmitted, counters.EntersEmitted);
         Add(ref _leavesEmitted, counters.LeavesEmitted);
+        Add(ref _leavesConsidered, counters.LeavesConsidered);
+        Add(ref _leavesStale, counters.LeavesStale);
+        Add(ref _leavesSwept, counters.LeavesSwept);
         Add(ref _knownTotal, counters.KnownTotal);
         Add(ref _owedTotal, counters.OwedTotal);
         Add(ref _oversizeSkips, counters.OversizeSkips);
@@ -1785,6 +1827,9 @@ internal sealed unsafe class FrameAssembler : IDisposable
             mark = now;
         }
 
+        counters.LeavesStale += staleLeaves;
+        counters.LeavesConsidered += scratch.Temporal.LeavesConsidered;
+
         var deferred = SelectEnters(state, scratch, view, _options.OwedSlotCarry && view != null);
 
         if (timing)
@@ -1796,7 +1841,7 @@ internal sealed unsafe class FrameAssembler : IDisposable
         if (!incremental)
         {
             counters.FullGathers++;
-            Sweep(state, scratch, scratch.Temporal, stamp, touched + staleLeaves);
+            counters.LeavesSwept += Sweep(state, scratch, scratch.Temporal, stamp, touched + staleLeaves);
         }
 
         if (timing)
@@ -2808,6 +2853,9 @@ internal sealed unsafe class FrameAssembler : IDisposable
             view.SetId(viewIndex, slot, 0);
         }
 
+        // Counted for every identity the interest pass dropped, BEFORE the suppression test, because the point of the number is the ratio between what
+        // was considered and what went out. One dropped from a cluster but read this tick in another is an entity that moved inside the view.
+        temporal.LeavesConsidered++;
         if (temporal.WasSeen(netId) || temporal.WasEmitted(netId))
         {
             return;
@@ -2871,16 +2919,17 @@ internal sealed unsafe class FrameAssembler : IDisposable
     }
 
     /// <summary>Finds the entities this session knows that its hits did not reach: its leaves.</summary>
-    private static void Sweep(SessionFrameState state, FrameWorkerScratch scratch, FrameIdentityScratch identities, ushort stamp, int accountedFor)
+    private static int Sweep(SessionFrameState state, FrameWorkerScratch scratch, FrameIdentityScratch identities, ushort stamp, int accountedFor)
     {
         var known = state.Known;
         if (accountedFor >= known.KnownCount)
         {
             // Every entry the table holds was reached by a hit or is already leaving, so nothing can be missing. The steady state takes this branch, which
             // is what keeps a 10 000-entity view from walking its whole table every tick to discover that nobody left.
-            return;
+            return 0;
         }
 
+        var emitted = 0;
         var enumerator = known.GetEnumerator();
         while (enumerator.MoveNext())
         {
@@ -2899,8 +2948,11 @@ internal sealed unsafe class FrameAssembler : IDisposable
             }
 
             identities.NoteEmitted(entry->NetId);
+            emitted++;
             scratch.Add(entry->Archetype, FrameListKind.Leave, new FrameRecord { NetId = entry->NetId, Archetype = entry->Archetype });
         }
+
+        return emitted;
     }
 
     private int SortAndCount(FrameWorkerScratch scratch)

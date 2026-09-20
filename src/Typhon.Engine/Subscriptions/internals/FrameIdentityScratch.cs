@@ -48,8 +48,18 @@ internal sealed unsafe class FrameIdentityScratch : IDisposable
     private bool _disposed;
 
     /// <summary>Empties both tables for the next session this worker assembles.</summary>
+    /// <summary>Identities this session's interest stopped reaching this tick, whether or not a leave went out for them.</summary>
+    /// <remarks>
+    /// <b>Counted against the leaves actually emitted, this is the suppression rate</b>, and it separates two things that look identical from outside.
+    /// An identity the interest pass dropped from one cluster but which this tick read in another has MOVED inside the view, and the leave is correctly
+    /// suppressed; one nothing else read has genuinely left. A high suppression rate is cluster migration, a low one is entities crossing the observer's
+    /// boundary, and the two have nothing to do with each other.
+    /// </remarks>
+    public int LeavesConsidered;
+
     public void BeginSession()
     {
+        LeavesConsidered = 0;
         if (_seenKeys == null)
         {
             Allocate(ref _seenKeys, ref _seenTouched, ref _seenMask, ref _seenCount, 256);

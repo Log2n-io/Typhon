@@ -119,6 +119,18 @@ internal sealed class NetIdAllocator : ResourceNode, IMemoryResource
     /// <summary>Identities currently allocated.</summary>
     public int LiveCount => _liveCount;
 
+    /// <summary>Identities handed out and given back since start, and how many hand-outs reused a quarantined id rather than minting a fresh one.</summary>
+    /// <remarks>
+    /// <b>This is the denominator for the frame stage's stale leaves.</b> A reissued netId is a leave and an enter for every session that held it
+    /// (SUB-06), so a world recycling identities quickly pays wire traffic proportional to the recycle rate times the watching population, whatever its
+    /// entities are doing. Written only under the allocator's thread affinity, so a read from elsewhere is a snapshot rather than a torn value.
+    /// </remarks>
+    public (long Minted, long Released, long Reused) IdentityFlow => (_minted, _released, _reused);
+
+    private long _minted;
+    private long _released;
+    private long _reused;
+
     /// <summary>Identities released and not yet reissuable, across every bucket of the quarantine ring.</summary>
     public int QuarantinedCount => _quarantineCount;
 
@@ -173,6 +185,7 @@ internal sealed class NetIdAllocator : ResourceNode, IMemoryResource
             {
                 netId = _freeHead;
                 _freeHead = _nextFree[netId];
+                _reused++;
             }
             else
             {
@@ -186,6 +199,7 @@ internal sealed class NetIdAllocator : ResourceNode, IMemoryResource
 
             _nextFree[netId] = LiveMarker;
             _liveCount++;
+            _minted++;
             return netId;
         }
         finally
@@ -242,6 +256,7 @@ internal sealed class NetIdAllocator : ResourceNode, IMemoryResource
             _bucketTails[bucket] = netId;
             _quarantineCount++;
             _liveCount--;
+            _released++;
         }
         finally
         {

@@ -192,6 +192,15 @@ public static class TatooineReplication
                 $"  enter flow: {ef.Entered} entered, {ef.Left} left, {ef.Deferred} deferred over {vf.Frames} frames "
                 + $"({ef.Entered * perFrame:F1} / {ef.Left * perFrame:F1} / {ef.Deferred * perFrame:F1} per frame)");
             Console.Error.WriteLine($"  view fill: {vf.Known:F0} entities known per frame, {vf.Owed:F1} enters owed");
+            var lc = subs.LeaveCauses;
+            var suppressed = lc.Considered == 0 ? 0d : 1d - (lc.Interest / (double)lc.Considered);
+            Console.Error.WriteLine(
+                $"  leave causes: interest {lc.Interest}, stale {lc.Stale}, swept {lc.Swept}; "
+                + $"{lc.Considered} considered, {suppressed * 100d:F0} % suppressed as moved-within-view");
+            var idf = subs.IdentityFlow;
+            Console.Error.WriteLine(
+                $"  identities: {idf.Minted} minted, {idf.Released} released, {idf.Reused} reused; "
+                + $"{subs.EntriesMigrated} entries relocated between clusters");
             var cc = subs.ClusterCandidates;
             Console.Error.WriteLine($"  cluster candidates: {cc.Collected} collected, {cc.Accepted} accepted");
             var ee = subs.EpochEnter;

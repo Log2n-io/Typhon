@@ -380,6 +380,50 @@ public sealed class SubscriptionsCommands
     /// <summary>Mean entities a client holds, and mean enters still owed to it, over the frames that published.</summary>
     public (double Known, double Owed, long Frames) ViewFill => _ingress.Frames == null ? default : _ingress.Frames.ViewFill;
 
+    /// <summary>Why the leaves were sent: geometry, a reissued identity, or the known-set sweep — beside what the interest pass merely stopped reaching.</summary>
+    public (long Considered, long Interest, long Stale, long Swept) LeaveCauses => _ingress.Frames == null ? default : _ingress.Frames.LeaveCauses;
+
+    /// <summary>Replication entries carried from one cluster to another since start, summed over every archetype.</summary>
+    /// <remarks>
+    /// <b>A relocation is invisible to the world and loud on the wire.</b> The entity did not move and nothing about it changed, but it now sits in a
+    /// different cluster — so a session that watches the source and not the destination is told the entity LEFT, and one that watches the destination and
+    /// not the source is told it ENTERED. Only a session holding both suppresses the pair. Read against <see cref="LeaveCauses"/>: if the two rates track,
+    /// the churn belongs to whatever relocates entities rather than to observers moving.
+    /// </remarks>
+    public long EntriesMigrated
+    {
+        get
+        {
+            var total = 0L;
+            var states = _ingress.Interest?.ReplicationStates;
+            for (var i = 0; states != null && i < states.Length; i++)
+            {
+                total += states[i] == null ? 0 : states[i].EntriesMigrated;
+            }
+
+            return total;
+        }
+    }
+
+    /// <summary>Network identities minted, released and reused since start — the denominator for <see cref="LeaveCauses"/>'s stale term.</summary>
+    /// <remarks>Every archetype shares one allocator, so the first non-null state answers for all of them.</remarks>
+    public (long Minted, long Released, long Reused) IdentityFlow
+    {
+        get
+        {
+            var states = _ingress.Interest?.ReplicationStates;
+            for (var i = 0; states != null && i < states.Length; i++)
+            {
+                if (states[i] != null)
+                {
+                    return states[i].NetIds.IdentityFlow;
+                }
+            }
+
+            return default;
+        }
+    }
+
     /// <summary>Cluster candidates the broad phase collected, and how many a session accepted.</summary>
     public (long Collected, long Accepted) ClusterCandidates =>
         _ingress.Interest == null ? default : (_ingress.Interest.ClusterCandidatesCollected, _ingress.Interest.ClusterCandidatesAccepted);
