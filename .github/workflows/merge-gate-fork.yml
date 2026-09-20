@@ -1,0 +1,111 @@
+name: Merge Gate (fork)
+
+# The heavy correctness suites for a PR whose head lives in a FORK — the half of the gate that merge-gate.yml
+# structurally cannot run.
+#
+# Why a second workflow exists at all. GitHub withholds every secret from a `pull_request` run whose head is a
+# fork (repo, org AND environment secrets alike — environment REVIEWERS gate a job, they do not lift the fork
+# restriction). So merge-gate.yml's c6id jobs cannot authenticate against an outside contribution, and #969 made
+# them skip rather than die inside SkyPilot. That left an outside PR with no path to a green mark at all, which
+# is not a tenable position for a repository that accepts contributions.
+#
+# `pull_request_target` is the seam: it is a BASE-context event, so secrets flow. The price is that it runs with
+# write-scoped credentials in reach of whatever the contributor wrote, which is the well-known "pwn request"
+# shape — a `Directory.Build.targets`, an MSBuild target, an npm `postinstall` or any test method can read
+# AWS_SECRET_ACCESS_KEY, and reading a one-line diff does not make that untrue. Three things hold the line:
+#
+#   1. `environment: fork-pr-gate` with required reviewers. The job does not start; it sits Waiting on the PR
+#      until a maintainer approves it. A later push is a new `synchronize` event, so a new run, so a new
+#      approval — an approved run cannot be extended by pushing after the fact.
+#   2. EPHEMERAL HARDWARE ONLY. There is deliberately no self-hosted variant of this job. The persistent c6id
+#      keeps warm bin/obj between runs by design and carries the runner's own IMDS credentials, so a fork's code
+#      on that box would execute against state later runs trust. The SkyPilot VM is torn down either way.
+#   3. `persist-credentials: false`. checkout otherwise leaves the job's GITHUB_TOKEN in .git/config, where any
+#      build step could use it.
+#
+# Still outstanding, and worth stating rather than implying it is handled: the AWS credentials this job carries
+# are the same ones every other gate job uses. Scoping them to a principal that can do nothing but launch the
+# gate instance type and write its S3 prefix is the control that would actually bound the blast radius here.
+#
+# Design + rationale: claude/design/Infrastructure/ci-merge-gate.md
+
+on:
+  pull_request_target:
+    branches: [main]
+
+# Keyed by PR, not by ref: every fork PR targets `main`, so a ref-keyed group would let one contributor's push
+# cancel another's waiting approval.
+concurrency:
+  group: merge-gate-fork-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # The job id IS the check name GitHub shows on the PR and the string branch protection requires — there is no
+  # workflow prefix. `heavy` would have been meaningless in a required-checks list next to `gate` and `aws-gate`.
+  fork-gate:
+    # Internal PRs are gated by merge-gate.yml's own `pull_request` run, which has secrets and needs no approval.
+    # head.repo.full_name rather than head.repo.fork: a PR from a fork OF a fork reports the repo it was forked
+    # from, and the only question here is whether the head is THIS repository.
+    if: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+    environment: fork-pr-gate
+    runs-on: ubuntu-latest
+    # ---- COST FAIL-SAFE (#729). `sky launch` holds a billed VM for as long as this step runs. ----
+    timeout-minutes: 30
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: eu-west-1
+    steps:
+      # The merge ref, not the head: the gate measures the fork's code as it would land on main. `workdir: .` in
+      # ci.sky.yaml uploads whatever this step produced, so this checkout is what the VM actually runs.
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          persist-credentials: false
+
+      - name: Install SkyPilot
+        run: python3 -m pip install --quiet "skypilot[aws]"
+
+      # Both suites forced on, unlike merge-gate.yml's paths-filter run. A maintainer approval is an explicit
+      # "run the whole thing", and the filters are attacker-controlled input here in a way they are not on an
+      # internal PR: a fork choosing its own changed paths — or writing `[no-ut]` in its commit message — would
+      # be choosing how much of the gate applies to it.
+      - name: Run correctness gate on c6id
+        timeout-minutes: 25
+        run: |
+          sky launch bench/aws/ci.sky.yaml --down -y \
+            --env RUN_ENGINE=true \
+            --env RUN_WORKBENCH=true \
+            --env RUN_ID=${{ github.run_id }}
+
+      # `--down` only fires on a normal exit; a step timeout or a cancelled run strands the VM, billing with
+      # nothing watching it. No-op when the cluster is already gone.
+      - name: Tear down the VM (always, including on timeout or cancel)
+        if: always()
+        run: sky down -y typhon-ci-gate || true
+
+      - name: Pull reports from S3
+        if: always()
+        run: |
+          mkdir -p ci-out
+          aws s3 sync "s3://typhon-traces/ci/${{ github.run_id }}/" ci-out/ || true
+
+      - name: Render report on the check page
+        if: always()
+        run: |
+          if [ -f ci-out/summary.md ]; then
+            cat ci-out/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_No summary produced (the VM may have failed before writing one)._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload raw artifacts (.trx / coverage / logs)
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ci-reports-fork
+          path: ci-out/**
+          if-no-files-found: ignore

@@ -50,6 +50,9 @@ jobs:
       # The ref the heavy jobs check out. Empty on a normal run (checkout's default is correct); on a maintainer
       # dispatch it is the PR's merge ref, so the gate measures the fork's code as it would land.
       gate_ref: ${{ steps.dispatch.outputs.gate_ref }}
+      # Non-empty when this run gates a PR by dispatch. The code being gated may be a fork's, so everything below
+      # that would put it on the PERSISTENT box is switched off for the duration — see aws-gate-selfhosted.
+      dispatch_pr: ${{ steps.dispatch.outputs.pr }}
     steps:
       - uses: actions/checkout@v5
 
@@ -136,7 +139,7 @@ jobs:
       (needs.changes.outputs.engine == 'true' || needs.changes.outputs.workbench == 'true')
       && needs.changes.outputs.skip_ut != 'true'
       && needs.changes.outputs.is_fork != 'true'
-      && vars.GATE_RUNNER != 'selfhosted'
+      && (vars.GATE_RUNNER != 'selfhosted' || needs.changes.outputs.dispatch_pr != '')
     runs-on: ubuntu-latest
     # ---- COST FAIL-SAFE (#729, 2026-08-09). ----
     # Same exposure as the self-hosted job below, by a different route: `sky launch` holds a billed VM for as long as this
@@ -225,6 +228,7 @@ jobs:
       (needs.changes.outputs.engine == 'true' || needs.changes.outputs.workbench == 'true')
       && needs.changes.outputs.skip_ut != 'true'
       && needs.changes.outputs.is_fork != 'true'
+      && needs.changes.outputs.dispatch_pr == ''
       && vars.GATE_RUNNER == 'selfhosted'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -284,12 +288,16 @@ jobs:
     # is_fork is a SECURITY condition here, not just a credential one. This job runs on a persistent box that
     # deliberately keeps warm bin/obj between runs (`clean: false`) — so arbitrary code from an outside fork would
     # execute on a machine holding state that later runs trust, with the runner's own IMDS credentials in reach.
-    # A fork PR must reach this box only after a maintainer has read the diff, which is what the `pr` dispatch input
-    # provides: dispatch is a base-context event, so is_fork is false there and the job runs the reviewed merge ref.
+    # A fork PR must therefore never reach this box at all. `is_fork` keeps it off the `pull_request` path, and
+    # `dispatch_pr` keeps it off the maintainer-dispatch path: a dispatch is a base-context event, so `is_fork` is
+    # FALSE there even when the ref being gated is a fork's merge ref — which made the dispatch #969 introduced as
+    # the safe route the one route that put unreviewed-by-the-machine code on the trusted box. Any PR-gating
+    # dispatch runs on the ephemeral SkyPilot VM instead (see aws-gate's condition above), which is torn down.
     if: >-
       (needs.changes.outputs.engine == 'true' || needs.changes.outputs.workbench == 'true')
       && needs.changes.outputs.skip_ut != 'true'
       && needs.changes.outputs.is_fork != 'true'
+      && needs.changes.outputs.dispatch_pr == ''
       && vars.GATE_RUNNER == 'selfhosted'
     runs-on: [self-hosted, linux, typhon-c6id]
     # ---- COST FAIL-SAFE (#729, 2026-08-09). ----
@@ -663,26 +671,33 @@ jobs:
           [ "$inv" = "success" ] || { echo "invariants gate failed"; fail=1; }
           case "$keywords" in failure|cancelled) echo "closing-keywords guard failed"; fail=1 ;; esac
 
-          # A fork PR is RED BY CONSTRUCTION, and that is the point. The free-runner jobs above really did run and
-          # their results stand, but the heavy suites did not — and #774 is this repository's standing lesson that a
-          # gate reporting green while its heaviest job never ran is worse than no gate. So say so, on the required
-          # check's own page, with the one action that produces a real verdict.
+          # A fork PR reports on what it ACTUALLY ran, and hands the rest off by name.
+          #
+          # #969 made this a hard red, on the reasoning that a gate reporting green while its heaviest job never ran
+          # is #774 all over again. That reasoning is right and is not weakened here — what changed is that the heavy
+          # job is no longer unrunnable. merge-gate-fork.yml gates the same merge ref on `pull_request_target`, where
+          # secrets flow, behind an environment a maintainer has to approve. So the honest report is no longer "RED,
+          # nothing verified it" but "these jobs passed, that check owns the rest".
+          #
+          # THIS IS ONLY TRUE WHILE `fork-gate` IS A REQUIRED CHECK ON `main`. Drop it from branch
+          # protection and this job's green becomes exactly the lie #774 is named after: a fork PR would show a green
+          # gate with no suite behind it. The required-check list is load-bearing, not cosmetic.
           if [ "$fork" = "true" ]; then
-            fail=1
             {
-              echo "## Merge gate: RED — heavy suites did not run (fork PR)"
+              echo "## Merge gate: policy jobs only (fork PR)"
               echo ""
-              echo "GitHub withholds secrets from \`pull_request\` runs whose head is a fork, so the c6id jobs have"
-              echo "no AWS credentials and were skipped rather than left to die inside SkyPilot. Everything that needs"
-              echo "no credential did run: \`invariants\`, \`changes\`, \`rule-coverage\`, \`closing-keywords\`, \`tla\`."
+              echo "GitHub withholds secrets from \`pull_request\` runs whose head is a fork, so the c6id jobs have no"
+              echo "AWS credentials and were skipped here. What ran and passed above needs no credential:"
+              echo "\`invariants\`, \`changes\`, \`rule-coverage\`, \`closing-keywords\`, \`tla\`."
               echo ""
-              echo "**Maintainer: read the diff, then run the real gate.** From the Actions tab → Merge Gate →"
-              echo "*Run workflow*, leave the branch at \`main\` and set **pr** to \`${{ github.event.pull_request.number }}\`."
-              echo "That run is in base context, so secrets flow and the heavy job checks out this PR's merge ref."
+              echo "**The heavy suites are gated by \`fork-gate\` on this same PR.** That check runs"
+              echo "on \`pull_request_target\` — base context, so secrets flow — and waits on the \`fork-pr-gate\`"
+              echo "environment until a maintainer approves it from this PR's Checks tab. Approve it after reading the"
+              echo "diff; it runs the engine and Workbench suites against this PR's merge ref on an ephemeral c6id."
               echo ""
-              echo "Treat that dispatched run as this PR's verdict. Do not merge on the strength of this check alone."
+              echo "A green mark HERE does not mean the tests passed. That verdict is the other check's."
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "fork PR — heavy suites skipped, no credentials available; dispatch Merge Gate with pr=${{ github.event.pull_request.number }}"
+            echo "::notice::Fork PR — heavy suites are gated by 'fork-gate', pending maintainer approval."
           fi
 
           if [ "$fail" -ne 0 ]; then echo "Merge gate: RED"; exit 1; fi
