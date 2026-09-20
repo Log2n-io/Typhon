@@ -60,5 +60,10 @@ internal interface IDurabilityLog
     long DurableLsn { get; }
 
     /// <summary>Highest LSN claimed so far — replaces <c>CommitBuffer.NextLsn - 1</c> peeking at UoW flush (M7).</summary>
+    /// <remarks>#937: this is the ALLOCATION frontier. It names LSNs that no frame owns whenever a claim is abandoned or times out,
+    /// so it must not be used as a durability wait target — use <see cref="LastPublishedLsn"/> for that.</remarks>
     long LastAppendedLsn { get; }
+
+    /// <summary>#937 — highest LSN a frame was actually PUBLISHED with. The sound target for "flush everything the WAL holds as of now".</summary>
+    long LastPublishedLsn { get; }
 }

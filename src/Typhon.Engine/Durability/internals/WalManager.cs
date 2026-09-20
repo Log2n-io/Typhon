@@ -69,6 +69,14 @@ internal sealed class WalManager : ResourceNode
     /// barrier (CK-02) to flush the WAL through everything appended before capturing dirty pages.</summary>
     public long LastAppendedLsn => (CommitBuffer?.NextLsn ?? 1) - 1;
 
+    /// <summary>
+    /// #937 — highest LSN a WAL frame was actually PUBLISHED with, and the only sound target for a durability wait that means
+    /// "everything the WAL holds as of now". <see cref="LastAppendedLsn"/> is the ALLOCATION frontier and names LSNs no frame owns
+    /// whenever a claim is abandoned or its producer times out over the buffer boundary; on an idle engine a wait for one of those
+    /// can only end at its deadline. Ordering: <c>CheckpointLSN ≤ DurableLsn ≤ LastPublishedLsn ≤ LastAppendedLsn</c> (WP-01).
+    /// </summary>
+    public long LastPublishedLsn => CommitBuffer?.LastPublishedLsn ?? 0;
+
     /// <summary>Whether the WAL writer thread is running.</summary>
     public bool IsRunning => _writer?.IsRunning ?? false;
 

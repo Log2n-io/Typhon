@@ -382,11 +382,15 @@ CK-08 (flush-only cycles) are later increments.
 
 ### CK-02: Captured ⊆ durable `[fatal]` `[silent]`
   invariant the WAL is flushed through the high-water of records a captured page copy can reflect `[flush through
-            LastAppendedLsn after capture]` strictly precedes `[data-file fsync]`; `CheckpointLSN` advances only to `barrierLsn`
+            LastPublishedLsn after capture]` strictly precedes `[data-file fsync]`; `CheckpointLSN` advances only to `barrierLsn`
             (the post-flush `DurableLsn` taken before capture), never beyond
-  requires: AP-01
-  scope: `CheckpointManager.RunCheckpointCycle` — step-1 barrier (`RequestFlush` + `WaitForDurable(LastAppendedLsn)` →
-         `barrierLsn`); step-3 flush2 (`RequestFlush` + `WaitForDurable(LastAppendedLsn)`) before each pass's `FlushToDisk`
+  requires: AP-01, WP-16
+  scope: `CheckpointManager.RunCheckpointCycle` — step-1 barrier (`RequestFlush` + `WaitForDurable(LastPublishedLsn)` →
+         `barrierLsn`); step-3 flush2 (`RequestFlush` + `WaitForDurable(LastPublishedLsn)`) before each pass's `FlushToDisk`
+  note the target was `LastAppendedLsn` until #937. The published frontier is not a weakening: AP-01 orders a commit's
+       page effects strictly after its append returns, so a page captured now can only reflect records already published.
+       What it drops is the unreachable part of the old target — LSNs allocated to claims that produced no frame, which
+       stalled every cycle on an idle engine for the full CheckpointBarrierTimeoutMs.
   on_violation: never-durable bytes persisted in the data file → phantom data after crash
   verified: Barrier_DrivesCheckpointAdvance_IgnoringStaleTarget (CheckpointResilienceTests); the deep crash property
             (captured ⊆ durable across a power cut) is proven by the A1.2 crash sweep (P1.5)
@@ -714,12 +718,16 @@ Any short-circuit — skipping a step, reversing two adjacent steps — breaks
 either durability, recoverability, or consistency.
 
 ### WP-01: LSN watermark ordering `[fatal]`
-  invariant CheckpointLSN ≤ DurableLSN ≤ CurrentLSN
-  scope: WalWriter.cs, CheckpointManager.cs, WalSegmentManager.cs
+  invariant CheckpointLSN ≤ DurableLSN ≤ LastPublishedLsn ≤ LastAppendedLsn (= NextLsn - 1, the allocation frontier)
+  scope: WalWriter.cs, CheckpointManager.cs, WalSegmentManager.cs, WalCommitBuffer.Publish
   on_violation:
     CheckpointLSN > DurableLSN → checkpoint flushes pages whose WAL is not yet on disk;
       crash loses data with no recovery path
-    DurableLSN > CurrentLSN → logically impossible (signals writes not yet issued)
+    DurableLSN > LastPublishedLsn → the watermark names an LSN no frame carries (LOG-05)
+    LastPublishedLsn > LastAppendedLsn → logically impossible (a frame published an LSN nobody allocated)
+  note the chain gained LastPublishedLsn in #937. The two middle terms are NOT interchangeable, and which one a
+    WAIT targets is the whole of WP-16: the gap between them is the set of LSNs that were allocated and will
+    never be written, so it is reachable only from below.
 
 ### WP-02: WAL-before-visibility `[fatal][silent]`
   invariant ∀rev: rev.Visible → rev.WalRecord.LSN ≤ DurableLSN
@@ -861,7 +869,9 @@ either durability, recoverability, or consistency.
   invariant DurableLsn advances only over batches for which that write was issued
   never CompleteDrain / AdvanceDurable on a path that did not attempt the write (e.g. a size guard with no chunked
         fallback)
-  scope: WalWriter.WriterLoop, WalWriter.DrainRemaining, WalWriter.DrainAndWriteSync — i.e. every PatchChunkCrcs caller
+  scope: WalWriter.WriterLoop, WalWriter.DrainRemaining, WalWriter.DrainAndWriteSync — i.e. every PatchChunkCrcs caller;
+         WalCommitBuffer.AssertNothingLeftToDrain — the swap-point guard that the buffer reset cannot be reached with a
+         published-but-unwritten frame below it
   on_violation: committed records are discarded from the ring buffer while the watermark advances past them; nothing
     downstream can detect the gap because recovery starts after the watermark
   rationale: WP-03 states the ORDERING (write before advance) and LOG-05 bounds what the watermark may CLAIM, but
@@ -869,6 +879,44 @@ either durability, recoverability, or consistency.
     the WriteInChunks fallback its two sibling drain paths have, so an oversized final batch is dropped on a graceful
     shutdown and the watermark advances anyway. Naming every PatchChunkCrcs caller in scope is what makes the
     asymmetry visible on inspection.
+
+### WP-16: A durability wait targets a PUBLISHED LSN, never an allocated one `[fatal]`
+  invariant every `WaitForDurable(lsn)` whose lsn means "everything the WAL holds as of now" passes
+            `LastPublishedLsn` — the max over frames that reached `WalCommitBuffer.Publish` — and NEVER
+            `LastAppendedLsn` / `NextLsn - 1`
+  never a waiter is given an LSN that no frame owns
+  rationale: allocation and publication are different events, and the gap between them is not always closed.
+    `TryClaim` allocates the byte range and the LSN range in ONE atomic (WP-06), BEFORE it knows whether the
+    claim fits the active buffer, so an LSN is consumed on paths that produce no frame at all:
+      - the append throws after its claim → `AbandonClaim` publishes a SKIP frame, whose `LastLsn` is 0, so
+        draining it advances no watermark;
+      - the claim straddles the buffer end and its producer then times out in the back-pressure park → there
+        is no frame and no `AbandonClaim` either, and `PerformSwap` folds the consumed offsets into
+        `_lsnBase` regardless.
+    An interior gap is harmless — `AdvanceDurable` takes a MAX, so a later frame covers it. A gap at the TAIL
+    is not: nothing will ever carry that LSN, so the wait can only end when an unrelated later commit drains
+    past it. A busy engine hides this; an idle one runs the wait to its deadline.
+  composes_with: AP-01 (append, including the frame's publish, strictly precedes any page effect), which is
+    what lets CK-02 use the published frontier: a captured page can only reflect records whose frames are
+    already published, so `LastPublishedLsn` bounds "records a captured page copy can reflect" from above.
+  scope: `WalCommitBuffer.Publish` (advances it, BEFORE the FrameLength release — see the note),
+    `WalCommitBuffer.SeedNextLsn` (seeds it on reopen so DurableLSN never starts above it),
+    `WalManager.LastPublishedLsn`, `DurabilityLog.LastPublishedLsn`, `UnitOfWork.Flush`, `UnitOfWork.FlushAsync`,
+    `CheckpointManager.RunCheckpointCycle` (the step-1 barrier and the CK-02 flush2)
+  on_violation: #937 — `Transaction.Dispose` blocks for `DefaultCommitTimeout` (30 s) and then throws
+    `WalBackPressureTimeoutException` FROM the dispose, replacing the in-flight exception that caused the
+    failure; every checkpoint cycle, the shutdown cycle included, fails transiently for
+    `CheckpointBarrierTimeoutMs`
+  verified: WalFlushTargetTests — DisposingTheFailedTransaction_DoesNotWaitForAnLsnNoFrameOwns,
+    ACheckpointCycle_CompletesWithoutALaterCommit, TheFlushTarget_NeverNamesAnLsnNoFrameOwns [VerifiesRule]
+  note the max-CAS in `Publish` runs BEFORE the `FrameLength` release store, not after. AP-01 puts a commit's
+    page effects strictly after its append returns, so a frontier read taken after `Publish` returns covers
+    every record a captured page can reflect. Ordered the other way there is a window where the frame is
+    drainable — and its page effects therefore imminent — while the frontier still omits it, which is exactly
+    the hole CK-02 forbids.
+  note `LastAppendedLsn` is NOT retired. It remains the correct thing to read for "what has the allocator
+    handed out" (LOG-08 monotonicity, the reopen seed, integrity's NextLsn check). It is only unfit as a WAIT
+    TARGET.
 
 ### WP-14: CRC patched over the WHOLE drained batch, never per write-slice `[fatal][silent]`
   context a drained batch can exceed the staging buffer (commit-buffer half = 2 MB, staging = 256 KB default),
