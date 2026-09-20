@@ -1,4 +1,5 @@
 using System;
+using System.Net;
 using Microsoft.Extensions.Configuration;
 
 namespace Typhon.Engine;
@@ -21,8 +22,9 @@ namespace Typhon.Engine;
 /// </para>
 /// <para>
 /// <b>Sentinels.</b> Unset state is encoded in-band: <see cref="TraceFilePath"/> is <c>null</c>, <see cref="LivePort"/>
-/// is <c>-1</c>, <see cref="LiveWaitMs"/> is <c>0</c>. <see cref="MergedWith"/> uses these sentinels to decide which
-/// config "wins" per field, so an unset field in the override doesn't clobber the base.
+/// is <c>-1</c>, <see cref="LiveWaitMs"/> is <c>0</c>. <see cref="BindAddress"/> resolves to IPv4 loopback when unset,
+/// while retaining whether an address was explicitly supplied so <see cref="MergedWith"/> can preserve a base-layer bind.
+/// <see cref="MergedWith"/> uses these sentinels to decide which config "wins" per field, so an unset field in the override doesn't clobber the base.
 /// </para>
 /// </remarks>
 public sealed record ProfilerLaunchConfig
@@ -55,6 +57,22 @@ public sealed record ProfilerLaunchConfig
     /// <summary>TCP port the <see cref="TcpExporter"/> listens on, or <c>-1</c> for no live exporter.</summary>
     public int LivePort { get; init; } = -1;
 
+    private IPAddress _bindAddress;
+
+    /// <summary>
+    /// Address the live profiler listener binds to. Defaults to <see cref="IPAddress.Loopback"/> so enabling live
+    /// profiling does not expose telemetry off-box unless the host explicitly asks for a routable bind.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="IPAddress.Loopback"/> is the IPv4 loopback address (<c>127.0.0.1</c>). That matches the current
+    /// Workbench attach path, which resolves IPv4 only; <c>::1</c> is not part of the current automatic attach contract.
+    /// </remarks>
+    public IPAddress BindAddress
+    {
+        get => _bindAddress ?? IPAddress.Loopback;
+        init => _bindAddress = value;
+    }
+
     /// <summary>
     /// If &gt; 0, <see cref="TcpExporter.Initialize"/> blocks up to this many milliseconds waiting for the
     /// first live client to connect. Lets the host pause at startup until the workbench is attached. <c>0</c> disables
@@ -70,6 +88,7 @@ public sealed record ProfilerLaunchConfig
     /// <list type="bullet">
     ///   <item><c>--trace &lt;path&gt;</c> — sidecar file path</item>
     ///   <item><c>--live [port]</c> — TCP port (default <see cref="DefaultLivePort"/> if omitted or non-numeric)</item>
+    ///   <item><c>--live-bind &lt;address&gt;</c> — explicit listener bind address (default <see cref="IPAddress.Loopback"/>)</item>
     ///   <item><c>--live-wait &lt;ms&gt;</c> — synchronous wait timeout in milliseconds</item>
     /// </list>
     /// Unknown flags are ignored — the host is responsible for its own argument parsing pass; this method only picks
@@ -84,6 +103,7 @@ public sealed record ProfilerLaunchConfig
 
         string traceFile = null;
         int livePort = -1;
+        IPAddress bindAddress = null;
         int liveWaitMs = 0;
 
         for (int i = 0; i < args.Length; i++)
@@ -104,6 +124,12 @@ public sealed record ProfilerLaunchConfig
                         livePort = DefaultLivePort;
                     }
                     break;
+                case "--live-bind" when i + 1 < args.Length:
+                    if (IPAddress.TryParse(args[++i], out var address))
+                    {
+                        bindAddress = address;
+                    }
+                    break;
                 case "--live-wait" when i + 1 < args.Length:
                     if (int.TryParse(args[++i], out var ms) && ms >= 0)
                     {
@@ -113,12 +139,13 @@ public sealed record ProfilerLaunchConfig
             }
         }
 
-        return new ProfilerLaunchConfig
+        var result = new ProfilerLaunchConfig
         {
             TraceFilePath = traceFile,
             LivePort = livePort,
             LiveWaitMs = liveWaitMs,
         };
+        return bindAddress == null ? result : result with { BindAddress = bindAddress };
     }
 
     /// <summary>
@@ -127,6 +154,7 @@ public sealed record ProfilerLaunchConfig
     /// <list type="bullet">
     ///   <item><c>Typhon:Profiler:Trace</c> — sidecar file path</item>
     ///   <item><c>Typhon:Profiler:Live</c> — TCP port (or any non-numeric value to use <see cref="DefaultLivePort"/>)</item>
+    ///   <item><c>Typhon:Profiler:LiveBind</c> — explicit listener bind address (default <see cref="IPAddress.Loopback"/>)</item>
     ///   <item><c>Typhon:Profiler:LiveWaitMs</c> — wait timeout in milliseconds</item>
     /// </list>
     /// The configuration is built once by <see cref="TelemetryConfig"/> from <c>typhon.telemetry.json</c> (probed in the current directory then next to the
@@ -160,6 +188,13 @@ public sealed record ProfilerLaunchConfig
             livePort = int.TryParse(liveValue, out var p) ? p : DefaultLivePort;
         }
 
+        IPAddress bindAddress = null;
+        var bindValue = config["Typhon:Profiler:LiveBind"];
+        if (!string.IsNullOrWhiteSpace(bindValue) && IPAddress.TryParse(bindValue, out var parsedBindAddress))
+        {
+            bindAddress = parsedBindAddress;
+        }
+
         var liveWaitMs = 0;
         var waitValue = config["Typhon:Profiler:LiveWaitMs"];
         if (!string.IsNullOrWhiteSpace(waitValue) && int.TryParse(waitValue, out var ms) && ms >= 0)
@@ -167,20 +202,21 @@ public sealed record ProfilerLaunchConfig
             liveWaitMs = ms;
         }
 
-        return new ProfilerLaunchConfig
+        var result = new ProfilerLaunchConfig
         {
             TraceFilePath = traceFile,
             LivePort = livePort,
             LiveWaitMs = liveWaitMs,
             SuppressCapture = suppressCapture,
         };
+        return bindAddress == null ? result : result with { BindAddress = bindAddress };
     }
 
     /// <summary>
     /// Combine two configs — fields explicitly set in <paramref name="overrideWith"/> win over <c>this</c>.
     /// "Set" means "different from the field's sentinel": <see cref="TraceFilePath"/> non-null, <see cref="LivePort"/>
-    /// ≥ 0, <see cref="LiveWaitMs"/> &gt; 0. Use as <c>env.MergedWith(args)</c> for the standard "CLI overrides env"
-    /// precedence.
+    /// ≥ 0, an explicitly supplied <see cref="BindAddress"/>, or <see cref="LiveWaitMs"/> &gt; 0. Use as
+    /// <c>env.MergedWith(args)</c> for the standard "CLI overrides env" precedence.
     /// </summary>
     public ProfilerLaunchConfig MergedWith(ProfilerLaunchConfig overrideWith)
     {
@@ -188,7 +224,7 @@ public sealed record ProfilerLaunchConfig
         {
             return this;
         }
-        return new ProfilerLaunchConfig
+        var merged = new ProfilerLaunchConfig
         {
             TraceFilePath = overrideWith.TraceFilePath ?? TraceFilePath,
             LivePort = overrideWith.LivePort >= 0 ? overrideWith.LivePort : LivePort,
@@ -196,5 +232,9 @@ public sealed record ProfilerLaunchConfig
             // Suppression is sticky: `false` is this field's sentinel, so an override that does not mention it cannot silently re-enable capture writing.
             SuppressCapture = overrideWith.SuppressCapture || SuppressCapture,
         };
+        // Keep the backing null as the "not explicitly supplied" sentinel. The public getter still resolves it to
+        // loopback, but an args layer that did not mention --live-bind must not erase a file/env bind address.
+        merged._bindAddress = overrideWith._bindAddress ?? _bindAddress;
+        return merged;
     }
 }
