@@ -27,8 +27,20 @@ namespace Typhon.Engine.Tests;
 [NonParallelizable]
 internal sealed class WalFlushTargetTests
 {
-    /// <summary>Short enough that a regression is a fast red rather than a 30 s wall-clock wait per case.</summary>
-    private static readonly TimeSpan ShortCommitTimeout = TimeSpan.FromSeconds(2);
+    /// <summary>Distinctive substring of this rule's rejection messages, which its mutant must trip.</summary>
+    private const string Wp16Marker = "WP-16 violated";
+
+    /// <summary>
+    /// The budget a stalled flush actually spends, and the threshold a healthy one must beat. Short, because the mutant
+    /// deliberately stalls and would otherwise cost the suite the production default on every run.
+    /// </summary>
+    /// <remarks>
+    /// It is <c>DefaultUowTimeout</c> that governs here, not <c>DefaultCommitTimeout</c>: a quick transaction's UoW is created with
+    /// a BOUNDED deadline (<c>CreateUnitOfWork</c> falls back to <c>DefaultUowTimeout</c>), so <c>FlushAsync</c> takes its
+    /// <c>FromDeadline</c> branch and never reads the commit timeout at all. Both defaults are 30 s, which is why the issue's
+    /// measured stall was attributed to the wrong one; overriding only the commit timeout left the mutant costing a full 30 s.
+    /// </remarks>
+    private static readonly TimeSpan ShortCommitTimeout = TimeSpan.FromSeconds(1);
 
     private const int BarrierTimeoutMs = 2000;
 
@@ -36,6 +48,7 @@ internal sealed class WalFlushTargetTests
     private string _walDir;
     private ServiceProvider _serviceProvider;
     private TimeSpan _savedCommitTimeout;
+    private TimeSpan _savedUowTimeout;
 
     private static string CurrentDatabaseName
     {
@@ -104,7 +117,9 @@ internal sealed class WalFlushTargetTests
         if (_savedCommitTimeout != default)
         {
             TimeoutOptions.Current.DefaultCommitTimeout = _savedCommitTimeout;
+            TimeoutOptions.Current.DefaultUowTimeout = _savedUowTimeout;
             _savedCommitTimeout = default;
+            _savedUowTimeout = default;
         }
 
         _serviceProvider?.Dispose();
@@ -132,10 +147,29 @@ internal sealed class WalFlushTargetTests
     [Test]
     [CancelAfter(20_000)]
     [VerifiesRule("WP-16")]
-    public void AbandonedTailClaim_DisposingTheFailedTransaction_DoesNotWaitForAnLsnNoFrameOwns()
+    public void AbandonedTailClaim_DisposingTheFailedTransaction_DoesNotWaitForAnLsnNoFrameOwns() =>
+        AbandonedTailDisposeScenario(targetTheAllocationFrontier: false);
+
+    /// <summary>
+    /// The <see cref="RuleMutantAttribute"/> companion: point the flush target back at the allocation frontier — the pre-#937
+    /// behaviour — and the dispose must go back to spending its whole budget and throwing, which the verifier must reject.
+    /// </summary>
+    [Test]
+    [CancelAfter(20_000)]
+    [RuleMutant("WP-16")]
+    public void AbandonedTailClaim_AFlushTargetingTheAllocationFrontier_IsRejected() =>
+        RuleMutants.AssertDetects("WP-16", Wp16Marker, () => AbandonedTailDisposeScenario(targetTheAllocationFrontier: true));
+
+    private void AbandonedTailDisposeScenario(bool targetTheAllocationFrontier)
     {
         using var scope = _serviceProvider.CreateScope();
         var dbe = PrepareEngine(scope, out var id);
+
+        var wal = dbe.WalManager;
+        if (targetTheAllocationFrontier)
+        {
+            wal.FlushTargetProbe = () => wal.LastAppendedLsn;
+        }
 
         var failed = FailAnAppendAfterItsClaim(dbe, id);
 
@@ -152,11 +186,14 @@ internal sealed class WalFlushTargetTests
         elapsed.Stop();
 
         var report = $"elapsed={elapsed.ElapsedMilliseconds}ms, DurableLsn={dbe.DurabilityLog.DurableLsn}, "
-            + $"LastPublishedLsn={dbe.DurabilityLog.LastPublishedLsn}, LastAppendedLsn={dbe.DurabilityLog.LastAppendedLsn}, "
+            + $"LastPublishedLsn={wal.CommitBuffer.LastPublishedLsn}, LastAppendedLsn={wal.LastAppendedLsn}, "
             + $"threw={fromDispose?.GetType().Name ?? "<none>"}";
 
-        Assert.That(fromDispose, Is.Null, $"disposing the failed transaction threw ({report})");
-        Assert.That(elapsed.Elapsed, Is.LessThan(ShortCommitTimeout), $"the dispose waited for an LSN no frame owns ({report})");
+        // Cleared before the assertions: a mutant that leaves the seam armed would hold it across the scope's teardown flush.
+        wal.FlushTargetProbe = null;
+
+        Assert.That(fromDispose, Is.Null, $"{Wp16Marker}: disposing the failed transaction threw ({report})");
+        Assert.That(elapsed.Elapsed, Is.LessThan(ShortCommitTimeout), $"{Wp16Marker}: the dispose waited for an LSN no frame owns ({report})");
     }
 
     /// <summary>
@@ -227,7 +264,9 @@ internal sealed class WalFlushTargetTests
 
         // After the engine's own initialization, which installs the singleton this overrides.
         _savedCommitTimeout = TimeoutOptions.Current.DefaultCommitTimeout;
+        _savedUowTimeout = TimeoutOptions.Current.DefaultUowTimeout;
         TimeoutOptions.Current.DefaultCommitTimeout = ShortCommitTimeout;
+        TimeoutOptions.Current.DefaultUowTimeout = ShortCommitTimeout;
 
         using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
         {

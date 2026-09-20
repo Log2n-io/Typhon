@@ -903,12 +903,18 @@ either durability, recoverability, or consistency.
     `WalCommitBuffer.SeedNextLsn` (seeds it on reopen so DurableLSN never starts above it),
     `WalManager.LastPublishedLsn`, `DurabilityLog.LastPublishedLsn`, `UnitOfWork.Flush`, `UnitOfWork.FlushAsync`,
     `CheckpointManager.RunCheckpointCycle` (the step-1 barrier and the CK-02 flush2)
-  on_violation: #937 — `Transaction.Dispose` blocks for `DefaultCommitTimeout` (30 s) and then throws
+  on_violation: #937 — `Transaction.Dispose` blocks for the UoW's deadline and then throws
     `WalBackPressureTimeoutException` FROM the dispose, replacing the in-flight exception that caused the
     failure; every checkpoint cycle, the shutdown cycle included, fails transiently for
     `CheckpointBarrierTimeoutMs`
   verified: WalFlushTargetTests — DisposingTheFailedTransaction_DoesNotWaitForAnLsnNoFrameOwns,
-    ACheckpointCycle_CompletesWithoutALaterCommit, TheFlushTarget_NeverNamesAnLsnNoFrameOwns [VerifiesRule]
+    ACheckpointCycle_CompletesWithoutALaterCommit, TheFlushTarget_NeverNamesAnLsnNoFrameOwns [VerifiesRule];
+    AFlushTargetingTheAllocationFrontier_IsRejected [RuleMutant], which drives the pre-fix behaviour through
+    `WalManager.FlushTargetProbe`
+  note the stalling budget is `DefaultUowTimeout`, NOT `DefaultCommitTimeout`. A quick transaction's UoW is
+    created with a BOUNDED deadline (`CreateUnitOfWork` falls back to `DefaultUowTimeout`), so
+    `UnitOfWork.FlushAsync` takes its `FromDeadline` branch and never reads the commit timeout. Both default
+    to 30 s, which is how the issue came to name the wrong one.
   note the max-CAS in `Publish` runs BEFORE the `FrameLength` release store, not after. AP-01 puts a commit's
     page effects strictly after its append returns, so a frontier read taken after `Publish` returns covers
     every record a captured page can reflect. Ordered the other way there is a window where the frame is
