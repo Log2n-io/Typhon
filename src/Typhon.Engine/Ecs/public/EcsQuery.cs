@@ -975,6 +975,12 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// </summary>
     internal void DetachTransaction() => _tx = null;
 
+    /// <summary>
+    /// True while this query holds a borrowed <see cref="Transaction"/>. A query being executed legitimately holds one; the copy a long-lived
+    /// <see cref="EcsView{TArchetype}"/> retains must not between operations (VIEW-01), and nothing but a test asserts on this.
+    /// </summary>
+    internal readonly bool HoldsTransaction => _tx != null;
+
     /// <summary>Execute the query and collect matching entity IDs into a HashSet.</summary>
     public HashSet<EntityId> Execute(
         [CallerFilePath]   string callerFile = null,
