@@ -8,11 +8,26 @@
       "Resource": "arn:aws:ec2:*::image/ami-*"
     },
     {
-      "Sid": "LaunchResources",
+      "Sid": "LaunchOnlyGateInstanceTypes",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:*:940864285707:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:InstanceType": [
+            "c6id.8xlarge",
+            "z1d.metal",
+            "m6idn.metal",
+            "c5d.metal"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "LaunchSupportingResources",
       "Effect": "Allow",
       "Action": "ec2:RunInstances",
       "Resource": [
-        "arn:aws:ec2:*:940864285707:instance/*",
         "arn:aws:ec2:*:940864285707:network-interface/*",
         "arn:aws:ec2:*:940864285707:subnet/*",
         "arn:aws:ec2:*:940864285707:volume/*",
@@ -41,19 +56,27 @@
     {
       "Sid": "Tags",
       "Effect": "Allow",
-      "Action": ["ec2:CreateTags", "ec2:DeleteTags"],
+      "Action": [
+        "ec2:CreateTags",
+        "ec2:DeleteTags"
+      ],
       "Resource": "arn:aws:ec2:*:940864285707:*"
     },
     {
       "Sid": "Describe",
       "Effect": "Allow",
-      "Action": ["ec2:Describe*"],
+      "Action": [
+        "ec2:Describe*"
+      ],
       "Resource": "*"
     },
     {
       "Sid": "SecurityGroups",
       "Effect": "Allow",
-      "Action": ["ec2:CreateSecurityGroup", "ec2:AuthorizeSecurityGroupIngress"],
+      "Action": [
+        "ec2:CreateSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress"
+      ],
       "Resource": "arn:aws:ec2:*:940864285707:*"
     },
     {
@@ -62,31 +85,47 @@
       "Action": "iam:CreateServiceLinkedRole",
       "Resource": "*",
       "Condition": {
-        "StringEquals": { "iam:AWSServiceName": "spot.amazonaws.com" }
+        "StringEquals": {
+          "iam:AWSServiceName": "spot.amazonaws.com"
+        }
       }
     },
     {
       "Sid": "UseTheInstanceRoleButNeverRewriteIt",
       "Effect": "Allow",
-      "Action": ["iam:GetRole", "iam:PassRole"],
-      "Resource": ["arn:aws:iam::940864285707:role/skypilot-v1"]
+      "Action": [
+        "iam:GetRole",
+        "iam:PassRole"
+      ],
+      "Resource": [
+        "arn:aws:iam::940864285707:role/skypilot-v1"
+      ]
     },
     {
       "Sid": "ReadTheInstanceProfile",
       "Effect": "Allow",
-      "Action": ["iam:GetInstanceProfile"],
+      "Action": [
+        "iam:GetInstanceProfile"
+      ],
       "Resource": "arn:aws:iam::940864285707:instance-profile/skypilot-v1"
     },
     {
       "Sid": "TraceBucketObjects",
       "Effect": "Allow",
-      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ],
       "Resource": "arn:aws:s3:::typhon-traces/*"
     },
     {
       "Sid": "TraceBucketList",
       "Effect": "Allow",
-      "Action": ["s3:ListBucket", "s3:GetBucketLocation"],
+      "Action": [
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
       "Resource": "arn:aws:s3:::typhon-traces"
     },
     {
