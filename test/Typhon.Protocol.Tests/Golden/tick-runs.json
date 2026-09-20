@@ -1,0 +1,76 @@
+{
+  "description": "an ENTITIES state sub-list of two runs, the second restarting at a lower netId than the first ended on",
+  "catalog": "catalog-kitchen-sink",
+  "log": [
+    {
+      "call": "beginTick",
+      "tick": 70000,
+      "flags": 0,
+      "periodUs": 0
+    },
+    {
+      "call": "beginEntities",
+      "archetype": "Beacon"
+    },
+    {
+      "call": "state",
+      "netId": 40,
+      "groupMask": 1
+    },
+    {
+      "call": "number",
+      "field": "drift",
+      "values": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "strength",
+      "values": [
+        "c002000000000000"
+      ]
+    },
+    {
+      "call": "state",
+      "netId": 41,
+      "groupMask": 1
+    },
+    {
+      "call": "number",
+      "field": "drift",
+      "values": [
+        "c008000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "strength",
+      "values": [
+        "3ff8000000000000"
+      ]
+    },
+    {
+      "call": "state",
+      "netId": 7,
+      "groupMask": 1
+    },
+    {
+      "call": "number",
+      "field": "drift",
+      "values": [
+        "4022000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "strength",
+      "values": [
+        "3fe0000000000000"
+      ]
+    },
+    {
+      "call": "endTick"
+    }
+  ]
+}

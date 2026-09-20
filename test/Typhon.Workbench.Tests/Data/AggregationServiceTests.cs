@@ -440,7 +440,6 @@ public sealed class AggregationServiceTests
         {
             new AggregationQueryDto("posttick/writeTickFence",     "durationUs", "sum", [1, 1]),
             new AggregationQueryDto("posttick/walFlush",           "durationUs", "sum", [1, 1]),
-            new AggregationQueryDto("posttick/subscriptionOutput", "durationUs", "sum", [1, 1]),
             new AggregationQueryDto("posttick/tierIndexRebuild",   "durationUs", "sum", [1, 1]),
             new AggregationQueryDto("posttick/dormancySweep",      "durationUs", "sum", [1, 1]),
             new AggregationQueryDto("posttick/tierBudget",         "durationUs", "sum", [1, 1]),
@@ -448,10 +447,15 @@ public sealed class AggregationServiceTests
         var results = AggregationService.Compute(meta, queries);
         Assert.That(results[0].Value, Is.EqualTo(1.0).Within(1e-9));
         Assert.That(results[1].Value, Is.EqualTo(2.0).Within(1e-9));
-        Assert.That(results[2].Value, Is.EqualTo(3.0).Within(1e-9));
-        Assert.That(results[3].Value, Is.EqualTo(4.0).Within(1e-9));
-        Assert.That(results[4].Value, Is.EqualTo(5.0).Within(1e-9));
-        Assert.That(results[5].Value, Is.EqualTo(6.0).Within(1e-9));
+        Assert.That(results[2].Value, Is.EqualTo(4.0).Within(1e-9));
+        Assert.That(results[3].Value, Is.EqualTo(5.0).Within(1e-9));
+        Assert.That(results[4].Value, Is.EqualTo(6.0).Within(1e-9));
+
+        // And the retired name is REFUSED rather than answered with a zero. It named the old subscription server's post-tick phase, deleted by #205; an
+        // allow-list that still carried it returned 0.0 for every query, which reads as "that phase cost nothing" rather than "that phase is gone".
+        var retired = new[] { new AggregationQueryDto("posttick/subscriptionOutput", "durationUs", "sum", [1, 1]) };
+        var ex = Assert.Throws<WorkbenchException>(() => AggregationService.Compute(meta, retired));
+        Assert.That(ex.ErrorCode, Is.EqualTo("unknown-posttick-phase"));
     }
 
     // ────────────────────────────────────────────────────────────────────────
