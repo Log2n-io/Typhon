@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Net;
 using Microsoft.Extensions.Configuration;
 using NUnit.Framework;
 
@@ -18,6 +19,7 @@ public sealed class ProfilerLaunchConfigTests
         var cfg = new ProfilerLaunchConfig();
         Assert.That(cfg.TraceFilePath, Is.Null);
         Assert.That(cfg.LivePort, Is.EqualTo(-1));
+        Assert.That(cfg.BindAddress, Is.EqualTo(IPAddress.Loopback));
         Assert.That(cfg.LiveWaitMs, Is.EqualTo(0));
         Assert.That(cfg.IsActive, Is.False);
     }
@@ -66,6 +68,13 @@ public sealed class ProfilerLaunchConfigTests
         var cfg = ProfilerLaunchConfig.FromArgs(new[] { "--live", "--trace", "out.bin" });
         Assert.That(cfg.LivePort, Is.EqualTo(ProfilerLaunchConfig.DefaultLivePort));
         Assert.That(cfg.TraceFilePath, Is.EqualTo("out.bin"));
+    }
+
+    [Test]
+    public void FromArgs_BindAddress()
+    {
+        var cfg = ProfilerLaunchConfig.FromArgs(new[] { "--live", "9100", "--bind-address", "0.0.0.0" });
+        Assert.That(cfg.BindAddress, Is.EqualTo(IPAddress.Any));
     }
 
     [Test]
@@ -143,6 +152,15 @@ public sealed class ProfilerLaunchConfigTests
     }
 
     [Test]
+    public void FromConfiguration_BindAddress()
+    {
+        var cfg = ProfilerLaunchConfig.FromConfiguration(Config(
+            ("Typhon:Profiler:Live", "9100"),
+            ("Typhon:Profiler:BindAddress", "0.0.0.0")));
+        Assert.That(cfg.BindAddress, Is.EqualTo(IPAddress.Any));
+    }
+
+    [Test]
     public void FromConfiguration_LiveWaitMs()
     {
         var cfg = ProfilerLaunchConfig.FromConfiguration(Config(
@@ -182,6 +200,22 @@ public sealed class ProfilerLaunchConfigTests
         var baseCfg = new ProfilerLaunchConfig { LivePort = 9100 };
         var over = new ProfilerLaunchConfig { LivePort = 9200 };
         Assert.That(baseCfg.MergedWith(over).LivePort, Is.EqualTo(9200));
+    }
+
+    [Test]
+    public void MergedWith_OverrideBindAddressWinsWhenSet()
+    {
+        var baseCfg = ProfilerLaunchConfig.FromConfiguration(Config(("Typhon:Profiler:BindAddress", "127.0.0.1")));
+        var over = ProfilerLaunchConfig.FromArgs(new[] { "--bind-address", "0.0.0.0" });
+        Assert.That(baseCfg.MergedWith(over).BindAddress, Is.EqualTo(IPAddress.Any));
+    }
+
+    [Test]
+    public void MergedWith_BaseBindAddressRetainedWhenOverrideUnset()
+    {
+        var baseCfg = ProfilerLaunchConfig.FromConfiguration(Config(("Typhon:Profiler:BindAddress", "0.0.0.0")));
+        var over = ProfilerLaunchConfig.FromArgs(Array.Empty<string>());
+        Assert.That(baseCfg.MergedWith(over).BindAddress, Is.EqualTo(IPAddress.Any));
     }
 
     [Test]
