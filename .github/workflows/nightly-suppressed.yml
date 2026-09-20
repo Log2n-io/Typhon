@@ -54,6 +54,24 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      # OlcBTreeRaceStressTests self-attaches with `dotnet-stack report` the instant it detects a stall, and that
+      # capture IS the diagnosis: without it the failure report degrades to five counters all reading +0, which says
+      # "stuck" and nothing whatever about where. The 2026-09-20 run hit the stall in Remove_Disjoint and lost it
+      # exactly that way — `No such file or directory` for the tool. Installed here rather than depended upon,
+      # because the runner image does not carry it.
+      #
+      # Non-fatal on purpose, and the test agrees: a missing tool already degrades to a one-line note. A diagnostic
+      # that can fail the run it exists to explain is worse than no diagnostic.
+      - name: Install dotnet-stack (stall diagnostics)
+        run: |
+          set -uo pipefail
+          if dotnet tool install -g dotnet-stack; then
+            echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+            "$HOME/.dotnet/tools/dotnet-stack" --version
+          else
+            echo "::warning::dotnet-stack did not install. An OLC stall in this run will report counters only, with no stacks."
+          fi
+
       - name: Build (Release)
         run: dotnet build test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj -c Release
 
@@ -267,7 +285,7 @@ jobs:
           TYPHON_TEST_SEED: ${{ steps.seed.outputs.seed }}
         run: |
           set -uo pipefail
-          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY'
           import glob, os, sys, xml.etree.ElementTree as ET
           NS = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
           seed = os.environ["TYPHON_TEST_SEED"]
@@ -286,13 +304,28 @@ jobs:
               for r in root.iter(f"{NS}UnitTestResult"):
                   if r.get("outcome") == "Failed":
                       rows.append(names.get(r.get("testId"), r.get("testName", "?")))
-          print(f"## Seeded cell — seed `{seed}`\n")
-          print(f"| seed | total | passed | failed |\n|---|---|---|---|\n| `{seed}` | {total} | {passed} | {failed} |\n")
+          out = [f"## Seeded cell — seed `{seed}`\n",
+                 f"| seed | total | passed | failed |\n|---|---|---|---|\n| `{seed}` | {total} | {passed} | {failed} |\n"]
           if rows:
-              print("### Failures — reproduce each with the seed above\n")
+              out.append("### Failures — reproduce each with the seed above\n")
               for r in sorted(set(rows)):
-                  print(f"- `TYPHON_TEST_SEED={seed} dotnet test test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj --filter \"FullyQualifiedName~{r}\"`")
-              print("\nA seeded red is a REAL finding on a state no previous run had visited — file it, do not re-pin the seed (#704).")
+                  out.append(f"- `TYPHON_TEST_SEED={seed} dotnet test test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj --filter \"FullyQualifiedName~{r}\"`")
+              out.append("\nA seeded red is a REAL finding on a state no previous run had visited — file it, do not re-pin the seed (#704).")
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as fh:
+                  fh.write("\n".join(out) + "\n")
+          print("\n".join(out))
+
+          # The summary goes to a FILE now, so annotations have to reach stdout separately: piping the whole script
+          # through `tee` put both on one stream, which would render every ::warning:: as literal text in the
+          # summary. This job stays continue-on-error by design — a seeded red REPORTS, it does not fail the
+          # nightly (#704). But a green job whose only record of a finding is a downloadable .trx is a finding
+          # nobody reads: the 2026-09-20 WalCrashSweep lost-write sat in exactly that state, invisible behind three
+          # green checks. A warning names the test and its seed in the run's annotation list, reddening nothing.
+          for r in sorted(set(rows)):
+              print(f"::warning::Seeded red: {r} failed at TYPHON_TEST_SEED={seed}. A seeded red is a REAL finding "
+                    f"on a state no previous run had visited — file it, do not re-pin the seed (#704).")
           if total == 0:
               print("::error::`Category=Seeded` selected ZERO tests — the seed cell is testing nothing.")
               sys.exit(1)
