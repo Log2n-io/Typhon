@@ -61,9 +61,18 @@ jobs:
     steps:
       # The merge ref, not the head: the gate measures the fork's code as it would land on main. `workdir: .` in
       # ci.sky.yaml uploads whatever this step produced, so this checkout is what the VM actually runs.
+      # allow-unsafe-pr-checkout is the explicit opt-in actions/checkout@v5 requires before it will fetch fork code
+      # in a `pull_request_target` job, and refusing by default is the right default — the action is naming the exact
+      # "pwn request" hazard this workflow's header describes. Opting in is the whole point of the job, so what makes
+      # it defensible has to be real: the `fork-pr-gate` approval in front of it, ephemeral hardware only, and the
+      # `persist-credentials: false` below, which answers the GITHUB_TOKEN half of the action's warning directly.
+      #
+      # It does NOT answer the secrets half. AWS_ACCESS_KEY_ID is in this job's env and SkyPilot copies it onto the
+      # instance that runs the fork's tests — see #971, which is what turns "approved once" into "bounded".
       - uses: actions/checkout@v5
         with:
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          allow-unsafe-pr-checkout: true
           persist-credentials: false
 
       - name: Install SkyPilot
