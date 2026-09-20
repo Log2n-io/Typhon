@@ -335,15 +335,20 @@ public sealed class SubscriptionsCommands
     /// <b>A diagnostic, and the one the cell-keyed broad phase is judged by.</b> Its whole benefit is that co-located observers resolve once, so a
     /// deployment whose sessions never share a cell pays the grouping's sort and gets nothing back — and no timing comparison can tell that case from a
     /// design that does not work, because both look like "no change". Reading it is how an operator, or a measurement, tells them apart.
+    /// <para>
+    /// <b>Cumulative since start, and it was per tick until a zero from it was believed.</b> Sampled after a load generator disconnects, the per-tick
+    /// form read "0 cells, 0 sessions" and was written up as the grouping failing at the density where it matters most. There were simply no sessions
+    /// left to group. See the note at the reset site in <c>InterestPass</c>.
+    /// </para>
     /// </remarks>
-    public (long Cells, long SessionsShared) InterestSharingLastTick =>
+    public (long Cells, long SessionsShared) InterestSharing =>
         _ingress.Interest == null ? (0L, 0L) : (_ingress.Interest.CellsResolved, _ingress.Interest.SessionsShared);
 
     /// <summary>
     /// How many frames since start were built as a difference against the session's previous tick, and how many walked the whole view (15 § 3.2).
     /// </summary>
     /// <remarks>
-    /// <b>Cumulative, unlike <see cref="InterestSharingLastTick"/>.</b> It exists for the same reason: a measurement showing no change means "the
+    /// <b>Cumulative, as <see cref="InterestSharing"/> now is.</b> It exists for the same reason: a measurement showing no change means "the
     /// difference does not pay" or "the difference never happened", and those call for opposite next steps. A ratio near zero is the second.
     /// </remarks>
     public (long Difference, long Full) GatherShape =>
@@ -387,6 +392,10 @@ public sealed class SubscriptionsCommands
     /// <summary>How much of the interest answer has been what the sessions already held, since start.</summary>
     public (long RunsUnchanged, long RunsTotal, long SessionsCoherent, long SessionsTotal) InterestCoherence =>
         _ingress.Interest == null ? default : _ingress.Interest.InterestCoherence;
+
+    /// <summary>Why cell sharing did or did not happen: ungroupable sessions, keyed sessions, the viewpoint span and the interest cell side.</summary>
+    public (long Ungroupable, long Keyed, double SpanX, double SpanY, double CellSide) GroupingDiagnostic =>
+        _ingress.Interest == null ? default : _ingress.Interest.GroupingDiagnostic;
 
     /// <summary>How a session's cluster set turns over: first seen since its last published frame, carried, and departed. Since start.</summary>
     public (long FirstSeen, long Carried, long Departed) RunFlow =>

@@ -181,7 +181,7 @@ public static class TatooineReplication
         // measurement that shows no change means "the sharing does not pay" or "the sharing never happened" — and those call for opposite next steps.
         if (++_placeTicks % 300 == 0)
         {
-            var (cells, shared) = subs.InterestSharingLastTick;
+            var (cells, shared) = subs.InterestSharing;
 
             // Error, not Out: a redirected stdout is block-buffered and this process is stopped rather than asked to exit, so the buffer is never flushed
             // and the diagnostic is lost exactly when it is being collected.
@@ -189,7 +189,7 @@ public static class TatooineReplication
             var (visited, carried) = subs.GatherSlots;
             var (projected, dormant) = subs.ProjectionBlocks;
             Console.Error.WriteLine(
-                $"  interest sharing: {cells} cells resolved, {shared} sessions shared; gathers: {difference} difference, {full} full; "
+                $"  interest sharing (cumulative): {cells} cells resolved, {shared} sessions shared; gathers: {difference} difference, {full} full; "
                 + $"slots: {visited} read, {carried} carried; blocks: {projected} projected, {dormant} dormant, sleeping {subs.SleepingClusters}");
             var vp = subs.VisitParts;
             Console.Error.WriteLine($"  visit made of: entered {vp.Entered}, changed {vp.Changed}, owed {vp.Owed}");
@@ -219,6 +219,14 @@ public static class TatooineReplication
                     $"  coherence (cumulative): {ic.RunsUnchanged} of {ic.RunsTotal} runs unchanged ({ic.RunsUnchanged * 100d / ic.RunsTotal:F1} %), "
                     + $"{ic.SessionsCoherent} of {ic.SessionsTotal} sessions wholly unchanged "
                     + $"({(ic.SessionsTotal == 0 ? 0d : ic.SessionsCoherent * 100d / ic.SessionsTotal):F1} %)");
+            }
+
+            var gd = subs.GroupingDiagnostic;
+            if (gd.Ungroupable + gd.Keyed > 0)
+            {
+                Console.Error.WriteLine(
+                    $"  grouping: {gd.Keyed} keyed, {gd.Ungroupable} ungroupable; viewpoint span {gd.SpanX:F0} x {gd.SpanY:F0} m "
+                    + $"at a {gd.CellSide:F0} m cell = {(gd.CellSide <= 0d ? 0d : (gd.SpanX / gd.CellSide) * (gd.SpanY / gd.CellSide)):F0} cells");
             }
 
             // The cluster set's turnover, as opposed to the slot masks' — what an incremental candidate set would still have to pay for.

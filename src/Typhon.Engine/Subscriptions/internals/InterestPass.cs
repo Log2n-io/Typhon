@@ -556,11 +556,16 @@ internal sealed unsafe class InterestPass
             arena.BeginTick();
         }
 
-        // Reset here, with the rest of the tick's state: the properties below are documented per tick and were accumulating for the life of the process, so
-        // anything reading them as a tick figure — a panel, an assertion — was reading a total.
-        Volatile.Write(ref _cellsResolved, 0);
-        Volatile.Write(ref _sessionsShared, 0);
-
+        // ── These are NOT reset here, and the reason is a measurement that was read wrong ────────────────────────────────────────────────────────────
+        //
+        // They used to be per tick. A run at d07 then reported "0 cells resolved, 0 sessions shared" in every one of its reports, which was read as the
+        // cell grouping failing to engage at the one density where it matters — and written up as a defect. It was not. The reports were printed after
+        // the bot swarm had disconnected, and a LAST-TICK counter with no session left to resolve is zero however well the tick before it went. Measured
+        // again with sessions attached: 302 of 400 sessions shared, 74 cells, at the same density and the same binary.
+        //
+        // That is 18 § 8.4's lesson arriving a second time through a different counter: a per-tick figure read by a reporting system with no fence
+        // against the tick produces a plausible zero, and a plausible zero is believed. Cumulative, a torn read costs recency and never a wrong ratio,
+        // and "no sessions right now" can no longer impersonate "sharing is broken".
         _tickSessionCount = 0;
         foreach (var session in _sessions)
         {
@@ -647,6 +652,23 @@ internal sealed unsafe class InterestPass
         {
             _sortIndices[i] = i;
             _tickCellKeys[i] = CellKeyOf(i);
+
+            // #983-adjacent diagnostic: separate "no session could be keyed" from "every session got its own key". Those have opposite causes and the
+            // sharing counters cannot tell them apart — both report zero cells resolved.
+            if (_tickCellKeys[i] == NoCellKey)
+            {
+                _diagUngroupable++;
+            }
+            else
+            {
+                _diagKeyed++;
+                var vp = _tickViewpoints[i];
+                _diagMinX = Math.Min(_diagMinX, vp.X);
+                _diagMaxX = Math.Max(_diagMaxX, vp.X);
+                _diagMinY = Math.Min(_diagMinY, vp.Y);
+                _diagMaxY = Math.Max(_diagMaxY, vp.Y);
+                _diagCellSide = CellSideFor(_profiles[_tickProfiles[i]].QueryRadius);
+            }
         }
 
         // Sorted by the key, so equal keys are adjacent. Array.Sort over the key array with the index array as items is the standard permutation sort and it
@@ -932,10 +954,33 @@ internal sealed unsafe class InterestPass
         }
     }
 
-    /// <summary>Interest cells the broad phase resolved last tick.</summary>
+    private long _diagUngroupable;
+    private long _diagKeyed;
+    private double _diagMinX = double.MaxValue;
+    private double _diagMaxX = double.MinValue;
+    private double _diagMinY = double.MaxValue;
+    private double _diagMaxY = double.MinValue;
+    private double _diagCellSide;
+
+    /// <summary>
+    /// Why sharing did or did not happen: sessions that could not be keyed at all, sessions that were, the span their viewpoints covered and the interest
+    /// cell side. Cumulative for the counts; the span and the side are last tick's.
+    /// </summary>
+    /// <remarks>
+    /// <b>Zero cells resolved has two opposite causes</b> and <see cref="CellsResolved"/> reports the same zero for both: every session failed a predicate
+    /// in <c>CellKeyOf</c> and took the direct path, or every session was keyed and no two keys collided. The first is a bug, the second is geometry. The
+    /// viewpoint span against the cell side says which, because a span of N cells cannot hold S sessions without collisions when S &gt; N squared.
+    /// </remarks>
+    public (long Ungroupable, long Keyed, double SpanX, double SpanY, double CellSide) GroupingDiagnostic =>
+        (Volatile.Read(ref _diagUngroupable), Volatile.Read(ref _diagKeyed),
+         _diagMaxX < _diagMinX ? 0d : _diagMaxX - _diagMinX,
+         _diagMaxY < _diagMinY ? 0d : _diagMaxY - _diagMinY,
+         _diagCellSide);
+
+    /// <summary>Interest cells the broad phase has resolved, cumulative since start.</summary>
     public long CellsResolved => Volatile.Read(ref _cellsResolved);
 
-    /// <summary>Sessions last tick that were served from a cell resolution somebody else paid for.</summary>
+    /// <summary>Sessions served from a cell resolution somebody else paid for, cumulative since start.</summary>
     public long SessionsShared => Volatile.Read(ref _sessionsShared);
 
     /// <summary>Resolves the interest of the sessions this chunk owns.</summary>
