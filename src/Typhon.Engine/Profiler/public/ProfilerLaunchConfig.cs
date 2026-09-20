@@ -88,7 +88,7 @@ public sealed record ProfilerLaunchConfig
     /// <list type="bullet">
     ///   <item><c>--trace &lt;path&gt;</c> — sidecar file path</item>
     ///   <item><c>--live [port]</c> — TCP port (default <see cref="DefaultLivePort"/> if omitted or non-numeric)</item>
-    ///   <item><c>--live-bind &lt;address&gt;</c> — explicit listener bind address (default <see cref="IPAddress.Loopback"/>)</item>
+    ///   <item><c>--bind-address &lt;address&gt;</c> — explicit listener bind address (default <see cref="IPAddress.Loopback"/>)</item>
     ///   <item><c>--live-wait &lt;ms&gt;</c> — synchronous wait timeout in milliseconds</item>
     /// </list>
     /// Unknown flags are ignored — the host is responsible for its own argument parsing pass; this method only picks
@@ -124,7 +124,7 @@ public sealed record ProfilerLaunchConfig
                         livePort = DefaultLivePort;
                     }
                     break;
-                case "--live-bind" when i + 1 < args.Length:
+                case "--bind-address" when i + 1 < args.Length:
                     if (IPAddress.TryParse(args[++i], out var address))
                     {
                         bindAddress = address;
@@ -154,7 +154,7 @@ public sealed record ProfilerLaunchConfig
     /// <list type="bullet">
     ///   <item><c>Typhon:Profiler:Trace</c> — sidecar file path</item>
     ///   <item><c>Typhon:Profiler:Live</c> — TCP port (or any non-numeric value to use <see cref="DefaultLivePort"/>)</item>
-    ///   <item><c>Typhon:Profiler:LiveBind</c> — explicit listener bind address (default <see cref="IPAddress.Loopback"/>)</item>
+    ///   <item><c>Typhon:Profiler:BindAddress</c> — explicit listener bind address (default <see cref="IPAddress.Loopback"/>)</item>
     ///   <item><c>Typhon:Profiler:LiveWaitMs</c> — wait timeout in milliseconds</item>
     /// </list>
     /// The configuration is built once by <see cref="TelemetryConfig"/> from <c>typhon.telemetry.json</c> (probed in the current directory then next to the
@@ -189,7 +189,7 @@ public sealed record ProfilerLaunchConfig
         }
 
         IPAddress bindAddress = null;
-        var bindValue = config["Typhon:Profiler:LiveBind"];
+        var bindValue = config["Typhon:Profiler:BindAddress"];
         if (!string.IsNullOrWhiteSpace(bindValue) && IPAddress.TryParse(bindValue, out var parsedBindAddress))
         {
             bindAddress = parsedBindAddress;
@@ -233,7 +233,7 @@ public sealed record ProfilerLaunchConfig
             SuppressCapture = overrideWith.SuppressCapture || SuppressCapture,
         };
         // Keep the backing null as the "not explicitly supplied" sentinel. The public getter still resolves it to
-        // loopback, but an args layer that did not mention --live-bind must not erase a file/env bind address.
+        // loopback, but an args layer that did not mention --bind-address must not erase a file/env bind address.
         merged._bindAddress = overrideWith._bindAddress ?? _bindAddress;
         return merged;
     }
