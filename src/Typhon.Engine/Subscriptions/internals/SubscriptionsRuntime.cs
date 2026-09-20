@@ -50,6 +50,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     private readonly IngressRingPool _ingressRings;
     private readonly SubscriptionsIngress _ingress;
     private readonly FrameAssembler _frames;
+    private readonly SessionViewStore _views;
     private readonly SendPump _sendPump;
     private bool _disposed;
 
@@ -136,12 +137,31 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
             // S2a (P1-12). Built after the states because it holds them, and after the session table because the table's open rows are its per-tick input. It
             // resolves every profile to plan indices here, so the tick path never looks an archetype up by Type.
-            Interest = new InterestPass(engine, Plans, _replicationStates, registry, _sessions);
+            // Each session's interest membership, shared by S2a and S2b: S2a takes the difference against it, S2b commits it on a publish (15 § 3.2).
+            // Created only when the option is on, because the pass's null check is what selects Phase 1's shape and a store that existed but was unused
+            // would make the two arms differ by more than the shape under test.
+            _views = Options.IncrementalInterest ? new SessionViewStore(Options.MaxSessions) : null;
+
+            Interest = new InterestPass(engine, Plans, _replicationStates, registry, _sessions, Options.CellKeyedInterest, _views,
+                Options.ResidentInterest);
 
             // S2b (P1-13b). It owns the frame pool, the per-session known-sets and the per-slot hand-off counters, so a frame's whole lifetime — gathered,
             // encoded, published, released — lives behind one field here rather than spread across the tick-scoped context.
             _frames = new FrameAssembler("Subscriptions.Frames", parent, engine.MemoryAllocator, Options, Plans, Catalog.Canonical, _sessions,
-                NominalTickPeriodUs);
+                NominalTickPeriodUs, _views);
+
+            // Encode-once cluster runs (17 § 18). The projection builds them and the frame stage references them, so each side needs what the other owns:
+            // S1 needs the wire encoding constants S2b resolved from the catalog, and S2b needs the tables and arenas S1 writes into. Wired only when the
+            // option is on, so both sides decide the whole feature with one null check rather than an option read on a per-cluster path.
+            if (Options.SharedClusterBlocks)
+            {
+                for (var a = 0; a < _replicationStates.Length; a++)
+                {
+                    _replicationStates[a].EncodePlan = _frames.EncodePlanOf(a);
+                }
+
+                _frames.AttachReplication(_replicationStates);
+            }
 
             // The send side (P1-14b). It holds no memory of its own beyond one view and one work item per slot; what it carries is the rule that a frame
             // leaves the engine only after the tick that produced it has flushed.
@@ -154,6 +174,8 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             _ingressRings = new IngressRingPool("Subscriptions.IngressRings", parent, engine.MemoryAllocator, Options);
             _ingress = new SubscriptionsIngress(_sessions, registry, CommandTypes, new CommandTypeBuffers(CommandTypes, Options.MaxSessions), _ingressRings,
                 Options.MaxSessions, _sendPump);
+            _ingress.Interest = Interest;
+            _ingress.Frames = _frames;
             Commands = new SubscriptionsCommands(_ingress);
 
             // STATS (P1-16). Last of the tick-path objects, because it reads across all of them — the session table's open count, the send pump's bytes, the

@@ -107,6 +107,9 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// <summary>How many frames were produced across every session.</summary>
     public long FramesProduced => _harness.Assembler.FramesProduced;
 
+    /// <summary>Runs referenced rather than encoded, the records they carried, and the clusters that had one and could not be shared (17 § 18).</summary>
+    public (long Runs, long Records, long Refused) SharedRunUse => _harness.Assembler.SharedRunUse;
+
     /// <summary>
     /// How many entity-to-entity comparisons the oracle has actually made.
     /// </summary>
@@ -132,11 +135,12 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// <param name="skipPercent">One entry per session: the percentage of ticks on which that session's frames are left undrained.</param>
     /// <param name="name">A name for the resource registry.</param>
     /// <returns>The oracle.</returns>
-    public static OracleHarness Create(DatabaseEngine engine, int seed, int[] skipPercent, string name)
+    /// <param name="sharedClusterBlocks">Whether each cluster's records are encoded once and referenced by every session (17 § 18).</param>
+    public static OracleHarness Create(DatabaseEngine engine, int seed, int[] skipPercent, string name, bool sharedClusterBlocks = false)
     {
         ArgumentNullException.ThrowIfNull(skipPercent);
 
-        var harness = FrameHarness.Create(engine, Declare, name, Options());
+        var harness = FrameHarness.Create(engine, Declare, name, Options(sharedClusterBlocks));
         try
         {
             var oracle = new OracleHarness(harness, skipPercent, seed);
@@ -238,6 +242,18 @@ internal sealed unsafe class OracleHarness : IDisposable
         // worst failure mode: the two sides agreeing about a world neither of them has.
         _harness.Interest.AssertWatchedMatchesOccupancy(_creatureIndex, because);
         _harness.Interest.AssertWatchedMatchesOccupancy(_rockIndex, because);
+
+        // The invariant a referenced cluster run rests on, checked over the WHOLE view rather than over the slots some run happened to name (17 § 18). A
+        // disagreement here is latent: it sits in a quiet cluster until that cluster changes, and only then is a client handed a record for an entity it
+        // has never heard of. Checked on every arm, because the invariant is the subsystem's and not the feature's.
+        foreach (var session in _sessions)
+        {
+            var disagreement = _harness.Assembler.FindViewIdentityDisagreement(session);
+            if (disagreement != null)
+            {
+                divergences.Add($"{disagreement} ({because})");
+            }
+        }
 
         var truth = ServerTruth(divergences);
         var before = Compared;
@@ -341,7 +357,13 @@ internal sealed unsafe class OracleHarness : IDisposable
         List<string> divergences)
     {
         var held = replica.NetIds(plan);
+        // The SET is what the comparison below needs; the LENGTH is asserted first, because collapsing duplicates here would hide a replica holding one
+        // identity twice — which is precisely the shape of a missed leave followed by a re-enter, the defect family this oracle exists for.
         var seen = new HashSet<uint>(held);
+        if (seen.Count != held.Length)
+        {
+            divergences.Add($"session {session}: {name} client holds {held.Length} identities but only {seen.Count} distinct ones");
+        }
 
         foreach (var netId in held)
         {
@@ -463,11 +485,16 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// induces on purpose — the run would still be correct but it would no longer be measuring what it says it measures. The enter budget is left at the
     /// engine's default: deferring enters across ticks is real behaviour that the quiet window is there to absorb, and raising it would hide it.
     /// </remarks>
-    private static SubscriptionsOptions Options() => new()
+    private static SubscriptionsOptions Options(bool sharedClusterBlocks) => new()
     {
         MaxSessions = 64,
         StatePoolBudgetBytes = 64L * 1024 * 1024,
         FramePoolBudgetBytes = 64L * 1024 * 1024,
+        SharedClusterBlocks = sharedClusterBlocks,
+
+        // Always on with the feature, because this fixture is the only thing that proves the invariant a referenced run rests on. It costs exactly the
+        // work the feature saves, which is why it is a harness switch and not a default.
+        VerifySharedRuns = sharedClusterBlocks,
     };
 
     /// <summary>The projections and the profile the oracle runs against: both test archetypes, watched whole.</summary>

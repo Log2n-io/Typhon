@@ -337,6 +337,32 @@
 
 ## Module: Interest
 
+### SUB-17: Sharing a broad phase never changes what a session watches, and a session's runs are its own `[fatal][silent]`
+  invariant ∀ sessions s1, s2 resolved from one shared broad phase, ∀ tick T: each of s1 and s2 watches exactly the entities a query at
+    ITS OWN centre and radius would have returned. The shared phase queries a LARGER region than any member asked for, so every member
+    narrows it back; the enlargement is a cost, never a result
+  invariant the narrowing repeats the ENGINE's narrowphase arithmetic rather than approximating it — the same axes, the same closest-point
+    distance, the same miss conditions — or the two paths disagree at the boundary where nobody looks
+  invariant a session's interest runs occupy a CONTIGUOUS span of its worker's run list: the broad phase collects every archetype's
+    candidates before any member is narrowed, so no member's runs are interleaved with another's
+  invariant a session that cannot share — unplaced, a different observer shape, or a viewpoint outside the key's range — is resolved alone,
+    and grouping never gives it a centre it did not ask for
+  invariant every buffer the broad phase writes is owned by ONE worker: several workers resolve groups at the same time, so a buffer held
+    on the pass rather than on the worker's arena is one buffer serving all of them
+  never group sessions whose observers differ in radius or shape: one enlarged query cannot cover two radii, and the member with the larger
+    one would silently lose what falls between them
+  scope: InterestPass.OrderSessionsByCell, InterestPass.CellKeyOf, InterestPass.ResolveCellGroup, InterestPass.ResolveSessionDirect,
+    HitArena.FilterCandidatesInto, HitArena.AddCandidate, HitArena.CellRanges
+  on_violation: silent in both directions and neither is visible from the server. A member that keeps too much is told about entities behind
+    it — bandwidth, and a client that can see through the world; a member that keeps too little has players who never appear. The run-span
+    half is worse: a span covering a neighbour's runs leaves the hit TOTAL plausible while the frame stage walks another session's clusters,
+    so the symptom is an internal error on some fraction of sessions rather than a wrong picture. Measured when it happened: forty of a
+    hundred and ten sessions closed with 1011 within twenty-five seconds, while the fixture that should have caught it passed, because its
+    profile named one archetype and one archetype cannot interleave.
+  verified: CellKeyedInterestTests.ACrowdSharingACellSeesExactlyWhatEachWouldSeeAlone,
+    CellKeyedInterestTests.ACrowdWithAMultiArchetypeProfileResolvesEachMembersOwnDisc,
+    CellKeyedInterestTests.ScatteredSessionsAreUnaffected, CellKeyedInterestTests.AnUnplacedSessionSeesNothingAndDoesNotJoinACell
+
 ### SUB-16: A bounded observer watches what its region contains, and a session with no region watches nothing `[fatal][silent]`
   invariant ∀ session s with a bounded observer of radius r centred at c, ∀ tick T: s's watched set is exactly the entities whose
     position lies within r of c — no entity outside it is marked watched, and none inside it is left unmarked
@@ -472,6 +498,72 @@
     one covers orders nobody chose, which is where a baseline bug that depends on WHEN the skip fell would hide. Its own falsifiability is
     DifferentialOracleTests.TheOracleDetectsABaselineThatAdvancesOnASkippedTick, the same production mutant, and DifferentialOracleTests asserts a floor on
     how many entity comparisons it actually made — an oracle whose truth walk returned an empty set is green, fast and worthless, and has no other symptom.
+
+### SUB-18: Interest is a difference against what a session last held, and every slot it loses is named `[fatal][silent]`
+  invariant ∀ session S, cluster C, tick T: the interest pass compares this tick's slot mask for C against the one S's LAST PUBLISHED FRAME described, and
+    reports `entered = now & ~held` and `left = held & ~now`. The held mask moves only when a frame is published, so a session whose frame was skipped
+    takes its next difference from the same baseline and carries the union of everything it missed (SUB-03)
+  invariant ∀ slot the frame stage reads: it is one that ENTERED the session's view, or one S1 named in the block's change mask. Neither half is
+    sufficient alone — a block cannot say which slots are new to a session, and a session cannot say what changed — and reading only the change mask is
+    C-1's unsoundness, where a slot unknown to the session and unchanged this tick is silently never classified
+  invariant a mask cannot show a slot whose OCCUPANT changed, because the bit stays set. Every slot the gather reads has its identity compared against the
+    one the view holds, and a difference retires the old one; a destroy and a spawn into the same slot inside a skip window is the ordinary way this
+    happens, and left undetected it is a known-set entry nothing can ever remove
+  invariant a leave names the identity the SESSION was told about, read from the view, WITH its generation, and a leave is emitted at most once per
+    identity per frame. The block's entry names whoever stands there now — a different entity the moment a slot is reused — and one netId was observed
+    naming two live entries in the same tick
+  invariant a session not exactly one tick behind, still filling, or resetting reads EVERY slot of its interest: one tick's change mask does not carry
+    the groups an older baseline is owed (SUB-03)
+  invariant ∀ slot the frame before could not describe — an enter the per-frame budget deferred, or a slot whose occupant was replaced — that SLOT is
+    carried to the next frame's visit and cleared by it. The view claims every slot this tick's interest reached, including those, so the difference
+    would never offer them again and the client would never be told about an entity the engine had decided to describe. What is owed is the slots, NOT
+    the session's whole next frame: at d06 with 200 sessions the blunt form fired on 40.8 % of frames and those frames performed ~91 % of every slot read
+    in the subsystem, against 12.1 % and 61 % fewer reads once the debt was recorded at its true size. Where no view exists to record into, the whole
+    frame is still the only honest answer
+  invariant ∀ frame: a debt is discharged only by a frame that READS the slot. A full walk reads every slot the session reaches and so discharges the
+    whole debt for that cluster; a reduced walk discharges only what it visited. A frame may serve a SLICE of a large debt and leave the rest owed —
+    everything owed is an enter and a frame sends at most the enter budget, so reading more is work that cannot be used — and the slice is taken per
+    CLUSTER, because runs are walked in a fixed order and a per-frame cap serves the first clusters every tick and starves the last ones forever
+  invariant a view that owes anything is NOT complete: a frame that visited everything it chose to can still hold entities the client has never heard
+    of, and latching the completion flag there tells the client its world is whole while the debt is outstanding
+  never emit a leave and an enter for one identity in one frame: an entity that crossed clusters vanishes from one and appears in another within a tick,
+    and both halves of the difference see it (SUB-06). The test is "did this tick read it", never the known-set's seen stamp — a slot the reduction skips
+    is deliberately never stamped, so a stamp untouched for 65 536 ticks would wrap onto this tick's and suppress a real leave
+  never move a view entry while a run holds its index: the frame stage commits membership through that index, so compaction belongs at the top of the
+    interest pass, which is the one point in the tick where no index is outstanding
+  scope: InterestPass.FlushSphereRun, InterestPass.WalkArchetype, InterestPass.CloseSession, InterestPass.BeginView, FrameAssembler.GatherIncremental,
+    FrameAssembler.ClassifyHit, FrameAssembler.EmitLeaveIfGone, FrameAssembler.CommitView, FrameAssembler.SelectEnters, SessionInterestView,
+    SessionInterestView.Owe, SessionInterestView.OwedAt, SessionInterestView.ClearOwed, SessionInterestView.KeepOwed,
+    SessionInterestView.OwedCount, SessionInterestView.Touch,
+    SessionInterestView.Commit, SessionInterestView.Compact, FrameIdentityScratch.WasSeen, FrameIdentityScratch.NoteDisplaced,
+    SubscriptionsOptions.IncrementalInterest
+  on_violation: silent and permanent, in both directions. A slot skipped because it was unchanged but never classified is an entity the client is never
+    told about and that has nothing to change tomorrow either. A leave that is never emitted leaves a known-set entry nothing can remove, so the client
+    renders a ghost and the server's own record of what that client holds is wrong from then on. Neither throws and neither self-heals, because nothing
+    re-derives the view.
+  rationale: 13 § 6 measures 2 056 hits per session per tick producing ~293 records, and Phase 1 probed the known-set once per hit and then walked the
+    whole known-set to find what left. Comparing per-cluster MASKS replaces the first with one 64-bit operation per cluster — some tens per session — and
+    the second with work proportional to what moved. Design: 15 § 3.2.
+  note the reduction is an optimisation over the steady state and the full walk is its backstop, which is what keeps this a performance change and not a
+    change of contract. The interest pass takes the difference either way; `full` decides only how much of it the frame stage reads.
+  note the identity tables this uses are open-addressed with linear probing, so they GROW before the insert that would take them past half full. A probe
+    that runs out of empty slots does not slow down, it never returns: the first measured run of this path at four times the density its initial size was
+    chosen for froze the server, the tick stopped producing frames and every session was reported unserved.
+  verified: IncrementalInterestTests.TheDifferenceEmitsExactlyWhatTheFullWalkEmits — the differential oracle's own seeded churn (spawns, destroys, drifts
+    below the motion tolerance, teleports that force real cluster migrations, writes to both change groups) under six SPHERE observers moving every tick
+    for 200 ticks, run twice on one binary with the option as the only difference, requiring the collected frames to be byte-identical per session per
+    frame, and repeated at delivery rates of 0, 60 and 90 %. It is a consistency check between the two paths, not an appeal to an already-trusted one:
+    DifferentialOracleTests runs on the engine's defaults, so what IT validates against the engine's own state is the difference. Unlike a comparison of
+    the final replicas, byte equality rejects a leave sent a tick late against an enter sent a tick early; and the skipped rates are the only path on which
+    a session's held membership lags the world by more than one tick, which is where the reused-slot defect lived. Its anti-vacuity is asserted in the same
+    fixture — the reference arm must take no difference at all and must still have walked, both arms must produce the same non-trivial number of frames, the
+    difference must apply, and the workload must have destroyed and teleported enough to reach slot reuse and migration — with
+    IncrementalInterestTests.TheObserversGainAndLoseEntitiesThroughoutTheRun counting ENTER and LEAVE records off the decoded wire, because two arms that
+    see nothing also agree byte for byte, and IncrementalInterestTests.TheIdentityTableGrowsPastTheSizeItWasGivenRatherThanSpinning for the probe's
+    termination.
+    Also DifferentialOracleTests.AClientsWorldIsTheServersAfterSeededChurn at skip rates of 0, 30, 60 and 90 %, which runs on this path by default and is
+    what caught the reused-slot hole above: at a 90 % skip rate a destroy and a spawn into one slot routinely fall inside a session's skip window, the mask
+    is unchanged across it, and the client was left holding two entities the server no longer had.
 
 ---
 

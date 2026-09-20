@@ -248,72 +248,100 @@ export class TickReader {
     sink.beginEntities(archetype);
 
     const t0 = this.t0;
-    let prev = -1;
-    for (let n = r.varu(); n > 0; n--) {
-      prev = nextNetId(r, prev);
-      t0[0] = 0;
-      let epoch = 0;
-      if (position !== null) {
-        readNumber(r, position.pos, tick, p, 0);
-        if (position.moving) {
-          if (position.vel !== null) {
-            readNumber(r, position.vel, tick, v, 0);
+
+    // ── enters ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    for (let runs = r.varu(); runs > 0; runs--) {
+      let prev = -1;
+      for (let n = this.runLength(); n > 0; n--) {
+        prev = nextNetId(r, prev);
+        t0[0] = 0;
+        let epoch = 0;
+        if (position !== null) {
+          readNumber(r, position.pos, tick, p, 0);
+          if (position.moving) {
+            if (position.vel !== null) {
+              readNumber(r, position.vel, tick, v, 0);
+            }
+
+            // decodeTickLo, written out: its result would be boxed crossing the call once the tick passes 2^30.
+            const low = r.u16();
+            t0[0] = tick - ((tick - low) & 0xffff);
+            epoch = r.u8();
           }
+        }
 
-          // decodeTickLo, written out: its result would be boxed crossing the call once the tick passes 2^30.
-          const low = r.u16();
-          t0[0] = tick - ((tick - low) & 0xffff);
-          epoch = r.u8();
+        sink.enter(prev, p, v, t0, epoch);
+        readSection(r, archetype.onEnter, tick, sink);
+        for (let s = 0; s < sections.length; s++) {
+          readSection(r, sections[s]!, tick, sink);
         }
       }
+    }
 
-      sink.enter(prev, p, v, t0, epoch);
-      readSection(r, archetype.onEnter, tick, sink);
-      for (let s = 0; s < sections.length; s++) {
-        readSection(r, sections[s]!, tick, sink);
+    // ── segments ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    const segmentRuns = r.varu();
+    if (segmentRuns > 0 && (position === null || !position.moving)) {
+      throw malformed(`archetype '${archetype.name}' does not move but its block carries segment(s)`);
+    }
+
+    for (let runs = segmentRuns; runs > 0; runs--) {
+      let prev = -1;
+      for (let n = this.runLength(); n > 0; n--) {
+        prev = nextNetId(r, prev);
+        readNumber(r, position!.pos, tick, p, 0);
+        if (position!.vel !== null) {
+          readNumber(r, position!.vel, tick, v, 0);
+        }
+
+        const low = r.u16();
+        t0[0] = tick - ((tick - low) & 0xffff);
+        sink.segment(prev, p, v, t0, r.u8());
       }
     }
 
-    const segments = r.varu();
-    if (segments > 0 && (position === null || !position.moving)) {
-      throw malformed(`archetype '${archetype.name}' does not move but its block carries ${segments} segment(s)`);
-    }
-
-    prev = -1;
-    for (let n = segments; n > 0; n--) {
-      prev = nextNetId(r, prev);
-      readNumber(r, position!.pos, tick, p, 0);
-      if (position!.vel !== null) {
-        readNumber(r, position!.vel, tick, v, 0);
-      }
-
-      const low = r.u16();
-      t0[0] = tick - ((tick - low) & 0xffff);
-      sink.segment(prev, p, v, t0, r.u8());
-    }
-
-    prev = -1;
+    // ── states ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     const groupCount = archetype.groups.length;
-    for (let n = r.varu(); n > 0; n--) {
-      prev = nextNetId(r, prev);
-      const mask = r.u8();
-      if (mask === 0 || mask >> groupCount !== 0) {
-        throw malformed(`state record mask 0x${mask.toString(16)} is invalid for ${groupCount} group(s)`);
-      }
+    for (let runs = r.varu(); runs > 0; runs--) {
+      let prev = -1;
+      for (let n = this.runLength(); n > 0; n--) {
+        prev = nextNetId(r, prev);
+        const mask = r.u8();
+        if (mask === 0 || mask >> groupCount !== 0) {
+          throw malformed(`state record mask 0x${mask.toString(16)} is invalid for ${groupCount} group(s)`);
+        }
 
-      sink.state(prev, mask);
-      for (let g = 0; g < groupCount; g++) {
-        if ((mask & (1 << g)) !== 0) {
-          readSection(r, sections[g]!, tick, sink);
+        sink.state(prev, mask);
+        for (let g = 0; g < groupCount; g++) {
+          if ((mask & (1 << g)) !== 0) {
+            readSection(r, sections[g]!, tick, sink);
+          }
         }
       }
     }
 
-    prev = -1;
-    for (let n = r.varu(); n > 0; n--) {
-      prev = nextNetId(r, prev);
-      sink.leave(prev);
+    // ── leaves ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    for (let runs = r.varu(); runs > 0; runs--) {
+      let prev = -1;
+      for (let n = this.runLength(); n > 0; n--) {
+        prev = nextNetId(r, prev);
+        sink.leave(prev);
+      }
     }
+  }
+
+  /**
+   * One sub-list run's record count, which the grammar forbids to be zero.
+   *
+   * A canonical encoding has no empty run: a sub-list with nothing to say spends one `varu` zero on its RUN count and stops. Admitting an empty run
+   * would give two byte strings for one frame, and would let a hostile stream spend a megabyte of run counts on no records at all.
+   */
+  private runLength(): number {
+    const n = this.r.varu();
+    if (n === 0) {
+      throw malformed('an ENTITIES sub-list run carries no record');
+    }
+
+    return n;
   }
 
   private readSelf(tick: number, sink: TickSink): void {

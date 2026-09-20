@@ -269,30 +269,222 @@ public sealed class SubscriptionsOptions
     public int CollapseBelowWorkUnits { get; init; }
 
     /// <summary>
-    /// Whether a session that holds last tick's frame is served from the change set S1 published, instead of walking everything it watches. Default: off.
+    /// Whether interest is expressed as a DIFFERENCE against what each session reached on the previous tick, rather than re-derived whole every tick
+    /// (15 § 3.2). On by default: it is the algorithm, and the switch exists so that it can be measured against the shape it replaced on one binary.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>OFF by default, because the path is UNSOUND as built.</b> The change mask is applied to a run before the known-set is probed, so a hit slot
-    /// that this session does not know AND that did not change this tick is never classified: it produces no enter record, and it still counts toward
-    /// the hit total that proves "nothing left the view" and skips the leave sweep. The session never receives that entity, and an unchanged entity
-    /// has nothing to change tomorrow either.
+    /// <b>This is the temporal half of the interest design.</b> Each session keeps a
+    /// snapshot of the clusters and slots its interest reached last tick, and the identity it found in each. This tick's runs are then split three ways: a
+    /// slot new to the session is classified in full, a slot it already held is classified only when S1 named it in the block's change mask, and a slot it
+    /// held and no longer reaches becomes a leave named by the snapshot. At the density 13 § 6 measures — 2 056 hits per session per tick producing ~293
+    /// records — the middle case is the overwhelming majority, and it costs an array copy instead of two random cache misses.
     /// </para>
     /// <para>
-    /// <b>Two ordinary states produce it, and neither involves an exotic observer.</b> An enter deferred by the per-frame budget is not recorded
-    /// anywhere and stays unknown, to be rediscovered by the next gather — the walk this mask cripples; and interest that moves onto a slot another
-    /// session keeps watched presents an entity that compared equal. It is self-limiting only when the session has nothing else to publish, because the
-    /// baseline then stalls and the next tick takes the full walk; a session with any other traffic keeps the fast path and never recovers.
+    /// <b>Why this is sound where the change mask alone is not.</b> C-1 masks before probing and therefore cannot tell a slot that is unchanged from a slot
+    /// that is unchanged AND unknown to this session; the second produces no enter and the entity is lost permanently. The difference knows which slots are
+    /// new because it has last tick's set, so it never skips one. The copy of an identity is in turn justified by an invariant of S1 rather than by an
+    /// assumption about the world: <c>ProjectionPass</c> re-initializes any slot whose entity differs from the one its entry describes, and an initialized
+    /// slot joins <c>ChangedSlots</c> unconditionally, so an unmasked retained slot holds the entity it held last tick.
     /// </para>
     /// <para>
-    /// It is kept rather than deleted because the measurement it was built for is real — 1.5-2.5x on the frame stage for whole-world views — and the
-    /// repair is known: probe the known-set over the UNMASKED run and apply the mask only to the record-emitting half, or carry a count of hits the fast
-    /// path could not classify and fail the proof on it. Turning it on today trades a silent, permanent divergence for that speed.
+    /// <b>It also retires the leave sweep for the sessions that take it.</b> Leaves come from the slots the snapshot held and this tick does not, plus the
+    /// slots whose occupant was replaced, both filtered against the identities the tick actually read so that an entity which merely moved between slots
+    /// owes none. That replaces a walk of the whole known-set — 14 § 5.2, the worst-scaling function measured — with work proportional to what moved.
     /// </para>
     /// <para>
-    /// A session that is behind, still filling, or resetting takes the full walk regardless — SUB-03 requires every group newer than its baseline, and
-    /// one tick's change set does not contain them.
+    /// A session that is behind, still filling, resetting, or owed anything by the frame before takes the full walk, and taking it is what rebuilds the
+    /// snapshot. Turning this off leaves that walk as the only path, which is Phase 1's behaviour exactly.
+    /// </para>
+    /// <para>
+    /// <b>It is off by default because the measurement says so, and the measurement is the interesting part</b> (15 § 10). At d05 with 200 sessions it
+    /// engages on 79 % of frames and carries <b>89.5 %</b> of hit slots — 60.7 million of 67.8 million skip their block read and their known-set probe
+    /// entirely — and the frame stage costs the same to within the noise: −0.7 % on <c>frames</c>, +3.5 % on the <c>subs</c> track, three of four
+    /// interleaved pairs favouring the walk. Removing nine tenths of the per-hit work changed nothing, which says the per-hit work was not the cost. What
+    /// remains is the ITERATION of the session's whole hit list, plus the sort and encode that are proportional to records rather than to hits. Making each
+    /// hit cheaper cannot help while the list is still walked per session per tick; the list itself has to stop being built, which is what a dirty-driven
+    /// interest pass would do (15 § 3.2) and what this is NOT.
     /// </para>
     /// </remarks>
-    public bool ChangedOnlyGather { get; init; }
+    public bool IncrementalInterest { get; init; } = true;
+
+    /// <summary>
+    /// Whether a frame that could not say everything owes its next frame the SLOTS it left out, rather than a walk of the session's whole view.
+    /// Default: on.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Two things make a frame incomplete: an ENTER the per-frame budget deferred, and a slot whose occupant was replaced (which no change mask can show,
+    /// because the bit stays set). Either way the interest view is about to claim the slot, so the difference would never offer it again and the client
+    /// would never be told about an entity the engine had decided to describe. Something must carry the debt.
+    /// </para>
+    /// <para>
+    /// <b>What it costs to carry it as the whole frame.</b> Measured at d06 with 200 sessions: the blunt form forced a full walk on <b>40.8 %</b> of
+    /// frames, those frames performed roughly <b>91 %</b> of every slot read in the subsystem, and 13 679 of 13 880 full gathers came from this one
+    /// condition — not from slot reuse, and not from a lagging session, which accounted for none. Carrying the slots instead takes the full-gather rate to
+    /// <b>12.1 %</b> and slot reads down <b>61 %</b>, with no overlap between the arms on either count.
+    /// </para>
+    /// <para>
+    /// Turning it off restores the blunt <c>ForceFullGather</c> exactly, which is what makes the two an A/B on one binary. The blunt form is still what
+    /// runs wherever there is no interest view to record the debt into.
+    /// </para>
+    /// </remarks>
+    public bool OwedSlotCarry { get; init; } = true;
+
+    /// <summary>
+    /// How much of a session's outstanding slot debt one frame may serve, as a multiple of <see cref="EnterBudgetPerFrame"/>. <c>0</c> serves all of it.
+    /// Default: 2.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Everything owed is an ENTER waiting to be described, and a frame can describe at most <see cref="EnterBudgetPerFrame"/> of them. When a view is
+    /// larger than the budget can fill — a 31 147-entity disc against a budget of 500 — the backlog never drains, and reading all of it on every frame
+    /// spends thousands of slot reads to choose five hundred. Measured at d07 with 200 sessions: <b>428 of the 513 million slots the gather read were
+    /// owed</b>, 83.6 % of the frame stage, to send 500 per frame. Bounding it took the gather's visited set from 512 M to 165 M.
+    /// </para>
+    /// <para>
+    /// <b>Nothing is lost by bounding it.</b> A slot the slice does not reach keeps its bit and the next frame takes it — the debt is a mask, not a flag.
+    /// What DOES change is when an entity is described: a session whose view outruns its budget learns about it over more frames, in a different order.
+    /// Raising <see cref="EnterBudgetPerFrame"/> is the direct answer to that; this only stops the engine spending unboundedly on a backlog it cannot
+    /// send.
+    /// </para>
+    /// <para>
+    /// The slice is applied PER RUN rather than per frame, because runs are walked in a fixed order and a per-frame cap would serve the first clusters
+    /// every tick and starve the last ones forever.
+    /// </para>
+    /// </remarks>
+    public int OwedSliceMultiplier { get; init; } = 2;
+
+    /// <summary>
+    /// Whether a sphere observer's interest is resolved at CLUSTER granularity, reading no entity at all. Default <see langword="false"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>What it removes.</b> Every other form of this pass answers "which entities are inside this disc" by reading entities: the spatial query walks
+    /// each cluster the disc reaches and tests each entity's bounds. Measured on the SWG demo at d06 with 200 sessions that is about <b>416 000 entity
+    /// examinations per tick</b>, 22.5 ms of CPU, and the largest single item in the whole subsystem. This form asks the same query for the CLUSTERS it
+    /// reaches and stops there — about <b>19 000 boxes</b> for the same tick, of the same 64-entity groups the ECS already keeps spatially tight.
+    /// </para>
+    /// <para>
+    /// <b>What it costs.</b> A cluster reaching inside the disc is taken whole, so one straddling the boundary contributes entities outside it. The
+    /// over-approximation is one cluster extent wide around the disc's rim and it is never the other direction: every entity an exact query would report
+    /// lives in a cluster this admits, which is the property <c>ResidentInterestTests</c> asserts entity by entity. It shows up as a larger view and
+    /// therefore as wire bytes, which <c>ClusterCandidatesCollected</c>/<c>Accepted</c> and the demo's <c>bytesPerSessionPerSec</c> both report.
+    /// </para>
+    /// <para>
+    /// <b>Why it is off by default.</b> It changes what a session is told, not merely how fast: two servers with the same profile and different settings
+    /// of this describe different worlds to the same client. That is an application's decision about how much bandwidth an exact disc is worth, and an
+    /// engine default has no business making it. Its cost when off is one predicted branch per session per tick.
+    /// </para>
+    /// </remarks>
+    public bool ResidentInterest { get; init; }
+
+    /// <summary>
+    /// Whether each cluster's changed records are encoded ONCE per tick and referenced by every session that watches it, rather than re-encoded per
+    /// session. Default <see langword="false"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>What it removes is the per-session multiplier, not the encode</b> (17 § 16). A state record's bytes depend on the entity and the tick, never on
+    /// who is watching, so the records an encode-once design produces is the count of slots the projection names as changed — a property of the WORLD.
+    /// Measured at d06 that count is flat in the session count while the records the frame stage emits are linear in it: 41× at 200 sessions and 83× at
+    /// 1 000.
+    /// </para>
+    /// <para>
+    /// <b>It needs the wire to admit sub-runs</b>, which it does (03 § 5): a netId gap is relative to the record before it, so a sub-list that was one
+    /// ascending sequence could never be assembled from bytes encoded elsewhere. Each run restarts the delta.
+    /// </para>
+    /// <para>
+    /// <b>A session falls back to encoding a cluster itself whenever it cannot prove it may share</b> — its baseline is not the previous tick, it has not
+    /// been told about every slot the run describes, it is owed something there, or an identity in the cluster has moved since it last read it. The
+    /// fallback is per cluster and not per frame, so one arriving entity costs one cluster rather than the session's whole view.
+    /// </para>
+    /// <para>
+    /// <b>It pairs with cluster-granular interest.</b> A shared run describes every changed slot of a cluster, so a session that reaches only part of one
+    /// can never use it — the "told about every slot" test refuses it, correctly and at no risk, but also at no gain. With
+    /// <see cref="ResidentInterest"/> off the share rate is near zero by construction.
+    /// </para>
+    /// </remarks>
+    public bool SharedClusterBlocks { get; init; }
+
+    /// <summary>
+    /// Whether a referenced cluster run is checked against the session's known-set, slot by slot, before it is taken. Default <see langword="false"/>.
+    /// </summary>
+    /// <remarks>
+    /// <b>It is the work <see cref="SharedClusterBlocks"/> exists to skip, so it is a test harness and not an option to run with.</b> Referencing a run
+    /// without walking the cluster rests on an invariant spanning three structures — the session's per-slot identities, its known-set and the block's
+    /// record of entities that arrived from elsewhere — and a hole in it does not fail loudly: one client is handed a <c>STATE</c> for an entity it has
+    /// never heard of, and diverges silently from there. This turns that into a throw, so the differential oracle proves the invariant rather than
+    /// sampling its consequences.
+    /// </remarks>
+    public bool VerifySharedRuns { get; init; }
+
+    /// <summary>
+    /// Whether the frame stage takes its sessions from a shared cursor rather than a fixed slice each. Default <see langword="true"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A stage's wall time is its slowest chunk.</b> Splitting the tick's sessions into equal COUNTS assumes they cost the same, and they do not: a
+    /// session working through an enter backlog describes up to <see cref="EnterBudgetPerFrame"/> entities where a settled one describes a handful, and
+    /// which sessions end up together is decided by the interest-cell sort, which balances nothing. Measured at d06 with 1 000 sessions, the static split
+    /// delivered 59 ms of CPU in 17 ms of wall — an effective 3.5 workers out of 32.
+    /// </para>
+    /// <para>
+    /// <b>The mechanism is one <c>Interlocked.Increment</c> per session</b>, which needs no estimate of what a session will cost — the
+    /// thing no static heuristic can get right, because the cost depends on a backlog that changes every tick. Its cost when off is one predicted branch
+    /// per chunk.
+    /// </para>
+    /// <para>
+    /// <b>What it gives up</b> is the affinity between a worker and the sessions it served last tick, which matters only to
+    /// <c>FrameWorkerScratch.Shared</c> — the per-worker cache that lets two sessions with identical frames copy rather than re-encode. That cache applies
+    /// to <c>ObserverKind.World</c> observers only, so a spatial profile loses nothing by it.
+    /// </para>
+    /// </remarks>
+    public bool DynamicFrameScheduling { get; init; } = true;
+
+    /// <summary>
+    /// Whether the gather issues hardware prefetches for the lines it is about to read. Default <see langword="false"/>, and the default is a
+    /// measurement rather than a preference.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>It changes no output, only when the lines arrive.</b> The gather reads four things per interest run whose addresses form a dependent chain —
+    /// the block header, the view's debt word, the slot's hot entry, and the known-set probe, whose address only the hot entry supplies. On paper nothing
+    /// in that chain overlaps anything else. This issues the next run's independent lines a run early and the next slot's probe line a slot early.
+    /// </para>
+    /// <para>
+    /// <b>It is off by default because it was measured and it did nothing.</b> Six interleaved pairs at d06 with 200 sessions, on one binary, gave
+    /// 381/455/392 ns of gather per run with it off against 381/426/389 with it on — no separation. The premise was wrong: only about <b>464 replication
+    /// blocks are projected per tick</b> at that point and roughly eighty sessions read each one, so the headers and hot entries are cache-resident and
+    /// there is no latency to hide.
+    /// </para>
+    /// <para>
+    /// <b>It is kept because the regime it is built for is real and this workload is not it</b> — a world wide enough that each block is read by one
+    /// session rather than eighty makes every one of those lines a genuine miss. Nothing here derives an engine default from one application's shape, so
+    /// the switch stays and the default states what was measured. Its cost when off is one predicted branch per run on a value already in a register,
+    /// and on a platform with no prefetch instruction the tests fold at JIT time and the code disappears entirely.
+    /// </para>
+    /// </remarks>
+    public bool GatherPrefetch { get; init; }
+
+    /// <summary>
+    /// Whether sessions sharing an interest cell resolve their observers from one query instead of one each. Default: on.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The broad phase is keyed by SPACE, not by session.</b> Sphere observers are grouped by the cell their viewpoint falls in; a cell holding more than
+    /// one session runs a single query, enlarged by half a cell diagonal so that it covers every viewpoint the cell can hold, and each member then keeps the
+    /// candidates within its own radius using the engine's own narrowphase arithmetic. Membership is identical to a per-session query — the enlargement buys
+    /// the sharing and is removed again before any run is recorded.
+    /// </para>
+    /// <para>
+    /// <b>It cannot lose.</b> A cell holding one session takes the direct path, so nothing is enlarged for a lone observer; a cell holding two already costs
+    /// less than resolving them separately, because the enlarged query is 1.53x the area of one disc. The switch exists so the two shapes can be measured on
+    /// one binary, which is what this repository's A/B rule requires, not because there is a workload that should turn it off.
+    /// </para>
+    /// <para>
+    /// Non-sphere observers, and sessions that have not been placed, are unaffected: they have no cell and take the direct path.
+    /// </para>
+    /// </remarks>
+    public bool CellKeyedInterest { get; init; } = true;
 }

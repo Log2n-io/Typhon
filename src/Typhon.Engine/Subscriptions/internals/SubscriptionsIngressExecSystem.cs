@@ -135,6 +135,18 @@ internal sealed class SubscriptionsIngress : IDisposable
     /// <summary>A record whose wire index is this one is not a command but a rejection the transport side decided.</summary>
     internal const ushort AckRecordMarker = 0xFFFF;
 
+    /// <summary>
+    /// The interest pass, for diagnostics only. Set by the runtime once both exist.
+    /// </summary>
+    /// <remarks>
+    /// It is here so that <see cref="SubscriptionsCommands"/> can report how much of the interest resolution was shared without the application reaching
+    /// into an internal type. Nothing on the tick path reads it.
+    /// </remarks>
+    internal InterestPass Interest;
+
+    /// <summary>The frame assembler, for diagnostics only. Set by the runtime once both exist; nothing on the tick path reads it.</summary>
+    internal FrameAssembler Frames;
+
     /// <summary>Bytes of a ring record before the command itself.</summary>
     internal const int RecordHeaderBytes = 8;
 

@@ -175,6 +175,25 @@ internal sealed unsafe class RecordArena : IDisposable
         return new Span<byte>(_bytes + offset, bytes);
     }
 
+    /// <summary>
+    /// Gives back the unused tail of the most recent <see cref="Reserve"/>, so a writer that could only BOUND what it would produce does not leave the
+    /// difference behind.
+    /// </summary>
+    /// <param name="offset">The offset that reservation returned.</param>
+    /// <param name="used">Bytes actually written.</param>
+    /// <remarks>
+    /// <b>Only the last reservation can be trimmed</b>, which the offset check enforces rather than assumes: the arena is a bump allocator, so rewinding
+    /// past anything else would hand the same bytes out twice. A caller that has reserved again since is silently left alone, because the alternative —
+    /// throwing on a path the projection takes per cluster — would turn a wasted kilobyte into a faulted stage.
+    /// </remarks>
+    public void TrimReserve(int offset, int used)
+    {
+        if (offset >= 0 && used >= 0 && offset + used <= _byteCount)
+        {
+            _byteCount = offset + used;
+        }
+    }
+
     /// <summary>Names a body that has just been written through <see cref="Reserve"/>.</summary>
     /// <param name="record">The record.</param>
     public void Append(in ReplicationRecordRef record)
@@ -201,6 +220,17 @@ internal sealed unsafe class RecordArena : IDisposable
 
         return ref _records[index];
     }
+
+    /// <summary>
+    /// The byte at <paramref name="offset"/>, for a caller that named a region of this arena by offset rather than by record.
+    /// </summary>
+    /// <param name="offset">An offset a <see cref="Reserve"/> returned this tick.</param>
+    /// <returns>Its address, valid until the next <see cref="Reset"/> or growth.</returns>
+    /// <remarks>
+    /// <b>Resolved on read and never cached</b>, because <see cref="Reserve"/> reallocates. The frame stage calls this after the projection stage has
+    /// joined, so nothing can grow the arena between the address being taken and the bytes being copied out of it.
+    /// </remarks>
+    public byte* At(int offset) => _bytes + offset;
 
     /// <summary>The pre-encoded bytes of <paramref name="record"/>, valid until the next <see cref="Reset"/>.</summary>
     /// <param name="record">A record this arena produced.</param>

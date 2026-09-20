@@ -38,10 +38,57 @@ internal struct ReplicationBlockHeader
     /// <para>
     /// <b>Valid only for the tick it names.</b> A reader must test <see cref="ChangedTick"/> against its own tick before trusting a bit: a block not
     /// projected this tick carries the previous tick's mask, and treating that as current would drop this tick's changes silently. Both fields live in the
-    /// header's existing padding — it is declared <c>Size = 64</c> and used 25 bytes — so nothing about the block's layout moves.
+    /// header's existing padding — it is declared <c>Size = 64</c> and used 45 bytes with the two projection-state
+    /// fields below — so nothing about the block's layout moves.
     /// </para>
     /// </remarks>
     public ulong ChangedSlots;
+
+    /// <summary>The watched mask as it stood the last time this block was actually projected.</summary>
+    /// <remarks>
+    /// <b>This is what makes the dormant-cluster skip safe.</b> A sleeping cluster's bytes cannot have changed, but a session that starts watching one of
+    /// its slots still needs that slot's IDENTITY, and identities are minted by the projection pass. Skipping a dormant block whose watched set had grown
+    /// left the new slot without a netId for as long as the cluster slept, which the frame stage reads as "this session is still owed something" — so
+    /// ViewComplete never latched, every gather fell back to the full walk, and the frame stage lost more than the projection saved. Measured on the SWG
+    /// demo: "0 difference, 36 566 full" and frames up from 3.4 ms to 5.8 ms. Comparing against this mask costs one AND and one branch.
+    /// </remarks>
+    public ulong ProjectedWatchedMask;
+
+    /// <summary>The cluster's occupancy word as it stood the last time this block was projected.</summary>
+    /// <remarks>
+    /// <b>The second half of what makes the dormant-cluster skip safe, and the half that is about DESTROY.</b> A slot that stops being occupied is
+    /// detected nowhere else — <c>ProjectBlock</c>'s own remark says "there is no destroy hook anywhere, and a slot that stopped being occupied is
+    /// detected by this AND" — and no destroy path raises a dirty bit, so a destroy inside a sleeping cluster would never wake it. The identity would
+    /// never be released, the block would go on describing a dead entity, and a respawn into that slot would be served to clients as the OLD entity under
+    /// the OLD netId, which the frame stage's reuse detection cannot see because it compares against the block's own stale id. Comparing the occupancy
+    /// word costs one load the skip has to do anyway.
+    /// </remarks>
+    public ulong ProjectedOccupancy;
+
+
+    /// <summary>
+    /// Bit <c>i</c> is set when an entity ARRIVED in slot <c>i</c> from somewhere else since this block was last projected — a migration carried in, or a
+    /// parked entry drained into it. Read, OR-ed into <see cref="ChangedSlots"/> and cleared by the projection.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>It closes the one way an entity can move without anything saying so.</b> A migration copies the entry verbatim: the identity, the group stamps
+    /// and the quantized state all arrive unchanged, so if the entity's projected bytes did not change on that tick, NO group tick is stamped and the
+    /// destination's change mask does not name the slot. The session that reaches the destination therefore never visits it — and the session that reached
+    /// the SOURCE sees the slot it held change occupant, calls the entity displaced, and emits a LEAVE for an entity that never left its view. The client
+    /// is told to drop it and told to enter it again on some later tick.
+    /// </para>
+    /// <para>
+    /// <b>Naming the arrival costs one bit and no wire bytes.</b> The slot is visited, the session's per-slot identity is refreshed, the walk records the
+    /// identity as read this tick — which is what suppresses the source's leave — and no record is emitted at all when nothing about the entity changed.
+    /// </para>
+    /// <para>
+    /// <b>Set with <see cref="System.Threading.Interlocked"/> and read with an exchange</b>, because migrations run in the fence's parallel slices while
+    /// nothing holds this block, and the projection that consumes it runs on one worker per block. A plain OR would drop an arrival between the read and
+    /// the write.
+    /// </para>
+    /// </remarks>
+    public ulong ArrivedSlots;
 
     /// <summary>The tick <see cref="ChangedSlots"/> describes. Any other tick means the mask is stale and must not be read.</summary>
     /// <remarks>

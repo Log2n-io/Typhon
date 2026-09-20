@@ -45,14 +45,14 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
         subs.Profile(OtherProfile, p => p.World().Of<ProjCreature>().Of<ProjRock>());
     }
 
-    private static SubscriptionsOptions Options(int enterBudget = 500, bool changedOnlyGather = true) =>
+    private static SubscriptionsOptions Options(int enterBudget = 500, bool incrementalInterest = true) =>
         new()
         {
             MaxSessions = 64,
             StatePoolBudgetBytes = 64L * 1024 * 1024,
             FramePoolBudgetBytes = 64L * 1024 * 1024,
             EnterBudgetPerFrame = enterBudget,
-            ChangedOnlyGather = changedOnlyGather,
+            IncrementalInterest = incrementalInterest,
         };
 
     private FrameHarness Create(SubscriptionsOptions options = null) =>
@@ -139,17 +139,18 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
     /// go without a frame — which is exactly why 02 § 5 calls this the defensive path, and why a test that waited for the engine to produce one would be
     /// waiting for a bug.
     /// <para>
-    /// <b>Pinned to the full walk</b> (<c>ChangedOnlyGather = false</c>). The changed-only gather visits only the slots S1 reported as changed, and this
-    /// corruption is by construction something nothing reported: the entity is untouched, so its slot carries no bit and no probe reaches it. That is sound
-    /// where the state is reachable — a real reused identity bumps the hot entry's generation, which IS a change, so the slot is visited on the tick it
-    /// happens, and a session that missed that tick is by definition behind and takes the full walk anyway. What the fast path cannot do is discover a
-    /// corruption that nothing reported, which is what the defensive branch is for and what this fixture exercises.
+    /// <b>Pinned to the full walk</b> (<c>IncrementalInterest = false</c>). The reduction visits only the slots that
+    /// entered a session's view or that S1 reported as changed, and this corruption is by construction something nothing reported: the entity is untouched,
+    /// its slot carries no bit, it was in the session's view a tick ago and it still is, so no probe reaches it. That is sound where the state is REACHABLE
+    /// — a real reused identity bumps the hot entry's generation, and re-initializing a slot puts it in <c>ChangedSlots</c> unconditionally, so the slot is
+    /// visited on the tick the reuse happens; a session that missed that tick is by definition behind and reads every slot anyway. What a reduction cannot
+    /// do is discover a corruption that nothing reported, which is what the defensive branch is for and what this fixture exercises.
     /// </para>
     /// </remarks>
     [Test]
     public void AStaleGenerationLeavesInThisFrameAndEntersInTheNext()
     {
-        using var harness = Create(Options(changedOnlyGather: false));
+        using var harness = Create(Options(incrementalInterest: false));
         SpawnCreatures(harness, 4);
         var session = harness.OpenSessions(1, Profile)[0];
 

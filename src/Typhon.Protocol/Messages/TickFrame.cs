@@ -301,73 +301,110 @@ public static class TickReader
         Span<double> p = stackalloc double[3];
         Span<double> v = stackalloc double[3];
 
-        var prev = -1L;
-        for (var n = r.ReadVaru(); n > 0; n--)
+        // ── enters ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+        for (var runs = r.ReadVaru(); runs > 0; runs--)
         {
-            var netId = NextNetId(ref r, ref prev);
-            uint t0 = 0;
-            byte epoch = 0;
-            var dims = 0;
-            var velDims = 0;
-            if (position != null)
+            var prev = -1L;
+            for (var n = ReadRunLength(ref r); n > 0; n--)
             {
-                dims = position.Dims;
+                var netId = NextNetId(ref r, ref prev);
+                uint t0 = 0;
+                byte epoch = 0;
+                var dims = 0;
+                var velDims = 0;
+                if (position != null)
+                {
+                    dims = position.Dims;
+                    FieldCodec.ReadNumber(ref r, position.Pos, tick, p);
+                    if (position.Moving)
+                    {
+                        velDims = ReadSegmentTail(ref r, position, tick, v, out t0, out epoch);
+                    }
+                }
+
+                sink.Enter(netId, p[..dims], v[..velDims], t0, epoch);
+                FieldCodec.ReadSection(ref r, archetype.OnEnter, tick, ref sink);
+                foreach (var section in archetype.GroupSections)
+                {
+                    FieldCodec.ReadSection(ref r, section, tick, ref sink);
+                }
+            }
+        }
+
+        // ── segments ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+        var segmentRuns = r.ReadVaru();
+        if (segmentRuns > 0 && (position == null || !position.Moving))
+        {
+            throw WireFormatException.Malformed($"archetype '{archetype.Name}' does not move but its block carries segment(s)");
+        }
+
+        for (var runs = segmentRuns; runs > 0; runs--)
+        {
+            var prev = -1L;
+            for (var n = ReadRunLength(ref r); n > 0; n--)
+            {
+                var netId = NextNetId(ref r, ref prev);
                 FieldCodec.ReadNumber(ref r, position.Pos, tick, p);
-                if (position.Moving)
-                {
-                    velDims = ReadSegmentTail(ref r, position, tick, v, out t0, out epoch);
-                }
-            }
-
-            sink.Enter(netId, p[..dims], v[..velDims], t0, epoch);
-            FieldCodec.ReadSection(ref r, archetype.OnEnter, tick, ref sink);
-            foreach (var section in archetype.GroupSections)
-            {
-                FieldCodec.ReadSection(ref r, section, tick, ref sink);
+                var velDims = ReadSegmentTail(ref r, position, tick, v, out var t0, out var epoch);
+                sink.Segment(netId, p[..position.Dims], v[..velDims], t0, epoch);
             }
         }
 
-        prev = -1;
-        var segments = r.ReadVaru();
-        if (segments > 0 && (position == null || !position.Moving))
-        {
-            throw WireFormatException.Malformed($"archetype '{archetype.Name}' does not move but its block carries {segments} segment(s)");
-        }
-
-        for (var n = segments; n > 0; n--)
-        {
-            var netId = NextNetId(ref r, ref prev);
-            FieldCodec.ReadNumber(ref r, position.Pos, tick, p);
-            var velDims = ReadSegmentTail(ref r, position, tick, v, out var t0, out var epoch);
-            sink.Segment(netId, p[..position.Dims], v[..velDims], t0, epoch);
-        }
-
-        prev = -1;
+        // ── states ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
         var groupCount = archetype.Groups.Length;
-        for (var n = r.ReadVaru(); n > 0; n--)
+        for (var runs = r.ReadVaru(); runs > 0; runs--)
         {
-            var netId = NextNetId(ref r, ref prev);
-            var mask = r.ReadU8();
-            if (mask == 0 || (mask >> groupCount) != 0)
+            var prev = -1L;
+            for (var n = ReadRunLength(ref r); n > 0; n--)
             {
-                throw WireFormatException.Malformed($"state record mask 0x{mask:x2} is invalid for {groupCount} group(s)");
-            }
-
-            sink.State(netId, mask);
-            for (var g = 0; g < groupCount; g++)
-            {
-                if ((mask & (1 << g)) != 0)
+                var netId = NextNetId(ref r, ref prev);
+                var mask = r.ReadU8();
+                if (mask == 0 || (mask >> groupCount) != 0)
                 {
-                    FieldCodec.ReadSection(ref r, archetype.GroupSections[g], tick, ref sink);
+                    throw WireFormatException.Malformed($"state record mask 0x{mask:x2} is invalid for {groupCount} group(s)");
+                }
+
+                sink.State(netId, mask);
+                for (var g = 0; g < groupCount; g++)
+                {
+                    if ((mask & (1 << g)) != 0)
+                    {
+                        FieldCodec.ReadSection(ref r, archetype.GroupSections[g], tick, ref sink);
+                    }
                 }
             }
         }
 
-        prev = -1;
-        for (var n = r.ReadVaru(); n > 0; n--)
+        // ── leaves ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+        for (var runs = r.ReadVaru(); runs > 0; runs--)
         {
-            sink.Leave(NextNetId(ref r, ref prev));
+            var prev = -1L;
+            for (var n = ReadRunLength(ref r); n > 0; n--)
+            {
+                sink.Leave(NextNetId(ref r, ref prev));
+            }
         }
+    }
+
+    /// <summary>
+    /// Reads one sub-list run's record count, which the grammar forbids to be zero.
+    /// </summary>
+    /// <param name="r">The reader, positioned at the run's count.</param>
+    /// <returns>The run's record count.</returns>
+    /// <remarks>
+    /// <b>A canonical encoding has no empty run.</b> A sub-list with nothing to say spends one <c>varu</c> zero on its RUN count and stops; an empty run
+    /// inside a non-empty sub-list is therefore never produced, and admitting it would give two byte strings for one frame. The check also bounds the
+    /// decoder's work against a hostile stream, which could otherwise spend a megabyte of run counts on no records at all.
+    /// </remarks>
+    private static uint ReadRunLength(ref WireReader r)
+    {
+        var n = r.ReadVaru();
+        if (n == 0)
+        {
+            throw WireFormatException.Malformed("an ENTITIES sub-list run carries no record");
+        }
+
+        return n;
     }
 
     private static int ReadSegmentTail(ref WireReader r, PositionPlan position, uint tick, scoped Span<double> v, out uint t0, out byte epoch)
@@ -631,7 +668,7 @@ public static class TickWriter
         w.WriteVaru((uint)archetype.Idx);
         var position = archetype.Position;
 
-        w.WriteVaru((uint)enters.Count);
+        WriteRunHeader(ref w, enters.Count);
         var prev = -1L;
         foreach (var e in enters)
         {
@@ -657,7 +694,7 @@ public static class TickWriter
             throw new ArgumentException($"archetype '{archetype.Name}' does not move and cannot carry segments");
         }
 
-        w.WriteVaru((uint)segments.Count);
+        WriteRunHeader(ref w, segments.Count);
         prev = -1;
         foreach (var s in segments)
         {
@@ -666,7 +703,7 @@ public static class TickWriter
             WriteSegmentTail(ref w, frameTick, position, s.Velocity, s.T0, s.Epoch);
         }
 
-        w.WriteVaru((uint)states.Count);
+        WriteRunHeader(ref w, states.Count);
         prev = -1;
         foreach (var s in states)
         {
@@ -686,7 +723,7 @@ public static class TickWriter
             }
         }
 
-        w.WriteVaru((uint)leaves.Count);
+        WriteRunHeader(ref w, leaves.Count);
         prev = -1;
         foreach (var netId in leaves)
         {
@@ -694,6 +731,27 @@ public static class TickWriter
         }
 
         EndBlock(ref w, mark);
+    }
+
+    /// <summary>
+    /// Writes a sub-list that is one run: the run count, then that run's record count. An empty sub-list writes a single zero and no run.
+    /// </summary>
+    /// <param name="w">The writer.</param>
+    /// <param name="count">The sub-list's record count.</param>
+    /// <remarks>
+    /// <b>This writer always produces one run</b>, because it builds a frame from an object model and has no shared blocks to reference. The engine's
+    /// encoder is the one that produces several (17 § 18); the grammar is the same either way, which is what lets the golden vectors pin both.
+    /// </remarks>
+    private static void WriteRunHeader(ref WireWriter w, int count)
+    {
+        if (count == 0)
+        {
+            w.WriteVaru(0);
+            return;
+        }
+
+        w.WriteVaru(1);
+        w.WriteVaru((uint)count);
     }
 
     /// <summary>Writes a whole <c>EVENTS</c> block.</summary>

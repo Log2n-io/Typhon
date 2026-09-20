@@ -32,17 +32,32 @@ internal struct FrameRecord
     /// <summary>The entity's replication block. An <see cref="nint"/> so the record can live in either managed or native storage.</summary>
     public nint Block;
 
-    /// <summary>The slot the entity occupies in that block.</summary>
-    public ushort Slot;
-
     /// <summary>
     /// The archetype's plan index, which decides the <c>ENTITIES</c> block this record travels in. Carried per record because the enter budget ranks
     /// candidates across every archetype at once, and a leave is discovered by sweeping a table that holds no block pointer at all.
     /// </summary>
     public ushort Archetype;
 
+    /// <summary>The slot the entity occupies in that block. A cluster holds at most 64, so a byte is the honest width.</summary>
+    public byte Slot;
+
     /// <summary>For a state record, the groups it carries as the wire's <c>u8</c> mask (W14); zero otherwise.</summary>
     public byte GroupMask;
+
+    /// <summary>
+    /// The session-view entry of the cluster this record came from, or <c>-1</c> where there is none.
+    /// </summary>
+    /// <remarks>
+    /// <b>Carried so that an enter the per-frame budget declines can be owed back to the view without a lookup.</b> The gather knows the entry index; the
+    /// budget, which runs later over a ranked list spanning every archetype, does not — and re-deriving it meant reading the block header for its chunk id
+    /// and hash-probing the view once per declined candidate. Measured at d07 with 200 sessions that cost 11.4 s of a 98 s profile and took the selection
+    /// phase to 22 % of the frame stage.
+    /// <para>
+    /// It is free: narrowing <see cref="Slot"/> to the byte a 64-slot cluster actually needs leaves exactly the four bytes this takes, so the record is
+    /// still 24 bytes and the sort still moves the same number of cache lines.
+    /// </para>
+    /// </remarks>
+    public int ViewIndex;
 }
 
 /// <summary>Orders records by netId, which is what the wire's gap encoding requires.</summary>

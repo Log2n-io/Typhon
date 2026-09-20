@@ -114,8 +114,13 @@ string Blocks()
     var subs = project + interest + frames;
     var tick = swarm.ServerMetric("typhon.tick.p50");
     Console.WriteLine();
+    // Wire cost beside CPU cost: bytes per session per second is the number a capacity plan is actually built on, and a design that trades CPU for
+    // payload (or the reverse) cannot be judged from the timing half alone.
+    var elapsed = Math.Max(1.0, (DateTime.UtcNow - started).TotalSeconds);
+    var bytesPerSessionPerSec = bots > 0 ? swarm.BytesReceived / elapsed / bots : 0;
     Console.WriteLine($"SWEEP kind={kind} sessions={bots} project={project:F3} interest={interest:F3} frames={frames:F3} "
-        + $"subs={subs:F3} tickP50={tick:F3} subsPct={(tick > 0 ? subs / tick * 100 : 0):F1} recPerFrame={swarm.RecordsPerFrame:F0}");
+        + $"subs={subs:F3} tickP50={tick:F3} subsPct={(tick > 0 ? subs / tick * 100 : 0):F1} recPerFrame={swarm.RecordsPerFrame:F0} "
+        + $"bytesPerSessionPerSec={bytesPerSessionPerSec:F0} totalBytes={swarm.BytesReceived}");
 }
 
 Console.WriteLine();

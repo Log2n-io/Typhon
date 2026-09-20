@@ -90,6 +90,46 @@ internal static unsafe class ProjectionPass
             return;
         }
 
+        // ── Dormant clusters are not re-projected (ADR: build on the engine's own per-tick state) ──────────────────────────────────────────────────
+        //
+        // The engine already answers this question every tick and replication has simply never asked it. `DormancySweep` runs at the fence, advances a
+        // per-cluster counter of consecutive clean ticks, and moves a cluster to `Sleeping` once it passes `SleepThresholdTicks`. `TyphonRuntime` then
+        // skips sleeping clusters when it dispatches systems — which is what makes this SOUND rather than merely plausible: nothing is dispatched over a
+        // sleeping cluster, so no system can write to one, so every byte this method would encode is already the byte the block holds.
+        //
+        // <b>Cost when the application never enables dormancy: one field read.</b> `SleepingClusterCount` is zero until a cluster actually sleeps, which
+        // is the same zero-overhead guard `TyphonRuntime.OnParallelQueryPrepare` uses for the same reason. `SleepThresholdTicks` defaults to 0 — dormancy
+        // is opt-in — so an application that wants none pays a predictable-not-taken branch per block and nothing else.
+        //
+        // <b>The precondition, stated plainly:</b> an application that writes into a sleeping cluster through a path that raises no dirty bit
+        // (`ClusterRef.GetSpan` outside a dispatched system) gets a stale entity here. That is not a new contract — the same write is already lost by the
+        // WAL and already fails to wake the cluster, so it is a pre-existing requirement of using dormancy at all, not one replication introduces.
+        var clusterState = state.ClusterState;
+        if (clusterState != null && clusterState.SleepingClusterCount > 0)
+        {
+            var sleepStates = clusterState.SleepStates;
+            var chunkId = block->ChunkId;
+            // Two things a sleeping cluster can still change under us, and neither raises a dirty bit:
+            //   - a newly WATCHED slot needs its identity minted, and only this pass mints one (ProjectedWatchedMask);
+            //   - a DESTROY clears an occupancy bit, which is detected nowhere else in the engine (ProjectedOccupancy). No destroy path wakes a cluster,
+            //     so without this the identity is never released, the block goes on describing a dead entity, and a respawn into that slot reaches
+            //     clients as the OLD entity under the OLD netId — which the frame stage's reuse check cannot see, because it compares against the block's
+            //     own stale id.
+            // The occupancy word is the cluster's own, at offset 0, and the slot loop below has to load it anyway.
+            if (sleepStates != null && (uint)chunkId < (uint)sleepStates.Length && sleepStates[chunkId] == ClusterSleepState.Sleeping
+                && (block->WatchedMask & ~block->ProjectedWatchedMask) == 0
+                && *(ulong*)clusterBase == block->ProjectedOccupancy)
+            {
+                // The stamp still moves. The frame stage reads (ChangedTick, ChangedSlots) as a pair and treats any tick but this one as "the mask is
+                // stale, read every retained slot", so leaving a declined block on last tick's tick would turn this saving into a frame-stage loss
+                // several times its size. Two stores, against a slot loop of read, re-encode and compare.
+                block->ChangedSlots = 0;
+                Volatile.Write(ref block->ChangedTick, tick);
+                state.NoteBlockDormant();
+                return;
+            }
+        }
+
         var layout = plan.BlockLayout;
         var clusterLayout = plan.ClusterLayout;
         var slotCount = plan.SlotCount;
@@ -410,13 +450,229 @@ internal static unsafe class ProjectionPass
         // its own: arm64 may commit the two plain stores in either order, and a reader that saw the new tick against the old mask would apply a stale change
         // set to a live tick. The stage join between S1 and S2b happens to separate this writer from that reader today, but the pair is documented as
         // self-describing and read as such, so it carries its own ordering. Free on x64, one stlr on arm64.
+        // ── Arrivals, folded in and consumed ────────────────────────────────────────────────────────────────────────────────────────────────────────
+        //
+        // An entity carried in from another cluster since this block was last projected. A migration copies the entry whole — the identity, the group
+        // stamps and the quantized state all arrive unchanged — so if the entity's bytes did not change on that tick NOTHING else names the slot: not the
+        // change mask, not the initialisation test, not the occupancy compare. The session that reaches the destination never visits it, and the session
+        // that reached the SOURCE sees its slot change occupant, calls the entity displaced and retracts an entity still inside its own view.
+        //
+        // Restricted to what is LIVE AND WATCHED, because a slot no session reaches needs no visit. Exchanged rather than read-then-cleared: the fence's
+        // migration slices are the other writer and they run in parallel with each other.
+        var arrived = Interlocked.Exchange(ref block->ArrivedSlots, 0UL) & live;
+        changedSlots |= arrived;
+
         block->ChangedSlots = changedSlots;
+        block->ProjectedWatchedMask = watched;
+        block->ProjectedOccupancy = *(ulong*)clusterBase;
         Volatile.Write(ref block->ChangedTick, tick);
 
         // The watched mask is deliberately LEFT SET. It is the interest stage's, cleared by its own prologue at the start of the next tick, and the frame
         // stage still has to read it after this one has run — a pass that tidied up after itself would erase the very thing S2b is about to consult.
+        PublishSharedRun(state, worker, block, blockBytes, arena, changedSlots, released, initializing, arrived, tick);
+
+        state.NoteChangedSlots(BitOperations.PopCount(changedSlots));
         state.NoteProjected(blocks: 1, slots: visited, records: records, releases: released);
         state.NoteSegments(segmentsEmitted, shadowSegments);
+    }
+
+    /// <summary>
+    /// Encodes this cluster's changed records ONCE, as two <c>ENTITIES</c> sub-list runs every session watching the cluster can reference (17 § 18).
+    /// </summary>
+    /// <param name="state">The archetype's replication state, which owns the run table and hands out identity versions.</param>
+    /// <param name="worker">The chunk index, which names the arena the bytes are written into.</param>
+    /// <param name="block">The block being projected.</param>
+    /// <param name="blockBytes">Its first byte.</param>
+    /// <param name="arena">This worker's record arena, where the bytes live until the tick ends.</param>
+    /// <param name="changedSlots">The slots this tick changed.</param>
+    /// <param name="released">How many identities this projection gave back.</param>
+    /// <param name="initializing">The slots this projection had to (re-)initialize.</param>
+    /// <param name="arrived">The slots an entity was carried into from another cluster.</param>
+    /// <param name="tick">The tick.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>Built here because this is where the bytes are already hot.</b> The slot loop above has just read every one of these hot entries to decide that
+    /// they changed; encoding the run in a later stage would read them all again, from a cache a stage barrier has had time to spoil.
+    /// </para>
+    /// <para>
+    /// <b>A cluster whose identities moved publishes nothing</b>, and that is the whole of the correctness argument on this side. A mint, a release or a
+    /// slot whose occupant was replaced all mean that some session's per-slot memory of this cluster is now wrong, and telling which sessions would be per
+    /// session — the work being removed. Refusing to share the cluster for that one tick costs those sessions an ordinary per-session encode, which is what
+    /// they did before this existed. The SWG demo measures a few tens of such events a tick across a world of a quarter of a million entities.
+    /// </para>
+    /// <para>
+    /// <b>The mask is "changed in THIS tick", which is why a reader has to be exactly one tick behind.</b> The per-session encoder asks for the groups whose
+    /// stamp is past its baseline; with a baseline of <c>tick - 1</c> that is the same set, and with any older baseline it is a superset this run does not
+    /// carry. The frame stage tests the baseline before it reads anything here.
+    /// </para>
+    /// </remarks>
+    private static void PublishSharedRun(ArchetypeReplicationState state, int worker, ReplicationBlockHeader* block, byte* blockBytes, RecordArena arena,
+        ulong changedSlots, int released, ulong initializing, ulong arrived, uint tick)
+    {
+        var encode = state.EncodePlan;
+        if (encode == null)
+        {
+            return;
+        }
+
+        var table = state.SharedRuns;
+        var chunkId = block->ChunkId;
+
+        // One statement for the three ways this pass changes who a slot holds: a released identity, a slot whose entity differs from the one the entry
+        // described, and a slot watched now but not last tick. All three are already accumulated above, so this costs two comparisons.
+        // ── A cluster whose identities moved publishes nothing ──────────────────────────────────────────────────────────────────────────────────────
+        //
+        // Three ways a slot can change WHICH ENTITY it holds, and all three have to be here. A release and a re-initialisation are the obvious two. The
+        // third is an ARRIVAL, and it is the one that is invisible from everything else: a migration copies the entry whole, so the destination's entity
+        // matches, its last-watched tick matches, and nothing marks it as new. A session that already had that slot in its committed mask would then
+        // reference the run without walking it, never learn the occupant changed, and go on naming the previous entity in its own view — which is the
+        // disagreement FindViewIdentityDisagreement exists to catch. Arrivals are a few tens a tick across a quarter-million entities, so refusing their
+        // clusters for one tick costs nothing measurable.
+        if (released != 0 || initializing != 0 || arrived != 0)
+        {
+            state.NoteSharedSkip(released != 0 ? 1 : 2);
+            table.Retire(chunkId);
+            return;
+        }
+
+        if (changedSlots == 0)
+        {
+            state.NoteSharedSkip(3);
+            table.Retire(chunkId);
+            return;
+        }
+
+        var layout = encode.Layout;
+        var groupCount = encode.GroupCount;
+        var moving = encode.Moving;
+
+        // The slots, ordered by netId, because a run's gaps are relative and must ascend. At most sixty-four of them, so an insertion sort over two parallel
+        // stack arrays beats anything with an allocation in it — and the array is almost always nearly sorted, since netIds are leased as slots fill.
+        var netIds = stackalloc uint[MaxSlots];
+        var slotOf = stackalloc byte[MaxSlots];
+        var maskOf = stackalloc byte[MaxSlots];
+        var segmentOf = stackalloc bool[MaxSlots];
+        var count = 0;
+        var stateCount = 0;
+        var segmentCount = 0;
+
+        var bits = changedSlots;
+        while (bits != 0)
+        {
+            var slot = BitOperations.TrailingZeroCount(bits);
+            bits &= bits - 1;
+            var hot = (ReplicationHotEntry*)(blockBytes + layout.HotOffset + (slot * layout.HotStride));
+            if (hot->NetId == NetIdAllocator.NoNetId)
+            {
+                // No identity to name the record with. The slot is owed to every session by the ordinary path, which is where it is already handled.
+                table.Retire(chunkId);
+                return;
+            }
+
+            var mask = 0;
+            for (var g = 0; g < groupCount; g++)
+            {
+                if (hot->GroupTicks[encode.GroupTickSlot[g]] == tick)
+                {
+                    mask |= 1 << g;
+                }
+            }
+
+            var segment = moving && hot->GroupTicks[encode.MotionTickSlot] == tick;
+            if (mask == 0 && !segment)
+            {
+                continue;
+            }
+
+            var netId = hot->NetId;
+            var at = count++;
+            while (at > 0 && netIds[at - 1] > netId)
+            {
+                netIds[at] = netIds[at - 1];
+                slotOf[at] = slotOf[at - 1];
+                maskOf[at] = maskOf[at - 1];
+                segmentOf[at] = segmentOf[at - 1];
+                at--;
+            }
+
+            netIds[at] = netId;
+            slotOf[at] = (byte)slot;
+            maskOf[at] = (byte)mask;
+            segmentOf[at] = segment;
+            if (mask != 0)
+            {
+                stateCount++;
+            }
+
+            if (segment)
+            {
+                segmentCount++;
+            }
+        }
+
+        if (stateCount == 0 && segmentCount == 0)
+        {
+            table.Retire(chunkId);
+            return;
+        }
+
+        var run = new SharedClusterRun
+        {
+            Tick = tick,
+            Slots = changedSlots,
+            Worker = worker,
+            StateOffset = -1,
+            SegmentOffset = -1,
+            StateCount = (ushort)stateCount,
+            SegmentCount = (ushort)segmentCount,
+        };
+
+        var address = (nint)blockBytes;
+        if (segmentCount > 0)
+        {
+            var bound = EntitiesEncoder.MaxGapBytes + (segmentCount * encode.MaxSegmentBytes);
+            var bytes = arena.Reserve(bound, out var offset);
+            var w = new WireWriter(bytes);
+            w.WriteVaru((uint)segmentCount);
+            var prev = -1L;
+            for (var i = 0; i < count; i++)
+            {
+                if (segmentOf[i])
+                {
+                    EntitiesEncoder.WriteSegmentRecord(ref w, encode, ref prev, netIds[i], address, slotOf[i]);
+                }
+            }
+
+            arena.TrimReserve(offset, w.Position);
+            run.SegmentOffset = offset;
+            run.SegmentBytes = (ushort)w.Position;
+        }
+
+        if (stateCount > 0)
+        {
+            var bound = EntitiesEncoder.MaxGapBytes + (stateCount * encode.MaxStateBytes);
+            var bytes = arena.Reserve(bound, out var offset);
+            var w = new WireWriter(bytes);
+            w.WriteVaru((uint)stateCount);
+            var prev = -1L;
+            for (var i = 0; i < count; i++)
+            {
+                if (maskOf[i] != 0)
+                {
+                    EntitiesEncoder.WriteStateRecord(ref w, encode, ref prev, netIds[i], address, slotOf[i], maskOf[i]);
+                }
+            }
+
+            arena.TrimReserve(offset, w.Position);
+            run.StateOffset = offset;
+            run.StateBytes = (ushort)w.Position;
+        }
+
+        if (table.Publish(chunkId, in run))
+        {
+            state.NoteSharedRun(stateCount + segmentCount);
+            state.NoteSharedSkip(0);
+        }
     }
 
     // ── Column walk ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────

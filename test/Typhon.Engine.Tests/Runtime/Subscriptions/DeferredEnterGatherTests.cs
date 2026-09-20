@@ -44,25 +44,21 @@ class DeferredEnterGatherTests : TestBase<DeferredEnterGatherTests>
     }
 
     /// <summary>
-    /// Every entity arrives, whether or not the changed-only gather is enabled.
+    /// Every entity the enter budget defers still arrives.
     /// </summary>
-    /// <param name="changedOnlyGather">Which gather to drive. The full walk is the control: it must deliver all six.</param>
     [Test]
-    [TestCase(false)]
-    [TestCase(true)]
     [VerifiesRule("SUB-03")]
-    public void EntitiesDeferredByTheEnterBudgetAreStillDelivered(bool changedOnlyGather)
+    public void EntitiesDeferredByTheEnterBudgetAreStillDelivered()
     {
         var options = new SubscriptionsOptions
         {
             EnterBudgetPerFrame = EnterBudget,
-            ChangedOnlyGather = changedOnlyGather,
         };
 
         using var harness = FrameHarness.Create(
             ProjectionTestSchema.SetupEngine(ServiceProvider),
             Declare,
-            nameof(EntitiesDeferredByTheEnterBudgetAreStillDelivered) + changedOnlyGather,
+            nameof(EntitiesDeferredByTheEnterBudgetAreStillDelivered),
             options);
 
         // The mover, alone, so the session completes its view and reaches a steady state before anything is deferred.

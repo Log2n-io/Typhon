@@ -40,6 +40,56 @@ sealed class DifferentialOracleTests : TestBase<DifferentialOracleTests>
     private const int DeterminismTicks = 60;
 
     /// <summary>
+    /// The same gate case with each cluster's records encoded ONCE and referenced by every session watching it (17 § 18).
+    /// </summary>
+    /// <param name="skipPercent">The percentage of ticks on which the session's frames are left undrained.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>This is the test that decides whether the feature may ship</b>, because what it changes is not a cost but WHICH BYTES a client receives. A shared
+    /// run is referenced on the strength of four O(1) predicates — the run is this tick's, no identity has moved, the session still reaches every slot it
+    /// names, and it has already been told about all of them — and every one of those is a claim about state some other session, some other stage or some
+    /// earlier tick wrote. The oracle is the only thing here that would catch one of them being subtly false: it decodes each client's world with the real
+    /// decoder and compares it against the server's projection, so a session told about an entity it cannot see, or not told about one it can, diverges.
+    /// </para>
+    /// <para>
+    /// <b>The skip rates matter more here than anywhere else.</b> A session that falls behind may NOT reference a run — the mask a run carries names the
+    /// groups that changed in one tick, and a session further back is owed the union since its baseline. At a 90 % skip rate almost every frame is in that
+    /// state, so this arm is mostly a test that the feature correctly refuses itself.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-03")]
+    public void AClientsWorldIsTheServersWithSharedClusterRuns([Values(0, 30, 60, 90)] int skipPercent)
+    {
+        using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 20260920 + skipPercent, [skipPercent],
+            nameof(DifferentialOracleTests), sharedClusterBlocks: true);
+
+        for (var i = 0; i < GateTicks; i++)
+        {
+            oracle.Step();
+            if ((i + 1) % CompareEvery == 0)
+            {
+                oracle.Quiesce();
+                oracle.AssertConverged($"after {i + 1} churned ticks at a {skipPercent}% skip rate, sharing cluster runs");
+            }
+        }
+
+        oracle.Quiesce();
+        oracle.AssertConverged($"at the end of a {GateTicks}-tick run at a {skipPercent}% skip rate, sharing cluster runs");
+
+        Assert.That(oracle.Workload.Destroyed, Is.GreaterThan(10), "the workload destroyed too little to put any pressure on identity");
+        AssertLookedAtSomething(oracle);
+
+        // Vacuous otherwise. A run that shared nothing would converge for the same reason the arm above does, and would say nothing at all about the
+        // feature; the whole point of this fixture is that the bytes a client received came through the shared path.
+        if (skipPercent == 0)
+        {
+            Assert.That(oracle.SharedRunUse.Runs, Is.GreaterThan(0), "no cluster run was ever referenced, so this arm tested nothing");
+            Assert.That(oracle.SharedRunUse.Records, Is.GreaterThan(0), "the referenced runs carried no records");
+        }
+    }
+
+    /// <summary>
     /// The gate case: one seeded run per skip rate, compared every 50 ticks and at the end.
     /// </summary>
     /// <param name="skipPercent">The percentage of ticks on which the session's frames are left undrained.</param>

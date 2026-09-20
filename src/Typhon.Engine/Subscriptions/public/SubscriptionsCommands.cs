@@ -3,6 +3,7 @@ using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Typhon.Protocol;
 
 namespace Typhon.Engine;
@@ -325,6 +326,195 @@ public sealed class SubscriptionsCommands
     /// <param name="session">The session.</param>
     /// <returns>The kind.</returns>
     public string SessionKindOf(SessionId session) => _ingress.Sessions.SessionKind(session);
+
+    /// <summary>
+    /// Last tick: how many interest cells the broad phase resolved, and how many sessions were served from a resolution somebody else paid for.
+    /// </summary>
+    /// <returns>The cells resolved and the sessions shared.</returns>
+    /// <remarks>
+    /// <b>A diagnostic, and the one the cell-keyed broad phase is judged by.</b> Its whole benefit is that co-located observers resolve once, so a
+    /// deployment whose sessions never share a cell pays the grouping's sort and gets nothing back — and no timing comparison can tell that case from a
+    /// design that does not work, because both look like "no change". Reading it is how an operator, or a measurement, tells them apart.
+    /// </remarks>
+    public (long Cells, long SessionsShared) InterestSharingLastTick =>
+        _ingress.Interest == null ? (0L, 0L) : (_ingress.Interest.CellsResolved, _ingress.Interest.SessionsShared);
+
+    /// <summary>
+    /// How many frames since start were built as a difference against the session's previous tick, and how many walked the whole view (15 § 3.2).
+    /// </summary>
+    /// <remarks>
+    /// <b>Cumulative, unlike <see cref="InterestSharingLastTick"/>.</b> It exists for the same reason: a measurement showing no change means "the
+    /// difference does not pay" or "the difference never happened", and those call for opposite next steps. A ratio near zero is the second.
+    /// </remarks>
+    public (long Difference, long Full) GatherShape =>
+        _ingress.Frames == null ? (0L, 0L) : (_ingress.Frames.TemporalGathers, _ingress.Frames.FullGathers);
+
+    /// <summary>Hit slots the difference read, and hit slots it carried forward without reading, since start (15 § 3.2).</summary>
+    public (long Visited, long Carried) GatherSlots => _ingress.Frames == null ? (0L, 0L) : _ingress.Frames.TemporalSlots;
+
+    /// <summary>Blocks the projection pass read, and blocks it declined because their cluster was dormant, since start.</summary>
+    /// <remarks>
+    /// The second number is zero unless the application enabled cluster dormancy, which is what makes the pair readable: a projection cost that did not
+    /// move means one thing if nothing was declined and the opposite if most of it was.
+    /// </remarks>
+    /// <summary>Clusters asleep across every replicated archetype, refreshed by each read of <see cref="ProjectionBlocks"/>. A diagnostic.</summary>
+    public int SleepingClusters;
+
+    /// <summary>Why the incremental path fell back to the full walk: reset, forced, incomplete view, or behind by more
+    /// than one tick.</summary>
+    public (long Reset, long Forced, long Incomplete, long Behind) FullGatherCauses =>
+        _ingress.Frames == null ? default : _ingress.Frames.FullGatherCauses;
+
+    /// <summary>What the reduced gather's visited slots were made of: newly entered, named by the change mask, owed by an earlier frame.</summary>
+    public (long Entered, long Changed, long Owed) VisitParts => _ingress.Frames == null ? default : _ingress.Frames.VisitParts;
+
+    /// <summary>Cluster candidates the broad phase collected, and how many a session accepted.</summary>
+    public (long Collected, long Accepted) ClusterCandidates =>
+        _ingress.Interest == null ? default : (_ingress.Interest.ClusterCandidatesCollected, _ingress.Interest.ClusterCandidatesAccepted);
+
+    /// <summary>
+    /// Runs referenced rather than encoded, the records they carried, the clusters that offered one and could not be shared, and the records the
+    /// projection encoded once (17 § 18).
+    /// </summary>
+    public (long Runs, long Records, long Refused, long Built) SharedRuns
+    {
+        get
+        {
+            if (_ingress.Frames == null)
+            {
+                return default;
+            }
+
+            var use = _ingress.Frames.SharedRunUse;
+            var built = 0L;
+            var states = _ingress.Interest?.ReplicationStates;
+            if (states != null)
+            {
+                for (var i = 0; i < states.Length; i++)
+                {
+                    built += states[i] == null ? 0 : states[i].SharedRunRecords;
+                }
+            }
+
+            return (use.Runs, use.Records, use.Refused, built);
+        }
+    }
+
+    /// <summary>Clusters that published a shared cluster run, and why the others did not (17 § 18).</summary>
+    public (long Published, long Released, long Init, long NoChange) SharedRunSkips
+    {
+        get
+        {
+            var states = _ingress.Interest?.ReplicationStates;
+            var t = (0L, 0L, 0L, 0L);
+            if (states != null)
+            {
+                for (var i = 0; i < states.Length; i++)
+                {
+                    if (states[i] == null)
+                    {
+                        continue;
+                    }
+
+                    var s = states[i].SharedRunSkips;
+                    t = (t.Item1 + s.Published, t.Item2 + s.Released, t.Item3 + s.Init, t.Item4 + s.NoChange);
+                }
+            }
+
+            return t;
+        }
+    }
+
+    /// <summary>Why a run with something to say did not reference shared bytes (17 § 18).</summary>
+    public (long Gated, long NoRun, long NotReached) SharedRunMisses =>
+        _ingress.Frames == null ? default : _ingress.Frames.SharedRunMisses;
+
+    /// <summary>
+    /// Slots the projection named as changed, against the records the frame stage actually emitted — Layer 4's sharing ratio.
+    /// </summary>
+    public (long ChangedSlots, long Records) ShareCensus
+    {
+        get
+        {
+            if (_ingress.Frames == null)
+            {
+                return default;
+            }
+
+            var changed = 0L;
+            var states = _ingress.Interest?.ReplicationStates;
+            if (states != null)
+            {
+                for (var i = 0; i < states.Length; i++)
+                {
+                    changed += states[i] == null ? 0 : states[i].ChangedSlotsPublished;
+                }
+            }
+
+            return (changed, _ingress.Frames.RecordsEncoded);
+        }
+    }
+
+    /// <summary>Mean microseconds a subscriptions chunk spends entering its epoch, and how many chunks were measured.</summary>
+    public (double MeanUs, long Chunks) EpochEnter
+    {
+        get
+        {
+            var count = Volatile.Read(ref Internals.SubscriptionsExecSystemBase.EpochEnterCount);
+            return count == 0
+                ? default
+                : (Volatile.Read(ref Internals.SubscriptionsExecSystemBase.EpochEnterTicks) * 1_000_000d / System.Diagnostics.Stopwatch.Frequency / count, count);
+        }
+    }
+
+    /// <summary>The frame stage's span against the busy time inside it, and the concurrency the two imply.</summary>
+    public (double SpanMs, double BusyMs, double Concurrency, double StartSpreadMs) FrameSpan => _ingress.Frames == null ? default : _ingress.Frames.ChunkSpan;
+
+    /// <summary>The frame stage's single-threaded prologue, per tick, in ms.</summary>
+    public (double Prologue, double Sweep, double Prepare) FramePrologueMs => _ingress.Frames == null ? default : _ingress.Frames.PrologueMs;
+
+    /// <summary>The frame stage's effective worker count and parallel efficiency; zero unless phase timing is on.</summary>
+    public (double Effective, double Efficiency, long Ticks) FrameBalance => _ingress.Frames == null ? default : _ingress.Frames.ChunkBalance;
+
+    /// <summary>Interest runs the gather walked, and how many of them had nothing to say.</summary>
+    public (long Walked, long Empty) GatherRunShape => _ingress.Frames == null ? default : _ingress.Frames.GatherShape;
+
+    /// <summary>Retained slots read in full because the block's change mask named another tick, and the runs that caused it.</summary>
+    public (long Slots, long Runs) StaleMask => _ingress.Frames == null ? default : _ingress.Frames.StaleMask;
+
+    /// <summary>The frame stage's phases, in ms of CPU summed over workers since start. All zero unless phase timing was enabled.</summary>
+    public (double Gather, double Select, double Sweep, double Sort, double Encode, double Publish) FramePhases =>
+        _ingress.Frames == null ? default : _ingress.Frames.PhaseMilliseconds;
+
+    /// <summary>Blocks the projection pass read, and blocks it declined because their cluster was dormant, since start.</summary>
+    public (long Projected, long Dormant) ProjectionBlocks
+    {
+        get
+        {
+            SleepingClusters = 0;
+            var states = _ingress.Interest?.ReplicationStates;
+            if (states == null)
+            {
+                return (0L, 0L);
+            }
+
+            var projected = 0L;
+            var dormant = 0L;
+            for (var i = 0; i < states.Length; i++)
+            {
+                if (states[i] == null)
+                {
+                    continue;
+                }
+
+                projected += states[i].BlocksProjected;
+                dormant += states[i].BlocksDormant;
+                SleepingClusters += states[i].ClusterState?.SleepingClusterCount ?? 0;
+            }
+
+            return (projected, dormant);
+        }
+    }
 
     /// <summary>
     /// This tick's commands of one type.

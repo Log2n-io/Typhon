@@ -57,7 +57,14 @@ public sealed partial class TatooineSim
             Subscriptions = new SubscriptionsOptions
             {
                 CollapseBelowWorkUnits = _config.SubscriptionsCollapseWorkUnits,
-                ChangedOnlyGather = _config.SubscriptionsChangedOnlyGather,
+                CellKeyedInterest = _config.SubscriptionsCellKeyedInterest,
+                IncrementalInterest = _config.SubscriptionsIncrementalInterest,
+                OwedSlotCarry = _config.SubscriptionsOwedSlotCarry,
+                OwedSliceMultiplier = _config.SubscriptionsOwedSlice,
+                GatherPrefetch = _config.SubscriptionsGatherPrefetch,
+                ResidentInterest = _config.SubscriptionsResidentInterest,
+                DynamicFrameScheduling = _config.SubscriptionsDynamicSchedule,
+                SharedClusterBlocks = _config.SubscriptionsSharedClusterBlocks,
             },
         });
 

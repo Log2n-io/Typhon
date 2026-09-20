@@ -97,7 +97,7 @@ export function writeEntitiesBlock(
   w.varu(archetype.idx);
   const position = archetype.position;
 
-  w.varu(enters.length);
+  writeRunHeader(w, enters.length);
   let prev = -1;
   for (const e of enters) {
     prev = writeGap(w, prev, e.netId);
@@ -118,7 +118,7 @@ export function writeEntitiesBlock(
     throw new RangeError(`archetype '${archetype.name}' does not move and cannot carry segments`);
   }
 
-  w.varu(segments.length);
+  writeRunHeader(w, segments.length);
   prev = -1;
   for (const s of segments) {
     prev = writeGap(w, prev, s.netId);
@@ -126,7 +126,7 @@ export function writeEntitiesBlock(
     writeSegmentTail(w, frameTick, position!, s.velocity ?? NO_VALUES, s.t0, s.epoch);
   }
 
-  w.varu(states.length);
+  writeRunHeader(w, states.length);
   prev = -1;
   const groupCount = archetype.groups.length;
   for (const s of states) {
@@ -144,13 +144,29 @@ export function writeEntitiesBlock(
     }
   }
 
-  w.varu(leaves.length);
+  writeRunHeader(w, leaves.length);
   prev = -1;
   for (const netId of leaves) {
     prev = writeGap(w, prev, netId);
   }
 
   endBlock(w, mark);
+}
+
+/**
+ * Writes a sub-list that is one run: the run count, then that run's record count. An empty sub-list writes a single zero and no run.
+ *
+ * This writer always produces one run, because it builds a frame from an object model and has no shared blocks to reference. The engine's encoder is
+ * the one that produces several; the grammar is the same either way, which is what lets the golden vectors pin both.
+ */
+function writeRunHeader(w: WireWriter, count: number): void {
+  if (count === 0) {
+    w.varu(0);
+    return;
+  }
+
+  w.varu(1);
+  w.varu(count);
 }
 
 /** A whole `EVENTS` block, in emission order. */

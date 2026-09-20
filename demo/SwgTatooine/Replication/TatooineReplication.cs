@@ -155,6 +155,8 @@ public static class TatooineReplication
     /// a disc left where a player was is a view of somewhere they have left.
     /// </para>
     /// </remarks>
+    private static long _placeTicks;
+
     public static void PlacePlayerSessions(TickContext tick)
     {
         var subs = tick.Subscriptions;
@@ -162,6 +164,63 @@ public static class TatooineReplication
         if (subs == null || tx == null)
         {
             return;
+        }
+
+        // How much of the interest resolution was shared, once every thousand ticks. Printed rather than kept, because the answer decides whether a
+        // measurement that shows no change means "the sharing does not pay" or "the sharing never happened" — and those call for opposite next steps.
+        if (++_placeTicks % 300 == 0)
+        {
+            var (cells, shared) = subs.InterestSharingLastTick;
+
+            // Error, not Out: a redirected stdout is block-buffered and this process is stopped rather than asked to exit, so the buffer is never flushed
+            // and the diagnostic is lost exactly when it is being collected.
+            var (difference, full) = subs.GatherShape;
+            var (visited, carried) = subs.GatherSlots;
+            var (projected, dormant) = subs.ProjectionBlocks;
+            Console.Error.WriteLine(
+                $"  interest sharing: {cells} cells resolved, {shared} sessions shared; gathers: {difference} difference, {full} full; "
+                + $"slots: {visited} read, {carried} carried; blocks: {projected} projected, {dormant} dormant, sleeping {subs.SleepingClusters}");
+            var vp = subs.VisitParts;
+            Console.Error.WriteLine($"  visit made of: entered {vp.Entered}, changed {vp.Changed}, owed {vp.Owed}");
+            var cc = subs.ClusterCandidates;
+            Console.Error.WriteLine($"  cluster candidates: {cc.Collected} collected, {cc.Accepted} accepted");
+            var ee = subs.EpochEnter;
+            Console.Error.WriteLine($"  epoch enter: {ee.MeanUs:F1} us mean over {ee.Chunks} chunks");
+            var fs = subs.FrameSpan;
+            Console.Error.WriteLine($"  frame span: {fs.SpanMs:F2} ms wall, {fs.BusyMs:F2} ms busy, {fs.Concurrency:F1} concurrent, start spread {fs.StartSpreadMs:F2} ms");
+            var pm = subs.FramePrologueMs;
+            Console.Error.WriteLine($"  frame prologue: {pm.Prologue:F2} ms/tick serial (sweep {pm.Sweep:F2}, prepare {pm.Prepare:F2})");
+            var fb = subs.FrameBalance;
+            Console.Error.WriteLine($"  frame balance: {fb.Effective:F1} effective workers, {fb.Efficiency * 100d:F0} % efficiency over {fb.Ticks} ticks");
+            var census = subs.ShareCensus;
+            var ratio = census.ChangedSlots == 0 ? 0d : (double)census.Records / census.ChangedSlots;
+            Console.Error.WriteLine($"  share census: {census.ChangedSlots} changed slots, {census.Records} records emitted, ratio {ratio:F1}x");
+
+            var sharedRuns = subs.SharedRuns;
+            if (sharedRuns.Built > 0 || sharedRuns.Runs > 0)
+            {
+                var covered = census.Records == 0 ? 0d : 100d * sharedRuns.Records / census.Records;
+                Console.Error.WriteLine(
+                    $"  shared runs: {sharedRuns.Runs} referenced carrying {sharedRuns.Records} records ({covered:F1}% of all records), "
+                    + $"{sharedRuns.Refused} clusters refused, {sharedRuns.Built} records encoded once");
+                var miss = subs.SharedRunMisses;
+                Console.Error.WriteLine($"  shared misses: gated {miss.Gated}, no run {miss.NoRun}, not reached {miss.NotReached}");
+                var sk = subs.SharedRunSkips;
+                Console.Error.WriteLine($"  shared build: {sk.Published} published, skipped: released {sk.Released}, init {sk.Init}, no change {sk.NoChange}");
+            }
+            var gs = subs.GatherRunShape;
+            Console.Error.WriteLine($"  gather shape: {gs.Walked} runs, {gs.Empty} empty");
+            var sm = subs.StaleMask;
+            Console.Error.WriteLine($"  stale change-mask: {sm.Slots} slots read over {sm.Runs} runs");
+            var fc = subs.FullGatherCauses;
+            Console.Error.WriteLine($"  full-gather causes: reset {fc.Reset}, forced {fc.Forced}, incomplete {fc.Incomplete}, behind {fc.Behind}");
+            var ph = subs.FramePhases;
+            if (ph.Gather + ph.Encode > 0d)
+            {
+                Console.Error.WriteLine(
+                    $"  frame phases (ms CPU, cumulative): gather {ph.Gather:F0}, select {ph.Select:F0}, sweep {ph.Sweep:F0}, sort {ph.Sort:F0}, "
+                    + $"encode {ph.Encode:F0}, publish {ph.Publish:F0}");
+            }
         }
 
         // NOT disposed: the accessor comes from the TICK's transaction, which owns it and releases it. Disposing one taken from a transaction this

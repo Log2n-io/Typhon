@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 
 namespace Typhon.Engine.Internals;
 
@@ -98,6 +99,12 @@ internal abstract class SubscriptionsExecSystemBase : ChunkedCallbackSystem<Subs
     /// </remarks>
     protected virtual bool RunsInThisShape(bool collapsed) => !collapsed;
 
+    /// <summary>Timestamp ticks every subscriptions chunk spent entering an epoch, and how many did. A diagnostic; zero unless phase timing is on.</summary>
+    internal static long EpochEnterTicks;
+
+    /// <summary>Chunks that entered an epoch while the measurement was on.</summary>
+    internal static long EpochEnterCount;
+
     protected sealed override int Prepare(SubscriptionsContext ctx)
     {
         try
@@ -123,8 +130,17 @@ internal abstract class SubscriptionsExecSystemBase : ChunkedCallbackSystem<Subs
         var from = SubscriptionsTelemetry.Now();
         try
         {
+            // Timed separately from the work: a chunk's measured span starts when a worker GRABS it, and everything between the grab and the first line of
+            // the stage counts against the stage's wall without appearing in any of its phases. Entering an epoch is the only thing in that window.
+            var epochFrom = FrameAssembler.PhaseTimingEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
             using (EpochGuard.Enter(Engine.EpochManager))
             {
+                if (epochFrom != 0L)
+                {
+                    Interlocked.Add(ref EpochEnterTicks, System.Diagnostics.Stopwatch.GetTimestamp() - epochFrom);
+                    Interlocked.Increment(ref EpochEnterCount);
+                }
+
                 ExecuteChunk(ctx, tick.ChunkIndex, tick.ChunkCount);
             }
         }

@@ -64,6 +64,14 @@ public sealed partial class SimBridge
                     continue;
                 }
 
+                // AMBIENT population, skipped BEFORE the write below, and the order is the whole point. A creature that merely counts down still writes
+                // its brain on every tick of its life, which keeps its cluster permanently dirty and defeats every change-detection mechanism
+                // downstream. See SimConfig.IdleCreatureFraction.
+                if (ai.Mode == AiMode.Idle)
+                {
+                    continue;
+                }
+
                 if (ai.ThinkCooldown > 0)
                 {
                     ai.ThinkCooldown--;
@@ -405,6 +413,7 @@ public sealed partial class SimBridge
     {
         var half = _config.WorldEdgeM * 0.5f;
         var batched = _config.BatchedSpatialWrites;
+        var dormancy = _config.DormancyTicks > 0;
         Span<CreaturePlacement> next = stackalloc CreaturePlacement[64];
 
         using var clusters = ctx.ClusterIds != null
@@ -466,12 +475,23 @@ public sealed partial class SimBridge
                 {
                     cluster.WriteSpatial(Creature.Bounds, idx, nb);
                 }
+
+                moved |= 1UL << idx;
             }
 
             // The moved slots in one call: the barrier's bookkeeping once per cluster rather than once per creature.
-            if (batched)
+            if (batched && moved != 0)
             {
                 cluster.WriteSpatial(Creature.Bounds, moved, next);
+            }
+
+            // WriteSpatial raises no dirty bit by design, so under dormancy a cluster whose creatures only MOVE looks clean to the fence's sweep, is put
+            // to sleep, stops being dispatched, and freezes in place. Marking the column is the documented contract for combining the two. Once per
+            // CLUSTER, and only for a cluster that actually moved something — marking unconditionally would keep every cluster awake forever, which is
+            // the same as not having dormancy at all.
+            if (dormancy && moved != 0)
+            {
+                cluster.MarkDirty(Creature.Bounds);
             }
         }
     }

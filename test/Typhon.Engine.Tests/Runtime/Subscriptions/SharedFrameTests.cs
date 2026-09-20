@@ -285,56 +285,6 @@ unsafe class SharedFrameTests : TestBase<SharedFrameTests>
         Assert.That(copied, Is.EqualTo(Sessions - 1), "every session after the first should have copied");
     }
 
-    /// <summary>
-    /// How often the changed-only gather is actually taken, which is what decides whether it is worth anything.
-    /// </summary>
-    /// <remarks>
-    /// The fast path requires <c>Baseline == tick − 1</c>, and a session's baseline advances only on a tick it was PRODUCED for. A session with nothing to
-    /// say has its frame abandoned and its baseline left behind, so every silent tick costs the session its fast path on the tick after. A world quiet
-    /// enough to skip frames is therefore the world where the optimisation stops applying — which is the opposite of what one would assume, and the reason
-    /// this is measured rather than reasoned about.
-    /// </remarks>
-    [Test]
-    public void TheChangedOnlyGatherIsTakenInSteadyState()
-    {
-        // Enabled explicitly: the option is OFF by default since the review of 2026-09-18 found the path unsound (see SubscriptionsOptions
-        // .ChangedOnlyGather). This fixture measures the path's BEHAVIOUR when it is on, which is still worth pinning for whoever repairs it.
-        using var harness = Create(changedOnlyGather: true);
-        SpawnCreatures(harness, 40);
-        var sessions = harness.OpenSessions(8, Profile);
-
-        harness.PrimeBlocks();
-        Settle(harness, sessions, fromTick: 2, ticks: 4);
-
-        var before = (harness.Assembler.ChangedOnlyGathers, harness.Assembler.FullGathers, harness.Assembler.UnprovenGathers);
-        for (var tick = 6L; tick <= 25; tick++)
-        {
-            DamageAll(harness, seed: (int)(1000 + tick));
-            harness.RunTick(tick);
-            foreach (var session in sessions)
-            {
-                harness.Deliver(session);
-            }
-        }
-
-        var fast = harness.Assembler.ChangedOnlyGathers - before.ChangedOnlyGathers;
-        var full = harness.Assembler.FullGathers - before.FullGathers;
-        var unproven = harness.Assembler.UnprovenGathers - before.UnprovenGathers;
-        TestContext.Out.WriteLine($"changed-only {fast}, full {full}, unproven {unproven}");
-
-        Assert.Multiple(() =>
-        {
-            // A MAJORITY, not merely more. The remark claims the fast path is "the common case" in a steady state, and `fast > full` is satisfied by
-            // 81 against 79 — which would be the optimisation barely applying while the test reported it working. With the option off by default this
-            // fixture is the only coverage the path has, so the bound is the claim rather than a direction.
-            Assert.That(fast, Is.GreaterThan((fast + full) * 3 / 4),
-                $"the fast path was taken {fast} times against {full} full walks. In a steady state where every session holds last tick's frame it is "
-                + "supposed to be the common case, not merely the more frequent of two");
-            Assert.That(unproven, Is.Zero, "a fast gather could not prove nothing had left and was redone — that is a double walk, and in a steady state "
-                + "with no churn it should never happen");
-        });
-    }
-
     // ── harness ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     private static void Declare(SubscriptionsRegistry subs)
@@ -344,7 +294,7 @@ unsafe class SharedFrameTests : TestBase<SharedFrameTests>
         subs.Profile(OtherProfile, p => p.World().Of<ProjCreature>());
     }
 
-    private FrameHarness Create(int enterBudget = 500, bool changedOnlyGather = false) => FrameHarness.Create(
+    private FrameHarness Create(int enterBudget = 500, bool incrementalInterest = false) => FrameHarness.Create(
         ProjectionTestSchema.SetupEngine(ServiceProvider),
         Declare,
         nameof(SharedFrameTests),
@@ -354,7 +304,7 @@ unsafe class SharedFrameTests : TestBase<SharedFrameTests>
             StatePoolBudgetBytes = 64L * 1024 * 1024,
             FramePoolBudgetBytes = 64L * 1024 * 1024,
             EnterBudgetPerFrame = enterBudget,
-            ChangedOnlyGather = changedOnlyGather,
+            IncrementalInterest = incrementalInterest,
         });
 
     /// <summary>Runs ticks and drains every session, so they all reach a complete view at the same baseline.</summary>

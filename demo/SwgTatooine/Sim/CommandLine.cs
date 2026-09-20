@@ -70,12 +70,53 @@ public static class CommandLine
             c.SplitAwareness = true;
         }
 
-        c.SubscriptionsChangedOnlyGather = Str(args, "--subs-gather", "changed") switch
+        var interestMode = Str(args, "--subs-interest", "cell");
+        c.SubscriptionsCellKeyedInterest = interestMode switch
         {
-            "changed" => true,
-            "full" => false,
-            var other => throw new ArgumentException($"--subs-gather takes changed or full, not '{other}'"),
+            "cell" or "resident" => true,
+            "pull" => false,
+            var other => throw new ArgumentException($"--subs-interest takes cell, resident or pull, not '{other}'"),
         };
+
+        c.SubscriptionsResidentInterest = interestMode == "resident";
+        c.WorkerIdleSpin = Int(args, "--idle-spin", c.WorkerIdleSpin);
+        c.SubscriptionsDynamicSchedule = Str(args, "--subs-sched", "dynamic") switch
+        {
+            "dynamic" => true,
+            "static" => false,
+            var other => throw new ArgumentException($"--subs-sched takes dynamic or static, not '{other}'"),
+        };
+
+        c.SubscriptionsSharedClusterBlocks = Str(args, "--subs-shared", "off") switch
+        {
+            "on" => true,
+            "off" => false,
+            var other => throw new ArgumentException($"--subs-shared takes on or off, not '{other}'"),
+        };
+
+        c.SubscriptionsIncrementalInterest = Str(args, "--subs-incremental", "on") switch
+        {
+            "on" => true,
+            "off" => false,
+            var other => throw new ArgumentException($"--subs-incremental takes on or off, not '{other}'"),
+        };
+
+        c.DormancyTicks = Int(args, "--dormancy", 0);
+        c.SubscriptionsPhaseTiming = Array.IndexOf(args, "--subs-phases") >= 0;
+        c.SubscriptionsOwedSlice = Int(args, "--subs-owed-slice", 2);
+        c.SubscriptionsGatherPrefetch = Str(args, "--subs-prefetch", "off") switch
+        {
+            "on" => true,
+            "off" => false,
+            var other => throw new ArgumentException($"--subs-prefetch takes on or off, not '{other}'"),
+        };
+        c.SubscriptionsOwedSlotCarry = Str(args, "--subs-owed", "on") switch
+        {
+            "on" => true,
+            "off" => false,
+            var other => throw new ArgumentException($"--subs-owed takes on or off, not '{other}'"),
+        };
+        c.IdleCreatureFraction = Math.Clamp(Dbl(args, "--idle-creatures", 0d), 0d, 1d);
 
         c.SubscriptionsCollapseWorkUnits = Str(args, "--subs-pipeline", "staged") switch
         {
@@ -114,5 +155,11 @@ public static class CommandLine
     {
         var i = Array.IndexOf(args, name);
         return i >= 0 && i + 1 < args.Length && int.TryParse(args[i + 1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) ? v : fallback;
+    }
+
+    private static double Dbl(string[] args, string name, double fallback)
+    {
+        var i = Array.IndexOf(args, name);
+        return i >= 0 && i + 1 < args.Length && double.TryParse(args[i + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : fallback;
     }
 }

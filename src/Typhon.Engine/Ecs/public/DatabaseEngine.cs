@@ -888,6 +888,58 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         state.SpatialBarrierOnly = value;
     }
 
+    /// <summary>
+    /// Enables cluster dormancy for <typeparamref name="TArch"/>: a cluster with no entity written for <paramref name="thresholdTicks"/> consecutive
+    /// ticks is put to sleep, and a sleeping cluster is skipped by system dispatch and by the replication projection pass.
+    /// </summary>
+    /// <typeparam name="TArch">The cluster archetype.</typeparam>
+    /// <param name="thresholdTicks">Consecutive clean ticks before sleeping. <c>0</c> disables dormancy, which is the default.</param>
+    /// <param name="heartbeatTicks">When &gt; 0, a sleeping cluster is woken on a staggered schedule every this many ticks. <c>0</c> for none.</param>
+    /// <exception cref="InvalidOperationException">The archetype is not registered, or is not a cluster archetype.</exception>
+    /// <remarks>
+    /// <para>
+    /// The mechanism itself is older than this entry point (issue #233) and had no public way to turn it on, which is the likeliest reason nothing used
+    /// it. What it buys is the same thing Unreal's net dormancy buys: work proportional to what MOVES rather than to what EXISTS, on every consumer that
+    /// honours it.
+    /// </para>
+    /// <para>
+    /// <b>The precondition, and it is sharp.</b> Sleep is decided from the per-entity dirty bitmap, and
+    /// <see cref="ClusterRef{TArch}.WriteSpatial{T}(Comp{T}, int, in T)"/> deliberately raises no dirty bit — so an archetype whose entities only MOVE
+    /// looks clean, is put to sleep while still in motion, stops being dispatched, and freezes. An application that combines the two must mark the
+    /// column itself (<see cref="ClusterRef{TArch}.MarkDirty{T}"/>) on a cluster it moved. That is a contract of <c>WriteSpatial</c>, not of dormancy.
+    /// </para>
+    /// <para>
+    /// <b>Cost when unused: nothing measurable.</b> Every consumer gates on <c>SleepingClusterCount &gt; 0</c>, which stays zero while the threshold is
+    /// zero, so the check folds to one predictable-not-taken branch.
+    /// </para>
+    /// </remarks>
+    [PublicAPI]
+    public void SetClusterDormancy<TArch>(int thresholdTicks, int heartbeatTicks = 0) where TArch : Archetype<TArch>
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(thresholdTicks);
+        ArgumentOutOfRangeException.ThrowIfNegative(heartbeatTicks);
+
+        var meta = Archetype<TArch>.Metadata;
+        if (meta == null)
+        {
+            throw new InvalidOperationException($"Archetype {typeof(TArch).Name} not registered. Call after InitializeArchetypes.");
+        }
+
+        var state = _archetypeStates[meta.ArchetypeId]?.ClusterState
+                    ?? throw new InvalidOperationException($"Archetype {typeof(TArch).Name} is not a cluster archetype.");
+
+        // The same check SetSpatialBarrierOnly makes, and for a sharper reason here: the dormancy arrays are allocated only inside InitializeSpatial's
+        // spatial branch, so on a non-spatial archetype this would set a threshold that nothing can ever act on and report success.
+        if (!state.SpatialSlot.HasSpatialIndex)
+        {
+            throw new InvalidOperationException(
+                $"Archetype {typeof(TArch).Name} has no spatial-indexed component, so it has no dormancy state to configure.");
+        }
+
+        state.SleepThresholdTicks = thresholdTicks;
+        state.HeartbeatIntervalTicks = heartbeatTicks;
+    }
+
     /// <summary>Raised during schema migration to report progress to subscribers.</summary>
     [PublicAPI]
     public event EventHandler<MigrationProgressEventArgs> OnMigrationProgress;

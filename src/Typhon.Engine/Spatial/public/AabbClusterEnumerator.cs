@@ -437,6 +437,82 @@ public unsafe ref struct AabbClusterEnumerator
         }
     }
 
+    /// <summary>
+    /// Write up to <paramref name="destination"/>.Length further CLUSTERS the broadphase admits, and return how many were written.
+    /// </summary>
+    /// <param name="destination">Where to write them.</param>
+    /// <returns>How many were written; 0 once the query is exhausted, or for an empty destination.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>No entity is read.</b> The broadphase — the per-cell cluster index, its SIMD half, the cell tree and the escaped-cluster tail — runs exactly as
+    /// it does for <see cref="MoveNext"/>, and the narrowphase that would split each admitted cluster back into entities does not. For a caller whose unit
+    /// of interest is the cluster that is the whole query: measured on the SWG demo at d06 with 200 sessions, the entity-level form reports about 416 000
+    /// hits per tick where this reports about 19 000 clusters, and the 54 ns each of those hits costs is what it removes.
+    /// </para>
+    /// <para>
+    /// <b>It abandons whatever the previous call left open.</b> This enumeration answers per cluster, so a cluster is reported once and its remaining slots
+    /// are dropped rather than carried; mixing it with <see cref="MoveNext"/> or <see cref="Fill"/> on one enumerator therefore loses the entities of the
+    /// cluster in hand. Nothing forbids it, and nothing needs it.
+    /// </para>
+    /// <para>
+    /// <b>The bounds are the cluster's own, read back into world space.</b> They come from the archetype's <c>ClusterAabbs</c> in the frame of the cell
+    /// <c>ClusterCellMap</c> files the cluster under, rather than from whichever of the three broadphase branches admitted it — one conversion that is
+    /// right for all of them, against three that would each have to be kept right separately.
+    /// </para>
+    /// </remarks>
+    public int FillClusters(scoped Span<ClusterBroadphaseHit> destination)
+    {
+        if (destination.IsEmpty)
+        {
+            return 0;
+        }
+
+        ThrowIfRentStale();
+        var aabbs = Volatile.Read(ref _state.ClusterAabbs);
+        var cellMap = Volatile.Read(ref _state.ClusterCellMap);
+        var written = 0;
+        while (written < destination.Length)
+        {
+            // Drop the cluster in hand rather than draining it: this enumeration's unit is the cluster.
+            _currentOccupancyBits = 0UL;
+            _decidedHits = 0UL;
+            if (!NextCluster())
+            {
+                ReleaseRentAfterDrain();
+                break;
+            }
+
+            var chunkId = _currentClusterChunkId;
+            var slots = _currentOccupancyBits;
+            if (slots == 0UL)
+            {
+                // An empty cluster the broadphase still holds bounds for. It names no entity, so it is not a hit.
+                continue;
+            }
+
+            // An unbounded box for a cluster whose bounds cannot be read is the SAFE direction: the caller's own test then admits it and looks inside,
+            // where the truth is. Narrowing on a missing entry would drop entities, which is SQ-01's silent direction.
+            var minX = double.NegativeInfinity;
+            var minY = double.NegativeInfinity;
+            var maxX = double.PositiveInfinity;
+            var maxY = double.PositiveInfinity;
+            if (aabbs != null && cellMap != null && (uint)chunkId < (uint)aabbs.Length && (uint)chunkId < (uint)cellMap.Length)
+            {
+                ref readonly var box = ref aabbs[chunkId];
+                _grid.CellOrigin(cellMap[chunkId], out var originX, out var originY, out _);
+                minX = ClusterSpatialAabb.ToWorldExact(box.MinX, originX);
+                minY = ClusterSpatialAabb.ToWorldExact(box.MinY, originY);
+                maxX = ClusterSpatialAabb.ToWorldExact(box.MaxX, originX);
+                maxY = ClusterSpatialAabb.ToWorldExact(box.MaxY, originY);
+            }
+
+            destination[written++] = new ClusterBroadphaseHit(chunkId, slots, minX, minY, maxX, maxY);
+        }
+
+        _tallyHits += written;
+        return written;
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     // Narrowphase: one drain loop per storage tier
     // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════

@@ -112,6 +112,9 @@ public sealed class TyphonClient : IAsyncDisposable
     /// <summary>How many messages have been received across every attempt.</summary>
     public long MessagesReceived { get; private set; }
 
+    /// <summary>How many bytes those messages carried, as they came off the transport — the wire cost of this session.</summary>
+    public long BytesReceived { get; private set; }
+
     /// <summary>How many times a session has been opened, including reconnects.</summary>
     public int Connects { get; private set; }
 
@@ -395,6 +398,7 @@ public sealed class TyphonClient : IAsyncDisposable
             }
 
             MessagesReceived++;
+            BytesReceived += message.Length;
             _options.Recorder?.Record(message);
 
             try

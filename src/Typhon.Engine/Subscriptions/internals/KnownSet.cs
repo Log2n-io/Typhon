@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics.X86;
 
 namespace Typhon.Engine.Internals;
 
@@ -265,6 +266,29 @@ internal sealed unsafe class KnownSet : ResourceNode, IMemoryResource
     /// <inheritdoc />
     /// <remarks>Bookkeeping only. The entry buffer is a child of this node and is accounted separately, per the interface contract.</remarks>
     public int EstimatedMemorySize => 64;
+
+    /// <summary>
+    /// Brings the line a <see cref="Probe"/> of <paramref name="netId"/> would read first toward the core, without reading it.
+    /// </summary>
+    /// <remarks>
+    /// <b>A hint and nothing else.</b> It observes no state, returns nothing, and cannot fault: a prefetch of an address the caller may not read is
+    /// architecturally a no-op, which is what makes it safe to issue for a slot the walk has not reached yet. On a platform with no prefetch instruction
+    /// the whole body folds away, so the feature costs a JIT-time constant when it is not available.
+    /// <para>
+    /// It exists because the gather's probe is the one miss whose ADDRESS depends on a previous miss — the slot's netId, read from its replication block —
+    /// so the only way to overlap it with anything is to compute it one slot early. Measured at d06 with 200 sessions the gather spent 409 ns per interest
+    /// run for 1.7 visited slots, which is five dependent misses end to end and no memory-level parallelism at all.
+    /// </para>
+    /// </remarks>
+    /// <param name="netId">The identity a later <see cref="Probe"/> will look up.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void PrefetchProbe(uint netId)
+    {
+        if (Sse.IsSupported)
+        {
+            Sse.Prefetch0(_entries + (int)(HashUtils.FastHash32(netId) & (uint)_mask));
+        }
+    }
 
     /// <summary>
     /// Answers the probe question for one hit: unknown, known-and-current, or known-under-another-generation.

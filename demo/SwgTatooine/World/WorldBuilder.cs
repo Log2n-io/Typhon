@@ -221,9 +221,19 @@ public static class WorldBuilder
         var bounds = default(CreaturePlacement);
         bounds.SetAt(x, z, 1.5f);
 
+        // AMBIENT: a creature that never thinks and never moves, so its cluster can actually go quiet.
+        //
+        // Decided PER LAIR, not per creature, and that is the whole difference between a knob that works and one that does not. Clusters are spatial and
+        // a lair's creatures are spawned inside one disc, so they share clusters; drawing the coin per creature leaves every cluster holding a mix, one
+        // active member is enough to keep a cluster dirty, and nothing ever sleeps. Measured: half the creatures ambient, drawn per creature, produced
+        // ZERO dormant clusters. The hash is of the lair's own position, so it is stable across arms without threading extra state through the call.
+        var lairHash = (uint)(BitConverter.SingleToInt32Bits(lairX) * 0x9E3779B1) ^ (uint)(BitConverter.SingleToInt32Bits(lairZ) * 0x85EBCA77);
+        var ambient = config.IdleCreatureFraction > 0d
+            && (lairHash % 1000u) < (uint)(config.IdleCreatureFraction * 1000d);
+
         var ai = new CreatureBrain
         {
-            Mode = AiMode.Wander,
+            Mode = ambient ? AiMode.Idle : AiMode.Wander,
             HomeX = lairX,
             HomeZ = lairZ,
             LeashRadius = TatooineData.LeashRadiusM * config.ContentScale,

@@ -158,6 +158,12 @@ internal sealed unsafe class ReplicationBlockPool : ResourceNode, IMemoryResourc
             // counter wraps" is a worse guarantee than "empty", for two stores on a path that runs once per block.
             header->ChangedSlots = 0;
             header->ChangedTick = 0;
+
+            // NOT inert if left behind, unlike the pair above: ProjectedWatchedMask and ProjectedOccupancy carry no tick, so the dormant-cluster skip in
+            // ProjectionPass would read ANOTHER cluster's state and conclude that this block needs no projection. Its hot entries would then keep naming
+            // the previous occupant's entities, with their identities, and sessions would be served them.
+            header->ProjectedWatchedMask = 0;
+            header->ProjectedOccupancy = 0;
             header->ChunkId = UnassignedChunkId;
             header->NextFree = FreeListEnd;
             header->PoolState = PoolStateRented;

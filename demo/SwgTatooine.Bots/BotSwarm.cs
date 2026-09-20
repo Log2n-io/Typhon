@@ -111,6 +111,21 @@ public sealed class BotSwarm : IAsyncDisposable
     }
 
     /// <summary>Messages received across every session.</summary>
+    /// <summary>Bytes delivered to the whole population, as they came off the wire.</summary>
+    public long BytesReceived
+    {
+        get
+        {
+            var total = 0L;
+            foreach (var bot in _bots)
+            {
+                total += bot.Client.BytesReceived;
+            }
+
+            return total;
+        }
+    }
+
     public long MessagesReceived
     {
         get

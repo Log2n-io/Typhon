@@ -32,6 +32,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     private bool _disposed;
     private ArchetypeClusterState _attachedTo;
     private long _drainFaults;
+    private long _blocksDormant;
 
     // ── The tick's projection state ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     //
@@ -47,6 +48,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     private long _migrationsAbandoned;
     private readonly RecordArenaSet _records = new();
     private readonly NetIdLeaseSet _netIdLeases = new();
+    private readonly SharedRunTable _sharedRuns = new();
 
     private long _blocksProjected;
     private long _slotsProjected;
@@ -116,7 +118,8 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     {
         get
         {
-            var bytes = Directory.EstimatedBytes + _watchedBlocks.EstimatedBytes + _records.EstimatedBytes + _netIdLeases.EstimatedBytes + 128L;
+            var bytes = Directory.EstimatedBytes + _watchedBlocks.EstimatedBytes + _records.EstimatedBytes + _netIdLeases.EstimatedBytes
+                + _sharedRuns.EstimatedBytes + 128L;
             return bytes > int.MaxValue ? int.MaxValue : (int)bytes;
         }
     }
@@ -164,16 +167,98 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// </summary>
     public ArchetypeClusterState ClusterState => _attachedTo;
 
+    /// <summary>Blocks the projection pass declined because their cluster was dormant, across every tick since start.</summary>
+    /// <remarks>
+    /// Zero whenever the application has not enabled dormancy, which is what makes it usable as an anti-vacuity check rather than merely a diagnostic:
+    /// a measurement that shows no change means one thing if the pass declined most of the work and the opposite if it declined none.
+    /// </remarks>
+    public long BlocksDormant => Volatile.Read(ref _blocksDormant);
+
+    /// <summary>Records that the pass declined one block because its cluster was dormant.</summary>
+    /// <remarks>
+    /// One atomic per DECLINED block, beside the one <c>NoteProjected</c> already pays per projected block. It rides the cheap path by construction —
+    /// a declined block does no slot loop at all — so it cannot cost more than the work it replaces.
+    /// </remarks>
+    public void NoteBlockDormant() => Interlocked.Increment(ref _blocksDormant);
+
     /// <summary>The blocks this tick's interest hits marked, and the list S1 is partitioned over (SUB-13).</summary>
     public WatchedBlockList WatchedBlocks => _watchedBlocks;
 
     /// <summary>One record arena per S1 chunk: this tick's pre-encoded enter and state bodies.</summary>
     public RecordArenaSet Records => _records;
 
+    /// <summary>This archetype's shared cluster runs for the tick being assembled (17 § 18).</summary>
+    public SharedRunTable SharedRuns => _sharedRuns;
+
+    /// <summary>
+    /// The archetype's wire encoding constants, or <see langword="null"/> when shared cluster runs are off.
+    /// </summary>
+    /// <remarks>
+    /// <b>Resolved by the frame stage and handed here, rather than resolved twice.</b> The constants are the catalog's — a wire index, the offsets a record
+    /// is copied from, the section walk that recovers a body's real length — and a second derivation of them is exactly the drift the golden vectors exist
+    /// to catch. It is null unless <c>SubscriptionsOptions.SharedClusterBlocks</c> is on, which is also how the projection pass decides whether to build a
+    /// run at all: one null check, not an option read.
+    /// </remarks>
+    public ArchetypeEncodePlan EncodePlan { get; set; }
+
+    /// <summary>Records produced into a shared cluster run this tick — the encode-once count, against which the frame stage's is the multiplier.</summary>
+    public long SharedRunRecords => Volatile.Read(ref _sharedRunRecords);
+
+    private long _sharedRunRecords;
+
+    /// <summary>Counts one cluster's shared records.</summary>
+    /// <param name="records">State plus segment records in the run just published.</param>
+    public void NoteSharedRun(int records) => Interlocked.Add(ref _sharedRunRecords, records);
+
+    private long _skipReleased;
+    private long _skipInit;
+    private long _skipNoChange;
+    private long _published;
+
+    /// <summary>Clusters that published a shared run this run, and why the others did not.</summary>
+    public (long Published, long Released, long Init, long NoChange) SharedRunSkips =>
+        (Volatile.Read(ref _published), Volatile.Read(ref _skipReleased), Volatile.Read(ref _skipInit), Volatile.Read(ref _skipNoChange));
+
+    /// <summary>Counts one cluster's publish decision.</summary>
+    /// <param name="which">0 published, 1 an identity was released, 2 an entry was initialized, otherwise nothing changed.</param>
+    public void NoteSharedSkip(int which)
+    {
+        switch (which)
+        {
+            case 0: Interlocked.Increment(ref _published); break;
+            case 1: Interlocked.Increment(ref _skipReleased); break;
+            case 2: Interlocked.Increment(ref _skipInit); break;
+            default: Interlocked.Increment(ref _skipNoChange); break;
+        }
+    }
+
     /// <summary>Per-worker slices of the database's identity space, so S1 can name new entities from several workers at once.</summary>
     public NetIdLeaseSet NetIdLeases => _netIdLeases;
 
     /// <summary>Blocks the projection pass has walked, cumulative.</summary>
+    /// <summary>
+    /// Slots the projection named as changed, summed over every block and tick — the number of records a per-CLUSTER encode would produce.
+    /// </summary>
+    /// <remarks>
+    /// <b>The ceiling of Layer 4, measured rather than argued.</b> A state record's bytes depend on the entity and the tick, not on who is watching, so
+    /// every session that holds a cluster and is one tick behind is owed the SAME bytes for every slot the projection named. This counts those slots once;
+    /// the frame stage counts the records it actually emits. The ratio between them is how many times the subsystem encodes the same thing, and therefore
+    /// the most an encode-once-per-cluster design could remove. Below about 2 it is not worth a wire format change.
+    /// </remarks>
+    public long ChangedSlotsPublished => Volatile.Read(ref _changedSlotsPublished);
+
+    private long _changedSlotsPublished;
+
+    /// <summary>Records the slots one block's projection named as changed.</summary>
+    /// <param name="slots">How many.</param>
+    public void NoteChangedSlots(int slots)
+    {
+        if (slots != 0)
+        {
+            Interlocked.Add(ref _changedSlotsPublished, slots);
+        }
+    }
+
     public long BlocksProjected => Volatile.Read(ref _blocksProjected);
 
     /// <summary>
@@ -315,6 +400,10 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
             }
 
             ClearEntry(srcBytes, srcSlot);
+
+            // The arrival, named for the projection. Without it an entity whose projected bytes did not change on this tick moves clusters invisibly, and
+            // the session watching the cluster it LEFT emits a leave for an entity still inside its own view (see ReplicationBlockHeader.ArrivedSlots).
+            Interlocked.Or(ref destination->ArrivedSlots, 1UL << dstSlot);
             Interlocked.Increment(ref _entriesMigrated);
             return ReplicationMigrationOutcome.Carried;
         }
@@ -439,6 +528,8 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
                         (uint)Layout.OwnerEntrySize);
                 }
 
+                // Same reason as the carried path: a parked entry lands with every stamp it left with, so nothing else would name the slot.
+                Interlocked.Or(ref block->ArrivedSlots, 1UL << slot);
                 written++;
             }
             else
@@ -511,6 +602,27 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
         // has none, and only a watched slot is ever reached. It sizes the very first refill and nothing after it — see NetIdLeaseSet.BeginTick.
         _netIdLeases.BeginTick(NetIds, workers, _watchedBlocks.Count * Layout.SlotCount);
         _records.BeginTick(workers);
+
+        // Sized HERE, serially, because the workers below publish into it from every chunk at once and a growth on that path is several threads
+        // reallocating one native buffer with nothing synchronizing them (17 § 18). A chunk id past the end simply publishes nothing and is encoded per
+        // session, so an under-estimate costs sharing and never correctness.
+        if (EncodePlan != null)
+        {
+            var highest = -1;
+            for (var i = 0; i < _watchedBlocks.Count; i++)
+            {
+                var chunkId = _watchedBlocks[i]->ChunkId;
+                if (chunkId > highest)
+                {
+                    highest = chunkId;
+                }
+            }
+
+            if (highest >= 0)
+            {
+                _sharedRuns.EnsureCapacity(highest + 1);
+            }
+        }
     }
 
     /// <summary>
@@ -577,6 +689,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     public void ResetProjectionCounters()
     {
         Volatile.Write(ref _blocksProjected, 0);
+        Volatile.Write(ref _blocksDormant, 0);
         Volatile.Write(ref _slotsProjected, 0);
         Volatile.Write(ref _recordsProduced, 0);
         Volatile.Write(ref _identitiesReleased, 0);
@@ -739,6 +852,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
         _watchedBlocks.Dispose();
         _records.Dispose();
         _netIdLeases.Dispose();
+        _sharedRuns.Dispose();
 
         // The parked entries hold native memory of their own, and nothing else names it.
         lock (_parkLock)
