@@ -270,6 +270,13 @@ public sealed class SimConfig
     /// <summary>Whether each cluster's records are encoded once and referenced by every session (<c>--subs-shared on|off</c>).</summary>
     public bool SubscriptionsSharedClusterBlocks;
 
+    /// <summary><c>--subs-band on|off</c>: whether the player disc keeps a hysteresis band between its enter and leave radii.</summary>
+    /// <remarks>
+    /// A same-binary switch, and both arms query the same radius: off declares one disc at the LEAVE radius, on declares the pair. What moves is whether
+    /// an entity between the two is admitted to a session that does not already hold it, which is the only difference the measurement is about.
+    /// </remarks>
+    public bool SubscriptionsHysteresis = true;
+
     /// <summary>Idle iterations a scheduler worker spins inside a tick before yielding (<c>--idle-spin N</c>).</summary>
     public int WorkerIdleSpin = 100;
 

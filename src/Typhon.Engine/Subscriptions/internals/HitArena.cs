@@ -173,6 +173,9 @@ internal sealed class HitArena
 
     private int[] _sphereChunks = new int[64];
     private ulong[] _sphereMasks = new ulong[64];
+
+    /// <summary>Per sphere run, the subset of <see cref="_sphereMasks"/> inside the observer's ENTER radius rather than merely inside the band.</summary>
+    private ulong[] _sphereNear = new ulong[64];
     private int _sphereCount;
 
     /// <summary>
@@ -254,6 +257,9 @@ internal sealed class HitArena
     private int[] _pickChunks = new int[256];
     private ulong[] _pickMasks = new ulong[256];
 
+    /// <summary>Per picked cluster, its slots when the cluster's box reaches inside the ENTER radius, and zero when it only reaches the band.</summary>
+    private ulong[] _pickNear = new ulong[256];
+
     /// <summary>Where each accepted candidate came from in the candidate columns, so its bounds can be read back without copying them.</summary>
     private int[] _pickSources = new int[256];
     private int _pickCount;
@@ -322,23 +328,36 @@ internal sealed class HitArena
     /// nearest point of its tight box is within the radius, so every entity inside the disc is inside a cluster that passes — the over-approximation goes
     /// one way only, and <c>ResidentInterestTests</c> asserts that direction entity by entity against a direct query.
     /// </remarks>
-    public void SelectClustersInto(double cx, double cy, double radius, int from, int to) => SelectClustersInto(cx, cy, radius, from, to, onlyNew: false);
+    public void SelectClustersInto(double cx, double cy, double radius, int from, int to) =>
+        SelectClustersInto(cx, cy, radius, radius, from, to, onlyNew: false);
+
+    /// <summary>Selects the cluster candidates one session reaches, splitting them into those inside the enter radius and those only inside the band.</summary>
+    /// <param name="cx">The viewpoint X.</param>
+    /// <param name="cy">The viewpoint Y.</param>
+    /// <param name="enterRadius">The radius a cluster the session does not already hold must reach inside.</param>
+    /// <param name="leaveRadius">The radius a cluster the session already holds may stay inside; never smaller than <paramref name="enterRadius"/>.</param>
+    /// <param name="from">First candidate.</param>
+    /// <param name="to">One past the last.</param>
+    public void SelectClustersInto(double cx, double cy, double enterRadius, double leaveRadius, int from, int to) =>
+        SelectClustersInto(cx, cy, enterRadius, leaveRadius, from, to, onlyNew: false);
 
     /// <summary>
-    /// Selects cluster candidates within <paramref name="radius"/>, optionally only those the cell did not hold last tick.
+    /// Selects cluster candidates the session reaches, optionally only those the cell did not hold last tick.
     /// </summary>
     /// <param name="cx">The session's viewpoint X.</param>
     /// <param name="cy">Its viewpoint Y.</param>
-    /// <param name="radius">The distance to admit within.</param>
+    /// <param name="enterRadius">The radius a cluster the session does not already hold must reach inside.</param>
+    /// <param name="leaveRadius">The radius a cluster the session already holds may stay inside; never smaller than <paramref name="enterRadius"/>.</param>
     /// <param name="from">First candidate of the archetype's range.</param>
     /// <param name="to">One past its last.</param>
     /// <param name="onlyNew">
     /// When set, only candidates flagged new are considered. That is the incremental residency pass's second half: everything else it needs is already an
     /// entry of the session's view, and only a cluster the cell has never shown it can require a map lookup.
     /// </param>
-    public void SelectClustersInto(double cx, double cy, double radius, int from, int to, bool onlyNew)
+    public void SelectClustersInto(double cx, double cy, double enterRadius, double leaveRadius, int from, int to, bool onlyNew)
     {
-        var radiusSq = radius * radius;
+        var enterSq = enterRadius * enterRadius;
+        var leaveSq = leaveRadius * leaveRadius;
         var accepted = 0;
         for (var i = from; i < to; i++)
         {
@@ -350,7 +369,8 @@ internal sealed class HitArena
             // Closest-point distance to the box, per axis: zero inside the span, the gap outside it.
             var dx = Math.Max(Math.Max(_clusterMinX[i] - cx, 0d), cx - _clusterMaxX[i]);
             var dy = Math.Max(Math.Max(_clusterMinY[i] - cy, 0d), cy - _clusterMaxY[i]);
-            if ((dx * dx) + (dy * dy) > radiusSq)
+            var distSq = (dx * dx) + (dy * dy);
+            if (distSq > leaveSq)
             {
                 continue;
             }
@@ -359,11 +379,16 @@ internal sealed class HitArena
             {
                 Array.Resize(ref _pickChunks, _pickChunks.Length * 2);
                 Array.Resize(ref _pickMasks, _pickChunks.Length);
+                Array.Resize(ref _pickNear, _pickChunks.Length);
                 Array.Resize(ref _pickSources, _pickChunks.Length);
             }
 
             _pickChunks[_pickCount] = _clusterChunks[i];
             _pickMasks[_pickCount] = _clusterSlots[i];
+
+            // Zero when the cluster reaches only the band: its slots are then admitted for a session that already holds them and for nobody else. With no
+            // declared band the two radii are equal, every accepted cluster is near, and the blend downstream is the identity.
+            _pickNear[_pickCount] = distSq <= enterSq ? _clusterSlots[i] : 0UL;
             _pickSources[_pickCount] = i;
             _pickCount++;
             accepted++;
@@ -397,6 +422,17 @@ internal sealed class HitArena
     /// <param name="index">Its position.</param>
     /// <returns>The mask.</returns>
     public ulong PickMask(int index) => _pickMasks[index];
+
+    /// <summary>
+    /// The picked cluster's slots when its box reaches inside the enter radius, and zero when it reaches only the band.
+    /// </summary>
+    /// <remarks>
+    /// <b>All or nothing per cluster, because at cluster granularity that is the only thing that can be said.</b> This form never reads an entity, so it
+    /// cannot know which entities of a straddling cluster are inside the enter radius and which are in the band; the cluster's closest point is what it
+    /// has. That is the same over-approximation the mode already makes in the other direction, and it errs the safe way: a cluster whose box reaches the
+    /// enter disc admits all of its entities, exactly as it does today.
+    /// </remarks>
+    public ulong PickNear(int index) => _pickNear[index];
 
     /// <summary>Where each archetype's candidates begin, for the cell being resolved.</summary>
     /// <remarks>
@@ -467,9 +503,28 @@ internal sealed class HitArena
     /// Repeating it rather than approximating it is what makes this path's membership identical to a direct query's, which is the property the whole broad
     /// phase depends on and which <c>CellKeyedInterestTests</c> asserts entity by entity.
     /// </remarks>
-    public void FilterCandidatesInto(double cx, double cy, double radius, int from, int to)
+    public void FilterCandidatesInto(double cx, double cy, double radius, int from, int to) =>
+        FilterCandidatesInto(cx, cy, radius, radius, from, to);
+
+    /// <summary>
+    /// Filters the cell's candidates to one session's disc, splitting them into those inside the enter radius and those only inside the hysteresis band.
+    /// </summary>
+    /// <param name="cx">The viewpoint X.</param>
+    /// <param name="cy">The viewpoint Y.</param>
+    /// <param name="enterRadius">The radius an entity the session does not already hold must be inside.</param>
+    /// <param name="leaveRadius">The radius an entity the session already holds may stay inside; never smaller than <paramref name="enterRadius"/>.</param>
+    /// <param name="from">First candidate.</param>
+    /// <param name="to">One past the last.</param>
+    /// <remarks>
+    /// <b>One pass, two compares.</b> The loads, the box rejection and the closest-point distance are what this kernel costs and they are done once; the
+    /// band adds one more compare against an already-computed squared distance and one more mask extraction per step. Running the kernel twice at two
+    /// radii would double the part that is expensive to buy the part that is nearly free.
+    /// </remarks>
+    public void FilterCandidatesInto(double cx, double cy, double enterRadius, double leaveRadius, int from, int to)
     {
+        var radius = leaveRadius;
         var radiusSq = radius * radius;
+        var enterSq = enterRadius * enterRadius;
         var qMinX = cx - radius;
         var qMaxX = cx + radius;
         var qMinY = cy - radius;
@@ -488,6 +543,7 @@ internal sealed class HitArena
             var vcx = Vector512.Create(cx);
             var vcy = Vector512.Create(cy);
             var vr2 = Vector512.Create(radiusSq);
+            var vEnter2 = Vector512.Create(enterSq);
             var vqMinX = Vector512.Create(qMinX);
             var vqMaxX = Vector512.Create(qMaxX);
             var vqMinY = Vector512.Create(qMinY);
@@ -508,15 +564,17 @@ internal sealed class HitArena
 
                 var dx = Vector512.MaxNative(zero, Vector512.MaxNative(minX - vcx, vcx - maxX));
                 var dy = Vector512.MaxNative(zero, Vector512.MaxNative(minY - vcy, vcy - maxY));
-                miss |= Vector512.GreaterThan((dx * dx) + (dy * dy), vr2);
+                var distSq = (dx * dx) + (dy * dy);
+                miss |= Vector512.GreaterThan(distSq, vr2);
 
                 var hit = ~miss.ExtractMostSignificantBits() & 0xFFu;
+                var near = ~(miss | Vector512.GreaterThan(distSq, vEnter2)).ExtractMostSignificantBits() & 0xFFu;
                 while (hit != 0)
                 {
                     var lane = BitOperations.TrailingZeroCount(hit);
                     hit &= hit - 1;
                     _candAccepted++;
-                    AddSphereHit(_candChunks[i + lane], _candSlots[i + lane]);
+                    AddSphereHit(_candChunks[i + lane], _candSlots[i + lane], (near & (1u << lane)) != 0);
                 }
             }
         }
@@ -526,6 +584,7 @@ internal sealed class HitArena
             var vcx = Vector256.Create(cx);
             var vcy = Vector256.Create(cy);
             var vr2 = Vector256.Create(radiusSq);
+            var vEnter2 = Vector256.Create(enterSq);
             var vqMinX = Vector256.Create(qMinX);
             var vqMaxX = Vector256.Create(qMaxX);
             var vqMinY = Vector256.Create(qMinY);
@@ -547,15 +606,17 @@ internal sealed class HitArena
 
                 var dx = Vector256.MaxNative(zero, Vector256.MaxNative(minX - vcx, vcx - maxX));
                 var dy = Vector256.MaxNative(zero, Vector256.MaxNative(minY - vcy, vcy - maxY));
-                miss |= Vector256.GreaterThan((dx * dx) + (dy * dy), vr2);
+                var distSq = (dx * dx) + (dy * dy);
+                miss |= Vector256.GreaterThan(distSq, vr2);
 
                 var hit = ~miss.ExtractMostSignificantBits() & 0xFu;
+                var near = ~(miss | Vector256.GreaterThan(distSq, vEnter2)).ExtractMostSignificantBits() & 0xFu;
                 while (hit != 0)
                 {
                     var lane = BitOperations.TrailingZeroCount(hit);
                     hit &= hit - 1;
                     _candAccepted++;
-                    AddSphereHit(_candChunks[i + lane], _candSlots[i + lane]);
+                    AddSphereHit(_candChunks[i + lane], _candSlots[i + lane], (near & (1u << lane)) != 0);
                 }
             }
         }
@@ -574,13 +635,14 @@ internal sealed class HitArena
             // upstream can produce a NaN bound today, but "repeated exactly" has to stay true of the arithmetic and not only of the shape.
             var dx = double.MaxNative(0d, double.MaxNative(minX - cx, cx - maxX));
             var dy = double.MaxNative(0d, double.MaxNative(minY - cy, cy - maxY));
-            if (((dx * dx) + (dy * dy)) > radiusSq)
+            var distSq = (dx * dx) + (dy * dy);
+            if (distSq > radiusSq)
             {
                 continue;
             }
 
             _candAccepted++;
-            AddSphereHit(_candChunks[i], _candSlots[i]);
+            AddSphereHit(_candChunks[i], _candSlots[i], distSq <= enterSq);
         }
     }
 
@@ -674,7 +736,16 @@ internal sealed class HitArena
     /// <summary>Merges one sphere hit into the run for its cluster.</summary>
     /// <param name="chunkId">The cluster the hit is in.</param>
     /// <param name="slot">Its slot within the cluster.</param>
-    public void AddSphereHit(int chunkId, int slot)
+    public void AddSphereHit(int chunkId, int slot) => AddSphereHit(chunkId, slot, near: true);
+
+    /// <summary>Merges one accepted entity into its cluster's run, recording whether it is inside the enter radius or only inside the band.</summary>
+    /// <param name="chunkId">Its cluster.</param>
+    /// <param name="slot">Its slot.</param>
+    /// <param name="near">
+    /// <see langword="false"/> when the entity is between the enter and leave radii. Such a slot is admitted only for a session that already holds it,
+    /// which is what stops an entity on the boundary entering and leaving on alternate ticks.
+    /// </param>
+    public void AddSphereHit(int chunkId, int slot, bool near)
     {
         if (chunkId < 0 || (uint)slot >= 64u)
         {
@@ -682,10 +753,13 @@ internal sealed class HitArena
         }
 
         var bit = 1UL << slot;
+        var nearBit = near ? bit : 0UL;
         var mapSlot = FindMapSlot(chunkId);
         if (_sphereMapKeys[mapSlot] != 0)
         {
-            _sphereMasks[_sphereMapValues[mapSlot]] |= bit;
+            var at = _sphereMapValues[mapSlot];
+            _sphereMasks[at] |= bit;
+            _sphereNear[at] |= nearBit;
             return;
         }
 
@@ -693,11 +767,13 @@ internal sealed class HitArena
         {
             Array.Resize(ref _sphereChunks, _sphereChunks.Length * 2);
             Array.Resize(ref _sphereMasks, _sphereChunks.Length);
+            Array.Resize(ref _sphereNear, _sphereChunks.Length);
             Array.Resize(ref _sphereMapSlots, _sphereChunks.Length);
         }
 
         _sphereChunks[_sphereCount] = chunkId;
         _sphereMasks[_sphereCount] = bit;
+        _sphereNear[_sphereCount] = nearBit;
 
         // Grown BEFORE the insert would take the table past half full, so FindMapSlot's probe loop always has an empty slot to terminate on. Growing after
         // would leave this insert probing a full table, which does not return.
@@ -725,6 +801,9 @@ internal sealed class HitArena
     /// <param name="index">Its position.</param>
     /// <returns>The mask.</returns>
     public ulong SphereMask(int index) => _sphereMasks[index];
+
+    /// <summary>The subset of <see cref="SphereMask"/> inside the observer's enter radius; equal to it when the profile declared no band.</summary>
+    public ulong SphereNear(int index) => _sphereNear[index];
 
     /// <summary>Records one cluster run.</summary>
     /// <param name="archetypeIndex">Index of the archetype's compiled plan.</param>

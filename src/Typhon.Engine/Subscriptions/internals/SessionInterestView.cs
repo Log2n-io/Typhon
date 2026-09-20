@@ -84,6 +84,26 @@ internal sealed unsafe class SessionInterestView : IDisposable
     /// <summary>The key of cluster <paramref name="index"/>.</summary>
     public long KeyAt(int index) => _entryKeys[index];
 
+    /// <summary>What the session's last published frame described in a cluster, WITHOUT creating an entry for it or marking it reached.</summary>
+    /// <param name="key">The cluster, from <see cref="KeyOf"/>.</param>
+    /// <returns>The committed mask, or <c>0</c> when the session has never held that cluster.</returns>
+    /// <remarks>
+    /// <b>It exists for the hysteresis band, which has to ask "do I already hold this" before deciding whether the cluster is reached at all.</b>
+    /// <see cref="Touch"/> cannot answer it: touching creates an empty entry and stamps it as reached this tick, which is exactly the claim the band is
+    /// still deciding whether to make, and an entry stamped for a cluster that then admits nothing tells <c>CloseSession</c> the session still holds a
+    /// cluster it does not.
+    /// </remarks>
+    public ulong HeldMask(long key)
+    {
+        if (_mapKeys == null || _entryCount == 0)
+        {
+            return 0;
+        }
+
+        var slot = FindMapSlot(key);
+        return _mapKeys[slot] == 0 ? 0UL : _entryMasks[_mapValues[slot]];
+    }
+
     /// <summary>Slots of cluster <paramref name="index"/> that the next frame must visit whatever the change masks say.</summary>
     public ulong OwedAt(int index) => _entryOwed[index];
 

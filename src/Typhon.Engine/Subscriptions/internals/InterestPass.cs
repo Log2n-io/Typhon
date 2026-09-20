@@ -120,6 +120,22 @@ internal sealed unsafe class InterestPass
         /// the walk entirely. Narrowing the band back down to "enter" for entities the session does not yet know is the refinement this defers.
         /// </remarks>
         public double QueryRadius { get; init; }
+
+        /// <summary>
+        /// The radius at which a <see cref="ObserverKind.Sphere"/> profile ADMITS an entity it does not already hold, in world units.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>The band between this and <see cref="QueryRadius"/> is the hysteresis.</b> An entity the session already holds stays while it is anywhere
+        /// inside the query radius; one the session does not hold is admitted only inside this. Without the band an entity hovering on the boundary enters
+        /// and leaves on alternate ticks, and every re-entry costs a full ENTER record rather than a state delta.
+        /// </para>
+        /// <para>
+        /// <b>Equal to <see cref="QueryRadius"/> when the profile declared no leave radius</b>, which makes the band's presence a property of the
+        /// declaration rather than of the code path: the two masks the narrow phase produces are then identical and the blend is the identity.
+        /// </para>
+        /// </remarks>
+        public double EnterRadius { get; init; }
     }
 
     private readonly CompiledProjectionPlan[] _plans;
@@ -811,8 +827,8 @@ internal sealed unsafe class InterestPass
         {
             sessionHits += profile.Kind == ObserverKind.Sphere
                 ? _resident
-                    ? WalkSphereResident(arena, view, archetypes[a], _tickViewpoints[i], profile.QueryRadius, ref probes)
-                    : WalkSphere(arena, view, archetypes[a], _tickViewpoints[i], profile.QueryRadius, ref probes)
+                    ? WalkSphereResident(arena, view, archetypes[a], _tickViewpoints[i], profile.EnterRadius, profile.QueryRadius, ref probes)
+                    : WalkSphere(arena, view, archetypes[a], _tickViewpoints[i], profile.EnterRadius, profile.QueryRadius, ref probes)
                 : WalkArchetype(arena, view, archetypes[a], ref probes);
         }
 
@@ -907,6 +923,7 @@ internal sealed unsafe class InterestPass
         var profile = _profiles[_tickProfiles[start]];
         var archetypes = profile.ArchetypeIndices;
         var radius = profile.QueryRadius;
+        var enterRadius = profile.EnterRadius;
         var cell = CellSideFor(radius);
 
         // The cell's centre, recomputed from the first member's viewpoint. Every member shares the key, so every member shares this.
@@ -959,11 +976,11 @@ internal sealed unsafe class InterestPass
                 }
 
                 arena.BeginSphere();
-                arena.FilterCandidatesInto(viewpoint.X, viewpoint.Y, radius, ranges[a], to);
+                arena.FilterCandidatesInto(viewpoint.X, viewpoint.Y, enterRadius, radius, ranges[a], to);
 
                 for (var r = 0; r < arena.SphereCount; r++)
                 {
-                    sessionHits += FlushSphereRun(arena, view, archetypes[a], arena.SphereChunk(r), arena.SphereMask(r), ref probes);
+                    sessionHits += FlushSphereRun(arena, view, archetypes[a], arena.SphereChunk(r), arena.SphereNear(r), arena.SphereMask(r), ref probes);
                 }
             }
 
@@ -978,7 +995,8 @@ internal sealed unsafe class InterestPass
     /// <param name="arena">The worker's arena.</param>
     /// <param name="archetypeIndex">The archetype's plan index.</param>
     /// <param name="centre">The sphere's centre.</param>
-    /// <param name="radius">Its radius, in world units.</param>
+    /// <param name="enterRadius">The radius something the session does not already hold must be inside, in world units.</param>
+    /// <param name="radius">The radius it may stay inside once held; the query runs at this one.</param>
     /// <param name="probes">Directory probes, accumulated.</param>
     /// <returns>Hits recorded.</returns>
     /// <remarks>
@@ -999,7 +1017,8 @@ internal sealed unsafe class InterestPass
     /// </para>
     /// </remarks>
     /// <param name="view">The session's interest membership, or <see langword="null"/> when the pass is not incremental.</param>
-    private int WalkSphere(HitArena arena, SessionInterestView view, int archetypeIndex, Vector3D centre, double radius, ref long probes)
+    private int WalkSphere(HitArena arena, SessionInterestView view, int archetypeIndex, Vector3D centre, double enterRadius, double radius,
+        ref long probes)
     {
         var clusterState = _clusterStates[archetypeIndex];
         if (clusterState == null || clusterState.Grid == null)
@@ -1008,15 +1027,20 @@ internal sealed unsafe class InterestPass
         }
 
         arena.BeginSphere();
+        // The band, from the bounds the query already hands back rather than from a second query at the enter radius. Same closest-point arithmetic as
+        // the cell-keyed narrow phase, and it costs four loads the caller would otherwise have taken from the component table.
+        var enterSq = enterRadius * enterRadius;
         foreach (var hit in clusterState.QueryRadius(clusterState.Grid, centre.X, centre.Y, centre.Z, radius))
         {
-            arena.AddSphereHit(hit.ClusterChunkId, hit.SlotIndex);
+            var hx = double.MaxNative(0d, double.MaxNative(hit.MinX - centre.X, centre.X - hit.MaxX));
+            var hy = double.MaxNative(0d, double.MaxNative(hit.MinY - centre.Y, centre.Y - hit.MaxY));
+            arena.AddSphereHit(hit.ClusterChunkId, hit.SlotIndex, ((hx * hx) + (hy * hy)) <= enterSq);
         }
 
         var hits = 0;
         for (var i = 0; i < arena.SphereCount; i++)
         {
-            hits += FlushSphereRun(arena, view, archetypeIndex, arena.SphereChunk(i), arena.SphereMask(i), ref probes);
+            hits += FlushSphereRun(arena, view, archetypeIndex, arena.SphereChunk(i), arena.SphereNear(i), arena.SphereMask(i), ref probes);
         }
 
         return hits;
@@ -1054,6 +1078,7 @@ internal sealed unsafe class InterestPass
         var profile = _profiles[_tickProfiles[start]];
         var archetypes = profile.ArchetypeIndices;
         var radius = profile.QueryRadius;
+        var enterRadius = profile.EnterRadius;
         var cell = CellSideFor(radius);
         var centreX = (Math.Floor(_tickViewpoints[start].X / cell) + 0.5d) * cell;
         var centreY = (Math.Floor(_tickViewpoints[start].Y / cell) + 0.5d) * cell;
@@ -1103,10 +1128,10 @@ internal sealed unsafe class InterestPass
                 }
 
                 arena.BeginPick();
-                arena.SelectClustersInto(viewpoint.X, viewpoint.Y, radius, ranges[a], to);
+                arena.SelectClustersInto(viewpoint.X, viewpoint.Y, enterRadius, radius, ranges[a], to);
                 for (var r = 0; r < arena.PickCount; r++)
                 {
-                    sessionHits += FlushSphereRun(arena, view, archetypes[a], arena.PickChunk(r), arena.PickMask(r), ref probes);
+                    sessionHits += FlushSphereRun(arena, view, archetypes[a], arena.PickChunk(r), arena.PickNear(r), arena.PickMask(r), ref probes);
                 }
             }
 
@@ -1122,7 +1147,8 @@ internal sealed unsafe class InterestPass
     /// <param name="view">The session's interest membership, or <see langword="null"/> when the pass is not incremental.</param>
     /// <param name="archetypeIndex">The archetype's plan index.</param>
     /// <param name="centre">The sphere's centre.</param>
-    /// <param name="radius">Its radius, in world units.</param>
+    /// <param name="enterRadius">The radius something the session does not already hold must be inside, in world units.</param>
+    /// <param name="radius">The radius it may stay inside once held; the query runs at this one.</param>
     /// <param name="probes">Directory probes, accumulated.</param>
     /// <returns>Hits recorded.</returns>
     /// <remarks>
@@ -1130,7 +1156,8 @@ internal sealed unsafe class InterestPass
     /// corner of it passes the box and misses the disc. The closest-point test is repeated here for that reason, and so that this path's membership is the
     /// grouped one's.
     /// </remarks>
-    private int WalkSphereResident(HitArena arena, SessionInterestView view, int archetypeIndex, Vector3D centre, double radius, ref long probes)
+    private int WalkSphereResident(HitArena arena, SessionInterestView view, int archetypeIndex, Vector3D centre, double enterRadius, double radius,
+        ref long probes)
     {
         var clusterState = _clusterStates[archetypeIndex];
         if (clusterState == null || clusterState.Grid == null)
@@ -1141,6 +1168,7 @@ internal sealed unsafe class InterestPass
         Span<ClusterBroadphaseHit> batch = stackalloc ClusterBroadphaseHit[64];
         var query = clusterState.QueryRadius(clusterState.Grid, centre.X, centre.Y, centre.Z, radius);
         var radiusSq = radius * radius;
+        var enterSq = enterRadius * enterRadius;
         var hits = 0;
         int filled;
         while ((filled = query.FillClusters(batch)) > 0)
@@ -1150,12 +1178,15 @@ internal sealed unsafe class InterestPass
                 ref readonly var cluster = ref batch[k];
                 var dx = Math.Max(Math.Max(cluster.MinX - centre.X, 0d), centre.X - cluster.MaxX);
                 var dy = Math.Max(Math.Max(cluster.MinY - centre.Y, 0d), centre.Y - cluster.MaxY);
-                if ((dx * dx) + (dy * dy) > radiusSq)
+                var distSq = (dx * dx) + (dy * dy);
+                if (distSq > radiusSq)
                 {
                     continue;
                 }
 
-                hits += FlushSphereRun(arena, view, archetypeIndex, cluster.ChunkId, cluster.Slots, ref probes);
+                // All or nothing per cluster: this form reads no entity, so the cluster's closest point is the only thing it can say about the band.
+                var near = distSq <= enterSq ? cluster.Slots : 0UL;
+                hits += FlushSphereRun(arena, view, archetypeIndex, cluster.ChunkId, near, cluster.Slots, ref probes);
             }
         }
 
@@ -1166,15 +1197,40 @@ internal sealed unsafe class InterestPass
     /// <param name="arena">The worker's arena.</param>
     /// <param name="archetypeIndex">The archetype's plan index.</param>
     /// <param name="chunkId">The cluster, or -1 for "nothing accumulated yet".</param>
-    /// <param name="mask">The slots inside the sphere.</param>
+    /// <param name="nearMask">The slots inside the observer's ENTER radius, which it may take whether or not it already holds them.</param>
+    /// <param name="farMask">
+    /// The slots inside the LEAVE radius, a superset of <paramref name="nearMask"/>. Those outside the near mask are admitted only for a session that
+    /// already holds them; equal to it when the profile declared no band, which makes the blend the identity.
+    /// </param>
     /// <param name="probes">Directory probes, accumulated.</param>
     /// <returns>Hits recorded.</returns>
     /// <param name="view">The session's interest membership, or <see langword="null"/> when the pass is not incremental.</param>
-    private int FlushSphereRun(HitArena arena, SessionInterestView view, int archetypeIndex, int chunkId, ulong mask, ref long probes)
+    private int FlushSphereRun(HitArena arena, SessionInterestView view, int archetypeIndex, int chunkId, ulong nearMask, ulong farMask, ref long probes)
     {
-        if (chunkId < 0 || mask == 0)
+        if (chunkId < 0 || farMask == 0)
         {
             return 0;
+        }
+
+        // ── The hysteresis band ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+        //
+        // The query ran at the LEAVE radius, so `farMask` names everything the session may keep and `nearMask` the subset it may newly take. A slot the
+        // session already holds stays while it is anywhere inside the band; one it does not hold is admitted only inside the enter radius. Without that,
+        // an entity hovering on the boundary enters and leaves on alternate ticks and every re-entry costs a full ENTER record rather than a delta.
+        //
+        // Asked WITHOUT touching the view, because touching creates the entry and stamps it as reached — which is the claim this is still deciding
+        // whether to make. A cluster that reaches only the band and holds nothing of this session's is not reached at all, and stamping one would tell
+        // CloseSession the session still holds a cluster it does not.
+        //
+        // With no declared band the two masks are equal and this is the identity, which is what makes the two shapes one binary apart.
+        var mask = farMask;
+        if (nearMask != farMask)
+        {
+            mask = nearMask | (farMask & (view?.HeldMask(SessionInterestView.KeyOf((ushort)archetypeIndex, chunkId)) ?? 0UL));
+            if (mask == 0)
+            {
+                return 0;
+            }
         }
 
         var directory = _states[archetypeIndex].Directory;
@@ -1405,6 +1461,7 @@ internal sealed unsafe class InterestPass
             indices.Clear();
             var kind = ObserverKind.World;
             var queryRadius = 0d;
+            var enterRadius = 0d;
             var first = true;
 
             foreach (var observer in declaration.Observers)
@@ -1435,8 +1492,11 @@ internal sealed unsafe class InterestPass
                             $"Profile '{declaration.Name}' declares a Sphere observer with radius {observer.Radius}. A sphere needs a positive radius.");
                     }
 
-                    // The leave radius when there is one: the watched set must contain the hysteresis band, or an entity inside the band is dropped from the
-                    // walk and reported as a leave, which is the flapping the band exists to prevent.
+                    // TWO radii, and the distinction is the whole of the band. The query runs at the larger, because the watched set must contain the
+                    // band or an entity inside it is dropped from the walk and reported as a leave — the flapping the band exists to prevent. The enter
+                    // radius is what an entity the session does NOT already hold has to be inside, and keeping it is what was missing: folding both into
+                    // one number left nothing downstream able to tell the band from the disc, so the disc was a hard edge at the larger of the two.
+                    enterRadius = Math.Max(enterRadius, observer.Radius);
                     queryRadius = Math.Max(queryRadius, Math.Max(observer.Radius, observer.LeaveRadius));
                 }
 
@@ -1460,7 +1520,16 @@ internal sealed unsafe class InterestPass
                 }
             }
 
-            profiles[p] = new CompiledProfile(declaration.Name, indices.ToArray()) { Kind = kind, QueryRadius = queryRadius };
+            profiles[p] = new CompiledProfile(declaration.Name, indices.ToArray())
+            {
+                Kind = kind,
+                QueryRadius = queryRadius,
+
+                // No declared band means no band: the two radii are equal and every blend below is the identity. The engine does not invent one, because
+                // the width that would stop an entity flapping is a function of how fast things move relative to an observer and how long a tick is, and
+                // an engine default guessed without those is a number derived from nothing.
+                EnterRadius = enterRadius > 0d ? enterRadius : queryRadius,
+            };
         }
 
         return profiles;

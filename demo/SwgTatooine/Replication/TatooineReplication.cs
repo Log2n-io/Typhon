@@ -68,7 +68,17 @@ public static class TatooineReplication
 
     /// <summary>Declares everything a client can see.</summary>
     /// <param name="subs">The runtime's registry, before <c>Start</c>.</param>
-    public static void Declare(SubscriptionsRegistry subs)
+    public static void Declare(SubscriptionsRegistry subs) => Declare(subs, hysteresis: true);
+
+    /// <summary>Declares everything a client can see, with the player disc's hysteresis band on or off.</summary>
+    /// <param name="subs">The runtime's registry, before <c>Start</c>.</param>
+    /// <param name="hysteresis">
+    /// When false the disc is a hard edge at <see cref="PlayerLeaveRadiusM"/> — the same radius, no band — which is what the engine did before the band
+    /// was built. Both arms therefore query the same area and describe the same population, and the only thing that moves is whether an entity between
+    /// the two radii is admitted to a session that does not already hold it. That is what makes the comparison a measurement of the band rather than of
+    /// the disc's size.
+    /// </param>
+    public static void Declare(SubscriptionsRegistry subs, bool hysteresis)
     {
         ArgumentNullException.ThrowIfNull(subs);
 
@@ -107,7 +117,7 @@ public static class TatooineReplication
             .Of<WorldObject>());
 
         subs.Profile(PlayerProfile, p => p
-            .Sphere(PlayerRadiusM, PlayerLeaveRadiusM)
+            .Sphere(hysteresis ? PlayerRadiusM : PlayerLeaveRadiusM, hysteresis ? PlayerLeaveRadiusM : 0d)
             .Of<Player>()
             .Of<CityNpc>()
             .Of<Creature>());

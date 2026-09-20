@@ -70,6 +70,13 @@ public static class CommandLine
             c.SplitAwareness = true;
         }
 
+        c.SubscriptionsHysteresis = Str(args, "--subs-band", "on") switch
+        {
+            "on" => true,
+            "off" => false,
+            var other => throw new ArgumentException($"--subs-band takes on or off, not '{other}'"),
+        };
+
         var interestMode = Str(args, "--subs-interest", "cell");
         c.SubscriptionsCellKeyedInterest = interestMode switch
         {
