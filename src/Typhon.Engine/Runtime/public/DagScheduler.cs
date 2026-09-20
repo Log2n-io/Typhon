@@ -418,6 +418,28 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     private readonly ManualResetEventSlim[] _workerWake;
 
     /// <summary>
+    /// How many idle iterations a worker spins before it starts yielding the core, WHILE A TICK IS IN PROGRESS. Default 4096.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is the dispatch ramp, and it is a latency knob, not a throughput one.</b> A worker that finds no ready system inside a tick is waiting for a
+    /// sibling to finish a system it depends on — work that is coming in microseconds. Yielding gives the core up, and on a box with two threads per core
+    /// and every worker yielding, coming back costs tens of microseconds: measured on the SWG demo at 1 000 sessions, the last of 31 chunks of the frame
+    /// stage started <b>1.88 ms</b> after the first, which was 51 % of that stage's whole span and capped its parallel efficiency at 79 %.
+    /// </para>
+    /// <para>
+    /// <b>The budget is bounded by the tick, not by the gap between ticks.</b> Between ticks a worker parks on its own event and burns nothing — that path
+    /// is untouched. This one only spins while <c>_tickInProgress</c> is set and there are systems left, so the worst case is a worker spinning for the
+    /// remainder of a tick it has no work in, which is what a core would otherwise be idle for anyway.
+    /// </para>
+    /// <para>
+    /// <b>Lower it</b> on a box that is oversubscribed, or where the engine shares cores with other processes: there the yield is the right answer and the
+    /// spin is theft. 0 restores the pre-#906 behaviour of yielding after the first microsecond.
+    /// </para>
+    /// </remarks>
+    public static int WorkerIdleSpinBudget { get; set; } = 100;
+
+    /// <summary>
     /// Test seam: how long a parked worker waits before re-checking the generation by itself. 50 ms, a shutdown-liveness backstop; a test raises it so a
     /// worker the dispatcher failed to wake stalls the tick instead of arriving 50 ms late.
     /// </summary>
@@ -1583,7 +1605,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                         idleSpellStart = Stopwatch.GetTimestamp();
                     }
                     idleSpins++;
-                    if (idleSpins <= 100)
+                    if (idleSpins <= WorkerIdleSpinBudget)
                     {
                         if (trackUtilization)
                         {
