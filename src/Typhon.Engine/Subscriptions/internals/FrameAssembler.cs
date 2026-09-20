@@ -50,6 +50,18 @@ internal struct FrameCounters
     /// <summary>Enter candidates the budget deferred.</summary>
     public long EntersDeferred;
 
+    /// <summary>ENTER records the published frames carried.</summary>
+    public long EntersEmitted;
+
+    /// <summary>LEAVE records the published frames carried.</summary>
+    public long LeavesEmitted;
+
+    /// <summary>Known-set size at the moment each frame committed, summed. Divide by <see cref="FramesProduced"/> for the mean.</summary>
+    public long KnownTotal;
+
+    /// <summary>Outstanding slot debt at the moment each frame committed, summed.</summary>
+    public long OwedTotal;
+
     /// <summary>Frames refused for exceeding the ceiling.</summary>
     public long OversizeSkips;
 
@@ -720,6 +732,10 @@ internal sealed unsafe class FrameAssembler : IDisposable
     private long _bytesEncoded;
     private long _recordsEncoded;
     private long _entersDeferred;
+    private long _entersEmitted;
+    private long _leavesEmitted;
+    private long _knownTotal;
+    private long _owedTotal;
     private long _oversizeSkips;
     private long _sessionsDegraded;
     private long _sessionsClosedLagging;
@@ -833,6 +849,32 @@ internal sealed unsafe class FrameAssembler : IDisposable
 
     /// <summary>Enter candidates the per-frame budget deferred to a later frame.</summary>
     public long EntersDeferred => Volatile.Read(ref _entersDeferred);
+
+    /// <summary>ENTER and LEAVE records published since start, beside the enters the budget deferred.</summary>
+    /// <remarks>
+    /// <b>The ratio is what separates a backlog from churn</b>, and the two want opposite fixes. A session filling a view it has never completed emits
+    /// enters and almost no leaves: the queue is draining, slowly, and a bigger budget drains it faster. A session whose entities cross its interest
+    /// boundary and cross back emits the two in equal numbers, and a bigger budget spends more wire on the same entities arriving again. Read beside the
+    /// world's true arrival rate: enters far above it, with leaves to match, is churn whatever the owed count says.
+    /// </remarks>
+    public (long Entered, long Left, long Deferred) EnterFlow =>
+        (Volatile.Read(ref _entersEmitted), Volatile.Read(ref _leavesEmitted), Volatile.Read(ref _entersDeferred));
+
+    /// <summary>Mean known-set size and mean outstanding slot debt over the frames that published.</summary>
+    /// <remarks>
+    /// <b>The trajectory is the other half of the same question.</b> A known-set that climbs over a run is a view still filling; one that sits flat while
+    /// enters are being emitted every tick is a view that finished filling long ago and is being re-told what it already knew.
+    /// </remarks>
+    public (double Known, double Owed, long Frames) ViewFill
+    {
+        get
+        {
+            var frames = Volatile.Read(ref _framesProduced);
+            return frames == 0
+                ? default
+                : (Volatile.Read(ref _knownTotal) / (double)frames, Volatile.Read(ref _owedTotal) / (double)frames, frames);
+        }
+    }
 
     /// <summary>Frames the ceiling refused, which the pool would have refused too.</summary>
     public long OversizeSkips => Volatile.Read(ref _oversizeSkips);
@@ -1249,6 +1291,10 @@ internal sealed unsafe class FrameAssembler : IDisposable
         Add(ref _bytesEncoded, counters.BytesEncoded);
         Add(ref _recordsEncoded, counters.RecordsEncoded);
         Add(ref _entersDeferred, counters.EntersDeferred);
+        Add(ref _entersEmitted, counters.EntersEmitted);
+        Add(ref _leavesEmitted, counters.LeavesEmitted);
+        Add(ref _knownTotal, counters.KnownTotal);
+        Add(ref _owedTotal, counters.OwedTotal);
         Add(ref _oversizeSkips, counters.OversizeSkips);
         Add(ref _temporalGathers, counters.TemporalGathers);
         Add(ref _fullGathers, counters.FullGathers);
@@ -1913,7 +1959,7 @@ internal sealed unsafe class FrameAssembler : IDisposable
 
         // COMMIT, and only now. The known-set and the baseline move because a frame that carries them exists; had anything above failed, the session would
         // have been left exactly as it was and its next frame would carry the same union (SUB-03).
-        Commit(state, scratch, stamp);
+        Commit(state, scratch, stamp, ref counters);
         state.Baseline = _tick;
         CommitView(index, view);
         if (completed)
@@ -2882,13 +2928,18 @@ internal sealed unsafe class FrameAssembler : IDisposable
     /// <summary>
     /// Applies to the known-set what the published frame told the client: the enters it carried are now known, and the leaves it carried are forgotten.
     /// </summary>
-    private void Commit(SessionFrameState state, FrameWorkerScratch scratch, ushort stamp)
+    /// <param name="state">The session.</param>
+    /// <param name="scratch">The worker's scratch, holding the records the frame carried.</param>
+    /// <param name="stamp">This tick, as the known-set stores it.</param>
+    /// <param name="counters">The chunk's tally, which takes the enter and leave counts from the loops that are walking them anyway.</param>
+    private void Commit(SessionFrameState state, FrameWorkerScratch scratch, ushort stamp, ref FrameCounters counters)
     {
         var known = state.Known;
         for (var a = 0; a < _plans.Length; a++)
         {
             var plan = _encodePlans[a];
             var enters = scratch.List(a, FrameListKind.Enter);
+            counters.EntersEmitted += enters.Length;
             for (var i = 0; i < enters.Length; i++)
             {
                 ref readonly var record = ref enters[i];
@@ -2915,11 +2966,17 @@ internal sealed unsafe class FrameAssembler : IDisposable
             }
 
             var leaves = scratch.List(a, FrameListKind.Leave);
+            counters.LeavesEmitted += leaves.Length;
             for (var i = 0; i < leaves.Length; i++)
             {
                 known.Remove(leaves[i].NetId);
             }
         }
+
+        // Read AFTER the enters and leaves have been applied, so the pair describes what the client holds once this frame lands rather than what it held
+        // before. The debt is the frame stage's own view of what it still owes; a session with no view owes nothing it can name.
+        counters.KnownTotal += known.KnownCount;
+        counters.OwedTotal += state.DeferredEnters;
     }
 
     private int UpperBound(FrameWorkerScratch scratch)

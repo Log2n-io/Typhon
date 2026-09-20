@@ -182,6 +182,16 @@ public static class TatooineReplication
                 + $"slots: {visited} read, {carried} carried; blocks: {projected} projected, {dormant} dormant, sleeping {subs.SleepingClusters}");
             var vp = subs.VisitParts;
             Console.Error.WriteLine($"  visit made of: entered {vp.Entered}, changed {vp.Changed}, owed {vp.Owed}");
+
+            // Per PUBLISHED frame, not per tick: a session with nothing to say produces no frame, and dividing by ticks would report the flow of the
+            // sessions that spoke as if it were everyone's. The ratio of the first two is the question — a view filling emits enters and few leaves.
+            var ef = subs.EnterFlow;
+            var vf = subs.ViewFill;
+            var perFrame = vf.Frames == 0 ? 0d : 1d / vf.Frames;
+            Console.Error.WriteLine(
+                $"  enter flow: {ef.Entered} entered, {ef.Left} left, {ef.Deferred} deferred over {vf.Frames} frames "
+                + $"({ef.Entered * perFrame:F1} / {ef.Left * perFrame:F1} / {ef.Deferred * perFrame:F1} per frame)");
+            Console.Error.WriteLine($"  view fill: {vf.Known:F0} entities known per frame, {vf.Owed:F1} enters owed");
             var cc = subs.ClusterCandidates;
             Console.Error.WriteLine($"  cluster candidates: {cc.Collected} collected, {cc.Accepted} accepted");
             var ee = subs.EpochEnter;

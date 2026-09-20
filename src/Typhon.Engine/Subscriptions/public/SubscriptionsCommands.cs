@@ -368,6 +368,18 @@ public sealed class SubscriptionsCommands
     /// <summary>What the reduced gather's visited slots were made of: newly entered, named by the change mask, owed by an earlier frame.</summary>
     public (long Entered, long Changed, long Owed) VisitParts => _ingress.Frames == null ? default : _ingress.Frames.VisitParts;
 
+    /// <summary>ENTER and LEAVE records published since start, beside the enters the per-frame budget deferred.</summary>
+    /// <remarks>
+    /// <b>The ratio separates a view still filling from one being re-told what it already knew</b>, and the two want opposite fixes. Enters far above
+    /// leaves is a queue draining, and it drains faster with a larger budget. Enters and leaves in step, at a rate far above what the world actually
+    /// spawns and moves, is the same entities crossing the interest boundary and crossing back — there a larger budget spends more wire on the same
+    /// entities arriving again. Read it beside <see cref="ViewFill"/>, which says whether the client's world is still growing.
+    /// </remarks>
+    public (long Entered, long Left, long Deferred) EnterFlow => _ingress.Frames == null ? default : _ingress.Frames.EnterFlow;
+
+    /// <summary>Mean entities a client holds, and mean enters still owed to it, over the frames that published.</summary>
+    public (double Known, double Owed, long Frames) ViewFill => _ingress.Frames == null ? default : _ingress.Frames.ViewFill;
+
     /// <summary>Cluster candidates the broad phase collected, and how many a session accepted.</summary>
     public (long Collected, long Accepted) ClusterCandidates =>
         _ingress.Interest == null ? default : (_ingress.Interest.ClusterCandidatesCollected, _ingress.Interest.ClusterCandidatesAccepted);
