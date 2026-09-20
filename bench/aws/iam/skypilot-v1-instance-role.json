@@ -1,0 +1,23 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "TraceBucketObjects",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::typhon-traces/*"
+    },
+    {
+      "Sid": "TraceBucketList",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket", "s3:GetBucketLocation"],
+      "Resource": "arn:aws:s3:::typhon-traces"
+    },
+    {
+      "Sid": "ProvisionerReadOnly",
+      "Effect": "Allow",
+      "Action": ["ec2:Describe*"],
+      "Resource": "*"
+    }
+  ]
+}
