@@ -248,6 +248,9 @@ public sealed class SimConfig
     /// </remarks>
     public bool SubscriptionsPhaseTiming;
 
+    /// <summary>Whether the interest stage times its broad phase, narrow phase and run assembly separately. <c>--subs-interest-phases</c>.</summary>
+    public bool SubscriptionsInterestPhases;
+
     /// <summary>
     /// <c>--subs-owed on|off</c>: whether a reused slot costs the session that slot on its next frame, or its whole next frame.
     /// </summary>

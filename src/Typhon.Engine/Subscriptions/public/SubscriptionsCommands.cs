@@ -380,6 +380,33 @@ public sealed class SubscriptionsCommands
     /// <summary>Mean entities a client holds, and mean enters still owed to it, over the frames that published.</summary>
     public (double Known, double Owed, long Frames) ViewFill => _ingress.Frames == null ? default : _ingress.Frames.ViewFill;
 
+    /// <summary>Where the interest stage's time has gone since start, in microseconds. Needs <c>MeasureInterestPhases</c>.</summary>
+    public (double BroadUs, double NarrowUs, double FlushUs) InterestPhases =>
+        _ingress.Interest == null ? default : _ingress.Interest.InterestPhases;
+
+    /// <summary>How much of the interest answer has been what the sessions already held, since start.</summary>
+    public (long RunsUnchanged, long RunsTotal, long SessionsCoherent, long SessionsTotal) InterestCoherence =>
+        _ingress.Interest == null ? default : _ingress.Interest.InterestCoherence;
+
+    /// <summary>
+    /// How far the OBSERVERS moved: steps compared, total displacement in millimetres, and placed session-ticks seen.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The quantity every enter and leave rate is a consequence of.</b> An observer advancing <c>d</c> in a tick sweeps about <c>2Rd</c> of area out of
+    /// the back of its disc, so at a known density the entities it must drop are arithmetic, and a churn figure read without it is a number with no
+    /// expected value beside it.
+    /// </para>
+    /// <para>
+    /// <b>It is the counter that found the SWG demo binding its sessions to an unstable iteration order.</b> The viewpoints were moving 118.8 m per tick
+    /// against the 0.1 m a player covers at 50 Hz, and every symptom read as an engine fault — an enter-to-leave ratio of 1.05, an enter backlog that
+    /// never drained, leaves naming entities that had not moved — followed from it. Nothing else in the track reported observer speed, so nothing else
+    /// could tell a busy world from a teleporting camera.
+    /// </para>
+    /// </remarks>
+    public (long Steps, long Millimetres, long Placed) ObserverMotion =>
+        _ingress.Interest == null ? default : _ingress.Interest.ObserverMotion;
+
     /// <summary>Why the leaves were sent: geometry, a reissued identity, or the known-set sweep — beside what the interest pass merely stopped reaching.</summary>
     public (long Considered, long Interest, long Stale, long Swept) LeaveCauses => _ingress.Frames == null ? default : _ingress.Frames.LeaveCauses;
 

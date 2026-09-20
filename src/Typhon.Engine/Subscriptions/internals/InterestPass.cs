@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Numerics;
 using System.Threading;
 
@@ -200,6 +201,38 @@ internal sealed unsafe class InterestPass
     private long _cellsResolved;
     private long _sessionsShared;
 
+    /// <summary>Whether the interest stage times its own phases. <c>SubscriptionsOptions.MeasureInterestPhases</c>.</summary>
+    private readonly bool _measurePhases;
+
+    /// <summary>
+    /// What entered and left for the session currently being resolved, accumulated across its clusters.
+    /// </summary>
+    /// <remarks>
+    /// <b>Per worker by construction, not by declaration.</b> A chunk resolves one session at a time to completion, and a session belongs to exactly one
+    /// chunk, so these are only ever touched by the thread resolving that session — but they are INSTANCE fields on a pass shared by every worker, which
+    /// would be a race if two chunks were ever inside <see cref="FlushSphereRun"/> at once. They are therefore [ThreadStatic].
+    /// </remarks>
+    [ThreadStatic]
+    private static ulong _sessionEntered;
+
+    [ThreadStatic]
+    private static ulong _sessionLeft;
+
+    // ── The observer census ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // HOW FAST THE VIEWPOINTS MOVE, which is the one quantity the enter and leave rates are governed by and the only one nothing reported. An observer
+    // advancing `d` sweeps a lune of about 2Rd out of the back of its disc every tick, so at a known density the number of entities it MUST drop is
+    // arithmetic — and a leave rate is only surprising relative to that number. Read against the entity motion census and the two answer different
+    // questions: entities move at the mean of the whole population, of which most are idle, while the leave rate is set by the observers alone.
+    //
+    // Kept per session SLOT with its generation, because this tick's arrays are ordered by interest cell and a session's index is not stable between
+    // ticks. Accumulated in millimetres as an integer: the sum runs to billions over a measurement and a double would stop being exact.
+    private Vector3D[] _lastViewpoint = [];
+    private ushort[] _lastViewpointGeneration = [];
+    private long _observerSteps;
+    private long _observerMillimetresMoved;
+    private long _observerPlaced;
+
     /// <summary>Whether co-located sessions share one query. <see cref="SubscriptionsOptions.CellKeyedInterest"/>.</summary>
     private readonly bool _cellKeyed;
 
@@ -263,8 +296,10 @@ internal sealed unsafe class InterestPass
     /// <exception cref="InvalidOperationException">An observer names an archetype that has no projection, so it could never be replicated.</exception>
     /// <param name="views">Per-session interest membership, or <see langword="null"/> to resolve interest the way Phase 1 did.</param>
     /// <param name="residentInterest">Whether a sphere is resolved at cluster granularity, reading no entity.</param>
+    /// <param name="measureInterestPhases">Whether the stage times its broad phase, narrow phase and run assembly separately.</param>
     public InterestPass(DatabaseEngine engine, CompiledProjectionPlan[] plans, ArchetypeReplicationState[] states, SubscriptionsRegistry registry,
-        SessionTable sessions, bool cellKeyedInterest = true, SessionViewStore views = null, bool residentInterest = false)
+        SessionTable sessions, bool cellKeyedInterest = true, SessionViewStore views = null, bool residentInterest = false,
+        bool measureInterestPhases = false)
     {
         ArgumentNullException.ThrowIfNull(engine);
         ArgumentNullException.ThrowIfNull(plans);
@@ -277,6 +312,7 @@ internal sealed unsafe class InterestPass
         _sessions = sessions;
         _cellKeyed = cellKeyedInterest;
         _resident = residentInterest;
+        _measurePhases = measureInterestPhases;
         _views = views;
         _fenceWindow = engine.EpochManager.FenceWindow;
 
@@ -555,6 +591,7 @@ internal sealed unsafe class InterestPass
             // also fixes the tick's answer — a session cannot resolve two archetypes around two different centres.
             _tickPlaced[_tickSessionCount] = _sessions.TryGetViewpoint(session, out var viewpoint);
             _tickViewpoints[_tickSessionCount] = viewpoint;
+            NoteObserverMotion(session, viewpoint, _tickPlaced[_tickSessionCount]);
             _tickProfiles[_tickSessionCount] = profile;
             _tickHits[_tickSessionCount] = default;
             _tickSessions[_tickSessionCount++] = session;
@@ -720,6 +757,106 @@ internal sealed unsafe class InterestPass
         return ((long)profileIndex << 48) | (cx << 24) | cy;
     }
 
+    /// <summary>Accumulates how far one session's viewpoint moved since the last tick it was placed on.</summary>
+    /// <param name="session">The session.</param>
+    /// <param name="viewpoint">Its viewpoint this tick.</param>
+    /// <param name="placed">Whether it has one at all.</param>
+    /// <remarks>
+    /// A session that was not placed last tick contributes no step, only a placement: an observer appearing out of nowhere has not travelled the distance
+    /// between where it was not and where it now is, and counting that would put every admission into the mean.
+    /// </remarks>
+    private void NoteObserverMotion(SessionId session, Vector3D viewpoint, bool placed)
+    {
+        if (!placed)
+        {
+            return;
+        }
+
+        var slot = session.Slot;
+        if (slot >= _lastViewpoint.Length)
+        {
+            var grown = Math.Max(16, Math.Max(slot + 1, _lastViewpoint.Length * 2));
+            Array.Resize(ref _lastViewpoint, grown);
+            Array.Resize(ref _lastViewpointGeneration, grown);
+        }
+
+        _observerPlaced++;
+        if (_lastViewpointGeneration[slot] == session.Generation)
+        {
+            var previous = _lastViewpoint[slot];
+            var dx = viewpoint.X - previous.X;
+            var dy = viewpoint.Y - previous.Y;
+            var dz = viewpoint.Z - previous.Z;
+            _observerSteps++;
+            _observerMillimetresMoved += (long)(Math.Sqrt((dx * dx) + (dy * dy) + (dz * dz)) * 1000d);
+        }
+
+        _lastViewpoint[slot] = viewpoint;
+        _lastViewpointGeneration[slot] = session.Generation;
+    }
+
+    /// <summary>
+    /// How far the OBSERVERS moved: steps compared, total displacement in millimetres, and placed sessions seen — cumulative since start.
+    /// </summary>
+    /// <remarks>
+    /// <b>The input the enter and leave rates are consequences of.</b> An observer that advances <c>d</c> in a tick must drop about <c>2Rd x density</c>
+    /// entities out of the back of its disc and take up as many at the front, whatever the engine does; a churn figure read without it is a number with no
+    /// expected value beside it. It is NOT the entity motion census: that averages over the whole replicated population, most of which stands still, and
+    /// using it to predict churn understates the answer by the ratio between the two.
+    /// </remarks>
+    public (long Steps, long MillimetresMoved, long Placed) ObserverMotion =>
+        (Volatile.Read(ref _observerSteps), Volatile.Read(ref _observerMillimetresMoved), Volatile.Read(ref _observerPlaced));
+
+    /// <summary>
+    /// Where the interest stage's time has gone since start, in microseconds: the shared broad query, the per-entity narrow filter, and the run assembly.
+    /// </summary>
+    /// <remarks>Populated only under <c>SubscriptionsOptions.MeasureInterestPhases</c>. The direct path cannot separate broad from narrow and charges
+    /// both to <c>Narrow</c>; see <c>ResolveSessionDirect</c>.</remarks>
+    public (double BroadUs, double NarrowUs, double FlushUs) InterestPhases
+    {
+        get
+        {
+            long broad = 0, narrow = 0, flush = 0;
+            for (var w = 0; w < _arenas.Length; w++)
+            {
+                var p = _arenas[w].PhaseTicks;
+                broad += p.Broad;
+                narrow += p.Narrow;
+                flush += p.Flush;
+            }
+
+            var perTick = 1_000_000d / Stopwatch.Frequency;
+            return (broad * perTick, narrow * perTick, flush * perTick);
+        }
+    }
+
+    /// <summary>
+    /// How much of the interest answer has been what the sessions already held, since start: runs unchanged, and sessions whose entire answer was unchanged.
+    /// </summary>
+    /// <remarks>
+    /// <b>The second pair is the ceiling on any residency or live-set scheme.</b> A session counted coherent produced no entered slot, no left slot and no
+    /// departed cluster — its query could have been skipped and its previous answer reused, had the pass been able to prove nothing new had come into
+    /// range. This does not supply that proof; it supplies the size of the prize.
+    /// </remarks>
+    public (long RunsUnchanged, long RunsTotal, long SessionsCoherent, long SessionsTotal) InterestCoherence
+    {
+        get
+        {
+            long ru = 0, rt = 0, sc = 0, st = 0;
+            for (var w = 0; w < _arenas.Length; w++)
+            {
+                var r = _arenas[w].RunCoherence;
+                var c = _arenas[w].SessionCoherence;
+                ru += r.Unchanged;
+                rt += r.Total;
+                sc += c.Coherent;
+                st += c.Total;
+            }
+
+            return (ru, rt, sc, st);
+        }
+    }
+
     /// <summary>Interest cells the broad phase resolved last tick.</summary>
     public long CellsResolved => Volatile.Read(ref _cellsResolved);
 
@@ -823,6 +960,7 @@ internal sealed unsafe class InterestPass
         }
 
         var sessionHits = 0;
+        var from = _measurePhases ? Stopwatch.GetTimestamp() : 0L;
         for (var a = 0; a < archetypes.Length; a++)
         {
             sessionHits += profile.Kind == ObserverKind.Sphere
@@ -832,7 +970,19 @@ internal sealed unsafe class InterestPass
                 : WalkArchetype(arena, view, archetypes[a], ref probes);
         }
 
+        if (_measurePhases)
+        {
+            // The direct path queries and filters in one enumerator pass, so its broad and narrow phases cannot be separated without changing what it
+            // does. Charged to `narrow` whole, which is where the bulk of it is and which keeps the split honest about what it can and cannot see.
+            arena.NotePhases(0L, Stopwatch.GetTimestamp() - from, 0L);
+        }
+
+        var runsBefore = arena.RunCount;
+        var coherent = _sessionEntered == 0 && _sessionLeft == 0;
         _tickHits[i] = CloseSession(arena, view, chunkIndex, runStart, leaveStart, sessionHits);
+        arena.NoteSessionCoherence(coherent && arena.RunCount == runsBefore && view != null);
+        _sessionEntered = 0;
+        _sessionLeft = 0;
         return sessionHits;
     }
 
@@ -940,6 +1090,7 @@ internal sealed unsafe class InterestPass
         // real profile with several archetypes ran.
         arena.BeginCell();
         var ranges = arena.CellRanges(archetypes.Length);
+        var broadFrom = _measurePhases ? Stopwatch.GetTimestamp() : 0L;
 
         for (var a = 0; a < archetypes.Length; a++)
         {
@@ -957,6 +1108,9 @@ internal sealed unsafe class InterestPass
         }
 
         arena.NoteCellCollected();
+        var broadTicks = _measurePhases ? Stopwatch.GetTimestamp() - broadFrom : 0L;
+        var narrowTicks = 0L;
+        var flushTicks = 0L;
 
         // NARROW PHASE, one session at a time, so each session's runs are contiguous.
         for (var i = start; i < start + count; i++)
@@ -975,17 +1129,40 @@ internal sealed unsafe class InterestPass
                     continue;
                 }
 
+                var narrowFrom = _measurePhases ? Stopwatch.GetTimestamp() : 0L;
                 arena.BeginSphere();
                 arena.FilterCandidatesInto(viewpoint.X, viewpoint.Y, enterRadius, radius, ranges[a], to);
+                if (_measurePhases)
+                {
+                    narrowTicks += Stopwatch.GetTimestamp() - narrowFrom;
+                    narrowFrom = Stopwatch.GetTimestamp();
+                }
 
                 for (var r = 0; r < arena.SphereCount; r++)
                 {
                     sessionHits += FlushSphereRun(arena, view, archetypes[a], arena.SphereChunk(r), arena.SphereNear(r), arena.SphereMask(r), ref probes);
                 }
+
+                if (_measurePhases)
+                {
+                    flushTicks += Stopwatch.GetTimestamp() - narrowFrom;
+                }
             }
 
+            // A session is coherent only if NOTHING changed for it: no slot entered, none left, and no cluster departed. CloseSession appends the
+            // departures, so the run count it added is the last term and has to be read after it.
+            var runsBefore = arena.RunCount;
+            var coherent = _sessionEntered == 0 && _sessionLeft == 0;
             _tickHits[i] = CloseSession(arena, view, chunkIndex, runStart, leaveStart, sessionHits);
+            arena.NoteSessionCoherence(coherent && arena.RunCount == runsBefore && view != null);
+            _sessionEntered = 0;
+            _sessionLeft = 0;
             hits += sessionHits;
+        }
+
+        if (_measurePhases)
+        {
+            arena.NotePhases(broadTicks, narrowTicks, flushTicks);
         }
     }
 
@@ -1265,6 +1442,9 @@ internal sealed unsafe class InterestPass
             entered = mask & ~held;
 
             var left = held & ~mask;
+            arena.NoteRunCoherence(entered == 0 && left == 0);
+            _sessionEntered |= entered;
+            _sessionLeft |= left;
             while (left != 0)
             {
                 var slot = BitOperations.TrailingZeroCount(left);

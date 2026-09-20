@@ -420,6 +420,19 @@ public sealed class SubscriptionsOptions
     public bool VerifySharedRuns { get; init; }
 
     /// <summary>
+    /// Whether the interest stage times its own phases: the shared broad query, the per-entity narrow filter, and the run assembly. Default
+    /// <see langword="false"/>.
+    /// </summary>
+    /// <remarks>
+    /// <b>It answers whether caching a session's CLUSTER set could pay.</b> A maintained cluster list removes the broad phase, the directory probes and
+    /// the run assembly; it does not remove the narrow phase, because knowing a cluster is in range says nothing about which of its slots are. A density
+    /// ladder cannot separate the two — cluster count inside a disc scales with density exactly as entity count does — so the split has to be timed.
+    /// Three timestamp pairs per session per archetype is real cost on a stage measured in single-digit milliseconds, hence a measurement instrument and
+    /// not a setting to run with.
+    /// </remarks>
+    public bool MeasureInterestPhases { get; init; }
+
+    /// <summary>
     /// Whether the frame stage takes its sessions from a shared cursor rather than a fixed slice each. Default <see langword="true"/>.
     /// </summary>
     /// <remarks>

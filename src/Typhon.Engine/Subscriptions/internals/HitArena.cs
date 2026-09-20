@@ -672,6 +672,15 @@ internal sealed class HitArena
         ChunksInsideOpenWindow = 0;
         CandidatesCollected = 0;
         _candAccepted = 0;
+
+        // ── The phase and coherence counters are NOT reset here, and that is the fix for a race rather than an oversight ──────────────────────────────
+        //
+        // Reset per tick, they were read by a reporting system running elsewhere in the tick with no fence against this prologue, so a read could land
+        // after some arenas had been cleared and before the others had been filled. At d07 that produced "0 of 3 sessions" for a 400-session run and a
+        // phase split of "broad 0 %, narrow 100 %, assemble 0 %" — self-evidently wrong, and wrong in a direction a reader could have believed.
+        //
+        // Cumulative, the RATIO these exist to report is immune to when it is read: a torn read costs a little recency, never a wrong proportion. The
+        // absolute values are then totals since the runtime started, which is what ObserverMotion already does and why it never had this problem.
     }
 
     /// <summary>
@@ -874,6 +883,79 @@ internal sealed class HitArena
     public void AddWatchedBlock(nint block)
     {
         _watchedBlocks.Add(block);
+    }
+
+    // ── The interest phase split ────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // Where the interest stage's time actually goes, which no counter reported and which decides whether caching a session's CLUSTER set could pay.
+    // A maintained cluster list would remove the broad phase, the directory probes and the run assembly; it would NOT remove the per-entity narrow
+    // phase, because knowing which cluster is in range says nothing about which of its 64 slots are. So the question "is the narrow phase the
+    // dominant term" has to be answered before that work is worth doing, and two points on a density ladder cannot answer it: cluster count inside a
+    // disc scales with density just as entity count does, so both terms move together and neither can be read off the total.
+    //
+    // Accumulated in raw Stopwatch ticks, per worker, on the arena, so no line is shared. Gated, because three timestamp pairs per session is real
+    // cost on a stage measured in single-digit milliseconds.
+    private long _broadTicks;
+    private long _narrowTicks;
+    private long _flushTicks;
+
+    /// <summary>Raw timestamp ticks spent in the broad phase, the per-entity narrow phase and the run assembly, SINCE START. Needs <c>MeasureInterestPhases</c>.</summary>
+    public (long Broad, long Narrow, long Flush) PhaseTicks => (_broadTicks, _narrowTicks, _flushTicks);
+
+    /// <summary>Adds one phase sample.</summary>
+    /// <param name="broad">Broad-phase ticks.</param>
+    /// <param name="narrow">Narrow-phase ticks.</param>
+    /// <param name="flush">Run-assembly ticks.</param>
+    public void NotePhases(long broad, long narrow, long flush)
+    {
+        _broadTicks += broad;
+        _narrowTicks += narrow;
+        _flushTicks += flush;
+    }
+
+    // ── The coherence ceiling ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // How much of a session's answer is UNCHANGED since the last one it published. A run whose slot mask equals the mask the view already holds is a
+    // run the session could have been served from a cache, and a session all of whose runs are unchanged is one whose whole query could have been
+    // skipped. That second figure is the ceiling on what any residency or live-set scheme can ever save, and it costs two compares per run that the
+    // caller has already loaded into registers.
+    private long _runsUnchanged;
+    private long _runsTotal;
+
+    /// <summary>Runs whose mask was already what the session's view held, beside the total. Cumulative since start.</summary>
+    public (long Unchanged, long Total) RunCoherence => (_runsUnchanged, _runsTotal);
+
+    private long _sessionsCoherent;
+    private long _sessionsTotal;
+
+    /// <summary>Sessions whose entire answer was unchanged since their last published frame, beside the total resolved. Cumulative since start.</summary>
+    /// <remarks>
+    /// <b>The ceiling on a residency cache.</b> A session in this set produced no entered slot, no left slot and no departed cluster: its query could
+    /// have been skipped entirely and the previous answer reused, had the pass been able to prove that nothing new had come into range. That proof is
+    /// the hard part and this number does not supply it — it supplies the size of the prize.
+    /// </remarks>
+    public (long Coherent, long Total) SessionCoherence => (_sessionsCoherent, _sessionsTotal);
+
+    /// <summary>Notes one session's coherence.</summary>
+    /// <param name="coherent"><see langword="true"/> when nothing at all changed for it this tick.</param>
+    public void NoteSessionCoherence(bool coherent)
+    {
+        _sessionsTotal++;
+        if (coherent)
+        {
+            _sessionsCoherent++;
+        }
+    }
+
+    /// <summary>Notes one run's coherence.</summary>
+    /// <param name="unchanged"><see langword="true"/> when nothing entered or left the run.</param>
+    public void NoteRunCoherence(bool unchanged)
+    {
+        _runsTotal++;
+        if (unchanged)
+        {
+            _runsUnchanged++;
+        }
     }
 
     /// <summary>Publishes a chunk's accumulated counters. Called once per chunk, never per run.</summary>

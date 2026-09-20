@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Numerics;
 
 namespace SwgTatooine.Replication;
@@ -202,6 +203,32 @@ public static class TatooineReplication
                 $"  enter flow: {ef.Entered} entered, {ef.Left} left, {ef.Deferred} deferred over {vf.Frames} frames "
                 + $"({ef.Entered * perFrame:F1} / {ef.Left * perFrame:F1} / {ef.Deferred * perFrame:F1} per frame)");
             Console.Error.WriteLine($"  view fill: {vf.Known:F0} entities known per frame, {vf.Owed:F1} enters owed");
+            var ip = subs.InterestPhases;
+            if (ip.BroadUs + ip.NarrowUs + ip.FlushUs > 0d)
+            {
+                var total = ip.BroadUs + ip.NarrowUs + ip.FlushUs;
+                Console.Error.WriteLine(
+                    $"  interest phases (us, cumulative): broad {ip.BroadUs:F0} ({ip.BroadUs * 100d / total:F1} %), "
+                    + $"narrow {ip.NarrowUs:F0} ({ip.NarrowUs * 100d / total:F1} %), assemble {ip.FlushUs:F0} ({ip.FlushUs * 100d / total:F1} %)");
+            }
+
+            var ic = subs.InterestCoherence;
+            if (ic.RunsTotal > 0)
+            {
+                Console.Error.WriteLine(
+                    $"  coherence (cumulative): {ic.RunsUnchanged} of {ic.RunsTotal} runs unchanged ({ic.RunsUnchanged * 100d / ic.RunsTotal:F1} %), "
+                    + $"{ic.SessionsCoherent} of {ic.SessionsTotal} sessions wholly unchanged "
+                    + $"({(ic.SessionsTotal == 0 ? 0d : ic.SessionsCoherent * 100d / ic.SessionsTotal):F1} %)");
+            }
+
+            var om = subs.ObserverMotion;
+            if (om.Steps > 0)
+            {
+                var observerMetresPerTick = om.Millimetres / 1000d / om.Steps;
+                Console.Error.WriteLine(
+                    $"  observer motion: {om.Steps} viewpoint steps, {observerMetresPerTick:F3} m/tick mean over {om.Placed} placed session-ticks");
+            }
+
             var lc = subs.LeaveCauses;
             var suppressed = lc.Considered == 0 ? 0d : 1d - (lc.Interest / (double)lc.Considered);
             Console.Error.WriteLine(
@@ -255,60 +282,119 @@ public static class TatooineReplication
         // NOT disposed: the accessor comes from the TICK's transaction, which owns it and releases it. Disposing one taken from a transaction this
         // method did not create tears down the cached EntityMap and chunk accessors mid-tick, which stops later systems reading.
         var accessor = tx.For<Player>();
-        {
-            var enumerator = accessor.GetClusterEnumerator();
-            var cluster = default(ClusterRef<Player>);
-            var occupancy = 0UL;
-            var wraps = 0;
 
-            foreach (var session in subs.OpenSessions)
+        // Which sessions still need a player. Collected first so the walk below can hand one out the moment it meets a player nobody holds.
+        Unbound.Clear();
+        Seen.Clear();
+        foreach (var session in subs.OpenSessions)
+        {
+            if (!string.Equals(subs.SessionKindOf(session), PlayerKind, StringComparison.Ordinal))
             {
-                if (!string.Equals(subs.SessionKindOf(session), PlayerKind, StringComparison.Ordinal))
+                continue;
+            }
+
+            Seen.Add(session.Value);
+            if (!BoundPlayer.ContainsKey(session.Value))
+            {
+                Unbound.Add(session);
+            }
+        }
+
+        // ONE walk: this tick's position for every player a session holds, and a player for every session that does not hold one yet.
+        BoundPositions.Clear();
+        var cursor = 0;
+        foreach (var cluster in accessor.GetClusterEnumerator())
+        {
+            var occupancy = cluster.OccupancyBits;
+            var placements = cluster.GetReadOnlySpan(Player.Bounds);
+            var ids = cluster.EntityIds;
+            while (occupancy != 0)
+            {
+                var slot = BitOperations.TrailingZeroCount(occupancy);
+                occupancy &= occupancy - 1;
+                var id = ids[slot];
+                var held = BoundIds.Contains(id);
+                if (!held && cursor >= Unbound.Count)
                 {
                     continue;
                 }
 
-                // The next player in the walk, wrapping when the sessions outnumber them. Advancing the SAME walk across sessions is what spreads the discs:
-                // placing them all on one player would make every view identical, and identical views are the case the shared-frame path serves at the cost
-                // of one — a measurement taken that way reports a per-session cost no real population has.
-                var found = false;
-                while (!found)
+                var b = placements[slot].Bounds;
+                var at = new Vector3D((b.MinX + b.MaxX) * 0.5, (b.MinY + b.MaxY) * 0.5, 0d);
+                if (!held)
                 {
-                    while (occupancy == 0)
-                    {
-                        if (!enumerator.MoveNext())
-                        {
-                            // BOUNDED. The old form restarted the walk and only gave up when a FRESH enumerator yielded no cluster at all, so a population
-                            // whose clusters all happened to be empty — a cluster whose last occupant migrated out, before the drain releases it — spun this
-                            // loop forever on the tick path with no progress and nothing to report.
-                            if (++wraps > 1)
-                            {
-                                return;
-                            }
-
-                            enumerator = accessor.GetClusterEnumerator();
-                            if (!enumerator.MoveNext())
-                            {
-                                return;
-                            }
-                        }
-
-                        cluster = enumerator.Current;
-                        occupancy = cluster.OccupancyBits;
-                    }
-
-                    var slot = BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-
-#pragma warning disable TYPHON009
-                    var placements = cluster.GetSpan(Player.Bounds);
-#pragma warning restore TYPHON009
-                    ref readonly var placement = ref placements[slot];
-                    var b = placement.Bounds;
-                    subs.Place(session, new Vector3D((b.MinX + b.MaxX) * 0.5, (b.MinY + b.MaxY) * 0.5, 0d));
-                    found = true;
+                    var session = Unbound[cursor++];
+                    BoundPlayer[session.Value] = id;
+                    BoundIds.Add(id);
                 }
+
+                BoundPositions[id] = at;
             }
         }
+
+        foreach (var session in subs.OpenSessions)
+        {
+            if (string.Equals(subs.SessionKindOf(session), PlayerKind, StringComparison.Ordinal)
+                && BoundPlayer.TryGetValue(session.Value, out var id)
+                && BoundPositions.TryGetValue(id, out var at))
+            {
+                subs.Place(session, at);
+            }
+        }
+
+        // A closed session gives its player back, or the maps grow for the life of the process and every player eventually reads as held — at which
+        // point a new session is bound to nothing and sees nothing.
+        Retired.Clear();
+        foreach (var (sessionValue, id) in BoundPlayer)
+        {
+            if (!Seen.Contains(sessionValue))
+            {
+                Retired.Add(sessionValue);
+                BoundIds.Remove(id);
+            }
+        }
+
+        for (var i = 0; i < Retired.Count; i++)
+        {
+            BoundPlayer.Remove(Retired[i]);
+        }
     }
+
+    /// <summary>The player each session watches, for the life of the session.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A session is an observer, and an observer has to be somewhere in particular.</b> This used to re-pick the player per session per tick by walking
+    /// the Player clusters and taking the n-th one — so a session was bound to an ORDINAL IN AN ITERATION ORDER rather than to a character. That order is
+    /// not stable: players migrate between clusters, repair redistributes them, and clusters are created and released, so session n watched a different
+    /// character on almost every tick and its viewpoint jumped to wherever that character happened to stand.
+    /// </para>
+    /// <para>
+    /// <b>Measured, it moved the viewpoints 118.8 m per tick</b> against the 0.1 m a player running at <c>PlayerRunSpeedMps</c> covers at 50 Hz — about
+    /// twelve hundred times too fast, and the distance between two arbitrary characters rather than a distance anybody travelled. Every session therefore
+    /// entered and left most of a disc every tick: 322 enters and 321 leaves per frame with 6 600 enters permanently owed, a backlog that could never
+    /// drain because the next tick moved the disc again. That is where "the enter backlog" and the 1.05 enter-to-leave ratio came from, and both are
+    /// artefacts of this method rather than anything the subscriptions track did.
+    /// </para>
+    /// <para>
+    /// <b>Spreading the sessions across DIFFERENT players is still the point</b> and is why the binding walks for a player nobody holds: identical views
+    /// are the one case the shared-frame path serves at the cost of one, and a measurement taken that way reports a per-session cost no real population
+    /// has. Doing it ONCE is what makes each session an observer instead of a teleport.
+    /// </para>
+    /// </remarks>
+    private static readonly Dictionary<uint, long> BoundPlayer = [];
+
+    /// <summary>The players held by some session, so the walk can tell a free one from a taken one without searching.</summary>
+    private static readonly HashSet<long> BoundIds = [];
+
+    /// <summary>Scratch, reused every tick: this tick's position for each held player.</summary>
+    private static readonly Dictionary<long, Vector3D> BoundPositions = [];
+
+    /// <summary>Scratch: the player sessions open this tick that hold no player yet.</summary>
+    private static readonly List<SessionId> Unbound = [];
+
+    /// <summary>Scratch: the player sessions seen open this tick, so the closed ones can give their players back.</summary>
+    private static readonly HashSet<uint> Seen = [];
+
+    /// <summary>Scratch: the bindings to drop, collected before the dictionary is written.</summary>
+    private static readonly List<uint> Retired = [];
 }
