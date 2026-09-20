@@ -178,6 +178,42 @@ static class ProjectionTestSchema
         return dbe;
     }
 
+    /// <summary>
+    /// The same engine, with the partitioner driven as hard as its knobs allow, for a fixture whose subject is what repair does.
+    /// </summary>
+    /// <param name="services">The fixture's service provider.</param>
+    /// <returns>The engine.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>A fixture of a few thousand entities cannot reach a production repair rate on the shipped defaults, and that is why this exists.</b> The default
+    /// <c>repairCooldownTicks</c> of 50 lets a cluster be repaired once in fifty ticks, so a run of forty ticks sees NO relocation at all — which is how
+    /// <c>RelocationVisibilityTests</c> came to assert for weeks that relocation was invisible to a client without a single relocation having happened.
+    /// </para>
+    /// <para>
+    /// <b>These are the fixtures' settings and nobody else's.</b> Engine defaults are not derived from one workload, and nothing here proposes changing
+    /// them: this is a test reaching in twenty ticks a state a production world reaches by being large.
+    /// </para>
+    /// </remarks>
+    public static DatabaseEngine SetupEngineWithHotRepair(IServiceProvider services)
+    {
+        var dbe = services.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<ProjBounds>();
+        dbe.RegisterComponentFromAccessor<ProjBounds3>();
+        dbe.RegisterComponentFromAccessor<ProjAi>();
+        dbe.RegisterComponentFromAccessor<ProjVitals>();
+        dbe.RegisterComponentFromAccessor<ProjWallet>();
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
+            worldMin: new Vector2(-WorldExtentM, -WorldExtentM),
+            worldMax: new Vector2(WorldExtentM, WorldExtentM),
+            cellSize: 128f,
+            clusterRepairExtentRatio: 0.3f,
+            reclusterBudgetMs: 16f,
+            repairWorstClustersPerUnit: 64,
+            repairCooldownTicks: 1));
+        dbe.InitializeArchetypes();
+        return dbe;
+    }
+
     /// <summary>The creature projection, declared in the order a reader would write it.</summary>
     public static void DeclareCreature(SubscriptionsRegistry subs)
     {
