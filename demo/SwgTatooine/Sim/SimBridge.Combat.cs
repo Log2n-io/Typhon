@@ -70,6 +70,7 @@ public sealed partial class SimBridge
             var places = cluster.GetReadOnlySpan(Creature.Bounds);
             var vitals = cluster.GetSpan(Creature.Vitals);
             var brains = cluster.GetSpan(Creature.Ai);
+            var timers = cluster.GetSpan(Creature.Timers);
             var chunk = cluster.ChunkId;
 
             if (batch)
@@ -81,6 +82,7 @@ public sealed partial class SimBridge
                     places,
                     vitals,
                     brains,
+                    timers,
                     members,
                     slots,
                     shooters,
@@ -99,8 +101,9 @@ public sealed partial class SimBridge
                 bits &= bits - 1;
 
                 ref var ai = ref brains[idx];
+                ref var t = ref timers[idx];
                 ref var v = ref vitals[idx];
-                if (!ReadyToTakeFire(ref v, ref ai, ref revived))
+                if (!ReadyToTakeFire(ref v, ref ai, ref t, ref revived))
                 {
                     continue;
                 }
@@ -124,7 +127,7 @@ public sealed partial class SimBridge
                     e.Dispose();
                 }
 
-                TakeFire(ref v, ref ai, count, ctx.TickNumber, chunk, idx, minDelay, delaySpan, ref engaged, ref killed);
+                TakeFire(ref v, ref ai, ref t, count, ctx.TickNumber, chunk, idx, minDelay, delaySpan, ref engaged, ref killed);
             }
         }
 
@@ -148,11 +151,11 @@ public sealed partial class SimBridge
     /// The part of a creature's turn that needs no query: a dead one counts down to its revival, and one whose attacker's weapon is still cycling waits.
     /// True when the creature can be fired on this tick.
     /// </summary>
-    private static bool ReadyToTakeFire(ref CreatureVitals v, ref CreatureBrain ai, ref long revived)
+    private static bool ReadyToTakeFire(ref CreatureVitals v, ref CreatureBrain ai, ref CreatureTimers t, ref long revived)
     {
         if (ai.Mode == AiMode.Dead)
         {
-            if (--ai.ThinkCooldown > 0)
+            if (--t.ThinkCooldown > 0)
             {
                 return false;
             }
@@ -161,12 +164,12 @@ public sealed partial class SimBridge
             // this simulation makes, and it forces a cell change plus a cluster-bound recomputation.
             v.Health = v.MaxHealth;
             ai.Mode = AiMode.Wander;
-            ai.ThinkCooldown = 1;
+            t.ThinkCooldown = 1;
 
             // Cleared, or a creature revived part-way through an old rest keeps standing until a schedule from its previous life runs out. Zero is in the
             // past for every tick, so the next decision picks a fresh leg.
-            ai.MoveUntilTick = 0;
-            ai.RestUntilTick = 0;
+            t.MoveUntilTick = 0;
+            t.RestUntilTick = 0;
             revived++;
             return false;
         }
@@ -196,6 +199,7 @@ public sealed partial class SimBridge
         ReadOnlySpan<CreaturePlacement> places,
         Span<CreatureVitals> vitals,
         Span<CreatureBrain> brains,
+        Span<CreatureTimers> timers,
         Span<BSphere2F> members,
         Span<int> slots,
         Span<int> shooters,
@@ -209,7 +213,7 @@ public sealed partial class SimBridge
         for (var b = bits; b != 0; b &= b - 1)
         {
             var idx = BitOperations.TrailingZeroCount(b);
-            if (ReadyToTakeFire(ref vitals[idx], ref brains[idx], ref revived))
+            if (ReadyToTakeFire(ref vitals[idx], ref brains[idx], ref timers[idx], ref revived))
             {
                 members[m] = new BSphere2F { CenterX = places[idx].X, CenterY = places[idx].Z, Radius = RangedRange };
                 slots[m++] = idx;
@@ -228,7 +232,7 @@ public sealed partial class SimBridge
         for (var j = 0; j < m; j++)
         {
             var idx = slots[j];
-            TakeFire(ref vitals[idx], ref brains[idx], shooters[j], tick, chunk, idx, minDelay, delaySpan, ref engaged, ref killed);
+            TakeFire(ref vitals[idx], ref brains[idx], ref timers[idx], shooters[j], tick, chunk, idx, minDelay, delaySpan, ref engaged, ref killed);
         }
     }
 
@@ -236,6 +240,7 @@ public sealed partial class SimBridge
     private static void TakeFire(
         ref CreatureVitals v,
         ref CreatureBrain ai,
+        ref CreatureTimers t,
         int shooters,
         long tick,
         int chunk,
@@ -259,7 +264,7 @@ public sealed partial class SimBridge
             if (ai.Mode == AiMode.Wander)
             {
                 ai.Mode = AiMode.Pursue;
-                ai.ThinkCooldown = 0;
+                t.ThinkCooldown = 0;
             }
 
             return;
@@ -267,7 +272,7 @@ public sealed partial class SimBridge
 
         v.Health = 0;
         ai.Mode = AiMode.Dead;
-        ai.ThinkCooldown = RespawnTicks;
+        t.ThinkCooldown = RespawnTicks;
         killed++;
     }
 

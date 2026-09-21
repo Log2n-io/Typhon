@@ -101,10 +101,16 @@ public static class WorldBuilder
                         HomeX = x,
                         HomeZ = z,
                         LeashRadius = 8f,
-                        ThinkCooldown = rng.NextInt(1, 40),
                     };
+
+                    // Staggered so a city's NPCs do not all pick a leg on the same tick. Absolute stamps, so standing still writes nothing.
+                    var npcTimers = new NpcTimers { MoveUntilTick = 0, RestUntilTick = rng.NextInt(1, 40) };
                     var move = new NpcMotion { SpeedMps = 1.2f };
-                    tx.Spawn<CityNpc>(CityNpc.Bounds.Set(in bounds), CityNpc.Ai.Set(in ai), CityNpc.Move.Set(in move));
+                    tx.Spawn<CityNpc>(
+                        CityNpc.Bounds.Set(in bounds),
+                        CityNpc.Ai.Set(in ai),
+                        CityNpc.Timers.Set(in npcTimers),
+                        CityNpc.Move.Set(in move));
                     census.CityNpcs++;
                 }
 
@@ -239,11 +245,12 @@ public static class WorldBuilder
             LeashRadius = TatooineData.LeashRadiusM * config.ContentScale,
             AggroRadius = CreatureTemplates.Aggressive[template] ? TatooineData.AggroRadiusM * config.ContentScale : 0f,
 
-            // Staggered so a lair's creatures do not all think on the same tick. Core3's own interval is 400-1000 ms,
-            // which at this tick rate is four to ten ticks — the AI is deliberately not a per-tick cost.
-            ThinkCooldown = rng.NextInt(1, AiTicksMax(config)),
             Lair = lairId,
         };
+
+        // Staggered so a lair's creatures do not all think on the same tick. Core3's own interval is 400-1000 ms, which at this tick rate is four to ten
+        // ticks — the AI is deliberately not a per-tick cost. In its own component, because nothing on the wire reads it (see CreatureTimers).
+        var timers = new CreatureTimers { ThinkCooldown = rng.NextInt(1, AiTicksMax(config)) };
         var move = new CreatureMotion { SpeedMps = CreatureTemplates.SpeedMps[template] };
         var vitals = new CreatureVitals
         {
@@ -255,6 +262,7 @@ public static class WorldBuilder
         return tx.Spawn<Creature>(
             Creature.Bounds.Set(in bounds),
             Creature.Ai.Set(in ai),
+            Creature.Timers.Set(in timers),
             Creature.Move.Set(in move),
             Creature.Vitals.Set(in vitals));
     }

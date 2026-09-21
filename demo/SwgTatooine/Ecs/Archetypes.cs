@@ -55,6 +55,9 @@ public partial class Creature : Archetype<Creature>
     public static readonly Comp<CreatureMotion> Move = Register<CreatureMotion>();
     public static readonly Comp<CreatureVitals> Vitals = Register<CreatureVitals>();
     public static readonly Comp<CreatureBrain> Ai = Register<CreatureBrain>();
+
+    /// <summary>Scheduling only — deliberately NOT projected, so a write here reaches no subscriber. See <see cref="CreatureTimers"/>.</summary>
+    public static readonly Comp<CreatureTimers> Timers = Register<CreatureTimers>();
 }
 
 /// <summary>
@@ -68,6 +71,9 @@ public partial class CityNpc : Archetype<CityNpc>
     public static readonly Comp<NpcPlacement> Bounds = Register<NpcPlacement>();
     public static readonly Comp<NpcMotion> Move = Register<NpcMotion>();
     public static readonly Comp<NpcBrain> Ai = Register<NpcBrain>();
+
+    /// <summary>Scheduling only — deliberately NOT projected. See <see cref="CreatureTimers"/>.</summary>
+    public static readonly Comp<NpcTimers> Timers = Register<NpcTimers>();
 }
 
 /// <summary>

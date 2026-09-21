@@ -554,9 +554,86 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             // assuming one: a 10 Hz runtime left at the default would get a threshold six times too tight and a heartbeat six times too long.
             states[i].TickPeriodSeconds = NominalTickPeriodSeconds;
             states[i].AttachTo(clusterState);
+
+            // Narrowed HERE and nowhere else, because this is the only place a compiled plan and its cluster state are both in hand. Until this runs the
+            // mask is all ones, which suppresses nothing — an archetype whose plan has not been published yet must not have its writes dropped.
+            clusterState.ProjectedComponentMask = ProjectedComponentMaskOf(plan);
+
+            if (Options.TrackClusterContentChanges)
+            {
+                clusterState.TrackContentChanges = true;
+                clusterState.PublishChangedClusterList = true;
+            }
         }
 
         return states;
+    }
+
+    /// <summary>
+    /// The component slots one archetype's projection reads, as a bitmask.
+    /// </summary>
+    /// <param name="plan">The compiled plan.</param>
+    /// <returns>Bit <c>s</c> set for every component slot the plan reads; all ones when any slot is too wide for the mask to describe.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>Every reader of a component value has to appear here, and the cost of forgetting one is a change no client is told about.</b> The three are the
+    /// public fields, the owner fields, and the position — whose velocity may live in a component of its own when <c>VelocityFrom</c> named one, which is a
+    /// second slot the position contributes and the easiest of the three to miss.
+    /// </para>
+    /// <para>
+    /// <b>All ones on a slot at or past 64.</b> The mask cannot describe it, and admitting everything is the direction whose failure is wasted work rather
+    /// than a silent loss. Cluster layouts today are far narrower than that; the guard is for the day one is not.
+    /// </para>
+    /// </remarks>
+    private static ulong ProjectedComponentMaskOf(CompiledProjectionPlan plan)
+    {
+        var mask = 0UL;
+
+        static bool Add(ref ulong mask, int slot)
+        {
+            if ((uint)slot >= 64u)
+            {
+                return false;
+            }
+
+            mask |= 1UL << slot;
+            return true;
+        }
+
+        var fields = plan.Fields;
+        for (var i = 0; fields != null && i < fields.Length; i++)
+        {
+            if (!Add(ref mask, fields[i].ComponentSlot))
+            {
+                return ulong.MaxValue;
+            }
+        }
+
+        var owners = plan.OwnerFields;
+        for (var i = 0; owners != null && i < owners.Length; i++)
+        {
+            if (!Add(ref mask, owners[i].ComponentSlot))
+            {
+                return ulong.MaxValue;
+            }
+        }
+
+        var position = plan.Position;
+        if (position != null)
+        {
+            if (!Add(ref mask, position.ComponentSlot))
+            {
+                return ulong.MaxValue;
+            }
+
+            // 0xFF is "the velocity is measured from successive positions", not a slot.
+            if (position.VelocityComponentSlot != 0xFF && !Add(ref mask, position.VelocityComponentSlot))
+            {
+                return ulong.MaxValue;
+            }
+        }
+
+        return mask;
     }
 
     private static ArchetypeClusterState ClusterStateOf(DatabaseEngine engine, CompiledProjectionPlan plan)

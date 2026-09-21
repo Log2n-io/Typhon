@@ -2495,6 +2495,35 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     public bool TrackContentChanges;
 
+    /// <summary>
+    /// Bit <c>s</c> set means component slot <c>s</c> is read by this archetype's compiled projection. All ones until a projection says otherwise.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A static fast-reject for the one write path that cannot describe itself.</b> <c>ClusterRef.GetSpan</c> marks the cluster changed on the HANDOUT
+    /// — it returns a mutable span and never observes what the caller does with it — so today a write to a component no client has ever heard of is
+    /// indistinguishable from a write to a replicated one. The set of components a projection reads is fixed when the projection is compiled, so the
+    /// question "could this span possibly matter to a subscriber" is answerable with one bit test against a value computed once at registration.
+    /// </para>
+    /// <para>
+    /// <b>All ones is the safe default and the one that must survive a missing projection.</b> An archetype nobody replicates, or one whose plan has not
+    /// been published yet, suppresses nothing: a false positive costs re-reading bytes that turn out identical, while a false negative is a change a client
+    /// never hears about. The narrowing is applied only where a compiled plan is in hand.
+    /// </para>
+    /// <para>
+    /// <b>It answers COMPONENT granularity and no finer.</b> A projection that names one field of a seven-field component still admits every write to that
+    /// component; the byte comparison downstream is what turns that into "nothing this publishes moved", at the cost of one visit per entity. Making that
+    /// visit free would need field-level write detection, which <c>GetSpan</c>'s signature cannot provide.
+    /// </para>
+    /// </remarks>
+    public ulong ProjectedComponentMask = ulong.MaxValue;
+
+    /// <summary>Span handouts suppressed because the component they covered is not projected. Diagnostic only.</summary>
+    public long UnprojectedSpanClaims;
+
+    /// <summary>Span handouts that reached the changed-cluster list. Diagnostic only, and the denominator of the one above.</summary>
+    public long ProjectedSpanClaims;
+
     /// <summary>Clusters whose bounds moved, summed over ticks — slice 5's gating quantity.</summary>
     public long AabbMovedClusters;
 
@@ -4800,6 +4829,43 @@ internal sealed unsafe partial class ArchetypeClusterState
     {
         // No slot information: every slot of the cluster is claimed. The callers in this state are the ones that genuinely cannot say more — a
         // mutable span handed over a whole column, and a cluster joining the active list.
+        NoteSlotsChanged(clusterChunkId, ulong.MaxValue);
+    }
+
+    /// <summary>
+    /// Claim every slot of a cluster for a write through a span over one component, unless no projection reads that component.
+    /// </summary>
+    /// <param name="clusterChunkId">The cluster.</param>
+    /// <param name="componentSlot">The component the span covers.</param>
+    /// <remarks>
+    /// The whole of <see cref="ProjectedComponentMask"/>'s value is here: a slot outside the mask cannot reach any subscriber however it is written, so the
+    /// claim is dropped before it costs a bitmap word. A slot at or past 64 is admitted rather than tested, because a mask cannot describe it and admitting
+    /// is the safe direction.
+    /// </remarks>
+    internal void NoteSpanContentChanged(int clusterChunkId, int componentSlot)
+    {
+        var suppressed = (uint)componentSlot < 64u && (ProjectedComponentMask & (1UL << componentSlot)) == 0UL;
+
+        // The two counters are DIAGNOSTIC and are written from fence workers, so they are gated on the same flag as the signal they describe. Left
+        // ungated they were a plain ++ on a field shared by every worker: lossy, which a counter can live with, but also a store into one cache line from
+        // every thread on every span handout — false sharing on the tick path, for a number nobody reads unless the signal is on.
+        if (TrackContentChanges)
+        {
+            if (suppressed)
+            {
+                Interlocked.Increment(ref UnprojectedSpanClaims);
+            }
+            else
+            {
+                Interlocked.Increment(ref ProjectedSpanClaims);
+            }
+        }
+
+        if (suppressed)
+        {
+            return;
+        }
+
         NoteSlotsChanged(clusterChunkId, ulong.MaxValue);
     }
 

@@ -47,7 +47,15 @@ public sealed partial class SimBridge
             }
 
             var places = cluster.GetReadOnlySpan(Creature.Bounds);
-            var brains = cluster.GetSpan(Creature.Ai);
+
+            // READ-ONLY by default, and taken mutably only on the tick a mode actually changes. GetSpan marks the cluster changed on the HANDOUT, so a
+            // mutable span taken every tick to read Mode claims a change on every tick whether or not one happened — which is the whole of what the
+            // projected-component mask cannot see through, since CreatureBrain genuinely is projected.
+            var brains = cluster.GetReadOnlySpan(Creature.Ai);
+            Span<CreatureBrain> brainsRw = default;
+
+            // Scheduling: written every tick by design, read by nobody on the wire, and in a component no projection names.
+            var timers = cluster.GetSpan(Creature.Timers);
             var motions = cluster.GetSpan(Creature.Move);
             var vitals = cluster.GetReadOnlySpan(Creature.Vitals);
             var chunk = cluster.ChunkId;
@@ -58,7 +66,9 @@ public sealed partial class SimBridge
                 var idx = BitOperations.TrailingZeroCount(bits);
                 bits &= bits - 1;
 
-                ref var ai = ref brains[idx];
+                // A COPY, not a ref: the span above is read-only. Every mode write below ends its iteration, so the copy is never read after being stale.
+                var ai = brains[idx];
+                ref var t = ref timers[idx];
                 if (ai.Mode == AiMode.Dead)
                 {
                     continue;
@@ -72,13 +82,13 @@ public sealed partial class SimBridge
                     continue;
                 }
 
-                if (ai.ThinkCooldown > 0)
+                if (t.ThinkCooldown > 0)
                 {
-                    ai.ThinkCooldown--;
+                    t.ThinkCooldown--;
                     continue;
                 }
 
-                ai.ThinkCooldown = thinkMin + (int)(Hash01(Salt(tick, chunk, idx, 0x51ED2701u)) * thinkSpan);
+                t.ThinkCooldown = thinkMin + (int)(Hash01(Salt(tick, chunk, idx, 0x51ED2701u)) * thinkSpan);
 
                 ref var move = ref motions[idx];
                 var x = places[idx].X;
@@ -91,7 +101,7 @@ public sealed partial class SimBridge
                 // the way. Without it one kited creature walks off the map and its cluster's bound follows.
                 if (homeSq > ai.LeashRadius * ai.LeashRadius)
                 {
-                    ai.Mode = AiMode.Leashing;
+                    SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Leashing);
                     Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, ai.HomeX, ai.HomeZ);
                     continue;
                 }
@@ -100,7 +110,7 @@ public sealed partial class SimBridge
                 {
                     if (homeSq < 16f)
                     {
-                        ai.Mode = AiMode.Wander;
+                        SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Wander);
                         PickWanderDestination(ref move, in ai, tick, chunk, idx);
                     }
                     else
@@ -130,7 +140,7 @@ public sealed partial class SimBridge
                         var breakRange = _creatureAttackRange * AttackRangeHysteresis;
                         if (targetSq > breakRange * breakRange)
                         {
-                            ai.Mode = AiMode.Pursue;
+                            SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Pursue);
                             Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
                         }
 
@@ -140,7 +150,7 @@ public sealed partial class SimBridge
 
                     if (targetSq <= _creatureAttackRange * _creatureAttackRange)
                     {
-                        ai.Mode = AiMode.Fighting;
+                        SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Fighting);
                         StandStill(ref move);
                     }
                     else
@@ -156,11 +166,11 @@ public sealed partial class SimBridge
                 // Three states, distinguished by two absolute tick stamps so that neither of the two common ones writes anything: walking the current leg
                 // (the velocity already points the right way and the Move system applies it), standing still (written once, on the transition), and
                 // picking the next leg. See CreatureBrain.MoveUntilTick.
-                if (tick < ai.MoveUntilTick)
+                if (tick < t.MoveUntilTick)
                 {
                     // Mid-leg. Re-steering here would only re-derive the velocity it already has.
                 }
-                else if (tick < ai.RestUntilTick)
+                else if (tick < t.RestUntilTick)
                 {
                     StandStill(ref move);
                 }
@@ -170,8 +180,8 @@ public sealed partial class SimBridge
                     Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
 
                     var legTicks = 1 + (int)(Hash01(Salt(tick, chunk, idx, 0x1B873593u)) * _wanderLegTicks);
-                    ai.MoveUntilTick = tick + legTicks;
-                    ai.RestUntilTick = ai.MoveUntilTick + (legTicks * WanderRestToMoveRatio);
+                    t.MoveUntilTick = tick + legTicks;
+                    t.RestUntilTick = t.MoveUntilTick + (legTicks * WanderRestToMoveRatio);
                 }
 
                 // The aggro query. A 24 m bubble against a few hundred players spread over a 16 km planet returns
@@ -203,7 +213,7 @@ public sealed partial class SimBridge
                         if (found)
                         {
                             aggroHits++;
-                            ai.Mode = AiMode.Pursue;
+                            SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Pursue);
                             move.DestX = tx;
                             move.DestZ = tz;
                             Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, tx, tz);
@@ -231,6 +241,26 @@ public sealed partial class SimBridge
         var r = ai.LeashRadius * 0.7f * MathF.Sqrt(Hash01(Salt(tick, chunk, idx, 0x85EBCA6Bu)));
         move.DestX = ai.HomeX + (MathF.Cos(a) * r);
         move.DestZ = ai.HomeZ + (MathF.Sin(a) * r);
+    }
+
+    /// <summary>Writes a creature's mode, taking the mutable brain span on the first write of this cluster and not before.</summary>
+    /// <param name="cluster">The cluster being walked.</param>
+    /// <param name="rw">The mutable span, empty until the first write.</param>
+    /// <param name="idx">The slot.</param>
+    /// <param name="mode">The new mode.</param>
+    /// <remarks>
+    /// <c>GetSpan</c> marks its cluster changed on the handout rather than on a write, so taking one per tick to read a field claims a change per tick.
+    /// Mode transitions are rare — a creature aggroes, leashes, engages or dies — so deferring the handout to the tick one happens is the difference
+    /// between a cluster that is dirty always and one that is dirty when something actually changed.
+    /// </remarks>
+    private static void SetCreatureMode(in ClusterRef<Creature> cluster, ref Span<CreatureBrain> rw, int idx, int mode)
+    {
+        if (rw.IsEmpty)
+        {
+            rw = cluster.GetSpan(Creature.Ai);
+        }
+
+        rw[idx].Mode = mode;
     }
 
     /// <summary>Stops a mover, writing only when it was actually moving.</summary>
@@ -491,6 +521,7 @@ public sealed partial class SimBridge
             var places = cluster.GetReadOnlySpan(Creature.Bounds);
             var motions = cluster.GetReadOnlySpan(Creature.Move);
             var brains = cluster.GetReadOnlySpan(Creature.Ai);
+            var timers = cluster.GetReadOnlySpan(Creature.Timers);
 
             var moved = 0UL;
             var bits = bits0;
@@ -505,7 +536,7 @@ public sealed partial class SimBridge
                 var h = p.HalfExtent;
                 float x, z;
 
-                if (ai.Mode == AiMode.Wander && ai.ThinkCooldown == 1 && p.X != ai.HomeX)
+                if (ai.Mode == AiMode.Wander && timers[idx].ThinkCooldown == 1 && p.X != ai.HomeX)
                 {
                     // Just revived: teleport home. The largest position jump the simulation makes, and the one that
                     // forces both a cell change and a cluster-bound recomputation in the same tick.
@@ -642,7 +673,11 @@ public sealed partial class SimBridge
             }
 
             var places = cluster.GetReadOnlySpan(CityNpc.Bounds);
-            var brains = cluster.GetSpan(CityNpc.Ai);
+
+            // Read-only: this loop only ever READS Mode. Nothing here changes an NPC's mode, so the mutable span it used to take claimed a change on
+            // every tick of every city in the world for no write at all.
+            var brains = cluster.GetReadOnlySpan(CityNpc.Ai);
+            var timers = cluster.GetSpan(CityNpc.Timers);
             var motions = cluster.GetSpan(CityNpc.Move);
             var chunk = cluster.ChunkId;
 
@@ -653,12 +688,12 @@ public sealed partial class SimBridge
                 var idx = BitOperations.TrailingZeroCount(bits);
                 bits &= bits - 1;
 
-                ref var ai = ref brains[idx];
-                if (ai.Mode != AiMode.Wander)
+                if (brains[idx].Mode != AiMode.Wander)
                 {
                     continue;
                 }
 
+                ref var ai = ref timers[idx];
                 ref var move = ref motions[idx];
                 var p = places[idx];
 
@@ -681,9 +716,10 @@ public sealed partial class SimBridge
                 }
                 else
                 {
+                    var brain = brains[idx];
                     var ang = Hash01(Salt(tick, chunk, idx, 0x846CA68Bu)) * MathF.PI * 2f;
-                    move.DestX = ai.HomeX + (MathF.Cos(ang) * ai.LeashRadius);
-                    move.DestZ = ai.HomeZ + (MathF.Sin(ang) * ai.LeashRadius);
+                    move.DestX = brain.HomeX + (MathF.Cos(ang) * brain.LeashRadius);
+                    move.DestZ = brain.HomeZ + (MathF.Sin(ang) * brain.LeashRadius);
                     Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, p.X, p.Z, move.DestX, move.DestZ);
 
                     var legTicks = 1 + (int)(Hash01(Salt(tick, chunk, idx, 0x7FEB352Du)) * _wanderLegTicks);

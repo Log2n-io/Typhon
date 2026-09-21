@@ -106,6 +106,10 @@ public sealed partial class TatooineSim : IDisposable
         Dbe.RegisterComponentFromAccessor<LairVitals>();
         Dbe.RegisterComponentFromAccessor<CreatureBrain>();
         Dbe.RegisterComponentFromAccessor<NpcBrain>();
+
+        // Scheduling, split out of the two brains above so a write to it reaches no subscriber. See CreatureTimers.
+        Dbe.RegisterComponentFromAccessor<CreatureTimers>();
+        Dbe.RegisterComponentFromAccessor<NpcTimers>();
         Dbe.RegisterComponentFromAccessor<PlayerState>();
         Dbe.RegisterComponentFromAccessor<Lair>();
         Dbe.RegisterComponentFromAccessor<Structure>();

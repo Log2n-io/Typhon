@@ -547,6 +547,9 @@ public sealed class SubscriptionsCommands
     /// <summary>Entity candidates every cell's broad phase collected.</summary>
     public long EntityCandidatesCollected => _ingress.Interest == null ? 0L : _ingress.Interest.EntityCandidatesCollected;
 
+    /// <summary>Span handouts the projected-component mask dropped, against those it let through.</summary>
+    public (long Suppressed, long Admitted) SpanClaims => _ingress.Interest == null ? default : _ingress.Interest.SpanClaims;
+
     /// <summary>Clusters an interest cell admitted whole, and the entity reads that avoided.</summary>
     public (long Clusters, long EntitiesSkipped) InteriorAdmission =>
         _ingress.Interest == null ? default : _ingress.Interest.InteriorAdmission;

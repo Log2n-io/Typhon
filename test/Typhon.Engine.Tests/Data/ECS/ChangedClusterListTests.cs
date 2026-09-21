@@ -263,6 +263,84 @@ class ChangedClusterListTests : TestBase<ChangedClusterListTests>
         Assert.That(Published(cs, 2), Does.Contain(chunkId), "the cluster whose column was handed out as a mutable span");
     }
 
+    /// <summary>
+    /// A mutable span over a component NO projection reads names nothing — and the same span over a projected one still names its cluster.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The one place the list is allowed to stay silent, and it is decided statically.</b> Every other test here asserts presence, because a clean
+    /// cluster in the list costs one wasted visit and a missing dirty one is a change no client hears about. This case is different in kind: the set of
+    /// components a projection reads is fixed when the projection is compiled, so a write to a component outside that set cannot reach a subscriber
+    /// however the caller writes through it. Suppressing it is not a guess about the bytes, it is a fact about the schema.
+    /// </para>
+    /// <para>
+    /// <b>Both halves are asserted in one test on purpose.</b> A test that only checked the suppression would pass just as well against a mask that
+    /// suppressed everything — which is the failure that loses changes silently — so the projected column is written in the same tick, through the same
+    /// API, and must still be named.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void AMutableSpanOverAnUnprojectedColumnNamesNothing()
+    {
+        using var dbe = SetupEngine();
+        var (_, chunkId) = SeedOneCluster(dbe, 4, 10, 10, tick: 1);
+
+        var cs = StateOf(dbe);
+
+        // Meta is out of the mask: the AI-bookkeeping shape — written every tick, read by nobody on the wire.
+        cs.ProjectedComponentMask = ~(1UL << Archetype<ClSpatialUnit>.Metadata.GetSlot(ClSpatialUnit.Meta._componentTypeId));
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var accessor = tx.For<ClSpatialUnit>();
+            foreach (var cluster in accessor.GetClusterEnumerator())
+            {
+                var metas = cluster.GetSpan(ClSpatialUnit.Meta);
+                var bits = cluster.OccupancyBits;
+                while (bits != 0)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    bits &= bits - 1;
+                    metas[slot].Tag = 4321;
+                }
+            }
+
+            accessor.Dispose();
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(2);
+        Assert.That(Published(cs, 2), Does.Not.Contain(chunkId),
+            "a span over a column no projection reads cannot reach a subscriber, so the list must not name its cluster");
+        Assert.That(cs.UnprojectedSpanClaims, Is.GreaterThan(0), "and the suppression must be the reason, not an unrelated silence");
+
+        // The SAME write, with Meta back in the mask: named. Varying only the mask is what makes this a test of the mask rather than of the write — and
+        // without this half, a mask that suppressed everything would pass the assertions above.
+        cs.ProjectedComponentMask = ulong.MaxValue;
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var accessor = tx.For<ClSpatialUnit>();
+            foreach (var cluster in accessor.GetClusterEnumerator())
+            {
+                var metas = cluster.GetSpan(ClSpatialUnit.Meta);
+                var bits = cluster.OccupancyBits;
+                while (bits != 0)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    bits &= bits - 1;
+                    metas[slot].Tag = 8765;
+                }
+            }
+
+            accessor.Dispose();
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(3);
+        Assert.That(Published(cs, 3), Does.Contain(chunkId), "the same span over a column the projection DOES read still names its cluster");
+    }
+
     /// <summary>A destroy names the cluster the entity left.</summary>
     [Test]
     public void ADestroyNamesItsCluster()

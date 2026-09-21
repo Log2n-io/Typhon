@@ -111,6 +111,12 @@ public static class CommandLine
         c.DormancyTicks = Int(args, "--dormancy", 0);
         c.SubscriptionsPhaseTiming = Array.IndexOf(args, "--subs-phases") >= 0;
         c.SubscriptionsInterestPhases = Array.IndexOf(args, "--subs-interest-phases") >= 0;
+        c.SubscriptionsTrackContent = Str(args, "--subs-content", "off") switch
+        {
+            "on" => true,
+            "off" => false,
+            var other => throw new ArgumentException($"--subs-content takes on or off, not '{other}'"),
+        };
         c.SubscriptionsInteriorAdmission = Str(args, "--subs-interior", "off") switch
         {
             "on" => true,

@@ -249,25 +249,47 @@ public struct CreatureBrain
     /// <summary>[CORE3] Distance at which a hostile is noticed — <c>DEFAULTAGGRORADIUS = 24</c>. Zero for a passive template.</summary>
     [Field] public float AggroRadius;
 
-    /// <summary>Ticks until the next decision. Staggered at spawn so a lair's creatures do not all think on one tick.</summary>
-    [Field] public int ThinkCooldown;
-
     /// <summary>The lair that owns this creature, so a kill can decrement its live count.</summary>
     [Field] public EntityId Lair;
+
+}
+
+/// <summary>
+/// A creature's scheduling bookkeeping: when it next decides, when it stops walking, when it moves again.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Split out of <see cref="CreatureBrain"/> because nothing on the wire reads it, and the engine can only see that at COMPONENT granularity.</b>
+/// <c>ClusterRef.GetSpan</c> marks a cluster changed when the span is handed out — it returns a mutable span and never observes what the caller does with
+/// it — so the engine's only static defence is the set of components the compiled projection reads. <c>CreatureBrain</c> is in that set, because the
+/// projection sends <c>Mode</c> and <c>AggroRadius</c>; a countdown living beside them is therefore indistinguishable from a real change every time it is
+/// written.
+/// </para>
+/// <para>
+/// <b>This is the realistic schema, not a trick to please a gate.</b> Replicated state and scheduling state have different lifetimes, different readers
+/// and different write rates, and a server that mixes them pays for the mixture on every tick of every entity.
+/// </para>
+/// </remarks>
+[Component("Swg.CreatureTimers", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct CreatureTimers
+{
+    /// <summary>Ticks until the next decision, and the respawn countdown while dead. Staggered at spawn so a lair does not think on one tick.</summary>
+    [Field] public int ThinkCooldown;
 
     /// <summary>
     /// The tick a wandering creature stops walking its current leg, after which it stands still until <see cref="RestUntilTick"/>.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>An ABSOLUTE tick rather than a countdown, and that is the point of it.</b> A countdown has to be decremented, and decrementing writes the brain on
-    /// every tick of a creature's life — which keeps its cluster permanently dirty however still the creature is, and defeats every change-detection
-    /// mechanism downstream. A stamp is written once per decision and merely compared in between.
+    /// <b>An ABSOLUTE tick rather than a countdown, and that is the point of it.</b> A countdown has to be decremented, and decrementing writes on every
+    /// tick of a creature's life — which keeps its cluster permanently dirty however still the creature is. A stamp is written once per decision and
+    /// merely compared in between.
     /// </para>
     /// <para>
-    /// <b>Why a creature rests at all.</b> A wandering creature that walks continuously writes a new position every tick forever, which is one workload shape
-    /// among many and happens to be the one no cache can help. Real creatures graze: they amble a few metres and then stand. The duty cycle here is one leg
-    /// to four rests — stationary about 80 % of the time — which is what the simulation was always meant to express.
+    /// <b>Why a creature rests at all.</b> A wandering creature that walks continuously writes a new position every tick forever, which is one workload
+    /// shape among many and happens to be the one no cache can help. Real creatures graze: they amble a few metres and then stand. The duty cycle here is
+    /// one leg to four rests — stationary about 80 % of the time.
     /// </para>
     /// </remarks>
     [Field] public long MoveUntilTick;
@@ -285,9 +307,14 @@ public struct NpcBrain
     [Field] public float HomeX;
     [Field] public float HomeZ;
     [Field] public float LeashRadius;
-    [Field] public int ThinkCooldown;
+}
 
-    /// <summary>The tick a shuffling NPC stops its current leg. See <see cref="CreatureBrain.MoveUntilTick"/> for why these are stamps, not countdowns.</summary>
+/// <summary>A city NPC's scheduling bookkeeping. Split from <see cref="NpcBrain"/> for the reason <see cref="CreatureTimers"/> records.</summary>
+[Component("Swg.NpcTimers", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct NpcTimers
+{
+    /// <summary>The tick a shuffling NPC stops its current leg. See <see cref="CreatureTimers.MoveUntilTick"/> for why these are stamps, not countdowns.</summary>
     [Field] public long MoveUntilTick;
 
     /// <summary>The tick a standing NPC picks its next leg.</summary>

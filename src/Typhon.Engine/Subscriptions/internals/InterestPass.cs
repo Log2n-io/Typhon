@@ -469,6 +469,29 @@ internal sealed unsafe class InterestPass
     public int HitsCountOf(int index) => _tickHits[index].Hits;
 
     /// <summary>Cluster candidates the cluster-granular broad phase collected this run, summed over the workers.</summary>
+    /// <summary>Span handouts the projected-component mask dropped, against those it let through.</summary>
+    public (long Suppressed, long Admitted) SpanClaims
+    {
+        get
+        {
+            var suppressed = 0L;
+            var admitted = 0L;
+            for (var i = 0; i < _states.Length; i++)
+            {
+                var cs = _states[i]?.ClusterState;
+                if (cs == null)
+                {
+                    continue;
+                }
+
+                suppressed += cs.UnprojectedSpanClaims;
+                admitted += cs.ProjectedSpanClaims;
+            }
+
+            return (suppressed, admitted);
+        }
+    }
+
     /// <summary>Clusters admitted whole by the box test, and the entity reads that avoided.</summary>
     public (long Clusters, long EntitiesSkipped) InteriorAdmission
     {

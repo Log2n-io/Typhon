@@ -449,6 +449,17 @@ public sealed class SubscriptionsOptions
     public bool InteriorClusterAdmission { get; init; }
 
     /// <summary>
+    /// Whether the engine tracks and publishes the per-tick changed-cluster list for replicated archetypes. Default off.
+    /// </summary>
+    /// <remarks>
+    /// Both halves of the signal at once, because they gate different costs and neither is useful alone: the marks on the write paths, and the drain that
+    /// turns them into a list. It is off because the consumer that justified it — the projection gate of 21 section 7.2 — does not pay on the workloads
+    /// measured so far, and a signal with no reader is pure cost. It stays switchable because the measurements that would justify a reader cannot be taken
+    /// with it compiled out.
+    /// </remarks>
+    public bool TrackClusterContentChanges { get; init; }
+
+    /// <summary>
     /// Whether the frame stage takes its sessions from a shared cursor rather than a fixed slice each. Default <see langword="true"/>.
     /// </summary>
     /// <remarks>

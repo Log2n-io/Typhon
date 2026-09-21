@@ -65,6 +65,7 @@ public sealed partial class TatooineSim
                 ResidentInterest = _config.SubscriptionsResidentInterest,
                 MeasureInterestPhases = _config.SubscriptionsInterestPhases,
                 InteriorClusterAdmission = _config.SubscriptionsInteriorAdmission,
+                TrackClusterContentChanges = _config.SubscriptionsTrackContent,
                 DynamicFrameScheduling = _config.SubscriptionsDynamicSchedule,
                 SharedClusterBlocks = _config.SubscriptionsSharedClusterBlocks,
             },

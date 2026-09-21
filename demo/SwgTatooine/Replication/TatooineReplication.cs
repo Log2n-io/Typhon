@@ -302,6 +302,11 @@ public static class TatooineReplication
                 + $"{subs.EntriesMigrated} entries relocated between clusters");
             var cc = subs.ClusterCandidates;
             Console.Error.WriteLine($"  cluster candidates: {cc.Collected} collected, {cc.Accepted} accepted");
+            var sc = subs.SpanClaims;
+            var scTotal = sc.Suppressed + sc.Admitted;
+            Console.Error.WriteLine(
+                $"  span claims: {sc.Suppressed} suppressed as unprojected, {sc.Admitted} admitted "
+                + $"({(scTotal == 0 ? 0d : sc.Suppressed * 100d / scTotal):F1} % dropped)");
             var ia = subs.InteriorAdmission;
             Console.Error.WriteLine($"  interior admission: {ia.Clusters} clusters whole, {ia.EntitiesSkipped} entity reads skipped");
             var bcr = subs.BroadClustersReached;

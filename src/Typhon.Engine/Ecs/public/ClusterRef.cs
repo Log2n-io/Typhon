@@ -203,7 +203,12 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         // its chunk id in hand, so naming it costs one bitmap bit; naming the ARCHETYPE instead — which is what the first cut did, by symmetry with the
         // flag above — degrades every tick that touches any span to "everything changed". Measured on the SWG demo at d06: 100 % of archetype-ticks, so
         // the list carried no information at all on the one workload it was built for.
-        _state.NoteClusterContentChanged(_chunkId);
+        //
+        // And the slot is passed, because this method has it and the claim is otherwise blind. A projection reads a FIXED set of components, decided when
+        // it is compiled, so a span over a component outside that set cannot reach any subscriber however the caller writes through it. One bit test
+        // against a mask computed at registration drops the claim before it costs a bitmap word — the difference between "this archetype is replicated"
+        // and "this COLUMN is replicated", which nothing was making.
+        _state.NoteSpanContentChanged(_chunkId, slot);
 
         return new Span<T>(ResolveBase(slot) + _layout.ComponentOffset(slot), _layout.ClusterSize);
     }

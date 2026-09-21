@@ -252,6 +252,9 @@ public sealed class SimConfig
     public bool SubscriptionsInterestPhases;
 
     /// <summary>Whether an interest cell admits a wholly-contained cluster without reading its entities. A same-binary switch, so one build is both arms.</summary>
+    /// <summary>Whether the engine tracks and publishes the changed-cluster list. Off by default; it has no reader yet, so it exists to be measured.</summary>
+    public bool SubscriptionsTrackContent;
+
     public bool SubscriptionsInteriorAdmission;
 
     /// <summary>
