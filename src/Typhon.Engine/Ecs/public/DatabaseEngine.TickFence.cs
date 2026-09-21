@@ -1935,6 +1935,11 @@ public partial class DatabaseEngine
             // No fence work on this path — a pure-Transient archetype, or a Static one nobody wrote — but its queries still ran and the budget controller
             // still moved, and a trace that skipped the record would sum to less than the accessors do.
             EmitSpatialArchetypeSnapshot(clusterState, meta.ArchetypeId, _spatialGrid);
+
+            // The changed-cluster list is published on THIS branch too (#205). A GetSpan write to a non-spatial column raises nothing the branch
+            // selection looks at, so an archetype can reach here with content bits set; skipping the publish would leave them to be drained by some later
+            // tick and reported as that tick's change, which is a stale answer rather than a missing one — worse, because it is believable.
+            clusterState.PublishChangedClusters(null, tickNumber);
             return false;
         }
 

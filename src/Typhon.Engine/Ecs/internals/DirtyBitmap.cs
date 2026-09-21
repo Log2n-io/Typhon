@@ -142,6 +142,33 @@ internal sealed class DirtyBitmap
     }
 
     /// <summary>
+    /// Clears one whole word — the 64 ids <paramref name="wordIndex"/> covers — in a single interlocked operation.
+    /// </summary>
+    /// <param name="wordIndex">The word, which for a cluster-indexed bitmap is the cluster's chunk id.</param>
+    /// <remarks>
+    /// For a caller that is retiring the thing the word describes, so the bits must not survive into a drain that would then name a chunk id which
+    /// has been freed and may already have been handed to something else. Out-of-range indices are ignored rather than faulting: this is called on
+    /// the tick path, where throwing is the worse failure.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void ClearWord(int wordIndex)
+    {
+        if (wordIndex < 0)
+        {
+            return;
+        }
+
+        var blocks = Volatile.Read(ref _blocks);
+        var blockIndex = wordIndex >> WordsPerBlockShift;
+        if (blockIndex >= blocks.Length)
+        {
+            return;
+        }
+
+        Interlocked.Exchange(ref blocks[blockIndex][wordIndex & WordInBlockMask], 0L);
+    }
+
+    /// <summary>
     /// ORs a mask into one whole word — the 64 ids <paramref name="wordIndex"/> covers — in a single interlocked operation.
     /// </summary>
     /// <param name="wordIndex">The word, which for a cluster-indexed bitmap is the cluster's chunk id.</param>
@@ -154,7 +181,9 @@ internal sealed class DirtyBitmap
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void OrWord(int wordIndex, long mask)
     {
-        if (mask == 0)
+        // Negative is checked as well as zero, and deliberately: ResolveBlock's `blockIndex < blocks.Length` is TRUE for a negative index, so the
+        // array access below would throw — on a call made unconditionally from the tick path, where throwing is the worse failure by a distance.
+        if (mask == 0 || wordIndex < 0)
         {
             return;
         }

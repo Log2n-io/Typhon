@@ -380,4 +380,62 @@ class ChangedClusterListTests : TestBase<ChangedClusterListTests>
         Assert.That(cs.ChangedClustersCoverAll, Is.False, "nothing was written, so nothing can have handed out a span");
         Assert.That(cs.ChangedClusterCount, Is.Zero, "a quiet tick names no cluster");
     }
+    /// <summary>
+    /// A destroy on a NON-spatial archetype names its cluster too — the path whose signal cannot come from spatial machinery.
+    /// </summary>
+    /// <remarks>
+    /// <c>ADestroyNamesItsCluster</c> proves the invariant on a spatial archetype, where the AABB machinery marks the cluster for reasons of its own, so
+    /// it cannot distinguish "the release path signals" from "something else did". This one has no spatial index at all: if <c>ReleaseSlot</c> does not
+    /// mark, nothing does, and a session goes on describing an entity that no longer exists until something unrelated touches the cluster.
+    /// </remarks>
+    [Test]
+    public void ADestroyOnANonSpatialArchetypeNamesItsCluster()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<ClPosition>();
+        dbe.RegisterComponentFromAccessor<ClMovement>();
+        dbe.InitializeArchetypes();
+
+        var ids = new EntityId[4];
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < ids.Length; i++)
+            {
+                var pos = new ClPosition(i, i);
+                var mov = new ClMovement(i, i);
+                ids[i] = tx.Spawn<ClAnt>(ClAnt.Position.Set(in pos), ClAnt.Movement.Set(in mov));
+            }
+
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(1);
+
+        var cs = dbe._archetypeStates[Archetype<ClAnt>.Metadata.ArchetypeId].ClusterState;
+        Assert.That(cs.SpatialSlot.HasSpatialIndex, Is.False, "precondition: this archetype has no spatial index, so nothing else can mark for it");
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Destroy(ids[1]);
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(2);
+
+        // The invariant is conditional on publication, and that is the contract rather than a weakening of it: an archetype the fence finds no work for
+        // is never visited, so no list is published and its stamp stays behind. Every consumer tests the stamp before the contents — the projection gate
+        // will not narrow anything unless it names the current tick — so an unpublished tick costs the optimisation and cannot cost correctness. What
+        // would be a defect is a CURRENT stamp that does not name the cluster, and that is what this asserts.
+        if (cs.ChangedClusterTick != 2L)
+        {
+            Assert.That(cs.ChangedClusterTick, Is.LessThan(2L),
+                "an unpublished tick must leave an older stamp; a current stamp over contents nobody computed is the one unsafe outcome");
+            return;
+        }
+
+        Assert.That(cs.ChangedClustersCoverAll || cs.ChangedClusterCount > 0, Is.True,
+            $"the tick published, so it must name the destroyed entity's cluster — there is no spatial machinery here to do it incidentally. "
+            + $"count={cs.ChangedClusterCount} coverAll={cs.ChangedClustersCoverAll}");
+    }
+
 }

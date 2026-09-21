@@ -1087,6 +1087,11 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     private void RetireClusterId(int clusterChunkId)
     {
+        // The changed-cluster list is exactly such a side table (#205): ReleaseSlot marks the slot it is freeing, and when that release drains the
+        // cluster the id becomes recyclable a few lines later. A bit left behind would have the next publish name a chunk id that is retired, and a
+        // consumer that dereferences an id — slice 5's resident-set walk will — would read a freed chunk.
+        ClusterContentChanges?.ClearWord(clusterChunkId);
+
         ResetClusterVisibility(clusterChunkId);
         ReplicationState?.ReleaseBlockForDrain(clusterChunkId);
     }
@@ -2434,27 +2439,20 @@ internal sealed unsafe partial class ArchetypeClusterState
     public bool ChangedClustersCoverAll;
 
     /// <summary>
-    /// Somebody was handed a mutable span over one of this archetype's columns this tick, so which clusters they wrote is unknown.
+    /// A change could not be attributed to a cluster at all, so every cluster of this archetype must be treated as changed for the tick.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>Distinct from <c>SpatialSpanHandedOut</c>, deliberately.</b> That flag is read by the AABB refresh and must not be set by a span over a
-    /// non-spatial column, because a read-only walk would then make a refused repair relocate entities — the hazard <c>ClusterRef.GetSpan</c>'s own
-    /// remarks record. This one feeds only the changed-cluster list, where the entire cost of a false positive is re-reading bytes that turn out to be
-    /// identical.
+    /// <b>The only thing that still sets it</b> is <see cref="NoteSlotsChanged"/> finding no bitmap to write to — the window before the cluster
+    /// state is fully built. An earlier design set it from <c>GetSpan</c> per ARCHETYPE, which degraded 100 % of archetype-ticks on the SWG demo;
+    /// <c>GetSpan</c> now names its own cluster, because it is called per cluster and holds the id.
     /// </para>
     /// <para>
-    /// <b>Why it is needed at all.</b> A <c>GetSpan</c> write to a non-spatial durable column raises no signal anywhere: not the dirty bitmap, not the
-    /// process bit, not <c>SpatialSpanHandedOut</c>, and <c>TYPHON009</c> does not flag it either — its subject is the <c>WriteSpatial</c> barrier.
-    /// Without this flag the list would silently miss those writes and its one-directional invariant would be false. The SWG demo writes
-    /// <c>Creature.Ai</c> through exactly that path.
-    /// </para>
-    /// <para>
-    /// A plain <see cref="bool"/> set to the same value repeatedly: it goes read-only after the first span of the tick, so the line is shared rather than
-    /// ping-ponged — the argument <see cref="WrittenSlotUnion"/>'s remarks make for being one field rather than an array.
+    /// Written by any worker and read by the fence, so both halves are ordered. It is the degradation path: losing the write loses the
+    /// one-directional invariant, which is the one thing the list may not do.
     /// </para>
     /// </remarks>
-    public bool MutableSpanHandedOut;
+    public int MutableSpanHandedOut;
 
     /// <summary>Entries contributed by the dirty bitmap, cumulative.</summary>
     public long ChangedFromSlots;
@@ -2499,15 +2497,14 @@ internal sealed unsafe partial class ArchetypeClusterState
         var start = Stopwatch.GetTimestamp();
         ChangedClusterCount = 0;
         ChangedClustersCoverAll = false;
-        ChangedClusterTick = tickNumber;
         ChangedPublishedTicks++;
 
-        if (MutableSpanHandedOut)
+        if (Interlocked.Exchange(ref MutableSpanHandedOut, 0) != 0)
         {
-            MutableSpanHandedOut = false;
             ChangedClustersCoverAll = true;
             ChangedCoverAllTicks++;
             ChangedSlotsWordCount = 0;
+            Volatile.Write(ref ChangedClusterTick, tickNumber);
             ChangedPublishStopwatchTicks += Stopwatch.GetTimestamp() - start;
             return;
         }
@@ -2590,8 +2587,12 @@ internal sealed unsafe partial class ArchetypeClusterState
             }
         }
 
+        // COUNT first, then the stamp with a release. A consumer tests the stamp and then reads the count — the protocol the fixtures describe —
+        // so publishing the stamp first offers a current tick over a count that is still zero or still growing. Nothing but the fence reads these
+        // today; slice 5's resident-set walk will, from a worker, and on arm64 plain stores would let it see exactly that.
         ChangedClusterCount = count;
         ChangedFromSlots += count;
+        Volatile.Write(ref ChangedClusterTick, tickNumber);
         ChangedPublishStopwatchTicks += Stopwatch.GetTimestamp() - start;
     }
 
@@ -4660,13 +4661,18 @@ internal sealed unsafe partial class ArchetypeClusterState
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void NoteSlotsChanged(int clusterChunkId, ulong slots)
     {
+        if (clusterChunkId < 0)
+        {
+            return;
+        }
+
         var bitmap = ClusterContentChanges;
         if (bitmap == null)
         {
             // The bitmap is created with the rest of the cluster state, so this is the window before that and nothing else. Losing the signal silently
             // is the one outcome the list's invariant does not permit, so the archetype degrades to "everything changed" for the tick instead — which is
             // what ChangedClustersCoverAll exists to express, and the only thing that still sets it.
-            MutableSpanHandedOut = true;
+            Volatile.Write(ref MutableSpanHandedOut, 1);
             return;
         }
 
