@@ -2472,6 +2472,39 @@ internal sealed unsafe partial class ArchetypeClusterState
     private long[] _changedClusterWords = [];
 
     /// <summary>
+    /// Whether the fence publishes the changed-cluster list for this archetype. Off until something consumes it.
+    /// </summary>
+    /// <remarks>
+    /// <b>Off by default because it is not free and, on the workload it was built for, nothing yet spends what it costs.</b> The publish measured
+    /// 0.21 ms per tick across five archetypes at d06/400 — 42 us per archetype-tick, by its own stopwatch rather than by subtraction — while its only
+    /// consumer, the projection gate, saves nothing there for reasons that are about granularity rather than about this list (21 § 7.2). Carrying a
+    /// measured cost for an unrealised benefit is the thing slice 2 was just made to stop doing, and this is the same call.
+    /// <para>
+    /// The signals behind it stay on: the content bitmap is written whatever this says, because its writers are one interlocked OR on paths that were
+    /// dropping the information entirely. Only the per-tick compaction is gated, so turning this on costs a tick and no warm-up.
+    /// </para>
+    /// </remarks>
+    public bool PublishChangedClusterList;
+
+    /// <summary>
+    /// Whether the write paths record content changes at all. Off with <see cref="PublishChangedClusterList"/>, and for the same reason.
+    /// </summary>
+    /// <remarks>
+    /// Separate from the publish flag because they gate different costs — the compaction is per tick, the marks are per write — and a consumer that
+    /// wants the list must turn both on, one tick before it first reads one, so the bitmap has a tick's worth of marks to drain.
+    /// </remarks>
+    public bool TrackContentChanges;
+
+    /// <summary>Clusters whose bounds moved, summed over ticks — slice 5's gating quantity.</summary>
+    public long AabbMovedClusters;
+
+    /// <summary>Ticks the count above was taken over.</summary>
+    public long AabbMovedTicks;
+
+    /// <summary>Active clusters summed over those same ticks, so the ratio is against what was there rather than against capacity.</summary>
+    public long AabbMovedActiveClusters;
+
+    /// <summary>
     /// Publishes this tick's changed-cluster list from the signals the fence already holds. Single-threaded, once per archetype per tick.
     /// </summary>
     /// <param name="dirtyBits">The fence's dirty-bit snapshot, whose word <c>w</c> is cluster <c>w</c>'s slot mask. May be <see langword="null"/>.</param>
@@ -2481,8 +2514,16 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// is the <c>WriteSpatial</c>-only path, which is precisely the case whose signal lives in the process bitmap rather than in the dirty bits, so a
     /// publish placed after that return would report nothing for the archetypes that actually move.
     /// </remarks>
+
     public void PublishChangedClusters(long[] dirtyBits, long tickNumber)
     {
+        if (!PublishChangedClusterList)
+        {
+            // The bitmap still accumulates; it is drained by the first publish that runs. A consumer reads the tick stamp before the contents, and the
+            // stamp stays behind, so "not published" reads as "cannot narrow" rather than as "nothing changed".
+            return;
+        }
+
         // ── dirtyBits means two different things, and only one of them is dirtiness ───────────────────────────────────────────────────────────────
         //
         // On branch path 2 it is ClusterDirtyBitmap.Snapshot()'s result and word w is cluster w's mask of CHANGED slots. On branch path 1 it is the
@@ -4661,7 +4702,13 @@ internal sealed unsafe partial class ArchetypeClusterState
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void NoteSlotsChanged(int clusterChunkId, ulong slots)
     {
-        if (clusterChunkId < 0)
+        // ── The write paths pay nothing while nobody reads the list ───────────────────────────────────────────────────────────────────────────────
+        //
+        // One predictable-not-taken branch, and it is here rather than only around the publish because the MARKS are the part that sits on the hot
+        // paths: the single-slot WriteSpatial overload is called once per ENTITY per tick by a non-batched caller, and an interlocked OR there is the
+        // same shape as the per-cluster written-slot array that measured +2.1 ms/tick and was rejected. With the publish gated and the marks left on,
+        // three samples at d06/400 put subs at 7.61-8.05 ms against a 7.50 baseline; the cost was not in the compaction.
+        if (!TrackContentChanges || clusterChunkId < 0)
         {
             return;
         }
@@ -6884,6 +6931,23 @@ internal sealed unsafe partial class ArchetypeClusterState
         {
             return;
         }
+
+        // ── Slice 5's gating quantity, counted where the signal is about to be destroyed (#205) ───────────────────────────────────────────────────
+        //
+        // A session's resident cluster set can only change for four reasons, and three are global: a cluster created, released, or its BOUNDS moved.
+        // The third is this bitmap. If most clusters move their bounds every tick then a maintained resident set has to re-examine most of itself every
+        // tick, and the approach dies the way LiveResidency did — so this is the number to have before building it, not after.
+        for (var w = 0; w < ClusterProcessBitmap.Length; w++)
+        {
+            var bits = Volatile.Read(ref ClusterProcessBitmap[w]);
+            if (bits != 0)
+            {
+                AabbMovedClusters += BitOperations.PopCount((ulong)bits);
+            }
+        }
+
+        AabbMovedTicks++;
+        AabbMovedActiveClusters += ActiveClusterCount;
 
         for (var wordIdx = 0; wordIdx < ClusterProcessBitmap.Length; wordIdx++)
         {

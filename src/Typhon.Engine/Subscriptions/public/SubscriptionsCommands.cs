@@ -393,6 +393,33 @@ public sealed class SubscriptionsCommands
     public (long RunsUnchanged, long RunsTotal, long SessionsCoherent, long SessionsTotal) InterestCoherence =>
         _ingress.Interest == null ? default : _ingress.Interest.InterestCoherence;
 
+    /// <summary>Clusters whose bounds moved per tick, against the active clusters there were — slice 5's gating quantity.</summary>
+    public (long Moved, long Active, long Ticks) AabbChurn
+    {
+        get
+        {
+            var states = _ingress.Interest?.ReplicationStates;
+            long m = 0, a = 0, t = 0;
+            if (states != null)
+            {
+                for (var i = 0; i < states.Length; i++)
+                {
+                    var cs = states[i]?.ClusterState;
+                    if (cs == null)
+                    {
+                        continue;
+                    }
+
+                    m += cs.AabbMovedClusters;
+                    a += cs.AabbMovedActiveClusters;
+                    t += cs.AabbMovedTicks;
+                }
+            }
+
+            return (m, a, t);
+        }
+    }
+
     /// <summary>
     /// The changed-cluster list's census: clusters named, ticks published, ticks that degraded to "all", and the stopwatch ticks spent publishing.
     /// </summary>

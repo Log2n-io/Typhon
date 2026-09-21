@@ -187,9 +187,18 @@ internal static unsafe class ProjectionPass
         // question in its own pass would double the walk to learn something this one is a few bytes away from. See MotionTracker.IsExtrapolating.
         ulong extrapolating = 0;
 
-        // Hoisted above section 3's scratch carving, where it used to be built, because the gate below needs it and it is a struct over values the plan
-        // and the layout already hold — no allocation, no page access.
-        var gatePosition = plan.Position;
+        // ── Whether the gate can fire AT ALL, decided before the loop that feeds it ───────────────────────────────────────────────────────────────
+        //
+        // Hoisted here, above the per-slot work, because everything the gate needs is per-BLOCK: if the changed-cluster list was not published for this
+        // tick there is nothing to narrow against, and accumulating the extrapolating mask would then be a velocity read per live slot for a mask
+        // nobody reads. Measured with it unconditional: it is the residue that kept subs above baseline once the list itself was gated off.
+        var clusterStateForGate = state.ClusterState;
+        var gated = clusterStateForGate != null
+            && !clusterStateForGate.ChangedClustersCoverAll
+            && clusterStateForGate.ChangedClusterTick == tick;
+
+        // A struct over values the plan and the layout already hold — no allocation, no page access. Built only when the gate can use it.
+        var gatePosition = gated ? plan.Position : null;
         var gateMotion = gatePosition != null ? MotionPolicy.For(gatePosition, layout, state.TickPeriodSeconds) : default;
         var previousTick = tick - 1;
         var bits = live;
@@ -239,11 +248,6 @@ internal static unsafe class ProjectionPass
         //   - a slot whose client is still EXTRAPOLATING it: motion is the one projected thing that is stateful on the client, so identical bytes mean
         //     the entity has stopped and the client does not know yet — the opposite of "nothing to send";
         //   - everything, when the signal degraded to "cannot say" for this archetype this tick.
-        var clusterStateForGate = state.ClusterState;
-        var gated = clusterStateForGate != null
-            && !clusterStateForGate.ChangedClustersCoverAll
-            && clusterStateForGate.ChangedClusterTick == tick;
-
         var visit = live;
         if (gated)
         {
@@ -319,7 +323,7 @@ internal static unsafe class ProjectionPass
         // Everything the rule needs that is a property of the ARCHETYPE rather than of the entity: the tolerance and teleport thresholds pre-squared, the
         // heartbeat in ticks, and the four offsets a segment is written at. The scratch is carved once for the whole block, so the per-slot call allocates no
         // stack of its own and stays inlinable.
-        var motion = gateMotion;
+        var motion = gated && gatePosition != null ? gateMotion : MotionPolicy.For(position, layout, state.TickPeriodSeconds);
         byte* velocityColumn = null;
         if (motion.Enabled && motion.VelocityDeclared)
         {

@@ -42,7 +42,19 @@ class ChangedClusterListTests : TestBase<ChangedClusterListTests>
             worldMax: new Vector2(10_000, 10_000),
             cellSize: 100f));
         dbe.InitializeArchetypes();
+        EnableTracking(dbe, Archetype<ClSpatialUnit>.Metadata.ArchetypeId);
         return dbe;
+    }
+
+    /// <summary>Turns the changed-cluster list on for one archetype — both halves, because they gate different costs.</summary>
+    private static void EnableTracking(DatabaseEngine dbe, int archetypeId)
+    {
+        var cs = dbe._archetypeStates[archetypeId]?.ClusterState;
+        if (cs != null)
+        {
+            cs.TrackContentChanges = true;
+            cs.PublishChangedClusterList = true;
+        }
     }
 
     private static ClSpatialPos MakePos(float x, float y, float z, float size = 1.0f) =>
@@ -395,6 +407,7 @@ class ChangedClusterListTests : TestBase<ChangedClusterListTests>
         dbe.RegisterComponentFromAccessor<ClPosition>();
         dbe.RegisterComponentFromAccessor<ClMovement>();
         dbe.InitializeArchetypes();
+        EnableTracking(dbe, Archetype<ClAnt>.Metadata.ArchetypeId);
 
         var ids = new EntityId[4];
         using (var tx = dbe.CreateQuickTransaction())

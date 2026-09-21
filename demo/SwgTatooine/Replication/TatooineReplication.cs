@@ -230,6 +230,14 @@ public static class TatooineReplication
                     + $"{rs.ClippedSlots} tested ({rs.InteriorSlots * 100d / (rs.InteriorSlots + rs.ClippedSlots):F1} % needed no per-entity test)");
             }
 
+            var ac = subs.AabbChurn;
+            if (ac.Ticks > 0 && ac.Active > 0)
+            {
+                Console.Error.WriteLine(
+                    $"  aabb churn (cumulative): {ac.Moved} cluster bounds moved over {ac.Ticks} archetype-ticks against {ac.Active} active "
+                    + $"({ac.Moved * 100d / ac.Active:F1} % of clusters move their bounds per tick)");
+            }
+
             var ccc = subs.ChangedClusterCensus;
             if (ccc.Ticks > 0)
             {
