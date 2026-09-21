@@ -2498,6 +2498,99 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <summary>Clusters whose bounds moved, summed over ticks — slice 5's gating quantity.</summary>
     public long AabbMovedClusters;
 
+    /// <summary>
+    /// Whether the AABB refresh records WHICH clusters moved, not merely how many.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Off by default, like every other signal added for replication.</b> The cost when on is one <see cref="DirtyBitmap.Set"/> per cluster whose bounds
+    /// actually changed — an <c>Interlocked.Or</c> on a word shared by 64 chunk ids — plus one drain per archetype per tick. The cost when off is a predicted
+    /// branch on a field the refresh loop already has in cache.
+    /// </para>
+    /// <para>
+    /// <b>Why this is a different signal from <see cref="ChangedClusterIds"/> and not a duplicate of it.</b> Slice 1 names clusters whose CONTENT changed,
+    /// from the write paths. This names clusters whose BOX changed, from the refresh that recomputes boxes. The first is a superset in every case anyone has
+    /// enumerated, but it is a superset by reasoning about funnels rather than by construction, and the broad-phase cache is a structure whose correctness is
+    /// permanent per session once wrong. Taking the narrower signal from the place that actually decides it — <see cref="NoteAabbChange"/>, called on exactly
+    /// <c>boundsMoved</c> by both arms of the refresh — removes the reasoning step.
+    /// </para>
+    /// </remarks>
+    public bool TrackAabbMovedClusters;
+
+    /// <summary>Per-tick accumulator of the clusters whose bounds moved. Written by the parallel refresh slices, drained once in Finalize.</summary>
+    private DirtyBitmap _aabbMovedBits;
+
+    /// <summary>Drain scratch for <see cref="_aabbMovedBits"/>, retained across ticks so a steady state reaches the allocator on no tick at all.</summary>
+    private long[] _aabbMovedDrain = [];
+
+    /// <summary>Chunk ids whose AABB moved on <see cref="AabbMovedClusterTick"/>, ascending. Valid for <see cref="AabbMovedClusterIdCount"/> entries.</summary>
+    public int[] AabbMovedClusterIds = [];
+
+    /// <summary>How many entries of <see cref="AabbMovedClusterIds"/> this tick published.</summary>
+    public int AabbMovedClusterIdCount;
+
+    /// <summary>The tick <see cref="AabbMovedClusterIds"/> describes, or -1. Any other tick means the list is last tick's and must not be read.</summary>
+    public long AabbMovedClusterTick = -1;
+
+    /// <summary>
+    /// Whether this tick's published list is complete, or whether the consumer must assume every cluster moved.
+    /// </summary>
+    /// <remarks>
+    /// Set when the refresh could not name its movers — today only when tracking was switched on mid-tick, so the bitmap missed the slices that ran before
+    /// it. A consumer treats it exactly as it treats a missing tick stamp: rebuild from scratch rather than patch.
+    /// </remarks>
+    public bool AabbMovedCoversAll;
+
+    /// <summary>
+    /// Publishes the clusters whose bounds moved this tick as a dense ascending list.
+    /// </summary>
+    /// <param name="tickNumber">The tick the list describes.</param>
+    /// <remarks>
+    /// <b>Called from Finalize, after the refresh phase barrier and before the bookkeeping clear</b>, which is the only window where the bitmap is both
+    /// complete and still intact. The count is established BEFORE the tick stamp is published, so a reader that sees the stamp sees a count that is already
+    /// correct — the publication-ordering defect review 1 found in <see cref="PublishChangedClusters"/>, not repeated here.
+    /// </remarks>
+    public void PublishAabbMovedClusters(long tickNumber)
+    {
+        if (!TrackAabbMovedClusters)
+        {
+            return;
+        }
+
+        var bitmap = _aabbMovedBits;
+        if (bitmap == null)
+        {
+            AabbMovedClusterIdCount = 0;
+            AabbMovedCoversAll = true;
+            Volatile.Write(ref AabbMovedClusterTick, tickNumber);
+            return;
+        }
+
+        var words = bitmap.DrainInto(ref _aabbMovedDrain);
+        var count = 0;
+        for (var w = 0; w < words; w++)
+        {
+            var bits = (ulong)_aabbMovedDrain[w];
+            while (bits != 0)
+            {
+                var bit = BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+
+                var chunkId = (w << 6) + bit;
+                if (count == AabbMovedClusterIds.Length)
+                {
+                    Array.Resize(ref AabbMovedClusterIds, AabbMovedClusterIds.Length == 0 ? 64 : AabbMovedClusterIds.Length * 2);
+                }
+
+                AabbMovedClusterIds[count++] = chunkId;
+            }
+        }
+
+        AabbMovedClusterIdCount = count;
+        AabbMovedCoversAll = false;
+        Volatile.Write(ref AabbMovedClusterTick, tickNumber);
+    }
+
     /// <summary>Ticks the count above was taken over.</summary>
     public long AabbMovedTicks;
 
@@ -2938,6 +3031,9 @@ internal sealed unsafe partial class ArchetypeClusterState
             // because it aligns each cluster to exactly one bitmap word for O(1) per-cluster dirty scan.
             ClusterDirtyBitmap = new DirtyBitmap(Math.Max(64, capacity * 64)),
             ClusterContentChanges = new DirtyBitmap(Math.Max(64, capacity * 64)),
+
+            // One bit per CHUNK ID rather than per entity slot, so this is 64x smaller than the two above it and its drain skips whole blocks at a time.
+            _aabbMovedBits = new DirtyBitmap(Math.Max(64, capacity)),
         };
     }
 
@@ -2963,6 +3059,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             // because it aligns each cluster to exactly one bitmap word for O(1) per-cluster dirty scan.
             ClusterDirtyBitmap = new DirtyBitmap(Math.Max(64, capacity * 64)),
             ClusterContentChanges = new DirtyBitmap(Math.Max(64, capacity * 64)),
+            _aabbMovedBits = new DirtyBitmap(Math.Max(64, capacity)),
         };
 
         state.RebuildActiveList();
@@ -4103,9 +4200,25 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// being collected for.
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void NoteAabbChange(in ClusterSpatialAabb previous, in ClusterSpatialAabb fresh)
+    private void NoteAabbChange(int chunkId, in ClusterSpatialAabb previous, in ClusterSpatialAabb fresh)
     {
         Interlocked.Increment(ref AabbChangeCount);
+
+        // The broad-phase cache's whole input, taken at the one place that decides `boundsMoved`. Both arms of the refresh reach here and only here, so a
+        // mover cannot be missed by adding an arm later without also failing to count itself — which is the property the counter beside it already relies on.
+        if (TrackAabbMovedClusters && chunkId >= 0)
+        {
+            var bitmap = _aabbMovedBits;
+            if (bitmap == null)
+            {
+                // Switched on mid-tick: the slices that already ran filed nothing, so this tick cannot claim a complete list.
+                AabbMovedCoversAll = true;
+            }
+            else
+            {
+                bitmap.Set(chunkId);
+            }
+        }
 
         // A degenerate previous box (the Empty sentinel) is a first fill, not a move: +inf/-inf contains nothing, so counting it as an escape would inflate
         // the rate by the whole spawn burst.
@@ -5734,7 +5847,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                         // CA-01 PRECONDITION (see the method's remarks): `stored = fresh` is a BLIND STORE, not a grow-merge. Sound only under the tick fence
                         // barrier, which guarantees no concurrent WriteSpatial is flagging new geometry into this cell. Relaxing that barrier without
                         // converting it to a union against `stored` silently drops the racing write and leaves the AABB too tight (#573).
-                        NoteAabbChange(in stored, in fresh);
+                        NoteAabbChange(chunkId, in stored, in fresh);
                         stored = fresh;
                         aabbsChanged++;
                     }
@@ -5952,7 +6065,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 fresh.CategoryMask = ReadStoredCategoryMask(slot, chunkId, indexSlot);
                 if (boundsMoved)
                 {
-                    NoteAabbChange(in stored, in fresh);
+                    NoteAabbChange(chunkId, in stored, in fresh);
                     stored = fresh;
                 }
 

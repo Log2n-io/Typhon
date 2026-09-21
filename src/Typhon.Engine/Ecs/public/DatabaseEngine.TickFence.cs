@@ -1940,6 +1940,11 @@ public partial class DatabaseEngine
             // selection looks at, so an archetype can reach here with content bits set; skipping the publish would leave them to be drained by some later
             // tick and reported as that tick's change, which is a stale answer rather than a missing one — worse, because it is believable.
             clusterState.PublishChangedClusters(null, tickNumber);
+
+            // Branch 0 ran no refresh, so nothing moved and the list is legitimately empty. Publishing the EMPTY list rather than skipping the call is the
+            // point: a consumer distinguishes "this tick named no movers" from "this tick did not answer" by the tick stamp alone, and a skipped publish
+            // would leave the stamp at the last tick that did run and be read as that tick's answer.
+            clusterState.PublishAabbMovedClusters(tickNumber);
             return false;
         }
 
@@ -1969,6 +1974,11 @@ public partial class DatabaseEngine
         // bitmap rather than in the dirty bits. Published after the migration compaction and the pending-finalization drain above, so the ids it
         // names are the ones the tick ends with.
         clusterState.PublishChangedClusters(dirtyBits, tickNumber);
+
+        // The AABB-moved list, from the same window and for the same reason. Its producer is NoteAabbChange inside the refresh slices, which the phase
+        // barrier above has already joined, so the bitmap is complete; ClearAabbRefreshBookkeeping below does not touch it, but keeping the two publishes
+        // adjacent is what stops a later edit from separating one of them from the barrier it depends on.
+        clusterState.PublishAabbMovedClusters(tickNumber);
 
         if (clusterState.SpatialSlot.HasSpatialIndex && clusterState.SpatialSlot.FieldInfo.Mode == SpatialMode.Dynamic)
         {
