@@ -462,7 +462,12 @@ internal sealed class HitArena
     }
 
     /// <summary>Discards the previous cell's candidates.</summary>
-    public void BeginCell() => _candCount = 0;
+    public void BeginCell()
+    {
+        _runCountCells = 0;
+        _candCount = 0;
+        _runCountCells = 0;
+    }
 
     /// <summary>Notes the candidates this cell's broad phase collected, once it is complete.</summary>
     public void NoteCellCollected() => CandidatesCollected += _candCount;
@@ -493,7 +498,158 @@ internal sealed class HitArena
         _candMinY[_candCount] = minY;
         _candMaxX[_candCount] = maxX;
         _candMaxY[_candCount] = maxY;
+
+        // ── The cluster run, accumulated here because the boxes are already in registers (#205, 21 slice 2) ──────────────────────────────────────
+        //
+        // QueryRadius walks cluster by cluster, so candidates arrive cluster-major and a run is just "the chunk id changed". The union of the entity
+        // boxes IS a bound on the candidates of that cluster, and a tighter one than the cluster's stored AABB — which is cell-relative, includes
+        // entities this query did not return, and would cost a separate indexed load per run to fetch. A run whose union lies wholly inside a session's
+        // enter radius needs no per-entity test at all: every entity in it is admissible by construction, and 74.4 % of accepted slots are in such a
+        // cluster (20 § 3.2).
+        if (!TrackCandidateRuns)
+        {
+            _candCount++;
+            return;
+        }
+
+        if (_runCountCells == 0 || _runChunk[_runCountCells - 1] != chunkId)
+        {
+            if (_runCountCells == _runChunk.Length)
+            {
+                var g = Math.Max(16, _runChunk.Length * 2);
+                Array.Resize(ref _runChunk, g);
+                Array.Resize(ref _runStart, g);
+                Array.Resize(ref _runEnd, g);
+                Array.Resize(ref _runMinX, g);
+                Array.Resize(ref _runMinY, g);
+                Array.Resize(ref _runMaxX, g);
+                Array.Resize(ref _runMaxY, g);
+            }
+
+            _runChunk[_runCountCells] = chunkId;
+            _runStart[_runCountCells] = _candCount;
+            _runMinX[_runCountCells] = minX;
+            _runMinY[_runCountCells] = minY;
+            _runMaxX[_runCountCells] = maxX;
+            _runMaxY[_runCountCells] = maxY;
+            _runCountCells++;
+        }
+        else
+        {
+            var r = _runCountCells - 1;
+            if (minX < _runMinX[r]) { _runMinX[r] = minX; }
+            if (minY < _runMinY[r]) { _runMinY[r] = minY; }
+            if (maxX > _runMaxX[r]) { _runMaxX[r] = maxX; }
+            if (maxY > _runMaxY[r]) { _runMaxY[r] = maxY; }
+        }
+
         _candCount++;
+        _runEnd[_runCountCells - 1] = _candCount;
+    }
+
+    private int[] _runChunk = new int[64];
+    private int[] _runStart = new int[64];
+    private int[] _runEnd = new int[64];
+    private double[] _runMinX = new double[64];
+    private double[] _runMinY = new double[64];
+    private double[] _runMaxX = new double[64];
+    private double[] _runMaxY = new double[64];
+    private int _runCountCells;
+
+    /// <summary>
+    /// Whether <see cref="AddCandidate"/> maintains the per-cluster run index that <see cref="FilterCandidateRunsInto"/> reads.
+    /// </summary>
+    /// <remarks>
+    /// <b>Off, because it is not free and nothing consumes it by default.</b> The bookkeeping is a branch and four min/max updates per candidate on the
+    /// broad phase's hottest loop, and with the run filter unwired it measured 0.45 ms of interest at d06/400 for nothing — more than the split it exists
+    /// to enable was ever going to save. Turned on to re-measure the split, or by whatever eventually wires it.
+    /// </remarks>
+    public bool TrackCandidateRuns;
+
+    private long _interiorRuns;
+    private long _clippedRuns;
+    private long _interiorSlotsAccepted;
+    private long _clippedSlotsTested;
+
+    /// <summary>Cluster runs accepted whole against runs that needed a per-entity test, and the slots each accounted for. Cumulative since start.</summary>
+    public (long InteriorRuns, long ClippedRuns, long InteriorSlots, long ClippedSlots) RunSplit =>
+        (_interiorRuns, _clippedRuns, _interiorSlotsAccepted, _clippedSlotsTested);
+
+    /// <summary>
+    /// Filters one archetype's candidates to a session's disc, accepting whole cluster runs that lie inside the enter radius without testing entities.
+    /// </summary>
+    /// <param name="cx">The viewpoint X.</param>
+    /// <param name="cy">The viewpoint Y.</param>
+    /// <param name="enterRadius">The radius an entity the session does not hold must be inside.</param>
+    /// <param name="leaveRadius">The radius an entity it already holds may stay inside.</param>
+    /// <param name="from">First candidate of the archetype's range.</param>
+    /// <param name="to">One past its last.</param>
+    /// <remarks>
+    /// <b>MEASURED SLOWER THAN THE KERNEL IT REPLACES, and not wired into the pass.</b> Its premise is sound and measures true — 74.0 % of accepted
+    /// slots at d06 are in a run the disc contains wholly, so their distance tests are known to pass before they run. Interest still went from 4.16 ms to
+    /// 4.56 ms, and the reason is what the split does to the OTHER 26 %: filtering per run hands the AVX kernel ranges of about twenty-one candidates
+    /// instead of one range of thousands, so its prologue and scalar tail are paid per cluster and it loses more than the skipped tests save. Removing the
+    /// per-entity map probe from the accepted side (see <see cref="AddSphereRunNear"/>) recovered 0.2 ms of that and no more.
+    /// <para>
+    /// What it needs before it can pay is for the clipped candidates to reach the kernel as ONE contiguous range — a compaction pass whose copying has to
+    /// cost less than the tests it enables skipping — or for the query to hand back a per-cluster slot mask so an interior run needs no candidate walk at
+    /// all. Kept, with its counter, because the 74 % is the measurement the next attempt starts from.
+    /// </para>
+    /// <b>Three answers per run, and only the third costs anything per entity.</b> A run whose box is beyond the leave radius is rejected whole; one whose
+    /// FARTHEST corner is inside the enter radius is accepted whole, because every entity in it is then inside too; only a run the disc clips runs the
+    /// vectorised per-entity kernel, which is unchanged. The membership this produces is identical to testing every entity — the two whole-run cases are
+    /// implications of the box test, not approximations of it — which is what lets CellKeyedInterestTests keep asserting entity by entity.
+    /// </remarks>
+    public void FilterCandidateRunsInto(double cx, double cy, double enterRadius, double leaveRadius, int from, int to)
+    {
+        var enterSq = enterRadius * enterRadius;
+        var leaveSq = leaveRadius * leaveRadius;
+
+        for (var r = 0; r < _runCountCells; r++)
+        {
+            var start = _runStart[r];
+            var end = _runEnd[r];
+            if (end <= from || start >= to)
+            {
+                continue;
+            }
+
+            if (start < from) { start = from; }
+            if (end > to) { end = to; }
+
+            // Closest point: beyond the leave radius means no entity of this run can be seen.
+            var dx = Math.Max(Math.Max(_runMinX[r] - cx, 0d), cx - _runMaxX[r]);
+            var dy = Math.Max(Math.Max(_runMinY[r] - cy, 0d), cy - _runMaxY[r]);
+            if ((dx * dx) + (dy * dy) > leaveSq)
+            {
+                continue;
+            }
+
+            // Farthest corner: inside the enter radius means every entity of this run is admissible, whether or not the session already holds it.
+            var fx = Math.Max(Math.Abs(_runMinX[r] - cx), Math.Abs(_runMaxX[r] - cx));
+            var fy = Math.Max(Math.Abs(_runMinY[r] - cy), Math.Abs(_runMaxY[r] - cy));
+            if ((fx * fx) + (fy * fy) <= enterSq)
+            {
+                _interiorRuns++;
+                _interiorSlotsAccepted += end - start;
+
+                // One mask, one probe. The slots come from the candidate list rather than the cluster's occupancy word because the query returned exactly
+                // the entities that exist and match the archetype's filters; an occupancy word would include slots this query deliberately excluded.
+                var mask = 0UL;
+                for (var i = start; i < end; i++)
+                {
+                    mask |= 1UL << _candSlots[i];
+                }
+
+                _candAccepted += end - start;
+                AddSphereRunNear(_runChunk[r], mask);
+                continue;
+            }
+
+            _clippedRuns++;
+            _clippedSlotsTested += end - start;
+            FilterCandidatesInto(cx, cy, enterRadius, leaveRadius, start, end);
+        }
     }
 
     /// <summary>
@@ -753,6 +909,57 @@ internal sealed class HitArena
     /// <param name="chunkId">The cluster the hit is in.</param>
     /// <param name="slot">Its slot within the cluster.</param>
     public void AddSphereHit(int chunkId, int slot) => AddSphereHit(chunkId, slot, near: true);
+
+    /// <summary>
+    /// Merges a whole cluster's slots into the session's run map in one probe.
+    /// </summary>
+    /// <param name="chunkId">The cluster.</param>
+    /// <param name="mask">Its slots, all of which are inside the enter radius.</param>
+    /// <remarks>
+    /// <b>The probe, not the distance test, is what a per-entity loop costs here.</b> Accepting an interior run through
+    /// <see cref="AddSphereHit(int, int, bool)"/> pays one Fibonacci-hashed map lookup per ENTITY to reach the same map entry twenty-one times on the SWG
+    /// demo's average cluster. Skipping the distance test while keeping those probes measured SLOWER than testing every entity — interest went from
+    /// 4.16 ms to 4.77 ms — because the arithmetic that was removed was the cheap half. One probe per run is the point of the split.
+    /// </remarks>
+    public void AddSphereRunNear(int chunkId, ulong mask)
+    {
+        if (chunkId < 0 || mask == 0)
+        {
+            return;
+        }
+
+        var mapSlot = FindMapSlot(chunkId);
+        if (_sphereMapKeys[mapSlot] != 0)
+        {
+            var at = _sphereMapValues[mapSlot];
+            _sphereMasks[at] |= mask;
+            _sphereNear[at] |= mask;
+            return;
+        }
+
+        if (_sphereCount == _sphereChunks.Length)
+        {
+            Array.Resize(ref _sphereChunks, _sphereChunks.Length * 2);
+            Array.Resize(ref _sphereMasks, _sphereChunks.Length);
+            Array.Resize(ref _sphereNear, _sphereChunks.Length);
+            Array.Resize(ref _sphereMapSlots, _sphereChunks.Length);
+        }
+
+        _sphereChunks[_sphereCount] = chunkId;
+        _sphereMasks[_sphereCount] = mask;
+        _sphereNear[_sphereCount] = mask;
+
+        if ((_sphereCount + 1) * 2 > _sphereMapKeys.Length)
+        {
+            GrowSphereMap();
+            mapSlot = FindMapSlot(chunkId);
+        }
+
+        _sphereMapKeys[mapSlot] = chunkId + 1;
+        _sphereMapValues[mapSlot] = _sphereCount;
+        _sphereMapSlots[_sphereCount] = mapSlot;
+        _sphereCount++;
+    }
 
     /// <summary>Merges one accepted entity into its cluster's run, recording whether it is inside the enter radius or only inside the band.</summary>
     /// <param name="chunkId">Its cluster.</param>

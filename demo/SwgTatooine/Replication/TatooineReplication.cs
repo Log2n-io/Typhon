@@ -222,6 +222,14 @@ public static class TatooineReplication
             }
 
             // Slice 1's measurement: how many clusters a tick names, against the watched blocks the projection pass would otherwise walk.
+            var rs = subs.RunSplit;
+            if (rs.InteriorSlots + rs.ClippedSlots > 0)
+            {
+                Console.Error.WriteLine(
+                    $"  run split (cumulative): {rs.InteriorRuns} runs accepted whole, {rs.ClippedRuns} clipped; slots {rs.InteriorSlots} untested vs "
+                    + $"{rs.ClippedSlots} tested ({rs.InteriorSlots * 100d / (rs.InteriorSlots + rs.ClippedSlots):F1} % needed no per-entity test)");
+            }
+
             var ccc = subs.ChangedClusterCensus;
             if (ccc.Ticks > 0)
             {

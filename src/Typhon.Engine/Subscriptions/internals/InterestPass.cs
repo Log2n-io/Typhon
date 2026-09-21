@@ -977,6 +977,31 @@ internal sealed unsafe class InterestPass
          _diagMaxY < _diagMinY ? 0d : _diagMaxY - _diagMinY,
          _diagCellSide);
 
+    /// <summary>
+    /// Cluster runs accepted whole against runs the disc clipped, and the slots each accounted for. Cumulative since start.
+    /// </summary>
+    /// <remarks>
+    /// Slice 2's measurement: 20 § 3.2 put 74.4 % of accepted slots in clusters wholly inside the enter radius, measured on the cluster-granularity arm.
+    /// This reports what the cell path actually achieves, where the run's bound is the union of the candidate boxes rather than the cluster's stored AABB.
+    /// </remarks>
+    public (long InteriorRuns, long ClippedRuns, long InteriorSlots, long ClippedSlots) RunSplit
+    {
+        get
+        {
+            long ir = 0, cr = 0, isl = 0, csl = 0;
+            for (var w = 0; w < _arenas.Length; w++)
+            {
+                var r = _arenas[w].RunSplit;
+                ir += r.InteriorRuns;
+                cr += r.ClippedRuns;
+                isl += r.InteriorSlots;
+                csl += r.ClippedSlots;
+            }
+
+            return (ir, cr, isl, csl);
+        }
+    }
+
     /// <summary>Interest cells the broad phase has resolved, cumulative since start.</summary>
     public long CellsResolved => Volatile.Read(ref _cellsResolved);
 
@@ -1252,6 +1277,8 @@ internal sealed unsafe class InterestPass
 
                 var narrowFrom = _measurePhases ? Stopwatch.GetTimestamp() : 0L;
                 arena.BeginSphere();
+                // FilterCandidateRunsInto is the interior/boundary split and it is NOT wired here — see its own remarks. It is correct and its premise
+                // measures true (74.0 % of accepted slots need no per-entity test), and it is slower than this line, so this line stays.
                 arena.FilterCandidatesInto(viewpoint.X, viewpoint.Y, enterRadius, radius, ranges[a], to);
                 if (_measurePhases)
                 {

@@ -427,6 +427,10 @@ public sealed class SubscriptionsCommands
         }
     }
 
+    /// <summary>Cluster runs accepted whole against runs the disc clipped, and the slots each accounted for.</summary>
+    public (long InteriorRuns, long ClippedRuns, long InteriorSlots, long ClippedSlots) RunSplit =>
+        _ingress.Interest == null ? default : _ingress.Interest.RunSplit;
+
     /// <summary>Why cell sharing did or did not happen: ungroupable sessions, keyed sessions, the viewpoint span and the interest cell side.</summary>
     public (long Ungroupable, long Keyed, double SpanX, double SpanY, double CellSide) GroupingDiagnostic =>
         _ingress.Interest == null ? default : _ingress.Interest.GroupingDiagnostic;
