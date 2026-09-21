@@ -182,6 +182,15 @@ internal static unsafe class ProjectionPass
         // nobody was looking at this entity last tick — in which case no session holds any history of it and a full enter is both correct and cheaper than
         // reasoning about what a session might remember.
         ulong initializing = 0;
+
+        // Slots whose client is still dead-reckoning them, accumulated HERE because this loop already touches every live slot's hot entry — asking the
+        // question in its own pass would double the walk to learn something this one is a few bytes away from. See MotionTracker.IsExtrapolating.
+        ulong extrapolating = 0;
+
+        // Hoisted above section 3's scratch carving, where it used to be built, because the gate below needs it and it is a struct over values the plan
+        // and the layout already hold — no allocation, no page access.
+        var gatePosition = plan.Position;
+        var gateMotion = gatePosition != null ? MotionPolicy.For(gatePosition, layout, state.TickPeriodSeconds) : default;
         var previousTick = tick - 1;
         var bits = live;
         while (bits != 0)
@@ -190,6 +199,11 @@ internal static unsafe class ProjectionPass
             bits &= bits - 1;
             var hot = (ReplicationHotEntry*)(blockBytes + layout.HotOffset + (slot * layout.HotStride));
             var entity = (ulong)entityIds[slot];
+
+            if (gatePosition != null && MotionTracker.IsExtrapolating(in gateMotion, (byte*)hot))
+            {
+                extrapolating |= 1UL << slot;
+            }
 
             if (hot->Entity.RawValue != entity)
             {
@@ -210,13 +224,69 @@ internal static unsafe class ProjectionPass
             }
         }
 
+        // ── 2b. The gate: which live slots can possibly have something to say (#205, design/Subscriptions/21 slice 3) ───────────────────────────────────
+        //
+        // S1's cost has always been O(watched), not O(changed), because there was no signal it could trust: GetSpan and WriteSpatial raise no dirty bit
+        // (SUB-10), so the only sound answer was to re-encode every watched slot and compare the bytes. Slice 1 gave the fence a signal it CAN trust —
+        // one that may only over-approximate — so the pass can now narrow the set it considers while keeping the byte comparison exactly as it was. The
+        // comparison still decides whether a group's tick advances; the mask only decides which entities are looked at.
+        //
+        // Four things must be visited whatever the change signal says, and each is a bug if dropped:
+        //   - a slot being (re-)initialized: it has no valid entry to compare against;
+        //   - a slot that ARRIVED by migration: its bytes came across unchanged, so nothing else names it and the session watching the destination would
+        //     never see it;
+        //   - a slot nobody watched last tick: no session holds history for it, so it owes a full enter;
+        //   - a slot whose client is still EXTRAPOLATING it: motion is the one projected thing that is stateful on the client, so identical bytes mean
+        //     the entity has stopped and the client does not know yet — the opposite of "nothing to send";
+        //   - everything, when the signal degraded to "cannot say" for this archetype this tick.
+        var clusterStateForGate = state.ClusterState;
+        var gated = clusterStateForGate != null
+            && !clusterStateForGate.ChangedClustersCoverAll
+            && clusterStateForGate.ChangedClusterTick == tick;
+
+        var visit = live;
+        if (gated)
+        {
+            var newlyWatched = live & ~block->ProjectedWatchedMask;
+            var arrivedPeek = Volatile.Read(ref block->ArrivedSlots);
+            visit = live & (clusterStateForGate.ChangedSlotsOf(block->ChunkId) | initializing | newlyWatched | arrivedPeek | extrapolating);
+        }
+
+        var skipped = live & ~visit;
+        if (skipped != 0)
+        {
+            // A skipped slot is unchanged, not unwatched, and the difference is one field. LastWatchedTick is what tells the NEXT tick that a session
+            // held this entity, and section 2 above turns a stale one into a re-initialization — so leaving it behind would make every gated slot take a
+            // full enter on the following tick, which is the opposite of the saving. A four-byte store against a column walk, an encode and a memcmp.
+            var stamp = skipped;
+            while (stamp != 0)
+            {
+                var slot = BitOperations.TrailingZeroCount(stamp);
+                stamp &= stamp - 1;
+                SetLastWatchedTick(blockBytes, layout, slot, tick);
+            }
+        }
+
+        if (visit == 0)
+        {
+            // Nothing to encode, but the block's published state still has to move: the frame stage reads (ChangedTick, ChangedSlots) as a pair and
+            // treats any other tick as "the mask is stale, read every retained slot", so a block left on last tick's stamp turns this saving into a
+            // frame-stage loss several times its size — the same reasoning the dormancy skip above states.
+            block->ChangedSlots = 0;
+            block->ProjectedWatchedMask = watched;
+            block->ProjectedOccupancy = *(ulong*)clusterBase;
+            Volatile.Write(ref block->ChangedTick, tick);
+            state.NoteProjected(blocks: 1, slots: 0, records: 0, releases: released);
+            return;
+        }
+
         // ── 3. One column walk per projected field, over the live watched slots ─────────────────────────────────────────────────────────────────────────
         var fields = plan.Fields;
         var ownerFields = plan.OwnerFields;
         var codeRows = fields.Length + ownerFields.Length;
         var codes = arena.Codes(Math.Max(1, codeRows) * MaxSlots);
-        Quantize(fields, 0, clusterLayout, clusterBase, transientBase, slotCount, live, codes);
-        Quantize(ownerFields, fields.Length, clusterLayout, clusterBase, transientBase, slotCount, live, codes);
+        Quantize(fields, 0, clusterLayout, clusterBase, transientBase, slotCount, visit, codes);
+        Quantize(ownerFields, fields.Length, clusterLayout, clusterBase, transientBase, slotCount, visit, codes);
 
         // ── 4. Scratch, carved once per block ────────────────────────────────────────────────────────────────────────────────────────────────────────────
         var packBytes = MaxPackBytes(plan);
@@ -249,7 +319,7 @@ internal static unsafe class ProjectionPass
         // Everything the rule needs that is a property of the ARCHETYPE rather than of the entity: the tolerance and teleport thresholds pre-squared, the
         // heartbeat in ticks, and the four offsets a segment is written at. The scratch is carved once for the whole block, so the per-slot call allocates no
         // stack of its own and stays inlinable.
-        var motion = MotionPolicy.For(position, layout, state.TickPeriodSeconds);
+        var motion = gateMotion;
         byte* velocityColumn = null;
         if (motion.Enabled && motion.VelocityDeclared)
         {
@@ -262,7 +332,7 @@ internal static unsafe class ProjectionPass
 
         var visited = 0;
         var records = 0;
-        bits = live;
+        bits = visit;
         while (bits != 0)
         {
             var slot = BitOperations.TrailingZeroCount(bits);

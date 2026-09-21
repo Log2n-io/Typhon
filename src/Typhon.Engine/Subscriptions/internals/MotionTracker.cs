@@ -391,6 +391,39 @@ internal static unsafe class MotionTracker
     }
 
     /// <summary>
+    /// Whether the segment this entry last published carries a non-zero velocity — i.e. the client is still dead-reckoning it forward.
+    /// </summary>
+    /// <param name="policy">The archetype's motion policy.</param>
+    /// <param name="hotBytes">The slot's hot entry.</param>
+    /// <returns><see langword="true"/> when any axis of the stored segment has a non-zero velocity code.</returns>
+    /// <remarks>
+    /// <b>Why anything outside this class needs to ask.</b> Motion is the one projected thing that is STATEFUL on the client: a client holding a moving
+    /// segment keeps advancing the entity every frame whether or not the server sends anything. So "this entity's bytes are identical to last tick's"
+    /// does not mean "this client needs nothing" — it usually means the opposite, that the entity has STOPPED and the client does not know yet. A
+    /// change-gated projection pass that skipped such a slot would let the client coast past tolerance, which is exactly what the differential oracle
+    /// caught: a creature 0.14 units ahead of the server after two hundred churned ticks, against a 0.057 tolerance.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static bool IsExtrapolating(in MotionPolicy policy, byte* hotBytes)
+    {
+        if (policy.SegmentOffset < 0)
+        {
+            return false;
+        }
+
+        var velocity = hotBytes + policy.SegmentOffset + policy.SegmentVelocityOffset;
+        for (var a = 0; a < policy.Dims; a++)
+        {
+            if (ReadVelocity(velocity + (a * policy.VelBytes), policy.VelBytes) != 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Writes one segment into the hot entry's pre-encoded region: <c>p0</c>, the velocity when the model carries one, <c>t0</c> as the tick's low 16 bits
     /// (W9) and the epoch.
     /// </summary>

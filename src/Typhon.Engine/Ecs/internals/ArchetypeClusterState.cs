@@ -2471,8 +2471,6 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <summary>Stopwatch ticks spent publishing, cumulative.</summary>
     public long ChangedPublishStopwatchTicks;
 
-    private int[] _changedScratchIds = [];
-    private ulong[] _changedScratchSlots = [];
     private long[] _changedClusterWords = [];
 
     /// <summary>
@@ -2509,23 +2507,28 @@ internal sealed unsafe partial class ArchetypeClusterState
             MutableSpanHandedOut = false;
             ChangedClustersCoverAll = true;
             ChangedCoverAllTicks++;
+            ChangedSlotsWordCount = 0;
             ChangedPublishStopwatchTicks += Stopwatch.GetTimestamp() - start;
             return;
         }
 
-        // ── Pass 1: the two per-cluster SLOT-MASK sources, ORed word by word into scratch ─────────────────────────────────────────────────────────
+        // ── One array, three sources, no merge ────────────────────────────────────────────────────────────────────────────────────────────────────
         //
-        // Both index entities as chunkId * 64 + slot, so word w of either is cluster w's mask and the union is one OR. The content bitmap is DRAINED
-        // — it accumulates between ticks and this pass consumes it — while dirtyBits was already snapshotted by the fence.
+        // All three sources are cluster-keyed, so they are ORed into ONE word array indexed by chunk id and everything downstream reads that. The first
+        // cut merged two ascending streams into the dense list instead, which was more code for a worse result: a merge produces the list but not the
+        // by-chunk lookup, and the projection pass needs the lookup — it visits blocks in watched order, not in chunk order, so a sorted list would have
+        // to be searched per block.
         var contentWords = ClusterContentChanges == null ? 0 : ClusterContentChanges.DrainInto(ref _changedClusterWords);
         var dirtyWords = dirtyBits == null ? 0 : Math.Min(dirtyBits.Length, Math.Max(1, PrimarySegmentCapacity));
-        var slotWords = Math.Max(contentWords, dirtyWords);
-        if (slotWords > 0 && (_changedClusterWords == null || _changedClusterWords.Length < slotWords))
+        var words = Math.Max(contentWords, dirtyWords);
+
+        if (words > 0 && (_changedClusterWords == null || _changedClusterWords.Length < words))
         {
-            Array.Resize(ref _changedClusterWords, slotWords);
+            Array.Resize(ref _changedClusterWords, words);
         }
 
-        for (var w = contentWords; w < slotWords; w++)
+        // Everything the drain did not write is last tick's and must not be believed.
+        for (var w = contentWords; w < words; w++)
         {
             _changedClusterWords[w] = 0L;
         }
@@ -2539,123 +2542,77 @@ internal sealed unsafe partial class ArchetypeClusterState
             }
         }
 
-        var fromSlots = 0;
+        // ── The process bitmap is deliberately NOT read ───────────────────────────────────────────────────────────────────────────────────────────
+        //
+        // It is one bit per CLUSTER, so folding it in widens that cluster to all sixty-four slots. It was the first version's answer to "WriteSpatial
+        // signals nothing", and it stopped being needed the moment WriteSpatial started recording the exact mask it is handed — at which point reading
+        // it only destroyed the precision just gained. Measured with it folded in: the SWG demo moves through WriteSpatial, so every moving cluster was
+        // widened and the projection gate saved nothing at all.
+        //
+        // It is also the wrong SIGNAL: the process bit means "this cluster's BOUNDS need revisiting", which the AABB refresh owns and clears. Content
+        // and bounds are different questions about the same cluster, and conflating them is what made setting it from here perturb the partition.
+        ChangedSlotsWordCount = words;
+
+        // ── Compact to the dense list ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+        //
+        // The scan is the one place this pass is O(all clusters) rather than O(changed): a word IS a cluster, so finding the non-empty ones means
+        // reading them all — there is no index in front of them. The vector step buys the BRANCH per empty word rather than the load.
+        var count = 0;
+        var i = 0;
+        if (Vector256.IsHardwareAccelerated)
         {
-            var words = slotWords;
-
-            // ── The one place this pass is O(all clusters) rather than O(changed) ──────────────────────────────────────────────────────────────────
-            //
-            // A word IS a cluster here, so finding the changed ones means reading every word: there is no index in front of them. What the vector skip
-            // buys is the BRANCH per empty word, not the load — a quiet archetype is a sequential read of one long per cluster with one test per eight
-            // of them instead of one each. At the SWG demo's x16 Creature that is 2 625 words, and the whole publish measures 0.09 ms/tick across five
-            // archetypes, so the scan is affordable; it is called out because it is the term that would grow if an archetype's cluster count did.
-            var w = 0;
-            if (Vector256.IsHardwareAccelerated)
+            var zero = Vector256<long>.Zero;
+            for (; i + Vector256<long>.Count <= words; i += Vector256<long>.Count)
             {
-                var zero = Vector256<long>.Zero;
-                for (; w + Vector256<long>.Count <= words; w += Vector256<long>.Count)
-                {
-                    var block = Vector256.LoadUnsafe(ref _changedClusterWords[w]);
-                    if (Vector256.EqualsAll(block, zero))
-                    {
-                        continue;
-                    }
-
-                    for (var k = w; k < w + Vector256<long>.Count; k++)
-                    {
-                        var m = (ulong)_changedClusterWords[k];
-                        if (m == 0)
-                        {
-                            continue;
-                        }
-
-                        if (fromSlots == _changedScratchIds.Length)
-                        {
-                            GrowScratch();
-                        }
-
-                        _changedScratchIds[fromSlots] = k;
-                        _changedScratchSlots[fromSlots] = m;
-                        fromSlots++;
-                    }
-                }
-            }
-
-            for (; w < words; w++)
-            {
-                var mask = (ulong)_changedClusterWords[w];
-                if (mask == 0)
+                var block = Vector256.LoadUnsafe(ref _changedClusterWords[i]);
+                if (Vector256.EqualsAll(block, zero))
                 {
                     continue;
                 }
 
-                if (fromSlots == _changedScratchIds.Length)
+                for (var k = i; k < i + Vector256<long>.Count; k++)
                 {
-                    GrowScratch();
+                    var m = (ulong)_changedClusterWords[k];
+                    if (m != 0)
+                    {
+                        Emit(ref count, k, m);
+                    }
                 }
-
-                _changedScratchIds[fromSlots] = w;
-                _changedScratchSlots[fromSlots] = mask;
-                fromSlots++;
             }
         }
 
-        // ── Pass 2: merge the process bitmap in ───────────────────────────────────────────────────────────────────────────────────────────────────
-        //
-        // Both streams are ascending, so this is a two-cursor merge into the published arrays rather than an in-place shuffle. A cluster carrying both
-        // signals widens to every slot: the process bit means WriteSpatial moved something, and the slot mask beside it does not necessarily name which,
-        // so the safe direction is to widen.
-        // The two cluster-granular sources are ORed into one word array first, so the merge below has exactly two streams rather than three. The
-        // content bitmap is DRAINED — it accumulates between ticks and is this pass's to consume — while the process bitmap is only READ, because the
-        // AABB refresh owns it and clears it itself a few lines later in the fence.
-        var process = Volatile.Read(ref ClusterProcessBitmap);
-        var processWords = process?.Length ?? 0;
-
-        var count = 0;
-        var fromProcess = 0;
-        var i = 0;
-
-        if (processWords > 0)
+        for (; i < words; i++)
         {
-            for (var w = 0; w < processWords; w++)
+            var m = (ulong)_changedClusterWords[i];
+            if (m != 0)
             {
-                var word = (ulong)Volatile.Read(ref process[w]);
-                while (word != 0)
-                {
-                    var chunkId = (w << 6) + BitOperations.TrailingZeroCount(word);
-                    word &= word - 1;
-
-                    while (i < fromSlots && _changedScratchIds[i] < chunkId)
-                    {
-                        Emit(ref count, _changedScratchIds[i], _changedScratchSlots[i]);
-                        i++;
-                    }
-
-                    if (i < fromSlots && _changedScratchIds[i] == chunkId)
-                    {
-                        Emit(ref count, chunkId, ulong.MaxValue);
-                        i++;
-                    }
-                    else
-                    {
-                        Emit(ref count, chunkId, ulong.MaxValue);
-                        fromProcess++;
-                    }
-                }
+                Emit(ref count, i, m);
             }
-        }
-
-        while (i < fromSlots)
-        {
-            Emit(ref count, _changedScratchIds[i], _changedScratchSlots[i]);
-            i++;
         }
 
         ChangedClusterCount = count;
-        ChangedFromSlots += fromSlots;
-        ChangedFromProcess += fromProcess;
+        ChangedFromSlots += count;
         ChangedPublishStopwatchTicks += Stopwatch.GetTimestamp() - start;
     }
+
+    /// <summary>
+    /// This tick's changed-slot mask per cluster, indexed by chunk id — the lookup form of <see cref="ChangedClusterIds"/>.
+    /// </summary>
+    /// <remarks>
+    /// Valid for <see cref="ChangedSlotsWordCount"/> entries and only for <see cref="ChangedClusterTick"/>. A consumer that visits clusters in some
+    /// other order — the projection pass walks watched blocks, not chunk ids — reads this instead of searching the dense list.
+    /// </remarks>
+    public long[] ChangedSlotsByChunk => _changedClusterWords;
+
+    /// <summary>How many entries of <see cref="ChangedSlotsByChunk"/> are valid.</summary>
+    public int ChangedSlotsWordCount;
+
+    /// <summary>The changed-slot mask for one cluster this tick, or zero when the tick named nothing for it.</summary>
+    /// <param name="chunkId">The cluster.</param>
+    /// <returns>The mask; <see cref="ulong.MaxValue"/> when the tick could not be narrower.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public ulong ChangedSlotsOf(int chunkId) =>
+        (uint)chunkId < (uint)ChangedSlotsWordCount ? (ulong)_changedClusterWords[chunkId] : 0UL;
 
     /// <summary>Appends one entry to the published arrays, growing them if needed.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -2673,13 +2630,6 @@ internal sealed unsafe partial class ArchetypeClusterState
         count++;
     }
 
-    /// <summary>Doubles the scratch arrays. Never shrinks: the high-water mark is what a steady-state tick needs (SUB-07).</summary>
-    private void GrowScratch()
-    {
-        var grown = Math.Max(64, _changedScratchIds.Length == 0 ? 64 : _changedScratchIds.Length * 2);
-        Array.Resize(ref _changedScratchIds, grown);
-        Array.Resize(ref _changedScratchSlots, grown);
-    }
 
     /// <summary>
     /// Per-archetype per-cell cluster claim list (issue #229 Q10 resolution). Holds the cluster chunk IDs of THIS archetype's clusters attached to each
