@@ -177,6 +177,8 @@ public struct TickContext {
 }
 ```
 
+`Accessor` and the cluster range are dispatch-specific. A non-parallel system uses `Transaction`, has `Accessor == null`, and receives the sentinel range `(0,0)`; a scoped cluster enumerator treats that range as empty, never as “all”. For an intentional whole-archetype scan use `ctx.Transaction.GetClusterEnumerator<T>()`. That is a storage-level full walk, not the system's filtered `Input` / `Entities` set.
+
 `CreateSideTransaction(durabilityMode)` is the escape hatch for economy-critical operations (trades, purchases) that must commit independently of the tick's main UoW. The caller owns and disposes the side transaction.
 
 ---
