@@ -50,6 +50,7 @@ public struct TickContext
     /// Per-worker EntityAccessor for parallel QuerySystems that do NOT write Versioned components.
     /// Provides Open/OpenMut with warm ChunkAccessor caches, zero per-entity dictionary overhead.
     /// Null when the system uses Transaction-based access (WritesVersioned=true or non-parallel systems).
+    /// For a non-parallel full-archetype cluster walk, use <c>ctx.Transaction.GetClusterEnumerator&lt;TArch&gt;()</c> instead.
     /// </summary>
     public EntityAccessor Accessor { get; init; }
 
@@ -93,13 +94,16 @@ public struct TickContext
     /// into <see cref="ClusterIds"/>, which points at either the full <c>ActiveClusterIds</c> (for <see cref="SimTier.All"/> systems) or a per-tier cluster
     /// list (for tier-filtered systems). Game code that passed <c>ctx.StartClusterIndex</c> / <c>ctx.EndClusterIndex</c> to the old two-argument
     /// <c>GetClusterEnumerator(int, int)</c> overload must migrate to the new three-argument overload that takes <see cref="ClusterIds"/> explicitly.</para>
-    /// <para>Default 0 (not -1) due to struct constraint. Check <c>EndClusterIndex &gt; StartClusterIndex</c> for validity — a zero range means not applicable
-    /// (non-parallel, non-cluster, or entity-level dispatch).</para>
+    /// <para>Default 0 (not -1) due to struct constraint. Check <c>EndClusterIndex &gt; StartClusterIndex</c> for validity — a zero range means no applicable
+    /// cluster partition (non-parallel, non-cluster, or entity-level dispatch). Scoped cluster enumerators deliberately treat <c>(0,0)</c> as an empty
+    /// range; it never means "all clusters". For an intentional non-parallel full-archetype walk, use
+    /// <c>ctx.Transaction.GetClusterEnumerator&lt;TArch&gt;()</c>. That parameterless walk scans the whole archetype and does not apply the system's
+    /// <c>Input</c> View or change-filter semantics; use <see cref="Entities"/> when those semantics matter.</para>
     /// </remarks>
     public int StartClusterIndex { get; init; }
 
     /// <summary>Exclusive end index into <see cref="ClusterIds"/> for this worker's assigned cluster range.</summary>
-    /// <remarks>Default 0. Check <c>EndClusterIndex &gt; StartClusterIndex</c> for validity — a zero range means not applicable.</remarks>
+    /// <remarks>Default 0. Check <c>EndClusterIndex &gt; StartClusterIndex</c> for validity — a zero range means no applicable partition, not a full walk.</remarks>
     public int EndClusterIndex { get; init; }
 
     /// <summary>

@@ -30,6 +30,7 @@ Guarantees hold across all three — MVCC visibility, B+Tree and spatial indexes
 ## In the API
 
 - **Bulk path:** [`GetClusterEnumerator()`](xref:Typhon.Engine.EntityAccessor.GetClusterEnumerator*) → [`ClusterRef<TArch>`](xref:Typhon.Engine.ClusterRef`1), with [`GetSpan<T>`](xref:Typhon.Engine.ClusterRef`1.GetSpan*) / [`GetReadOnlySpan<T>`](xref:Typhon.Engine.ClusterRef`1.GetReadOnlySpan*) and [`OccupancyBits`](xref:Typhon.Engine.ClusterRef`1.OccupancyBits) for branch-free per-slot access; flag writes with `MarkCurrentDirty()` or `MarkSlotDirty(slot)`.
+- **Runtime scope matters:** a parallel cluster-native `QuerySystem` gets `ctx.Accessor` plus an assigned `[StartClusterIndex, EndClusterIndex)` partition. A non-parallel system gets no accessor and the sentinel range `(0,0)`; use `ctx.Transaction.GetClusterEnumerator<T>()` only for an intentional full-archetype scan. Scoped `(0,0)` stays empty and never means “all”. The parameterless full walk bypasses the system's Input-View/change-filter entity set.
 - **Random path:** `Open` / `OpenMut` — transparently cluster-backed; it resolves to a cluster slot without any work on your side.
 - The layout itself is an internal subsystem — you interact with it only through these accessors, never by allocating or sizing a cluster.
 

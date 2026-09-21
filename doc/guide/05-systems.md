@@ -219,6 +219,8 @@ How a parallel system touches data depends on what it **writes**:
 - **Non-Versioned writes (SingleVersion / Transient)** — the fast path. Each worker gets a per-worker **`ctx.Accessor`** (an `EntityAccessor`) with warm caches and **zero per-entity locking**, riding on a single frozen snapshot (a `PointInTimeAccessor`). This is how `MoveSystem` and `RegenSystem` write `Transform` and `Ham` (both SV) across all cores with no contention.
 - **Versioned writes** — declare `.WritesVersioned()`. The engine falls back to a **per-chunk `Transaction`** (via `ctx.Transaction`) because Versioned writes need the full MVCC machinery. Correct, but heavier — which is exactly why hot, overwrite-often data like position is usually SingleVersion ([ch.2](02-modeling.md)).
 
+For cluster-native dispatch, `StartClusterIndex` / `EndClusterIndex` are valid only when the runtime actually assigned a cluster partition. The default `(0,0)` means **no partition**, not “all clusters”, and a scoped enumerator over `(0,0)` is intentionally empty. Non-parallel systems have `ctx.Accessor == null`; when such a system deliberately needs a **whole-archetype** cluster sweep, use `ctx.Transaction.GetClusterEnumerator<T>()`. That parameterless walk does **not** preserve the system's `.Input(...)` View or change-filter entity set — iterate `ctx.Entities` when those filters are part of the system's semantics.
+
 ```csharp
 b.Input(() => _characters).Parallel()
  .Writes<Transform>();                       // SV write → ctx.Accessor, lock-free

@@ -29,7 +29,8 @@ public class Ant : Archetype<Ant>
     public static readonly Comp<Movement> Movement = Register<Movement>();
 }
 
-// Bulk iteration — the cluster-native path, ~50x faster than per-entity Open/OpenMut.
+// Parallel QuerySystem bulk iteration — the cluster-native path, ~50x faster than per-entity Open/OpenMut.
+// ctx.Accessor exists only on the parallel non-Versioned path.
 var ants = ctx.Accessor.For<Ant>();
 using var clusters = ants.GetClusterEnumerator();
 while (clusters.MoveNext())
@@ -49,6 +50,10 @@ while (clusters.MoveNext())
     clusters.MarkCurrentDirty(); // required: flags the writes for WAL/checkpoint — the cluster path skips dirty tracking otherwise
 }
 
+// Non-parallel system, when a whole-archetype scan is actually intended.
+// ctx.Accessor is null on this path; (StartClusterIndex, EndClusterIndex) == (0, 0) means "no partition".
+using var serialClusters = ctx.Transaction.GetClusterEnumerator<Ant>();
+
 // Random single-entity access — same archetype, same API, transparently cluster-backed.
 var entity = ants.OpenMut(someAntId);
 ref var pos = ref entity.Write(Ant.Position);
@@ -58,6 +63,8 @@ pos.X += 1;
 ## ⚠️ Guarantees & limits
 
 - **Cluster size is auto-computed, not chosen by the caller**: N ∈ [8, 64] is picked per archetype to maximize entities-per-page; iteration code is identical for every N.
+- **Cluster partition scope is explicit**: `TickContext.StartClusterIndex == EndClusterIndex == 0` means there is no applicable partition. Scoped `GetClusterEnumerator(..., start, end)` overloads treat `(0,0)` as empty and never reinterpret it as a full walk.
+- **A full cluster walk is not an Input-View walk**: in a non-parallel system, `ctx.Transaction.GetClusterEnumerator<T>()` scans the whole archetype. It does not apply `.Input(...)`, `ctx.Entities`, change filters, or tier/entity filtering; use `ctx.Entities` when those semantics are required.
 - **Every archetype is cluster-backed, and there is no opt-out**: eligibility is unconditional, the pure-`Versioned` archetype included — a cluster stores the `Versioned` HEAD in the slot and keeps the revision chain separate, exactly as it does for a mixed archetype. Being unconditional is what makes exactly one spatial index possible; an opt-out would keep a second index home alive for every consumer to branch on.
 - **Direct `GetSpan`/`Get` writes bypass dirty tracking**: call `MarkCurrentDirty()` (whole cluster) or `MarkSlotDirty(slot)` (single entity) after writing, or the change never reaches the WAL/checkpoint. Writing `Versioned` components through `GetSpan` is rejected by design (`Debug.Assert`) — use `OpenMut`/`Write` for those, which still goes through the revision chain.
 - **Measured impact** (100K entities, 2-component archetype): per-entity cost 134 ns → ~2.7 ns (~50x), tick time ~10x, working set 19.2 MB → 2.5 MB (L3 → L2).

@@ -238,6 +238,73 @@ class SystemArchetypeTouchTests : TestBase<SystemArchetypeTouchTests>
         view.Dispose();
     }
 
+    [Test]
+    public void NonParallelQuery_ZeroClusterRangeIsNoPartition_AndFullWalkIsExplicit()
+    {
+        using var dbe = SetupEngine();
+        using var txView = dbe.CreateQuickTransaction();
+        var view = txView.Query<TouchArch>().ToView();
+
+        var observed = 0;
+        var accessorWasNull = 0;
+        var start = -1;
+        var end = -1;
+        var scopedVisited = -1;
+        var fullVisited = -1;
+
+        using (var runtime = TyphonRuntime.Create(dbe, schedule =>
+        {
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.QuerySystem("Walk", ctx =>
+            {
+                if (Volatile.Read(ref observed) != 0)
+                {
+                    return;
+                }
+
+                var scopedCount = 0;
+                using (var scoped = ctx.Transaction.GetClusterEnumerator<TouchArch>(ctx.StartClusterIndex, ctx.EndClusterIndex))
+                {
+                    foreach (var cluster in scoped)
+                    {
+                        scopedCount += System.Numerics.BitOperations.PopCount(cluster.OccupancyBits);
+                    }
+                }
+
+                var fullCount = 0;
+                using (var full = ctx.Transaction.GetClusterEnumerator<TouchArch>())
+                {
+                    foreach (var cluster in full)
+                    {
+                        fullCount += System.Numerics.BitOperations.PopCount(cluster.OccupancyBits);
+                    }
+                }
+
+                Volatile.Write(ref accessorWasNull, ctx.Accessor == null ? 1 : 0);
+                Volatile.Write(ref start, ctx.StartClusterIndex);
+                Volatile.Write(ref end, ctx.EndClusterIndex);
+                Volatile.Write(ref scopedVisited, scopedCount);
+                Volatile.Write(ref fullVisited, fullCount);
+                Volatile.Write(ref observed, 1);
+            }, input: () => view);
+        }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }))
+        {
+            runtime.Start();
+            var completed = SpinWait.SpinUntil(() => Volatile.Read(ref observed) != 0, TimeSpan.FromSeconds(5));
+            runtime.Shutdown();
+            Assert.That(completed, Is.True, "the non-parallel QuerySystem did not execute");
+        }
+
+        Assert.That(accessorWasNull, Is.EqualTo(1), "non-parallel QuerySystems use ctx.Transaction, not ctx.Accessor");
+        Assert.That(start, Is.Zero);
+        Assert.That(end, Is.Zero);
+        Assert.That(scopedVisited, Is.Zero, "(0,0) is the no-partition sentinel and remains an empty scoped range");
+        Assert.That(fullVisited, Is.EqualTo(EntityCount),
+            "the parameterless Transaction cluster enumerator is the explicit whole-archetype walk for a non-parallel system");
+
+        view.Dispose();
+    }
+
     private static int CountVisited(TickContext ctx)
     {
         using var clusters = ctx.ClusterIds != null
