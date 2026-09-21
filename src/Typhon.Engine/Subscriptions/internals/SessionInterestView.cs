@@ -56,6 +56,7 @@ internal sealed unsafe class SessionInterestView : IDisposable
     /// </remarks>
     private ulong* _entryOwed;
 
+
     private long* _entryTouched;
 
     private ulong* _entryIds;
@@ -102,6 +103,25 @@ internal sealed unsafe class SessionInterestView : IDisposable
 
         var slot = FindMapSlot(key);
         return _mapKeys[slot] == 0 ? 0UL : _entryMasks[_mapValues[slot]];
+    }
+
+    /// <summary>The entry this key occupies, or <c>-1</c> when the session holds no entry for it.</summary>
+    /// <param name="key">The packed archetype and chunk id.</param>
+    /// <returns>The entry index, or <c>-1</c>.</returns>
+    /// <remarks>
+    /// The lookup half of <see cref="Touch"/>, without its side effects. <c>Touch</c> creates the entry and stamps it as reached, and both are claims a
+    /// caller may not yet be entitled to make — the hysteresis test asks about a cluster whose admission is still being decided, and the block cache asks
+    /// before the run exists at all.
+    /// </remarks>
+    public int IndexOf(long key)
+    {
+        if (_mapKeys == null || _entryCount == 0)
+        {
+            return -1;
+        }
+
+        var slot = FindMapSlot(key);
+        return _mapKeys[slot] == 0 ? -1 : _mapValues[slot];
     }
 
     /// <summary>Slots of cluster <paramref name="index"/> that the next frame must visit whatever the change masks say.</summary>
@@ -188,6 +208,16 @@ internal sealed unsafe class SessionInterestView : IDisposable
 
     /// <summary>The generation half of a packed entry.</summary>
     public static ushort GenerationOf(ulong id) => (ushort)(id >> 32);
+
+    /// <summary>Stamps an entry the caller has already located as reached this tick.</summary>
+    /// <param name="index">The entry, from <see cref="IndexOf"/>.</param>
+    /// <param name="tick">The tick.</param>
+    /// <remarks>
+    /// The half of <see cref="Touch"/> that is left once the lookup is done. <c>FlushSphereRun</c> asks this view three separate keyed questions about
+    /// one cluster — what mask is held, which block was cached, and then stamp it — and each was its own probe of the same map for the same key. At
+    /// ~192 000 runs a tick that is three hash lookups where one answers everything.
+    /// </remarks>
+    public void TouchAt(int index, long tick) => _entryTouched[index] = tick;
 
     /// <summary>
     /// Finds the cluster's entry, creating an empty one if the session has never reached it, and marks it reached on <paramref name="tick"/>.

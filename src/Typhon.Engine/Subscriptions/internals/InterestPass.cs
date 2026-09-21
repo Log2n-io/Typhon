@@ -1548,10 +1548,22 @@ internal sealed unsafe class InterestPass
         // CloseSession the session still holds a cluster it does not.
         //
         // With no declared band the two masks are equal and this is the identity, which is what makes the two shapes one binary apart.
+        // ── ONE keyed lookup for the whole run ────────────────────────────────────────────────────────────────────────────────────────────────────
+        //
+        // This method used to ask the view three separate keyed questions about one cluster — HeldMask for the hysteresis blend, then the block cache,
+        // then Touch to stamp it — each probing the same map for the same key, plus the replication directory for a fourth. At roughly 192 000 runs a
+        // tick that is four hash lookups where one index answers everything, and 92.9 % of those runs are unchanged from the tick before (18 § 8.3).
+        //
+        // Found BEFORE the admission decision, because the hysteresis blend needs the held mask and must not create an entry: touching one would stamp
+        // the cluster as reached, which is the claim still being decided.
+        var viewKey = SessionInterestView.KeyOf((ushort)archetypeIndex, chunkId);
+        var entry = view?.IndexOf(viewKey) ?? -1;
+        var held = entry >= 0 ? view.MaskAt(entry) : 0UL;
+
         var mask = farMask;
         if (nearMask != farMask)
         {
-            mask = nearMask | (farMask & (view?.HeldMask(SessionInterestView.KeyOf((ushort)archetypeIndex, chunkId)) ?? 0UL));
+            mask = nearMask | (farMask & held);
             if (mask == 0)
             {
                 return 0;
@@ -1560,8 +1572,16 @@ internal sealed unsafe class InterestPass
 
         var directory = _states[archetypeIndex].Directory;
         var stamp = (uint)_tickNumber;
-        probes++;
 
+        // ── The session's own answer from last time, before the directory's ───────────────────────────────────────────────────────────────────────
+        //
+        // Which block a cluster has is a property of the CLUSTER, and this pass asks the directory once per run per SESSION — some 192 000 hash probes
+        // a tick at d06/400, for an answer that changes for almost none of them: 92.9 % of runs are unchanged tick to tick (18 § 8.3). The view is
+        // already keyed by cluster and about to be touched anyway, so it is where the answer belongs.
+        //
+        // Caching the BLOCK in the entry as well was tried and removed: validated against the header's chunk id it was correct, and it bought nothing
+        // measurable — four samples put interest at 4.11 ms against 4.16 — while costing eight bytes per entry per session. The directory probe is not
+        // where this pass spends its time either.
         nint blockAddress = 0;
         ushort flags = InterestRunFlags.None;
         if (directory.TryGetBlock(chunkId, out var block))
@@ -1575,6 +1595,8 @@ internal sealed unsafe class InterestPass
             arena.AddNewBlock(archetypeIndex, chunkId);
         }
 
+        probes++;
+
         // ── The difference (15 § 3.2) ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
         //
         // One 64-bit comparison against what this session's last published frame described, in place of a known-set probe per entity. `entered` is the half
@@ -1585,8 +1607,18 @@ internal sealed unsafe class InterestPass
         var viewIndex = -1;
         if (view != null)
         {
-            viewIndex = view.Touch(SessionInterestView.KeyOf((ushort)archetypeIndex, chunkId), _tickNumber);
-            var held = view.MaskAt(viewIndex);
+            // The entry is created only here, once the cluster is admitted — and only when the lookup above did not already find it.
+            if (entry >= 0)
+            {
+                viewIndex = entry;
+                view.TouchAt(entry, _tickNumber);
+            }
+            else
+            {
+                viewIndex = view.Touch(viewKey, _tickNumber);
+                held = view.MaskAt(viewIndex);
+            }
+
             entered = mask & ~held;
 
             var left = held & ~mask;
