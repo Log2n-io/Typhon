@@ -311,7 +311,8 @@ internal sealed class TradeSystem : CallbackSystem
             int ai = (int)((ctx.TickNumber * 7 + k * 2) % n);
             int bi = (ai + 1) % n;
 
-            // The roster can name an entity destroyed since the last refresh, so open defensively rather than letting OpenMut throw.
+            // The roster can name an entity destroyed since the last refresh. TryOpen is deliberately read-only: use it only as the non-throwing stale-id
+            // guard, then reopen with OpenMut below for the write. Both opens use this transaction's fixed snapshot.
             if (!ctx.Transaction.TryOpen(_roster[ai], out _) || !ctx.Transaction.TryOpen(_roster[bi], out _))
             {
                 continue;
