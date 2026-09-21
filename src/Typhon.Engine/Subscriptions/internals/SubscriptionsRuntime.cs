@@ -143,7 +143,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             _views = Options.IncrementalInterest ? new SessionViewStore(Options.MaxSessions) : null;
 
             Interest = new InterestPass(engine, Plans, _replicationStates, registry, _sessions, Options.CellKeyedInterest, _views,
-                Options.ResidentInterest, Options.MeasureInterestPhases);
+                Options.ResidentInterest, Options.InteriorClusterAdmission, Options.MeasureInterestPhases);
 
             // S2b (P1-13b). It owns the frame pool, the per-session known-sets and the per-slot hand-off counters, so a frame's whole lifetime — gathered,
             // encoded, published, released — lives behind one field here rather than spread across the tick-scoped context.

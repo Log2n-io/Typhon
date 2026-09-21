@@ -210,6 +210,80 @@ internal sealed class HitArena
     private double[] _candMaxY = new double[1024];
     private int _candCount;
 
+    /// <summary>
+    /// Clusters this cell's broad phase admitted WHOLE, with no entity read and no per-entity test.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A cell's query is centred on the CELL, not on any member</b>, so every member's disc contains the disc of radius <c>enter - cell*sqrt(2)/2</c>
+    /// about that centre: a member sits somewhere in the cell, at most a half-diagonal from the centre, and the triangle inequality does the rest. A
+    /// cluster box lying wholly inside that inscribed disc therefore holds entities every member can see, and the answer is the cluster's occupancy word
+    /// rather than sixty-four distance tests repeated per member.
+    /// </para>
+    /// <para>
+    /// <b>It is the HOISTING that makes this pay, not the predicate.</b> The same containment test applied per session AFTER the candidates were collected
+    /// is <see cref="FilterCandidateRunsInto"/>, which is correct, measures its premise true, and is slower — because by then the scattered entity reads are
+    /// already paid and the remaining work is a vector kernel the split fragments into short runs. Decided here, the entities are never read at all and the
+    /// decision is taken once for the whole cell instead of once per member.
+    /// </para>
+    /// </remarks>
+    private int[] _intChunks = new int[256];
+    private ulong[] _intSlots = new ulong[256];
+    private int[] _intRanges = [];
+    private int _intCount;
+
+    /// <summary>Clusters admitted whole for the cell being resolved.</summary>
+    public int InteriorCount => _intCount;
+
+    /// <summary>The chunk id of one whole-admitted cluster.</summary>
+    /// <param name="i">Its index.</param>
+    /// <returns>The chunk id.</returns>
+    public int InteriorChunk(int i) => _intChunks[i];
+
+    /// <summary>The occupancy of one whole-admitted cluster — the mask every member of the cell sees.</summary>
+    /// <param name="i">Its index.</param>
+    /// <returns>The slots.</returns>
+    public ulong InteriorSlots(int i) => _intSlots[i];
+
+    /// <summary>Clusters admitted whole, summed over the cells this worker resolved.</summary>
+    public long InteriorClustersAdmitted;
+
+    /// <summary>Entity reads those whole admissions avoided — the occupancy popcount that never reached the narrow phase.</summary>
+    public long InteriorEntitiesSkipped;
+
+    /// <summary>The per-archetype range array for the interior list, grown to fit.</summary>
+    /// <param name="archetypeCount">How many archetypes the profile names.</param>
+    /// <returns>An array of at least that length, whose contents the caller overwrites.</returns>
+    public int[] CellInteriorRanges(int archetypeCount)
+    {
+        if (_intRanges.Length < archetypeCount)
+        {
+            _intRanges = new int[Math.Max(8, archetypeCount)];
+        }
+
+        return _intRanges;
+    }
+
+    /// <summary>Records a cluster every member of this cell sees whole.</summary>
+    /// <param name="chunkId">The cluster.</param>
+    /// <param name="slots">Its occupancy — the mask, because containment makes every occupied slot a hit.</param>
+    public void AddInteriorCluster(int chunkId, ulong slots)
+    {
+        if (_intCount == _intChunks.Length)
+        {
+            var grown = _intChunks.Length * 2;
+            Array.Resize(ref _intChunks, grown);
+            Array.Resize(ref _intSlots, grown);
+        }
+
+        _intChunks[_intCount] = chunkId;
+        _intSlots[_intCount] = slots;
+        _intCount++;
+
+        InteriorClustersAdmitted++;
+        InteriorEntitiesSkipped += BitOperations.PopCount(slots);
+    }
+
     /// <summary>Candidates the broad phase collected for the cell being resolved.</summary>
     public int CandidateCount => _candCount;
 
@@ -466,11 +540,38 @@ internal sealed class HitArena
     {
         _runCountCells = 0;
         _candCount = 0;
-        _runCountCells = 0;
+        _intCount = 0;
     }
 
     /// <summary>Notes the candidates this cell's broad phase collected, once it is complete.</summary>
     public void NoteCellCollected() => CandidatesCollected += _candCount;
+
+    /// <summary>
+    /// Distinct clusters the broad phase reached, summed over the cells this worker resolved.
+    /// </summary>
+    /// <remarks>
+    /// <b>The ratio against <see cref="CandidatesCollected"/> is what decides whether a cached cluster list can pay.</b> The broad phase produces one
+    /// candidate per ENTITY, and an entity's box moves every tick, so what a cache could reuse is the cluster MEMBERSHIP and never the boxes. If a cell
+    /// reaches a hundred clusters to collect ten thousand entities, caching the membership removes the tree walk and leaves the ten thousand scattered
+    /// reads exactly where they were. That is an arithmetic question and this counter is the arithmetic.
+    /// </remarks>
+    public long BroadClustersReached;
+
+    /// <summary>Counts one cluster the broad phase reached. Called on a chunk-id transition, which is free: the query walks cluster-major.</summary>
+    public void NoteBroadCluster() => BroadClustersReached++;
+
+    /// <summary>
+    /// Entity candidates the broad phase reached, CUMULATIVE — the partner of <see cref="BroadClustersReached"/>.
+    /// </summary>
+    /// <remarks>
+    /// <b>Not <see cref="CandidatesCollected"/>, which <see cref="BeginTick"/> resets per tick.</b> Dividing a cumulative count by a per-tick one is the
+    /// error the block above this reset warns about, and it reported 0.0 entities per cluster over a 400-session run — self-evidently wrong, and wrong in a
+    /// direction a reader could have believed.
+    /// </remarks>
+    public long BroadEntitiesReached;
+
+    /// <summary>Counts one entity candidate the broad phase reached.</summary>
+    public void NoteBroadEntity() => BroadEntitiesReached++;
 
     /// <summary>Records one entity the enlarged cell query reached.</summary>
     /// <param name="chunkId">Its cluster.</param>

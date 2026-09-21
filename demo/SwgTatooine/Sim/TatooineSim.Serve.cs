@@ -64,6 +64,7 @@ public sealed partial class TatooineSim
                 GatherPrefetch = _config.SubscriptionsGatherPrefetch,
                 ResidentInterest = _config.SubscriptionsResidentInterest,
                 MeasureInterestPhases = _config.SubscriptionsInterestPhases,
+                InteriorClusterAdmission = _config.SubscriptionsInteriorAdmission,
                 DynamicFrameScheduling = _config.SubscriptionsDynamicSchedule,
                 SharedClusterBlocks = _config.SubscriptionsSharedClusterBlocks,
             },

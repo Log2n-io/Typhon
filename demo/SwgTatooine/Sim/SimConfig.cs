@@ -251,6 +251,9 @@ public sealed class SimConfig
     /// <summary>Whether the interest stage times its broad phase, narrow phase and run assembly separately. <c>--subs-interest-phases</c>.</summary>
     public bool SubscriptionsInterestPhases;
 
+    /// <summary>Whether an interest cell admits a wholly-contained cluster without reading its entities. A same-binary switch, so one build is both arms.</summary>
+    public bool SubscriptionsInteriorAdmission;
+
     /// <summary>
     /// <c>--subs-owed on|off</c>: whether a reused slot costs the session that slot on its next frame, or its whole next frame.
     /// </summary>

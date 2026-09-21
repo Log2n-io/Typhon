@@ -302,6 +302,12 @@ public static class TatooineReplication
                 + $"{subs.EntriesMigrated} entries relocated between clusters");
             var cc = subs.ClusterCandidates;
             Console.Error.WriteLine($"  cluster candidates: {cc.Collected} collected, {cc.Accepted} accepted");
+            var ia = subs.InteriorAdmission;
+            Console.Error.WriteLine($"  interior admission: {ia.Clusters} clusters whole, {ia.EntitiesSkipped} entity reads skipped");
+            var bcr = subs.BroadClustersReached;
+            var bcand = subs.EntityCandidatesCollected;
+            Console.Error.WriteLine(
+                $"  broad phase reach: {bcr} clusters -> {bcand} entity candidates ({(bcr == 0 ? 0d : (double)bcand / bcr):F1} per cluster)");
             var ee = subs.EpochEnter;
             Console.Error.WriteLine($"  epoch enter: {ee.MeanUs:F1} us mean over {ee.Chunks} chunks");
             var fs = subs.FrameSpan;

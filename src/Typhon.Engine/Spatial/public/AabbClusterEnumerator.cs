@@ -513,6 +513,110 @@ public unsafe ref struct AabbClusterEnumerator
         return written;
     }
 
+    /// <summary>
+    /// Advance to the next CLUSTER the broadphase admits, reading no entity, and leave it open so the caller may decide whether to drain it.
+    /// </summary>
+    /// <param name="cluster">The cluster: its chunk id, its occupied slots and its tight bounds in world space.</param>
+    /// <returns><see langword="false"/> once the query is exhausted.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>The caller-driven half of <see cref="FillClusters"/>.</b> That method answers "every cluster, no entities" in one frame, which suits a caller
+    /// whose unit of interest is only ever the cluster. This one stops on each cluster so the caller can answer a question about the BOX and then either
+    /// walk the entities with <see cref="FillCurrentCluster"/> or move on, paying the narrowphase for the clusters where the box was not decisive and for
+    /// no others.
+    /// </para>
+    /// <para>
+    /// <b>Why that split is worth an API.</b> A subscription's broad phase is centred on an interest CELL rather than on any one observer, so a cluster
+    /// lying wholly inside the cell's inscribed disc is visible to every member of the cell and one lying outside the enlarged disc to none — in both cases
+    /// without a single entity being read or tested. On the SWG demo at d06 that is about 838 clusters reached per cell resolution against 13.2 entities
+    /// each, so the decision this exposes is taken 838 times to avoid up to eleven thousand reads.
+    /// </para>
+    /// <para>
+    /// <b>It abandons the entities of the cluster in hand</b>, exactly as <see cref="FillClusters"/> does: advancing is what the caller asked for. The
+    /// bounds come from the archetype's <c>ClusterAabbs</c> read back into world space, and a cluster whose bounds cannot be read reports an UNBOUNDED box
+    /// so that the caller's own test admits it and looks inside — narrowing on a missing entry would drop entities, which is SQ-01's silent direction.
+    /// </para>
+    /// </remarks>
+    public bool MoveNextCluster(out ClusterBroadphaseHit cluster)
+    {
+        ThrowIfRentStale();
+        var aabbs = Volatile.Read(ref _state.ClusterAabbs);
+        var cellMap = Volatile.Read(ref _state.ClusterCellMap);
+
+        while (true)
+        {
+            // Drop the cluster in hand rather than draining it: advancing by cluster is what this method is.
+            _currentOccupancyBits = 0UL;
+            _decidedHits = 0UL;
+            if (!NextCluster())
+            {
+                ReleaseRentAfterDrain();
+                cluster = default;
+                return false;
+            }
+
+            var chunkId = _currentClusterChunkId;
+            var slots = _currentOccupancyBits;
+            if (slots == 0UL)
+            {
+                // An empty cluster the broadphase still holds bounds for. It names no entity, so it is not a hit.
+                continue;
+            }
+
+            var minX = double.NegativeInfinity;
+            var minY = double.NegativeInfinity;
+            var maxX = double.PositiveInfinity;
+            var maxY = double.PositiveInfinity;
+            if (aabbs != null && cellMap != null && (uint)chunkId < (uint)aabbs.Length && (uint)chunkId < (uint)cellMap.Length)
+            {
+                ref readonly var box = ref aabbs[chunkId];
+                _grid.CellOrigin(cellMap[chunkId], out var originX, out var originY, out _);
+                minX = ClusterSpatialAabb.ToWorldExact(box.MinX, originX);
+                minY = ClusterSpatialAabb.ToWorldExact(box.MinY, originY);
+                maxX = ClusterSpatialAabb.ToWorldExact(box.MaxX, originX);
+                maxY = ClusterSpatialAabb.ToWorldExact(box.MaxY, originY);
+            }
+
+            _tallyHits++;
+            cluster = new ClusterBroadphaseHit(chunkId, slots, minX, minY, maxX, maxY);
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Write up to <paramref name="destination"/>.Length further matches from the CURRENT cluster only, and return how many were written.
+    /// </summary>
+    /// <param name="destination">Where to write them.</param>
+    /// <returns>How many were written; 0 once this cluster is drained.</returns>
+    /// <remarks>
+    /// <b>Never advances.</b> <see cref="Fill"/> opens the next cluster when the one in hand runs out, which is right for a caller walking the whole query
+    /// and wrong for one stepping cluster by cluster with <see cref="MoveNextCluster"/> — there, advancing here would silently skip the box test the caller
+    /// stepped in order to make. Resumable against one cluster: call until it returns 0, then step.
+    /// </remarks>
+    public int FillCurrentCluster(scoped Span<ClusterSpatialQueryResult> destination)
+    {
+        if (destination.IsEmpty)
+        {
+            return 0;
+        }
+
+        ThrowIfRentStale();
+        var sink = new SpanSink(destination);
+        while (_currentOccupancyBits != 0UL)
+        {
+            DecideBlocks(3);
+            _currentOccupancyBits = DrainTier(_currentOccupancyBits, ref sink);
+            _decidedHits &= _currentOccupancyBits;
+            if (sink.Written == destination.Length)
+            {
+                break;
+            }
+        }
+
+        _tallyHits += sink.Written;
+        return sink.Written;
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     // Narrowphase: one drain loop per storage tier
     // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════

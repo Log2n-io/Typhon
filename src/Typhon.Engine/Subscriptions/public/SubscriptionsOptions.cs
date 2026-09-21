@@ -433,6 +433,22 @@ public sealed class SubscriptionsOptions
     public bool MeasureInterestPhases { get; init; }
 
     /// <summary>
+    /// Whether an interest cell's broad phase admits a wholly-contained cluster without reading its entities. Default off.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A cell's query is centred on the CELL rather than on any member, so a cluster whose box lies inside the disc of radius
+    /// <c>enterRadius - cell*sqrt(2)/2</c> about that centre is visible WHOLE to every member: a member is at most a half-diagonal from the centre, and the
+    /// triangle inequality closes it. The cluster AABB contains every entity box it holds, so the admission is an implication of the same containment test
+    /// the per-entity kernel would have run — exact, not an approximation.
+    /// </para>
+    /// <para>
+    /// <b>Off by default and switchable at runtime</b> because the two shapes are an A/B and this repository's rule requires both arms to be one build.
+    /// </para>
+    /// </remarks>
+    public bool InteriorClusterAdmission { get; init; }
+
+    /// <summary>
     /// Whether the frame stage takes its sessions from a shared cursor rather than a fixed slice each. Default <see langword="true"/>.
     /// </summary>
     /// <remarks>

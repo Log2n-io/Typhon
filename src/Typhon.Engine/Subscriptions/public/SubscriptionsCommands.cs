@@ -541,6 +541,16 @@ public sealed class SubscriptionsCommands
     public (long Collected, long Accepted) ClusterCandidates =>
         _ingress.Interest == null ? default : (_ingress.Interest.ClusterCandidatesCollected, _ingress.Interest.ClusterCandidatesAccepted);
 
+    /// <summary>Distinct clusters every cell's broad phase reached, against the entity candidates it collected from them.</summary>
+    public long BroadClustersReached => _ingress.Interest == null ? 0L : _ingress.Interest.BroadClustersReached;
+
+    /// <summary>Entity candidates every cell's broad phase collected.</summary>
+    public long EntityCandidatesCollected => _ingress.Interest == null ? 0L : _ingress.Interest.EntityCandidatesCollected;
+
+    /// <summary>Clusters an interest cell admitted whole, and the entity reads that avoided.</summary>
+    public (long Clusters, long EntitiesSkipped) InteriorAdmission =>
+        _ingress.Interest == null ? default : _ingress.Interest.InteriorAdmission;
+
     /// <summary>
     /// Runs referenced rather than encoded, the records they carried, the clusters that offered one and could not be shared, and the records the
     /// projection encoded once (17 § 18).
