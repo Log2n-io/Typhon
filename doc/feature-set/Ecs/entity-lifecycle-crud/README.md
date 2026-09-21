@@ -64,6 +64,15 @@ p.X += 1f;
 m.Disable(Unit.Stats);          // O(1) bit flip — data preserved, not freed, instantly re-enable-able
 wtx.Commit();
 
+// ─── Optional target + write — TryOpen is a read-only existence guard ───
+using var guarded = dbe.CreateQuickTransaction();
+if (guarded.TryOpen(id, out _))
+{
+    ref Position guardedPos = ref guarded.OpenMut(id).Write(Unit.Pos);
+    guardedPos.X += 1f;
+    guarded.Commit();
+}
+
 // ─── Destroy — tombstones now (cascade-deletes configured children); freed later by GC ───
 using var dtx = dbe.CreateQuickTransaction();
 dtx.Destroy(id);
@@ -72,6 +81,12 @@ dtx.Commit();
 
 ## ⚠️ Guarantees & limits
 
+- `TryOpen` is the non-throwing form of the read-only `Open`, not of `OpenMut`. An `EntityRef` returned by `TryOpen` cannot be written through.
+  When an id may be stale and the caller intends to mutate it, use `TryOpen(id, out _)` as the guard and then `OpenMut(id)` for the writable open.
+  Both resolve at the same transaction TSN, so the visibility decision is stable for that transaction. `EntityId` carries the target archetype routing id,
+  so the target may belong to a different archetype than a system's input.
+- The guarded `TryOpen` + `OpenMut` pattern performs two entity lookups. There is intentionally no `TryOpenMut` API today; adding a single-lookup
+  writable try-open is an API/performance decision, not required for correct cross-archetype mutation.
 - One LinearHash probe per `Open`/`OpenMut` (~350ns), amortized across every subsequent `Read`/`Write` on that
   `EntityRef` (~1-5ns per component for `SingleVersion`/`Transient`).
 - `EntityRef` is a `ref struct` — stack-only, cannot escape its creating accessor/transaction, cannot be stored
