@@ -393,6 +393,40 @@ public sealed class SubscriptionsCommands
     public (long RunsUnchanged, long RunsTotal, long SessionsCoherent, long SessionsTotal) InterestCoherence =>
         _ingress.Interest == null ? default : _ingress.Interest.InterestCoherence;
 
+    /// <summary>
+    /// The changed-cluster list's census: clusters named, ticks published, ticks that degraded to "all", and the stopwatch ticks spent publishing.
+    /// </summary>
+    /// <remarks>
+    /// <b>Slice 1 ships a measurement, and this is it.</b> 9.2 % of watched SLOTS change per tick (20 § 3.1); the CLUSTER figure is what decides
+    /// whether gating the projection pass on it is worth building, and it was unknown. Cumulative, for the reason 18 § 8.4 records.
+    /// </remarks>
+    public (long Named, long Ticks, long CoverAll, long StopwatchTicks) ChangedClusterCensus
+    {
+        get
+        {
+            var states = _ingress.Interest?.ReplicationStates;
+            long named = 0, ticks = 0, coverAll = 0, sw = 0;
+            if (states != null)
+            {
+                for (var i = 0; i < states.Length; i++)
+                {
+                    var cs = states[i]?.ClusterState;
+                    if (cs == null)
+                    {
+                        continue;
+                    }
+
+                    named += cs.ChangedFromSlots + cs.ChangedFromProcess;
+                    ticks += cs.ChangedPublishedTicks;
+                    coverAll += cs.ChangedCoverAllTicks;
+                    sw += cs.ChangedPublishStopwatchTicks;
+                }
+            }
+
+            return (named, ticks, coverAll, sw);
+        }
+    }
+
     /// <summary>Why cell sharing did or did not happen: ungroupable sessions, keyed sessions, the viewpoint span and the interest cell side.</summary>
     public (long Ungroupable, long Keyed, double SpanX, double SpanY, double CellSide) GroupingDiagnostic =>
         _ingress.Interest == null ? default : _ingress.Interest.GroupingDiagnostic;

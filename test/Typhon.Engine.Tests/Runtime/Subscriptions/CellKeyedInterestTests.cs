@@ -118,7 +118,7 @@ class CellKeyedInterestTests : TestBase<CellKeyedInterestTests>
                 hits[harness.Interest.SessionAt(i).Value] = harness.Interest.HitsCountOf(i);
             }
 
-            sessionsShared = harness.Interest.SessionsShared;
+            sessionsShared = harness.SessionsSharedLastPass;
             return hits;
         }
         finally
@@ -269,8 +269,8 @@ class CellKeyedInterestTests : TestBase<CellKeyedInterestTests>
             // ONE shared session, not two: the group is the placed PAIR. A zero here would mean the pair never grouped and the fixture proved nothing about
             // association; a two would mean the unplaced session was folded in — which its own zero hit count cannot detect, because an unplaced viewpoint
             // defaults far from the cell and would filter to nothing even if it had been grouped.
-            Assert.That(harness.Interest.SessionsShared, Is.EqualTo(1),
-                $"{harness.Interest.SessionsShared} sessions were shared. The two placed sessions share a cell, so exactly one is served from the other's "
+            Assert.That(harness.SessionsSharedLastPass, Is.EqualTo(1),
+                $"{harness.SessionsSharedLastPass} sessions were shared. The two placed sessions share a cell, so exactly one is served from the other's "
                 + "resolution, and the unplaced one must not join them");
         });
     }
@@ -393,8 +393,8 @@ class CellKeyedInterestTests : TestBase<CellKeyedInterestTests>
                 "the SECOND archetype must contribute a substantial share, or this fixture is the single-archetype one under another name");
 
             // Same guards as the single-archetype crowd: the grouping must have fired, and the members must want different totals.
-            Assert.That(harness.Interest.SessionsShared, Is.EqualTo(cellKeyed ? viewpoints.Length - 1 : 0),
-                $"{harness.Interest.SessionsShared} sessions shared a resolution with the feature {(cellKeyed ? "on" : "off")}");
+            Assert.That(harness.SessionsSharedLastPass, Is.EqualTo(cellKeyed ? viewpoints.Length - 1 : 0),
+                $"{harness.SessionsSharedLastPass} sessions shared a resolution with the feature {(cellKeyed ? "on" : "off")}");
 
             var totals = new HashSet<int>();
             for (var i = 0; i < viewpoints.Length; i++)
@@ -498,8 +498,8 @@ class CellKeyedInterestTests : TestBase<CellKeyedInterestTests>
 
         Assert.Multiple(() =>
         {
-            Assert.That(harness.Interest.SessionsShared, Is.Zero,
-                $"{harness.Interest.SessionsShared} sessions shared a resolution although the archetype is indexed on three axes. The shared filter tests "
+            Assert.That(harness.SessionsSharedLastPass, Is.Zero,
+                $"{harness.SessionsSharedLastPass} sessions shared a resolution although the archetype is indexed on three axes. The shared filter tests "
                 + "X and Y only, so it would admit entities the sphere excludes in Z and drop ones a member at another height should see");
 
             // EXACT, because it is computable: the observers stand at Z=0, so every flyer of the low sheet is at dz=0 and the three-dimensional test

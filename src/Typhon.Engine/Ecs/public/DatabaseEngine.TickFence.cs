@@ -1957,6 +1957,14 @@ public partial class DatabaseEngine
         //
         // The bookkeeping clear lives here (single-threaded, per-archetype) — it ran inside the legacy RecomputeDirtyClusterAabbs tail before and must run
         // AFTER all AABB slices finished, which the phase barrier guarantees.
+        // ── The changed-cluster list, published from what this method already holds (#205) ──────────────────────────────────────────────────────
+        //
+        // HERE, and the position is the whole of its correctness. Before ClearAabbRefreshBookkeeping, which zeroes the process bitmap this reads;
+        // and before branch path 1's early return below, because path 1 IS the WriteSpatial-only path — the case whose signal lives in the process
+        // bitmap rather than in the dirty bits. Published after the migration compaction and the pending-finalization drain above, so the ids it
+        // names are the ones the tick ends with.
+        clusterState.PublishChangedClusters(dirtyBits, tickNumber);
+
         if (clusterState.SpatialSlot.HasSpatialIndex && clusterState.SpatialSlot.FieldInfo.Mode == SpatialMode.Dynamic)
         {
             clusterState.ClearAabbRefreshBookkeeping();

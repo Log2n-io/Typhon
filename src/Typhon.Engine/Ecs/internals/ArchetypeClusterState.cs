@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using System.Threading;
 using System.Threading.Tasks;
 using Typhon.Schema.Definition;
@@ -1521,6 +1522,22 @@ internal sealed unsafe partial class ArchetypeClusterState
     public DirtyBitmap ClusterDirtyBitmap;
 
     /// <summary>
+    /// One bit per cluster: this cluster's CONTENT changed and replication must look at it (#205). Drained by the fence into the changed-cluster list.
+    /// </summary>
+    /// <remarks>
+    /// Indexed per ENTITY as <c>chunkId * 64 + slot</c>, exactly like <see cref="ClusterDirtyBitmap"/>, so word <c>w</c> is cluster <c>w</c>'s mask
+    /// of changed slots and the two merge by OR rather than by conversion. Cluster granularity was tried first and is not enough: the SWG demo
+    /// touches nearly every cluster every tick, so a per-cluster bit named 3 778 clusters per archetype-tick while only 9.2 % of watched SLOTS
+    /// actually change. The slot mask is what a consumer can act on.
+    /// <para>
+    /// It carries what no other signal does — a spawn, which marks nothing anywhere else in the engine, and a <c>WriteSpatial</c> move, which
+    /// raises no dirty bit by design — and is read by nothing but <see cref="PublishChangedClusters"/>, so a false positive in it costs one wasted
+    /// visit and can perturb no maintenance decision.
+    /// </para>
+    /// </remarks>
+    public DirtyBitmap ClusterContentChanges;
+
+    /// <summary>
     /// Per-cluster tight 2D AABB plus category mask for spatially-active clusters (issue #230).
     /// Indexed by clusterChunkId. Populated by spawn/destroy/migration hooks and the tick-fence recompute pass. Null for non-spatial archetypes or before the
     /// first spatial write. In-memory only — rebuilt at startup via <see cref="RebuildClusterAabbs"/> from entity positions (Q2/Q6 transient-state decision).
@@ -1726,6 +1743,14 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     internal void NoteClusterBorn(int clusterChunkId, long bornTsn)
     {
+        // Every claim into an EXISTING cluster folds here, which makes it the companion funnel to AddToActiveList for the changed-cluster list (#205).
+        // It fires slightly before the CAS that publishes the slot, so a claim that then loses the race marks a cluster nothing landed in — conservative
+        // in the direction the list's one-directional invariant allows, and cheaper than a second hook after every CAS.
+        if (clusterChunkId >= 0)
+        {
+            NoteClusterContentChanged(clusterChunkId);
+        }
+
         // Name the caller's mistake rather than letting it surface as an IndexOutOfRangeException from the fold below. That exception was read for three
         // weeks as "the visibility array had not grown to cover the cluster" (#807) — a theory the code refutes, since the array only ever grows and is
         // sized for clusterChunkId + 1 on the next line. The real defect was a negative id produced one frame up (#842). An out-of-range index here is
@@ -2357,6 +2382,305 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </summary>
     public DirtyBitmapRing ClusterDirtyRing;
 
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // The dense changed-cluster list (#205, design/Subscriptions/21 slice 1)
+    //
+    // WHAT IT IS. Two parallel arrays published once per tick naming the clusters something wrote to, and the slots inside each, so a consumer iterates
+    // O(changed) instead of scanning O(all clusters) to find them. Structure of arrays rather than a list of structs because a consumer walks the ids to
+    // decide whether to look at all and only then reads the mask — two sequential streams, and the id stream alone is four bytes per changed cluster.
+    //
+    // WHY IT IS DERIVED HERE AND NOT WRITTEN AT THE WRITE SITE. A per-cluster array written by every worker on every marking write was implemented,
+    // measured at +2.1 ms/tick median with a ~10 ms spread on a 20k archetype, and rejected for false sharing across ~27 cache lines — see
+    // WrittenSlotUnion's remarks. This publishes the same information with ONE writer, single-threaded, from bitmaps the fence already holds, so that
+    // result does not apply. Nothing is added to any write path.
+    //
+    // THE ACCIDENT THAT MAKES THE MAIN PASS FREE. ClusterDirtyBitmap indexes entities as chunkId * 64 + slotIndex, so word w of the fence's snapshot
+    // covers entity indices w*64 .. w*64+63 — exactly cluster w's 64 slots. The per-entity dirty bitmap IS a per-cluster slot-mask array already, so the
+    // compaction is a non-zero-word scan over it and never touches a cluster page.
+    //
+    // THE INVARIANT, one-directional: if any entity in a cluster changed, that cluster is in the list. The converse is not promised — a clean cluster in
+    // the list costs one wasted visit downstream and nothing else. Over-approximation is the design, and it is what lets the list be trusted without
+    // auditing every write path in the engine.
+    //
+    // IDS ARE ASCENDING. Both sources are walked in ascending order and merged, so a consumer can intersect this against its own sorted cluster set with
+    // a linear two-cursor walk instead of a lookup per entry. That is the property slice 5's resident-set maintenance is built on, and it is cheap to
+    // provide here and expensive to recover later.
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>Chunk ids of the clusters that changed on <see cref="ChangedClusterTick"/>, ascending. Valid for <see cref="ChangedClusterCount"/>.</summary>
+    public int[] ChangedClusterIds = [];
+
+    /// <summary>Slot mask per entry of <see cref="ChangedClusterIds"/>, parallel to it.</summary>
+    /// <remarks>
+    /// <see cref="ulong.MaxValue"/> where the source could only say "this cluster" rather than "these slots" — the process bitmap, which
+    /// <c>WriteSpatial</c> sets per cluster. Reading the cluster's occupancy word to narrow it would put a page-cache read per changed cluster into a
+    /// pass that otherwise touches nothing but its own arrays, and every consumer ANDs this against a mask of its own regardless.
+    /// </remarks>
+    public ulong[] ChangedClusterSlots = [];
+
+    /// <summary>How many entries of the two arrays are valid.</summary>
+    public int ChangedClusterCount;
+
+    /// <summary>The tick the list describes. Any other tick means the list is last tick's and must not be read.</summary>
+    public long ChangedClusterTick = -1;
+
+    /// <summary>
+    /// Every active cluster of this archetype must be treated as changed, and the list is not populated.
+    /// </summary>
+    /// <remarks>
+    /// The degenerate case, kept O(1) to publish rather than expanded to an entry per active cluster — which would make the one case that cannot be
+    /// narrowed also the most expensive to describe. Set when a mutable span over any column was handed out this tick.
+    /// </remarks>
+    public bool ChangedClustersCoverAll;
+
+    /// <summary>
+    /// Somebody was handed a mutable span over one of this archetype's columns this tick, so which clusters they wrote is unknown.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Distinct from <c>SpatialSpanHandedOut</c>, deliberately.</b> That flag is read by the AABB refresh and must not be set by a span over a
+    /// non-spatial column, because a read-only walk would then make a refused repair relocate entities — the hazard <c>ClusterRef.GetSpan</c>'s own
+    /// remarks record. This one feeds only the changed-cluster list, where the entire cost of a false positive is re-reading bytes that turn out to be
+    /// identical.
+    /// </para>
+    /// <para>
+    /// <b>Why it is needed at all.</b> A <c>GetSpan</c> write to a non-spatial durable column raises no signal anywhere: not the dirty bitmap, not the
+    /// process bit, not <c>SpatialSpanHandedOut</c>, and <c>TYPHON009</c> does not flag it either — its subject is the <c>WriteSpatial</c> barrier.
+    /// Without this flag the list would silently miss those writes and its one-directional invariant would be false. The SWG demo writes
+    /// <c>Creature.Ai</c> through exactly that path.
+    /// </para>
+    /// <para>
+    /// A plain <see cref="bool"/> set to the same value repeatedly: it goes read-only after the first span of the tick, so the line is shared rather than
+    /// ping-ponged — the argument <see cref="WrittenSlotUnion"/>'s remarks make for being one field rather than an array.
+    /// </para>
+    /// </remarks>
+    public bool MutableSpanHandedOut;
+
+    /// <summary>Entries contributed by the dirty bitmap, cumulative.</summary>
+    public long ChangedFromSlots;
+
+    /// <summary>Entries contributed by the process bitmap alone, cumulative.</summary>
+    public long ChangedFromProcess;
+
+    /// <summary>Ticks that degraded to <see cref="ChangedClustersCoverAll"/>, cumulative.</summary>
+    public long ChangedCoverAllTicks;
+
+    /// <summary>Ticks published, cumulative — the denominator for the two above.</summary>
+    public long ChangedPublishedTicks;
+
+    /// <summary>Stopwatch ticks spent publishing, cumulative.</summary>
+    public long ChangedPublishStopwatchTicks;
+
+    private int[] _changedScratchIds = [];
+    private ulong[] _changedScratchSlots = [];
+    private long[] _changedClusterWords = [];
+
+    /// <summary>
+    /// Publishes this tick's changed-cluster list from the signals the fence already holds. Single-threaded, once per archetype per tick.
+    /// </summary>
+    /// <param name="dirtyBits">The fence's dirty-bit snapshot, whose word <c>w</c> is cluster <c>w</c>'s slot mask. May be <see langword="null"/>.</param>
+    /// <param name="tickNumber">The tick being published.</param>
+    /// <remarks>
+    /// Called before <c>ClearAabbRefreshBookkeeping</c>, which zeroes the process bitmap, and before branch path 1's early return — both matter. Path 1
+    /// is the <c>WriteSpatial</c>-only path, which is precisely the case whose signal lives in the process bitmap rather than in the dirty bits, so a
+    /// publish placed after that return would report nothing for the archetypes that actually move.
+    /// </remarks>
+    public void PublishChangedClusters(long[] dirtyBits, long tickNumber)
+    {
+        // ── dirtyBits means two different things, and only one of them is dirtiness ───────────────────────────────────────────────────────────────
+        //
+        // On branch path 2 it is ClusterDirtyBitmap.Snapshot()'s result and word w is cluster w's mask of CHANGED slots. On branch path 1 it is the
+        // local occupancy-only buffer (see FenceDirtyBits' own remarks), so word w is cluster w's mask of OCCUPIED slots — and reading that as change
+        // names every occupied cluster on every tick. Measured before this guard: 3 777 clusters named per archetype-tick against roughly 839 clusters
+        // in an average archetype of the SWG demo, which is the whole world reported as changed, every tick, in a list whose purpose is to be short.
+        if (FenceBranchPath != 2)
+        {
+            dirtyBits = null;
+        }
+
+        var start = Stopwatch.GetTimestamp();
+        ChangedClusterCount = 0;
+        ChangedClustersCoverAll = false;
+        ChangedClusterTick = tickNumber;
+        ChangedPublishedTicks++;
+
+        if (MutableSpanHandedOut)
+        {
+            MutableSpanHandedOut = false;
+            ChangedClustersCoverAll = true;
+            ChangedCoverAllTicks++;
+            ChangedPublishStopwatchTicks += Stopwatch.GetTimestamp() - start;
+            return;
+        }
+
+        // ── Pass 1: the two per-cluster SLOT-MASK sources, ORed word by word into scratch ─────────────────────────────────────────────────────────
+        //
+        // Both index entities as chunkId * 64 + slot, so word w of either is cluster w's mask and the union is one OR. The content bitmap is DRAINED
+        // — it accumulates between ticks and this pass consumes it — while dirtyBits was already snapshotted by the fence.
+        var contentWords = ClusterContentChanges == null ? 0 : ClusterContentChanges.DrainInto(ref _changedClusterWords);
+        var dirtyWords = dirtyBits == null ? 0 : Math.Min(dirtyBits.Length, Math.Max(1, PrimarySegmentCapacity));
+        var slotWords = Math.Max(contentWords, dirtyWords);
+        if (slotWords > 0 && (_changedClusterWords == null || _changedClusterWords.Length < slotWords))
+        {
+            Array.Resize(ref _changedClusterWords, slotWords);
+        }
+
+        for (var w = contentWords; w < slotWords; w++)
+        {
+            _changedClusterWords[w] = 0L;
+        }
+
+        for (var w = 0; w < dirtyWords; w++)
+        {
+            var bits = dirtyBits[w];
+            if (bits != 0)
+            {
+                _changedClusterWords[w] |= bits;
+            }
+        }
+
+        var fromSlots = 0;
+        {
+            var words = slotWords;
+
+            // ── The one place this pass is O(all clusters) rather than O(changed) ──────────────────────────────────────────────────────────────────
+            //
+            // A word IS a cluster here, so finding the changed ones means reading every word: there is no index in front of them. What the vector skip
+            // buys is the BRANCH per empty word, not the load — a quiet archetype is a sequential read of one long per cluster with one test per eight
+            // of them instead of one each. At the SWG demo's x16 Creature that is 2 625 words, and the whole publish measures 0.09 ms/tick across five
+            // archetypes, so the scan is affordable; it is called out because it is the term that would grow if an archetype's cluster count did.
+            var w = 0;
+            if (Vector256.IsHardwareAccelerated)
+            {
+                var zero = Vector256<long>.Zero;
+                for (; w + Vector256<long>.Count <= words; w += Vector256<long>.Count)
+                {
+                    var block = Vector256.LoadUnsafe(ref _changedClusterWords[w]);
+                    if (Vector256.EqualsAll(block, zero))
+                    {
+                        continue;
+                    }
+
+                    for (var k = w; k < w + Vector256<long>.Count; k++)
+                    {
+                        var m = (ulong)_changedClusterWords[k];
+                        if (m == 0)
+                        {
+                            continue;
+                        }
+
+                        if (fromSlots == _changedScratchIds.Length)
+                        {
+                            GrowScratch();
+                        }
+
+                        _changedScratchIds[fromSlots] = k;
+                        _changedScratchSlots[fromSlots] = m;
+                        fromSlots++;
+                    }
+                }
+            }
+
+            for (; w < words; w++)
+            {
+                var mask = (ulong)_changedClusterWords[w];
+                if (mask == 0)
+                {
+                    continue;
+                }
+
+                if (fromSlots == _changedScratchIds.Length)
+                {
+                    GrowScratch();
+                }
+
+                _changedScratchIds[fromSlots] = w;
+                _changedScratchSlots[fromSlots] = mask;
+                fromSlots++;
+            }
+        }
+
+        // ── Pass 2: merge the process bitmap in ───────────────────────────────────────────────────────────────────────────────────────────────────
+        //
+        // Both streams are ascending, so this is a two-cursor merge into the published arrays rather than an in-place shuffle. A cluster carrying both
+        // signals widens to every slot: the process bit means WriteSpatial moved something, and the slot mask beside it does not necessarily name which,
+        // so the safe direction is to widen.
+        // The two cluster-granular sources are ORed into one word array first, so the merge below has exactly two streams rather than three. The
+        // content bitmap is DRAINED — it accumulates between ticks and is this pass's to consume — while the process bitmap is only READ, because the
+        // AABB refresh owns it and clears it itself a few lines later in the fence.
+        var process = Volatile.Read(ref ClusterProcessBitmap);
+        var processWords = process?.Length ?? 0;
+
+        var count = 0;
+        var fromProcess = 0;
+        var i = 0;
+
+        if (processWords > 0)
+        {
+            for (var w = 0; w < processWords; w++)
+            {
+                var word = (ulong)Volatile.Read(ref process[w]);
+                while (word != 0)
+                {
+                    var chunkId = (w << 6) + BitOperations.TrailingZeroCount(word);
+                    word &= word - 1;
+
+                    while (i < fromSlots && _changedScratchIds[i] < chunkId)
+                    {
+                        Emit(ref count, _changedScratchIds[i], _changedScratchSlots[i]);
+                        i++;
+                    }
+
+                    if (i < fromSlots && _changedScratchIds[i] == chunkId)
+                    {
+                        Emit(ref count, chunkId, ulong.MaxValue);
+                        i++;
+                    }
+                    else
+                    {
+                        Emit(ref count, chunkId, ulong.MaxValue);
+                        fromProcess++;
+                    }
+                }
+            }
+        }
+
+        while (i < fromSlots)
+        {
+            Emit(ref count, _changedScratchIds[i], _changedScratchSlots[i]);
+            i++;
+        }
+
+        ChangedClusterCount = count;
+        ChangedFromSlots += fromSlots;
+        ChangedFromProcess += fromProcess;
+        ChangedPublishStopwatchTicks += Stopwatch.GetTimestamp() - start;
+    }
+
+    /// <summary>Appends one entry to the published arrays, growing them if needed.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void Emit(ref int count, int chunkId, ulong slots)
+    {
+        if (count == ChangedClusterIds.Length)
+        {
+            var grown = Math.Max(64, count == 0 ? 64 : count * 2);
+            Array.Resize(ref ChangedClusterIds, grown);
+            Array.Resize(ref ChangedClusterSlots, grown);
+        }
+
+        ChangedClusterIds[count] = chunkId;
+        ChangedClusterSlots[count] = slots;
+        count++;
+    }
+
+    /// <summary>Doubles the scratch arrays. Never shrinks: the high-water mark is what a steady-state tick needs (SUB-07).</summary>
+    private void GrowScratch()
+    {
+        var grown = Math.Max(64, _changedScratchIds.Length == 0 ? 64 : _changedScratchIds.Length * 2);
+        Array.Resize(ref _changedScratchIds, grown);
+        Array.Resize(ref _changedScratchSlots, grown);
+    }
+
     /// <summary>
     /// Per-archetype per-cell cluster claim list (issue #229 Q10 resolution). Holds the cluster chunk IDs of THIS archetype's clusters attached to each
     /// grid cell. Before Q10 this pool was owned by <see cref="SpatialGrid"/> and shared across archetypes, which meant two spatial archetypes couldn't
@@ -2621,6 +2945,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             // Index = clusterChunkId * 64 + slotIndex. The 64 multiplier is fixed (not cluster size N)
             // because it aligns each cluster to exactly one bitmap word for O(1) per-cluster dirty scan.
             ClusterDirtyBitmap = new DirtyBitmap(Math.Max(64, capacity * 64)),
+            ClusterContentChanges = new DirtyBitmap(Math.Max(64, capacity * 64)),
         };
     }
 
@@ -2645,6 +2970,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             // Index = clusterChunkId * 64 + slotIndex. The 64 multiplier is fixed (not cluster size N)
             // because it aligns each cluster to exactly one bitmap word for O(1) per-cluster dirty scan.
             ClusterDirtyBitmap = new DirtyBitmap(Math.Max(64, capacity * 64)),
+            ClusterContentChanges = new DirtyBitmap(Math.Max(64, capacity * 64)),
         };
 
         state.RebuildActiveList();
@@ -3076,6 +3402,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         Interlocked.Increment(ref cell.EntityCount);
 
         TyphonEvent.EmitSpatialGridClusterCellAssign(newChunkId, cellKey, (ushort)Math.Min(ArchetypeId, ushort.MaxValue));
+
         freshCell = cellKey;
         freshCluster = newChunkId;
         return (newChunkId, 0);
@@ -4342,6 +4669,58 @@ internal sealed unsafe partial class ArchetypeClusterState
             Interlocked.Or(ref Volatile.Read(ref ClusterMigrationPendingSlots)[clusterChunkId], slotBits);
         }
         while (!WriteBookkeepingWriteLanded(stamp));
+    }
+
+    /// <summary>
+    /// Records that a cluster's CONTENT changed, for the changed-cluster list, without claiming anything about its bounds.
+    /// </summary>
+    /// <param name="clusterChunkId">The cluster.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>Its own bitmap, and the two it is NOT.</b> Not the dirty bitmap: that is what selects the fence's WAL branch
+    /// (<c>ClusterDirtyBitmap.HasDirty</c>), so marking there would route an archetype through WAL emission on account of a signal added for
+    /// replication — a durability change smuggled in by a performance feature. And not <see cref="ClusterProcessBitmap"/>, which was tried: that
+    /// bitmap is an INPUT to spatial maintenance, read by the AABB refresh as "visit and republish this cluster", so setting it on every claim
+    /// changed placement, repair packing and the sliced-prep queue — eighteen tests, including four that then ran for thirty seconds. It is the
+    /// hazard <c>ClusterRef.GetSpan</c>'s own remarks record, met from the other side: a read must not perturb the partition, and neither must a
+    /// signal that only replication consumes.
+    /// </para>
+    /// <para>
+    /// One bit per cluster in a <see cref="DirtyBitmap"/>, whose blocks are one cache line each and whose growth never moves a word — the same
+    /// primitive the per-entity bitmap uses, for the same reasons, rather than a second hand-rolled one.
+    /// </para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void NoteClusterContentChanged(int clusterChunkId)
+    {
+        // No slot information: every slot of the cluster is claimed. The callers in this state are the ones that genuinely cannot say more — a
+        // mutable span handed over a whole column, and a cluster joining the active list.
+        NoteSlotsChanged(clusterChunkId, ulong.MaxValue);
+    }
+
+    /// <summary>
+    /// Records that named SLOTS of a cluster changed, for the changed-cluster list.
+    /// </summary>
+    /// <param name="clusterChunkId">The cluster.</param>
+    /// <param name="slots">The slots written.</param>
+    /// <remarks>
+    /// The precise entry point, for callers that hold a mask — <c>WriteSpatial</c>'s batched overload is handed one by its caller and currently
+    /// drops it. One interlocked OR per call, against one per bit if the mask were replayed through <c>Set</c>.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void NoteSlotsChanged(int clusterChunkId, ulong slots)
+    {
+        var bitmap = ClusterContentChanges;
+        if (bitmap == null)
+        {
+            // The bitmap is created with the rest of the cluster state, so this is the window before that and nothing else. Losing the signal silently
+            // is the one outcome the list's invariant does not permit, so the archetype degrades to "everything changed" for the tick instead — which is
+            // what ChangedClustersCoverAll exists to express, and the only thing that still sets it.
+            MutableSpanHandedOut = true;
+            return;
+        }
+
+        bitmap.OrWord(clusterChunkId, (long)slots);
     }
 
     /// <summary>
@@ -7774,6 +8153,11 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     public void AddToActiveList(int chunkId)
     {
+        // A cluster that was not active a moment ago is the largest content change there is, and nothing else reports it (#205): the spawn path calls
+        // no SetDirty anywhere, so the dirty bitmap never learns of a new entity. Recorded at THIS funnel rather than at the nine sites that write an
+        // occupancy word, because a new cluster reaches the active list through every one of them and through no other route.
+        NoteClusterContentChanged(chunkId);
+
         var n = ActiveClusterCount;
         var ids = ActiveClusterIds;
         if (n >= ids.Length)
@@ -7915,6 +8299,10 @@ internal sealed unsafe partial class ArchetypeClusterState
     public void ReleaseSlot(ref ChunkAccessor<PersistentStore> accessor, int clusterChunkId, int slotIndex, ChangeSet changeSet, SpatialGrid grid = null,
         bool deferFinalize = false)
     {
+        // A slot that stopped being occupied is a change with no other signal: nothing in the engine reports a destroy, and a consumer that misses
+        // it goes on describing a dead entity — and hands a respawn into that slot to a client under the OLD identity (#205).
+        NoteSlotsChanged(clusterChunkId, 1UL << slotIndex);
+
         var clusterBase = accessor.GetChunkAddress(clusterChunkId, true);
 
         // Release SV ComponentCollection buffers held in this slot BEFORE clearing it — but only on a true destroy.
@@ -7996,6 +8384,10 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </summary>
     public void ReleaseSlot(ref ChunkAccessor<TransientStore> accessor, int clusterChunkId, int slotIndex, SpatialGrid grid = null, bool deferFinalize = false)
     {
+        // A slot that stopped being occupied is a change with no other signal: nothing in the engine reports a destroy, and a consumer that misses
+        // it goes on describing a dead entity — and hands a respawn into that slot to a client under the OLD identity (#205).
+        NoteSlotsChanged(clusterChunkId, 1UL << slotIndex);
+
         var clusterBase = accessor.GetChunkAddress(clusterChunkId, true);
 
         var slotMask = 1UL << slotIndex;

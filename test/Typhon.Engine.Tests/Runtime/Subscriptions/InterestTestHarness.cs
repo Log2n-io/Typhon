@@ -115,8 +115,20 @@ sealed unsafe class InterestHarness : IDisposable
     /// <param name="tick">The tick number.</param>
     /// <param name="workers">Worker-pool width.</param>
     /// <returns>Chunks the pass asked for.</returns>
+    /// <summary>Sessions served from somebody else's cell resolution during the most recent <see cref="RunPass"/> alone.</summary>
+    /// <remarks>
+    /// The pass-scoped figure, because <c>InterestPass.SessionsShared</c> is cumulative since start and every fixture here runs several passes before
+    /// the one it asserts on. Reading the cumulative counter directly gave the sum of them, which is how three tests came to expect 1 and see 2.
+    /// </remarks>
+    public long SessionsSharedLastPass { get; private set; }
+
+    /// <summary>Interest cells resolved during the most recent <see cref="RunPass"/> alone.</summary>
+    public long CellsResolvedLastPass { get; private set; }
+
     public int RunPass(long tick, int workers = 1)
     {
+        var sharedBefore = Interest.SessionsShared;
+        var cellsBefore = Interest.CellsResolved;
         var chunks = Interest.BeginTick(tick, workers);
         for (var c = 0; c < chunks; c++)
         {
@@ -128,6 +140,8 @@ sealed unsafe class InterestHarness : IDisposable
             }
         }
 
+        SessionsSharedLastPass = Interest.SessionsShared - sharedBefore;
+        CellsResolvedLastPass = Interest.CellsResolved - cellsBefore;
         return chunks;
     }
 

@@ -221,6 +221,16 @@ public static class TatooineReplication
                     + $"({(ic.SessionsTotal == 0 ? 0d : ic.SessionsCoherent * 100d / ic.SessionsTotal):F1} %)");
             }
 
+            // Slice 1's measurement: how many clusters a tick names, against the watched blocks the projection pass would otherwise walk.
+            var ccc = subs.ChangedClusterCensus;
+            if (ccc.Ticks > 0)
+            {
+                var usPerTick = ccc.StopwatchTicks * 1_000_000d / System.Diagnostics.Stopwatch.Frequency / ccc.Ticks;
+                Console.Error.WriteLine(
+                    $"  changed clusters (cumulative): {ccc.Named} named over {ccc.Ticks} archetype-ticks ({ccc.Named / (double)ccc.Ticks:F1} per tick), "
+                    + $"{ccc.CoverAll} degraded to all ({ccc.CoverAll * 100d / ccc.Ticks:F1} %), publish {usPerTick:F2} us/archetype-tick");
+            }
+
             var gd = subs.GroupingDiagnostic;
             if (gd.Ungroupable + gd.Keyed > 0)
             {

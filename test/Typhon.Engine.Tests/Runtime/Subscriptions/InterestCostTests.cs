@@ -180,7 +180,7 @@ class InterestCostTests : TestBase<InterestCostTests>
         var shared = PointsWithin(centre.X, centre.Y, Radius);
 
         TestContext.Out.WriteLine(
-            $"Q3: two sessions 2 m apart cost {a} + {b} = {a + b} hits to resolve ~{shared} shared entities, and shared {harness.Interest.SessionsShared} "
+            $"Q3: two sessions 2 m apart cost {a} + {b} = {a + b} hits to resolve ~{shared} shared entities, and shared {harness.SessionsSharedLastPass} "
             + "resolutions");
 
         Assert.Multiple(() =>
@@ -196,7 +196,7 @@ class InterestCostTests : TestBase<InterestCostTests>
             // And the hit counts CANNOT tell you whether anything was shared — the cell-keyed path credits each session with its own disc too. This is the
             // measurement that distinguishes the two shapes, and it is here so that a future reader does not mistake the sum above for evidence about
             // sharing in general rather than about this pass.
-            Assert.That(harness.Interest.SessionsShared, Is.Zero,
+            Assert.That(harness.SessionsSharedLastPass, Is.Zero,
                 "this fixture is pinned to the per-session pass, so nothing may be shared; the hit totals above cannot detect sharing on their own");
         });
     }
