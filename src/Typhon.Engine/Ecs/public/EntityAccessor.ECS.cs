@@ -175,7 +175,10 @@ public unsafe partial class EntityAccessor
         return entity;
     }
 
-    /// <summary>Try to open an entity. Returns false if the entity doesn't exist or isn't visible.</summary>
+    /// <summary>
+    /// Try to open an entity for reading. Returns false if the entity doesn't exist or isn't visible.
+    /// The returned <see cref="EntityRef"/> is read-only; use <see cref="OpenMut"/> when the caller intends to write.
+    /// </summary>
     public bool TryOpen(EntityId id, out EntityRef entity)
     {
         entity = ResolveEntity(id, false);
