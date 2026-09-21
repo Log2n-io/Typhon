@@ -254,6 +254,26 @@ public struct CreatureBrain
 
     /// <summary>The lair that owns this creature, so a kill can decrement its live count.</summary>
     [Field] public EntityId Lair;
+
+    /// <summary>
+    /// The tick a wandering creature stops walking its current leg, after which it stands still until <see cref="RestUntilTick"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>An ABSOLUTE tick rather than a countdown, and that is the point of it.</b> A countdown has to be decremented, and decrementing writes the brain on
+    /// every tick of a creature's life — which keeps its cluster permanently dirty however still the creature is, and defeats every change-detection
+    /// mechanism downstream. A stamp is written once per decision and merely compared in between.
+    /// </para>
+    /// <para>
+    /// <b>Why a creature rests at all.</b> A wandering creature that walks continuously writes a new position every tick forever, which is one workload shape
+    /// among many and happens to be the one no cache can help. Real creatures graze: they amble a few metres and then stand. The duty cycle here is one leg
+    /// to four rests — stationary about 80 % of the time — which is what the simulation was always meant to express.
+    /// </para>
+    /// </remarks>
+    [Field] public long MoveUntilTick;
+
+    /// <summary>The tick a resting creature picks its next leg. See <see cref="MoveUntilTick"/>.</summary>
+    [Field] public long RestUntilTick;
 }
 
 /// <summary>A city NPC's behaviour. Almost always <see cref="AiMode.Idle"/>.</summary>
@@ -266,6 +286,12 @@ public struct NpcBrain
     [Field] public float HomeZ;
     [Field] public float LeashRadius;
     [Field] public int ThinkCooldown;
+
+    /// <summary>The tick a shuffling NPC stops its current leg. See <see cref="CreatureBrain.MoveUntilTick"/> for why these are stamps, not countdowns.</summary>
+    [Field] public long MoveUntilTick;
+
+    /// <summary>The tick a standing NPC picks its next leg.</summary>
+    [Field] public long RestUntilTick;
 }
 
 /// <summary>What an AI agent is currently doing.</summary>

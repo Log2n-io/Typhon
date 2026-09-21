@@ -113,20 +113,65 @@ public sealed partial class SimBridge
 
                 if (ai.Mode is AiMode.Pursue or AiMode.Fighting)
                 {
-                    // Keep closing on where the target was last seen; combat owns the transition out of these modes.
-                    Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
+                    // Close to weapon range, then STAND AND SHOOT.
+                    //
+                    // A pursuer that keeps steering once it is already in range writes a new position on every tick of every fight, which is the same
+                    // defect as a creature that never rests and costs the same downstream. Real combat is a closing phase and then a stationary one: the
+                    // creature walks until the target is within its weapon's reach and holds position while it attacks.
+                    //
+                    // The break range is deliberately wider than the attack range. At equal thresholds a creature sitting on the boundary alternates
+                    // between stopping and closing on successive decisions, which writes MORE than pursuing would.
+                    var dxT = move.DestX - x;
+                    var dzT = move.DestZ - z;
+                    var targetSq = (dxT * dxT) + (dzT * dzT);
+
+                    if (ai.Mode == AiMode.Fighting)
+                    {
+                        var breakRange = _creatureAttackRange * AttackRangeHysteresis;
+                        if (targetSq > breakRange * breakRange)
+                        {
+                            ai.Mode = AiMode.Pursue;
+                            Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
+                        }
+
+                        // Otherwise in range and already stopped: nothing is written, which is the whole gain.
+                        continue;
+                    }
+
+                    if (targetSq <= _creatureAttackRange * _creatureAttackRange)
+                    {
+                        ai.Mode = AiMode.Fighting;
+                        StandStill(ref move);
+                    }
+                    else
+                    {
+                        Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
+                    }
+
                     continue;
                 }
 
-                var dxd = move.DestX - x;
-                var dzd = move.DestZ - z;
-                if ((dxd * dxd) + (dzd * dzd) < 4f)
+                // Wander as amble-then-graze rather than a permanent walk.
+                //
+                // Three states, distinguished by two absolute tick stamps so that neither of the two common ones writes anything: walking the current leg
+                // (the velocity already points the right way and the Move system applies it), standing still (written once, on the transition), and
+                // picking the next leg. See CreatureBrain.MoveUntilTick.
+                if (tick < ai.MoveUntilTick)
                 {
-                    PickWanderDestination(ref move, in ai, tick, chunk, idx);
+                    // Mid-leg. Re-steering here would only re-derive the velocity it already has.
+                }
+                else if (tick < ai.RestUntilTick)
+                {
+                    StandStill(ref move);
                 }
                 else
                 {
+                    PickWanderDestination(ref move, in ai, tick, chunk, idx);
                     Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
+
+                    var legTicks = 1 + (int)(Hash01(Salt(tick, chunk, idx, 0x1B873593u)) * _wanderLegTicks);
+                    ai.MoveUntilTick = tick + legTicks;
+                    ai.RestUntilTick = ai.MoveUntilTick + (legTicks * WanderRestToMoveRatio);
                 }
 
                 // The aggro query. A 24 m bubble against a few hundred players spread over a 16 km planet returns
@@ -186,6 +231,21 @@ public sealed partial class SimBridge
         var r = ai.LeashRadius * 0.7f * MathF.Sqrt(Hash01(Salt(tick, chunk, idx, 0x85EBCA6Bu)));
         move.DestX = ai.HomeX + (MathF.Cos(a) * r);
         move.DestZ = ai.HomeZ + (MathF.Sin(a) * r);
+    }
+
+    /// <summary>Stops a mover, writing only when it was actually moving.</summary>
+    /// <param name="move">The motion component.</param>
+    /// <remarks>
+    /// The guard is the point rather than a micro-optimisation: these components are <c>GetSpan</c>-backed, so an unconditional store marks the cluster
+    /// changed on every tick of a rest and gives back exactly what the rest was introduced to save.
+    /// </remarks>
+    private static void StandStill(ref CreatureMotion move)
+    {
+        if (move.VelX != 0f || move.VelZ != 0f)
+        {
+            move.VelX = 0f;
+            move.VelZ = 0f;
+        }
     }
 
     /// <summary>
@@ -601,19 +661,36 @@ public sealed partial class SimBridge
 
                 ref var move = ref motions[idx];
                 var p = places[idx];
-                if (ai.ThinkCooldown > 0)
+
+                // The same amble-then-stand cycle the creatures use, and for the same reason: the countdown this replaced wrote the brain on every tick of
+                // every wandering NPC, and the steer below it wrote a new position on every tick as well. A city NPC shuffles between stalls; it does not
+                // march. Only 12 % of NPCs wander at all (WorldBuilder), so this is a small population writing continuously rather than a large one.
+                if (tick < ai.MoveUntilTick)
                 {
-                    ai.ThinkCooldown--;
+                    // Mid-leg: the velocity already points at the destination.
+                }
+                else if (tick < ai.RestUntilTick)
+                {
+                    if (move.VelX != 0f || move.VelZ != 0f)
+                    {
+                        move.VelX = 0f;
+                        move.VelZ = 0f;
+                    }
+
+                    continue;
                 }
                 else
                 {
-                    ai.ThinkCooldown = 20 + (int)(Hash01(Salt(tick, chunk, idx, 0x7FEB352Du)) * 60);
                     var ang = Hash01(Salt(tick, chunk, idx, 0x846CA68Bu)) * MathF.PI * 2f;
                     move.DestX = ai.HomeX + (MathF.Cos(ang) * ai.LeashRadius);
                     move.DestZ = ai.HomeZ + (MathF.Sin(ang) * ai.LeashRadius);
+                    Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, p.X, p.Z, move.DestX, move.DestZ);
+
+                    var legTicks = 1 + (int)(Hash01(Salt(tick, chunk, idx, 0x7FEB352Du)) * _wanderLegTicks);
+                    ai.MoveUntilTick = tick + legTicks;
+                    ai.RestUntilTick = ai.MoveUntilTick + (legTicks * WanderRestToMoveRatio);
                 }
 
-                Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, p.X, p.Z, move.DestX, move.DestZ);
                 if (move.VelX == 0f && move.VelZ == 0f)
                 {
                     continue;

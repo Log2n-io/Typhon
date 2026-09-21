@@ -162,6 +162,11 @@ public sealed partial class SimBridge
             v.Health = v.MaxHealth;
             ai.Mode = AiMode.Wander;
             ai.ThinkCooldown = 1;
+
+            // Cleared, or a creature revived part-way through an old rest keeps standing until a schedule from its previous life runs out. Zero is in the
+            // past for every tick, so the next decision picks a fresh leg.
+            ai.MoveUntilTick = 0;
+            ai.RestUntilTick = 0;
             revived++;
             return false;
         }

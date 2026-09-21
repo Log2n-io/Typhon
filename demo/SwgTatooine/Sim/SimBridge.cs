@@ -44,11 +44,40 @@ public sealed partial class SimBridge
         MeleeRange = TatooineData.MeleeRangeM * config.ContentScale;
         RangedRange = TatooineData.RangedRangeM * config.ContentScale;
         MetresPerTick = 1f / config.TickRateHz;
+
+        // A leg is about a second and a half of ambling, and a rest four times that, so a wandering creature is stationary roughly 80 % of the time. Both
+        // are expressed in TICKS off the configured rate so that an --hz sweep changes the sampling and not the behaviour being sampled.
+        _wanderLegTicks = Math.Max(1, (int)(WanderLegSeconds * config.TickRateHz));
+
+        // A creature closes to melee before it stops. Ranged range is the PLAYER's weapon in this model — the distance at which a player shoots a creature —
+        // so using it here would have creatures halt 75 m out and never reach anything.
+        _creatureAttackRange = MeleeRange;
         AwarenessMinChunk = config.AwarenessMinChunk;
         _rngState = (uint)config.Seed | 1u;
         InitShuttles();
         InitChunkStats();
     }
+
+    /// <summary>How long one wander leg lasts, in seconds, before the creature stands still.</summary>
+    private const float WanderLegSeconds = 1.5f;
+
+    /// <summary>Rests per unit of walking. Four gives a creature that is stationary 80 % of the time.</summary>
+    private const int WanderRestToMoveRatio = 4;
+
+    /// <summary>
+    /// How much further than its attack range a target may drift before a fighting creature starts closing again.
+    /// </summary>
+    /// <remarks>
+    /// Hysteresis, not slack. At a single threshold a creature sitting exactly on the boundary flips between Fighting and Pursue on alternate decisions and
+    /// writes its position more often than one that simply kept walking — the failure mode the band exists to prevent.
+    /// </remarks>
+    private const float AttackRangeHysteresis = 1.5f;
+
+    /// <summary>Ticks in one wander leg, derived from the tick rate.</summary>
+    private readonly int _wanderLegTicks;
+
+    /// <summary>The distance at which a creature stops closing and begins attacking.</summary>
+    private readonly float _creatureAttackRange;
 
     /// <summary>Per-system chunk floor for the awareness system; 0 inherits the global one.</summary>
     public int AwarenessMinChunk { get; }
