@@ -569,6 +569,78 @@ class UnsuppliedComponentPayloadTests : TestBase<UnsuppliedComponentPayloadTests
 
         Assert.That(v.Dx, Is.EqualTo(41f),
             "the replayed value must be readable — if it is not, the apply wrote the cluster SoA and created no chain, so the point read resolves nothing");
+
+        // #847: point reads use the EntityMap copy of EnabledBits and passed even while the cluster SoA copy stayed stale.
+        // Assert the SoA specifically so bulk iteration sees the recovered enable too.
+        var clusterAccessor = read.For<EcsUnit>();
+        var foundInEnabledSoA = false;
+        foreach (var cluster in clusterAccessor.GetClusterEnumerator())
+        {
+            var occupancy = cluster.OccupancyBits;
+            var enabled = cluster.EnabledBits(velSlot);
+            if ((occupancy & enabled) != 0)
+            {
+                foundInEnabledSoA = true;
+                break;
+            }
+        }
+        clusterAccessor.Dispose();
+
+        Assert.That(foundInEnabledSoA, Is.True,
+            "WAL SetEnabledBits replay must publish the recovered enable into the cluster SoA, not only the EntityMap record");
+    }
+
+    /// <summary>
+    /// WAL replay of SetEnabledBits is absolute for cluster storage: it must clear stale SoA bits as well as set new ones (#847).
+    /// </summary>
+    [Test]
+    public void Recovery_SetEnabledBits_DisableClearsClusterSoA()
+    {
+        using var dbe = SetupEngine();
+
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var pos = new EcsPosition(1, 2, 3);
+            var vel = new EcsVelocity(4, 5, 6);
+            id = tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+            tx.Commit();
+        }
+
+        var meta = Archetype<EcsUnit>.Metadata;
+        var posSlot = meta.GetSlot(EcsUnit.Position._componentTypeId);
+        var velSlot = meta.GetSlot(EcsUnit.Velocity._componentTypeId);
+
+        using (var applier = new Typhon.Engine.Internals.RecoveryApplier(dbe))
+        {
+            using var epoch = Typhon.Engine.Internals.EpochGuard.Enter(dbe.EpochManager);
+
+            // Absolute state after the recovered transaction: Position enabled, Velocity disabled.
+            var recoveredBits = (ushort)(1 << posSlot);
+            applier.ApplySetEnabledBitsToExisting((long)id.RawValue, recoveredBits);
+
+            // AP-12: applying the same absolute record twice must remain a no-op semantically.
+            applier.ApplySetEnabledBitsToExisting((long)id.RawValue, recoveredBits);
+        }
+
+        using var read = dbe.CreateQuickTransaction();
+        Assert.That(read.Open(id).IsEnabled(EcsUnit.Velocity), Is.False,
+            "the EntityMap copy must reflect the recovered disable");
+
+        var clusterAccessor = read.For<EcsUnit>();
+        var anyVelocityEnabled = false;
+        foreach (var cluster in clusterAccessor.GetClusterEnumerator())
+        {
+            if ((cluster.OccupancyBits & cluster.EnabledBits(velSlot)) != 0)
+            {
+                anyVelocityEnabled = true;
+                break;
+            }
+        }
+        clusterAccessor.Dispose();
+
+        Assert.That(anyVelocityEnabled, Is.False,
+            "absolute SetEnabledBits replay must clear the entity's stale Velocity bit from the cluster SoA");
     }
 
     /// <summary>Spawns B against a chunk deliberately recycled from a destroyed A, omitting Velocity.</summary>
