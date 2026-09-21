@@ -255,8 +255,6 @@ public sealed class SimConfig
     /// <summary>Whether the engine tracks and publishes the changed-cluster list. Off by default; it has no reader yet, so it exists to be measured.</summary>
     public bool SubscriptionsTrackContent;
 
-    public bool SubscriptionsInteriorAdmission;
-
     /// <summary>
     /// <c>--subs-owed on|off</c>: whether a reused slot costs the session that slot on its next frame, or its whole next frame.
     /// </summary>
@@ -269,9 +267,6 @@ public sealed class SimConfig
 
     /// <summary>Whether the gather prefetches the lines it is about to read (<c>--subs-prefetch on|off</c>).</summary>
     public bool SubscriptionsGatherPrefetch;
-
-    /// <summary>Whether interest is resolved at cluster granularity, reading no entity (<c>--subs-interest resident</c>).</summary>
-    public bool SubscriptionsResidentInterest;
 
     /// <summary>Whether the frame stage takes sessions from a shared cursor (<c>--subs-sched static|dynamic</c>).</summary>
     public bool SubscriptionsDynamicSchedule = true;

@@ -221,15 +221,6 @@ public static class TatooineReplication
                     + $"({(ic.SessionsTotal == 0 ? 0d : ic.SessionsCoherent * 100d / ic.SessionsTotal):F1} %)");
             }
 
-            // Slice 1's measurement: how many clusters a tick names, against the watched blocks the projection pass would otherwise walk.
-            var rs = subs.RunSplit;
-            if (rs.InteriorSlots + rs.ClippedSlots > 0)
-            {
-                Console.Error.WriteLine(
-                    $"  run split (cumulative): {rs.InteriorRuns} runs accepted whole, {rs.ClippedRuns} clipped; slots {rs.InteriorSlots} untested vs "
-                    + $"{rs.ClippedSlots} tested ({rs.InteriorSlots * 100d / (rs.InteriorSlots + rs.ClippedSlots):F1} % needed no per-entity test)");
-            }
-
             var ac = subs.AabbChurn;
             if (ac.Ticks > 0 && ac.Active > 0)
             {
@@ -300,8 +291,6 @@ public static class TatooineReplication
             Console.Error.WriteLine(
                 $"  identities: {idf.Minted} minted, {idf.Released} released, {idf.Reused} reused; "
                 + $"{subs.EntriesMigrated} entries relocated between clusters");
-            var cc = subs.ClusterCandidates;
-            Console.Error.WriteLine($"  cluster candidates: {cc.Collected} collected, {cc.Accepted} accepted");
             var sc = subs.SpanClaims;
             var scTotal = sc.Suppressed + sc.Admitted;
             Console.Error.WriteLine(

@@ -77,15 +77,12 @@ public static class CommandLine
             var other => throw new ArgumentException($"--subs-band takes on or off, not '{other}'"),
         };
 
-        var interestMode = Str(args, "--subs-interest", "cell");
-        c.SubscriptionsCellKeyedInterest = interestMode switch
+        c.SubscriptionsCellKeyedInterest = Str(args, "--subs-interest", "cell") switch
         {
-            "cell" or "resident" => true,
+            "cell" => true,
             "pull" => false,
-            var other => throw new ArgumentException($"--subs-interest takes cell, resident or pull, not '{other}'"),
+            var other => throw new ArgumentException($"--subs-interest takes cell or pull, not '{other}'"),
         };
-
-        c.SubscriptionsResidentInterest = interestMode == "resident";
         c.WorkerIdleSpin = Int(args, "--idle-spin", c.WorkerIdleSpin);
         c.SubscriptionsDynamicSchedule = Str(args, "--subs-sched", "dynamic") switch
         {
@@ -116,12 +113,6 @@ public static class CommandLine
             "on" => true,
             "off" => false,
             var other => throw new ArgumentException($"--subs-content takes on or off, not '{other}'"),
-        };
-        c.SubscriptionsInteriorAdmission = Str(args, "--subs-interior", "off") switch
-        {
-            "on" => true,
-            "off" => false,
-            var other => throw new ArgumentException($"--subs-interior takes on or off, not '{other}'"),
         };
         c.SubscriptionsOwedSlice = Int(args, "--subs-owed-slice", 2);
         c.SubscriptionsGatherPrefetch = Str(args, "--subs-prefetch", "off") switch

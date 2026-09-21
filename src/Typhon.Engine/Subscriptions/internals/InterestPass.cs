@@ -236,18 +236,6 @@ internal sealed unsafe class InterestPass
     /// <summary>Whether co-located sessions share one query. <see cref="SubscriptionsOptions.CellKeyedInterest"/>.</summary>
     private readonly bool _cellKeyed;
 
-    /// <summary>
-    /// Whether a cell's broad phase admits a wholly-contained cluster without reading its entities.
-    /// </summary>
-    /// <remarks>
-    /// A same-binary switch, because the two shapes are an A/B and this repository's rule requires both arms to be one build. Off reproduces the shape that
-    /// preceded it exactly — the enumerator is walked entity-major as before — so the control carries no part of the treatment.
-    /// </remarks>
-    private readonly bool _interiorAdmission;
-
-    /// <summary>Whether interest is resolved at cluster granularity, reading no entity. <c>SubscriptionsOptions.ResidentInterest</c>.</summary>
-    private readonly bool _resident;
-
     // ── Dynamic group dispatch (17 § 17) ────────────────────────────────────────────────────────────────────────────────────────────────────────────
     //
     // The unit of interest work is a CELL GROUP, not a session: one query serves everyone in the cell, so a group has to stay together and its members
@@ -299,18 +287,14 @@ internal sealed unsafe class InterestPass
     /// <param name="states">The per-archetype replication state, parallel to <paramref name="plans"/>.</param>
     /// <param name="registry">The declarations, for the profiles.</param>
     /// <param name="sessions">The session table, whose open rows are this pass's input.</param>
-    /// <param name="interiorAdmission">
-    /// Whether a cell's broad phase admits a wholly-contained cluster without reading its entities; see <c>SubscriptionsOptions.InteriorClusterAdmission</c>.
-    /// </param>
     /// <param name="cellKeyedInterest">
     /// Whether sessions sharing an interest cell resolve from one query; see <see cref="SubscriptionsOptions.CellKeyedInterest"/>.
     /// </param>
     /// <exception cref="InvalidOperationException">An observer names an archetype that has no projection, so it could never be replicated.</exception>
     /// <param name="views">Per-session interest membership, or <see langword="null"/> to resolve interest the way Phase 1 did.</param>
-    /// <param name="residentInterest">Whether a sphere is resolved at cluster granularity, reading no entity.</param>
     /// <param name="measureInterestPhases">Whether the stage times its broad phase, narrow phase and run assembly separately.</param>
     public InterestPass(DatabaseEngine engine, CompiledProjectionPlan[] plans, ArchetypeReplicationState[] states, SubscriptionsRegistry registry,
-        SessionTable sessions, bool cellKeyedInterest = true, SessionViewStore views = null, bool residentInterest = false, bool interiorAdmission = false,
+        SessionTable sessions, bool cellKeyedInterest = true, SessionViewStore views = null,
         bool measureInterestPhases = false)
     {
         ArgumentNullException.ThrowIfNull(engine);
@@ -323,8 +307,6 @@ internal sealed unsafe class InterestPass
         _states = states;
         _sessions = sessions;
         _cellKeyed = cellKeyedInterest;
-        _interiorAdmission = interiorAdmission;
-        _resident = residentInterest;
         _measurePhases = measureInterestPhases;
         _views = views;
         _fenceWindow = engine.EpochManager.FenceWindow;
@@ -539,36 +521,8 @@ internal sealed unsafe class InterestPass
         }
     }
 
-    public long ClusterCandidatesCollected
-    {
-        get
-        {
-            var total = 0L;
-            for (var i = 0; i < _arenas.Length; i++)
-            {
-                total += _arenas[i].ClusterCandidatesCollected;
-            }
-
-            return total;
-        }
-    }
-
-    /// <summary>Cluster candidates a session accepted, summed over every session and worker of this run.</summary>
-    public long ClusterCandidatesAccepted
-    {
-        get
-        {
-            var total = 0L;
-            for (var i = 0; i < _arenas.Length; i++)
-            {
-                total += _arenas[i].ClusterCandidatesAccepted;
-            }
-
-            return total;
-        }
-    }
-
-    /// <summary>
+        /// <summary>Cluster candidates a session accepted, summed over every session and worker of this run.</summary>
+        /// <summary>
     /// Whether two sessions on this session's profile necessarily reach the same clusters, which is what makes a frame encode shareable between them.
     /// </summary>
     /// <param name="index">The session's index in this tick's partition.</param>
@@ -1067,25 +1021,7 @@ internal sealed unsafe class InterestPass
     /// Slice 2's measurement: 20 § 3.2 put 74.4 % of accepted slots in clusters wholly inside the enter radius, measured on the cluster-granularity arm.
     /// This reports what the cell path actually achieves, where the run's bound is the union of the candidate boxes rather than the cluster's stored AABB.
     /// </remarks>
-    public (long InteriorRuns, long ClippedRuns, long InteriorSlots, long ClippedSlots) RunSplit
-    {
-        get
-        {
-            long ir = 0, cr = 0, isl = 0, csl = 0;
-            for (var w = 0; w < _arenas.Length; w++)
-            {
-                var r = _arenas[w].RunSplit;
-                ir += r.InteriorRuns;
-                cr += r.ClippedRuns;
-                isl += r.InteriorSlots;
-                csl += r.ClippedSlots;
-            }
-
-            return (ir, cr, isl, csl);
-        }
-    }
-
-    /// <summary>Interest cells the broad phase has resolved, cumulative since start.</summary>
+        /// <summary>Interest cells the broad phase has resolved, cumulative since start.</summary>
     public long CellsResolved => Volatile.Read(ref _cellsResolved);
 
     /// <summary>Sessions served from a cell resolution somebody else paid for, cumulative since start.</summary>
@@ -1138,15 +1074,7 @@ internal sealed unsafe class InterestPass
             var count = _groupCount[g];
             if (count > 1)
             {
-                if (_resident)
-                {
-                    ResolveCellGroupResident(arena, chunkIndex, i, count, ref probes, ref hits);
-                }
-                else
-                {
-                    ResolveCellGroup(arena, chunkIndex, i, count, ref probes, ref hits);
-                }
-
+                ResolveCellGroup(arena, chunkIndex, i, count, ref probes, ref hits);
                 cells++;
                 shared += count - 1;
             }
@@ -1192,9 +1120,7 @@ internal sealed unsafe class InterestPass
         for (var a = 0; a < archetypes.Length; a++)
         {
             sessionHits += profile.Kind == ObserverKind.Sphere
-                ? _resident
-                    ? WalkSphereResident(arena, view, archetypes[a], _tickViewpoints[i], profile.EnterRadius, profile.QueryRadius, ref probes)
-                    : WalkSphere(arena, view, archetypes[a], _tickViewpoints[i], profile.EnterRadius, profile.QueryRadius, ref probes)
+                ? WalkSphere(arena, view, archetypes[a], _tickViewpoints[i], profile.EnterRadius, profile.QueryRadius, ref probes)
                 : WalkArchetype(arena, view, archetypes[a], ref probes);
         }
 
@@ -1332,7 +1258,11 @@ internal sealed unsafe class InterestPass
         // enter radius is inside both, which is what lets the admission carry the same (near, mask) pair FilterCandidatesInto would have computed.
         var interior = enterRadius - (cell * HalfDiagonal);
         var interiorSq = interior * interior;
-        var admitInterior = _interiorAdmission && interior > 0d;
+
+        // A profile whose enter radius is smaller than the cell's half-diagonal has no inscribed disc at all, so nothing can be admitted whole and every
+        // cluster takes the per-entity path. Geometry, not a policy: the cell side is derived from the radius, so this is only reachable for a degenerate
+        // profile.
+        var admitInterior = interior > 0d;
         var interiorRanges = arena.CellInteriorRanges(archetypes.Length);
         Span<ClusterSpatialQueryResult> drain = stackalloc ClusterSpatialQueryResult[64];
 
@@ -1346,26 +1276,6 @@ internal sealed unsafe class InterestPass
                 continue;
             }
 
-            if (!admitInterior)
-            {
-                // The shape that preceded the admission, unchanged. The chunk-id transition counts the clusters this walk reached: QueryRadius enumerates
-                // cluster-major, so a transition is exactly a new cluster and the test is one register compare in a loop already writing six arrays.
-                var lastChunk = -1;
-                foreach (var hit in clusterState.QueryRadius(clusterState.Grid, centreX, centreY, _tickViewpoints[start].Z, broadRadius))
-                {
-                    if (hit.ClusterChunkId != lastChunk)
-                    {
-                        lastChunk = hit.ClusterChunkId;
-                        arena.NoteBroadCluster();
-                    }
-
-                    arena.NoteBroadEntity();
-                    arena.AddCandidate(hit.ClusterChunkId, hit.SlotIndex, hit.MinX, hit.MinY, hit.MaxX, hit.MaxY);
-                }
-
-                continue;
-            }
-
             using var e = clusterState.QueryRadius(clusterState.Grid, centreX, centreY, _tickViewpoints[start].Z, broadRadius);
             while (e.MoveNextCluster(out var c))
             {
@@ -1374,7 +1284,7 @@ internal sealed unsafe class InterestPass
                 // Farthest corner of the box from the centre: inside the disc iff the whole box is.
                 var dx = Math.Max(centreX - c.MinX, c.MaxX - centreX);
                 var dy = Math.Max(centreY - c.MinY, c.MaxY - centreY);
-                if (dx <= interior && dy <= interior && (dx * dx) + (dy * dy) <= interiorSq)
+                if (admitInterior && dx <= interior && dy <= interior && (dx * dx) + (dy * dy) <= interiorSq)
                 {
                     arena.AddInteriorCluster(c.ChunkId, c.Slots);
                     continue;
@@ -1427,9 +1337,6 @@ internal sealed unsafe class InterestPass
 
                 var narrowFrom = _measurePhases ? Stopwatch.GetTimestamp() : 0L;
                 arena.BeginSphere();
-                // FilterCandidateRunsInto is the PER-SESSION interior/boundary split and it is NOT wired here — see its own remarks. Its premise measures
-                // true and it is still slower than this line, because by this point the entity reads are already paid and all it can do is fragment the
-                // kernel. The admission above is the same predicate hoisted to where it prevents the reads instead.
                 arena.FilterCandidatesInto(viewpoint.X, viewpoint.Y, enterRadius, radius, ranges[a], to);
                 if (_measurePhases)
                 {
@@ -1522,165 +1429,6 @@ internal sealed unsafe class InterestPass
         return hits;
     }
 
-    /// <summary>
-    /// Resolves a cell group's sessions at CLUSTER granularity, reading no entity at all.
-    /// </summary>
-    /// <param name="arena">The worker's arena.</param>
-    /// <param name="chunkIndex">The chunk, for the hit range's worker field.</param>
-    /// <param name="start">First session of the group.</param>
-    /// <param name="count">How many share the cell.</param>
-    /// <param name="probes">Directory probes, accumulated.</param>
-    /// <param name="hits">Hits recorded, accumulated.</param>
-    /// <remarks>
-    /// <para>
-    /// <b>This is the interest half's third form, and what separates it from the second is what it never touches.</b> The cell-keyed pass above shares one
-    /// ENTITY query between the cell's sessions and then filters its entities per session; this shares one CLUSTER query and then filters BOXES per
-    /// session. At d06 that is about 540 boxes where the other collects about 11 900 entities for the same cell, and the entity columns are not read by
-    /// interest on any tick.
-    /// </para>
-    /// <para>
-    /// <b>What it costs is exactness.</b> A cluster reaching inside the disc is taken whole, so a cluster straddling the boundary contributes entities
-    /// outside it. The direction is the safe one, and the only one that is safe: every entity a direct query would find lives in a cluster this admits,
-    /// which is what ResidentInterestTests asserts entity by entity. The size of the over-approximation is the cluster extent, which the spatial index's
-    /// own drift gate bounds, and it is reported as ClusterCandidatesCollected/Accepted so a running server states it rather than a geometry argument.
-    /// </para>
-    /// <para>
-    /// <b>The order is the cell-keyed pass's, for the same reason</b>: the whole broad phase first, for every archetype, and only then one session at a
-    /// time. A SessionHitRange is a contiguous span of the arena's run list, so interleaving two sessions' runs makes every range cover its neighbours'.
-    /// </para>
-    /// </remarks>
-    private void ResolveCellGroupResident(HitArena arena, int chunkIndex, int start, int count, ref long probes, ref long hits)
-    {
-        var profile = _profiles[_tickProfiles[start]];
-        var archetypes = profile.ArchetypeIndices;
-        var radius = profile.QueryRadius;
-        var enterRadius = profile.EnterRadius;
-        var cell = CellSideFor(radius);
-        var centreX = (Math.Floor(_tickViewpoints[start].X / cell) + 0.5d) * cell;
-        var centreY = (Math.Floor(_tickViewpoints[start].Y / cell) + 0.5d) * cell;
-        var broadRadius = radius + (cell * HalfDiagonal);
-
-        arena.BeginClusterCell();
-        var ranges = arena.CellRanges(archetypes.Length);
-        Span<ClusterBroadphaseHit> batch = stackalloc ClusterBroadphaseHit[64];
-
-        for (var a = 0; a < archetypes.Length; a++)
-        {
-            ranges[a] = arena.ClusterCandidateCount;
-            var clusterState = _clusterStates[archetypes[a]];
-            if (clusterState == null || clusterState.Grid == null)
-            {
-                continue;
-            }
-
-            var query = clusterState.QueryRadius(clusterState.Grid, centreX, centreY, _tickViewpoints[start].Z, broadRadius);
-            int filled;
-            while ((filled = query.FillClusters(batch)) > 0)
-            {
-                for (var k = 0; k < filled; k++)
-                {
-                    ref readonly var cluster = ref batch[k];
-                    arena.AddClusterCandidate(cluster.ChunkId, cluster.Slots, cluster.MinX, cluster.MinY, cluster.MaxX, cluster.MaxY);
-                }
-            }
-        }
-
-        arena.NoteClusterCellCollected();
-
-        for (var i = start; i < start + count; i++)
-        {
-            var viewpoint = _tickViewpoints[i];
-            var runStart = arena.RunCount;
-            var leaveStart = arena.LeaveCount;
-            var view = BeginView(i);
-            var sessionHits = 0;
-
-            for (var a = 0; a < archetypes.Length; a++)
-            {
-                var to = a + 1 < archetypes.Length ? ranges[a + 1] : arena.ClusterCandidateCount;
-                if (ranges[a] == to)
-                {
-                    continue;
-                }
-
-                arena.BeginPick();
-                arena.SelectClustersInto(viewpoint.X, viewpoint.Y, enterRadius, radius, ranges[a], to);
-                for (var r = 0; r < arena.PickCount; r++)
-                {
-                    sessionHits += FlushSphereRun(arena, view, archetypes[a], arena.PickChunk(r), arena.PickNear(r), arena.PickMask(r), ref probes);
-                }
-            }
-
-            _tickHits[i] = CloseSession(arena, view, chunkIndex, runStart, leaveStart, sessionHits);
-            hits += sessionHits;
-        }
-    }
-
-    /// <summary>
-    /// Resolves one archetype for one sphere session at cluster granularity, the ungrouped counterpart of <see cref="ResolveCellGroupResident"/>.
-    /// </summary>
-    /// <param name="arena">The worker's arena.</param>
-    /// <param name="view">The session's interest membership, or <see langword="null"/> when the pass is not incremental.</param>
-    /// <param name="archetypeIndex">The archetype's plan index.</param>
-    /// <param name="centre">The sphere's centre.</param>
-    /// <param name="enterRadius">The radius something the session does not already hold must be inside, in world units.</param>
-    /// <param name="radius">The radius it may stay inside once held; the query runs at this one.</param>
-    /// <param name="probes">Directory probes, accumulated.</param>
-    /// <returns>Hits recorded.</returns>
-    /// <remarks>
-    /// The query is the session's own disc rather than an enlarged cell, but the broadphase tests the disc's enclosing BOX, so a cluster sitting in a
-    /// corner of it passes the box and misses the disc. The closest-point test is repeated here for that reason, and so that this path's membership is the
-    /// grouped one's.
-    /// </remarks>
-    private int WalkSphereResident(HitArena arena, SessionInterestView view, int archetypeIndex, Vector3D centre, double enterRadius, double radius,
-        ref long probes)
-    {
-        var clusterState = _clusterStates[archetypeIndex];
-        if (clusterState == null || clusterState.Grid == null)
-        {
-            return 0;
-        }
-
-        Span<ClusterBroadphaseHit> batch = stackalloc ClusterBroadphaseHit[64];
-        var query = clusterState.QueryRadius(clusterState.Grid, centre.X, centre.Y, centre.Z, radius);
-        var radiusSq = radius * radius;
-        var enterSq = enterRadius * enterRadius;
-        var hits = 0;
-        int filled;
-        while ((filled = query.FillClusters(batch)) > 0)
-        {
-            for (var k = 0; k < filled; k++)
-            {
-                ref readonly var cluster = ref batch[k];
-                var dx = Math.Max(Math.Max(cluster.MinX - centre.X, 0d), centre.X - cluster.MaxX);
-                var dy = Math.Max(Math.Max(cluster.MinY - centre.Y, 0d), centre.Y - cluster.MaxY);
-                var distSq = (dx * dx) + (dy * dy);
-                if (distSq > radiusSq)
-                {
-                    continue;
-                }
-
-                // All or nothing per cluster: this form reads no entity, so the cluster's closest point is the only thing it can say about the band.
-                var near = distSq <= enterSq ? cluster.Slots : 0UL;
-                hits += FlushSphereRun(arena, view, archetypeIndex, cluster.ChunkId, near, cluster.Slots, ref probes);
-            }
-        }
-
-        return hits;
-    }
-
-    /// <summary>Records one cluster's worth of sphere hits as a run, marking the slots watched.</summary>
-    /// <param name="arena">The worker's arena.</param>
-    /// <param name="archetypeIndex">The archetype's plan index.</param>
-    /// <param name="chunkId">The cluster, or -1 for "nothing accumulated yet".</param>
-    /// <param name="nearMask">The slots inside the observer's ENTER radius, which it may take whether or not it already holds them.</param>
-    /// <param name="farMask">
-    /// The slots inside the LEAVE radius, a superset of <paramref name="nearMask"/>. Those outside the near mask are admitted only for a session that
-    /// already holds them; equal to it when the profile declared no band, which makes the blend the identity.
-    /// </param>
-    /// <param name="probes">Directory probes, accumulated.</param>
-    /// <returns>Hits recorded.</returns>
-    /// <param name="view">The session's interest membership, or <see langword="null"/> when the pass is not incremental.</param>
     private int FlushSphereRun(HitArena arena, SessionInterestView view, int archetypeIndex, int chunkId, ulong nearMask, ulong farMask, ref long probes)
     {
         if (chunkId < 0 || farMask == 0)

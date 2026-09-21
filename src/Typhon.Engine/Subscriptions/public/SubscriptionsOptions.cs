@@ -356,30 +356,6 @@ public sealed class SubscriptionsOptions
     public int OwedSliceMultiplier { get; init; } = 2;
 
     /// <summary>
-    /// Whether a sphere observer's interest is resolved at CLUSTER granularity, reading no entity at all. Default <see langword="false"/>.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <b>What it removes.</b> Every other form of this pass answers "which entities are inside this disc" by reading entities: the spatial query walks
-    /// each cluster the disc reaches and tests each entity's bounds. Measured on the SWG demo at d06 with 200 sessions that is about <b>416 000 entity
-    /// examinations per tick</b>, 22.5 ms of CPU, and the largest single item in the whole subsystem. This form asks the same query for the CLUSTERS it
-    /// reaches and stops there — about <b>19 000 boxes</b> for the same tick, of the same 64-entity groups the ECS already keeps spatially tight.
-    /// </para>
-    /// <para>
-    /// <b>What it costs.</b> A cluster reaching inside the disc is taken whole, so one straddling the boundary contributes entities outside it. The
-    /// over-approximation is one cluster extent wide around the disc's rim and it is never the other direction: every entity an exact query would report
-    /// lives in a cluster this admits, which is the property <c>ResidentInterestTests</c> asserts entity by entity. It shows up as a larger view and
-    /// therefore as wire bytes, which <c>ClusterCandidatesCollected</c>/<c>Accepted</c> and the demo's <c>bytesPerSessionPerSec</c> both report.
-    /// </para>
-    /// <para>
-    /// <b>Why it is off by default.</b> It changes what a session is told, not merely how fast: two servers with the same profile and different settings
-    /// of this describe different worlds to the same client. That is an application's decision about how much bandwidth an exact disc is worth, and an
-    /// engine default has no business making it. Its cost when off is one predicted branch per session per tick.
-    /// </para>
-    /// </remarks>
-    public bool ResidentInterest { get; init; }
-
-    /// <summary>
     /// Whether each cluster's changed records are encoded ONCE per tick and referenced by every session that watches it, rather than re-encoded per
     /// session. Default <see langword="false"/>.
     /// </summary>
@@ -402,7 +378,7 @@ public sealed class SubscriptionsOptions
     /// <para>
     /// <b>It pairs with cluster-granular interest.</b> A shared run describes every changed slot of a cluster, so a session that reaches only part of one
     /// can never use it — the "told about every slot" test refuses it, correctly and at no risk, but also at no gain. With
-    /// <see cref="ResidentInterest"/> off the share rate is near zero by construction.
+    /// the share rate is near zero by construction.
     /// </para>
     /// </remarks>
     public bool SharedClusterBlocks { get; init; }
@@ -446,9 +422,7 @@ public sealed class SubscriptionsOptions
     /// <b>Off by default and switchable at runtime</b> because the two shapes are an A/B and this repository's rule requires both arms to be one build.
     /// </para>
     /// </remarks>
-    public bool InteriorClusterAdmission { get; init; }
-
-    /// <summary>
+        /// <summary>
     /// Whether the engine tracks and publishes the per-tick changed-cluster list for replicated archetypes. Default off.
     /// </summary>
     /// <remarks>

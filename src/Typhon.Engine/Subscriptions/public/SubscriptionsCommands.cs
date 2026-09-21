@@ -455,10 +455,7 @@ public sealed class SubscriptionsCommands
     }
 
     /// <summary>Cluster runs accepted whole against runs the disc clipped, and the slots each accounted for.</summary>
-    public (long InteriorRuns, long ClippedRuns, long InteriorSlots, long ClippedSlots) RunSplit =>
-        _ingress.Interest == null ? default : _ingress.Interest.RunSplit;
-
-    /// <summary>Why cell sharing did or did not happen: ungroupable sessions, keyed sessions, the viewpoint span and the interest cell side.</summary>
+        /// <summary>Why cell sharing did or did not happen: ungroupable sessions, keyed sessions, the viewpoint span and the interest cell side.</summary>
     public (long Ungroupable, long Keyed, double SpanX, double SpanY, double CellSide) GroupingDiagnostic =>
         _ingress.Interest == null ? default : _ingress.Interest.GroupingDiagnostic;
 
@@ -538,10 +535,7 @@ public sealed class SubscriptionsCommands
     }
 
     /// <summary>Cluster candidates the broad phase collected, and how many a session accepted.</summary>
-    public (long Collected, long Accepted) ClusterCandidates =>
-        _ingress.Interest == null ? default : (_ingress.Interest.ClusterCandidatesCollected, _ingress.Interest.ClusterCandidatesAccepted);
-
-    /// <summary>Distinct clusters every cell's broad phase reached, against the entity candidates it collected from them.</summary>
+        /// <summary>Distinct clusters every cell's broad phase reached, against the entity candidates it collected from them.</summary>
     public long BroadClustersReached => _ingress.Interest == null ? 0L : _ingress.Interest.BroadClustersReached;
 
     /// <summary>Entity candidates every cell's broad phase collected.</summary>
