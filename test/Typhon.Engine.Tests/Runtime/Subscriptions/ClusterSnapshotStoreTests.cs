@@ -73,6 +73,20 @@ unsafe class ClusterSnapshotStoreTests
             Assert.That(occ, Is.Zero);
             Assert.That(store.TryBlockOf(2, 5, out _), Is.False, "a busy answer must not publish anything");
 
+            // Every caller that meets the held claim, at once and from several threads, is told the same thing and none of them blocks. The claim is held
+            // for the whole of this, so the answer does not depend on a race being won: it is what the never-waiting claim promises.
+            var busies = 0;
+            Parallel.For(0, 8, _ =>
+            {
+                store.TryGet(2, 5, out var concurrent);
+                if (concurrent == SnapshotClaim.Busy)
+                {
+                    Interlocked.Increment(ref busies);
+                }
+            });
+
+            Assert.That(busies, Is.EqualTo(8), "a held claim must be reported busy to every caller");
+
             store.Fill(2, 5, page, FieldsOffset, Stride, 0);
             Assert.That(store.TryGet(2, 5, out var third), Is.EqualTo(0b110UL));
             Assert.That(third, Is.EqualTo(SnapshotClaim.Ready));
@@ -95,7 +109,6 @@ unsafe class ClusterSnapshotStoreTests
         var page = NewCluster(0x0FF0UL);
         try
         {
-            var busies = 0;
             for (var tick = 1L; tick <= 200; tick++)
             {
                 var fills = 0;
@@ -111,7 +124,8 @@ unsafe class ClusterSnapshotStoreTests
                     }
                     else if (claim == SnapshotClaim.Busy)
                     {
-                        Interlocked.Increment(ref busies);
+                        // What a worker does when the store cannot serve it: read the cluster's page itself. Whether this happens at all depends on the
+                        // threads overlapping, which is why the busy answer is asserted deterministically in the fixture above rather than here.
                         occ = Volatile.Read(ref *(ulong*)page);
                     }
 
@@ -124,10 +138,6 @@ unsafe class ClusterSnapshotStoreTests
                 Assert.That(fills, Is.EqualTo(1), $"tick {tick}: the cluster was filled {fills} times");
                 Assert.That(wrong, Is.Zero, $"tick {tick}: {wrong} readers saw an occupancy the fill did not publish");
             }
-
-            // Anti-vacuity: with eight workers on one cluster over 200 ticks, some of them must have met a fill in progress — otherwise the busy path,
-            // which is the whole point of a claim that never waits, went untested.
-            Assert.That(busies, Is.GreaterThan(0), "no reader ever met a fill in progress, so the busy answer went untested");
         }
         finally
         {
