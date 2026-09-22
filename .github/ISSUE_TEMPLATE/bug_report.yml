@@ -1,7 +1,6 @@
 name: Bug Report
 description: Report a defect in Typhon.
 title: "[Bug]: "
-labels: ["bug"]
 type: Bug
 body:
   - type: markdown
@@ -19,19 +18,21 @@ body:
     attributes:
       label: Area
       options:
-        - Database
-        - MVCC
-        - Transactions
-        - Indexes
-        - Schema
-        - Storage
-        - Memory
         - Concurrency
-        - Primitives
-        - Observability
         - Execution
+        - Storage
+        - Durability
+        - MVCC
+        - Schema
+        - Spatial
+        - Query
+        - Runtime
+        - Observability
+        - Resources
         - Errors
+        - Utilities
         - Workbench
+        - Indexes
         - Unsure
     validations:
       required: true

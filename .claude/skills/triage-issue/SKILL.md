@@ -1,7 +1,7 @@
 ---
 name: triage-issue
 description: Deep-triage a GitHub issue — classify, analyze against the code, draft an answer, and apply the disposition
-argument-hint: "#123  (a single issue)  |  empty (sweep all needs-triage)  |  --help"
+argument-hint: "#123  (a single issue)  |  empty (sweep every untriaged external issue)  |  --help"
 ---
 
 # Triage a GitHub Issue for Typhon
@@ -15,9 +15,10 @@ This is the **local, code-aware** counterpart to the automated first-pass `.gith
 credentials, so it does what the CI bot deliberately cannot.
 
 > Companion skill: **`/create-issue`** — reuse its Field Reference (project ID, Status/field IDs, sub-issue
-> linking) and `_helpers.md` patterns. Taxonomy is identical: Issue Types `Task/Bug/Feature/Question/Epic`;
-> labels `bug, enhancement, documentation, performance, refactoring, testing, technical-debt`; issue-level
-> fields **Area** / **Product**; **Milestone** = release maturity; Epic→Feature→Task hierarchy.
+> linking) and `_helpers.md` patterns. Taxonomy is identical: Issue Types `Task/Bug/Feature/Question/Epic`
+> (the type — not a label — says it is a bug); labels `documentation, performance, refactoring,
+> testing, technical-debt, needs-info`; issue-level fields **Area** / **Product** / **Priority** (no priority
+> labels); **Milestone** = release maturity; Epic→Feature→Task hierarchy.
 
 ## Input provided by user
 
@@ -30,10 +31,11 @@ If `$ARGUMENTS` contains `--help` or `-h`, print this and **stop**:
 ```
 /triage-issue [#N]
 
-  Deep-triage a GitHub issue (or sweep all needs-triage issues).
+  Deep-triage a GitHub issue (or sweep every untriaged external issue).
 
 Arguments:
-  #N            Issue number to triage. If omitted, sweep every OPEN issue labelled `needs-triage`.
+  #N            Issue number to triage. If omitted, sweep every OPEN issue filed by someone outside the
+                team (not a bot) that has no Area set yet.
   --help, -h    Show this help
 
 What it does (per issue):
@@ -49,8 +51,24 @@ What it does (per issue):
 
 ### 1. Fetch
 `mcp__GitHub__get_issue` (owner `log2n-io`, repo `Typhon`, the number). Capture title, body, author,
-existing labels, current Issue Type, and the `number`/`id`. For a sweep, first
-`mcp__GitHub__search_issues` `repo:Log2n-io/Typhon is:issue is:open label:needs-triage`.
+existing labels, current Issue Type, and the `number`/`id`.
+
+For a sweep, first list the queue. "Untriaged" has no label: it is an open issue whose author is outside the team
+(`authorAssociation` not OWNER / MEMBER / COLLABORATOR), is not a bot (the doc-accuracy workflows file as
+`github-actions`, which GitHub reports as CONTRIBUTOR), and has no **Area** set — setting Area is the one write this
+skill always makes, so a triaged issue drops out of the list by itself:
+
+```bash
+MSYS_NO_PATHCONV=1 gh api graphql --paginate -f query='query($endCursor:String){repository(owner:"Log2n-io",name:"Typhon"){
+  issues(first:100,after:$endCursor,states:OPEN,orderBy:{field:CREATED_AT,direction:ASC}){pageInfo{hasNextPage endCursor}
+  nodes{number title authorAssociation author{login}
+    issueFieldValues(first:10){nodes{... on IssueFieldSingleSelectValue{field{... on IssueFieldSingleSelect{name}} value}}}}}}}' \
+  --jq '.data.repository.issues.nodes[]
+        | select(.authorAssociation as $a | ["OWNER","MEMBER","COLLABORATOR"] | index($a) | not)
+        | select(.author.login != "github-actions")
+        | select([.issueFieldValues.nodes[] | .field.name?] | index("Area") | not)
+        | "#\(.number) \(.title)"'
+```
 
 ### 2. Analyze against the source of truth
 - Read the code paths the report implicates (`file:line`), the relevant `claude/` design docs and
@@ -63,8 +81,8 @@ existing labels, current Issue Type, and the `number`/`id`. For a sweep, first
 - **Issue Type** (primary): `Bug` / `Feature` / `Question` / `Task` / `Epic`.
 - **Area** (issue-level field): the subsystem outcome area.
 - **Product**: `Engine` / `Workbench`.
-- **Severity / labels**: from `bug, enhancement, documentation, performance, refactoring, testing,
-  technical-debt, needs-info`.
+- **Severity**: the **Priority** issue field (`P0-Critical` … `P3-Low`), never a label.
+- **Labels**: from `documentation, performance, refactoring, testing, technical-debt, needs-info`.
 
 ### 4. Verdict
 One of: **real bug** (repro confirmed) · **duplicate** (link the original) · **misunderstanding**
@@ -83,7 +101,7 @@ On approval, apply with `gh` (your local creds have org permissions — no `PROJ
 
 ```bash
 # Labels
-gh issue edit <n> --repo log2n-io/Typhon --add-label "<l1>,<l2>" --remove-label needs-triage
+gh issue edit <n> --repo log2n-io/Typhon --add-label "<l1>,<l2>"
 # Issue Type (primary classifier)
 gh issue edit <n> --repo log2n-io/Typhon --type "Bug"        # or Feature / Question / Task / Epic
 # Milestone (release maturity, if applicable)
@@ -91,12 +109,13 @@ gh issue edit <n> --repo log2n-io/Typhon --milestone "alpha-1"
 # Comment (post the drafted reply)
 gh issue comment <n> --repo log2n-io/Typhon --body "<reply>"
 ```
-- **Area / Product / Claude Code Discussion** are issue-level custom fields — set them in one
+- **Area / Product / Priority / Claude Code Discussion** are issue-level custom fields — set them in one
   `setIssueFieldValue` mutation; **full recipe + field/option IDs in [`../_helpers.md` § "Issue-level custom
   fields"](../_helpers.md)**. Mirror the parent Epic if linked.
 - **Always set `Claude Code Discussion`** (`IFT_kgDOAqrjLw`, text) to this session's
   `https://claude.ai/code/session_…` URL when you triage — the analysis lives in the conversation, and the field is
   how a reader gets back to it. Available on every Issue Type **except `Task`**.
+- **Always set Area**, even when closing the issue — an issue without Area stays in the sweep queue (§1).
 - **Area — don't just copy the filer's choice.** `Execution` is the Unit-of-Work / commit-path layer; the tick loop
   and `DagScheduler` are `Runtime`. Reclassify when wrong and say so in the reply.
 - **Project board**: `gh project item-add 1 --owner Log2n-io --url <url>` then Status (see `/create-issue`
