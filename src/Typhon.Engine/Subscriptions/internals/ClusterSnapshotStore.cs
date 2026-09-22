@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -19,11 +18,11 @@ namespace Typhon.Engine.Internals;
 /// This store opens each cluster at most once per tick and every other cell reads what that open produced.
 /// </para>
 /// <para>
-/// <b>Filled lazily, by whichever worker reaches the cluster first.</b> The tick stamp is claimed with a compare-exchange to its negation, the winner reads
-/// the page and publishes the stamp with a release store. A worker that arrives meanwhile either reads the page itself (<see cref="SnapshotClaim.Busy"/>)
-/// or waits on an acquire load. The wait is a <see cref="SpinWait"/> that never sleeps but still YIELDS after ten iterations, and on a saturated pool a
-/// yield hands the core to a queued thread: the dense cells share clusters, so a reader could lose its core behind a fill that took nanoseconds
-/// (design 23 § 1). Reading privately costs one page open and writes nothing shared.
+/// <b>Filled by the tick's pre-fill wave, or lazily by whichever worker reaches the cluster first.</b> The tick stamp is claimed with a compare-exchange to
+/// its negation, the winner reads the page and publishes the stamp with a release store. A worker that arrives meanwhile is told
+/// <see cref="SnapshotClaim.Busy"/> and reads the page itself: it never waits. Waiting cost about 4 500 waits a tick, some 10 ms of CPU, at d06 with a
+/// thousand sessions — the wait yields, and on a saturated pool a yield hands the core to a queued thread, so a reader lost its core behind a fill that
+/// took nanoseconds (design 23 § 1). Reading privately costs one page open and writes nothing shared.
 /// </para>
 /// <para>
 /// <b>Valid for one tick, and stamped rather than cleared.</b> A stamp from an earlier tick is simply not equal to the current one, so nothing is swept
@@ -50,7 +49,7 @@ internal sealed unsafe class ClusterSnapshotStore
         /// <summary>The caller claimed the fill and must call <see cref="Fill"/> — or, beyond the store, open the cluster privately.</summary>
         Fill,
 
-        /// <summary>Another worker is filling it and the caller asked not to wait: it reads the cluster's page itself and writes nothing here.</summary>
+        /// <summary>Another worker is filling it: the caller reads the cluster's page itself and writes nothing here.</summary>
         Busy,
     }
 
@@ -70,43 +69,17 @@ internal sealed unsafe class ClusterSnapshotStore
     }
 
     private Entry[] _entries = [];
-    private AABB2F[] _boxes = [];
 
     /// <summary>
-    /// The boxes as columns instead — per cluster, MinX[64], MinY[64], MaxX[64], MaxY[64] — for <see cref="InterestBandKernel"/> (design 23, phase 2).
-    /// One layout or the other is kept, never both: the fill writes whichever the stage reads.
+    /// The boxes as columns — per cluster, MinX[64], MinY[64], MaxX[64], MaxY[64] — which is what <see cref="InterestBandKernel"/> reads: a sixteen-entity
+    /// block is four loads and no transpose (design 23, phase 2).
     /// </summary>
     private float[] _columns = [];
-    private bool _columnar;
-
-    /// <summary>Whether the boxes are kept as columns (<see cref="Columns"/>) rather than as one box per slot (<see cref="Box"/>).</summary>
-    public bool Columnar => _columnar;
 
     /// <summary>Grows the store to cover every chunk id below <paramref name="chunkCapacity"/>. Serial: called from the stage's prologue.</summary>
     /// <param name="chunkCapacity">One past the highest chunk id the archetype can hold this tick.</param>
-    /// <param name="columnar">Whether the boxes are kept as columns. Switching drops the other layout; every stamp is then from an earlier tick anyway.</param>
-    public void EnsureCapacity(int chunkCapacity, bool columnar = false)
+    public void EnsureCapacity(int chunkCapacity)
     {
-        if (columnar != _columnar)
-        {
-            _columnar = columnar;
-            _boxes = [];
-            _columns = [];
-            if (_entries.Length > 0)
-            {
-                // The other layout's boxes are gone, so no stamp may claim them: a zero stamp reads as "never filled".
-                Array.Clear(_entries);
-                if (columnar)
-                {
-                    _columns = new float[_entries.Length * InterestBandKernel.ColumnFloats];
-                }
-                else
-                {
-                    _boxes = new AABB2F[_entries.Length * 64];
-                }
-            }
-        }
-
         if (chunkCapacity <= _entries.Length)
         {
             return;
@@ -114,29 +87,19 @@ internal sealed unsafe class ClusterSnapshotStore
 
         var grown = Math.Max(chunkCapacity, Math.Max(64, _entries.Length * 2));
         Array.Resize(ref _entries, grown);
-        if (_columnar)
-        {
-            Array.Resize(ref _columns, grown * InterestBandKernel.ColumnFloats);
-        }
-        else
-        {
-            Array.Resize(ref _boxes, grown * 64);
-        }
+        Array.Resize(ref _columns, grown * InterestBandKernel.ColumnFloats);
     }
 
     /// <summary>
-    /// The cluster's occupancy for <paramref name="tick"/> if it is already in the store; otherwise claims the fill for the caller, or — another worker
-    /// holding the claim — either reports it busy or waits for it.
+    /// The cluster's occupancy for <paramref name="tick"/> if it is already in the store; otherwise claims the fill for the caller, or reports it busy when
+    /// another worker holds the claim. It never waits: a busy caller reads the cluster's page itself.
     /// </summary>
     /// <param name="chunkId">The cluster.</param>
     /// <param name="tick">The tick.</param>
-    /// <param name="neverWait">Whether a fill in progress is reported as <see cref="SnapshotClaim.Busy"/> rather than waited for.</param>
     /// <param name="claim">What the caller must do next.</param>
-    /// <param name="waitTicks">Timestamp ticks spent waiting on another worker's fill; zero when there was no wait.</param>
     /// <returns>The occupancy when <paramref name="claim"/> is <see cref="SnapshotClaim.Ready"/>; zero otherwise.</returns>
-    public ulong TryGet(int chunkId, long tick, bool neverWait, out SnapshotClaim claim, out long waitTicks)
+    public ulong TryGet(int chunkId, long tick, out SnapshotClaim claim)
     {
-        waitTicks = 0;
         if (tick <= 0 || (uint)chunkId >= (uint)_entries.Length)
         {
             // Beyond what the prologue sized — a cluster created after it — or a tick the stamps cannot tell from "never filled" (they start at zero, and
@@ -147,44 +110,27 @@ internal sealed unsafe class ClusterSnapshotStore
 
         ref var entry = ref _entries[chunkId];
         ref var stamp = ref entry.Tick;
-        var spin = new SpinWait();
-        var waitFrom = 0L;
         while (true)
         {
             var seen = Volatile.Read(ref stamp);
             if (seen == tick)
             {
                 claim = SnapshotClaim.Ready;
-                waitTicks = waitFrom == 0 ? 0 : Math.Max(1L, Stopwatch.GetTimestamp() - waitFrom);
                 return entry.Occupancy;
             }
 
-            if (seen != -tick)
-            {
-                // Unclaimed for this tick — never filled, last tick's, or a claim its holder abandoned. Retried on a lost race rather than waited on.
-                if (Interlocked.CompareExchange(ref stamp, -tick, seen) == seen)
-                {
-                    claim = SnapshotClaim.Fill;
-                    waitTicks = waitFrom == 0 ? 0 : Math.Max(1L, Stopwatch.GetTimestamp() - waitFrom);
-                    return 0UL;
-                }
-
-                continue;
-            }
-
-            if (neverWait)
+            if (seen == -tick)
             {
                 claim = SnapshotClaim.Busy;
                 return 0UL;
             }
 
-            // Another worker is filling it. Its fill is at most sixty-four small copies; the spin never sleeps, but it does yield (see the remarks).
-            if (waitFrom == 0)
+            // Unclaimed for this tick — never filled, last tick's, or a claim its holder abandoned. Retried on a lost race rather than waited on.
+            if (Interlocked.CompareExchange(ref stamp, -tick, seen) == seen)
             {
-                waitFrom = Stopwatch.GetTimestamp();
+                claim = SnapshotClaim.Fill;
+                return 0UL;
             }
-
-            spin.SpinOnce(sleep1Threshold: -1);
         }
     }
 
@@ -268,23 +214,8 @@ internal sealed unsafe class ClusterSnapshotStore
         ref var entry = ref _entries[chunkId];
         try
         {
-            var fields = clusterBase + fieldsOffset;
-            if (_columnar)
-            {
-                Transpose(fields, stride, occupancy, _columns.AsSpan(chunkId * InterestBandKernel.ColumnFloats, InterestBandKernel.ColumnFloats));
-            }
-            else
-            {
-                var boxes = _boxes.AsSpan(chunkId * 64, 64);
-                var bits = occupancy;
-                while (bits != 0UL)
-                {
-                    var slot = BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
-                    boxes[slot] = *(AABB2F*)(fields + (slot * stride));
-                }
-            }
-
+            Transpose(clusterBase + fieldsOffset, stride, occupancy,
+                _columns.AsSpan(chunkId * InterestBandKernel.ColumnFloats, InterestBandKernel.ColumnFloats));
             entry.Occupancy = occupancy;
             entry.Block = block;
         }
@@ -319,18 +250,11 @@ internal sealed unsafe class ClusterSnapshotStore
         }
     }
 
-    /// <summary>The first float of a cluster's columns, as this tick's fill left them. Only when <see cref="Columnar"/>.</summary>
+    /// <summary>The first float of a cluster's columns, as this tick's fill left them.</summary>
     /// <param name="chunkId">The cluster.</param>
     /// <returns>A reference to MinX[0]; MinY, MaxX and MaxY follow at 64-float steps.</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ref float Columns(int chunkId) => ref _columns[chunkId * InterestBandKernel.ColumnFloats];
-
-    /// <summary>One entity's bounds as the store captured them.</summary>
-    /// <param name="chunkId">The cluster.</param>
-    /// <param name="slot">The slot.</param>
-    /// <returns>The box.</returns>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ref readonly AABB2F Box(int chunkId, int slot) => ref _boxes[(chunkId * 64) + slot];
 
     /// <summary>Whether <paramref name="chunkId"/> is inside the store, so its boxes can be read from it rather than from a page.</summary>
     /// <param name="chunkId">The cluster.</param>

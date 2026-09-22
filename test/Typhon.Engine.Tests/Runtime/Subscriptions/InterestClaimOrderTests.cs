@@ -8,8 +8,8 @@ using Typhon.Schema.Definition;
 namespace Typhon.Engine.Tests.Runtime;
 
 /// <summary>
-/// Design 23's phase 1: how the interest stage schedules its work — a snapshot claim that never waits, and groups claimed by last tick's cost — changes
-/// who resolves what and when, never the answer.
+/// Design 23's phases 1 and 2: how the interest stage schedules its work — a snapshot claim that never waits, groups claimed by last tick's cost, a
+/// pre-fill wave, and members testing a cluster from the snapshot's columns — changes who resolves what and when, never the answer.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -19,9 +19,8 @@ namespace Typhon.Engine.Tests.Runtime;
 /// </para>
 /// <para>
 /// <b>The stationary path is not covered here.</b> This harness runs no frame stage, so no session can retain its last frame and every member takes the
-/// ordinary path. The stationary skip, with these options at their defaults, is compared with the full walk byte for byte by
-/// <c>IncrementalInterestTests.StationaryRetentionEmitsExactlyWhatTheFullWalkEmits</c>, and the block kernel with the candidate filter by
-/// <c>IncrementalInterestTests.TheBlockKernelEmitsExactlyWhatTheCandidateFilterEmits</c>.
+/// ordinary path. The stationary skip is compared with the full walk byte for byte by
+/// <c>IncrementalInterestTests.StationaryRetentionEmitsExactlyWhatTheFullWalkEmits</c>.
 /// </para>
 /// </remarks>
 [TestFixture]
@@ -102,39 +101,23 @@ class InterestClaimOrderTests : TestBase<InterestClaimOrderTests>
     }
 
     /// <summary>
-    /// Every session resolves exactly its own disc on every tick, whichever way the stage schedules its work.
+    /// Every session resolves exactly its own disc on every tick, however many workers run the stage and whoever wins each cluster's fill.
     /// </summary>
-    /// <param name="neverWait">Whether a claim on a cluster being filled reads the page instead of waiting.</param>
-    /// <param name="costOrdered">Whether groups are claimed by last tick's cost.</param>
     /// <param name="workers">Chunks, run in parallel when more than one — the only way two workers meet on one fill.</param>
     /// <param name="holdClaims">
-    /// Whether every cluster's snapshot claim is taken, and never filled, before the last tick — so every reader finds the fill "in progress" and must
-    /// read the page itself. Only with <paramref name="neverWait"/>: a waiting reader would spin forever.
+    /// Whether every cluster's snapshot claim is taken, and never filled, before the last tick — so every reader finds the fill "in progress" and must read
+    /// the page itself.
     /// </param>
-    /// <param name="prefill">Whether the snapshot is filled by a wave before any group.</param>
-    /// <param name="blockKernel">Whether members test boundary clusters from the snapshot's columns.</param>
-    [TestCase(false, false, false, false, 1, false, TestName = "ClaimsWaitCellOrder")]
-    [TestCase(false, true, false, false, 1, false, TestName = "CostOrderedGroups")]
-    [TestCase(true, false, false, false, 1, true, TestName = "EveryClaimBusyReadFromThePage")]
-    [TestCase(true, true, false, false, 8, false, TestName = "BothOnEightParallelWorkers")]
-    [TestCase(false, false, true, false, 1, false, TestName = "PrefilledSnapshot")]
-    [TestCase(false, false, false, true, 1, false, TestName = "BlockKernel")]
-    [TestCase(true, false, false, true, 1, true, TestName = "BlockKernelEveryClaimBusy")]
-    [TestCase(true, true, true, true, 8, false, TestName = "AllOnEightParallelWorkers")]
-    public void EverySessionResolvesItsOwnDisc(bool neverWait, bool costOrdered, bool prefill, bool blockKernel, int workers, bool holdClaims)
+    [TestCase(1, false, TestName = "OneWorker")]
+    [TestCase(8, false, TestName = "EightParallelWorkers")]
+    [TestCase(1, true, TestName = "EveryClaimBusyReadFromThePage")]
+    [TestCase(8, true, TestName = "EveryClaimBusyOnEightParallelWorkers")]
+    public void EverySessionResolvesItsOwnDisc(int workers, bool holdClaims)
     {
         var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
         Populate(dbe);
 
-        var options = new SubscriptionsOptions
-        {
-            InterestClaimNeverWaits = neverWait,
-            InterestCostOrderedGroups = costOrdered,
-            InterestPrefillSnapshots = prefill,
-            InterestBlockKernel = blockKernel,
-        };
-        using var harness = InterestHarness.Create(dbe, DeclareSphere,
-            $"{nameof(InterestClaimOrderTests)}{workers}{neverWait}{costOrdered}{prefill}{blockKernel}", options);
+        using var harness = InterestHarness.Create(dbe, DeclareSphere, $"{nameof(InterestClaimOrderTests)}{workers}{holdClaims}");
         var sessions = harness.OpenSessions(SessionCount, "near");
         RunPass(harness, 1, workers);
         harness.CreateRequestedBlocks();
@@ -157,14 +140,14 @@ class InterestClaimOrderTests : TestBase<InterestClaimOrderTests>
                 var store = harness.Interest.SnapshotOf(0);
                 for (var c = 0; store.Covers(c); c++)
                 {
-                    store.TryGet(c, tick, true, out _, out _);
+                    store.TryGet(c, tick, out _);
                 }
             }
 
             var before = harness.Interest.StageShape;
             RunPass(harness, tick, workers);
             costOrderedSeen |= harness.Interest.TickCostOrdered;
-            if (prefill && tick == 3)
+            if (tick == 3)
             {
                 // Nobody moved since tick 2, so the wave filled exactly what the cells read: a group that still fills lazily read a cluster the wave missed.
                 // With several workers a group can reach a cluster in a block another worker claimed but has not filled yet, so only mostly.
@@ -200,12 +183,8 @@ class InterestClaimOrderTests : TestBase<InterestClaimOrderTests>
         Assert.That(checkedSessions, Is.EqualTo(SessionCount * 4));
         Assert.That(harness.Interest.SessionsShared - sharedFrom, Is.GreaterThan(SessionCount * 2),
             "the crowd did not share cells, so the cell path went untested");
-        Assert.That(costOrderedSeen, Is.EqualTo(costOrdered), "the cost order was built when it should not have been, or never when it should");
-        Assert.That(harness.Interest.SnapshotOf(0).Columnar, Is.EqualTo(blockKernel), "the snapshot's layout does not match the kernel option");
-        if (prefill)
-        {
-            Assert.That(harness.Interest.StageShape.Prefills, Is.GreaterThan(100), "the pre-fill wave filled nothing");
-        }
+        Assert.That(costOrderedSeen, Is.True, "the groups were never claimed in cost order");
+        Assert.That(harness.Interest.StageShape.Prefills, Is.GreaterThan(100), "the pre-fill wave filled nothing");
 
         if (holdClaims)
         {

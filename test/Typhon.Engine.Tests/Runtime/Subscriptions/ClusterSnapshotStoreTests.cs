@@ -7,7 +7,7 @@ using static Typhon.Engine.Internals.ClusterSnapshotStore;
 
 namespace Typhon.Engine.Tests.Runtime;
 
-/// <summary>The per-tick cluster snapshot: one worker fills a cluster, every other reads it, and a failed fill never leaves a reader spinning.</summary>
+/// <summary>The per-tick cluster snapshot: one worker fills a cluster, every other reads it, and a failed fill never strands the cluster for the tick.</summary>
 [TestFixture]
 unsafe class ClusterSnapshotStoreTests
 {
@@ -21,30 +21,30 @@ unsafe class ClusterSnapshotStoreTests
         return page;
     }
 
-    /// <summary>A claim whose holder fails before filling is released, and a worker waiting on it claims the fill itself rather than spinning forever.</summary>
+    /// <summary>
+    /// A claim whose holder fails before filling is released, and the next caller claims the fill itself instead of reading the cluster's page for the rest
+    /// of the tick.
+    /// </summary>
     [Test]
-    public void AnAbandonedClaimIsReclaimedByAWaiter()
+    public void AnAbandonedClaimIsReclaimedByTheNextCaller()
     {
         var store = new ClusterSnapshotStore();
         store.EnsureCapacity(4);
         var page = NewCluster(0b101);
         try
         {
-            store.TryGet(1, 7, false, out var first, out _);
+            store.TryGet(1, 7, out var first);
             Assert.That(first, Is.EqualTo(SnapshotClaim.Fill), "the first caller must win the claim");
 
-            var waiter = Task.Run(() =>
-            {
-                store.TryGet(1, 7, false, out var claim, out _);
-                return claim;
-            });
+            store.TryGet(1, 7, out var busy);
+            Assert.That(busy, Is.EqualTo(SnapshotClaim.Busy), "a fill in progress must be reported to the next caller");
 
             store.Abandon(1, 7);
-            Assert.That(waiter.Wait(5000), Is.True, "the waiter kept spinning on an abandoned claim");
-            Assert.That(waiter.Result, Is.EqualTo(SnapshotClaim.Fill), "the waiter must re-claim the fill once the claim is abandoned");
+            store.TryGet(1, 7, out var second);
+            Assert.That(second, Is.EqualTo(SnapshotClaim.Fill), "an abandoned claim must be reclaimable");
 
             store.Fill(1, 7, page, FieldsOffset, Stride, 0);
-            Assert.That(store.TryGet(1, 7, false, out var again, out _), Is.EqualTo(0b101UL));
+            Assert.That(store.TryGet(1, 7, out var again), Is.EqualTo(0b101UL));
             Assert.That(again, Is.EqualTo(SnapshotClaim.Ready));
         }
         finally
@@ -53,15 +53,49 @@ unsafe class ClusterSnapshotStoreTests
         }
     }
 
-    /// <summary>Many workers reaching one cluster in the same tick: exactly one fills it, and every one reads the occupancy the fill published.</summary>
+    /// <summary>
+    /// A caller that finds a fill in progress is told so at once and writes nothing: the claim stays the filler's, and once the fill publishes the next
+    /// caller reads it from the store.
+    /// </summary>
     [Test]
-    public void ConcurrentReadersSeeOneFill()
+    public void ACallerFindingAFillInProgressIsToldBusyAndLeavesTheClaimAlone()
+    {
+        var store = new ClusterSnapshotStore();
+        store.EnsureCapacity(4);
+        var page = NewCluster(0b110);
+        try
+        {
+            store.TryGet(2, 5, out var first);
+            Assert.That(first, Is.EqualTo(SnapshotClaim.Fill));
+
+            var occ = store.TryGet(2, 5, out var second);
+            Assert.That(second, Is.EqualTo(SnapshotClaim.Busy), "a fill in progress must be reported, not waited for");
+            Assert.That(occ, Is.Zero);
+            Assert.That(store.TryBlockOf(2, 5, out _), Is.False, "a busy answer must not publish anything");
+
+            store.Fill(2, 5, page, FieldsOffset, Stride, 0);
+            Assert.That(store.TryGet(2, 5, out var third), Is.EqualTo(0b110UL));
+            Assert.That(third, Is.EqualTo(SnapshotClaim.Ready));
+        }
+        finally
+        {
+            NativeMemory.Free(page);
+        }
+    }
+
+    /// <summary>
+    /// Many workers reaching one cluster in the same tick: exactly one fills it, every other either reads what the fill published or is told busy and reads
+    /// the page itself, and none of them blocks.
+    /// </summary>
+    [Test]
+    public void ConcurrentReadersFillOnceAndNoneWaits()
     {
         var store = new ClusterSnapshotStore();
         store.EnsureCapacity(8);
-        var page = NewCluster(0xF0F0UL);
+        var page = NewCluster(0x0FF0UL);
         try
         {
+            var busies = 0;
             for (var tick = 1L; tick <= 200; tick++)
             {
                 var fills = 0;
@@ -69,14 +103,19 @@ unsafe class ClusterSnapshotStoreTests
                 var t = tick;
                 Parallel.For(0, 8, _ =>
                 {
-                    var occ = store.TryGet(3, t, false, out var claim, out _);
+                    var occ = store.TryGet(5, t, out var claim);
                     if (claim == SnapshotClaim.Fill)
                     {
                         Interlocked.Increment(ref fills);
-                        occ = store.Fill(3, t, page, FieldsOffset, Stride, 0);
+                        occ = store.Fill(5, t, page, FieldsOffset, Stride, 0);
+                    }
+                    else if (claim == SnapshotClaim.Busy)
+                    {
+                        Interlocked.Increment(ref busies);
+                        occ = Volatile.Read(ref *(ulong*)page);
                     }
 
-                    if (occ != 0xF0F0UL)
+                    if (occ != 0x0FF0UL)
                     {
                         Interlocked.Increment(ref wrong);
                     }
@@ -85,6 +124,10 @@ unsafe class ClusterSnapshotStoreTests
                 Assert.That(fills, Is.EqualTo(1), $"tick {tick}: the cluster was filled {fills} times");
                 Assert.That(wrong, Is.Zero, $"tick {tick}: {wrong} readers saw an occupancy the fill did not publish");
             }
+
+            // Anti-vacuity: with eight workers on one cluster over 200 ticks, some of them must have met a fill in progress — otherwise the busy path,
+            // which is the whole point of a claim that never waits, went untested.
+            Assert.That(busies, Is.GreaterThan(0), "no reader ever met a fill in progress, so the busy answer went untested");
         }
         finally
         {
@@ -92,12 +135,12 @@ unsafe class ClusterSnapshotStoreTests
         }
     }
 
-    /// <summary>A columnar store keeps each occupied slot's box as four columns, which is what the block kernel reads.</summary>
+    /// <summary>A fill keeps each occupied slot's box as four columns, which is what the block kernel reads.</summary>
     [Test]
-    public void AColumnarFillTransposesTheOccupiedBoxes()
+    public void AFillTransposesTheOccupiedBoxesIntoColumns()
     {
         var store = new ClusterSnapshotStore();
-        store.EnsureCapacity(4, columnar: true);
+        store.EnsureCapacity(4);
         var page = NewCluster(0b1001UL);
         try
         {
@@ -110,10 +153,9 @@ unsafe class ClusterSnapshotStoreTests
                 boxes[(slot * 4) + 3] = slot + 300f;
             }
 
-            store.TryGet(2, 9, false, out var claim, out _);
+            store.TryGet(2, 9, out var claim);
             Assert.That(claim, Is.EqualTo(SnapshotClaim.Fill));
             Assert.That(store.Fill(2, 9, page, FieldsOffset, Stride, 0), Is.EqualTo(0b1001UL));
-            Assert.That(store.Columnar, Is.True);
 
             ref var columns = ref store.Columns(2);
             foreach (var slot in new[] { 0, 3 })
@@ -150,90 +192,9 @@ unsafe class ClusterSnapshotStoreTests
     {
         var store = new ClusterSnapshotStore();
         store.EnsureCapacity(4);
-        store.TryGet(0, 0, false, out var a, out _);
-        store.TryGet(0, 0, true, out var b, out _);
+        store.TryGet(0, 0, out var a);
+        store.TryGet(0, 0, out var b);
         Assert.That(a == SnapshotClaim.Fill && b == SnapshotClaim.Fill, Is.True);
         Assert.That(store.TryBlockOf(0, 0, out _), Is.False);
-    }
-
-    /// <summary>
-    /// A never-wait caller that finds a fill in progress is told so at once and writes nothing: the claim stays the filler's, and once the fill publishes
-    /// the next caller reads it from the store.
-    /// </summary>
-    [Test]
-    public void ANeverWaitCallerIsToldBusyAndLeavesTheClaimAlone()
-    {
-        var store = new ClusterSnapshotStore();
-        store.EnsureCapacity(4);
-        var page = NewCluster(0b110);
-        try
-        {
-            store.TryGet(2, 5, true, out var first, out _);
-            Assert.That(first, Is.EqualTo(SnapshotClaim.Fill));
-
-            var occ = store.TryGet(2, 5, true, out var second, out var waited);
-            Assert.That(second, Is.EqualTo(SnapshotClaim.Busy), "a fill in progress must be reported, not waited for");
-            Assert.That(occ, Is.Zero);
-            Assert.That(waited, Is.Zero);
-            Assert.That(store.TryBlockOf(2, 5, out _), Is.False, "a busy answer must not publish anything");
-
-            store.Fill(2, 5, page, FieldsOffset, Stride, 0);
-            Assert.That(store.TryGet(2, 5, true, out var third, out _), Is.EqualTo(0b110UL));
-            Assert.That(third, Is.EqualTo(SnapshotClaim.Ready));
-        }
-        finally
-        {
-            NativeMemory.Free(page);
-        }
-    }
-
-    /// <summary>Never-wait readers racing one fill: exactly one fills, every other either reads the store or is told busy — none waits.</summary>
-    [Test]
-    public void ConcurrentNeverWaitReadersFillOnceAndNeverWait()
-    {
-        var store = new ClusterSnapshotStore();
-        store.EnsureCapacity(8);
-        var page = NewCluster(0x0FF0UL);
-        try
-        {
-            for (var tick = 1L; tick <= 200; tick++)
-            {
-                var fills = 0;
-                var wrong = 0;
-                var waits = 0;
-                var t = tick;
-                Parallel.For(0, 8, _ =>
-                {
-                    var occ = store.TryGet(5, t, true, out var claim, out var waited);
-                    if (waited != 0)
-                    {
-                        Interlocked.Increment(ref waits);
-                    }
-
-                    if (claim == SnapshotClaim.Fill)
-                    {
-                        Interlocked.Increment(ref fills);
-                        occ = store.Fill(5, t, page, FieldsOffset, Stride, 0);
-                    }
-                    else if (claim == SnapshotClaim.Busy)
-                    {
-                        occ = Volatile.Read(ref *(ulong*)page);
-                    }
-
-                    if (occ != 0x0FF0UL)
-                    {
-                        Interlocked.Increment(ref wrong);
-                    }
-                });
-
-                Assert.That(fills, Is.EqualTo(1), $"tick {tick}: the cluster was filled {fills} times");
-                Assert.That(wrong, Is.Zero, $"tick {tick}: {wrong} readers saw a wrong occupancy");
-                Assert.That(waits, Is.Zero, $"tick {tick}: {waits} never-wait readers waited");
-            }
-        }
-        finally
-        {
-            NativeMemory.Free(page);
-        }
     }
 }

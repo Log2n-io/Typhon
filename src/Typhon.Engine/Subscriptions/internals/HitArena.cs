@@ -517,12 +517,6 @@ internal sealed class HitArena
     /// <summary>Clusters this worker read from the shared snapshot without opening them — the redundant opens the store removed.</summary>
     public long SnapshotReads;
 
-    /// <summary>Snapshot reads that waited for another worker's fill. Cumulative.</summary>
-    public long SnapshotWaits;
-
-    /// <summary>Timestamp ticks <see cref="SnapshotWaits"/> spent waiting. Cumulative.</summary>
-    public long SnapshotWaitTicks;
-
     /// <summary>Clusters read from their own page because another worker was filling the snapshot, instead of waiting. Cumulative.</summary>
     public long SnapshotPrivateReads;
 

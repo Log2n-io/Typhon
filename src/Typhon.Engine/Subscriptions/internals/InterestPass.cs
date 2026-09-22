@@ -156,29 +156,6 @@ internal sealed unsafe class InterestPass
     /// <summary>The most sessions one cell group may hold; zero for the automatic cap. <see cref="SubscriptionsOptions.InterestGroupCap"/>.</summary>
     internal int GroupCap;
 
-    /// <summary>
-    /// Whether a cluster another worker is filling into the snapshot is read from its own page instead of waited for.
-    /// <see cref="SubscriptionsOptions.InterestClaimNeverWaits"/>.
-    /// </summary>
-    internal bool ClaimNeverWaits;
-
-    /// <summary>
-    /// Whether cell groups are claimed most expensive first, by last tick's broad-phase reach. <see cref="SubscriptionsOptions.InterestCostOrderedGroups"/>.
-    /// </summary>
-    internal bool CostOrderedGroups;
-
-    /// <summary>
-    /// Whether every chunk first fills its share of the snapshot — the clusters the stage read last tick — before claiming groups.
-    /// <see cref="SubscriptionsOptions.InterestPrefillSnapshots"/>.
-    /// </summary>
-    internal bool PrefillSnapshots;
-
-    /// <summary>
-    /// Whether members test boundary clusters with <see cref="InterestBandKernel"/> over the snapshot's columns instead of filtering a per-cell candidate copy.
-    /// <see cref="SubscriptionsOptions.InterestBlockKernel"/>.
-    /// </summary>
-    internal bool BlockKernel;
-
     // ── The pre-fill wave (23 § 3, phase 1) ─────────────────────────────────────────────────────────────────────────────────────────────────────────
     //
     // Filled lazily, the snapshot puts its fills on whichever groups run first — and ordered by cost, those are the heaviest, which is the critical path:
@@ -914,7 +891,7 @@ internal sealed unsafe class InterestPass
     private void OrderGroupsByCost()
     {
         var n = _groupTotal;
-        _tickCostOrdered = CostOrderedGroups && _cellKeyed && n > 1;
+        _tickCostOrdered = _cellKeyed && n > 1;
         if (!_tickCostOrdered)
         {
             return;
@@ -946,19 +923,17 @@ internal sealed unsafe class InterestPass
 
     /// <summary>
     /// Design 23's phase-0 counts, cumulative since start: ticks folded, the stage's wall and summed busy, the heaviest group and how late it started,
-    /// chunks that did almost nothing, the distinct threads that ran chunks, and the snapshot claims that waited (and for how long) or read privately.
-    /// All durations in timestamp ticks.
+    /// chunks that did almost nothing, the distinct threads that ran chunks, and the snapshot claims that read the page privately. All durations in
+    /// timestamp ticks.
     /// </summary>
-    public (long Ticks, long SpanTicks, long BusyTicks, long HeaviestTicks, long HeaviestStartTicks, long PhantomChunks, long Threads, long Waits,
-        long WaitTicks, long PrivateReads, long Fills, long Reads, long ActiveClusters, long Prefills, long PrefillTicks) StageShape
+    public (long Ticks, long SpanTicks, long BusyTicks, long HeaviestTicks, long HeaviestStartTicks, long PhantomChunks, long Threads,
+        long PrivateReads, long Fills, long Reads, long ActiveClusters, long Prefills, long PrefillTicks) StageShape
     {
         get
         {
-            long waits = 0, waitTicks = 0, privateReads = 0, fills = 0, reads = 0, prefills = 0, prefillTicks = 0;
+            long privateReads = 0, fills = 0, reads = 0, prefills = 0, prefillTicks = 0;
             for (var w = 0; w < _arenas.Length; w++)
             {
-                waits += _arenas[w].SnapshotWaits;
-                waitTicks += _arenas[w].SnapshotWaitTicks;
                 privateReads += _arenas[w].SnapshotPrivateReads;
                 fills += _arenas[w].SnapshotOpens;
                 reads += _arenas[w].SnapshotReads;
@@ -966,35 +941,18 @@ internal sealed unsafe class InterestPass
                 prefillTicks += _arenas[w].PrefillTicks;
             }
 
-            return (_spanCount, _spanTicks, _busySumTicks, _heaviestGroupTicks, _heaviestStartTicks, _phantomChunks, _chunkThreads, waits, waitTicks,
+            return (_spanCount, _spanTicks, _busySumTicks, _heaviestGroupTicks, _heaviestStartTicks, _phantomChunks, _chunkThreads,
                 privateReads, fills, reads, _activeClusters, prefills, prefillTicks);
         }
     }
 
-    /// <summary>Whether this tick's groups are claimed in cost order. For tests.</summary>
+    /// <summary>Whether this tick's groups are claimed in cost order — false when the stage is not cell-keyed, or has one group. For tests.</summary>
     internal bool TickCostOrdered => _tickCostOrdered;
 
     /// <summary>An archetype's snapshot store, by plan index. For tests.</summary>
     /// <param name="archetypeIndex">The plan index.</param>
     /// <returns>The store, or <see langword="null"/> when the archetype has none.</returns>
     internal ClusterSnapshotStore SnapshotOf(int archetypeIndex) => _snapshots[archetypeIndex];
-
-    /// <summary>Whether any archetype's snapshot keeps its boxes as columns, i.e. the block kernel is what this tick ran. For tests.</summary>
-    internal bool AnySnapshotColumnar
-    {
-        get
-        {
-            foreach (var snap in _snapshots)
-            {
-                if (snap is { Columnar: true })
-                {
-                    return true;
-                }
-            }
-
-            return false;
-        }
-    }
 
     /// <summary>Copies the cumulative log2 histogram of group microseconds (16 buckets) into <paramref name="into"/>.</summary>
     /// <param name="into">At least 16 elements.</param>
@@ -1042,7 +1000,7 @@ internal sealed unsafe class InterestPass
             var aabbs = _clusterStates[a]?.ClusterAabbs;
             if (_snapshots[a] != null && aabbs != null)
             {
-                _snapshots[a].EnsureCapacity(aabbs.Length, BlockKernel);
+                _snapshots[a].EnsureCapacity(aabbs.Length);
                 _clusterStates[a].ReadActiveClusterList(out var active);
                 _activeClusters += active;
             }
@@ -1081,7 +1039,7 @@ internal sealed unsafe class InterestPass
         for (var w = 0; w < _arenas.Length; w++)
         {
             _prefillFrom[w] = _prefillTotal;
-            _prefillTotal += PrefillSnapshots ? _arenas[w].PrevReadCount : 0;
+            _prefillTotal += _arenas[w].PrevReadCount;
         }
 
         _prefillFrom[_arenas.Length] = _prefillTotal;
@@ -1774,7 +1732,7 @@ internal sealed unsafe class InterestPass
                         continue;
                     }
 
-                    snap.TryGet(chunkId, tick, true, out var claim, out _);
+                    snap.TryGet(chunkId, tick, out var claim);
                     if (claim != ClusterSnapshotStore.SnapshotClaim.Fill)
                     {
                         continue;
@@ -2124,30 +2082,20 @@ internal sealed unsafe class InterestPass
             // Profiled at d06 with a thousand sessions, opening clusters was about half of this stage: each cell's query opens every cluster its disc
             // reaches, and about 165 overlapping cells reach each one some fifteen times a tick. The broadphase here only FINDS clusters — from the spatial
             // index and the cluster AABB table, with no page read — and the occupancy and entity bounds come from a store filled by whichever worker
-            // reached the cluster first this tick. The same filters the enumerator's drain applies are applied below, so the candidates are identical.
+            // reached the cluster first this tick. No entity of a cluster is read here at all: a cluster the cell's disc clips is listed for the members,
+            // which test its columns themselves (23 § 3, phase 2), and one it contains whole is admitted without any test.
             var snap = _snapshots[archetypes[a]];
             if (snap != null && e.IsAabb2F)
             {
                 var fieldsOffset = e.SpatialFieldsOffset;
                 var stride = e.SpatialStride;
-                var qMinX = centreX - broadRadius;
-                var qMaxX = centreX + broadRadius;
-                var qMinY = centreY - broadRadius;
-                var qMaxY = centreY + broadRadius;
-                var broadSq = broadRadius * broadRadius;
 
                 while (e.MoveNextClusterUnopened(out var chunkId, out var bMinX, out var bMinY, out var bMaxX, out var bMaxY))
                 {
                     arena.NoteBroadCluster();
-                    var occ = snap.TryGet(chunkId, _tickNumber, ClaimNeverWaits, out var claim, out var waitTicks);
+                    var occ = snap.TryGet(chunkId, _tickNumber, out var claim);
                     byte* privateBase = null;
-                    if (waitTicks != 0)
-                    {
-                        arena.SnapshotWaits++;
-                        arena.SnapshotWaitTicks += waitTicks;
-                    }
-
-                    if (PrefillSnapshots && _prefillArchetype[archetypes[a]] && snap.MarkRead(chunkId, _tickNumber))
+                    if (_prefillArchetype[archetypes[a]] && snap.MarkRead(chunkId, _tickNumber))
                     {
                         arena.AddRead(archetypes[a], chunkId);
                     }
@@ -2156,6 +2104,7 @@ internal sealed unsafe class InterestPass
                     {
                         // Another worker is filling it: read the same bytes from the page rather than wait (23 § 3, phase 1). Interest runs after the
                         // fence, so the page holds what the fill is copying; nothing is written to the store, and the block comes from the directory.
+                        // Waiting instead cost about 4 500 waits and 10 ms of CPU a tick at d06 with a thousand sessions.
                         privateBase = e.OpenCluster(chunkId);
                         occ = Volatile.Read(ref *(ulong*)privateBase);
                         arena.SnapshotPrivateReads++;
@@ -2214,61 +2163,11 @@ internal sealed unsafe class InterestPass
                         continue;
                     }
 
-                    if (snap.Columnar)
-                    {
-                        // Nothing of the cluster is read here: each member tests it from its column (23 § 3, phase 2). A cluster read from its own page
-                        // has its column copied into the arena, once for the cell.
-                        var privateColumns = privateBase != null ? arena.AddPrivateColumns(privateBase + fieldsOffset, stride, occ) : -1;
-                        arena.AddBoundaryCluster(chunkId, occ, sChanged, bMinX, bMinY, bMaxX, bMaxY, privateColumns);
-                        arena.BroadEntitiesReached += BitOperations.PopCount(occ);
-                        continue;
-                    }
-
-                    var sFrom = arena.CandidateCount;
-                    var sBits = occ;
-                    while (sBits != 0UL)
-                    {
-                        var slot = BitOperations.TrailingZeroCount(sBits);
-                        sBits &= sBits - 1;
-
-                        AABB2F box;
-                        if (privateBase != null)
-                        {
-                            box = *(AABB2F*)(privateBase + fieldsOffset + (slot * stride));
-                        }
-                        else
-                        {
-                            box = snap.Box(chunkId, slot);
-                        }
-
-                        double eMinX = box.MinX, eMinY = box.MinY, eMaxX = box.MaxX, eMaxY = box.MaxY;
-
-                        // The enumerator's drain, restated: degenerate bounds skipped, the query box, then the closest-point distance to the cell centre.
-                        if (!(eMinX <= eMaxX) || !(eMinY <= eMaxY))
-                        {
-                            continue;
-                        }
-
-                        if (eMaxX < qMinX || eMinX > qMaxX || eMaxY < qMinY || eMinY > qMaxY)
-                        {
-                            continue;
-                        }
-
-                        var ndx = Math.Max(Math.Max(eMinX - centreX, 0d), centreX - eMaxX);
-                        var ndy = Math.Max(Math.Max(eMinY - centreY, 0d), centreY - eMaxY);
-                        if ((ndx * ndx) + (ndy * ndy) > broadSq)
-                        {
-                            continue;
-                        }
-
-                        arena.NoteBroadEntity();
-                        arena.AddCandidate(chunkId, slot, eMinX, eMinY, eMaxX, eMaxY);
-                    }
-
-                    if (sChanged)
-                    {
-                        arena.NoteChangedRange(a, sFrom, arena.CandidateCount);
-                    }
+                    // Nothing of the cluster is read here: each member tests it from its column (23 § 3, phase 2). A cluster read from its own page has
+                    // its column copied into the arena, once for the cell.
+                    var privateColumns = privateBase != null ? arena.AddPrivateColumns(privateBase + fieldsOffset, stride, occ) : -1;
+                    arena.AddBoundaryCluster(chunkId, occ, sChanged, bMinX, bMinY, bMaxX, bMaxY, privateColumns);
+                    arena.BroadEntitiesReached += BitOperations.PopCount(occ);
                 }
 
                 continue;

@@ -177,10 +177,6 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             _ingress.Interest = Interest;
             Interest.SparseTopology = Options.SparseTopology;
             Interest.GroupCap = Options.InterestGroupCap;
-            Interest.ClaimNeverWaits = Options.InterestClaimNeverWaits;
-            Interest.CostOrderedGroups = Options.InterestCostOrderedGroups;
-            Interest.PrefillSnapshots = Options.InterestPrefillSnapshots;
-            Interest.BlockKernel = Options.InterestBlockKernel;
 
             // The sparse topology path, wired OUTSIDE the shared-blocks option on purpose: interest reads whether a session's next frame will be
             // incremental, and the frame stage reads projection's changed-block tables. Attaching the replication states the usual way would also

@@ -174,8 +174,8 @@ public static class TatooineReplication
     private static long IdleTickFrom;
     private static (double ActiveMs, double TickWallMs, long Ticks, int Workers) _utilFrom;
     private static long SendWindowFrom, SendFramesFrom, SendBytesFrom, SendAllocFrom, SendItemsFrom;
-    private static (long Ticks, long SpanTicks, long BusyTicks, long HeaviestTicks, long HeaviestStartTicks, long PhantomChunks, long Threads, long Waits,
-        long WaitTicks, long PrivateReads, long Fills, long Reads, long ActiveClusters, long Prefills, long PrefillTicks) ShapeFrom;
+    private static (long Ticks, long SpanTicks, long BusyTicks, long HeaviestTicks, long HeaviestStartTicks, long PhantomChunks, long Threads,
+        long PrivateReads, long Fills, long Reads, long ActiveClusters, long Prefills, long PrefillTicks) ShapeFrom;
     private static readonly long[] HistogramFrom = new long[16];
     private static readonly long[] HistogramNow = new long[16];
     private static double SendCpuFrom;
@@ -410,8 +410,6 @@ public static class TatooineReplication
                 var heaviestAt = (sh.HeaviestStartTicks - ShapeFrom.HeaviestStartTicks) * msPer;
                 var phantom = (double)(sh.PhantomChunks - ShapeFrom.PhantomChunks) / shTicks;
                 var threads = (double)(sh.Threads - ShapeFrom.Threads) / shTicks;
-                var waits = (double)(sh.Waits - ShapeFrom.Waits) / shTicks;
-                var waitUs = (sh.WaitTicks - ShapeFrom.WaitTicks) * msPer * 1000d;
                 var privateReads = (double)(sh.PrivateReads - ShapeFrom.PrivateReads) / shTicks;
                 var fills = (double)(sh.Fills - ShapeFrom.Fills) / shTicks;
                 var reads = (double)(sh.Reads - ShapeFrom.Reads) / shTicks;
@@ -420,8 +418,8 @@ public static class TatooineReplication
                 var prefillMs = (sh.PrefillTicks - ShapeFrom.PrefillTicks) * msPer;
                 Console.Error.WriteLine(
                     $"  interest stage (window, per tick): wall {wall:F2} ms, busy {busy:F2} ms, heaviest group {heaviest:F2} ms starting at "
-                    + $"{heaviestAt:F2} ms, phantom chunks {phantom:F1}, threads {threads:F1}, claim waits {waits:F1} ({waitUs:F0} us), "
-                    + $"private reads {privateReads:F1}; snapshot fills {fills:F0} (+{prefills:F0} pre-filled in {prefillMs:F2} ms CPU), reads {reads:F0}, "
+                    + $"{heaviestAt:F2} ms, phantom chunks {phantom:F1}, threads {threads:F1}, private reads {privateReads:F1}; "
+                    + $"snapshot fills {fills:F0} (+{prefills:F0} pre-filled in {prefillMs:F2} ms CPU), reads {reads:F0}, "
                     + $"active clusters {active:F0}; groups:{hist}");
             }
 

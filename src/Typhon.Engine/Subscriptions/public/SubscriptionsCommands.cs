@@ -570,12 +570,12 @@ public sealed class SubscriptionsCommands
         _ingress.Interest == null ? default : _ingress.Interest.ChunkSpan;
 
     /// <summary>
-    /// The interest stage's shape, cumulative since start (design 23, phase 0): ticks folded, wall and summed busy, the heaviest group and how late it started,
-    /// chunks that did almost nothing, distinct threads that ran chunks, snapshot claims that waited and for how long, and claims read privately instead.
-    /// Durations in <see cref="System.Diagnostics.Stopwatch"/> ticks.
+    /// The interest stage's shape, cumulative since start (design 23, phase 0): ticks folded, wall and summed busy, the heaviest group and how late it
+    /// started, chunks that did almost nothing, distinct threads that ran chunks, and the snapshot claims that read a cluster's page privately because
+    /// another worker was filling it. Durations in <see cref="System.Diagnostics.Stopwatch"/> ticks.
     /// </summary>
-    public (long Ticks, long SpanTicks, long BusyTicks, long HeaviestTicks, long HeaviestStartTicks, long PhantomChunks, long Threads, long Waits,
-        long WaitTicks, long PrivateReads, long Fills, long Reads, long ActiveClusters, long Prefills, long PrefillTicks) InterestStageShape =>
+    public (long Ticks, long SpanTicks, long BusyTicks, long HeaviestTicks, long HeaviestStartTicks, long PhantomChunks, long Threads,
+        long PrivateReads, long Fills, long Reads, long ActiveClusters, long Prefills, long PrefillTicks) InterestStageShape =>
         _ingress.Interest?.StageShape ?? default;
 
     /// <summary>Copies the interest stage's cumulative log2 histogram of group microseconds (16 buckets) into <paramref name="into"/>.</summary>
