@@ -1,7 +1,6 @@
 name: Feature Request
 description: Propose a capability or enhancement.
 title: "[Feature]: "
-labels: ["enhancement"]
 type: Feature
 body:
   - type: textarea
@@ -28,19 +27,21 @@ body:
     attributes:
       label: Area
       options:
-        - Database
-        - MVCC
-        - Transactions
-        - Indexes
-        - Schema
-        - Storage
-        - Memory
         - Concurrency
-        - Primitives
-        - Observability
         - Execution
+        - Storage
+        - Durability
+        - MVCC
+        - Schema
+        - Spatial
+        - Query
+        - Runtime
+        - Observability
+        - Resources
         - Errors
+        - Utilities
         - Workbench
+        - Indexes
         - Unsure
     validations:
       required: true

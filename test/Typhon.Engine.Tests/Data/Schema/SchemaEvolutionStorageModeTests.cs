@@ -166,12 +166,338 @@ class EvoMixV2Arch : Archetype<EvoMixV2Arch>
 
 #endregion
 
+#region Versioned enabled state across a migration (#846)
+
+// Own component pair rather than EvoMix's: ArchetypeMetadata is process-global, so a fixture sharing another's archetype inherits its schema version (#720).
+[Component("Typhon.Schema.UnitTest.Evo846Sv", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+struct Evo846SvV1
+{
+    public int A;
+    public Evo846SvV1(int a) { A = a; }
+}
+
+[Component("Typhon.Schema.UnitTest.Evo846Sv", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+struct Evo846SvV2
+{
+    public int A;
+    public long B;
+    public Evo846SvV2(int a, long b) { A = a; B = b; }
+}
+
+// The Versioned component whose enabled state is under test. It does not change; the SV neighbour's migration is what routes the open through
+// RebuildClusterFromChains.
+[Component("Typhon.Schema.UnitTest.Evo846Ver", 1)]
+[StructLayout(LayoutKind.Sequential)]
+struct Evo846Ver
+{
+    public long V;
+    public Evo846Ver(long v) { V = v; }
+}
+
+[Archetype]
+class Evo846Arch : Archetype<Evo846Arch>
+{
+    public static readonly Comp<Evo846SvV1> Sv = Register<Evo846SvV1>();
+    public static readonly Comp<Evo846Ver> Ver = Register<Evo846Ver>();
+}
+
+[Archetype]
+class Evo846V2Arch : Archetype<Evo846V2Arch>
+{
+    public static readonly Comp<Evo846SvV2> Sv = Register<Evo846SvV2>();
+    public static readonly Comp<Evo846Ver> Ver = Register<Evo846Ver>();
+}
+
+// Pure-Versioned twin: no SingleVersion slot, so the migration keeps no pre-migration cluster, and the component under test is the one that migrates.
+[Component("Typhon.Schema.UnitTest.Evo846PvKey", 1)]
+[StructLayout(LayoutKind.Sequential)]
+struct Evo846PvKey
+{
+    public long K;
+    public Evo846PvKey(long k) { K = k; }
+}
+
+[Component("Typhon.Schema.UnitTest.Evo846PvVer", 1)]
+[StructLayout(LayoutKind.Sequential)]
+struct Evo846PvVerV1
+{
+    public long V;
+    public Evo846PvVerV1(long v) { V = v; }
+}
+
+[Component("Typhon.Schema.UnitTest.Evo846PvVer", 1)]
+[StructLayout(LayoutKind.Sequential)]
+struct Evo846PvVerV2
+{
+    public long V;
+    public long W;
+    public Evo846PvVerV2(long v, long w) { V = v; W = w; }
+}
+
+[Archetype]
+class Evo846PvArch : Archetype<Evo846PvArch>
+{
+    public static readonly Comp<Evo846PvKey> Key = Register<Evo846PvKey>();
+    public static readonly Comp<Evo846PvVerV1> Ver = Register<Evo846PvVerV1>();
+}
+
+[Archetype]
+class Evo846PvV2Arch : Archetype<Evo846PvV2Arch>
+{
+    public static readonly Comp<Evo846PvKey> Key = Register<Evo846PvKey>();
+    public static readonly Comp<Evo846PvVerV2> Ver = Register<Evo846PvVerV2>();
+}
+
+#endregion
+
 /// <summary>
 /// Schema evolution across the storage-mode axis (#671). Each test seeds under the V1 schema, closes cleanly, then reopens declaring V2 and asserts the data
 /// survived the re-cluster — the migration changes component sizes, so every entity lands at a different <c>(clusterChunkId, slotIndex)</c>.
 /// </summary>
 class SchemaEvolutionStorageModeTests : TestBase<SchemaEvolutionStorageModeTests>
 {
+    /// <summary>
+    /// A migrating reopen keeps every Versioned component in the state the caller left it: present, disabled, or absent (#846).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>RebuildClusterFromChains</c> re-places every entity on a migrating open, and it used to set a Versioned slot's enabled bit whenever the entity had a
+    /// chain head. A head proves the component is present, not that it is enabled — <c>Disable</c> keeps the payload, so a disabled component has a head
+    /// too, and every migration silently re-enabled it. STAGE-02 forbids exactly that derivation.
+    /// </para>
+    /// <para>
+    /// Seventy entities, so the re-cluster fills more than one cluster at any size and the old-cluster bit has to be read at each entity's own position; the
+    /// three states rotate so a position mix-up lands an entity on a neighbour's state. The SV field added by the migration zero-fills, which proves the
+    /// open took the migrating path — the one that runs the rebuild.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [VerifiesRule("STAGE-02")]
+    public void Migration_KeepsAVersionedComponentsEnabledState_PresentDisabledAndAbsent()
+    {
+        const int count = 70;
+        var ids = new EntityId[count];
+
+        // State by i % 3: 0 = supplied then disabled, 1 = supplied and enabled, 2 = never supplied.
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<Evo846SvV1>();
+            dbe.RegisterComponentFromAccessor<Evo846Ver>();
+            dbe.InitializeArchetypes();
+
+            using (var t = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                for (var i = 0; i < count; i++)
+                {
+                    ids[i] = i % 3 == 2
+                        ? t.Spawn<Evo846Arch>(Evo846Arch.Sv.Set(new Evo846SvV1(i)))
+                        : t.Spawn<Evo846Arch>(Evo846Arch.Sv.Set(new Evo846SvV1(i)), Evo846Arch.Ver.Set(new Evo846Ver(i * 1000L + 7)));
+                }
+
+                t.Commit();
+            }
+
+            using (var t = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                for (var i = 0; i < count; i += 3)
+                {
+                    t.OpenMut(ids[i]).Disable(Evo846Arch.Ver);
+                }
+
+                t.Commit();
+            }
+        }
+
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<Evo846SvV2>();
+            dbe.RegisterComponentFromAccessor<Evo846Ver>();
+            dbe.InitializeArchetypes();
+
+            // Resolved through the entities' routing id, not Archetype<Evo846V2Arch>: the migrated entities live in the state the persisted archetype maps to.
+            var meta = dbe.GetMetaByRouting(ids[0].ArchetypeId);
+            Assert.That(meta, Is.Not.Null, "premise: the migrated entities' routing id resolves to an archetype");
+            var verSlot = meta.GetSlot(Evo846V2Arch.Ver._componentTypeId);
+
+            using (var t = dbe.CreateQuickTransaction())
+            {
+                Assert.Multiple(() =>
+                {
+                    for (var i = 0; i < count; i++)
+                    {
+                        var entity = t.Open(ids[i]);
+                        var sv = entity.Read(Evo846V2Arch.Sv);
+                        Assert.That(sv.A, Is.EqualTo(i), $"entity {i}: premise — the SV value must survive the re-cluster");
+                        Assert.That(sv.B, Is.EqualTo(0L), $"entity {i}: premise — the field the migration added zero-fills, so the open migrated");
+
+                        var enabled = i % 3 == 1;
+                        Assert.That(entity.IsEnabled(Evo846V2Arch.Ver), Is.EqualTo(enabled), $"entity {i} (state {i % 3}): the record's enabled bit");
+                        Assert.That(ClusterSoAProbe.IsEnabled(dbe, meta.ArchetypeId, ids[i], verSlot), Is.EqualTo(enabled),
+                            $"entity {i} (state {i % 3}): the cluster copy of the enabled bit");
+                        if (enabled)
+                        {
+                            Assert.That(entity.Read(Evo846V2Arch.Ver).V, Is.EqualTo(i * 1000L + 7), $"entity {i}: the enabled value survives");
+                        }
+                    }
+                });
+            }
+
+            // Disabled kept its value and re-enables without one; absent has no value and refuses.
+            for (var i = 0; i < count; i++)
+            {
+                if (i % 3 == 1)
+                {
+                    continue;
+                }
+
+                using var t = dbe.CreateQuickTransaction();
+                var entity = t.OpenMut(ids[i]);
+                if (i % 3 == 0)
+                {
+                    entity.Enable(Evo846V2Arch.Ver);
+                    t.Commit();
+                    using var read = dbe.CreateQuickTransaction();
+                    Assert.That(read.Open(ids[i]).Read(Evo846V2Arch.Ver).V, Is.EqualTo(i * 1000L + 7),
+                        $"entity {i}: a component disabled before the migration keeps its value across it");
+                }
+                else
+                {
+                    var refused = false;
+                    try
+                    {
+                        entity.Enable(Evo846V2Arch.Ver);
+                    }
+                    catch (System.InvalidOperationException)
+                    {
+                        refused = true;
+                    }
+
+                    Assert.That(refused, Is.True, $"entity {i}: a component never supplied must stay absent across the migration");
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// The same three states across a migration of the Versioned component ITSELF, in an archetype with no SingleVersion slot (#846).
+    /// </summary>
+    /// <remarks>
+    /// A migration keeps the pre-migration cluster only when the archetype has a SingleVersion slot — its bytes have no other copy — so a fix that read the
+    /// enabled bit from that cluster left every pure-Versioned archetype re-enabling its disabled components. The bit is read from the pre-migration EntityMap
+    /// record instead, which exists for every archetype and whose layout does not depend on the component sizes the migration changes.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("STAGE-02")]
+    public void Migration_OfTheVersionedComponentItself_KeepsItsEnabledState_WithoutASingleVersionSlot()
+    {
+        const int count = 70;
+        var ids = new EntityId[count];
+
+        // State by i % 3: 0 = supplied then disabled, 1 = supplied and enabled, 2 = never supplied. Key is always supplied, so every entity keeps a chain.
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<Evo846PvKey>();
+            dbe.RegisterComponentFromAccessor<Evo846PvVerV1>();
+            dbe.InitializeArchetypes();
+
+            using (var t = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                for (var i = 0; i < count; i++)
+                {
+                    ids[i] = i % 3 == 2
+                        ? t.Spawn<Evo846PvArch>(Evo846PvArch.Key.Set(new Evo846PvKey(i)))
+                        : t.Spawn<Evo846PvArch>(Evo846PvArch.Key.Set(new Evo846PvKey(i)), Evo846PvArch.Ver.Set(new Evo846PvVerV1(i * 1000L + 7)));
+                }
+
+                t.Commit();
+            }
+
+            using (var t = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                for (var i = 0; i < count; i += 3)
+                {
+                    t.OpenMut(ids[i]).Disable(Evo846PvArch.Ver);
+                }
+
+                t.Commit();
+            }
+        }
+
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<Evo846PvKey>();
+            dbe.RegisterComponentFromAccessor<Evo846PvVerV2>();
+            dbe.InitializeArchetypes();
+
+            var meta = dbe.GetMetaByRouting(ids[0].ArchetypeId);
+            Assert.That(meta, Is.Not.Null, "premise: the migrated entities' routing id resolves to an archetype");
+            var verSlot = meta.GetSlot(Evo846PvV2Arch.Ver._componentTypeId);
+
+            using (var t = dbe.CreateQuickTransaction())
+            {
+                Assert.Multiple(() =>
+                {
+                    for (var i = 0; i < count; i++)
+                    {
+                        var entity = t.Open(ids[i]);
+                        Assert.That(entity.Read(Evo846PvV2Arch.Key).K, Is.EqualTo(i), $"entity {i}: premise — the entity survives the re-cluster");
+
+                        var enabled = i % 3 == 1;
+                        Assert.That(entity.IsEnabled(Evo846PvV2Arch.Ver), Is.EqualTo(enabled), $"entity {i} (state {i % 3}): the record's enabled bit");
+                        Assert.That(ClusterSoAProbe.IsEnabled(dbe, meta.ArchetypeId, ids[i], verSlot), Is.EqualTo(enabled),
+                            $"entity {i} (state {i % 3}): the cluster copy of the enabled bit");
+                        if (enabled)
+                        {
+                            var ver = entity.Read(Evo846PvV2Arch.Ver);
+                            Assert.That(ver.V, Is.EqualTo(i * 1000L + 7), $"entity {i}: the enabled value survives its own migration");
+                            Assert.That(ver.W, Is.EqualTo(0L), $"entity {i}: premise — the field the migration added zero-fills, so the open migrated");
+                        }
+                    }
+                });
+            }
+
+            // Disabled kept its (migrated) value and re-enables without one; absent has no value and refuses.
+            for (var i = 0; i < count; i++)
+            {
+                if (i % 3 == 1)
+                {
+                    continue;
+                }
+
+                using var t = dbe.CreateQuickTransaction();
+                var entity = t.OpenMut(ids[i]);
+                if (i % 3 == 0)
+                {
+                    entity.Enable(Evo846PvV2Arch.Ver);
+                    t.Commit();
+                    using var read = dbe.CreateQuickTransaction();
+                    Assert.That(read.Open(ids[i]).Read(Evo846PvV2Arch.Ver).V, Is.EqualTo(i * 1000L + 7),
+                        $"entity {i}: a component disabled before its own migration keeps its value across it");
+                }
+                else
+                {
+                    var refused = false;
+                    try
+                    {
+                        entity.Enable(Evo846PvV2Arch.Ver);
+                    }
+                    catch (System.InvalidOperationException)
+                    {
+                        refused = true;
+                    }
+
+                    Assert.That(refused, Is.True, $"entity {i}: a component never supplied must stay absent across the migration");
+                }
+            }
+        }
+    }
+
     [Test]
     public void SingleVersion_AddField_PreservesDataAndZeroFillsNewField()
     {

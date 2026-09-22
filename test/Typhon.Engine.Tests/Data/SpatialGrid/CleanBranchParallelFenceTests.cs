@@ -204,11 +204,13 @@ class CleanBranchParallelFenceTests : TestBase<CleanBranchParallelFenceTests>
             {
                 schedule.PublicTrack.DeclareDag("Drift").CallbackSystem("Drift", ctx =>
                 {
-                    // Alternate ticks, so the run observes BOTH halves of the invariant on the parallel path. Drifting every tick — the first version of
-                    // this fixture — means every tick queues crossings, and the "no migrations, so no buffer is allocated" half is then unreachable by
-                    // construction rather than merely unobserved.
+                    // Alternate ticks during the motion phase, then stop. Drifting every tick — the first version of this fixture — made the "no migrations,
+                    // so no buffer is allocated" half unreachable by construction. Alternating was not enough either (#999): a tick that does not drift still
+                    // inherits the migrations the previous one queued but did not drain — measured 10 to 500 per quiet tick, with only 0 to 6 of ~21 quiet
+                    // ticks reaching Prep's tail empty, and none at all in about one run in five. So the quiet half is observed after the motion stops,
+                    // once the backlog has drained, rather than hoped for between drifts.
                     var n = Interlocked.Increment(ref ticks);
-                    if ((n & 1) == 1)
+                    if (n <= MotionTicks && (n & 1) == 1)
                     {
                         DriftEveryEntity(ctx.Transaction);
                     }
@@ -234,6 +236,10 @@ class CleanBranchParallelFenceTests : TestBase<CleanBranchParallelFenceTests>
                 };
                 runtime.Start();
                 SpinWait.SpinUntil(() => Volatile.Read(ref ticks) >= MotionTicks, TimeSpan.FromSeconds(90));
+
+                // Motion has stopped: keep ticking until the backlog drains and a tick reaches Prep's tail with nothing queued. The cap only bounds a
+                // backlog that never drains, which the quiet-tick assertion below then reports.
+                SpinWait.SpinUntil(() => Volatile.Read(ref quietTicksWithNoList) > 0, TimeSpan.FromSeconds(30));
                 var reached = Volatile.Read(ref ticks);
                 SpinWait.SpinUntil(() => Volatile.Read(ref ticks) >= reached + 3, TimeSpan.FromSeconds(10));
                 Volatile.Write(ref stopping, 1);

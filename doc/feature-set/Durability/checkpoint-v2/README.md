@@ -29,7 +29,7 @@ services
     .AddScopedDatabaseEngine(o =>
     {
         o.Resources.CheckpointIntervalMs = 30_000;        // background cadence when idle
-        o.Resources.CheckpointMaxDirtyPages = 10_000;      // force an early cycle past this many dirty pages
+        o.Resources.CheckpointDirtyPageThresholdPercent = 25; // force an early cycle once 25 % of the cache is dirty
         o.Resources.CheckpointBarrierTimeoutMs = 30_000;   // bound on the per-cycle WAL durability-barrier wait
     });
 
@@ -41,7 +41,7 @@ dbe.ForceCheckpoint();
 | Option | Default | Effect |
 |---|---|---|
 | `CheckpointIntervalMs` | 30000 | Background cycle cadence while idle |
-| `CheckpointMaxDirtyPages` | 10000 | Dirty-page count that forces an earlier cycle |
+| `CheckpointDirtyPageThresholdPercent` | 25 | Percentage of the page cache owing a writeback (0–100) that forces an earlier cycle; `0` disables the trigger |
 | `CheckpointBarrierTimeoutMs` | 30000 | Timeout for a cycle's WAL durability-barrier waits; on expiry the cycle is classified transient and retried next tick |
 
 ## ⚠️ Guarantees & limits

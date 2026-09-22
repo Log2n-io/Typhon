@@ -21,8 +21,8 @@ If you've used the engine before, you've used this code path. Every PK lookup, e
 `BTree<TKey, TStore>` is the universal index. The same class instance backs:
 
 - **Primary key indexes** on `ComponentTable` (one per component type).
-- **Secondary indexes** declared by `[Indexed]` on schema fields.
-- **Uniqueness constraints** (`[Unique]` is a unique secondary index — `AllowMultiple = false`).
+- **Secondary indexes** declared by `[Index]` on schema fields.
+- **Uniqueness constraints** — a plain `[Index]` is unique (`AllowMultiple` defaults to `false`); there is no separate `[Unique]` attribute.
 - **Multi-value indexes** (`AllowMultiple = true`) — values per key are stored in a `VariableSizedBufferSegment` whose buffer head ID lives in the BTree's value slot.
 
 The `TStore` generic threads through to [`IPageStore`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/IPageStore.cs) — concretely `PersistentStore` (WAL-backed, durable) or `TransientStore` (in-memory only, no WAL). The BTree code is identical for both; the store dictates whether mutations get journalled.
@@ -249,7 +249,7 @@ Triggered when a leaf is full and neither neighbour can absorb a spill (or under
 - **B-link HighKey update**: `right.HighKey = left.oldHighKey` (right inherits the upper bound); `left.HighKey = right.GetFirst().Key` (left's new upper bound is the new separator).
 - Returns the new right node + a separator key to be promoted to the parent.
 
-The parent-side promotion happens iteratively in `InsertIterative` — if the parent overflows, it splits too; if the root splits, a new root is allocated (under the root's write lock, to serialize concurrent root creators).
+The parent-side promotion happens iteratively in `InsertIterative` — if the parent overflows, it splits too; if the root splits, a new root is allocated under the root's write lock, which serializes concurrent root creators. Before Phase 4 attempts the root split, `InsertIterative` validates that the top of its recorded descent path is still the current root (`pathTop.ChunkId == _rootChunkId`). OLC version checks prove a node was not modified, not that no level appeared above it — a concurrent writer can grow the tree a level without touching the original root, which then validates cleanly with a stale version. If the tree grew during the descent, the writer restarts rather than building a root over a displaced node (IXW-05).
 
 Counted via `SplitCount` and (for contention-triggered splits) `ContentionSplitCount`.
 
@@ -323,7 +323,7 @@ These are **payload-less spans** — 37 B header, 53 B with trace context. The e
 ### What's not instrumented (and why)
 
 - **`TryGet` / `TryGetMultiple` (lookup)** — deliberately uninstrumented. A primary-key lookup is the engine's tightest hot path (multiple millions per second under load); the cost of a span begin/end pair is observable in microbenchmarks. Lookups are inferred from caller-level spans (`Entity.Read`, query planner) instead.
-- **OLC restarts** — counted via `OptimisticRestarts` / `PessimisticFallbacks` properties on the BTree, not per-event. Validation failures *do* emit a `Concurrency:OlcLatch:ValidationFail` event from `OlcLatch.ValidateVersion`.
+- **OLC restarts** — optimistic (version-validation) restarts counted via `OptimisticRestarts`; pessimistic (no-progress) retries through the `AddOrUpdateCorePessimistic` loop counted via `PessimisticRestarts`; fallbacks from the OLC path counted via `PessimisticFallbacks` — all properties on the BTree, none per-event. Validation failures *do* emit a `Concurrency:OlcLatch:ValidationFail` event from `OlcLatch.ValidateVersion`.
 
 ### What's instrumented but gated
 

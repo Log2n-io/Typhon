@@ -30,7 +30,7 @@ Arguments:
   --help, -h      Show this help
 
 What it does:
-  1. Gathers info (title, description, labels, issue type, area, product, milestone)
+  1. Gathers info (title, description, issue type, labels, area, product, priority, milestone)
   2. Creates the issue (MCP) and sets its Issue Type (gh --type)
   3. Adds it to the Typhon org project board and sets Status
   4. Optionally links it under a parent Epic as a native sub-issue
@@ -46,15 +46,14 @@ Gather the following. If NOT provided in the arguments, use `AskUserQuestion`:
 
 1. **Title** (required): a clear, concise issue title
 2. **Description** (required): what needs to be done and why
-3. **Issue Type** (recommended — native): `Task`, `Bug`, `Feature`, `Question`, or `Epic`
-4. **Type labels** (optional): one or more of `bug`, `enhancement`, `documentation`, `performance`, `refactoring`, `testing`, `technical-debt`
-   (Questions use the **`Question` Issue Type**, not a label.)
+3. **Issue Type** (required — native): `Task`, `Bug`, `Feature`, `Question`, or `Epic`. The type is what says an issue is a bug or a question — there is **no `bug` label** (removed 2026-09-22).
+4. **Labels** (optional): one or more of `documentation`, `performance`, `refactoring`, `testing`, `technical-debt`
 5. **Area** (optional — issue-level field): the subsystem outcome area (e.g. Execution, Storage, Concurrency, Observability, …). Match the parent Epic's Area when there is one.
 6. **Product** (optional — issue-level field): e.g. `Engine`, `Workbench`.
-7. **Milestone** (optional — release maturity on Features): e.g. `alpha-1`.
-8. **Parent Epic** (optional): issue number to link under as a native sub-issue.
-
-> **Priority / Estimate** were project single-selects on the old board and are currently unconfigured on the new one. If needed, convey priority with labels (`important`, `P0-Critical`, `P1-High`, …) rather than a project field.
+7. **Priority** (optional — issue-level field): `P0-Critical` / `P1-High` / `P2-Medium` / `P3-Low`. There are **no priority labels** (removed 2026-09-22) — the field is the only place priority lives.
+8. **Estimate** (optional — issue-level field): `XS` / `S` / `M` / `L` / `XL`.
+9. **Milestone** (optional — release maturity on Features): e.g. `alpha-1`.
+10. **Parent Epic** (optional): issue number to link under as a native sub-issue.
 
 ## Gathering information
 
@@ -115,10 +114,10 @@ gh project item-edit --project-id PVT_kwDOEcGj5M4Bb-8P --id <ITEM_ID> \
   --field-id PVTSSF_lADOEcGj5M4Bb-8PzhWrH1A --single-select-option-id f75ad846
 ```
 
-### Step 6 (optional): Set Area / Product / Claude Code Discussion / Milestone
+### Step 6 (optional): Set Area / Product / Priority / Estimate / Claude Code Discussion / Milestone
 
 - **Milestone** (release maturity): `gh issue edit <number> --repo log2n-io/Typhon --milestone "alpha-1"`
-- **Area / Product** are **issue-level fields** (the same ones Epics carry — e.g. #146 = Area:Execution, Product:Engine), **not** the now-empty project single-selects. Set them with `setIssueFieldValue` — **full recipe + all field/option IDs in [`../_helpers.md` § "Issue-level custom fields"](../_helpers.md)**. Match the parent Epic's values when linking under one.
+- **Area / Product / Priority / Estimate** are **issue-level fields** (the same ones Epics carry — e.g. #146 = Area:Execution, Product:Engine), **not** the now-empty project single-selects. Set them all in one `setIssueFieldValue` mutation — **full recipe + all field/option IDs in [`../_helpers.md` § "Issue-level custom fields"](../_helpers.md)**. Match the parent Epic's Area / Product when linking under one.
 - **Claude Code Discussion** (`IFT_kgDOAqrjLw`, a **text** field): set it to this conversation's
   `https://claude.ai/code/session_…` URL whenever the issue came out of a Claude Code session. Available on every
   Issue Type **except `Task`** — skip it there. Same `setIssueFieldValue` mutation, using `textValue`.
@@ -176,7 +175,7 @@ Do both — the `[tasklist]` gives a body-embedded checklist (used by `/complete
 
 ### Issue-level classifiers (not project fields)
 - **Issue Type:** `gh issue edit <n> --repo log2n-io/Typhon --type "<Type>"` (Task/Bug/Feature/Question/Epic)
-- **Area / Product:** issue custom fields (web UI / GraphQL); mirror the parent Epic
+- **Area / Product / Priority / Estimate:** issue custom fields (web UI / GraphQL `setIssueFieldValue`); mirror the parent Epic's Area / Product
 - **Milestone:** release maturity — `gh issue edit <n> --repo log2n-io/Typhon --milestone "<name>"`
 
 ## Output
@@ -186,7 +185,7 @@ After creating, report back with:
 - Issue Type set
 - Confirmation it was added to the Typhon org project (+ Status)
 - Parent Epic link, if any
-- Any Area / Product / Milestone / labels set
+- Any Area / Product / Priority / Estimate / Milestone / labels set
 
 ## Example interaction
 
@@ -204,5 +203,5 @@ Feature #123 created: "Add support for spatial indexing"
    Issue Type: Feature
    Added to Typhon org project · Status: Todo
    Parent: sub-issue of Epic #NN
-   Area: Indexes · Product: Engine · Labels: enhancement, performance
+   Area: Indexes · Product: Engine · Labels: performance
 ```

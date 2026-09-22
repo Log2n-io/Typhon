@@ -42,8 +42,8 @@
 
   <rect x="40" y="348" width="720" height="76" fill="#f0fdf4" stroke="#16a34a" rx="4"/>
   <text class="q"   x="58" y="370">Does the query box match the archetype&#8217;s storage tier?</text>
-  <text class="bad" x="58" y="392">No &#8594; the dimensionality and precision must agree exactly. An f64 box throws as not supported;</text>
-  <text class="bad" x="58" y="410">f32 is what ships today, in both two and three dimensions.</text>
+  <text class="bad" x="58" y="392">No &#8594; the dimensionality and precision must agree exactly; a mismatch throws at the call site.</text>
+  <text class="bad" x="58" y="410">f32 and f64 both ship, in two and three dimensions.</text>
   <text class="yes" x="700" y="370">yes</text>
 
   <path d="M 120 424 L 120 448" stroke="#16a34a" stroke-width="1.6" marker-end="url(#dn)"/>

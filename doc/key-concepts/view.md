@@ -10,7 +10,7 @@ description: 'A view is a query result you keep and refresh, and that reports wh
 
 Where a one-shot query is a snapshot answer, a view (`tx.Query<Unit>()…ToView()`) is a result set you hold: `Refresh(tx)` brings it up to date, `GetDelta()` returns the `Added` / `Removed` / `Modified` entity keys, and `ClearDelta()` resets for the next cycle. That delta is exactly what a reactive [system](xref:concept-system) or a UI needs.
 
-A view built on an [indexed](xref:concept-index) `WhereField` predicate updates **incrementally** — the engine moves only the entities that crossed the boundary. A view on a free `Where` is a **pull** view, recomputed on `Refresh`. Same delta either way; the difference is cost. A view is also the input a [`QuerySystem`](xref:concept-system) runs over, and what a [subscription](xref:concept-subscription) publishes to clients.
+A view built on an [indexed](xref:concept-index) `WhereField` predicate updates **incrementally** — the engine moves only the entities that crossed the boundary. A bare archetype view with no predicate (`tx.Query<Unit>().ToView()`) is a **membership** view: it subscribes to the per-archetype spawn/destroy channel and costs O(1) when nothing changed. A view on a free `Where` is a **pull** view, recomputed on `Refresh`. Same delta either way; the difference is cost. A view is also the input a [`QuerySystem`](xref:concept-system) runs over, and what a [subscription](xref:concept-subscription) publishes to clients.
 
 ## How it relates
 

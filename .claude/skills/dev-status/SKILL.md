@@ -70,7 +70,7 @@ Query items where Status = "Todo" - these are ready to be picked up next.
 Flag issues that:
 - Have Status = "In Progress" but no recent activity (check issue last updated date)
 - Have Status = "Todo" for more than 14 days
-- Are P0-Critical and not In Progress
+- Have the Priority issue field set to P0-Critical and are not In Progress (priority is a field, not a label)
 
 To check issue activity, use `mcp__GitHub__get_issue` with:
 - owner: `"log2n-io"`

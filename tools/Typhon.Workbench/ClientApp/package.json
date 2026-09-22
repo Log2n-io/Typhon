@@ -71,6 +71,9 @@
     "typescript": "^5.7.2",
     "vite": "^7.0.0",
     "vite-plugin-checker": "^0.8.0",
-    "vitest": "^3.0.0"
+    "vitest": "^4.1.11"
+  },
+  "overrides": {
+    "undici": "^7.29.1"
   }
 }

@@ -246,7 +246,9 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
   spec: rules/tla/CommitRecovery.tla (S2) — AP12_ApplyIdempotent (where idempotence is also proven)
   on_violation: a crash during recovery corrupts on re-run
   verified: CollectionDurabilityTests.ReapplyingTheWindow_ConvergesInContentAndRefcount (collections clause),
-    VsbsSetElementsTests.Set_AppliedTwice_ConvergesInContentAndRefcount (the Set primitive itself)
+    VsbsSetElementsTests.Set_AppliedTwice_ConvergesInContentAndRefcount (the Set primitive itself),
+    UnsuppliedComponentPayloadTests.Recovery_SetEnabledBits_ReapplyHealsASoACopyThePriorPassLeftStale (absolute EnabledBits
+    clause: a re-run over a record already holding the mask still rewrites the cluster SoA copy, #847)
 
 ### AP-13: Allocation tolerance
   invariant physical placement chosen at apply may differ from pre-crash; all references (EntityMap, cluster bookkeeping) are

@@ -184,7 +184,7 @@ Status option IDs:
 | Area | `PVTSSF_lADOEcGj5M4Bb-8PzhWsLu8` | project field empty — **Area is an issue-level field** |
 | Product | `PVTSSF_lADOEcGj5M4Bb-8PzhW2BfY` | project field empty — **Product is an issue-level field** |
 
-**Issue-level classifiers (not project fields):** Issue Type → `gh issue edit <n> --repo log2n-io/Typhon --type "<Task|Bug|Feature|Epic>"`; Milestone (release maturity) → `--milestone "<name>"`; Area/Product/Claude Code Discussion → `setIssueFieldValue` (below).
+**Issue-level classifiers (not project fields):** Issue Type → `gh issue edit <n> --repo log2n-io/Typhon --type "<Task|Bug|Feature|Epic>"`; Milestone (release maturity) → `--milestone "<name>"`; Area/Product/Priority/Estimate/Claude Code Discussion → `setIssueFieldValue` (below). The type says an issue is a bug and the Priority field carries priority — the `bug` and `P*`/`important` labels were removed on 2026-09-22.
 
 ### Issue-level custom fields — `setIssueFieldValue`
 

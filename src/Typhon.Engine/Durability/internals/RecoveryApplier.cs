@@ -256,13 +256,19 @@ internal sealed unsafe class RecoveryApplier : IDisposable
             }
         }
 
-        // Write the full EntityId and per-slot EnabledBits into the cluster SoA (occupancy bit was set by ClaimSlot).
+        // Write the full EntityId and per-slot EnabledBits into the cluster SoA (occupancy bit was set by ClaimSlot). The bits come from the absolute mask,
+        // clearing as well as setting: a claimed slot is not guaranteed clean of its previous occupant's bits (ENABLE-01).
         *(long*)(clusterBase + layout.EntityIdsOffset + slotIdx * 8) = entityIdRaw;
         for (int slot = 0; slot < _componentCount; slot++)
         {
+            ref var word = ref *(ulong*)(clusterBase + layout.EnabledBitsOffset(slot));
             if ((enabledBits & (1 << slot)) != 0)
             {
-                *(ulong*)(clusterBase + layout.EnabledBitsOffset(slot)) |= 1UL << slotIdx;
+                word |= 1UL << slotIdx;
+            }
+            else
+            {
+                word &= ~(1UL << slotIdx);
             }
         }
 
@@ -682,8 +688,9 @@ internal sealed unsafe class RecoveryApplier : IDisposable
 
     /// <summary>
     /// Applies a committed absolute enabled-bits change to a pre-existing (checkpointed) entity — the base-entity counterpart of
-    /// the spawn-time bits folded by <see cref="ApplySpawnedEntity"/>. Sets the record's EnabledBits in place (flat path) and
-    /// writes it back dirty-marked. Idempotent: an absolute set re-applies cleanly; a missing entity is a no-op.
+    /// the spawn-time bits folded by <see cref="ApplySpawnedEntity"/>. Updates every durable copy of the state: the EntityMap record
+    /// and, for cluster archetypes, the per-component SoA EnabledBits vectors. Idempotent: an absolute set re-applies cleanly; a
+    /// missing entity is a no-op.
     /// </summary>
     public void ApplySetEnabledBitsToExisting(long entityIdRaw, ushort enabledBits)
     {
@@ -695,6 +702,35 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         if (!_engineState.EntityMap.TryGet(key, readBuf, ref _mapAccessor))
         {
             return;
+        }
+
+        // A cluster entity stores the same enabled state twice: the per-entity ushort in the EntityMap record and one bit in each
+        // component's SoA EnabledBits word. SetEnabledBits is an ABSOLUTE WAL record, so replay must restore both copies from the
+        // record value rather than applying a delta. In particular, clear zero bits too: OR-only replay would recover enables but
+        // leave pre-crash enables visible after a recovered disable.
+        //
+        // Do not optimize this against the record's old EnabledBits. Recovery can itself crash after one copy was persisted and
+        // before the other; replaying all component bits every time is what makes the operation genuinely idempotent/self-healing.
+        if (_hasClusterAccessor)
+        {
+            var layout = _engineState.ClusterState.Layout;
+            var clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(readBuf);
+            var slotIdx = ClusterEntityRecordAccessor.GetSlotIndex(readBuf);
+            byte* clusterBase = _clusterAccessor.GetChunkAddress(clusterChunkId, true);
+            var entityMask = 1UL << slotIdx;
+
+            for (var slot = 0; slot < _componentCount; slot++)
+            {
+                ref ulong clusterBits = ref *(ulong*)(clusterBase + layout.EnabledBitsOffset(slot));
+                if ((enabledBits & (1 << slot)) != 0)
+                {
+                    clusterBits |= entityMask;
+                }
+                else
+                {
+                    clusterBits &= ~entityMask;
+                }
+            }
         }
 
         EntityRecordAccessor.GetHeader(readBuf).EnabledBits = enabledBits;

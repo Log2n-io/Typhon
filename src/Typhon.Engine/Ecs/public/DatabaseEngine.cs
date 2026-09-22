@@ -541,6 +541,17 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private Dictionary<ushort, (ChunkBasedSegment<PersistentStore> Segment, ArchetypeClusterInfo Layout)> _preMigrationClusters;
 
     /// <summary>
+    /// Per archetype, the <c>EnabledBits</c> of every entity, read from the EntityMap as it stood before this open's schema migration (key: EntityKey).
+    /// </summary>
+    /// <remarks>
+    /// The migration replaces the EntityMap with a fresh one, and the record is the only authority for enabled state — a chain head proves a Versioned
+    /// component is present, never that it is enabled (#846, STAGE-02). Read from the record rather than from <see cref="_preMigrationClusters"/> because that
+    /// one exists only for archetypes with a SingleVersion slot, and its geometry is reconstructed, not recorded; the record's layout does not depend on
+    /// component sizes or indexes at all. Consumed by <see cref="RebuildClusterFromChains"/>, dropped with the old segments.
+    /// </remarks>
+    private Dictionary<ushort, Dictionary<long, ushort>> _preMigrationEnabledBits;
+
+    /// <summary>
     /// Every segment this open decided to ABANDON because a schema migration invalidated it, as <c>(root page index, the stride it was written at)</c>. Freed
     /// by <see cref="ReleaseAbandonedMigrationSegments"/> once the migration rebuild has finished reading them.
     /// </summary>
@@ -3416,6 +3427,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 if (hasMigratedSlot && hasPersisted && persisted.Arch.EntityMapSPI > 0)
                 {
                     (_abandonedMigrationSegments ??= []).Add((persisted.Arch.EntityMapSPI, stride));
+                    CapturePreMigrationEnabledBits(meta, slotToTable, persisted.Arch.EntityMapSPI, stride);
                 }
 
                 // Fresh allocation (new archetype or legacy database without SPI)
@@ -4410,6 +4422,56 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
     }
 
+    /// <summary>
+    /// Reads the enabled state of every entity out of the EntityMap this open's migration is about to replace, for <see cref="RebuildClusterFromChains"/>
+    /// (#846). One scan of the old map, and a dictionary entry per entity that lives only until the rebuild is done.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Every entry is kept, all-enabled ones included, so that an entity MISSING from the snapshot means "unknown", never "all enabled". The difference
+    /// matters on a migrating open after a crash: the old map is loaded with the same torn-page tolerance as the ordinary reopen, and read under the same
+    /// best-effort contract as the crash rebuild's <see cref="SnapshotEntityMapEnabledBits"/> — a torn page loses its entries, and a lost entry must fall
+    /// back to the weaker sources, not silently re-enable whatever that entity had disabled.
+    /// </para>
+    /// <para>
+    /// The old records are read at the CURRENT record size, which is only valid while the archetype's Versioned slot count is unchanged — a revision bump
+    /// may change a component's StorageMode. When the persisted storage modes do not confirm the count (a mode changed, or a component is not found under
+    /// its current name after a rename), no snapshot is taken. Nor is one when the map cannot be loaded. The rebuild then falls back to the pre-migration
+    /// cluster's bits where one was kept, otherwise to the chain head.
+    /// </para>
+    /// </remarks>
+    private void CapturePreMigrationEnabledBits(ArchetypeMetadata meta, ComponentTable[] slotToTable, int entityMapSpi, int stride)
+    {
+        var persistedVersionedCount = 0;
+        for (var slot = 0; slot < meta.ComponentCount; slot++)
+        {
+            var name = slotToTable[slot]?.Definition.Name;
+            if (name == null || _persistedComponents == null || !_persistedComponents.TryGetValue(name, out var persistedComp))
+            {
+                return;
+            }
+
+            if ((StorageMode)persistedComp.Comp.StorageMode == StorageMode.Versioned)
+            {
+                persistedVersionedCount++;
+            }
+        }
+
+        if (persistedVersionedCount != meta.VersionedSlotCount)
+        {
+            return;
+        }
+
+        if (!MMF.TryLoadChunkBasedSegment(entityMapSpi, stride, out var oldSegment, WalFilesPresentAtOpen))
+        {
+            return;
+        }
+
+        using var guard = EpochGuard.Enter(EpochManager);
+        var oldMap = RawValuePagedHashMap<long, PersistentStore>.Open(oldSegment, 256, meta._entityRecordSize);
+        (_preMigrationEnabledBits ??= [])[meta.ArchetypeId] = SnapshotEnabledBits(oldMap);
+    }
+
     private void CapturePreMigrationCluster(ArchetypeMetadata meta, ComponentTable[] slotToTable, bool isClusterEligible, bool hasPersisted,
         (int ChunkId, ArchetypeR1 Arch) persisted)
     {
@@ -4507,11 +4569,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// exists to close. Its "no concurrent reader" precondition holds by construction: this is the single-threaded open path.
     /// </para>
     /// <para>
-    /// A cluster whose <see cref="StorageMode.SingleVersion"/> bytes were needed is already registered
-    /// (<see cref="CapturePreMigrationCluster"/> loaded it), so it deletes directly. Everything else — the EntityMap, and the cluster of an archetype with no
-    /// SV slot — was never loaded, so it is loaded here first, purely to obtain its page list. That load is best-effort and every failure is swallowed: the
-    /// reconstructed stride can be wrong (see <see cref="CapturePreMigrationCluster"/>), and reclaiming pages must never be able to fail an open that would
-    /// otherwise succeed. The cost of giving up is the orphan we already had.
+    /// A cluster whose <see cref="StorageMode.SingleVersion"/> bytes were needed is already registered (<see cref="CapturePreMigrationCluster"/> loaded it),
+    /// and so is an EntityMap whose enabled bits were snapshotted (<see cref="CapturePreMigrationEnabledBits"/>); both delete directly. Everything else — an
+    /// EntityMap that was not snapshotted, and the cluster of an archetype with no SV slot — was never loaded, so it is loaded here first, purely to obtain its
+    /// page list. That load is best-effort and every failure is swallowed: the reconstructed stride can be wrong (see <see
+    /// cref="CapturePreMigrationCluster"/>), and reclaiming pages must never be able to fail an open that would otherwise succeed. The cost of giving up is the
+    /// orphan we already had.
     /// </para>
     /// <para>
     /// <b>Crash window, accepted deliberately.</b> The replacement SPI does not reach <c>ArchetypeR1</c> until the first checkpoint
@@ -4525,6 +4588,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         var abandoned = _abandonedMigrationSegments;
         _abandonedMigrationSegments = null;
         _preMigrationClusters = null; // the rebuild is done with them; the loop below frees the segments themselves
+        _preMigrationEnabledBits = null;
 
         if (abandoned == null)
         {
@@ -4652,6 +4716,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // One accessor for the whole pass. It used to be created per entity inside the copy, which is O(entities) accessor construction on a path that already
         // walks every entity — cheap per call, but pure waste at scale and easy to hoist since every entity reads the same segment.
         var oldClusterAccessor = hasOldCluster ? oldCluster.Segment.CreateChunkAccessor(cs) : default;
+        Dictionary<long, ushort> preMigrationBits = null;
+        _preMigrationEnabledBits?.TryGetValue(meta.ArchetypeId, out preMigrationBits);
         long maxEntityKey = 0;
 
         try
@@ -4679,34 +4745,33 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 var hasOldPos = oldPositions != null && oldPositions.TryGetValue(entityPK, out oldPos);
                 byte* oldChunkBase = hasOldCluster && hasOldPos ? oldClusterAccessor.GetChunkAddress(oldPos.ChunkId) : null;
 
-                // Only a VERSIONED slot's presence is derivable from a chain, so a non-Versioned slot has to get its bit from somewhere else. Defaulting it to
-                // ENABLED is right when there is nothing better — a Transient slot has no chain and no persisted bytes, and leaving it clear would reopen the
-                // database with that component permanently disabled. But when the pre-migration cluster IS available it is the authority: a slot the caller had
-                // explicitly DISABLED must stay disabled, and re-deriving would silently re-enable it. This was unreachable until the C1 fix, because the crash
-                // branch swallowed this whole pass on precisely the migrating opens where an old cluster exists.
+                // Every slot's enabled bit comes from the entity's PRE-MIGRATION RECORD, the one authority for enabled state (#846). Only when the snapshot
+                // has no entry for it — none was taken, or its page was torn — do weaker sources apply: the pre-migration cluster's bits where one was kept,
+                // else ENABLED, which is right for a Transient slot (no chain, no persisted bytes, and it would otherwise reopen permanently disabled) and
+                // for a Versioned slot leaves the chain head as the only signal.
+                ushort recordBits = 0;
+                var hasRecordBits = preMigrationBits != null && preMigrationBits.TryGetValue(entityKey, out recordBits);
+
                 ushort enabledMask = 0;
                 for (var slot = 0; slot < meta.ComponentCount; slot++)
                 {
-                    var vi = slotToVi == null ? -1 : slotToVi[slot];
-                    if (vi < 0)
-                    {
-                        var enabled = oldChunkBase == null
-                            || (*(ulong*)(oldChunkBase + oldCluster.Layout.EnabledBitsOffset(slot)) & (1UL << oldPos.SlotIndex)) != 0;
-                        if (enabled)
-                        {
-                            enabledMask |= (ushort)(1 << slot);
-                            *(ulong*)(clusterBase + layout.EnabledBitsOffset(slot)) |= 1UL << slotIndex;
-                        }
+                    var wasEnabled = hasRecordBits
+                        ? (recordBits & (1 << slot)) != 0
+                        : oldChunkBase == null || (*(ulong*)(oldChunkBase + oldCluster.Layout.EnabledBitsOffset(slot)) & (1UL << oldPos.SlotIndex)) != 0;
 
-                        continue;
+                    var vi = slotToVi == null ? -1 : slotToVi[slot];
+                    if (vi >= 0)
+                    {
+                        var head = 0;
+                        chainHeads[slot]?.TryGetValue(entityPK, out head);
+                        ClusterEntityRecordAccessor.SetCompRevFirstChunkId(recordBuf, vi, head);
+
+                        // A chain head proves the component is PRESENT, never that it is ENABLED: Disable keeps the payload, so a disabled component has a
+                        // head too (STAGE-02, "never deriving one of those two signals from the other"). No head ⟹ absent, bit clear, whatever the record said.
+                        wasEnabled &= head != 0;
                     }
 
-                    var head = 0;
-                    chainHeads[slot]?.TryGetValue(entityPK, out head);
-                    ClusterEntityRecordAccessor.SetCompRevFirstChunkId(recordBuf, vi, head);
-
-                    // A Versioned slot with no chain head for this entity genuinely carries no component.
-                    if (head != 0)
+                    if (wasEnabled)
                     {
                         enabledMask |= (ushort)(1 << slot);
                         *(ulong*)(clusterBase + layout.EnabledBitsOffset(slot)) |= 1UL << slotIndex;
@@ -5082,17 +5147,23 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </summary>
     private static Dictionary<long, ushort> SnapshotEntityMapEnabledBits(ArchetypeEngineState state)
     {
-        var snapshot = new Dictionary<long, ushort>();
         if (state?.EntityMap == null || state.EntityMap.EntryCount == 0)
         {
             // Nothing persisted to preserve (e.g. a no-checkpoint crash where the map was never flushed); the WAL replay window is the
             // authoritative source for enabled-bits in that case. Skipping the empty-map walk also avoids perturbing the replay path.
-            return snapshot;
+            return new Dictionary<long, ushort>();
         }
 
-        var accessor = state.EntityMap.Segment.CreateChunkAccessor();
+        return SnapshotEnabledBits(state.EntityMap);
+    }
+
+    /// <summary>Collects <c>EnabledBits</c> per EntityKey from every entry of <paramref name="map"/>.</summary>
+    private static Dictionary<long, ushort> SnapshotEnabledBits(RawValuePagedHashMap<long, PersistentStore> map)
+    {
+        var snapshot = new Dictionary<long, ushort>();
+        var accessor = map.Segment.CreateChunkAccessor();
         var action = new EnabledBitsSnapshotAction { Snapshot = snapshot };
-        state.EntityMap.ForEachEntry(ref accessor, ref action);
+        map.ForEachEntry(ref accessor, ref action);
         accessor.Dispose();
         return snapshot;
     }
@@ -5173,8 +5244,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     clusterState.NoteClusterBorn(chunkId, 0);   // H1: reopened clusters are all-genesis, so seed the summary rather than leaving it unknown
 
                     // Prefer the preserved (non-derivable) EnabledBits from the persisted EntityMap; otherwise reconstruct the per-entity 16-bit mask from
-                    // the cluster's per-component EnabledBits[c] (bit slotIndex set ⇒ component c enabled), written by EntityRef.Enable/Disable. NOTE: the
-                    // durable crash-survival of that cluster copy is the open gap tracked in #398 — this fallback is only as good as what was checkpointed.
+                    // the cluster's per-component EnabledBits[c] (bit slotIndex set ⇒ component c enabled), which every commit keeps equal to the committed
+                    // record and dirties with the cluster page (ENABLE-01). This fallback is still only as good as what was checkpointed.
                     ushort enabledMask;
                     if (enabledSnapshot != null && enabledSnapshot.TryGetValue(entityKey, out var preservedBits))
                     {
