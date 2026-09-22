@@ -405,6 +405,8 @@ public sealed partial class TyphonRuntime : IDisposable
                 TickNumber = Scheduler.CurrentTickNumber,
                 DeltaTime = 0f,
                 Transaction = tx,
+                // #908: same handle under both names — see OnSystemStartInternal.
+                Accessor = tx,
                 CreateSideTransaction = _createSideTxDelegate,
                 Entities = PooledEntityList.Empty,
                 TierBudgetMetrics = _previousTickMetrics,
@@ -541,7 +543,10 @@ public sealed partial class TyphonRuntime : IDisposable
                 // another archetype's cluster ids — a page-index-out-of-range throw when the counts differ, or silent double/zero processing when they
                 // happen to match. This previously scanned the global ArchetypeRegistry and took the FIRST cluster-eligible archetype, which is correct
                 // only in a world with exactly one; every multi-archetype schema using parallel cluster-native systems was broken.
-                if (sys.IsParallelQuery && Engine != null)
+                // #908: bound for EVERY QuerySystem, not only the parallel ones. A non-parallel system used to be left unbound, so its TickContext carried
+                // ClusterIds == null and the (0,0) range no dispatch ever filled — the same cluster-walk body silently iterated nothing the moment a system
+                // dropped .Parallel().
+                if (sys.Type == SystemType.QuerySystem && Engine != null)
                 {
                     var viewArchetypeId = _systemViews[i].QueriedArchetypeId;
                     foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
@@ -1185,42 +1190,16 @@ public sealed partial class TyphonRuntime : IDisposable
     // ═══════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Prepare phase: selects the dispatch path based on WritesVersioned and change filter presence.
-    /// For non-Versioned systems, creates/advances a long-lived PointInTimeAccessor.
-    /// For the full non-Versioned path (Path 1), NO entity list is materialized — O(1).
+    /// Resolve the cluster list a system dispatch walks this tick and publish it to <c>_dispatchClusterIds</c> / <c>_dispatchClusterCount</c>: tier scope
+    /// (#231), the per-system amortization bucket, the dormancy filter (#233), the checkerboard phase (#234), and finally the snapshot the ranges are cut
+    /// from. Called by the parallel Prepare and by the non-parallel per-system start, so both dispatch modes hand the body the same cluster set (#908).
     /// </summary>
-    private int OnParallelQueryPrepare(int sysIdx)
+    /// <remarks>
+    /// CD-02: the list and its length are read ONCE here, and every range cut afterwards indexes that array and splits that length — never the live pair.
+    /// A spawn appending a cluster while the walk runs is picked up from the next tick.
+    /// </remarks>
+    private void PrepareDispatchClusterList(int sysIdx, SystemDefinition sys)
     {
-        var sys = Scheduler.Systems[sysIdx];
-
-        // Chunked-CallbackSystem fast-path: skip all entity-prep (no view, no PTA, no tier index, no change-filter materialization).
-        // The scheduler dispatches exactly ExplicitChunkCount chunks (or RuntimeChunkCount if the runtime set a per-dispatch override — used by FenceExec to
-        // size chunks from the per-tick FenceWorkPlan) and OnParallelQueryChunk routes to the simple dispatch below.
-        if (sys.ExplicitChunkCount > 0)
-        {
-            ref var metrics = ref Scheduler.GetCurrentSystemMetrics(sysIdx);
-            metrics.EntitiesProcessed = 0;
-            return sys.RuntimeChunkCount > 0 ? sys.RuntimeChunkCount : sys.ExplicitChunkCount;
-        }
-
-        var hasView = _systemViews[sysIdx] != null;
-        var hasChangeFilter = hasView && _systemChangeFilterTables[sysIdx] != null;
-
-        // P2 of umbrella #342 — emit the catalog descriptor for this view's query identity. The tracker dedups across the session so only the first call per
-        // (Kind, LocalId) actually writes to the trace; subsequent ticks pay one ConcurrentDictionary.ContainsKey-equivalent lookup inside the emit helper.
-        // Pull-mode/system-input views never go through View.Refresh, so this is the only hot path where the descriptor can be emitted with the profiler gate
-        // definitely open.
-        if (hasView && TelemetryConfig.QueryActive)
-        {
-            _systemViews[sysIdx].EmitDescriptorIfNeeded();
-            // Capture once per tick — Prepare can be called multiple times (checkerboard phases). The first call sets
-            // it; subsequent calls keep the original tick-start ts so the QueryPlan spans the full system body.
-            if (_systemQueryPlanStartTicks[sysIdx] == 0)
-            {
-                _systemQueryPlanStartTicks[sysIdx] = Stopwatch.GetTimestamp();
-            }
-        }
-
         // Issue #231: read the per-archetype tier cluster list. The rebuild itself was hoisted to BuildTierIndexesAtTickStart (runs single-threaded at
         // TickStart, before any parallel system dispatch). Here we only READ the prepared per-tier buffer and, if amortized, slice it into a per-system bucket.
         _systemTierClusterIds[sysIdx] = null;
@@ -1361,6 +1340,48 @@ public sealed partial class TyphonRuntime : IDisposable
 
         _dispatchClusterIds[sysIdx] = dispatchIds;
         _dispatchClusterCount[sysIdx] = dispatchClusters;
+    }
+
+    /// <summary>
+    /// Prepare phase: selects the dispatch path based on WritesVersioned and change filter presence.
+    /// For non-Versioned systems, creates/advances a long-lived PointInTimeAccessor.
+    /// For the full non-Versioned path (Path 1), NO entity list is materialized — O(1).
+    /// </summary>
+    private int OnParallelQueryPrepare(int sysIdx)
+    {
+        var sys = Scheduler.Systems[sysIdx];
+
+        // Chunked-CallbackSystem fast-path: skip all entity-prep (no view, no PTA, no tier index, no change-filter materialization).
+        // The scheduler dispatches exactly ExplicitChunkCount chunks (or RuntimeChunkCount if the runtime set a per-dispatch override — used by FenceExec to
+        // size chunks from the per-tick FenceWorkPlan) and OnParallelQueryChunk routes to the simple dispatch below.
+        if (sys.ExplicitChunkCount > 0)
+        {
+            ref var metrics = ref Scheduler.GetCurrentSystemMetrics(sysIdx);
+            metrics.EntitiesProcessed = 0;
+            return sys.RuntimeChunkCount > 0 ? sys.RuntimeChunkCount : sys.ExplicitChunkCount;
+        }
+
+        var hasView = _systemViews[sysIdx] != null;
+        var hasChangeFilter = hasView && _systemChangeFilterTables[sysIdx] != null;
+
+        // P2 of umbrella #342 — emit the catalog descriptor for this view's query identity. The tracker dedups across the session so only the first call per
+        // (Kind, LocalId) actually writes to the trace; subsequent ticks pay one ConcurrentDictionary.ContainsKey-equivalent lookup inside the emit helper.
+        // Pull-mode/system-input views never go through View.Refresh, so this is the only hot path where the descriptor can be emitted with the profiler gate
+        // definitely open.
+        if (hasView && TelemetryConfig.QueryActive)
+        {
+            _systemViews[sysIdx].EmitDescriptorIfNeeded();
+            // Capture once per tick — Prepare can be called multiple times (checkerboard phases). The first call sets
+            // it; subsequent calls keep the original tick-start ts so the QueryPlan spans the full system body.
+            if (_systemQueryPlanStartTicks[sysIdx] == 0)
+            {
+                _systemQueryPlanStartTicks[sysIdx] = Stopwatch.GetTimestamp();
+            }
+        }
+
+        // The dispatch cluster list (tier scope, dormancy filter, checkerboard phase, snapshot) — shared with the non-parallel path, which builds the
+        // same list in OnSystemStartInternal so one system body walks clusters the same way in both dispatch modes (#908).
+        PrepareDispatchClusterList(sysIdx, sys);
 
         if (sys.WritesVersioned)
         {
@@ -1901,6 +1922,8 @@ public sealed partial class TyphonRuntime : IDisposable
                 DeltaTime = _currentDeltaTime,
                 AmortizedDeltaTime = amortizedDt,
                 Transaction = tx,
+                // #908: same handle under both names — see OnSystemStartInternal.
+                Accessor = tx,
                 CreateSideTransaction = _createSideTxDelegate,
                 Entities = slice,
                 ConsumedQueues = null,
@@ -2005,6 +2028,8 @@ public sealed partial class TyphonRuntime : IDisposable
                 TickNumber = scheduler.CurrentTickNumber,
                 DeltaTime = _currentDeltaTime,
                 Transaction = tx,
+                // #908: same handle under both names — see OnSystemStartInternal.
+                Accessor = tx,
                 CreateSideTransaction = _createSideTxDelegate,
                 Entities = PooledEntityList.Empty,
                 TierBudgetMetrics = _previousTickMetrics,
@@ -2620,15 +2645,37 @@ public sealed partial class TyphonRuntime : IDisposable
 
         var sys = Scheduler.Systems[sysIdx];
         float amortizedDt = sys.CellAmortize > 0 ? _currentDeltaTime * sys.CellAmortize : _currentDeltaTime;
+
+        // #908: a single-invocation QuerySystem owns EVERY cluster of its input archetype, so it gets the same shape of cluster partition a parallel system's
+        // chunk gets — the whole list, [0, count). Before this the three fields were left at their defaults and the (0,0) that came out was read by the scoped
+        // enumerator as an empty range, so a cluster-walking body that worked under .Parallel() silently processed nothing without it.
+        int clusterStart = 0, clusterEnd = 0;
+        int[] clusterIdArray = null;
+        // !IsParallelQuery is load-bearing, not belt-and-braces: a parallel system already ran PrepareDispatchClusterList in its own Prepare, and running it
+        // again here would advance the checkerboard phase a second time in one tick (#234) — the Red half would be served twice and the Black half never.
+        if (sys.Type == SystemType.QuerySystem && !sys.IsParallelQuery && _systemClusterStates[sysIdx] != null)
+        {
+            PrepareDispatchClusterList(sysIdx, sys);
+            clusterIdArray = _dispatchClusterIds[sysIdx];
+            clusterEnd = clusterIdArray != null ? _dispatchClusterCount[sysIdx] : 0;
+        }
+
         return new TickContext
         {
             TickNumber = Scheduler.CurrentTickNumber,
             DeltaTime = _currentDeltaTime,
             AmortizedDeltaTime = amortizedDt,
             Transaction = tx,
+            // #908: the Transaction IS an EntityAccessor. Handing it over as the Accessor too means one body — ctx.Accessor.OpenMut(...),
+            // ctx.Accessor.GetClusterEnumerator(...) — compiles and runs on every dispatch path instead of NullReferenceException-ing the moment the
+            // system's declaration changes. Spawn/Destroy/Commit stay reachable only through ctx.Transaction, which is where they live.
+            Accessor = tx,
             CreateSideTransaction = _createSideTxDelegate,
             Entities = entities,
             ConsumedQueues = _systemConsumedQueues[sysIdx],
+            StartClusterIndex = clusterStart,
+            EndClusterIndex = clusterEnd,
+            ClusterIds = clusterIdArray,
             TierBudgetMetrics = _previousTickMetrics,
             SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
             WorkerId = workerId,

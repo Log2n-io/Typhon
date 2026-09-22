@@ -31,6 +31,57 @@ partial class TouchArch : Archetype<TouchArch>
     public static readonly Comp<TouchPos> Pos = Register<TouchPos>();
 }
 
+[Component("Typhon.Test.Touch.Other", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+struct TouchOther
+{
+    [Field]
+    public int Y;
+}
+
+/// <summary>A second archetype, so a system whose input is <see cref="TouchArch"/> can declare a component no entity in that input holds (#908 case 2).</summary>
+[Archetype]
+partial class TouchOtherArch : Archetype<TouchOtherArch>
+{
+    public static readonly Comp<TouchOther> Other = Register<TouchOther>();
+}
+
+/// <summary>#908 case 1: a CallbackSystem that declares component access. The claim under test is that its body still runs.</summary>
+sealed class DeclaringCallbackSystem : CallbackSystem
+{
+    public int Runs;
+
+    protected override void Configure(SystemBuilder b) => b
+        .Name("DeclaredCallback")
+        .Reads<TouchPos>()
+        .Writes<TouchOther>();
+
+    protected override void Execute(TickContext ctx) => Interlocked.Increment(ref Runs);
+}
+
+/// <summary>#908 case 2: a QuerySystem declaring a component of an archetype other than its input View's. Same claim.</summary>
+sealed class DeclaringQuerySystem : QuerySystem
+{
+    public Func<ViewBase> InputFactory;
+    public int Runs;
+    public int EntitiesSeen;
+
+    protected override void Configure(SystemBuilder b) => b
+        .Name("DeclaredQuery")
+        .Input(InputFactory)
+        .Reads<TouchPos>()
+        // ReadsFresh, not Reads: DeclaredCallback writes TouchOther in the same phase, and a bare Reads is the conflict the deriver rejects. The point of
+        // the test is unchanged — TouchOther is a component no entity in this system's input View holds.
+        .ReadsFresh<TouchOther>()
+        .After("DeclaredCallback");
+
+    protected override void Execute(TickContext ctx)
+    {
+        Volatile.Write(ref EntitiesSeen, ctx.Entities.Count);
+        Interlocked.Increment(ref Runs);
+    }
+}
+
 [TestFixture]
 [NonParallelizable]
 class SystemArchetypeTouchTests : TestBase<SystemArchetypeTouchTests>
@@ -41,6 +92,7 @@ class SystemArchetypeTouchTests : TestBase<SystemArchetypeTouchTests>
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<TouchPos>();
+        dbe.RegisterComponentFromAccessor<TouchOther>();
         dbe.InitializeArchetypes();
 
         using (var tx = dbe.CreateQuickTransaction())
@@ -238,8 +290,19 @@ class SystemArchetypeTouchTests : TestBase<SystemArchetypeTouchTests>
         view.Dispose();
     }
 
+    /// <summary>
+    /// #908 case 3: the SAME cluster-walking body must process the same entities whether or not the system is <c>.Parallel()</c>. It is
+    /// <see cref="CountVisited"/> — the helper the parallel tests above use — that runs here, unchanged, on a single-invocation QuerySystem.
+    /// </summary>
+    /// <remarks>
+    /// Before the fix, a non-parallel system was never bound to its input archetype's cluster state, so its TickContext carried <c>ClusterIds == null</c>,
+    /// the range <c>(0,0)</c> that no dispatch had filled, and <c>Accessor == null</c>. This body then NullReferenceException'd on <c>ctx.Accessor</c>; a body
+    /// that reached for <c>ctx.Transaction</c> instead walked the empty <c>(0,0)</c> range and silently processed nothing. Both fail by doing nothing, which
+    /// is why the issue took a bisect to find.
+    /// </remarks>
     [Test]
-    public void NonParallelQuery_ZeroClusterRangeIsNoPartition_AndFullWalkIsExplicit()
+    [VerifiesRule("CD-03")]
+    public void NonParallelQuery_OwnsItsWholeClusterPartition_AndRunsTheParallelBodyUnchanged()
     {
         using var dbe = SetupEngine();
         using var txView = dbe.CreateQuickTransaction();
@@ -247,9 +310,10 @@ class SystemArchetypeTouchTests : TestBase<SystemArchetypeTouchTests>
 
         var observed = 0;
         var accessorWasNull = 0;
+        var clusterIdsWereNull = 0;
         var start = -1;
         var end = -1;
-        var scopedVisited = -1;
+        var visited = -1;
         var fullVisited = -1;
 
         using (var runtime = TyphonRuntime.Create(dbe, schedule =>
@@ -262,14 +326,7 @@ class SystemArchetypeTouchTests : TestBase<SystemArchetypeTouchTests>
                     return;
                 }
 
-                var scopedCount = 0;
-                using (var scoped = ctx.Transaction.GetClusterEnumerator<TouchArch>(ctx.StartClusterIndex, ctx.EndClusterIndex))
-                {
-                    foreach (var cluster in scoped)
-                    {
-                        scopedCount += System.Numerics.BitOperations.PopCount(cluster.OccupancyBits);
-                    }
-                }
+                var seen = CountVisited(ctx);
 
                 var fullCount = 0;
                 using (var full = ctx.Transaction.GetClusterEnumerator<TouchArch>())
@@ -281,9 +338,10 @@ class SystemArchetypeTouchTests : TestBase<SystemArchetypeTouchTests>
                 }
 
                 Volatile.Write(ref accessorWasNull, ctx.Accessor == null ? 1 : 0);
+                Volatile.Write(ref clusterIdsWereNull, ctx.ClusterIds == null ? 1 : 0);
                 Volatile.Write(ref start, ctx.StartClusterIndex);
                 Volatile.Write(ref end, ctx.EndClusterIndex);
-                Volatile.Write(ref scopedVisited, scopedCount);
+                Volatile.Write(ref visited, seen);
                 Volatile.Write(ref fullVisited, fullCount);
                 Volatile.Write(ref observed, 1);
             }, input: () => view);
@@ -295,12 +353,51 @@ class SystemArchetypeTouchTests : TestBase<SystemArchetypeTouchTests>
             Assert.That(completed, Is.True, "the non-parallel QuerySystem did not execute");
         }
 
-        Assert.That(accessorWasNull, Is.EqualTo(1), "non-parallel QuerySystems use ctx.Transaction, not ctx.Accessor");
+        Assert.That(accessorWasNull, Is.Zero, "every dispatch path hands the body a usable ctx.Accessor — the Transaction is one (#908)");
+        Assert.That(clusterIdsWereNull, Is.Zero, "a non-parallel QuerySystem is bound to its input archetype's cluster list like a parallel one");
         Assert.That(start, Is.Zero);
-        Assert.That(end, Is.Zero);
-        Assert.That(scopedVisited, Is.Zero, "(0,0) is the no-partition sentinel and remains an empty scoped range");
-        Assert.That(fullVisited, Is.EqualTo(EntityCount),
-            "the parameterless Transaction cluster enumerator is the explicit whole-archetype walk for a non-parallel system");
+        Assert.That(end, Is.GreaterThan(0), "a single-invocation system owns the whole partition: [0, clusterCount), never the unfilled (0,0)");
+        Assert.That(visited, Is.EqualTo(EntityCount), "the parallel cluster-walk body, unchanged, must visit every entity on the non-parallel path");
+        Assert.That(fullVisited, Is.EqualTo(visited), "owning the whole partition means the scoped walk and the full-archetype walk agree");
+
+        view.Dispose();
+    }
+
+    /// <summary>
+    /// #908 cases 1 and 2, measured where the issue measured them — in a running tick, not at Build. Declared component access is scheduling metadata: it
+    /// derives edges and validates conflicts. It never decides whether a registered system's BODY runs, and a QuerySystem naming a component its input
+    /// archetype does not hold still iterates its whole View.
+    /// </summary>
+    /// <remarks>
+    /// A DAG-membership assertion is not enough on its own: the issue's symptom was a body that never executed, and a system can sit in
+    /// <c>UserSystems</c> and still be skipped at dispatch (change filter, ShouldRun, a failed predecessor). These assertions are on the run counts.
+    /// </remarks>
+    [Test]
+    public void DeclaredComponentAccess_DoesNotStopTheBodyFromRunning()
+    {
+        using var dbe = SetupEngine();
+        using var txView = dbe.CreateQuickTransaction();
+        var view = txView.Query<TouchArch>().ToView();
+
+        var callback = new DeclaringCallbackSystem();
+        var query = new DeclaringQuerySystem { InputFactory = () => view };
+
+        using (var runtime = TyphonRuntime.Create(dbe, schedule =>
+        {
+            schedule.PublicTrack.DeclareDag("Test")
+                    .Add(callback)
+                    .Add(query);
+        }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }))
+        {
+            runtime.Start();
+            var ran = SpinWait.SpinUntil(() => Volatile.Read(ref callback.Runs) > 0 && Volatile.Read(ref query.Runs) > 0, TimeSpan.FromSeconds(5));
+            runtime.Shutdown();
+            Assert.That(ran, Is.True,
+                $"both bodies must execute — CallbackSystem ran {Volatile.Read(ref callback.Runs)}x, QuerySystem ran {Volatile.Read(ref query.Runs)}x (#908)");
+        }
+
+        Assert.That(Volatile.Read(ref query.EntitiesSeen), Is.EqualTo(EntityCount),
+            "declaring a component the input archetype does not hold must not narrow the entity set either");
 
         view.Dispose();
     }

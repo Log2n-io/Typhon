@@ -36,9 +36,9 @@ public unsafe partial class EntityAccessor
     /// <param name="startIndex">Inclusive start into <see cref="ArchetypeClusterState.ActiveClusterIds"/>. Use <see cref="TickContext.StartClusterIndex"/>.</param>
     /// <param name="endIndex">Exclusive end index. Use <see cref="TickContext.EndClusterIndex"/>.</param>
     /// <remarks>
-    /// This overload always honors the half-open range literally: <c>(0,0)</c> is empty, never shorthand for all active clusters. A
-    /// <see cref="TickContext"/> with <c>StartClusterIndex == EndClusterIndex == 0</c> has no applicable cluster partition. In a non-parallel system,
-    /// call the parameterless overload through <c>ctx.Transaction</c> only when a full-archetype scan is intended.
+    /// The half-open range is always honored literally: an empty range walks nothing, and is never shorthand for all active clusters. Every QuerySystem is
+    /// handed a real partition — a chunk's share when parallel, <c>[0, clusterCount)</c> when single-invocation — so passing
+    /// <see cref="TickContext.StartClusterIndex"/> / <see cref="TickContext.EndClusterIndex"/> is correct in both dispatch modes (#908).
     /// </remarks>
     public ClusterEnumerator<TArch> GetClusterEnumerator<TArch>(int startIndex, int endIndex) where TArch : class
     {
@@ -58,8 +58,8 @@ public unsafe partial class EntityAccessor
     /// See <see cref="GetClusterEnumerator{TArch}(int,int)"/> for details.
     /// </summary>
     /// <remarks>
-    /// This is a whole-archetype storage walk. When called through <c>ctx.Transaction</c> in a non-parallel QuerySystem it does not inherit the
-    /// system's <c>Input</c> View, <c>ctx.Entities</c>, change filter, or other entity-set filtering.
+    /// A whole-archetype storage walk, ignoring any dispatch partition. Like the scoped overloads it does not inherit a system's <c>Input</c> View,
+    /// <c>ctx.Entities</c>, change filter or tier scope — reach for it only when the whole archetype is genuinely what you mean.
     /// </remarks>
     public ClusterEnumerator<TArch> GetClusterEnumerator<TArch>() where TArch : class
     {

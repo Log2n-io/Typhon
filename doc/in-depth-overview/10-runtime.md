@@ -177,7 +177,7 @@ public struct TickContext {
 }
 ```
 
-`Accessor` and the cluster range are dispatch-specific. A non-parallel system uses `Transaction`, has `Accessor == null`, and receives the sentinel range `(0,0)`; a scoped cluster enumerator treats that range as empty, never as “all”. For an intentional whole-archetype scan use `ctx.Transaction.GetClusterEnumerator<T>()`. That is a storage-level full walk, not the system's filtered `Input` / `Entities` set.
+`Accessor` is filled on every path that has entity access: the per-worker `EntityAccessor` on the lock-free parallel path, the system's (or the chunk's) `Transaction` otherwise — the very object `Transaction` carries, since `Transaction` derives from `EntityAccessor`. `Transaction` alone is null on the lock-free path, where Spawn/Destroy/Commit do not exist. Every QuerySystem also receives `ClusterIds` and a half-open `[StartClusterIndex, EndClusterIndex)` partition of it — a chunk's share when parallel, the whole list when single-invocation — so one cluster-walking body is correct in both modes. That partition is a storage slice: it does not carry the system's `Input` predicate or change filter, in either mode.
 
 `CreateSideTransaction(durabilityMode)` is the escape hatch for economy-critical operations (trades, purchases) that must commit independently of the tick's main UoW. The caller owns and disposes the side transaction.
 
