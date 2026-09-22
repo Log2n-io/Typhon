@@ -21,9 +21,9 @@ writes several components on the same entity, that's redundant hashmap work per 
 transaction's TSN, and return an `EntityRef` — a `ref struct` caching the per-slot component locations. From
 there, `Read<T>(Comp<T>)` / `Write<T>(Comp<T>)` resolve a component slot in O(1) and return a typed ref straight
 into chunk or cluster memory: `Versioned` writes copy-on-write into a new revision, `SingleVersion`/`Transient`
-writes mutate in place. `Spawn` allocates storage only for components actually supplied; omitted `Versioned`
-components are *absent* (no chunk, no revision chain), omitted `SingleVersion`/`Transient` are
-zero-initialized and disabled. The entity is staged invisibly until commit; `Destroy` tombstones it
+writes mutate in place. At `Spawn`, an omitted `Versioned` component is *absent* — no chunk and no revision
+chain are allocated for it — while an omitted `SingleVersion`/`Transient` component is zero-initialized and
+disabled. The entity is staged invisibly until commit; `Destroy` tombstones it
 (cascade-deleting configured children) — data is freed later by deferred GC, never by the destroying
 transaction itself.
 

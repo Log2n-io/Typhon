@@ -19,7 +19,7 @@ Game loops and UI panels routinely need to know "which entities currently match 
 
 `ToView()` on an indexed-field query (`WhereField`) builds the initial entity set once via the same selectivity-driven execution plan as a one-shot query, then registers the view to receive change notifications for every field it depends on. At commit time, the field-update path that already touches old/new values for the B+Tree index also pushes a small delta record (entity, before-key, after-key) into the view's lock-free multi-producer/single-consumer ring buffer — no extra scan, no polling. `Refresh(tx)` drains that buffer up to the transaction's snapshot, re-evaluates only the changed entities' predicates, and updates the entity set plus an Added/Removed/Modified delta. If the buffer fills up between refreshes (too many changes, too long a gap), the view self-heals by falling back to one full re-query using its cached execution plan, then resumes incremental mode.
 
-A `ToView()` on a **bare archetype query** (no `WhereField`, no `.Where`, no spatial predicate) takes the **Membership** path instead: the view subscribes to the per-archetype spawn/destroy channel. `Refresh(tx)` checks a structural epoch first — O(1) when nothing spawned or died — then drains the channel for any commits that did change membership. The result is the same `Added`/`Removed` delta interface, but with a cost proportional to how much the membership actually changed rather than to the archetype size.
+A `ToView()` on a **bare archetype query** (no `WhereField`, no `.Where`, no spatial predicate, no `Enabled<T>()`/`Disabled<T>()` filter — `.With`/`.Without` still qualify) takes the **Membership** path instead: the view subscribes to the per-archetype spawn/destroy channel. `Refresh(tx)` checks a structural epoch first — O(1) when nothing spawned or died — then drains the channel for any commits that did change membership. The result is the same `Added`/`Removed` delta interface, but with a cost proportional to how much the membership actually changed rather than to the archetype size.
 
 ## 💻 Usage
 
@@ -55,8 +55,8 @@ while (running)
 |---|---|---|
 | Incremental | Single `WhereField` branch | O(changes since last refresh) |
 | OR | `WhereField` with `\|\|` (multiple branches, max 16) | O(changes), per-entity branch bitmap |
-| Membership | No predicate (archetype-only: no `WhereField`, no `.Where`, no spatial) | O(1) when nothing spawned/died; O(changes) otherwise — fed by the per-archetype spawn/destroy channel, never a full rescan |
-| Pull | Opaque `.Where(lambda)` or spatial predicate | O(full result set), every call — correct, but not incremental |
+| Membership | No predicate (archetype-only: no `WhereField`, no `.Where`, no spatial, no `Enabled`/`Disabled` filter) | O(1) when nothing spawned/died; O(changes) otherwise — fed by the per-archetype spawn/destroy channel, never a full rescan |
+| Pull | No `WhereField`, but an opaque `.Where(lambda)`, a spatial predicate, or an `Enabled`/`Disabled` filter | O(full result set), every call — correct, but not incremental |
 
 ## ⚠️ Guarantees & limits
 

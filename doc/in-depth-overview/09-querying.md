@@ -266,7 +266,7 @@ Five constructors, five modes:
 | Mode | Trigger | Behavior |
 |---|---|---|
 | Membership | `EcsQuery` with no predicate (no `WhereField`, no `.Where`, no spatial, no T2 `Enabled`/`Disabled`) | Registers with `ArchetypeMembershipRegistry` (not `ViewRegistry`). `Refresh()` checks a structural epoch (O(1) gate); drains the spawn/destroy channel when it moved. Never re-executes the full query on quiet ticks. |
-| Pull | `EcsQuery` with an opaque `.Where(lambda)` or a spatial predicate | No evaluators, no `ViewRegistry` registration. `Refresh()` re-executes the full query every call. |
+| Pull | `EcsQuery` without `WhereField` but with an opaque `.Where(lambda)`, a spatial predicate, or a T2 `Enabled`/`Disabled` filter | No evaluators, no `ViewRegistry` registration. `Refresh()` re-executes the full query every call. |
 | Incremental (single AND branch) | One `WhereField` call | Single `ExecutionPlan`, ring buffer driven, registered with `ViewRegistry`. |
 | Incremental (cached plan) | Same as above, with plan reuse for descriptor emission | Caches the plan in `ViewBase._cachedPlans` for per-tick `QueryPlan` span emission. |
 | OR mode | Multiple DNF branches | One `ExecutionPlan` and one `FieldEvaluator[]` per branch. Per-entity `ushort` branch bitmap (`_branchBitmaps`) records which branches that entity currently satisfies. |

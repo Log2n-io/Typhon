@@ -224,7 +224,7 @@ Helpers ([`Spatial/internals/SpatialGeometry.cs`](https://github.com/Log2n-io/Ty
 
 A `SpatialFieldType` enum maps the schema-side `FieldType` to a compact 0–7 byte: `AABB2F=0`, `AABB3F=1`, `BSphere2F=2`, `BSphere3F=3`, `AABB2D=4`, …. `SpatialFieldInfo.ToVariant()` then maps that to the right `SpatialVariant` for the tree.
 
-Currently supported: **f32 only** (2D and 3D — Z is filtered at narrowphase). f64 variants are valid as field types and the `SpatialRTree` implementation handles them, but neither the grid bucketing nor the cluster bounds do, so no live query path reaches them. `SpatialGrid.ValidateSupportedFieldType` enforces this at `ConfigureSpatialGrid` time.
+All eight field types are supported on the live path since #914 — f32 and f64, 2D and 3D (Z is filtered at narrowphase for a 2D field). Grid bucketing, cluster bounds and the narrowphase all handle the f64 tiers; the cluster bounds store them the same way as f32 ones, as f32 boxes relative to their cell. `SpatialGrid.ValidateSupportedFieldType` now only rejects a value outside the `SpatialFieldType` enum.
 
 ---
 
