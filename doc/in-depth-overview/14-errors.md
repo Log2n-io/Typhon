@@ -77,7 +77,11 @@ System.Exception
    ├─ DurabilityException
    │  ├─ WalWriteException                  (fail-fast per ADR; engine stops accepting durable commits)
    │  ├─ WalClaimTooLargeException          (RequestedBytes, BufferCapacity)
-   │  └─ WalSegmentException                (SegmentPath)
+   │  ├─ WalSegmentException                (SegmentPath)
+   │  ├─ CommitDurabilityUncertainException (HighLsn)
+   │  ├─ BulkSessionAlreadyActiveException  (ActiveBulkSessionId)
+   │  ├─ BulkSessionClosedException         (BulkSessionId)
+   │  └─ BulkLoadCheckpointTimeoutException (BulkSessionId, Timeout)
    ├─ ResourceExhaustedException            (direct subclass; IsTransient => true)
    ├─ UniqueConstraintViolationException    (parameterless ctor only — currently)
    ├─ SchemaValidationException             (Diff: SchemaDiff)
@@ -184,7 +188,7 @@ A flat `enum TyphonErrorCode` organized into numeric ranges by subsystem. Codes 
 | 4xxx | Index | `UniqueConstraintViolation = 4001` |
 | 5xxx | Query | (reserved) |
 | 6xxx | Resource | `ResourceExhausted = 6001`, `LockTimeout = 6003` |
-| 7xxx | Durability | `WalBackPressureTimeout = 7001`, `WalClaimTooLarge = 7002`, `WalWriteFailure = 7003`, `WalSegmentError = 7004` |
+| 7xxx | Durability | `WalBackPressureTimeout = 7001`, `WalClaimTooLarge = 7002`, `WalWriteFailure = 7003`, `WalSegmentError = 7004`, `BulkSessionAlreadyActive = 7005`, `BulkSessionClosed = 7006`, `BulkLoadCheckpointTimeout = 7007`, `CommitDurabilityUncertain = 7008` |
 | 8xxx | Runtime / Scheduler | `InvalidSystemAccess = 8001` |
 
 **Notes:**

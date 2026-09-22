@@ -1138,10 +1138,16 @@ public class OlcBTreeRaceStressTests
         try
         {
             string exe = "dotnet-stack";
-            var local = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dotnet", "tools", "dotnet-stack.exe");
+
+            // do not rely on PATH inside a test host; the tool lives in a known place when it is installed at all. The
+            // file name is NOT the same everywhere — a global tool is `dotnet-stack.exe` on Windows and `dotnet-stack`
+            // with no extension on Linux and macOS, so probing only for the .exe silently misses an installed tool on
+            // every CI runner this fixture actually runs on.
+            var toolDir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dotnet", "tools");
+            var local = System.IO.Path.Combine(toolDir, OperatingSystem.IsWindows() ? "dotnet-stack.exe" : "dotnet-stack");
             if (System.IO.File.Exists(local))
             {
-                exe = local;   // do not rely on PATH inside a test host; the tool lives in a known place when it is installed at all
+                exe = local;
             }
 
             var psi = new ProcessStartInfo(exe, $"report -p {Environment.ProcessId}")
@@ -1158,13 +1164,24 @@ public class OlcBTreeRaceStressTests
                 return "  stack capture: could not start dotnet-stack.";
             }
 
-            string stdout = proc.StandardOutput.ReadToEnd();
-            string stderr = proc.StandardError.ReadToEnd();
+            // Both pipes have to drain CONCURRENTLY with the wait. Draining stdout to completion first and stderr only
+            // afterwards deadlocks the pair the moment stderr fills its buffer: the child blocks writing stderr, the
+            // parent blocks reading stdout, neither moves, and the 90s bound below never fires because control never
+            // reaches it. A method whose entire job is to survive a wedge must not be able to manufacture one.
+            var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+            var stderrTask = proc.StandardError.ReadToEndAsync();
+
             if (!proc.WaitForExit(90_000))
             {
                 try { proc.Kill(entireProcessTree: true); } catch { /* best-effort */ }
                 return "  stack capture: dotnet-stack did not return within 90s — the diagnostics endpoint is itself unresponsive, which is a finding.";
             }
+
+            // The child has exited, so both pipes are at EOF and these complete immediately in the normal case. Still
+            // bounded: a grandchild inheriting the write handle keeps the pipe open past its parent's exit, and that
+            // would hang here forever on an unbounded wait.
+            string stdout = stdoutTask.Wait(10_000) ? stdoutTask.Result : string.Empty;
+            string stderr = stderrTask.Wait(10_000) ? stderrTask.Result : string.Empty;
 
             if (string.IsNullOrWhiteSpace(stdout))
             {

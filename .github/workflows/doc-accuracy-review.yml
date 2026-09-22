@@ -48,7 +48,9 @@ name: Doc-Accuracy Review (nightly)
 # on both sides; serialising that to prose means the next human re-derives all of it before they dare
 # trust it. A diff carries the verification in a form you can check by looking at it.
 #
-# The fix is therefore applied here and pushed to a long-lived `doc-drift/nightly` branch as a DRAFT PR.
+# The fix is therefore applied here and pushed as a DRAFT PR on its own branch, one per night
+# (`doc-drift/<date>-r<run id>-<attempt>`), cut from the same `main` commit the review read. The write half is
+# the reusable `doc-accuracy-write.yml`, shared with the weekly audit, which also types the issues filed as Task.
 # Issues are still filed exactly as before — they are this layer's dedup ledger (Step 1 reads open
 # `documentation` issues so a finding is never refiled), and `Fixes #N` in the PR body means merging the
 # PR closes them and the ledger self-cleans.
@@ -68,10 +70,9 @@ name: Doc-Accuracy Review (nightly)
 # and context counts, `git apply` rejects the whole patch on any mismatch, and models miscount context
 # lines. `git diff` derives the patch mechanically from edits the model is actually good at making.
 #
-# NEVER force-push and never auto-resolve. That constraint is what forces `git merge origin/main` rather
-# than a rebase in `open-pr`: a rebase rewrites the branch and can only be pushed with --force, which
-# would clobber whatever the maintainer committed there. When the merge conflicts the bot stops and says
-# so on the PR — silently resolving a conflict in prose a human wrote is worse than giving up.
+# ── Why one PR per night, not one accumulating branch (changed 2026-09-22) ─────────────────────────────
+# The accumulating `doc-drift/nightly` branch jammed on a merge conflict and silently discarded five nights of
+# fixes (PR #829). The full rationale lives with the code that implements it, in doc-accuracy-write.yml.
 
 on:
   schedule:
@@ -103,6 +104,8 @@ jobs:
     timeout-minutes: 60
     outputs:
       has_patch: ${{ steps.patch.outputs.has_patch }}
+      has_work: ${{ steps.scope.outputs.has_work }}
+      run_start: ${{ steps.scope.outputs.run_start }}
     steps:
       - uses: actions/checkout@v5
 
@@ -249,41 +252,14 @@ jobs:
             Verify every claim against the source before reporting it. Do not report style, tone or
             speculation — only verifiable inaccuracies, each citing file:line for BOTH sides.
 
-            Do NOT set issue Type / assignees / milestone / project (org-level; the maintainer's job).
+            Do NOT set issue Type / assignees / milestone / project. A later step without an LLM types
+            your issues as Task; the rest is the maintainer's job.
 
             Step 5 — apply the fix for each issue you filed, editing the doc page directly.
+              FIRST Read .github/doc-fix-rules.md in full. Its rules are binding for every edit you make —
+              above all: edit files under doc/ ONLY, never run git, and fix only what you are confident about.
 
-              HARD CONSTRAINT: edit files under doc/ ONLY. Never touch src/, .github/, scripts/,
-              coverage/, or anything else — a later step diffs the tree and FAILS THE RUN if you did.
-              Do not run git. Do not commit. Do not push. Something else does that.
-
-              Fix ONLY what you are confident about. A finding you are sure is wrong but unsure how to
-              phrase should be filed as an issue and left unedited — an issue costs a read, a wrong
-              committed sentence costs a reviewer who believes it. Partial coverage is expected and fine.
-
-              QUALIFY, DO NOT REPLACE. When code gained an opt-in mode and the page describes the old
-              behaviour, that prose is still exactly right for the default — say so, then add what the new
-              mode does instead. Rewriting it makes the path 100% of users are on read as the exception.
-
-              State the exemptions, not just the headline. A rule with carve-outs documented as absolute
-              teaches readers to expect the wrong thing in precisely the cases that bite.
-
-              VERIFY THE WHOLE PARAGRAPH YOU EDIT, not only the sentence you came for. A paragraph is one
-              unit to a reader, so rewriting half of it and inheriting the rest unchecked signs your name to
-              claims you never read. This has already caused drift: the 2026-08-01 run rewrote the "PK
-              fallback" paragraph in 09-querying.md and inherited a stale cluster-storage sentence beside it,
-              which the next night had to file again as #642.
-
-              NEVER write a linking phrase — "in either case", "likewise", "the same applies", "in both
-              paths" — into prose you have not verified THIS run. A connector widens the scope of the claim
-              it points at; widening an unverified claim is precisely how a fix manufactures new drift. That
-              is the exact mechanism behind #642: "In either case ..." was added in front of a sentence that
-              was only ever true for non-cluster archetypes, and the connector made it read as universal.
-
-              If a neighbouring claim is wrong and you are not confident how to fix it, SPLIT the paragraph
-              instead of bridging across it, and file the remainder as its own issue.
-
-            Your edits will be pushed to a long-lived `doc-drift/nightly` branch and opened as a DRAFT PR
+            Your edits will be pushed to tonight's own branch and opened as a DRAFT PR
             for the maintainer to review, adjust or merge. The issues you filed are referenced from it and
             close on merge.
           claude_args: |
@@ -353,185 +329,18 @@ jobs:
           retention-days: 7
 
   # ── No LLM below this line. ────────────────────────────────────────────────────────────────────────
-  # Holds the write token. Its only input is a patch that already passed the doc/-only allowlist, so
-  # there is nothing here that attacker-controlled prose can talk into doing something else.
-  open-pr:
+  # Holds the write token. Its only inputs are a patch that already passed the doc/-only allowlist and the
+  # run's start time, so there is nothing here that attacker-controlled prose can talk into doing something else.
+  # !cancelled(): a review that filed issues and then failed still gets them typed.
+  write:
     needs: review
-    if: ${{ needs.review.outputs.has_patch == '1' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    if: ${{ !cancelled() && needs.review.outputs.has_work == '1' && needs.review.outputs.run_start != '' }}
     permissions:
-      contents: write
+      contents: write        # push access: without it GitHub silently drops an issue type
+      issues: write
       pull-requests: write
-    env:
-      BRANCH: doc-drift/nightly
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0        # rebase needs real history
-
-      - uses: actions/download-artifact@v7
-        with:
-          name: doc-fix-patch
-
-      - name: Apply onto the accumulating branch
-        run: |
-          set -euo pipefail
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
-            git fetch origin "$BRANCH"
-            git switch -c "$BRANCH" --track "origin/$BRANCH"
-            # Bring yesterday's still-open PR up to date with main before adding to it.
-            #
-            # MERGE, not rebase, and this is load-bearing: rebasing rewrites the branch, so the push below
-            # would need --force. Force-pushing a branch the maintainer may have checked out and committed
-            # to is precisely the silent clobber this whole design refuses. Merge keeps every push a
-            # fast-forward, so `git push` with no flags is all that is ever needed.
-            # The messier history costs nothing — this repo squash-merges PRs, so the merge commits never
-            # reach main.
-            if ! git merge --no-edit origin/main; then
-              git merge --abort || true
-              PR=$(gh pr list --repo "${{ github.repository }}" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
-              if [ -n "$PR" ]; then
-                gh pr comment "$PR" --body "🤖 Tonight's doc-drift fixes could **not** be applied: merging \`main\` into this branch conflicts. The findings were still filed as issues. Resolve it here (or just merge this PR) and the next run picks up again — nothing was force-pushed and no conflict was auto-resolved."
-              fi
-              echo "::error::Merging main into $BRANCH conflicts — stopping rather than resolving. Commented on PR #$PR."
-              exit 1
-            fi
-          else
-            git switch -c "$BRANCH"
-          fi
-
-          # Layer 1 (scripts/check-doc-links.py) gates doc/ on every PR through build-docs.yml — but never on
-          # THIS one. GitHub suppresses `pull_request` workflows for PRs created with GITHUB_TOKEN, so a
-          # bot-opened doc-drift PR is the one doc change in the repo that no link check ever sees. Run the same
-          # lint here instead, which is strictly stronger than the check it stands in for: it refuses to COMMIT
-          # a dead link rather than annotating one after it is already on the branch.
-          # Baseline BEFORE the patch, because the lint covers all of doc/ and main can in principle arrive
-          # already broken. Without this, inherited breakage would be reported as "tonight's fixes broke a
-          # link", and a nightly that misattributes its failures is one people learn to ignore.
-          python3 scripts/check-doc-links.py --quiet && BASE_OK=1 || BASE_OK=0
-
-          # --3way so a hunk that already moved (because an earlier night touched the same page) merges
-          # instead of hard-failing on context mismatch.
-          if ! git apply --3way doc-fix.patch; then
-            git reset --hard || true          # --3way leaves conflict markers staged; drop them
-            echo "::error::Patch does not apply to $BRANCH even with --3way. Findings remain filed as issues."
-            exit 1
-          fi
-
-          # Stage FIRST, then ask the INDEX whether anything is there. Not `git status --porcelain`: that is a
-          # whole-worktree predicate and is never empty in this job, because download-artifact drops
-          # doc-fix.patch and fixes.txt in the workspace root and they show up as `??` lines. The guard could
-          # therefore never fire, and every no-op night fell through to `git commit` and died on "nothing added
-          # to commit" (run 30689709217, attempt 2) — a red run reporting the wrong cause. Same trap the `patch`
-          # step above calls out by name; the index is the exact question being asked here.
-          # -A so a newly created page counts, not just edits to existing ones.
-          git add -A doc/
-          if git diff --cached --quiet; then
-            # A no-op night is benign ONLY if the fixes already on the branch are visible in a PR. If the branch
-            # carries doc/ changes main does not have and no PR is open, they are STRANDED: the patch is
-            # idempotent, so no later run re-commits them and the create path never fires again for work already
-            # on the branch. That is exactly how #632-#635 ended up invisible (run 30689709217). Returning green
-            # here would report "nothing to do" when the truth is "nothing will ever happen" — so fail, and say
-            # how to recover. Diffing doc/ against main, rather than counting commits, keeps the merge commits
-            # this job creates from reading as stranded work.
-            # Name the files rather than testing `! git diff --quiet`: --quiet exits non-zero for ERRORS (128,
-            # e.g. an unresolvable origin/main) exactly as it does for "differs" (1), so the negation would
-            # report stranded fixes when the real fault was something else entirely. Assigning the output keeps
-            # a genuine git failure fatal under `set -e`, with git's own message instead of a misleading one.
-            UNMERGED=$(git diff --name-only origin/main -- doc/)
-            OPEN_PR=$(gh pr list --repo "${{ github.repository }}" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
-            if [ -n "$UNMERGED" ] && [ -z "$OPEN_PR" ]; then
-              echo "::error::$BRANCH carries doc fixes that are not in main and has no open PR — they are stranded. Open one with: gh pr create --repo ${{ github.repository }} --draft --base main --head $BRANCH"
-              printf '  %s\n' $UNMERGED
-              exit 1
-            fi
-            echo "::notice::Patch applied to a no-op — these fixes are already on the branch. Nothing to commit."
-            echo "committed=0" >> "$GITHUB_ENV"
-            exit 0
-          fi
-
-          # Ping-pong guard. Is this patch rewriting prose a PREVIOUS [doc-drift] run wrote? Touching the same
-          # PAGE two nights running is fine and expected (--3way exists for it). Rewriting the same LINES is not:
-          # it means the reviewer is arguing with itself, and since each run only sees the current text, neither
-          # side knows a round trip is happening. #642 was that — the 2026-08-01 fix bridged into a claim it had
-          # not checked, and 2026-08-02 filed the result. Blame the PRE-IMAGE line ranges of each hunk (HEAD is
-          # still pre-patch here; the patch is staged, not committed) and refuse if any land on a recent
-          # [doc-drift] commit. Recent, not ever: prose the bot wrote months ago legitimately needs revising when
-          # the code moves, and a permanent ban would freeze those pages.
-          PINGPONG=""
-          NOW=$(date +%s)
-          for f in $(git diff --cached --name-only); do
-            for hunk in $(git diff --cached -U0 -- "$f" | sed -n 's/^@@ -\([0-9,]*\).*/\1/p'); do
-              start=${hunk%,*}
-              len=${hunk#*,}
-              [ "$hunk" = "$start" ] && len=1          # "@@ -12 @@" means one line, no comma
-              [ "$len" = 0 ] && continue               # pure insertion — touches nobody's prose
-              end=$((start + len - 1))
-              for sha in $(git blame -L "$start,$end" --porcelain HEAD -- "$f" 2>/dev/null \
-                             | grep -oE '^[0-9a-f]{40}' | sort -u); do
-                case "$(git log -1 --format=%s "$sha")" in
-                  '[doc-drift]'*)
-                    age=$(( (NOW - $(git log -1 --format=%ct "$sha")) / 86400 ))
-                    if [ "$age" -le 30 ]; then
-                      PINGPONG="$PINGPONG  $f:$start-$end was written ${age}d ago by ${sha:0:7}"$'\n'
-                    fi
-                    ;;
-                esac
-              done
-            done
-          done
-          if [ -n "$PINGPONG" ]; then
-            echo "::error::This patch rewrites lines a recent [doc-drift] run wrote — the reviewer is revising its own output, which is how a fix turns into a round trip. Findings remain filed as issues; apply them by hand after deciding which reading is right."
-            printf '%s' "$PINGPONG"
-            exit 1
-          fi
-
-          # There is something to commit — hold it to the same mechanical bar every other doc change clears.
-          if ! python3 scripts/check-doc-links.py; then
-            if [ "$BASE_OK" = 0 ]; then
-              echo "::warning::doc/ link lint was ALREADY failing before tonight's patch — committing anyway, this breakage is inherited from main and not caused by these fixes."
-            else
-              echo "::error::Tonight's doc fixes introduce a dead link, a stale anchor or an unresolvable src/ path. Refusing to commit them. The findings remain filed as issues and the next run retries from a clean tree."
-              exit 1
-            fi
-          fi
-
-          git commit -m "[doc-drift] nightly doc fixes $(date -u +%F) [no-ut] [no-doc]" \
-                     -m "$(cat fixes.txt)" \
-                     -m "Filed and fixed by doc-accuracy-review.yml. Review the diff — the model fixes only what it is confident about, so the referenced issues may cover more than this commit does."
-          git push -u origin "$BRANCH"
-          echo "committed=1" >> "$GITHUB_ENV"
-
-      - name: Open or update the draft PR
-        if: ${{ env.committed == '1' }}
-        run: |
-          set -euo pipefail
-          PR=$(gh pr list --repo "${{ github.repository }}" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
-
-          if [ -z "$PR" ]; then
-            {
-              echo "$(cat fixes.txt)"
-              echo
-              echo "Doc-drift fixes applied automatically by the nightly doc-accuracy review (\`.github/workflows/doc-accuracy-review.yml\`)."
-              echo
-              echo "**Draft on purpose — this wants a human read.** The model fixes only findings it is confident about, so the \`Fixes\` list above may be longer than the diff. Check the issues that have no corresponding change and either fix them here or drop the \`Fixes\` line."
-              echo
-              echo "To adjust: \`git fetch && git switch $BRANCH\`, edit, commit, push. Later runs merge \`main\` in and append on top — they never force-push, so your commits are safe, and a conflict stops the run instead of resolving it."
-            } > body.md
-            gh pr create --repo "${{ github.repository }}" --draft --base main --head "$BRANCH" \
-                --title "[doc-drift] Nightly documentation fixes" --body-file body.md
-          else
-            # Append only the Fixes lines not already present, so the closing keywords accumulate across
-            # nights without the body growing duplicates. -x -F: whole-line, literal — "Fixes #60" must
-            # not be considered already present just because the body contains "Fixes #601".
-            gh pr view "$PR" --repo "${{ github.repository }}" --json body --jq .body > old.md
-            grep -vxF -f old.md fixes.txt > new_fixes.txt || true
-            cat new_fixes.txt old.md > body.md
-            gh pr edit "$PR" --repo "${{ github.repository }}" --body-file body.md
-            gh pr comment "$PR" --body "🤖 Appended tonight's doc-drift fixes: $(tr '\n' ' ' < new_fixes.txt)"
-          fi
+    uses: ./.github/workflows/doc-accuracy-write.yml
+    with:
+      kind: doc-drift
+      since: ${{ needs.review.outputs.run_start }}
+      has_patch: ${{ needs.review.outputs.has_patch == '1' }}

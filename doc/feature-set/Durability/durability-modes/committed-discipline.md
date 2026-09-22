@@ -12,7 +12,7 @@ description: 'Zero-loss, atomic writes on Typhon''s cheapest component layout �
 
 ## 🎯 What it solves
 
-`SingleVersion` components are Typhon's cheapest write path (~3ns, in-place), but by default they're only
+`SingleVersion` components are Typhon's cheapest write path (~40 ns, in-place), but by default they're only
 durable at the next tick fence — up to one tick of writes (~16ms at 60fps) can be lost on crash. A large class
 of writes (a player teleport, an item pickup, a currency debit) needs atomicity and zero data loss but not
 MVCC snapshot isolation or AS-OF queries. Forcing those onto a `Versioned` component buys zero-loss durability

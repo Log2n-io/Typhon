@@ -81,47 +81,43 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
 
-          # Get the project item ID for this issue
+          # The add IS the lookup. For an issue already on the board, addProjectV2ItemById returns the existing item — "If you try to add an item
+          # that already exists, the existing item ID is returned instead" (GitHub, "Using the API to manage Projects"). The four lookups in this
+          # file used to scan items(first: 100) of a board past 400 items: every issue beyond the first page was "not found", the step printed a
+          # warning and exited 0, and 22 closed issues were left short of Done with every check green (#1000).
           ITEM_ID=$(gh api graphql -f query='
-            query($project: ID!) {
-              node(id: $project) {
-                ... on ProjectV2 {
-                  items(first: 100) {
-                    nodes {
-                      id
-                      content {
-                        ... on Issue {
-                          id
-                        }
-                      }
-                    }
-                  }
+            mutation($project: ID!, $issue: ID!) {
+              addProjectV2ItemById(input: {projectId: $project, contentId: $issue}) {
+                item {
+                  id
                 }
               }
             }
-          ' -f project="$PROJECT_ID" --jq ".data.node.items.nodes[] | select(.content.id == \"$ISSUE_NODE_ID\") | .id")
+          ' -f project="$PROJECT_ID" -f issue="$ISSUE_NODE_ID" --jq '.data.addProjectV2ItemById.item.id')
 
-          if [ -n "$ITEM_ID" ]; then
-            # Update status to Done
-            gh api graphql -f query='
-              mutation($project: ID!, $item: ID!, $field: ID!, $value: String!) {
-                updateProjectV2ItemFieldValue(input: {
-                  projectId: $project
-                  itemId: $item
-                  fieldId: $field
-                  value: {singleSelectOptionId: $value}
-                }) {
-                  projectV2Item {
-                    id
-                  }
+          # Fail rather than warn: a green step is read as "the board moved".
+          if [ -z "$ITEM_ID" ]; then
+            echo "::error::No project item for issue #$ISSUE_NUMBER — the board was not updated"
+            exit 1
+          fi
+
+          # Update status to Done
+          gh api graphql -f query='
+            mutation($project: ID!, $item: ID!, $field: ID!, $value: String!) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $project
+                itemId: $item
+                fieldId: $field
+                value: {singleSelectOptionId: $value}
+              }) {
+                projectV2Item {
+                  id
                 }
               }
-            ' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$STATUS_FIELD_ID" -f value="$STATUS_DONE"
+            }
+          ' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$STATUS_FIELD_ID" -f value="$STATUS_DONE"
 
-            echo "✅ Updated issue #$ISSUE_NUMBER status to Done"
-          else
-            echo "⚠️ Could not find project item for issue #$ISSUE_NUMBER"
-          fi
+          echo "✅ Updated issue #$ISSUE_NUMBER status to Done"
 
   # Update project status when issues are reopened
   update-status-on-reopen:
@@ -136,47 +132,39 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
 
-          # Get the project item ID for this issue
+          # The add IS the lookup — see update-status-on-close.
           ITEM_ID=$(gh api graphql -f query='
-            query($project: ID!) {
-              node(id: $project) {
-                ... on ProjectV2 {
-                  items(first: 100) {
-                    nodes {
-                      id
-                      content {
-                        ... on Issue {
-                          id
-                        }
-                      }
-                    }
-                  }
+            mutation($project: ID!, $issue: ID!) {
+              addProjectV2ItemById(input: {projectId: $project, contentId: $issue}) {
+                item {
+                  id
                 }
               }
             }
-          ' -f project="$PROJECT_ID" --jq ".data.node.items.nodes[] | select(.content.id == \"$ISSUE_NODE_ID\") | .id")
+          ' -f project="$PROJECT_ID" -f issue="$ISSUE_NODE_ID" --jq '.data.addProjectV2ItemById.item.id')
 
-          if [ -n "$ITEM_ID" ]; then
-            # Update status to In Progress
-            gh api graphql -f query='
-              mutation($project: ID!, $item: ID!, $field: ID!, $value: String!) {
-                updateProjectV2ItemFieldValue(input: {
-                  projectId: $project
-                  itemId: $item
-                  fieldId: $field
-                  value: {singleSelectOptionId: $value}
-                }) {
-                  projectV2Item {
-                    id
-                  }
+          if [ -z "$ITEM_ID" ]; then
+            echo "::error::No project item for issue #$ISSUE_NUMBER — the board was not updated"
+            exit 1
+          fi
+
+          # Update status to In Progress
+          gh api graphql -f query='
+            mutation($project: ID!, $item: ID!, $field: ID!, $value: String!) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $project
+                itemId: $item
+                fieldId: $field
+                value: {singleSelectOptionId: $value}
+              }) {
+                projectV2Item {
+                  id
                 }
               }
-            ' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$STATUS_FIELD_ID" -f value="$STATUS_IN_PROGRESS"
+            }
+          ' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$STATUS_FIELD_ID" -f value="$STATUS_IN_PROGRESS"
 
-            echo "✅ Updated issue #$ISSUE_NUMBER status to In Progress"
-          else
-            echo "⚠️ Could not find project item for issue #$ISSUE_NUMBER"
-          fi
+          echo "✅ Updated issue #$ISSUE_NUMBER status to In Progress"
 
   # Link PRs to issues and update status
   link-pr-to-issue:
@@ -206,49 +194,46 @@ jobs:
           if [ -n "$ISSUE_NUM" ]; then
             echo "Found linked issue: #$ISSUE_NUM"
 
-            # Get issue node ID
-            ISSUE_NODE_ID=$(gh api "/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUM" --jq '.node_id')
+            # Get issue node ID — empty when `#N` names a pull request. The issues endpoint serves PRs too, and the add below would put a PR on the
+            # board as an item; the scan it replaced matched only `... on Issue` content, so it never needed this guard.
+            ISSUE_NODE_ID=$(gh api "/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUM" --jq 'if .pull_request then "" else .node_id end')
 
             if [ -n "$ISSUE_NODE_ID" ]; then
-              # Get the project item ID
+              # The add IS the lookup — see update-status-on-close.
               ITEM_ID=$(gh api graphql -f query='
-                query($project: ID!) {
-                  node(id: $project) {
-                    ... on ProjectV2 {
-                      items(first: 100) {
-                        nodes {
-                          id
-                          content {
-                            ... on Issue {
-                              id
-                            }
-                          }
-                        }
-                      }
+                mutation($project: ID!, $issue: ID!) {
+                  addProjectV2ItemById(input: {projectId: $project, contentId: $issue}) {
+                    item {
+                      id
                     }
                   }
                 }
-              ' -f project="$PROJECT_ID" --jq ".data.node.items.nodes[] | select(.content.id == \"$ISSUE_NODE_ID\") | .id")
+              ' -f project="$PROJECT_ID" -f issue="$ISSUE_NODE_ID" --jq '.data.addProjectV2ItemById.item.id')
 
-              if [ -n "$ITEM_ID" ]; then
-                # Update status to In Progress (org project #1 has no Review status)
-                gh api graphql -f query='
-                  mutation($project: ID!, $item: ID!, $field: ID!, $value: String!) {
-                    updateProjectV2ItemFieldValue(input: {
-                      projectId: $project
-                      itemId: $item
-                      fieldId: $field
-                      value: {singleSelectOptionId: $value}
-                    }) {
-                      projectV2Item {
-                        id
-                      }
+              if [ -z "$ITEM_ID" ]; then
+                echo "::error::No project item for issue #$ISSUE_NUM — the board was not updated"
+                exit 1
+              fi
+
+              # Update status to In Progress (org project #1 has no Review status)
+              gh api graphql -f query='
+                mutation($project: ID!, $item: ID!, $field: ID!, $value: String!) {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: $project
+                    itemId: $item
+                    fieldId: $field
+                    value: {singleSelectOptionId: $value}
+                  }) {
+                    projectV2Item {
+                      id
                     }
                   }
-                ' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$STATUS_FIELD_ID" -f value="$STATUS_IN_PROGRESS"
+                }
+              ' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$STATUS_FIELD_ID" -f value="$STATUS_IN_PROGRESS"
 
-                echo "✅ Updated issue #$ISSUE_NUM status to In Progress"
-              fi
+              echo "✅ Updated issue #$ISSUE_NUM status to In Progress"
+            else
+              echo "ℹ️ #$ISSUE_NUM is a pull request, not an issue — board unchanged"
             fi
           else
             echo "ℹ️ No issue number found in PR title or branch name"
@@ -307,48 +292,44 @@ jobs:
             fi
             echo "Issue #$ISSUE_NUM is $ISSUE_STATE -> board $TARGET_NAME"
 
-            # Get issue node ID
-            ISSUE_NODE_ID=$(gh api "/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUM" --jq '.node_id')
+            # Get issue node ID — empty when `#N` names a pull request (see link-pr-to-issue).
+            ISSUE_NODE_ID=$(gh api "/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUM" --jq 'if .pull_request then "" else .node_id end')
 
             if [ -n "$ISSUE_NODE_ID" ]; then
-              # Get project item and update status to Done
+              # The add IS the lookup — see update-status-on-close.
               ITEM_ID=$(gh api graphql -f query='
-                query($project: ID!) {
-                  node(id: $project) {
-                    ... on ProjectV2 {
-                      items(first: 100) {
-                        nodes {
-                          id
-                          content {
-                            ... on Issue {
-                              id
-                            }
-                          }
-                        }
-                      }
+                mutation($project: ID!, $issue: ID!) {
+                  addProjectV2ItemById(input: {projectId: $project, contentId: $issue}) {
+                    item {
+                      id
                     }
                   }
                 }
-              ' -f project="$PROJECT_ID" --jq ".data.node.items.nodes[] | select(.content.id == \"$ISSUE_NODE_ID\") | .id")
+              ' -f project="$PROJECT_ID" -f issue="$ISSUE_NODE_ID" --jq '.data.addProjectV2ItemById.item.id')
 
-              if [ -n "$ITEM_ID" ]; then
-                gh api graphql -f query='
-                  mutation($project: ID!, $item: ID!, $field: ID!, $value: String!) {
-                    updateProjectV2ItemFieldValue(input: {
-                      projectId: $project
-                      itemId: $item
-                      fieldId: $field
-                      value: {singleSelectOptionId: $value}
-                    }) {
-                      projectV2Item {
-                        id
-                      }
+              if [ -z "$ITEM_ID" ]; then
+                echo "::error::No project item for issue #$ISSUE_NUM — the board was not updated"
+                exit 1
+              fi
+
+              gh api graphql -f query='
+                mutation($project: ID!, $item: ID!, $field: ID!, $value: String!) {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: $project
+                    itemId: $item
+                    fieldId: $field
+                    value: {singleSelectOptionId: $value}
+                  }) {
+                    projectV2Item {
+                      id
                     }
                   }
-                ' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$STATUS_FIELD_ID" -f value="$TARGET_STATUS"
+                }
+              ' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$STATUS_FIELD_ID" -f value="$TARGET_STATUS"
 
-                echo "✅ Issue #$ISSUE_NUM moved to $TARGET_NAME"
-              fi
+              echo "✅ Issue #$ISSUE_NUM moved to $TARGET_NAME"
+            else
+              echo "ℹ️ #$ISSUE_NUM is a pull request, not an issue — board unchanged"
             fi
           else
             echo "ℹ️ No issue number found in PR title or branch name"

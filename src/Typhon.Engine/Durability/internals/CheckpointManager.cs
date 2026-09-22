@@ -666,7 +666,10 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             // retry). The WaitContext gives the whole cycle one shared, bounded deadline budget.
             var ctx = WaitContext.FromTimeout(TimeSpan.FromMilliseconds(_resourceOptions.CheckpointBarrierTimeoutMs));
             _walManager.RequestFlush();
-            _walManager.WaitForDurable(_walManager.LastAppendedLsn, ref ctx);
+            // #937: the allocation frontier can name LSNs no frame owns (an abandoned claim, a claim whose producer timed out over
+            // the buffer boundary). Waiting for one of those stalls every cycle — the shutdown cycle included — for the full
+            // CheckpointBarrierTimeoutMs until an unrelated later commit happens to drain past it.
+            _walManager.WaitForDurable(_walManager.LastPublishedLsn, ref ctx);
             long barrierLsn = _walManager.DurableLsn;
 
             // CK-13: never past a commit still between its append and its publish. Read after the barrier: a barrier that covers a record has drained
@@ -720,12 +723,13 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
 
                         if (writtenThisPass > 0)
                         {
-                            // CK-02 flush2: the captured page copies just written may reflect records up to the current
-                            // LastAppendedLsn. Flush the WAL through that point BEFORE the data fsync makes those bytes
+                            // CK-02 flush2: the captured page copies just written may reflect records up to the current flush
+                            // target — every record whose frame was PUBLISHED, since AP-01 orders a commit's page effects strictly
+                            // after its append returns. Flush the WAL through that point BEFORE the data fsync makes those bytes
                             // durable, so the data file can never hold a change whose record could still be lost
                             // (captured ⊆ durable, composing with AP-01 — 04 §3).
                             _walManager.RequestFlush();
-                            _walManager.WaitForDurable(_walManager.LastAppendedLsn, ref ctx);
+                            _walManager.WaitForDurable(_walManager.LastPublishedLsn, ref ctx);
 
                             using (TyphonEvent.BeginCheckpointFsync())
                             {

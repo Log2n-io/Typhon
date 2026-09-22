@@ -73,7 +73,7 @@ using EcsView<Factory> view = tx.Query<Factory>()
 - `OrderByField`/`OrderByFieldDescending`/`Skip`/`Take` require a prior `WhereField` call (it identifies the component table) and an indexed field; `ExecuteOrdered()` does not support OR predicates.
 - `ToView()` rejects `OrderBy`/`Skip`/`Take` (a view is unordered) and rejects combining `WhereField` with a spatial predicate or a chained `.Where(lambda)`.
 - At most one spatial predicate (`WhereNearby`/`WhereInAABB`/`WhereRay`) per query; the target component must declare `[SpatialIndex]`.
-- `EcsQuery<TArchetype>` is a mutable struct that borrows the `Transaction` — it does not own it and must not outlive it.
+- `EcsQuery<TArchetype>` is a mutable struct that borrows the `Transaction` — it does not own it and must not outlive it. The view `ToView()` returns is the exception: it detaches its retained copy of the query from the creating transaction at construction (VIEW-01), so the view outlives that transaction and is refreshed against whichever `Transaction` you pass to `Refresh(tx)`.
 - Polymorphic queries (`Query<T>()`) match the archetype's full descendant subtree; use `QueryExact<T>()` to match only the named archetype.
 
 ## 🧪 Tests

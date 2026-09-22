@@ -18,8 +18,9 @@ produced, with no file round-trip and no restart required.
 
 ## ⚙️ How it works (in brief)
 
-`TcpExporter` listens on one TCP port and accepts a single client at a time. On connect it sends an Init frame
-(the same header + metadata tables as the file format) and then a stream of Block frames, one per drained batch,
+`TcpExporter` listens on one TCP port — IPv4 loopback unless told otherwise — and accepts a single client at a
+time. On connect it sends an Init frame (the same header + metadata tables as the file format) and then a stream
+of Block frames, one per drained batch,
 LZ4-compressed the same way as file export. It also re-sends a small catch-up frame — currently-claimed thread
 names — about once a second, so a viewer that attaches mid-session still gets correct lane labels. Sends are
 non-blocking: a frame that can't be written immediately is dropped rather than stalling the exporter thread. On
@@ -45,10 +46,18 @@ var runtime = TyphonRuntime.Create(dbe, schedule =>
 | Config key | Default | Effect |
 |---|---|---|
 | `Typhon:Profiler:Live` | unset (no live export) | TCP port to listen on; any non-numeric value falls back to port 9100 |
+| `Typhon:Profiler:BindAddress` | `127.0.0.1` | Address the listener binds to. Anything else puts the unauthenticated stream on a routable interface — see Guarantees & limits |
 | `Typhon:Profiler:LiveWaitMs` | `0` (don't wait) | Milliseconds `TyphonRuntime.Create` blocks waiting for the first viewer to attach before returning |
 
 ## ⚠️ Guarantees & limits
 
+- **Loopback by default, and no authentication at all** — the stream carries system, archetype and component
+  names, query text, timings and thread layout, with no handshake and no credential. Binding beyond `127.0.0.1`
+  hands all of that to anyone who can reach the port, so it is opt-in: set `BindAddress` (or pass
+  `--bind-address <addr>`) and mean it. Remote profiling of a server process is a real use case; it just has to be
+  asked for rather than inherited.
+- **IPv4 loopback specifically** — the default is `127.0.0.1`, not `::1`. The Workbench's attach path resolves
+  IPv4 only, so a client dialling `::1` explicitly will not connect.
 - **Single client only** — a second connection attempt while a viewer is attached is rejected outright; run a
   second session on a different `Live` port if you need a second observer.
 - **No persistence** — bytes never delivered over this socket cannot be replayed; a live-only session has no
@@ -67,6 +76,7 @@ var runtime = TyphonRuntime.Create(dbe, schedule =>
 ## 🧪 Tests
 
 - [TcpExporterIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/TcpExporterIntegrationTests.cs) — Init/Block frame round-trip over a loopback socket, plus `LiveWaitMs`/live-connect-timeout blocking-vs-non-blocking connect behavior
+- [ProfilerLaunchConfigTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/ProfilerLaunchConfigTests.cs) — that the resolved default really is loopback, that `--bind-address` and `Typhon:Profiler:BindAddress` are honoured, and that a CLI layer omitting the flag does not erase a bind set in config
 
 ## 🔗 Related
 

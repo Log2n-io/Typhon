@@ -437,6 +437,7 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
                         queueDrainScope.Dispose();
                     }
 
+
                     // 7. Advance durable LSN and signal waiters. Phase 8: Signal span — LSN advance + waiter wake-up.
                     //    The outer check only gates span emission (avoid creating the Signal span when no advance is likely); AdvanceDurable performs the
                     //    monotonic advance itself.

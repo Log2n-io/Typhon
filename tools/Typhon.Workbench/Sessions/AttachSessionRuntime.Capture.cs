@@ -13,7 +13,7 @@ namespace Typhon.Workbench.Sessions;
 /// <b>Why the filter lives here and not in the engine.</b> Gating at the producer (<c>TyphonEvent.BeginPrologue</c> plus
 /// the trace-event source generator) would additionally save the 25–50 ns/span the application's worker threads pay and
 /// remove the ring/spillover pressure that makes high-rate workloads drop records. It was rejected on blast radius: it
-/// needs a bidirectional control channel, a receive thread on a port bound to <c>IPAddress.Any</c>, and a change to a
+/// needs a bidirectional control channel, a receive thread on an explicitly configured profiler endpoint, and a change to a
 /// source generator feeding 204 event kinds. Filtering here changes no engine code and cannot regress a non-Workbench
 /// user. See <c>claude/design/Profiler/12-on-demand-tick-capture.md</c> §3.
 /// </para>

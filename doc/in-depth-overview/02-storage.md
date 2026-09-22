@@ -419,7 +419,7 @@ The Workbench's Database File Map (Module 15) reads the engine's storage state w
 |---|---|---|
 | `DatabaseName` | `"TyphonDB"` | Logical name. Validated against `^[A-Za-z0-9_-]+$` and ≤ 63 UTF-8 bytes. |
 | `DatabaseDirectory` | `Environment.CurrentDirectory` | Filesystem directory. Must exist. `DatabaseAbsoluteDirectory` returns the absolutized form. |
-| `DatabaseFileName` | `DatabaseName` (if unset) | Logical file prefix; backing file becomes `<DatabaseFileName>.bin`. Same validation rules. |
+| `DatabaseFileName` | `DatabaseName` (if unset) | Validated with the same rules, but no longer names any file: a database is the bundle directory `{DatabaseDirectory}/{DatabaseName}.typhon/`, and the paged data file inside it is always named `data` (no extension). |
 | `DatabaseCacheSize` | `256 MiB` (`DefaultDatabaseCacheSize`) | Total page cache bytes. Must be a multiple of `PageSize`, between `MinimumCacheSize` (8 MiB) and `MaximumCacheSize` (2 GiB minus one page). |
 | `PagesDebugPattern` | `false` | Fill newly-allocated pages with a debug pattern (development/testing). |
 | `BackpressureStrategyFactory` (internal) | `() => new WaitForIOStrategy()` | Test hook to substitute the backpressure strategy. |
@@ -428,7 +428,7 @@ Also exposed: `EnsureFileDeleted()` (best-effort delete of the backing file + lo
 
 `ManagedPagedMMFOptions` is currently a marker subclass — same shape, separate type for DI binding.
 
-The advisory lock file (`<DatabaseName>.lock` in `DatabaseDirectory`) is created on open and carries `{ pid, machineName, startedAt }` JSON. A stale lock (process gone) is silently removed; a live lock (or a foreign-machine lock that can't be verified) raises `DatabaseLockedException`.
+The advisory lock file (`db.lock` inside the `{DatabaseName}.typhon/` bundle directory) is created on open and carries `{ pid, machineName, startedAt, yieldable, profilerEndpoint }` JSON — the last two optional, absent meaning `false` / none. A stale lock (process gone) is silently removed; a live lock (or a foreign-machine lock that can't be verified) raises `DatabaseLockedException`.
 
 ---
 

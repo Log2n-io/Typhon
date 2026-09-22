@@ -1,5 +1,9 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests;
 
@@ -540,4 +544,440 @@ class EnableDisableTests : TestBase<EnableDisableTests>
             Assert.That(v.Dx, Is.EqualTo(4f), "the supplied value must persist across the commit");
         }
     }
+
+    // ── #998: the cluster copy of the enabled state (rule ENABLE-01) ─────────────────────────────────────────────────────────────────────────────────
+    //
+    // Every assertion below reads the cluster EnabledBits through ClusterSoAProbe. A point read uses the EntityMap record, which was right throughout #998:
+    // the defect lived entirely in the copy bulk iteration and the crash rebuild read.
+
+    private static EntityId SpawnUnit(DatabaseEngine dbe)
+    {
+        using var t = dbe.CreateQuickTransaction();
+        var pos = new EcsPosition(1, 2, 3);
+        var vel = new EcsVelocity(4, 5, 6);
+        var id = t.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+        t.Commit();
+        return id;
+    }
+
+    /// <summary>
+    /// A rolled-back Enable or Disable leaves the cluster EnabledBits at the committed state, as it leaves the record (#998).
+    /// </summary>
+    /// <remarks>
+    /// Enable/Disable used to write the cluster bit at staging, and nothing restored it on rollback. The two copies then disagreed with no crash involved: a
+    /// rolled-back Disable hid the component from bulk iteration while the record still said enabled, and a checkpoint made that durable.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("ENABLE-01")]
+    public void RolledBackChange_LeavesTheClusterBitAtTheCommittedState([Values] bool enable, [Values] bool explicitRollback)
+    {
+        using var dbe = SetupEngine();
+        var id = SpawnUnit(dbe);
+        var meta = Archetype<EcsUnit>.Metadata;
+        var velSlot = meta.GetSlot(EcsUnit.Velocity._componentTypeId);
+
+        // Rolling back an Enable needs a committed Disable to start from.
+        if (enable)
+        {
+            using var t = dbe.CreateQuickTransaction();
+            t.OpenMut(id).Disable(EcsUnit.Velocity);
+            t.Commit();
+        }
+
+        var committed = !enable;
+
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            var entity = t.OpenMut(id);
+            if (enable)
+            {
+                entity.Enable(EcsUnit.Velocity);
+            }
+            else
+            {
+                entity.Disable(EcsUnit.Velocity);
+            }
+
+            if (explicitRollback)
+            {
+                t.Rollback();
+            }
+        }
+
+        AssertBothCopiesAtCommittedState(dbe, id, velSlot, committed);
+    }
+
+    /// <summary>
+    /// The <see cref="RuleMutantAttribute"/> companion: reproduces the pre-fix staging-time write of the cluster bit, then rolls back, and requires the
+    /// rollback verifier's assertion to reject the result.
+    /// </summary>
+    [Test]
+    [RuleMutant("ENABLE-01")]
+    public void AClusterBitWrittenAtStaging_IsRejectedByTheRollbackAssertion()
+    {
+        RuleMutants.AssertDetects("ENABLE-01", "must hold the committed state after a rollback", () =>
+        {
+            using var dbe = SetupEngine();
+            var id = SpawnUnit(dbe);
+            var meta = Archetype<EcsUnit>.Metadata;
+            var velSlot = meta.GetSlot(EcsUnit.Velocity._componentTypeId);
+
+            using (var t = dbe.CreateQuickTransaction())
+            {
+                t.OpenMut(id).Disable(EcsUnit.Velocity);
+                ClusterSoAProbe.SetEnabled(dbe, meta.ArchetypeId, id, velSlot, false);   // what EntityRef.Disable used to do at staging
+                t.Rollback();
+            }
+
+            AssertBothCopiesAtCommittedState(dbe, id, velSlot, true);
+        });
+    }
+
+    private static void AssertBothCopiesAtCommittedState(DatabaseEngine dbe, EntityId id, int velSlot, bool committed)
+    {
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            Assert.That(t.Open(id).IsEnabled(EcsUnit.Velocity), Is.EqualTo(committed), "the record must hold the committed state");
+        }
+
+        Assert.That(ClusterSoAProbe.IsEnabled(dbe, Archetype<EcsUnit>.Metadata.ArchetypeId, id, velSlot), Is.EqualTo(committed),
+            "the cluster copy must hold the committed state after a rollback — bulk iteration reads it, not the record");
+    }
+
+    /// <summary>
+    /// A staged change reaches the cluster EnabledBits at commit and not before (#998).
+    /// </summary>
+    /// <remarks>
+    /// The cluster words are shared memory read by every bulk scan, unversioned. A bit written at staging was therefore visible to every concurrent
+    /// transaction before the change committed — read-uncommitted on the bulk path.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("ENABLE-01")]
+    public void StagedChange_ReachesTheClusterBitOnlyAtCommit()
+    {
+        using var dbe = SetupEngine();
+        var id = SpawnUnit(dbe);
+        var meta = Archetype<EcsUnit>.Metadata;
+        var posSlot = meta.GetSlot(EcsUnit.Position._componentTypeId);
+        var velSlot = meta.GetSlot(EcsUnit.Velocity._componentTypeId);
+
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            t.OpenMut(id).Disable(EcsUnit.Velocity);
+            Assert.That(ClusterSoAProbe.IsEnabled(dbe, meta.ArchetypeId, id, velSlot), Is.True,
+                "a staged Disable must not reach the cluster copy — every concurrent bulk scan reads it");
+            t.Commit();
+        }
+
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            Assert.That(t.Open(id).IsEnabled(EcsUnit.Velocity), Is.False, "the record must hold the committed Disable");
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(ClusterSoAProbe.IsEnabled(dbe, meta.ArchetypeId, id, velSlot), Is.False, "the commit must publish the Disable to the cluster copy");
+            Assert.That(ClusterSoAProbe.IsEnabled(dbe, meta.ArchetypeId, id, posSlot), Is.True, "a slot the change did not touch must stay enabled");
+        });
+    }
+
+    /// <summary>
+    /// Enable/Disable commits racing on different entities of one cluster lose no bit (#998).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// One cluster word holds a component's bit for every entity of the cluster, so two commits on different entities each read-modify-write the same word.
+    /// A plain <c>|=</c> / <c>&amp;=</c> lets one overwrite the other's bit; the commit path uses <c>Interlocked</c>, as <c>FinalizeSpawns</c> does for the
+    /// same words.
+    /// </para>
+    /// <para>
+    /// The copies are compared after EVERY round, not only at the end: the publish writes the absolute mask, so a bit lost in one round is rewritten by the
+    /// next commit on that entity and would be invisible to a final-state check. A timing race can only be caught, never forced — this is a guard.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(15_000)]
+    public void ConcurrentCommitsInOneCluster_LoseNoBit()
+    {
+        const int threads = 4;
+        const int perThread = 8;
+        const int rounds = 8;
+
+        using var dbe = SetupEngine();
+        var meta = Archetype<EcsUnit>.Metadata;
+        var velSlot = meta.GetSlot(EcsUnit.Velocity._componentTypeId);
+
+        // One spawn transaction fills the archetype's clusters in order; workers take the entities interleaved (i % threads), so any cluster holding two
+        // or more of them is written by more than one worker.
+        var ids = new EntityId[threads * perThread];
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < ids.Length; i++)
+            {
+                var pos = new EcsPosition(i, 0, 0);
+                var vel = new EcsVelocity(1, 1, 1);
+                ids[i] = t.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+            }
+
+            t.Commit();
+        }
+
+        // Premise: the race needs a word shared ACROSS threads. Every cluster the 32 entities occupy must hold entities of at least two workers, or the
+        // test would pass while each thread wrote words nobody else touched.
+        var workersByCluster = new System.Collections.Generic.Dictionary<int, System.Collections.Generic.HashSet<int>>();
+        for (var i = 0; i < ids.Length; i++)
+        {
+            var chunkId = ClusterSoAProbe.Locate(dbe, meta.ArchetypeId, ids[i]).ChunkId;
+            if (!workersByCluster.TryGetValue(chunkId, out var workerSet))
+            {
+                workersByCluster[chunkId] = workerSet = [];
+            }
+
+            workerSet.Add(i % threads);
+        }
+
+        foreach (var (chunkId, workerSet) in workersByCluster)
+        {
+            Assert.That(workerSet.Count, Is.GreaterThan(1), $"premise: cluster {chunkId} holds entities of one worker only, so nothing races on its words");
+        }
+
+        // Workers plus this thread: each round starts and ends on the barrier, and the copies are compared in between. A worker that fails keeps
+        // signalling, so every round runs to completion and nobody is left blocked on the barrier.
+        using var barrier = new Barrier(threads + 1);
+        Exception failure = null;
+        var workers = new Thread[threads];
+        for (var w = 0; w < threads; w++)
+        {
+            var worker = w;
+            workers[w] = new Thread(() =>
+            {
+                for (var round = 0; round < rounds; round++)
+                {
+                    barrier.SignalAndWait();
+                    try
+                    {
+                        for (var i = worker; i < ids.Length; i += threads)
+                        {
+                            using var t = dbe.CreateQuickTransaction();
+                            var entity = t.OpenMut(ids[i]);
+                            if ((round & 1) == 0)
+                            {
+                                entity.Disable(EcsUnit.Velocity);
+                            }
+                            else
+                            {
+                                entity.Enable(EcsUnit.Velocity);
+                            }
+
+                            t.Commit();
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Interlocked.CompareExchange(ref failure, ex, null);
+                    }
+
+                    barrier.SignalAndWait();
+                }
+            }) { IsBackground = true };
+            workers[w].Start();
+        }
+
+        var mismatches = 0;
+        for (var round = 0; round < rounds; round++)
+        {
+            barrier.SignalAndWait();
+            barrier.SignalAndWait();
+
+            var expected = (round & 1) != 0;
+            foreach (var id in ids)
+            {
+                if (ClusterSoAProbe.IsEnabled(dbe, meta.ArchetypeId, id, velSlot) != expected)
+                {
+                    mismatches++;
+                }
+            }
+        }
+
+        foreach (var worker in workers)
+        {
+            worker.Join();
+        }
+
+        Assert.That(failure, Is.Null, $"a worker's transaction failed — {failure}");
+        Assert.That(mismatches, Is.Zero, "a committed Enable/Disable was lost from the cluster copy: another entity's commit overwrote its bit");
+    }
+
+    /// <summary>
+    /// A change committed against an entity another transaction destroyed meanwhile must not reach the slot's NEXT occupant (#998 review).
+    /// </summary>
+    /// <remarks>
+    /// The commit-time publish reads the entity's record and writes the cluster slot it names. When a later transaction has destroyed the entity and committed
+    /// first, that record is a tombstone and its slot has been released at commit — and a spawn may already hold it. Writing then stamps the dead entity's mask
+    /// onto a different live entity. Single-threaded and deterministic: the transactions are interleaved by hand.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("ENABLE-01")]
+    public void ACommitAgainstADestroyedEntity_LeavesTheSlotsNextOccupantAlone()
+    {
+        using var dbe = SetupEngine();
+        var meta = Archetype<EcsUnit>.Metadata;
+        var posSlot = meta.GetSlot(EcsUnit.Position._componentTypeId);
+        var velSlot = meta.GetSlot(EcsUnit.Velocity._componentTypeId);
+
+        // Neighbours keep the cluster alive after the destroy, so the released slot is reused rather than the whole cluster freed.
+        var neighbour = SpawnUnit(dbe);
+        var victim = SpawnUnit(dbe);
+        SpawnUnit(dbe);
+        var victimSlot = ClusterSoAProbe.Locate(dbe, meta.ArchetypeId, victim);
+
+        using var stale = dbe.CreateQuickTransaction();
+        stale.OpenMut(victim).Disable(EcsUnit.Velocity);
+
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            t.Destroy(victim);
+            t.Commit();
+        }
+
+        EntityId occupant;
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            var pos = new EcsPosition(7, 7, 7);
+            var vel = new EcsVelocity(8, 8, 8);
+            occupant = t.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+            t.Commit();
+        }
+
+        Assert.That(ClusterSoAProbe.Locate(dbe, meta.ArchetypeId, occupant), Is.EqualTo(victimSlot),
+            "premise: the new entity must reuse the destroyed entity's slot, or nothing here can be overwritten");
+
+        stale.Commit();
+
+        // Premise: the stale commit reached the publish — it rewrote the tombstone's record, which is the step just before the cluster write. Without this,
+        // a record already reaped would skip the publish entirely and the assertions below would hold for nothing.
+        Assert.That(ClusterSoAProbe.RecordEnabledBits(dbe, meta.ArchetypeId, victim) & (1 << velSlot), Is.Zero,
+            "premise: the stale commit must have published its Disable to the tombstone's record");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(ClusterSoAProbe.IsEnabled(dbe, meta.ArchetypeId, occupant, velSlot), Is.True,
+                "the stale commit wrote the destroyed entity's Disable into the slot's new occupant");
+            Assert.That(ClusterSoAProbe.IsEnabled(dbe, meta.ArchetypeId, occupant, posSlot), Is.True);
+            Assert.That(ClusterSoAProbe.IsEnabled(dbe, meta.ArchetypeId, neighbour, velSlot), Is.True);
+        });
+    }
+
+    /// <summary>
+    /// A bit left on a freed slot does not reach the slot's next occupant: every claim writes the occupant's full mask (#998 review).
+    /// </summary>
+    /// <remarks>
+    /// A freed slot is not guaranteed clean. <c>ClearSlotMetadata</c> clears a slot's enabled bits before its occupancy bit, so a publish that passes its
+    /// occupancy check in between can put a bit back on the slot being freed. The bit is invisible while the slot is empty; the danger is the next claim, which
+    /// used to OR the new occupant's bits in and never clear — enabling, for the new entity, a component it may never have supplied. The stray bit is placed by
+    /// hand here, because the interleaving that leaves it cannot be forced from a test.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("ENABLE-01")]
+    public void AStrayBitOnAFreedSlot_DoesNotReachItsNextOccupant()
+    {
+        using var dbe = SetupEngine();
+        var meta = Archetype<EcsUnit>.Metadata;
+        var posSlot = meta.GetSlot(EcsUnit.Position._componentTypeId);
+        var velSlot = meta.GetSlot(EcsUnit.Velocity._componentTypeId);
+
+        SpawnUnit(dbe);
+        var victim = SpawnUnit(dbe);
+        SpawnUnit(dbe);
+        var freed = ClusterSoAProbe.Locate(dbe, meta.ArchetypeId, victim);
+
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            t.Destroy(victim);
+            t.Commit();
+        }
+
+        ClusterSoAProbe.SetBitAt(dbe, meta.ArchetypeId, freed, velSlot, true);
+
+        // The new occupant never supplies Velocity: an inherited bit would enable a component it does not have.
+        EntityId occupant;
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            var pos = new EcsPosition(7, 7, 7);
+            occupant = t.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos));
+            t.Commit();
+        }
+
+        Assert.That(ClusterSoAProbe.Locate(dbe, meta.ArchetypeId, occupant), Is.EqualTo(freed),
+            "premise: the new entity must reuse the freed slot that carries the stray bit");
+        Assert.Multiple(() =>
+        {
+            Assert.That(ClusterSoAProbe.IsEnabled(dbe, meta.ArchetypeId, occupant, velSlot), Is.False,
+                "the new occupant inherited the previous occupant's Velocity bit — a component it never supplied");
+            Assert.That(ClusterSoAProbe.IsEnabled(dbe, meta.ArchetypeId, occupant, posSlot), Is.True);
+        });
+    }
+
+    /// <summary>
+    /// A pure-Transient archetype keeps its cluster metadata in the TransientStore segment; the commit publishes there too (#998).
+    /// </summary>
+    [Test]
+    [VerifiesRule("ENABLE-01")]
+    public void PureTransientArchetype_CommitPublishesTheClusterBit()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<EdTrA>();
+        dbe.RegisterComponentFromAccessor<EdTrB>();
+        dbe.InitializeArchetypes();
+
+        var meta = Archetype<EdTrArch>.Metadata;
+        var aSlot = meta.GetSlot(EdTrArch.A._componentTypeId);
+        var bSlot = meta.GetSlot(EdTrArch.B._componentTypeId);
+        Assert.That(dbe._archetypeStates[meta.ArchetypeId].ClusterState.ClusterSegment, Is.Null,
+            "premise: a pure-Transient archetype has no PersistentStore cluster segment");
+
+        EntityId id;
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            id = t.Spawn<EdTrArch>(EdTrArch.A.Set(new EdTrA(1)), EdTrArch.B.Set(new EdTrB(2)));
+            t.Commit();
+        }
+
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            t.OpenMut(id).Disable(EdTrArch.B);
+            Assert.That(ClusterSoAProbe.IsEnabled(dbe, meta.ArchetypeId, id, bSlot), Is.True, "a staged Disable must not reach the TransientStore copy");
+            t.Commit();
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(ClusterSoAProbe.IsEnabled(dbe, meta.ArchetypeId, id, bSlot), Is.False,
+                "the commit must publish the Disable to the TransientStore copy");
+            Assert.That(ClusterSoAProbe.IsEnabled(dbe, meta.ArchetypeId, id, aSlot), Is.True);
+        });
+    }
+}
+
+[Component("Typhon.Test.EnableDisable.TrA", 1, StorageMode = StorageMode.Transient)]
+[StructLayout(LayoutKind.Sequential)]
+struct EdTrA
+{
+    public int V;
+    public EdTrA(int v) { V = v; }
+}
+
+[Component("Typhon.Test.EnableDisable.TrB", 1, StorageMode = StorageMode.Transient)]
+[StructLayout(LayoutKind.Sequential)]
+struct EdTrB
+{
+    public int V;
+    public EdTrB(int v) { V = v; }
+}
+
+[Archetype]
+class EdTrArch : Archetype<EdTrArch>
+{
+    public static readonly Comp<EdTrA> A = Register<EdTrA>();
+    public static readonly Comp<EdTrB> B = Register<EdTrB>();
 }

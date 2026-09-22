@@ -100,19 +100,15 @@ public static class ViewFanOutProfile
         dbe.InitializeArchetypes();
 
         // Register the views BEFORE any spawn, so every spawned entity is published to all N of them.
-        //
-        // The creating transaction stays OPEN for the run. That is not how production code should hold a view (ADR-042 is
-        // explicit that a view holds no transaction, precisely so it does not pin the TransactionChain) — it is a harness
-        // workaround: an incremental EcsView keeps the EcsQuery that built it, ProcessEntry calls
-        // MaskTestPublicByRouting -> _tx.DBE on the drain path, and unlike RefreshPull it never rebinds to the
-        // transaction passed to Refresh(). Dispose the creator and the next Refresh NREs at EcsQuery.cs:270.
-        // No fixture covers that ordering — every existing view test keeps its creating transaction alive for the whole
-        // test — so it is untested rather than known-good. Noted while measuring D3; not this profile's subject.
-        var viewTx = dbe.CreateQuickTransaction();
+        // The creating transaction is deliberately short-lived: production views outlive it (ADR-042), and #862 pins
+        // that lifecycle with regression coverage rather than keeping this benchmark on a harness-only workaround.
         var views = new List<EcsView<VfArch>>(viewCount);
-        for (var i = 0; i < viewCount; i++)
+        using (var viewTx = dbe.CreateQuickTransaction())
         {
-            views.Add(viewTx.Query<VfArch>().WhereField<VfData>(d => d.Bucket >= 0).ToView());
+            for (var i = 0; i < viewCount; i++)
+            {
+                views.Add(viewTx.Query<VfArch>().WhereField<VfData>(d => d.Bucket >= 0).ToView());
+            }
         }
 
         var samples = new double[iterations];
@@ -163,7 +159,6 @@ public static class ViewFanOutProfile
         {
             v.Dispose();
         }
-        viewTx.Dispose();
         dbe.Dispose();
         try { File.Delete($"{databaseName}.bin"); } catch (IOException) { /* best effort */ }
         try { File.Delete($"{databaseName}.lock"); } catch (IOException) { /* best effort */ }
