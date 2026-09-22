@@ -527,7 +527,8 @@ reclaimed.
   scope: EntityRef.Enable, EntityRef.IsVersionedSlotAbsent, EntityRef.ReadRaw, Transaction.CreateVersionedContentAndWrite,
          Transaction.AllocateVersionedSlotContent, Transaction.PublishNewVersionedChainRoots,
          Transaction.SpawnBatchAllocate, Transaction.SpawnBatchWriteAll, Transaction.FinalizeSpawns,
-         ArchetypeClusterState.RebuildVersionedHeadFromChain, VersionedHeadRebuildSkips
+         ArchetypeClusterState.RebuildVersionedHeadFromChain, VersionedHeadRebuildSkips, DatabaseEngine.RebuildClusterFromChains,
+         DatabaseEngine.CapturePreMigrationEnabledBits
   on_violation: the slot's storage is a RECYCLED chunk, so enabling an unsupplied component serves whatever a destroyed
                 entity last committed there — one live entity reading another's data through the ordinary public API
                 (#845). Silent in the worst way: the values are well-formed and plausible, and a fixture that happens to
@@ -538,6 +539,16 @@ reclaimed.
         never written, so what it actually guaranteed was that the read would not fault, not that the bytes were zero.
         Absence is the state the engine could not previously express; `RebuildClusterFromChains` already assumed it
         (`DatabaseEngine.cs`, "a Versioned slot with no chain head for this entity genuinely carries no component").
+  note: the migrating-open rebuild (`RebuildClusterFromChains`) re-places every entity and used to set a Versioned slot's
+        bit from `head ≠ 0` — the forbidden derivation, re-enabling every disabled component on each schema migration
+        (#846). It now takes presence from the head and the bit from the PRE-MIGRATION RECORD, snapshotted from the old
+        EntityMap before the migration replaces it (`CapturePreMigrationEnabledBits`). The record, not the old cluster:
+        the old cluster is kept only for archetypes with a SingleVersion slot, and its geometry is reconstructed, while
+        the record exists for every archetype and its layout does not depend on component sizes or indexes. The snapshot
+        keeps every entry, so a missing one means unknown, never all-enabled. Residual: when the old EntityMap cannot be
+        loaded, when the persisted storage modes do not confirm the Versioned slot count its records were written at, or
+        when an entity's entry was lost to a torn page, the rebuild falls back to the old cluster's bits where one was
+        kept, and otherwise to `head ≠ 0`.
   note: publication of a chain root created mid-life rides in `FlushPendingEnableDisable`'s existing record round trip.
         That relies on a coupling worth stating: supplying a value REQUIRES enabling, because `Write` is gated by the
         same EnabledBits as `Read`, so a mid-life creation cannot occur without a pending enable to carry its root.
@@ -554,9 +565,80 @@ reclaimed.
             Versioned_EnableWithAValue_OnAPendingSpawn_SurvivesTheCommit (the SpawnEntry route),
             Versioned_DisableThenEnable_KeepsTheValue_AndNeedsNoNewOne (the round trip the refusal must NOT catch),
             Versioned_ComponentSuppliedMidLife_IsWritableFromALaterTransaction (the root reached the persisted record,
-            not merely the transaction's cache), and
+            not merely the transaction's cache),
+            SchemaEvolutionStorageModeTests.Migration_KeepsAVersionedComponentsEnabledState_PresentDisabledAndAbsent
+            [VerifiesRule] (all three states across a migrating open, on the record and the cluster copy),
+            SchemaEvolutionStorageModeTests.Migration_OfTheVersionedComponentItself_KeepsItsEnabledState_WithoutASingleVersionSlot
+            [VerifiesRule] (the same, where no pre-migration cluster is kept and the migrating component is the one under
+            test), and
             NonGenericEntityAccessTests.ReadRaw_NeverSuppliedComponent_ReturnsAnEmptySpan (absent ≠ disabled for raw
             consumers).
+
+---
+
+## Module: ENABLE — The two copies of a cluster entity's enabled state
+
+A cluster entity's enabled state is stored twice: the EntityMap record's 16-bit `EnabledBits`, which point reads and
+queries resolve (with the MVCC overrides and the transaction's pending overlay), and one bit per component in the
+cluster's `EnabledBits[C]` words, which bulk iteration reads raw and the open-time rebuilds treat as durable data. The
+second copy is not derived on demand, so every path that changes one copy has to change the other (#847, #998, #846).
+
+### ENABLE-01: The cluster EnabledBits mirror the committed record, and nothing earlier `[fatal]` `[silent]`
+  invariant ∀ cluster entity e, ∀ component slot s, once the transaction that changed e's enabled state has published:
+            bit(cluster(e).EnabledBits[s], slotIndex(e)) = bit(record(e).EnabledBits, s), where record(e) is the COMMITTED
+            EntityMap record
+  invariant a change reaches both copies at commit, on every path that commits one: `FlushPendingEnableDisable` for a
+            live entity, `FinalizeSpawns` for a spawn, `RecoveryApplier` when the WAL is replayed
+  invariant every other writer of the words keeps the mirror: a slot's bits are cleared when it is released
+            (`ReleaseSlot` → `ClearSlotMetadata`; `ClearSlotBits` for an orphaned migrant's destination), and every CLAIM
+            writes the occupant's full mask, clearing as well as setting — `FinalizeSpawns`, `ApplySpawnedEntityToCluster`,
+            and a cluster migration's transcription to its destination slot (`ExecuteMigrations`, step 6). A freed slot is
+            therefore never trusted to be clean. The migration rebuild writes the bits from the pre-migration record
+            (`RebuildClusterFromChains`); the crash rebuild without a snapshot goes the other way and copies the cluster bits
+            INTO the record (`RebuildClusterEntityMapEntries`), which is why the cluster copy has to be exact.
+  never writing a slot the entity no longer occupies. The record a commit reads can be a TOMBSTONE — another transaction
+        destroyed the entity and committed first, releasing the slot at commit — and a spawn may already hold that slot.
+        The publish writes only while the slot's occupancy bit is set and its EntityIds tail holds this entity's id.
+  never writing the cluster bit at staging. `EntityRef.Enable/Disable` stage the change and nothing else; a staged bit
+        is visible to every concurrent bulk scan (the words are shared and unversioned) and nothing restores it on
+        rollback.
+  never a plain read-modify-write of an `EnabledBits` word on a live commit path. One word holds a component's bit for
+        every entity of the cluster, so commits on DIFFERENT entities race on it; `Interlocked.Or` / `Interlocked.And`
+        only. Plain writes are allowed exactly where no concurrent writer can exist: recovery and the open-time rebuilds
+        (single-threaded), and the fence's cluster migration — the tick-fence window excludes every committing
+        transaction (EW-01; an enable/disable commit writes the EntityMap), and the Migrate slices are carved on
+        destination cell, so no two workers write the same destination cluster.
+  scope: EntityRef.Enable, EntityRef.Disable, Transaction.StageEnableDisable, Transaction.FlushPendingEnableDisable,
+         Transaction.PublishClusterEnabledBits, Transaction.FinalizeSpawns, RecoveryApplier.ApplySetEnabledBitsToExisting,
+         RecoveryApplier.ApplySpawnedEntityToCluster, DatabaseEngine.RebuildClusterFromChains,
+         DatabaseEngine.RebuildClusterEntityMapEntries, DatabaseEngine.ExecuteMigrations, ArchetypeClusterState.ClearSlotBits,
+         ArchetypeClusterState.ReleaseSlot, ArchetypeClusterState.ClearSlotMetadata, ClusterRef.EnabledBits,
+         ClusterRef.ActiveBits
+  on_violation: bulk iteration sees a state the record does not hold. An uncommitted change reaches every concurrent
+                scan, a rolled-back one stays for good, and a checkpoint persists it. The crash rebuild without an
+                enabled-bits snapshot (`RebuildClusterEntityMapEntries`) then copies the cluster value INTO the record,
+                and the migration rebuild (`RebuildClusterFromChains`) reads it as the authority for a Versioned slot's
+                enabled state. Silent: point reads and queries use the record and look right throughout (#998).
+  note: bulk iteration shows COMMITTED enabled state only. A transaction's own staged change is visible to its point
+        reads and queries through the pending overlay, not through `ClusterRef` — the same treatment the cluster gives a
+        Versioned write, whose HEAD is copied into the slot at commit.
+  note: residual — two transactions changing the enabled state of the SAME entity is last-writer-wins on the record,
+        with no conflict detection. Per-slot atomics cannot keep the cluster copy equal to the record under that race.
+        The tombstone check above is not atomic with its write either. A publish that passes the check while a concurrent
+        destroy is clearing the slot (`ClearSlotMetadata` clears the bits before the occupancy bit) can leave a bit on the
+        freed slot; that bit is invisible (bulk iteration masks by occupancy) and the next claim overwrites it with the
+        new occupant's full mask. What remains is a release, a claim AND the new occupant's spawn commit all landing
+        between one publish's check and its write — a few instructions. Closing that needs the slot release serialised
+        with the publish.
+  verified: EnableDisableTests.RolledBackChange_LeavesTheClusterBitAtTheCommittedState [VerifiesRule] (rollback, both
+            directions, explicit and by dispose), EnableDisableTests.StagedChange_ReachesTheClusterBitOnlyAtCommit
+            [VerifiesRule] (not before commit, and at commit),
+            EnableDisableTests.ACommitAgainstADestroyedEntity_LeavesTheSlotsNextOccupantAlone [VerifiesRule] (the tombstone
+            check, with the slot's reuse asserted as a premise), EnableDisableTests.PureTransientArchetype_CommitPublishesTheClusterBit
+            [VerifiesRule] (the TransientStore home), and
+            LifecycleDurabilityBugTests.Issue847_EnabledChange_RecoveredFromWal_ReachesTheClusterSoA (the replay path).
+            EnableDisableTests.ConcurrentCommitsInOneCluster_LoseNoBit guards the atomicity clause but is not counted as
+            a verifier: a timing race can be caught, never forced.
 
 ## Module: REAP — Reclaiming what a destroy leaves behind
 
