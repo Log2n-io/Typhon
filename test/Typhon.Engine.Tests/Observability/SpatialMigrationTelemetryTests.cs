@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
+using Typhon.Engine.Internals;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests;
@@ -219,6 +220,35 @@ class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
 
         var total = dbe.GetSpatialTelemetryTotal();
         Assert.That(total.MigrationCount, Is.EqualTo(t.MigrationCount), "engine-wide total must include this archetype's migration");
+    }
+
+    /// <summary>
+    /// The fence's outlier buffer is the thread's reused scratch, not a list per call: two fences on one thread use the same instance and leave it empty.
+    /// </summary>
+    /// <remarks>
+    /// A fresh list per AabbRefresh slice per tick was nearly half of a loaded server's steady-state allocation — hundreds of slices a tick, each allocating
+    /// even when it stayed empty. The serial fence below runs on this thread, so the scratch it took is observable here.
+    /// </remarks>
+    [Test]
+    public void TheFenceReusesItsOutlierBufferInsteadOfAllocatingOne()
+    {
+        using var dbe = SetupEngineWithGrid();
+        var id = Spawn(dbe, 50f, 50f);
+
+        MoveTo(dbe, id, 150f, 250f);
+        dbe.WriteTickFence(1);
+        var first = ArchetypeClusterState.OutlierScratch;
+
+        MoveTo(dbe, id, 450f, 650f);
+        dbe.WriteTickFence(2);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(dbe.GetSpatialTelemetry(ArchetypeId).MigrationCount, Is.EqualTo(1), "the second fence must have run the refresh it is judged on");
+            Assert.That(first, Is.Not.Null, "the fence took no scratch: it allocated its own list");
+            Assert.That(ArchetypeClusterState.OutlierScratch, Is.SameAs(first), "the second fence allocated a new list instead of reusing the thread's");
+            Assert.That(first.Count, Is.Zero, "the merge must leave the scratch empty for the next slice");
+        });
     }
 
     [Test]

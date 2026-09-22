@@ -49,7 +49,22 @@ public partial class EntityAccessor : IDisposable
     private protected Dictionary<Type, ComponentInfo> _componentInfos;
 
     /// <summary>Array-indexed ComponentInfo cache — O(1) lookup by componentTypeId. Avoids Dictionary hash + equality overhead on hot path.</summary>
+    /// <remarks>
+    /// Grown to cover every type id this accessor meets (<see cref="EnsureInfoSlot"/>). Sized once at <see cref="ComponentInfosMaxCapacity"/>, it silently
+    /// dropped any id past that — a process with more component types than that sends those components down the dictionary path on every lookup, and
+    /// <see cref="ResetForNewSnapshot"/>, which flushes only the entries this array holds, never committed their chunk accessors.
+    /// </remarks>
     private protected ComponentInfo[] _componentInfosByTypeId;
+
+    /// <summary>
+    /// The entries this accessor held on its previous lease, by componentTypeId, waiting to be rebound. <see cref="ResetCore"/> moves them here instead of
+    /// dropping them, and the slow path of <see cref="GetComponentInfo"/> rebinds one before it allocates — so a pooled transaction touching the same
+    /// components every tick allocates nothing for them after its first lease.
+    /// </summary>
+    private protected ComponentInfo[] _recycledInfosByTypeId;
+
+    /// <summary>How many component entries this accessor holds on its current lease — one per component type it has touched.</summary>
+    internal int ComponentInfoCount => _componentInfos.Count;
 
     /// <summary>
     /// Cached EntityMap accessor for same-archetype repeated lookups.
@@ -107,6 +122,7 @@ public partial class EntityAccessor : IDisposable
     {
         _componentInfos = new Dictionary<Type, ComponentInfo>(ComponentInfosMaxCapacity);
         _componentInfosByTypeId = new ComponentInfo[ComponentInfosMaxCapacity];
+        _recycledInfosByTypeId = new ComponentInfo[ComponentInfosMaxCapacity];
     }
 
     /// <summary>
@@ -205,8 +221,9 @@ public partial class EntityAccessor : IDisposable
         if (_componentInfos.TryGetValue(componentType, out var info))
         {
             // Already in Dictionary but not in array (shouldn't happen, but handle gracefully)
-            if (typeId >= 0 && typeId < _componentInfosByTypeId.Length)
+            if (typeId >= 0)
             {
+                EnsureInfoSlot(typeId);
                 _componentInfosByTypeId[typeId] = info;
             }
 
@@ -233,38 +250,52 @@ public partial class EntityAccessor : IDisposable
             }
         }
 
-        info = new ComponentInfo
-        {
-            ComponentTypeId = resolvedTypeId,
-            ComponentTable = ct,
-            ComponentOverhead = ct.ComponentOverhead,
-            SingleCache = new Dictionary<long, ComponentInfo.CompRevInfo>(),
-        };
-
-        switch (ct.StorageMode)
-        {
-            case StorageMode.Transient:
-                info.TransientCompContentAccessor = ct.TransientComponentSegment.CreateChunkAccessor();
-                break;
-            case StorageMode.SingleVersion:
-                info.CompContentSegment  = ct.ComponentSegment;
-                info.CompContentAccessor = ct.ComponentSegment.CreateChunkAccessor(_changeSet);
-                break;
-            default: // Versioned
-                info.CompContentSegment   = ct.ComponentSegment;
-                info.CompRevTableSegment  = ct.CompRevTableSegment;
-                info.CompContentAccessor  = ct.ComponentSegment.CreateChunkAccessor(_changeSet);
-                info.CompRevTableAccessor = ct.CompRevTableSegment.CreateChunkAccessor(_changeSet);
-                break;
-        }
+        info = TakeRecycledInfo(resolvedTypeId, ct) ?? new ComponentInfo();
+        info.Bind(resolvedTypeId, ct, _changeSet);
 
         _componentInfos.Add(componentType, info);
-        if (info.ComponentTypeId >= 0 && info.ComponentTypeId < _componentInfosByTypeId.Length)
+        if (info.ComponentTypeId >= 0)
         {
+            EnsureInfoSlot(info.ComponentTypeId);
             _componentInfosByTypeId[info.ComponentTypeId] = info;
         }
 
         return info;
+    }
+
+    /// <summary>Grows the by-type-id arrays so <paramref name="componentTypeId"/> has a slot in both.</summary>
+    /// <param name="componentTypeId">A non-negative type id.</param>
+    /// <remarks>Growth only, on the slow path, bounded by the number of component types the process registers. The accessor is thread-affine.</remarks>
+    private void EnsureInfoSlot(int componentTypeId)
+    {
+        if (componentTypeId < _componentInfosByTypeId.Length)
+        {
+            return;
+        }
+
+        var grown = Math.Max(componentTypeId + 1, _componentInfosByTypeId.Length * 2);
+        Array.Resize(ref _componentInfosByTypeId, grown);
+        Array.Resize(ref _recycledInfosByTypeId, grown);
+    }
+
+    /// <summary>The entry this accessor held for <paramref name="componentTypeId"/> on its previous lease, if it served the same table.</summary>
+    /// <param name="componentTypeId">The component's type id.</param>
+    /// <param name="table">The table this lease resolved.</param>
+    /// <returns>The entry, removed from the recycled set, or <see langword="null"/>.</returns>
+    /// <remarks>
+    /// The table is compared by reference, which is what makes a pooled accessor that moves to another engine — or an engine whose table was rebuilt — safe:
+    /// its old entry is discarded rather than rebound onto a table it never described.
+    /// </remarks>
+    private ComponentInfo TakeRecycledInfo(int componentTypeId, ComponentTable table)
+    {
+        if ((uint)componentTypeId >= (uint)_recycledInfosByTypeId.Length)
+        {
+            return null;
+        }
+
+        var recycled = _recycledInfosByTypeId[componentTypeId];
+        _recycledInfosByTypeId[componentTypeId] = null;
+        return recycled != null && ReferenceEquals(recycled.ComponentTable, table) ? recycled : null;
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -409,7 +440,17 @@ public partial class EntityAccessor : IDisposable
             _componentInfos = new Dictionary<Type, ComponentInfo>(ComponentInfosMaxCapacity);
         }
 
-        Array.Clear(_componentInfosByTypeId);
+        // Kept for the next lease rather than dropped: the slow path rebinds them. Only entries the array indexes are recycled — every entry with a type id,
+        // since the array grows to cover them; one without (a type the registry never saw) is simply dropped, as every entry used to be.
+        for (var i = 0; i < _componentInfosByTypeId.Length; i++)
+        {
+            var info = _componentInfosByTypeId[i];
+            if (info != null)
+            {
+                _recycledInfosByTypeId[i] = info;
+                _componentInfosByTypeId[i] = null;
+            }
+        }
 
         FreeCommitStaging();
         _discipline = CommitDiscipline.TickFence;

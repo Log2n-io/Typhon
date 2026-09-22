@@ -53,17 +53,17 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
         _recordSize = archetype._entityRecordSize;
         _entityMapAccessor = engineState.EntityMap.Segment.CreateChunkAccessor();
 
-        // Detect if any component uses Versioned storage (needs revision chain walk)
+        // Detect if any component uses Versioned storage (needs revision chain walk). No ComponentInfo is created here: every reader and writer reaches
+        // one through GetComponentInfoByTypeId, which creates it on first touch, so warming every slot up front only cost an entry per component the
+        // caller never used — per transaction, since a pooled one starts each lease empty.
         _hasVersionedSlots = false;
         for (int slot = 0; slot < archetype.ComponentCount; slot++)
         {
             if (engineState.SlotToComponentTable[slot].StorageMode == StorageMode.Versioned)
             {
                 _hasVersionedSlots = true;
+                break;
             }
-
-            // Pre-warm ComponentInfo cache — ensures EntityRef.Read/Write hits the fast array path
-            accessor.EnsureComponentInfoCached(archetype._slotToComponentType[slot]);
         }
 
         // Cluster storage setup

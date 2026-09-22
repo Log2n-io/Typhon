@@ -2258,6 +2258,9 @@ internal sealed unsafe partial class ArchetypeClusterState
         {
             _finalizeLock.Exit();
         }
+
+        // Cleared as EnqueueMigrationsBulk clears its input: the buffer is the worker's reused scratch, and the next slice must start empty.
+        buffer.Clear();
     }
 
     /// <summary>
@@ -5830,7 +5833,9 @@ internal sealed unsafe partial class ArchetypeClusterState
             var totalWork = (SpatialBarrierOnly && ClusterProcessBitmap != null) ? ClusterProcessBitmap.Length : ActiveClusterCount;
             if (totalWork > 0)
             {
-                var outlierBuffer = new List<MigrationRequest>(0);
+                // The worker's scratch, as on the parallel path: this runs once per archetype per tick.
+                var outlierBuffer = OutlierScratch ??= [];
+                outlierBuffer.Clear();
                 // Appended to DIRECTLY rather than through EnqueueRepairNominationsBulk. This wrapper is the serial path — it is the single writer, so the
                 // lock the bulk enqueue takes would be uncontended overhead, and the parallel path's reason for a worker-local buffer (many slices, one
                 // list) does not exist here.
@@ -8398,6 +8403,18 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         Array.Resize(ref PendingMigrations, capacity);
     }
+
+    /// <summary>Per-worker outlier buffer for an AabbRefresh slice, merged by <see cref="EnqueueMigrationsBulk"/>, which clears it.</summary>
+    /// <remarks>
+    /// <see cref="ThreadStaticAttribute"/> for the reason <see cref="NominationScratch"/> is: one list per worker whose capacity converges to the worst slice
+    /// it has scanned, instead of a list per slice per tick. Never trimmed.
+    /// </remarks>
+    [ThreadStatic]
+    internal static List<MigrationRequest> OutlierScratch;
+
+    /// <summary>Per-worker promoted-cell deferral buffer for an AabbRefresh slice, merged by <see cref="EnqueuePromotedAppliesBulk"/>, which clears it.</summary>
+    [ThreadStatic]
+    internal static List<PromotedAabbApply> PromotedScratch;
 
     /// <summary>
     /// Bulk-append a worker-local outlier-buffer to <see cref="PendingMigrations"/>. Takes <see cref="_finalizeLock"/> once per slice (review D-2).

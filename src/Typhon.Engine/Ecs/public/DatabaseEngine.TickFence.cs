@@ -732,12 +732,15 @@ public partial class DatabaseEngine
         // per-slice accessor cost is sub-microsecond. Not worth caching.
         var accessor = clusterState.ClusterSegment.CreateChunkAccessor();
         // Worker-local outlier buffer (review D-2): RecomputeDirtyClusterAabbsSlice appends here per-entity without locking; we bulk-enqueue under
-        // _finalizeLock once after the slice finishes. List is short-lived per slice (no pooling — outlier fires are rare; allocations are bounded by the
-        // AABB-Refresh chunk count per tick).
-        var outlierBuffer = new List<MigrationRequest>(0);
-        // Worker-local deferral buffer for promoted cells, same shape and lifetime as the outlier buffer above and merged the same way. Allocated only when
-        // this archetype actually has a promoted cell — the overwhelmingly common case is none, and an empty List per slice per tick is not free.
-        var promotedBuffer = clusterState.PromotedCellCount > 0 ? new List<ArchetypeClusterState.PromotedAabbApply>(0) : null;
+        // _finalizeLock once after the slice finishes, which clears it. Held PER WORKER, like the repair nominations below: a fresh List per slice was
+        // measured at nearly half of the process's steady-state allocation (hundreds of slices a tick, each allocating even when it stays empty). Cleared
+        // on acquisition too, so a slice that threw before its merge cannot hand its entries to the next one.
+        var outlierBuffer = ArchetypeClusterState.OutlierScratch ??= [];
+        outlierBuffer.Clear();
+        // Worker-local deferral buffer for promoted cells, same shape and lifetime as the outlier buffer above and merged the same way. Only when this
+        // archetype actually has a promoted cell — the overwhelmingly common case is none.
+        var promotedBuffer = clusterState.PromotedCellCount > 0 ? ArchetypeClusterState.PromotedScratch ??= [] : null;
+        promotedBuffer?.Clear();
         // Worker-local repair nominations (#872 step 12), merged the same way as the outlier buffer above — but held PER WORKER rather than allocated per
         // slice. With ReclusterBudgetMs at its default of 1.0 this path is live out of the box, so a fresh List per slice per tick is a real per-tick
         // allocation on the fence; step 11 also doubled the element width, so each growth doubling costs twice what it did. EnqueueRepairNominationsBulk

@@ -347,8 +347,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             _finalizeLock.Exit();
         }
 
-        // Cleared, matching EnqueueMigrationsBulk. Redundant today — every slice allocates its own list — and exactly the
-        // assumption that stops being true the day these buffers are pooled.
+        // Cleared, matching EnqueueMigrationsBulk: every one of these buffers is a worker's reused scratch, so the next slice must start empty.
         nominations.Clear();
     }
 
