@@ -261,6 +261,20 @@ public sealed class SimConfig
     public int SubscriptionsGroupCap;
 
     /// <summary>
+    /// Whether an interest claim on a cluster being filled reads the page instead of waiting (<c>--subs-claim wait|nowait</c>). Same-binary switch.
+    /// </summary>
+    public bool SubscriptionsClaimNeverWaits = true;
+
+    /// <summary>Whether interest groups are claimed by last tick's cost (<c>--subs-group-order cell|cost</c>). Same-binary switch.</summary>
+    public bool SubscriptionsCostOrderedGroups = true;
+
+    /// <summary>Whether interest pre-fills its cluster snapshot before any group (<c>--subs-prefill on|off</c>). Same-binary switch.</summary>
+    public bool SubscriptionsPrefill = true;
+
+    /// <summary>Whether interest members test clusters with the block kernel (<c>--subs-kernel candidates|block</c>). Same-binary switch.</summary>
+    public bool SubscriptionsBlockKernel = true;
+
+    /// <summary>
     /// <c>--subs-owed on|off</c>: whether a reused slot costs the session that slot on its next frame, or its whole next frame.
     /// </summary>
     public bool SubscriptionsOwedSlotCarry = true;

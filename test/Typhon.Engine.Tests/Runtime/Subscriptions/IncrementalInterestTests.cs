@@ -66,6 +66,7 @@ class IncrementalInterestTests : TestBase<IncrementalInterestTests>
         public long SyntheticRuns;
         public long RunsRetainedByView;
         public long StationaryRetained;
+        public bool BlockKernel;
     }
 
     /// <summary>
@@ -281,6 +282,29 @@ class IncrementalInterestTests : TestBase<IncrementalInterestTests>
         });
     }
 
+    /// <summary>
+    /// The block kernel emits exactly what the candidate filter emits: members testing a boundary cluster from the snapshot's columns end on the same runs,
+    /// in the same order, as members filtering the entities the cell copied out — moving, stationary, and through skipped frames.
+    /// </summary>
+    /// <param name="skipPercent">The percentage of ticks on which a session's frames are left undrained.</param>
+    [Test]
+    public void TheBlockKernelEmitsExactlyWhatTheCandidateFilterEmits([Values(0, 60)] int skipPercent)
+    {
+        var candidates = Execute(temporal: true, skipPercent, crowd: true, pausing: true, blockKernel: false);
+        var kernel = Execute(temporal: true, skipPercent, crowd: true, pausing: true, blockKernel: true);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(candidates.FramesProduced, Is.GreaterThan(SessionCount), "the candidate arm produced too few frames to compare anything");
+            Assert.That(kernel.FramesProduced, Is.EqualTo(candidates.FramesProduced), "the two arms did not run the same world");
+            Assert.That(candidates.BlockKernel, Is.False, "the candidate arm ran the block kernel");
+            Assert.That(kernel.BlockKernel, Is.True, "the kernel arm never ran the block kernel");
+            Assert.That(kernel.StationaryRetained, Is.GreaterThan(0),
+                "no stationary member ever retained a run, so the kernel's stationary skip was not exercised");
+            AssertSameFrames(candidates, kernel, $"block kernel at {skipPercent}% skip");
+        });
+    }
+
     private static void AssertSameFrames(Run a, Run b, string what)
     {
         for (var s = 0; s < SessionCount; s++)
@@ -293,7 +317,7 @@ class IncrementalInterestTests : TestBase<IncrementalInterestTests>
         }
     }
 
-    private Run Execute(bool temporal, int skipPercent = 0, bool crowd = false, bool pausing = false, bool? sparse = null)
+    private Run Execute(bool temporal, int skipPercent = 0, bool crowd = false, bool pausing = false, bool? sparse = null, bool blockKernel = true)
     {
         // A FRESH service provider per arm. The engine is a singleton of it and its spatial grid may be configured exactly once, so a second arm built on
         // the fixture's own provider is refused with "ConfigureSpatialGrid must be called before InitializeArchetypes". Tearing the provider down and
@@ -319,6 +343,8 @@ class IncrementalInterestTests : TestBase<IncrementalInterestTests>
             // High enough that the initial fill never defers an enter. A deferred enter is owed, and an owed session takes the full walk — so a binding
             // budget would keep the difference from ever engaging and this fixture would compare the reference path against itself.
             EnterBudgetPerFrame = 100_000,
+
+            InterestBlockKernel = blockKernel,
         });
 
         harness.RunFence = true;
@@ -382,6 +408,7 @@ class IncrementalInterestTests : TestBase<IncrementalInterestTests>
             SyntheticRuns = harness.Assembler.SyntheticRuns,
             RunsRetainedByView = harness.Subscriptions.Interest.RunsRetainedByView,
             StationaryRetained = harness.Subscriptions.Interest.TopologyRunsRetained,
+            BlockKernel = harness.Subscriptions.Interest.AnySnapshotColumnar,
         };
     }
 

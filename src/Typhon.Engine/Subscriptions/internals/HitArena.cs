@@ -296,6 +296,119 @@ internal sealed class HitArena
         InteriorEntitiesSkipped += BitOperations.PopCount(slots);
     }
 
+    // ── The boundary list (design 23, phase 2) ─────────────────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // With the block kernel, the cell's broad phase stops reading entities: a cluster the disc clips is recorded as (chunk, occupancy, changed, box) and
+    // each member runs InterestBandKernel over the cluster's column in the snapshot. A cluster read from its own page — its fill was in progress, or it lies
+    // beyond the store — has its column copied here instead, once per cell.
+    private int[] _bndChunks = new int[256];
+    private ulong[] _bndOcc = new ulong[256];
+    private bool[] _bndChanged = new bool[256];
+    private int[] _bndPrivate = new int[256];
+    private double[] _bndMinX = new double[256];
+    private double[] _bndMinY = new double[256];
+    private double[] _bndMaxX = new double[256];
+    private double[] _bndMaxY = new double[256];
+    private int _bndCount;
+    private int[] _bndRanges = [];
+    private float[] _privColumns = new float[4 * InterestBandKernel.ColumnFloats];
+    private int _privCount;
+
+    /// <summary>Boundary clusters recorded for the cell being resolved.</summary>
+    public int BoundaryCount => _bndCount;
+
+    /// <summary>The per-archetype range array for the boundary list, grown to fit.</summary>
+    /// <param name="archetypeCount">How many archetypes the profile names.</param>
+    /// <returns>An array of at least that length, whose contents the caller overwrites.</returns>
+    public int[] CellBoundaryRanges(int archetypeCount)
+    {
+        if (_bndRanges.Length < archetypeCount)
+        {
+            _bndRanges = new int[Math.Max(8, archetypeCount)];
+        }
+
+        return _bndRanges;
+    }
+
+    /// <summary>Records a cluster the cell's disc clips, for every member to test with the block kernel.</summary>
+    /// <param name="chunkId">The cluster.</param>
+    /// <param name="occupancy">Its occupied slots.</param>
+    /// <param name="changed">Whether its structure changed this tick.</param>
+    /// <param name="minX">Its box, world space.</param>
+    /// <param name="minY">Its box.</param>
+    /// <param name="maxX">Its box.</param>
+    /// <param name="maxY">Its box.</param>
+    /// <param name="privateColumns">Its column in this arena (<see cref="AddPrivateColumns"/>), or -1 when it is read from the snapshot.</param>
+    public void AddBoundaryCluster(int chunkId, ulong occupancy, bool changed, double minX, double minY, double maxX, double maxY, int privateColumns)
+    {
+        if (_bndCount == _bndChunks.Length)
+        {
+            var grown = _bndChunks.Length * 2;
+            Array.Resize(ref _bndChunks, grown);
+            Array.Resize(ref _bndOcc, grown);
+            Array.Resize(ref _bndChanged, grown);
+            Array.Resize(ref _bndPrivate, grown);
+            Array.Resize(ref _bndMinX, grown);
+            Array.Resize(ref _bndMinY, grown);
+            Array.Resize(ref _bndMaxX, grown);
+            Array.Resize(ref _bndMaxY, grown);
+        }
+
+        _bndChunks[_bndCount] = chunkId;
+        _bndOcc[_bndCount] = occupancy;
+        _bndChanged[_bndCount] = changed;
+        _bndPrivate[_bndCount] = privateColumns;
+        _bndMinX[_bndCount] = minX;
+        _bndMinY[_bndCount] = minY;
+        _bndMaxX[_bndCount] = maxX;
+        _bndMaxY[_bndCount] = maxY;
+        _bndCount++;
+    }
+
+    /// <summary>Copies a cluster's boxes from its page into this arena's columns, for a cluster the snapshot cannot serve.</summary>
+    /// <param name="fields">Slot 0's spatial field in the page.</param>
+    /// <param name="stride">Bytes between two slots' fields.</param>
+    /// <param name="occupancy">The occupied slots.</param>
+    /// <returns>The index to pass to <see cref="AddBoundaryCluster"/>.</returns>
+    public unsafe int AddPrivateColumns(byte* fields, int stride, ulong occupancy)
+    {
+        if ((_privCount + 1) * InterestBandKernel.ColumnFloats > _privColumns.Length)
+        {
+            Array.Resize(ref _privColumns, _privColumns.Length * 2);
+        }
+
+        ClusterSnapshotStore.Transpose(fields, stride, occupancy,
+            _privColumns.AsSpan(_privCount * InterestBandKernel.ColumnFloats, InterestBandKernel.ColumnFloats));
+        return _privCount++;
+    }
+
+    /// <summary>One boundary cluster's chunk id.</summary>
+    public int BoundaryChunk(int i) => _bndChunks[i];
+
+    /// <summary>One boundary cluster's occupancy.</summary>
+    public ulong BoundaryOccupancy(int i) => _bndOcc[i];
+
+    /// <summary>Whether one boundary cluster's structure changed this tick.</summary>
+    public bool BoundaryChanged(int i) => _bndChanged[i];
+
+    /// <summary>One boundary cluster's private column index, or -1 for the snapshot's.</summary>
+    public int BoundaryPrivate(int i) => _bndPrivate[i];
+
+    /// <summary>One boundary cluster's box.</summary>
+    public void BoundaryBox(int i, out double minX, out double minY, out double maxX, out double maxY)
+    {
+        minX = _bndMinX[i];
+        minY = _bndMinY[i];
+        maxX = _bndMaxX[i];
+        maxY = _bndMaxY[i];
+    }
+
+    /// <summary>A private column's first float.</summary>
+    public ref float PrivateColumns(int index) => ref _privColumns[index * InterestBandKernel.ColumnFloats];
+
+    /// <summary>Counts entities a member's kernel accepted, for <see cref="CandidatesAccepted"/>.</summary>
+    public void NoteAccepted(int count) => _candAccepted += count;
+
     /// <summary>Candidates the broad phase collected for the cell being resolved.</summary>
     public int CandidateCount => _candCount;
 
@@ -339,6 +452,8 @@ internal sealed class HitArena
         _candCount = 0;
         _intCount = 0;
         _chgCount = 0;
+        _bndCount = 0;
+        _privCount = 0;
     }
 
     /// <summary>Notes the candidates this cell's broad phase collected, once it is complete.</summary>
@@ -387,6 +502,9 @@ internal sealed class HitArena
     /// <summary>Members of <see cref="HeaviestGroupTicks"/>'s group.</summary>
     public int HeaviestGroupMembers;
 
+    /// <summary>The timestamp <see cref="HeaviestGroupTicks"/>'s group started at, for how late the stage reached it.</summary>
+    public long HeaviestGroupStart;
+
     /// <summary>Runs a sparse session did not emit because its membership there did not move. Cumulative.</summary>
     public long SparseRunsSkipped;
 
@@ -399,6 +517,46 @@ internal sealed class HitArena
     /// <summary>Clusters this worker read from the shared snapshot without opening them — the redundant opens the store removed.</summary>
     public long SnapshotReads;
 
+    /// <summary>Snapshot reads that waited for another worker's fill. Cumulative.</summary>
+    public long SnapshotWaits;
+
+    /// <summary>Timestamp ticks <see cref="SnapshotWaits"/> spent waiting. Cumulative.</summary>
+    public long SnapshotWaitTicks;
+
+    /// <summary>Clusters read from their own page because another worker was filling the snapshot, instead of waiting. Cumulative.</summary>
+    public long SnapshotPrivateReads;
+
+    /// <summary>Clusters this worker filled in the pre-fill wave, before taking any group. Cumulative.</summary>
+    public long SnapshotPrefills;
+
+    /// <summary>Timestamp ticks this worker spent in the pre-fill wave. Cumulative.</summary>
+    public long PrefillTicks;
+
+    // The clusters this worker read first this tick, as (archetype << 32 | chunk id), and last tick's, which the pre-fill wave walks. Swapped by BeginTick.
+    private long[] _reads = new long[1024];
+    private int _readCount;
+    private long[] _prevReads = new long[1024];
+    private int _prevReadCount;
+
+    /// <summary>Records a cluster this worker read first this tick, for the next tick's pre-fill wave.</summary>
+    /// <param name="archetype">The archetype's plan index.</param>
+    /// <param name="chunkId">The cluster.</param>
+    public void AddRead(int archetype, int chunkId)
+    {
+        if (_readCount == _reads.Length)
+        {
+            Array.Resize(ref _reads, _reads.Length * 2);
+        }
+
+        _reads[_readCount++] = ((long)archetype << 32) | (uint)chunkId;
+    }
+
+    /// <summary>How many clusters this worker read first last tick.</summary>
+    public int PrevReadCount => _prevReadCount;
+
+    /// <summary>One of last tick's first reads, as (archetype &lt;&lt; 32 | chunk id).</summary>
+    public long PrevRead(int i) => _prevReads[i];
+
     /// <summary>Clusters the broad phase reached whose STRUCTURE changed this tick — the only ones whose membership can have moved. Cumulative.</summary>
     public long BroadClustersStructureChanged;
 
@@ -406,9 +564,15 @@ internal sealed class HitArena
     /// Entity candidates the broad phase reached, CUMULATIVE — the partner of <see cref="BroadClustersReached"/>.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// <b>Not <see cref="CandidatesCollected"/>, which <see cref="BeginTick"/> resets per tick.</b> Dividing a cumulative count by a per-tick one is the
     /// error the block above this reset warns about, and it reported 0.0 entities per cluster over a 400-session run — self-evidently wrong, and wrong in a
     /// direction a reader could have believed.
+    /// </para>
+    /// <para>
+    /// Under the block kernel no candidate is collected, and a boundary cluster's members test every occupied slot, so each counts all of them: the entities
+    /// handed to the members' test either way.
+    /// </para>
     /// </remarks>
     public long BroadEntitiesReached;
 
@@ -706,6 +870,9 @@ internal sealed class HitArena
     /// </summary>
     public void BeginTick()
     {
+        (_reads, _prevReads) = (_prevReads, _reads);
+        _prevReadCount = _readCount;
+        _readCount = 0;
         _runCount = 0;
         _leaveCount = 0;
         _newBlocks.Clear();

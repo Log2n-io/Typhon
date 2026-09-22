@@ -451,6 +451,55 @@ public sealed class SubscriptionsOptions
     public int InterestGroupCap { get; init; }
 
     /// <summary>
+    /// Whether an interest worker that reaches a cluster another worker is still copying into the shared snapshot reads the cluster's page itself instead
+    /// of waiting for the copy. Default <see langword="true"/> (design 23, phase 1).
+    /// </summary>
+    /// <remarks>
+    /// Same bytes either way: interest runs after the fence, so the page holds what the copy is copying. The wait never sleeps but can yield, and on a
+    /// saturated pool a yield can cost the worker its core behind a copy that took nanoseconds; the private read costs one page open. Measured at d06/1 000
+    /// before the pre-fill wave: about 4 500 waits a tick costing 10 ms of CPU.
+    /// </remarks>
+    public bool InterestClaimNeverWaits { get; init; } = true;
+
+    /// <summary>
+    /// Whether interest cell groups are claimed most expensive first — the clusters the same cell reached last tick, times its members plus one — instead of
+    /// in cell order. Default <see langword="true"/> (design 23, phase 1).
+    /// </summary>
+    /// <remarks>
+    /// The stage is one wave, so its wall time is the heaviest group plus how late a worker reached it; in cell order the densest cell often starts late.
+    /// The order never changes which entities a session resolves. It does change the order blocks are first watched in, hence the identities projection
+    /// leases; that is why it is a count and not a time: the same world gives the same order, and the same bytes, on every run.
+    /// </remarks>
+    public bool InterestCostOrderedGroups { get; init; } = true;
+
+    /// <summary>
+    /// Whether the interest stage first fills its shared cluster snapshot in parallel — the clusters its cells read last tick — before any cell group runs.
+    /// Default <see langword="true"/> (design 23, phase 1).
+    /// </summary>
+    /// <remarks>
+    /// Filled lazily, the fills land on whichever groups run first; ordered by cost, that is the heaviest group, the stage's critical path. The wave fills
+    /// what the lazy path would have, give or take the clusters that entered or left the cells' reach since last tick; each read stamps its cluster once.
+    /// </remarks>
+    public bool InterestPrefillSnapshots { get; init; } = true;
+
+    /// <summary>
+    /// Whether each interest member tests the clusters its cell's disc clips straight from the shared snapshot's columns, instead of the cell first copying
+    /// every entity of those clusters into a candidate buffer that each member then filters. Default <see langword="true"/> (design 23, phase 2).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Each member's own test, in the candidate filter's arithmetic, on the same bytes, so the members a query around its own viewpoint finds. The cell's
+    /// pretest on each candidate is gone: implied by the member's test in exact arithmetic, it could differ only on a rounding tie at the leave radius. The
+    /// snapshot keeps its boxes as columns (MinX, MinY, MaxX, MaxY) so a 16-entity block is four loads.
+    /// </para>
+    /// <para>
+    /// <b>The four interest options together</b>, measured at d06/1 000 over six interleaved pairs against all four off: interest −27.2 %, tick P50
+    /// −13.4 %, tick P99 −10.2 %, subscriptions −18 %, every pair. This one alone, on top of the other three: interest −17.9 %.
+    /// </para>
+    /// </remarks>
+    public bool InterestBlockKernel { get; init; } = true;
+
+    /// <summary>
     /// Whether the frame stage takes its sessions from a shared cursor rather than a fixed slice each. Default <see langword="true"/>.
     /// </summary>
     /// <remarks>

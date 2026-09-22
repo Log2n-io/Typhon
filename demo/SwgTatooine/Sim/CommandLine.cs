@@ -118,6 +118,30 @@ public static class CommandLine
         c.SubscriptionsPhaseTiming = Array.IndexOf(args, "--subs-phases") >= 0;
         c.SubscriptionsInterestPhases = Array.IndexOf(args, "--subs-interest-phases") >= 0;
         c.SubscriptionsGroupCap = Int(args, "--subs-group-cap", 0);
+        c.SubscriptionsClaimNeverWaits = Str(args, "--subs-claim", "nowait") switch
+        {
+            "wait" => false,
+            "nowait" => true,
+            var other => throw new ArgumentException($"--subs-claim takes wait or nowait, not '{other}'"),
+        };
+        c.SubscriptionsBlockKernel = Str(args, "--subs-kernel", "block") switch
+        {
+            "candidates" => false,
+            "block" => true,
+            var other => throw new ArgumentException($"--subs-kernel takes candidates or block, not '{other}'"),
+        };
+        c.SubscriptionsPrefill = Str(args, "--subs-prefill", "on") switch
+        {
+            "on" => true,
+            "off" => false,
+            var other => throw new ArgumentException($"--subs-prefill takes on or off, not '{other}'"),
+        };
+        c.SubscriptionsCostOrderedGroups = Str(args, "--subs-group-order", "cost") switch
+        {
+            "cell" => false,
+            "cost" => true,
+            var other => throw new ArgumentException($"--subs-group-order takes cell or cost, not '{other}'"),
+        };
         c.SubscriptionsSparse = Str(args, "--subs-sparse", "off") switch
         {
             "on" => true,

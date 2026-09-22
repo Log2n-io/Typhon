@@ -156,6 +156,42 @@ internal sealed unsafe class InterestPass
     /// <summary>The most sessions one cell group may hold; zero for the automatic cap. <see cref="SubscriptionsOptions.InterestGroupCap"/>.</summary>
     internal int GroupCap;
 
+    /// <summary>
+    /// Whether a cluster another worker is filling into the snapshot is read from its own page instead of waited for.
+    /// <see cref="SubscriptionsOptions.InterestClaimNeverWaits"/>.
+    /// </summary>
+    internal bool ClaimNeverWaits;
+
+    /// <summary>
+    /// Whether cell groups are claimed most expensive first, by last tick's broad-phase reach. <see cref="SubscriptionsOptions.InterestCostOrderedGroups"/>.
+    /// </summary>
+    internal bool CostOrderedGroups;
+
+    /// <summary>
+    /// Whether every chunk first fills its share of the snapshot — the clusters the stage read last tick — before claiming groups.
+    /// <see cref="SubscriptionsOptions.InterestPrefillSnapshots"/>.
+    /// </summary>
+    internal bool PrefillSnapshots;
+
+    /// <summary>
+    /// Whether members test boundary clusters with <see cref="InterestBandKernel"/> over the snapshot's columns instead of filtering a per-cell candidate copy.
+    /// <see cref="SubscriptionsOptions.InterestBlockKernel"/>.
+    /// </summary>
+    internal bool BlockKernel;
+
+    // ── The pre-fill wave (23 § 3, phase 1) ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // Filled lazily, the snapshot puts its fills on whichever groups run first — and ordered by cost, those are the heaviest, which is the critical path:
+    // measured at d06/1 000, the heaviest group started first grew from 4.9 to 6.2-7.2 ms. So each chunk first claims blocks of the clusters the stage READ
+    // last tick and fills them, all workers at once, and only then takes groups; the groups then read a warm store. Last tick's reads, not the archetype's
+    // active clusters: the wave then costs what the lazy fills would have, whatever the world's size — at d06/1 000, 13 500 of 21 000. A cluster first read
+    // this tick takes the lazy claim, which stays as the safety net.
+    private const int PrefillBlock = 64;
+    private readonly bool[] _prefillArchetype;
+    private int[] _prefillFrom = [];
+    private int _prefillTotal;
+    private int _prefillCursor;
+
     // Cluster size against the cells that host it, sampled every ClusterSizeEvery ticks.
     private const long ClusterSizeEvery = 64;
     private long _clusterSizeSamples;
@@ -295,6 +331,32 @@ internal sealed unsafe class InterestPass
     private int _groupCursor;
     private int _tickWorkerCount = 1;
 
+    // ── Cost-ordered claim (23 § 3, phase 1) ────────────────────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // The stage runs one wave, so its wall is the heaviest group plus how late it was claimed; claimed in cell-key order, the densest cell often starts
+    // late. Ordered by what each group should cost: the clusters its cell's broad phase reached LAST tick, times its members plus one — the walk once, then
+    // a kernel and a run per member per cluster. Member count alone is a poor proxy, because a dense cell's cost is its reach.
+    //
+    // A COUNT, not last tick's time, and that is a correctness point. The order decides which blocks are marked watched first, and projection leases
+    // identities in that order: ordered by time, the netIds a session receives would depend on timing even on one worker, and two runs of one world would
+    // no longer produce the same bytes (IncrementalInterestTests compares exactly that). The reach is a property of the cell and the index, the same on
+    // every path and every run. Each group's reach is written by the chunk that ran it and read by the next prologue, after the join.
+    private long[] _groupTicks = [];
+    private long[] _groupReach = [];
+    private int[] _groupOrder = [];
+    private long[] _groupOrderKey = [];
+    private bool _tickCostOrdered;
+
+    // Last tick's groups in the order BuildGroups formed them, which is ascending cell key with a crowded cell's pieces in order: key, piece, reach.
+    private long[] _prevGroupKey = [];
+    private int[] _prevGroupPiece = [];
+    private long[] _prevGroupReach = [];
+    private int _prevGroupTotal;
+    private long _prevMeanReach;
+
+    // Group times as a log2 histogram of microseconds, cumulative: bucket b holds [2^(b-1), 2^b) us, bucket 0 under one.
+    private readonly long[] _groupHistogram = new long[16];
+
     /// <summary>
     /// Each session's current interest membership, or <see langword="null"/> when the pass runs in Phase 1's shape.
     /// </summary>
@@ -365,6 +427,7 @@ internal sealed unsafe class InterestPass
             _snapshots[i] = _clusterStates[i] != null ? new ClusterSnapshotStore() : null;
         }
 
+        _prefillArchetype = new bool[plans.Length];
         _profiles = CompileProfiles(registry, plans);
         _profileIs2D = new bool[_profiles.Length];
         for (var i = 0; i < _profiles.Length; i++)
@@ -385,6 +448,17 @@ internal sealed unsafe class InterestPass
             }
 
             _profileIs2D[i] = twoDimensional;
+
+            // Only what the cell path reads from the snapshot: a sphere profile over 2D archetypes whose spatial field is the flat f32 box.
+            if (twoDimensional && _profiles[i].Kind == ObserverKind.Sphere)
+            {
+                for (var a = 0; a < archetypes.Length; a++)
+                {
+                    var clusterState = _clusterStates[archetypes[a]];
+                    _prefillArchetype[archetypes[a]] |= _snapshots[archetypes[a]] != null
+                        && clusterState.SpatialSlot.FieldInfo.FieldType == SpatialFieldType.AABB2F;
+                }
+            }
         }
     }
 
@@ -694,7 +768,15 @@ internal sealed unsafe class InterestPass
     private long[] _chunkBusy = [];
     private long[] _chunkStart = [];
     private long[] _chunkEnd = [];
+    private int[] _chunkThread = [];
     private int _lastChunkCount;
+
+    // Phase 0 of design 23, cumulative: chunks that did almost nothing (a worker that arrived after the cursor ran dry), the distinct threads that ran
+    // the chunks, and how late the heaviest group started after the first chunk did.
+    private long _phantomChunks;
+    private long _chunkThreads;
+    private long _heaviestStartTicks;
+    private long _activeClusters;
     private long _spanTicks;
     private long _busySumTicks;
     private long _busyMaxTicks;
@@ -712,6 +794,9 @@ internal sealed unsafe class InterestPass
         var first = long.MaxValue;
         var lastStart = 0L;
         var last = 0L;
+        var phantom = 0L;
+        var threads = 0L;
+        var phantomBelow = Stopwatch.Frequency / 20_000;
         for (var i = 0; i < _lastChunkCount && i < _chunkBusy.Length; i++)
         {
             if (_chunkStart[i] == 0)
@@ -719,16 +804,39 @@ internal sealed unsafe class InterestPass
                 continue;
             }
 
+            if (_chunkBusy[i] < phantomBelow)
+            {
+                phantom++;
+            }
+
+            // Distinct by a quadratic scan over at most a worker count of chunks, once per tick.
+            var seenBefore = false;
+            for (var j = 0; j < i && !seenBefore; j++)
+            {
+                seenBefore = _chunkStart[j] != 0 && _chunkThread[j] == _chunkThread[i];
+            }
+
+            if (!seenBefore)
+            {
+                threads++;
+            }
+
             sum += _chunkBusy[i];
             max = Math.Max(max, _chunkBusy[i]);
             first = Math.Min(first, _chunkStart[i]);
             lastStart = Math.Max(lastStart, _chunkStart[i]);
             last = Math.Max(last, _chunkEnd[i]);
+        }
+
+        // Cleared in a second pass: the distinct-thread scan above reads earlier chunks' starts.
+        for (var i = 0; i < _lastChunkCount && i < _chunkBusy.Length; i++)
+        {
             _chunkStart[i] = 0;
         }
 
         var heaviest = 0L;
         var members = 0;
+        var heaviestStart = 0L;
         for (var w = 0; w < _arenas.Length; w++)
         {
             var arena = _arenas[w];
@@ -736,6 +844,7 @@ internal sealed unsafe class InterestPass
             {
                 heaviest = arena.HeaviestGroupTicks;
                 members = arena.HeaviestGroupMembers;
+                heaviestStart = arena.HeaviestGroupStart;
             }
 
             if (arena != null)
@@ -752,9 +861,144 @@ internal sealed unsafe class InterestPass
             _startSpreadTicks += lastStart - first;
             _heaviestGroupTicks += heaviest;
             _heaviestGroupMembers += members;
+            _heaviestStartTicks += Math.Max(0L, heaviestStart - first);
+            _phantomChunks += phantom;
+            _chunkThreads += threads;
             _spanCount++;
         }
     }
+
+    /// <summary>
+    /// Records last tick's groups — cell key, piece, broad-phase reach — for this tick's cost order, and folds their times into the histogram. Serial, and
+    /// called before the session sort overwrites the keys the groups were formed from.
+    /// </summary>
+    private void CapturePreviousGroups()
+    {
+        var n = _groupTotal;
+        if (_prevGroupKey.Length < n)
+        {
+            Array.Resize(ref _prevGroupKey, _groupStart.Length);
+            Array.Resize(ref _prevGroupPiece, _groupStart.Length);
+            Array.Resize(ref _prevGroupReach, _groupStart.Length);
+        }
+
+        var reach = 0L;
+        var piece = 0;
+        var perMicrosecond = Math.Max(1L, Stopwatch.Frequency / 1_000_000);
+        for (var g = 0; g < n; g++)
+        {
+            var key = _tickCellKeys[_groupStart[g]];
+            piece = g > 0 && key == _prevGroupKey[g - 1] ? piece + 1 : 0;
+            _prevGroupKey[g] = key;
+            _prevGroupPiece[g] = piece;
+            _prevGroupReach[g] = _groupReach[g];
+            reach += _groupReach[g];
+            _groupReach[g] = 0;
+            _groupHistogram[Math.Min(15, 64 - BitOperations.LeadingZeroCount((ulong)(_groupTicks[g] / perMicrosecond)))]++;
+            _groupTicks[g] = 0;
+        }
+
+        _prevGroupTotal = n;
+        _prevMeanReach = n == 0 ? 0L : reach / n;
+    }
+
+    /// <summary>
+    /// Orders this tick's groups for the claim cursor, most expensive first: the clusters the same cell (and piece) reached last tick, times this tick's
+    /// members plus one. A cell that had no group last tick is priced at last tick's mean reach. Serial, after <see cref="BuildGroups"/>.
+    /// </summary>
+    /// <remarks>
+    /// Both lists are in ascending cell key with a crowded cell's pieces in order, so one forward walk pairs them: O(groups), then one sort of the group
+    /// indices, whose ties fall back to the index. The order changes which worker resolves a group and when, never what it resolves; and because it is
+    /// computed from counts, it is the same on every run of the same world.
+    /// </remarks>
+    private void OrderGroupsByCost()
+    {
+        var n = _groupTotal;
+        _tickCostOrdered = CostOrderedGroups && _cellKeyed && n > 1;
+        if (!_tickCostOrdered)
+        {
+            return;
+        }
+
+        var meanReach = Math.Max(1L, _prevMeanReach);
+        var p = 0;
+        var piece = 0;
+        for (var g = 0; g < n; g++)
+        {
+            var key = _tickCellKeys[_groupStart[g]];
+            piece = g > 0 && key == _tickCellKeys[_groupStart[g - 1]] ? piece + 1 : 0;
+            while (p < _prevGroupTotal && (_prevGroupKey[p] < key || (_prevGroupKey[p] == key && _prevGroupPiece[p] < piece)))
+            {
+                p++;
+            }
+
+            var known = key != NoCellKey && p < _prevGroupTotal && _prevGroupKey[p] == key && _prevGroupPiece[p] == piece && _prevGroupReach[p] > 0;
+            var reach = known ? _prevGroupReach[p] : meanReach;
+
+            // Most expensive first; the index in the low bits breaks ties the same way every run (Array.Sort is not stable). Reach and members are both far
+            // below 2^20, so the product fits in the 43 bits above the index.
+            _groupOrderKey[g] = (-(reach * (_groupCount[g] + 1L)) << 20) | (uint)g;
+            _groupOrder[g] = g;
+        }
+
+        Array.Sort(_groupOrderKey, _groupOrder, 0, n);
+    }
+
+    /// <summary>
+    /// Design 23's phase-0 counts, cumulative since start: ticks folded, the stage's wall and summed busy, the heaviest group and how late it started,
+    /// chunks that did almost nothing, the distinct threads that ran chunks, and the snapshot claims that waited (and for how long) or read privately.
+    /// All durations in timestamp ticks.
+    /// </summary>
+    public (long Ticks, long SpanTicks, long BusyTicks, long HeaviestTicks, long HeaviestStartTicks, long PhantomChunks, long Threads, long Waits,
+        long WaitTicks, long PrivateReads, long Fills, long Reads, long ActiveClusters, long Prefills, long PrefillTicks) StageShape
+    {
+        get
+        {
+            long waits = 0, waitTicks = 0, privateReads = 0, fills = 0, reads = 0, prefills = 0, prefillTicks = 0;
+            for (var w = 0; w < _arenas.Length; w++)
+            {
+                waits += _arenas[w].SnapshotWaits;
+                waitTicks += _arenas[w].SnapshotWaitTicks;
+                privateReads += _arenas[w].SnapshotPrivateReads;
+                fills += _arenas[w].SnapshotOpens;
+                reads += _arenas[w].SnapshotReads;
+                prefills += _arenas[w].SnapshotPrefills;
+                prefillTicks += _arenas[w].PrefillTicks;
+            }
+
+            return (_spanCount, _spanTicks, _busySumTicks, _heaviestGroupTicks, _heaviestStartTicks, _phantomChunks, _chunkThreads, waits, waitTicks,
+                privateReads, fills, reads, _activeClusters, prefills, prefillTicks);
+        }
+    }
+
+    /// <summary>Whether this tick's groups are claimed in cost order. For tests.</summary>
+    internal bool TickCostOrdered => _tickCostOrdered;
+
+    /// <summary>An archetype's snapshot store, by plan index. For tests.</summary>
+    /// <param name="archetypeIndex">The plan index.</param>
+    /// <returns>The store, or <see langword="null"/> when the archetype has none.</returns>
+    internal ClusterSnapshotStore SnapshotOf(int archetypeIndex) => _snapshots[archetypeIndex];
+
+    /// <summary>Whether any archetype's snapshot keeps its boxes as columns, i.e. the block kernel is what this tick ran. For tests.</summary>
+    internal bool AnySnapshotColumnar
+    {
+        get
+        {
+            foreach (var snap in _snapshots)
+            {
+                if (snap is { Columnar: true })
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>Copies the cumulative log2 histogram of group microseconds (16 buckets) into <paramref name="into"/>.</summary>
+    /// <param name="into">At least 16 elements.</param>
+    public void CopyGroupHistogram(Span<long> into) => _groupHistogram.AsSpan().CopyTo(into);
 
     /// <summary>
     /// Per tick, averaged: the stage's wall span, the CPU its chunks summed, the slowest chunk, how late the last chunk started, the heaviest single group
@@ -786,6 +1030,7 @@ internal sealed unsafe class InterestPass
     {
         var prologueFrom = Stopwatch.GetTimestamp();
         FoldChunkSpan();
+        CapturePreviousGroups();
         _tickNumber = tickNumber;
         var workers = Math.Max(1, workerCount);
         EnsureArenas(workers);
@@ -797,7 +1042,9 @@ internal sealed unsafe class InterestPass
             var aabbs = _clusterStates[a]?.ClusterAabbs;
             if (_snapshots[a] != null && aabbs != null)
             {
-                _snapshots[a].EnsureCapacity(aabbs.Length);
+                _snapshots[a].EnsureCapacity(aabbs.Length, BlockKernel);
+                _clusterStates[a].ReadActiveClusterList(out var active);
+                _activeClusters += active;
             }
 
             if (aabbs != null)
@@ -822,6 +1069,22 @@ internal sealed unsafe class InterestPass
 
             arena.BeginTick();
         }
+
+        // The wave's input: every arena's first reads of last tick, flattened by a prefix over the arenas. Taken after the arenas swapped their lists.
+        _prefillTotal = 0;
+        _prefillCursor = 0;
+        if (_prefillFrom.Length < _arenas.Length + 1)
+        {
+            _prefillFrom = new int[_arenas.Length + 1];
+        }
+
+        for (var w = 0; w < _arenas.Length; w++)
+        {
+            _prefillFrom[w] = _prefillTotal;
+            _prefillTotal += PrefillSnapshots ? _arenas[w].PrevReadCount : 0;
+        }
+
+        _prefillFrom[_arenas.Length] = _prefillTotal;
 
         // ── These are NOT reset here, and the reason is a measurement that was read wrong ────────────────────────────────────────────────────────────
         //
@@ -889,6 +1152,7 @@ internal sealed unsafe class InterestPass
             Array.Resize(ref _chunkBusy, Math.Max(16, chunkCount));
             Array.Resize(ref _chunkStart, _chunkBusy.Length);
             Array.Resize(ref _chunkEnd, _chunkBusy.Length);
+            Array.Resize(ref _chunkThread, _chunkBusy.Length);
         }
 
         _lastChunkCount = chunkCount;
@@ -1013,6 +1277,10 @@ internal sealed unsafe class InterestPass
         {
             Array.Resize(ref _groupStart, Math.Max(16, _tickSessionCount));
             Array.Resize(ref _groupCount, Math.Max(16, _tickSessionCount));
+            Array.Resize(ref _groupTicks, _groupStart.Length);
+            Array.Resize(ref _groupReach, _groupStart.Length);
+            Array.Resize(ref _groupOrder, _groupStart.Length);
+            Array.Resize(ref _groupOrderKey, _groupStart.Length);
         }
 
         // ── Why a crowded cell is still cut into pieces ────────────────────────────────────────────────────────────────────────────────────────────
@@ -1028,6 +1296,7 @@ internal sealed unsafe class InterestPass
 
         _groupTotal = 0;
         _groupCursor = 0;
+        _tickCostOrdered = false;
         if (_tickSessionCount == 0)
         {
             return;
@@ -1053,6 +1322,7 @@ internal sealed unsafe class InterestPass
         }
 
         _groupCursor = 0;
+        OrderGroupsByCost();
     }
 
     /// <summary>How far each of this tick's sessions moved since it was last resolved, or infinity when it has no previous viewpoint.</summary>
@@ -1391,18 +1661,26 @@ internal sealed unsafe class InterestPass
         var cells = 0L;
         var shared = 0L;
 
+        if (_prefillTotal > 0)
+        {
+            Prefill(arena);
+            arena.PrefillTicks += Stopwatch.GetTimestamp() - chunkFrom;
+        }
+
         // Groups, not sessions, and from a cursor rather than a slice: see BuildGroups. A chunk takes the next group until there are none left, so a
         // worker that drew a crowded cell is not also holding thirty empty ones behind it.
         while (true)
         {
-            var g = Interlocked.Increment(ref _groupCursor) - 1;
-            if (g >= _groupTotal)
+            var claimed = Interlocked.Increment(ref _groupCursor) - 1;
+            if (claimed >= _groupTotal)
             {
                 break;
             }
 
+            var g = _tickCostOrdered ? _groupOrder[claimed] : claimed;
             var i = _groupStart[g];
             var count = _groupCount[g];
+            var reachFrom = arena.BroadClustersReached;
             var groupFrom = Stopwatch.GetTimestamp();
             // A cell of ONE still takes the cell path when it has a key. The direct path opens every cluster it reaches through the enumerator, which is
             // exactly the redundant open the shared snapshot removed; profiled at a thousand sessions, the ~13 % of sessions alone in their cell were 39 %
@@ -1419,6 +1697,8 @@ internal sealed unsafe class InterestPass
             }
 
             var groupTicks = Stopwatch.GetTimestamp() - groupFrom;
+            _groupTicks[g] = groupTicks;
+            _groupReach[g] = arena.BroadClustersReached - reachFrom;
             if (_measurePhases)
             {
                 arena.NoteGroupTicks(groupTicks);
@@ -1428,6 +1708,7 @@ internal sealed unsafe class InterestPass
             {
                 arena.HeaviestGroupTicks = groupTicks;
                 arena.HeaviestGroupMembers = count;
+                arena.HeaviestGroupStart = groupFrom;
             }
         }
 
@@ -1437,6 +1718,7 @@ internal sealed unsafe class InterestPass
             _chunkBusy[chunkIndex] = now - chunkFrom;
             _chunkStart[chunkIndex] = chunkFrom;
             _chunkEnd[chunkIndex] = now;
+            _chunkThread[chunkIndex] = Environment.CurrentManagedThreadId;
         }
 
         arena.Note(probes, hits, _fenceWindow.IsOpen);
@@ -1444,6 +1726,102 @@ internal sealed unsafe class InterestPass
         {
             Interlocked.Add(ref _cellsResolved, cells);
             Interlocked.Add(ref _sessionsShared, shared);
+        }
+    }
+
+    /// <summary>
+    /// This chunk's share of the pre-fill wave: claims blocks of last tick's read lists, flattened across the arenas, from a shared cursor and fills each
+    /// cluster it wins.
+    /// </summary>
+    /// <remarks>
+    /// A cluster already filled or being filled is skipped — the claim decides, exactly as on the lazy path, so the wave and a group reaching the same
+    /// cluster can never both fill it, and a cluster listed twice is filled once. Blocks are claimed in increasing order by each worker, so the arena index
+    /// only ever moves forward.
+    /// </remarks>
+    private void Prefill(HitArena arena)
+    {
+        var tick = _tickNumber;
+        var w = 0;
+        var rentedFor = -1;
+        SpatialQueryAccessorCache.Entry entry = null;
+        var token = 0;
+        var fieldsOffset = 0;
+        var stride = 0;
+        try
+        {
+            while (true)
+            {
+                var from = Interlocked.Add(ref _prefillCursor, PrefillBlock) - PrefillBlock;
+                if (from >= _prefillTotal)
+                {
+                    break;
+                }
+
+                var to = Math.Min(from + PrefillBlock, _prefillTotal);
+                for (var k = from; k < to; k++)
+                {
+                    while (k >= _prefillFrom[w + 1])
+                    {
+                        w++;
+                    }
+
+                    var read = _arenas[w].PrevRead(k - _prefillFrom[w]);
+                    var a = (int)(read >> 32);
+                    var chunkId = (int)read;
+                    var snap = _snapshots[a];
+                    if (snap == null || !snap.Covers(chunkId))
+                    {
+                        continue;
+                    }
+
+                    snap.TryGet(chunkId, tick, true, out var claim, out _);
+                    if (claim != ClusterSnapshotStore.SnapshotClaim.Fill)
+                    {
+                        continue;
+                    }
+
+                    byte* basePtr;
+                    nint block;
+                    try
+                    {
+                        // Inside the try, as the lazy path's open is: the claim is already this worker's, and a rent that threw with it held would leave
+                        // every other reader of the cluster spinning on a fill that never comes.
+                        if (rentedFor != a)
+                        {
+                            if (entry != null)
+                            {
+                                SpatialQueryAccessorCache.Return(entry, token);
+                                entry = null;
+                            }
+
+                            var clusterState = _clusterStates[a];
+                            var layout = new ClusterFieldLayout(clusterState);
+                            fieldsOffset = layout.FieldsOffset;
+                            stride = layout.Stride;
+                            entry = SpatialQueryAccessorCache.Instance.Rent(clusterState.ClusterSegment, out token);
+                            rentedFor = a;
+                        }
+
+                        basePtr = entry.Accessor.GetChunkAddress(chunkId);
+                        block = _states[a].Directory.TryGetBlock(chunkId, out var found) ? (nint)found : 0;
+                    }
+                    catch
+                    {
+                        snap.Abandon(chunkId, tick);
+                        throw;
+                    }
+
+                    snap.Fill(chunkId, tick, basePtr, fieldsOffset, stride, block);
+                    arena.SnapshotPrefills++;
+                }
+            }
+        }
+        finally
+        {
+            if (entry != null)
+            {
+                SpatialQueryAccessorCache.Return(entry, token);
+            }
         }
     }
 
@@ -1700,6 +2078,7 @@ internal sealed unsafe class InterestPass
         // real profile with several archetypes ran.
         arena.BeginCell();
         var ranges = arena.CellRanges(archetypes.Length);
+        var boundaryRanges = arena.CellBoundaryRanges(archetypes.Length);
         var broadFrom = _measurePhases ? Stopwatch.GetTimestamp() : 0L;
 
         // ── The inscribed disc: what EVERY member of this cell can see without being asked ────────────────────────────────────────────────────────
@@ -1725,6 +2104,7 @@ internal sealed unsafe class InterestPass
         {
             ranges[a] = arena.CandidateCount;
             interiorRanges[a] = arena.InteriorCount;
+            boundaryRanges[a] = arena.BoundaryCount;
             var clusterState = _clusterStates[archetypes[a]];
             if (clusterState == null || clusterState.Grid == null)
             {
@@ -1759,9 +2139,28 @@ internal sealed unsafe class InterestPass
                 while (e.MoveNextClusterUnopened(out var chunkId, out var bMinX, out var bMinY, out var bMaxX, out var bMaxY))
                 {
                     arena.NoteBroadCluster();
-                    var occ = snap.TryGet(chunkId, _tickNumber, out var mustFill);
+                    var occ = snap.TryGet(chunkId, _tickNumber, ClaimNeverWaits, out var claim, out var waitTicks);
                     byte* privateBase = null;
-                    if (mustFill)
+                    if (waitTicks != 0)
+                    {
+                        arena.SnapshotWaits++;
+                        arena.SnapshotWaitTicks += waitTicks;
+                    }
+
+                    if (PrefillSnapshots && _prefillArchetype[archetypes[a]] && snap.MarkRead(chunkId, _tickNumber))
+                    {
+                        arena.AddRead(archetypes[a], chunkId);
+                    }
+
+                    if (claim == ClusterSnapshotStore.SnapshotClaim.Busy)
+                    {
+                        // Another worker is filling it: read the same bytes from the page rather than wait (23 § 3, phase 1). Interest runs after the
+                        // fence, so the page holds what the fill is copying; nothing is written to the store, and the block comes from the directory.
+                        privateBase = e.OpenCluster(chunkId);
+                        occ = Volatile.Read(ref *(ulong*)privateBase);
+                        arena.SnapshotPrivateReads++;
+                    }
+                    else if (claim == ClusterSnapshotStore.SnapshotClaim.Fill)
                     {
                         byte* basePtr;
                         nint fillBlock;
@@ -1812,6 +2211,16 @@ internal sealed unsafe class InterestPass
                     if (admitInterior && sdx <= interior && sdy <= interior && (sdx * sdx) + (sdy * sdy) <= interiorSq)
                     {
                         arena.AddInteriorCluster(chunkId, occ, sChanged);
+                        continue;
+                    }
+
+                    if (snap.Columnar)
+                    {
+                        // Nothing of the cluster is read here: each member tests it from its column (23 § 3, phase 2). A cluster read from its own page
+                        // has its column copied into the arena, once for the cell.
+                        var privateColumns = privateBase != null ? arena.AddPrivateColumns(privateBase + fieldsOffset, stride, occ) : -1;
+                        arena.AddBoundaryCluster(chunkId, occ, sChanged, bMinX, bMinY, bMaxX, bMaxY, privateColumns);
+                        arena.BroadEntitiesReached += BitOperations.PopCount(occ);
                         continue;
                     }
 
@@ -1923,6 +2332,9 @@ internal sealed unsafe class InterestPass
         var retainTicks = 0L;
         var closeTicks = 0L;
 
+        var leaveSq = radius * radius;
+        var enterSq = enterRadius * enterRadius;
+
         // NARROW PHASE, one session at a time, so each session's runs are contiguous.
         for (var i = start; i < start + count; i++)
         {
@@ -1984,6 +2396,56 @@ internal sealed unsafe class InterestPass
                 if (_measurePhases)
                 {
                     interiorTicks += Stopwatch.GetTimestamp() - interiorFrom;
+                }
+
+                // The boundary clusters, each tested from its column by the block kernel. Empty unless the snapshot is columnar.
+                var bTo = a + 1 < archetypes.Length ? boundaryRanges[a + 1] : arena.BoundaryCount;
+                if (boundaryRanges[a] < bTo)
+                {
+                    var kernelFrom = _measurePhases ? Stopwatch.GetTimestamp() : 0L;
+                    var snapA = _snapshots[archetypes[a]];
+                    for (var k = boundaryRanges[a]; k < bTo; k++)
+                    {
+                        // A stationary member's unchanged clusters are re-emitted by CloseSession, as with the candidate path's changed region.
+                        if (stationary && !arena.BoundaryChanged(k))
+                        {
+                            continue;
+                        }
+
+                        // Nothing in a cluster box farther than the leave radius can match: the box holds every entity box, and the closest-point distance
+                        // is monotone in the bounds, so one test per cluster stands in for the kernel.
+                        arena.BoundaryBox(k, out var cMinX, out var cMinY, out var cMaxX, out var cMaxY);
+                        var cdx = double.MaxNative(0d, double.MaxNative(cMinX - viewpoint.X, viewpoint.X - cMaxX));
+                        var cdy = double.MaxNative(0d, double.MaxNative(cMinY - viewpoint.Y, viewpoint.Y - cMaxY));
+                        if ((cdx * cdx) + (cdy * cdy) > leaveSq)
+                        {
+                            continue;
+                        }
+
+                        var chunk = arena.BoundaryChunk(k);
+                        var priv = arena.BoundaryPrivate(k);
+                        ulong near;
+                        var far = priv >= 0
+                            ? InterestBandKernel.Match(ref arena.PrivateColumns(priv), arena.BoundaryOccupancy(k), viewpoint.X, viewpoint.Y, radius, enterSq,
+                                out near)
+                            : InterestBandKernel.Match(ref snapA.Columns(chunk), arena.BoundaryOccupancy(k), viewpoint.X, viewpoint.Y, radius, enterSq,
+                                out near);
+                        if (far == 0UL)
+                        {
+                            continue;
+                        }
+
+                        arena.NoteAccepted(BitOperations.PopCount(far));
+                        if (!defer || !arena.TryDefer(archetypes[a], chunk, near, far))
+                        {
+                            sessionHits += FlushSphereRun(arena, view, archetypes[a], chunk, near, far, ref probes);
+                        }
+                    }
+
+                    if (_measurePhases)
+                    {
+                        narrowTicks += Stopwatch.GetTimestamp() - kernelFrom;
+                    }
                 }
 
                 var kFrom = stationary ? cFrom : ranges[a];

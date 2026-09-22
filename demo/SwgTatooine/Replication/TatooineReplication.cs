@@ -174,6 +174,10 @@ public static class TatooineReplication
     private static long IdleTickFrom;
     private static (double ActiveMs, double TickWallMs, long Ticks, int Workers) _utilFrom;
     private static long SendWindowFrom, SendFramesFrom, SendBytesFrom, SendAllocFrom, SendItemsFrom;
+    private static (long Ticks, long SpanTicks, long BusyTicks, long HeaviestTicks, long HeaviestStartTicks, long PhantomChunks, long Threads, long Waits,
+        long WaitTicks, long PrivateReads, long Fills, long Reads, long ActiveClusters, long Prefills, long PrefillTicks) ShapeFrom;
+    private static readonly long[] HistogramFrom = new long[16];
+    private static readonly long[] HistogramNow = new long[16];
     private static double SendCpuFrom;
     private static int SendGen0From;
 
@@ -381,6 +385,47 @@ public static class TatooineReplication
                 + $"({(isp.SpanMs <= 0 ? 0 : isp.BusyMs / isp.SpanMs):F1} concurrent), "
                 + $"slowest chunk {isp.MaxChunkMs:F2} ms, start spread {isp.StartSpreadMs:F2} ms, heaviest group {isp.HeaviestGroupMs:F2} ms "
                 + $"({isp.HeaviestGroupMembers:F1} members), prologue {isp.PrologueMs:F2} ms serial");
+            // Design 23's phase-0 counts, over this report's window only: the cumulative figures above carry the connection ramp.
+            var sh = subs.InterestStageShape;
+            var shTicks = sh.Ticks - ShapeFrom.Ticks;
+            if (shTicks > 0)
+            {
+                var msPer = 1000d / System.Diagnostics.Stopwatch.Frequency / shTicks;
+                subs.CopyInterestGroupHistogram(HistogramNow);
+                var hist = new System.Text.StringBuilder();
+                for (var b = 0; b < 16; b++)
+                {
+                    var n = HistogramNow[b] - HistogramFrom[b];
+                    if (n > 0)
+                    {
+                        hist.Append($" <{(b == 0 ? 1 : 1 << b)}us:{(double)n / shTicks:F1}");
+                    }
+
+                    HistogramFrom[b] = HistogramNow[b];
+                }
+
+                var wall = (sh.SpanTicks - ShapeFrom.SpanTicks) * msPer;
+                var busy = (sh.BusyTicks - ShapeFrom.BusyTicks) * msPer;
+                var heaviest = (sh.HeaviestTicks - ShapeFrom.HeaviestTicks) * msPer;
+                var heaviestAt = (sh.HeaviestStartTicks - ShapeFrom.HeaviestStartTicks) * msPer;
+                var phantom = (double)(sh.PhantomChunks - ShapeFrom.PhantomChunks) / shTicks;
+                var threads = (double)(sh.Threads - ShapeFrom.Threads) / shTicks;
+                var waits = (double)(sh.Waits - ShapeFrom.Waits) / shTicks;
+                var waitUs = (sh.WaitTicks - ShapeFrom.WaitTicks) * msPer * 1000d;
+                var privateReads = (double)(sh.PrivateReads - ShapeFrom.PrivateReads) / shTicks;
+                var fills = (double)(sh.Fills - ShapeFrom.Fills) / shTicks;
+                var reads = (double)(sh.Reads - ShapeFrom.Reads) / shTicks;
+                var active = (double)(sh.ActiveClusters - ShapeFrom.ActiveClusters) / shTicks;
+                var prefills = (double)(sh.Prefills - ShapeFrom.Prefills) / shTicks;
+                var prefillMs = (sh.PrefillTicks - ShapeFrom.PrefillTicks) * msPer;
+                Console.Error.WriteLine(
+                    $"  interest stage (window, per tick): wall {wall:F2} ms, busy {busy:F2} ms, heaviest group {heaviest:F2} ms starting at "
+                    + $"{heaviestAt:F2} ms, phantom chunks {phantom:F1}, threads {threads:F1}, claim waits {waits:F1} ({waitUs:F0} us), "
+                    + $"private reads {privateReads:F1}; snapshot fills {fills:F0} (+{prefills:F0} pre-filled in {prefillMs:F2} ms CPU), reads {reads:F0}, "
+                    + $"active clusters {active:F0}; groups:{hist}");
+            }
+
+            ShapeFrom = sh;
             var csz = subs.ClusterSize;
             Console.Error.WriteLine(
                 $"  cluster size: mean radius {csz.MeanRadius:F1} m (max {csz.MaxRadius:F1}) over {csz.Samples} samples; "

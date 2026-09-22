@@ -569,6 +569,19 @@ public sealed class SubscriptionsCommands
     public (double SpanMs, double BusyMs, double MaxChunkMs, double StartSpreadMs, double HeaviestGroupMs, double HeaviestGroupMembers, double PrologueMs) InterestSpan =>
         _ingress.Interest == null ? default : _ingress.Interest.ChunkSpan;
 
+    /// <summary>
+    /// The interest stage's shape, cumulative since start (design 23, phase 0): ticks folded, wall and summed busy, the heaviest group and how late it started,
+    /// chunks that did almost nothing, distinct threads that ran chunks, snapshot claims that waited and for how long, and claims read privately instead.
+    /// Durations in <see cref="System.Diagnostics.Stopwatch"/> ticks.
+    /// </summary>
+    public (long Ticks, long SpanTicks, long BusyTicks, long HeaviestTicks, long HeaviestStartTicks, long PhantomChunks, long Threads, long Waits,
+        long WaitTicks, long PrivateReads, long Fills, long Reads, long ActiveClusters, long Prefills, long PrefillTicks) InterestStageShape =>
+        _ingress.Interest?.StageShape ?? default;
+
+    /// <summary>Copies the interest stage's cumulative log2 histogram of group microseconds (16 buckets) into <paramref name="into"/>.</summary>
+    /// <param name="into">At least 16 elements.</param>
+    public void CopyInterestGroupHistogram(Span<long> into) => _ingress.Interest?.CopyGroupHistogram(into);
+
     /// <summary>The send path, measured while phase timing is on — see <c>SendPump.SendPath</c>.</summary>
     public (double WakeMsPerPublish, double WokenPerPublish, double QueueDelayUs, double SendUs, long SendsSync, long SendsAsync) SendPath =>
         _ingress.SendPump == null ? default : _ingress.SendPump.SendPath;
