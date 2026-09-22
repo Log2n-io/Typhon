@@ -56,6 +56,7 @@ services.AddManagedPagedMMF(o => o.DatabaseCacheSize = 512UL << 20);   // 512 Mi
 | `WalRingBufferSizeBytes` | 64 MB | Total pinned; 2 × 32 MB halves. Commit threads block once the ring drains slower than it fills. Sized for tail latency — lower for memory-constrained deployments |
 | `PageChecksumVerification` | `OnLoad` | CRC every page load · only during recovery · recovery-suspect mode |
 | `CheckpointIntervalMs` | 30000 | Idle checkpoint cadence |
+| `CheckpointDirtyPageThresholdPercent` | 25 | Run a checkpoint as soon as this percentage of the page cache owes a writeback, without waiting for the interval; `0` disables the trigger |
 | `CheckpointBarrierTimeoutMs` | 30000 | How long a checkpoint waits for its barrier before giving up |
 
 That is the entire type. There is no `PageCachePages`, `MaxPageCachePages`, `TransactionPoolSize`,

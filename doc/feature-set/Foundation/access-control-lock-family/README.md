@@ -25,7 +25,7 @@ All three pack their entire state into a single atomic word (8, 4, and 4 bytes r
 
 ## ⚠️ Guarantees & limits
 - All three are `internal` engine types — application code never constructs or calls them directly; they're the plumbing inside `ComponentTable`, `TransactionChain`, page latches, B+Tree nodes, segment chains, etc.
-- Thread IDs are stored in exactly 16 bits everywhere (max 65,535) — consistent overflow headroom across the family, sized for 500+ core servers.
+- Thread IDs are stored in exactly 16 bits everywhere, but the usable range is not uniform: `AccessControl` reaches 65,535, while `AccessControlSmall` and `ResourceAccessControl` hold the id in bits 16–31 of a *signed* `int` and cap at **32,767** simultaneously-live threads. Design to 32,767 — still far past 500+ core servers, and managed thread ids are recycled on thread death.
 - Pure userspace spin-wait, never OS-level parking — cheap for the engine's typical sub-microsecond hold times, wasteful if misused for long critical sections.
 - No deadlock detection by design: correctness rests on Typhon's MVCC (no cross-transaction lock holding) and strict latch-coupling order in the B+Tree/R-Tree, not on runtime detection in these primitives.
 - Contention surfaces through the profiler's trace-event stream (`TyphonEvent.Emit*`, gated and JIT-eliminated when the profiler is off) — not an opt-in callback interface.

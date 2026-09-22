@@ -7,7 +7,7 @@ description: 'Zero-allocation dual-generic result struct for hot-path lookups th
 # Result<TValue,TStatus> Hot-Path Result Type
 > Zero-allocation dual-generic result struct for hot-path lookups that expect a miss — no exceptions, no boxing, no branch on access.
 
-**Status:** ✅ Implemented · **Visibility:** Internal · **Category:** [Errors](./README.md)
+**Status:** ✅ Implemented · **Visibility:** Public · **Category:** [Errors](./README.md)
 
 ## 🎯 What it solves
 

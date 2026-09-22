@@ -8,7 +8,7 @@ description: 'A live utilization map of every significant engine resource, read 
 
 > **In one line:** a live **utilization map** of the engine — enough real-time data to see pressure building and **throttle before you hit a limit**, instead of meeting the ceiling as an exception.
 
-You set the budgets once, at startup, through `ResourceOptions` — page-cache size, max active transactions, WAL ring/segment sizing, checkpoint thresholds — and `Validate()` checks that the fixed allocations actually fit the total. From then on every significant resource (page cache, transactions, WAL, allocators, timers, …) sits in a fixed tree and reports its own utilization. Reporting is **pull-based**: metrics are read when you take a snapshot, never pushed on the hot path — so having the map costs nothing while you aren't looking at it.
+You set the budgets once, at startup — the page-cache size on `PagedMMFOptions`, and max active transactions, the WAL ring size and the checkpoint cadence and thresholds on `ResourceOptions` — and every value is range-checked automatically when the engine is resolved from DI; there is no validation method to call. From then on every significant resource (page cache, transactions, WAL, allocators, timers, …) sits in a fixed tree and reports its own utilization. Reporting is **pull-based**: metrics are read when you take a snapshot, never pushed on the hot path — so having the map costs nothing while you aren't looking at it.
 
 **Why this earns a page:** a budget is a ceiling, and hitting one isn't negotiable — it surfaces as a [`ResourceExhaustedException`](xref:concept-errors). The graph is what lets you *not get there*: it says how close you are **right now**, so you can shed load, slow your input, or throttle while there's still room. And when something does saturate, `FindRootCause` matters more than the raw number — the node that looks busiest is usually a *symptom*, so it walks the dependency chain back to whatever is actually backed up, letting you throttle the **right** thing instead of guessing.
 
@@ -23,7 +23,7 @@ You set the budgets once, at startup, through `ResourceOptions` — page-cache s
 
 ## In the API
 
-- [`ResourceOptions`](xref:Typhon.Engine.ResourceOptions) — the startup budgets; `Validate()` checks they fit the total.
+- [`ResourceOptions`](xref:Typhon.Engine.ResourceOptions) — the startup budgets, range-checked automatically at DI resolution.
 - [`IResourceGraph.GetSnapshot()`](xref:Typhon.Engine.IResourceGraph.GetSnapshot*) → [`ResourceSnapshot`](xref:Typhon.Engine.ResourceSnapshot), with [`FindMostUtilized`](xref:Typhon.Engine.ResourceSnapshot.FindMostUtilized*) and [`FindRootCause`](xref:Typhon.Engine.ResourceSnapshot.FindRootCause*).
 - [`ResourceExhaustedException`](xref:Typhon.Engine.ResourceExhaustedException) · [`ExhaustionPolicy`](xref:Typhon.Engine.ExhaustionPolicy).
 

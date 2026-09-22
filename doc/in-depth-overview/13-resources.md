@@ -252,7 +252,7 @@ Lives inside `DatabaseEngineOptions` and is consumed by the components at constr
 
 > **Page-cache size is not a `ResourceOptions` knob.** It lives on `PagedMMFOptions.DatabaseCacheSize` (bytes, default **256 MiB**) — set it via `TyphonOptions.PageCacheSize(...)`. There is no `PageCachePages` or `MaxPageCachePages` entry on `ResourceOptions`.
 
-`ResourceOptions` carries **five** properties. That is the whole type:
+`ResourceOptions` carries **six** properties. That is the whole type:
 
 | Property | Default | Meaning |
 |---|---:|---|
@@ -260,6 +260,7 @@ Lives inside `DatabaseEngineOptions` and is consumed by the components at constr
 | `WalRingBufferSizeBytes` | `64 * 1024 * 1024` (**64 MB** total, 2 × 32 MB halves) | In-memory WAL stage; sized for tail latency |
 | `PageChecksumVerification` | `OnLoad` | CRC every load · only during recovery · recovery-suspect mode |
 | `CheckpointIntervalMs` | `30000` (**30 s**) | Idle checkpoint cadence |
+| `CheckpointDirtyPageThresholdPercent` | `25` | Early checkpoint once this percentage of the page cache owes a writeback; `0` disables the trigger |
 | `CheckpointBarrierTimeoutMs` | `30000` (**30 s**) | How long a checkpoint waits for its barrier |
 
 Names such as `PageCachePages`, `MaxPageCachePages`, `TransactionPoolSize`, `WalBackPressureThreshold`, `WalMaxSegments`, `WalMaxSegmentSizeBytes`, `CheckpointMaxDirtyPages`, `ShadowBufferPages` and `PageSizeBytes` are **not** knobs on this type — nothing reads them and they bound no allocation. If you are looking for one of them, the live knob is elsewhere:

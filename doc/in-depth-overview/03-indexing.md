@@ -21,8 +21,8 @@ If you've used the engine before, you've used this code path. Every PK lookup, e
 `BTree<TKey, TStore>` is the universal index. The same class instance backs:
 
 - **Primary key indexes** on `ComponentTable` (one per component type).
-- **Secondary indexes** declared by `[Indexed]` on schema fields.
-- **Uniqueness constraints** (`[Unique]` is a unique secondary index — `AllowMultiple = false`).
+- **Secondary indexes** declared by `[Index]` on schema fields.
+- **Uniqueness constraints** — a plain `[Index]` is unique (`AllowMultiple` defaults to `false`); there is no separate `[Unique]` attribute.
 - **Multi-value indexes** (`AllowMultiple = true`) — values per key are stored in a `VariableSizedBufferSegment` whose buffer head ID lives in the BTree's value slot.
 
 The `TStore` generic threads through to [`IPageStore`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/IPageStore.cs) — concretely `PersistentStore` (WAL-backed, durable) or `TransientStore` (in-memory only, no WAL). The BTree code is identical for both; the store dictates whether mutations get journalled.

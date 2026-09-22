@@ -48,7 +48,7 @@ interest.UnregisterObserver(observer);
 | `RegisterObserver` arg | Default | Effect |
 |---|---|---|
 | `bounds` | required | Interest AABB, `[minX,minY,(minZ,) maxX,maxY,(maxZ)]` |
-| `categoryMask` | `0` | `0` = no filtering; non-zero = AND-conjunctive, the same semantics the cluster broadphase applies |
+| `categoryMask` | `0` | `0` = no filtering; non-zero = a cluster is admitted when any requested bit overlaps its archetype's category (the cluster broadphase test), then a changed entity is kept only if its archetype carries **every** requested bit — stricter than a trigger region with the same mask |
 | `initialTick` | `0` | Starting point for delta accumulation on the first `GetSpatialChanges` call |
 
 ## ⚠️ Guarantees & limits
@@ -74,7 +74,7 @@ interest.UnregisterObserver(observer);
 - Source: [src/Typhon.Engine/Spatial/public/SpatialObserverHandle.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/SpatialObserverHandle.cs) (public handle type)
 - Source: [src/Typhon.Engine/Spatial/public/SpatialChangeResult.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/SpatialChangeResult.cs) (public result type)
 - Source: [src/Typhon.Engine/Ecs/internals/DirtyBitmapRing.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/DirtyBitmapRing.cs) (64-tick archival ring, multi-tick OR accumulation)
-- Related catalog entry: [Category Filtering](./spatial-category-filtering.md) (the AND-conjunctive mask semantics this feature reuses)
+- Related catalog entry: [Category Filtering](./spatial-category-filtering.md) (the any-bit cluster admit this feature shares, and the stricter all-bits test only observers add)
 
 <!-- Deep dive: claude/design/Spatial/SpatialIndex/08-game-features.md (Feature F4 — Interest Management: inverted dirty-set rationale, ring buffer design, Tier 1/Tier 2 split) -->
 <!-- Rules: rules/spatial.md (Module: Interest Management — IM-01 no missed changes, IM-02 ring buffer safety, IM-03 SV-only scope, IM-04 both systems read the cluster index) -->
