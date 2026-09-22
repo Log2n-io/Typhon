@@ -195,7 +195,6 @@ public struct CreatureVitals
 {
     [Field] public int Health;
     [Field] public int MaxHealth;
-    [Field] public int AttackCooldown;
     [Field] public int AttackDamage;
 
     public readonly bool IsAlive => Health > 0;
@@ -296,6 +295,12 @@ public struct CreatureTimers
 
     /// <summary>The tick a resting creature picks its next leg. See <see cref="MoveUntilTick"/>.</summary>
     [Field] public long RestUntilTick;
+
+    /// <summary>
+    /// Ticks until the weapon firing at this creature cycles again. Decremented every tick while engaged, so it lives here rather than in
+    /// <see cref="CreatureVitals"/>: beside the health the projection sends, every decrement read as a change to a replicated component.
+    /// </summary>
+    [Field] public int AttackCooldown;
 }
 
 /// <summary>A city NPC's behaviour. Almost always <see cref="AiMode.Idle"/>.</summary>

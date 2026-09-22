@@ -54,6 +54,7 @@ class ChangedClusterListTests : TestBase<ChangedClusterListTests>
         {
             cs.TrackContentChanges = true;
             cs.PublishChangedClusterList = true;
+            cs.CountSpanClaims = true;
         }
     }
 

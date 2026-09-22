@@ -250,14 +250,13 @@ public static class WorldBuilder
 
         // Staggered so a lair's creatures do not all think on the same tick. Core3's own interval is 400-1000 ms, which at this tick rate is four to ten
         // ticks — the AI is deliberately not a per-tick cost. In its own component, because nothing on the wire reads it (see CreatureTimers).
-        var timers = new CreatureTimers { ThinkCooldown = rng.NextInt(1, AiTicksMax(config)) };
+        var timers = new CreatureTimers { ThinkCooldown = rng.NextInt(1, AiTicksMax(config)), AttackCooldown = rng.NextInt(0, 8) };
         var move = new CreatureMotion { SpeedMps = CreatureTemplates.SpeedMps[template] };
         var vitals = new CreatureVitals
         {
             Health = CreatureTemplates.Health[template],
             MaxHealth = CreatureTemplates.Health[template],
             AttackDamage = CreatureTemplates.Damage[template],
-            AttackCooldown = rng.NextInt(0, 8),
         };
         return tx.Spawn<Creature>(
             Creature.Bounds.Set(in bounds),

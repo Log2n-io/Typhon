@@ -2667,7 +2667,15 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     public ulong ProjectedComponentMask = ulong.MaxValue;
 
-    /// <summary>Span handouts suppressed because the component they covered is not projected. Diagnostic only.</summary>
+    /// <summary>Whether <see cref="UnprojectedSpanClaims"/> and <see cref="ProjectedSpanClaims"/> are counted. Off unless a measurement asks for them.</summary>
+    /// <remarks>
+    /// Separate from <see cref="TrackContentChanges"/>, and that is measured rather than tidy: gated on the signal itself, the two interlocked increments ran on
+    /// every span handout whenever the signal was on — every writer thread, one shared line — and cost the tick about 0.5 ms at d06/1 000 in the systems that
+    /// take spans (think, economy, missions), which was most of what the projection gate cost when it had nothing to save.
+    /// </remarks>
+    public bool CountSpanClaims;
+
+    /// <summary>Span handouts suppressed because the component they covered is not projected. Diagnostic only; see <see cref="CountSpanClaims"/>.</summary>
     public long UnprojectedSpanClaims;
 
     /// <summary>Span handouts that reached the changed-cluster list. Diagnostic only, and the denominator of the one above.</summary>
@@ -5010,10 +5018,9 @@ internal sealed unsafe partial class ArchetypeClusterState
     {
         var suppressed = (uint)componentSlot < 64u && (ProjectedComponentMask & (1UL << componentSlot)) == 0UL;
 
-        // The two counters are DIAGNOSTIC and are written from fence workers, so they are gated on the same flag as the signal they describe. Left
-        // ungated they were a plain ++ on a field shared by every worker: lossy, which a counter can live with, but also a store into one cache line from
-        // every thread on every span handout — false sharing on the tick path, for a number nobody reads unless the signal is on.
-        if (TrackContentChanges)
+        // The two counters are DIAGNOSTIC, and an interlocked add into one line from every writer thread on every span handout. Gated on their own flag,
+        // not on the signal's: on the signal's they were paid by every run that used the signal. See CountSpanClaims.
+        if (CountSpanClaims)
         {
             if (suppressed)
             {

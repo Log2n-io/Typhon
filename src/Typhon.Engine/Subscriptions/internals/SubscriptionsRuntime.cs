@@ -578,8 +578,16 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             clusterState.ProjectedComponentMask = ProjectedComponentMaskOf(plan);
 
             // The membership signal, on for every replicated archetype: interest's topology maintenance reads it, and without it every cluster reads as
-            // changed and retention never fires. Content tracking stays off — interest does not need it and it costs a mark per span handout.
+            // changed and retention never fires. The content signal is projection's, and follows its option.
             clusterState.TrackStructureChanges = true;
+            if (Options.GateProjectionOnChanges)
+            {
+                clusterState.TrackContentChanges = true;
+                clusterState.PublishChangedClusterList = true;
+            }
+
+            // The span-claim counters behind the report's "span claims" line: a measurement, paid only when one is asked for.
+            clusterState.CountSpanClaims = Options.MeasureInterestPhases;
         }
 
         return states;

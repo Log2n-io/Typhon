@@ -219,6 +219,16 @@ public static class TatooineReplication
                 Console.Error.WriteLine(
                     $"  interest phases (us, cumulative): broad {ip.BroadUs:F0} ({ip.BroadUs * 100d / total:F1} %), "
                     + $"narrow {ip.NarrowUs:F0} ({ip.NarrowUs * 100d / total:F1} %), assemble {ip.FlushUs:F0} ({ip.FlushUs * 100d / total:F1} %)");
+                var bk = subs.InterestBookkeeping;
+                if (bk.GroupUs > 0d)
+                {
+                    var rest = bk.GroupUs - total - bk.InteriorUs - bk.RetainUs - bk.CloseUs;
+                    Console.Error.WriteLine(
+                        $"  interest account (% of group time {bk.GroupUs:F0} us): broad {ip.BroadUs * 100d / bk.GroupUs:F1}, "
+                        + $"kernel {ip.NarrowUs * 100d / bk.GroupUs:F1}, flush {ip.FlushUs * 100d / bk.GroupUs:F1}, "
+                        + $"interior {bk.InteriorUs * 100d / bk.GroupUs:F1}, retain {bk.RetainUs * 100d / bk.GroupUs:F1}, "
+                        + $"close {bk.CloseUs * 100d / bk.GroupUs:F1}, untimed {rest * 100d / bk.GroupUs:F1}");
+                }
             }
 
             var ic = subs.InterestCoherence;
@@ -411,6 +421,10 @@ public static class TatooineReplication
             Console.Error.WriteLine($"  frame span: {fs.SpanMs:F2} ms wall, {fs.BusyMs:F2} ms busy, {fs.Concurrency:F1} concurrent, start spread {fs.StartSpreadMs:F2} ms");
             var pm = subs.FramePrologueMs;
             Console.Error.WriteLine($"  frame prologue: {pm.Prologue:F2} ms/tick serial (sweep {pm.Sweep:F2}, prepare {pm.Prepare:F2})");
+            var pp = subs.ProjectPrologueMs;
+            Console.Error.WriteLine(
+                $"  project: serial {pp.Create + pp.Drain + pp.Gather:F2} ms/tick (create {pp.Create:F2}, drain {pp.Drain:F2}, gather {pp.Gather:F2}), "
+                + $"parallel busy {pp.Busy:F2} ms/tick");
             var fb = subs.FrameBalance;
             Console.Error.WriteLine($"  frame balance: {fb.Effective:F1} effective workers, {fb.Efficiency * 100d:F0} % efficiency over {fb.Ticks} ticks");
             var census = subs.ShareCensus;

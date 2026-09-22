@@ -124,6 +124,12 @@ public static class CommandLine
             "off" => false,
             var other => throw new ArgumentException($"--subs-sparse takes on or off, not '{other}'"),
         };
+        c.SubscriptionsContentGate = Str(args, "--subs-content-gate", "on") switch
+        {
+            "on" => true,
+            "off" => false,
+            var other => throw new ArgumentException($"--subs-content-gate takes on or off, not '{other}'"),
+        };
         c.SubscriptionsOwedSlice = Int(args, "--subs-owed-slice", 2);
         c.SubscriptionsGatherPrefetch = Str(args, "--subs-prefetch", "off") switch
         {

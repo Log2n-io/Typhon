@@ -64,6 +64,7 @@ public sealed partial class TatooineSim
                 GatherPrefetch = _config.SubscriptionsGatherPrefetch,
                 MeasureInterestPhases = _config.SubscriptionsInterestPhases,
                 SparseTopology = _config.SubscriptionsSparse,
+                GateProjectionOnChanges = _config.SubscriptionsContentGate,
                 InterestGroupCap = _config.SubscriptionsGroupCap,
                 DynamicFrameScheduling = _config.SubscriptionsDynamicSchedule,
                 SharedClusterBlocks = _config.SubscriptionsSharedClusterBlocks,

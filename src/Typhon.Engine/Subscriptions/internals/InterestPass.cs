@@ -1199,6 +1199,29 @@ internal sealed unsafe class InterestPass
     }
 
     /// <summary>
+    /// The per-(session, cluster) bookkeeping the phases leave out, and the resolved groups' total, since start, in microseconds (22 § 7, M0).
+    /// </summary>
+    /// <remarks>Populated only under <c>SubscriptionsOptions.MeasureInterestPhases</c>, on the cell path.</remarks>
+    public (double InteriorUs, double RetainUs, double CloseUs, double GroupUs) InterestBookkeeping
+    {
+        get
+        {
+            long interior = 0, retain = 0, close = 0, group = 0;
+            for (var w = 0; w < _arenas.Length; w++)
+            {
+                var b = _arenas[w].BookkeepingTicks;
+                interior += b.Interior;
+                retain += b.Retain;
+                close += b.Close;
+                group += b.Group;
+            }
+
+            var perTick = 1_000_000d / Stopwatch.Frequency;
+            return (interior * perTick, retain * perTick, close * perTick, group * perTick);
+        }
+    }
+
+    /// <summary>
     /// How much of the interest answer has been what the sessions already held, since start: runs unchanged, and sessions whose entire answer was unchanged.
     /// </summary>
     /// <remarks>
@@ -1396,6 +1419,11 @@ internal sealed unsafe class InterestPass
             }
 
             var groupTicks = Stopwatch.GetTimestamp() - groupFrom;
+            if (_measurePhases)
+            {
+                arena.NoteGroupTicks(groupTicks);
+            }
+
             if (groupTicks > arena.HeaviestGroupTicks)
             {
                 arena.HeaviestGroupTicks = groupTicks;
@@ -1596,7 +1624,7 @@ internal sealed unsafe class InterestPass
         if (TryGetBlock(archetypeIndex, chunkId, out var block))
         {
             blockAddress = (nint)block;
-            MarkWatched(arena, block, mask, (uint)tick);
+            MarkWatched(arena, block, archetypeIndex, mask, (uint)tick);
             if (arena.Sparse)
             {
                 // Marked like any other, emitted as nothing: see FlushSphereRun.
@@ -1891,6 +1919,9 @@ internal sealed unsafe class InterestPass
         var broadTicks = _measurePhases ? Stopwatch.GetTimestamp() - broadFrom : 0L;
         var narrowTicks = 0L;
         var flushTicks = 0L;
+        var interiorTicks = 0L;
+        var retainTicks = 0L;
+        var closeTicks = 0L;
 
         // NARROW PHASE, one session at a time, so each session's runs are contiguous.
         for (var i = start; i < start + count; i++)
@@ -1900,7 +1931,6 @@ internal sealed unsafe class InterestPass
             var leaveStart = arena.LeaveCount;
             var view = BeginView(i);
             var sessionHits = 0;
-
             // ── A member that did not move ────────────────────────────────────────────────────────────────────────────────────────────────────────
             //
             // Its viewpoint is bit-identical to last tick's, so for every cluster whose contents also did not change, the kernel would compute exactly the
@@ -1930,6 +1960,7 @@ internal sealed unsafe class InterestPass
 
                 // Admitted whole by the box test: no distance is computed, and the mask IS the occupancy. One flush per cluster per member against the
                 // sixty-four tests per cluster per member it replaces.
+                var interiorFrom = _measurePhases ? Stopwatch.GetTimestamp() : 0L;
                 var iTo = a + 1 < archetypes.Length ? interiorRanges[a + 1] : arena.InteriorCount;
                 for (var k = interiorRanges[a]; k < iTo; k++)
                 {
@@ -1948,6 +1979,11 @@ internal sealed unsafe class InterestPass
                     {
                         sessionHits += FlushSphereRun(arena, view, archetypes[a], arena.InteriorChunk(k), slots, slots, ref probes);
                     }
+                }
+
+                if (_measurePhases)
+                {
+                    interiorTicks += Stopwatch.GetTimestamp() - interiorFrom;
                 }
 
                 var kFrom = stationary ? cFrom : ranges[a];
@@ -1985,9 +2021,16 @@ internal sealed unsafe class InterestPass
                 }
             }
 
+            var retainFrom = _measurePhases ? Stopwatch.GetTimestamp() : 0L;
             if (defer)
             {
                 sessionHits += RetainDeferred(arena, view, ref probes);
+            }
+
+            var closeFrom = _measurePhases ? Stopwatch.GetTimestamp() : 0L;
+            if (_measurePhases)
+            {
+                retainTicks += closeFrom - retainFrom;
             }
 
             // A session is coherent only if NOTHING changed for it: no slot entered, none left, and no cluster departed. CloseSession appends the
@@ -1995,6 +2038,11 @@ internal sealed unsafe class InterestPass
             var runsBefore = arena.RunCount;
             var coherent = _sessionEntered == 0 && _sessionLeft == 0;
             _tickHits[i] = CloseSession(arena, view, chunkIndex, runStart, leaveStart, sessionHits, retainUnchanged: stationary, ref probes);
+            if (_measurePhases)
+            {
+                closeTicks += Stopwatch.GetTimestamp() - closeFrom;
+            }
+
             _tickSparseSkipped[i] = arena.SessionSparseSkipped;
             arena.NoteSessionCoherence(coherent && arena.RunCount == runsBefore && view != null);
             _sessionEntered = 0;
@@ -2005,6 +2053,7 @@ internal sealed unsafe class InterestPass
         if (_measurePhases)
         {
             arena.NotePhases(broadTicks, narrowTicks, flushTicks);
+            arena.NoteBookkeeping(interiorTicks, retainTicks, closeTicks);
         }
     }
 
@@ -2053,7 +2102,7 @@ internal sealed unsafe class InterestPass
                 continue;
             }
 
-            MarkWatched(arena, block, mask, stamp);
+            MarkWatched(arena, block, archetype, mask, stamp);
             probes++;
             view.TouchAt(e, tick);
             arena.NoteRunCoherence(true);
@@ -2311,7 +2360,7 @@ internal sealed unsafe class InterestPass
         {
             // Still marked: projection must see exactly the slots the full walk would have marked, or a slot's continuity — and with it the segment a
             // later enter carries — would depend on which path a session took. Only the run and the frame stage's walk over it are saved.
-            MarkWatched(arena, heldBlock, mask, (uint)_tickNumber);
+            MarkWatched(arena, heldBlock, archetypeIndex, mask, (uint)_tickNumber);
             probes++;
             view.TouchAt(entry, _tickNumber);
             arena.NoteRunCoherence(true);
@@ -2338,7 +2387,7 @@ internal sealed unsafe class InterestPass
         if (TryGetBlock(archetypeIndex, chunkId, out var block))
         {
             blockAddress = (nint)block;
-            MarkWatched(arena, block, mask, stamp);
+            MarkWatched(arena, block, archetypeIndex, mask, stamp);
         }
         else
         {
@@ -2454,7 +2503,7 @@ internal sealed unsafe class InterestPass
             if (directory.TryGetBlock(chunkId, out var block))
             {
                 blockAddress = (nint)block;
-                MarkWatched(arena, block, occupancy, stamp);
+                MarkWatched(arena, block, archetypeIndex, occupancy, stamp);
             }
             else
             {
@@ -2494,6 +2543,7 @@ internal sealed unsafe class InterestPass
     /// <summary>Merges a run's slots into its block's watched mask, claiming the block for this tick if nobody had.</summary>
     /// <param name="arena">The worker's arena.</param>
     /// <param name="block">The cluster's block.</param>
+    /// <param name="archetypeIndex">The block's archetype, recorded with it so the blocks step need not recover it.</param>
     /// <param name="slots">The run's slots, never zero.</param>
     /// <param name="stamp">This tick, as the block's eviction clock stores it.</param>
     /// <remarks>
@@ -2503,7 +2553,7 @@ internal sealed unsafe class InterestPass
     /// already leaves it that way) and is marked by the following tick's interest pass, which is the one-tick lag the blocks step's position in the DAG
     /// already implies. <c>WorldObserverTests.AnEntityThatLeavesTheWorldIsUnmarked</c> is what fails if that stops being true.
     /// </remarks>
-    private static void MarkWatched(HitArena arena, ReplicationBlockHeader* block, ulong slots, uint stamp)
+    private static void MarkWatched(HitArena arena, ReplicationBlockHeader* block, int archetypeIndex, ulong slots, uint stamp)
     {
         // The overwhelmingly common case at 110 world sessions: the first session to reach this cluster already set every bit, and the other 109 workers do
         // one shared read of a line nobody is writing.
@@ -2520,7 +2570,7 @@ internal sealed unsafe class InterestPass
         // Exactly one caller sees a zero previous value, because `slots` is never zero. That caller owns the block for this tick: it stamps the eviction
         // clock (single writer, so a plain store) and puts the block on its own list for the next tick's prologue to clear.
         block->LastWatchedTick = stamp;
-        arena.AddWatchedBlock((nint)block);
+        arena.AddWatchedBlock((nint)block, archetypeIndex);
     }
 
     /// <summary>The index of the profile a session is bound to, or <c>-1</c> when it has none or it reaches nothing.</summary>

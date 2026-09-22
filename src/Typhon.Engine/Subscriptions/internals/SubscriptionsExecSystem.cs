@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Threading;
 
 namespace Typhon.Engine.Internals;
@@ -257,10 +258,9 @@ internal sealed class SubscriptionsInterestExecSystem : SubscriptionsExecSystemB
 /// the record arenas rewind, and the blocks the interest stage marked are gathered into one indexable partition per archetype.
 /// </para>
 /// <para>
-/// <b>The gather resolves each block's archetype with a directory probe, and that is a seam worth naming.</b> The interest stage lists the blocks it claimed
-/// per worker, flat across archetypes, so the archetype is recovered here by asking each directory whether it names that chunk id. It is one probe for a
-/// single-archetype runtime and averages half the archetype count otherwise — cheap for Phase 1's scales, and removable outright the moment the interest
-/// stage's watched-block entry carries the archetype index it already knows.
+/// <b>The gather reads each block's archetype from the interest stage's watched list</b>, which records it beside the block. It used to recover it by
+/// asking each archetype's directory whether it named the chunk id — measured at d06 with a thousand sessions, that probe loop was 0.5 ms of SERIAL time
+/// per tick, a fifth of the stage's wall clock, spent rediscovering a number every caller of <c>MarkWatched</c> already held.
 /// </para>
 /// </remarks>
 internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecSystemBase
@@ -301,6 +301,8 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
         }
 
         var interest = subs.Interest;
+        var timed = FrameAssembler.PhaseTimingEnabled;
+        var t0 = timed ? Stopwatch.GetTimestamp() : 0L;
 
         // Block creation comes BEFORE the "nothing is watched" exit, and the order is the whole of why the pipeline runs at all. A cluster becomes watchable
         // by having a block, and the interest stage lists the clusters it hit that had none; skipping the stage because no block is watched yet would mean the
@@ -315,16 +317,28 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
         // AFTER the blocks above, which is the whole point: a cluster that became watched this tick now has somewhere for its arrivals to go. One that
         // still has none is watched by nobody, so dropping its parked entries loses nothing — the entity is initialised from current values the first
         // time somebody does watch it. Single-threaded here, and separated from the slices that filled the lists by the fence's own barrier.
+        var t1 = timed ? Stopwatch.GetTimestamp() : 0L;
         for (var i = 0; i < states.Length; i++)
         {
             states[i]?.DrainParkedEntries();
         }
+
+        var t2 = timed ? Stopwatch.GetTimestamp() : 0L;
 
         // The gather comes FIRST, because the identity leases are sized from the watched slots it produces. Refilling before the partition exists would size
         // the very first tick's leases from nothing and defer most of an initial fill by a tick for no reason.
         if (interest != null)
         {
             Gather(interest, states, tick);
+        }
+
+        if (timed)
+        {
+            var t3 = Stopwatch.GetTimestamp();
+            PrologueCreateTicks += t1 - t0;
+            PrologueDrainTicks += t2 - t1;
+            PrologueGatherTicks += t3 - t2;
+            PrologueCount++;
         }
 
         var blocks = WatchedBlocks(states);
@@ -343,6 +357,14 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
         return chunks;
     }
 
+    // The blocks step's serial cost, split by part, and the parallel half's busy time — collected only while FrameAssembler.PhaseTimingEnabled is set.
+    // Written by the single thread that runs Prepare, or once per chunk with an interlocked add; read by the report after the tick.
+    internal static long PrologueCreateTicks;
+    internal static long PrologueDrainTicks;
+    internal static long PrologueGatherTicks;
+    internal static long PrologueCount;
+    internal static long ProjectBusyTicks;
+
     /// <summary>The stage's parallel half, for one chunk of <paramref name="chunkCount"/>.</summary>
     internal static void Project(SubscriptionsContext ctx, int chunkIndex, int chunkCount)
     {
@@ -352,6 +374,16 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
             return;
         }
 
+        var from = FrameAssembler.PhaseTimingEnabled ? Stopwatch.GetTimestamp() : 0L;
+        ProjectAll(subs, ctx, chunkIndex, chunkCount);
+        if (from != 0L)
+        {
+            Interlocked.Add(ref ProjectBusyTicks, Stopwatch.GetTimestamp() - from);
+        }
+    }
+
+    private static void ProjectAll(SubscriptionsRuntime subs, SubscriptionsContext ctx, int chunkIndex, int chunkCount)
+    {
         var tick = (uint)ctx.TickNumber;
         var plans = subs.Plans;
         var states = subs.ReplicationStates;
@@ -431,23 +463,16 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
 
         for (var w = 0; w < interest.ArenaCount; w++)
         {
-            var watched = interest.Arena(w).WatchedBlocks;
+            var arena = interest.Arena(w);
+            var watched = arena.WatchedBlocks;
             for (var i = 0; i < watched.Count; i++)
             {
-                var block = (ReplicationBlockHeader*)watched[i];
-                var chunkId = block->ChunkId;
-                if (chunkId < 0)
+                // No read of the block itself: a header dereference per block is a cache miss per block on the serial path, and the only thing it could
+                // reject — a block released since the mark — is rejected again by the parallel half, which reads the header anyway (ProjectArchetype).
+                var archetype = arena.WatchedBlockArchetype(i);
+                if ((uint)archetype < (uint)states.Length)
                 {
-                    continue;
-                }
-
-                for (var a = 0; a < states.Length; a++)
-                {
-                    if (states[a].Directory.TryGetBlock(chunkId, out var found) && found == block)
-                    {
-                        states[a].WatchedBlocks.Add(block);
-                        break;
-                    }
+                    states[archetype].WatchedBlocks.Add((ReplicationBlockHeader*)watched[i]);
                 }
             }
         }

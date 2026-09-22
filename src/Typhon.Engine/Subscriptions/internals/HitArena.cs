@@ -154,6 +154,9 @@ internal sealed class HitArena
     /// <summary>Blocks this worker was the first to mark watched this tick; the next tick's prologue clears their masks.</summary>
     private readonly List<nint> _watchedBlocks = [];
 
+    /// <summary>The archetype of each entry of <see cref="_watchedBlocks"/>, parallel to it, so the blocks step never has to recover it.</summary>
+    private readonly List<int> _watchedArchetypes = [];
+
     /// <summary>Runs recorded so far this tick.</summary>
     public int RunCount => _runCount;
 
@@ -708,6 +711,7 @@ internal sealed class HitArena
         _newBlocks.Clear();
         _newBlockSeen.Clear();
         _watchedBlocks.Clear();
+        _watchedArchetypes.Clear();
         DirectoryProbes = 0;
         Hits = 0;
         ChunksInsideOpenWindow = 0;
@@ -1043,10 +1047,15 @@ internal sealed class HitArena
 
     /// <summary>Records that this worker was the one that took <paramref name="block"/> from unwatched to watched this tick.</summary>
     /// <param name="block">The block.</param>
-    public void AddWatchedBlock(nint block)
+    /// <param name="archetype">The archetype index the block belongs to — known to every caller, and the one thing the blocks step cannot read off a block.</param>
+    public void AddWatchedBlock(nint block, int archetype)
     {
         _watchedBlocks.Add(block);
+        _watchedArchetypes.Add(archetype);
     }
+
+    /// <summary>The archetype index of <see cref="WatchedBlocks"/>' entry <paramref name="i"/>.</summary>
+    public int WatchedBlockArchetype(int i) => _watchedArchetypes[i];
 
     // ── The interest phase split ────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     //
@@ -1075,6 +1084,27 @@ internal sealed class HitArena
         _narrowTicks += narrow;
         _flushTicks += flush;
     }
+
+    // The per-(session, cluster) bookkeeping the three phases above leave out: the whole-cluster flushes, the view-pass retention and the departure walk.
+    // Together with the group total they close the account, so what no timer covers is visible as the remainder rather than silently missing (22 § 7, M0).
+    private long _interiorTicks;
+    private long _retainTicks;
+    private long _closeTicks;
+    private long _groupTicks;
+
+    /// <summary>Raw timestamp ticks in the interior flushes, the view-pass retention, the departure walk and whole groups, SINCE START.</summary>
+    public (long Interior, long Retain, long Close, long Group) BookkeepingTicks => (_interiorTicks, _retainTicks, _closeTicks, _groupTicks);
+
+    /// <summary>Adds one bookkeeping sample.</summary>
+    public void NoteBookkeeping(long interior, long retain, long close)
+    {
+        _interiorTicks += interior;
+        _retainTicks += retain;
+        _closeTicks += close;
+    }
+
+    /// <summary>Adds one resolved group's total.</summary>
+    public void NoteGroupTicks(long ticks) => _groupTicks += ticks;
 
     // ── The coherence ceiling ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     //

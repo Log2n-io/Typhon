@@ -425,6 +425,23 @@ public sealed class SubscriptionsOptions
     public bool SparseTopology { get; init; }
 
     /// <summary>
+    /// Whether projection re-encodes only the watched slots the engine marked changed, instead of every watched slot. Default on.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Turns on the replicated archetypes' content-change marks and the per-tick changed-cluster list, which the projection pass's gate reads (design 21,
+    /// slice 3 and § 7.2.1). The byte comparison still decides what is sent; the marks only narrow which slots are compared, so the wire is unchanged.
+    /// </para>
+    /// <para>
+    /// <b>On by default because the trade is lopsided, measured both ways at d06/1 000.</b> Where an app writes what changes, projection fell 41 %. Where
+    /// every replicated component is claimed every tick — the gate's worst case — what remains is the fence's list publish, about 1 % of the tick, and the
+    /// gate still paid it back. The marks themselves are one bit-OR per span handout and per spatial write. Turn it off only for an app that genuinely
+    /// rewrites every projected component every tick and cannot spare that 1 %.
+    /// </para>
+    /// </remarks>
+    public bool GateProjectionOnChanges { get; init; } = true;
+
+    /// <summary>
     /// The most sessions one interest cell group may hold before a crowded cell is cut into pieces. Zero (the default) is the automatic cap: sessions
     /// divided by workers, at least eight.
     /// </summary>

@@ -68,8 +68,15 @@ public sealed partial class SimBridge
             }
 
             var places = cluster.GetReadOnlySpan(Creature.Bounds);
-            var vitals = cluster.GetSpan(Creature.Vitals);
-            var brains = cluster.GetSpan(Creature.Ai);
+
+            // READ-ONLY, and taken mutably only on the tick a creature is actually hit or revived. Vitals and Ai are both projected, and GetSpan marks
+            // its cluster changed on the HANDOUT: taking them mutably every tick to read a health or a mode claimed a change for every creature on every
+            // tick, which is what kept the projection re-encoding every watched creature whether or not anything about it had moved. The weapon's
+            // cooldown, which does change every tick, lives in the unprojected timers for the same reason.
+            var vitals = cluster.GetReadOnlySpan(Creature.Vitals);
+            var brains = cluster.GetReadOnlySpan(Creature.Ai);
+            Span<CreatureVitals> vitalsRw = default;
+            Span<CreatureBrain> brainsRw = default;
             var timers = cluster.GetSpan(Creature.Timers);
             var chunk = cluster.ChunkId;
 
@@ -77,6 +84,7 @@ public sealed partial class SimBridge
             {
                 CombatBatch(
                     ctx.TickNumber,
+                    in cluster,
                     chunk,
                     bits0,
                     places,
@@ -100,10 +108,8 @@ public sealed partial class SimBridge
                 var idx = BitOperations.TrailingZeroCount(bits);
                 bits &= bits - 1;
 
-                ref var ai = ref brains[idx];
                 ref var t = ref timers[idx];
-                ref var v = ref vitals[idx];
-                if (!ReadyToTakeFire(ref v, ref ai, ref t, ref revived))
+                if (!ReadyToTakeFire(in cluster, vitals, brains, ref vitalsRw, ref brainsRw, ref t, idx, ref revived))
                 {
                     continue;
                 }
@@ -127,7 +133,8 @@ public sealed partial class SimBridge
                     e.Dispose();
                 }
 
-                TakeFire(ref v, ref ai, ref t, count, ctx.TickNumber, chunk, idx, minDelay, delaySpan, ref engaged, ref killed);
+                TakeFire(in cluster, vitals, brains, ref vitalsRw, ref brainsRw, ref t, count, ctx.TickNumber, chunk, idx, minDelay, delaySpan, ref engaged,
+                    ref killed);
             }
         }
 
@@ -151,9 +158,17 @@ public sealed partial class SimBridge
     /// The part of a creature's turn that needs no query: a dead one counts down to its revival, and one whose attacker's weapon is still cycling waits.
     /// True when the creature can be fired on this tick.
     /// </summary>
-    private static bool ReadyToTakeFire(ref CreatureVitals v, ref CreatureBrain ai, ref CreatureTimers t, ref long revived)
+    private static bool ReadyToTakeFire(
+        in ClusterRef<Creature> cluster,
+        ReadOnlySpan<CreatureVitals> vitals,
+        ReadOnlySpan<CreatureBrain> brains,
+        ref Span<CreatureVitals> vitalsRw,
+        ref Span<CreatureBrain> brainsRw,
+        ref CreatureTimers t,
+        int idx,
+        ref long revived)
     {
-        if (ai.Mode == AiMode.Dead)
+        if (brains[idx].Mode == AiMode.Dead)
         {
             if (--t.ThinkCooldown > 0)
             {
@@ -162,8 +177,8 @@ public sealed partial class SimBridge
 
             // Revive at the lair with full health. The teleport is the point: it is the biggest position jump
             // this simulation makes, and it forces a cell change plus a cluster-bound recomputation.
-            v.Health = v.MaxHealth;
-            ai.Mode = AiMode.Wander;
+            VitalsRw(in cluster, ref vitalsRw)[idx].Health = vitals[idx].MaxHealth;
+            BrainsRw(in cluster, ref brainsRw)[idx].Mode = AiMode.Wander;
             t.ThinkCooldown = 1;
 
             // Cleared, or a creature revived part-way through an old rest keeps standing until a schedule from its previous life runs out. Zero is in the
@@ -176,13 +191,35 @@ public sealed partial class SimBridge
 
         // Only a creature that is already engaged, or one a player has walked up to, is under fire. The cooldown
         // is the weapon's, not the creature's: 1-3 s at 10 Hz is 10-30 ticks.
-        if (v.AttackCooldown > 0)
+        if (t.AttackCooldown > 0)
         {
-            v.AttackCooldown--;
+            t.AttackCooldown--;
             return false;
         }
 
         return true;
+    }
+
+    /// <summary>The cluster's mutable vitals, handed out on the first write of this cluster's walk and not before. See <see cref="CreatureCombatTick"/>.</summary>
+    private static Span<CreatureVitals> VitalsRw(in ClusterRef<Creature> cluster, ref Span<CreatureVitals> rw)
+    {
+        if (rw.IsEmpty)
+        {
+            rw = cluster.GetSpan(Creature.Vitals);
+        }
+
+        return rw;
+    }
+
+    /// <summary>The cluster's mutable brains, handed out on the first write of this cluster's walk and not before.</summary>
+    private static Span<CreatureBrain> BrainsRw(in ClusterRef<Creature> cluster, ref Span<CreatureBrain> rw)
+    {
+        if (rw.IsEmpty)
+        {
+            rw = cluster.GetSpan(Creature.Ai);
+        }
+
+        return rw;
     }
 
     /// <summary>
@@ -194,11 +231,12 @@ public sealed partial class SimBridge
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void CombatBatch(
         long tick,
+        in ClusterRef<Creature> cluster,
         int chunk,
         ulong bits,
         ReadOnlySpan<CreaturePlacement> places,
-        Span<CreatureVitals> vitals,
-        Span<CreatureBrain> brains,
+        ReadOnlySpan<CreatureVitals> vitals,
+        ReadOnlySpan<CreatureBrain> brains,
         Span<CreatureTimers> timers,
         Span<BSphere2F> members,
         Span<int> slots,
@@ -209,11 +247,13 @@ public sealed partial class SimBridge
         ref long killed,
         ref long revived)
     {
+        Span<CreatureVitals> vitalsRw = default;
+        Span<CreatureBrain> brainsRw = default;
         var m = 0;
         for (var b = bits; b != 0; b &= b - 1)
         {
             var idx = BitOperations.TrailingZeroCount(b);
-            if (ReadyToTakeFire(ref vitals[idx], ref brains[idx], ref timers[idx], ref revived))
+            if (ReadyToTakeFire(in cluster, vitals, brains, ref vitalsRw, ref brainsRw, ref timers[idx], idx, ref revived))
             {
                 members[m] = new BSphere2F { CenterX = places[idx].X, CenterY = places[idx].Z, Radius = RangedRange };
                 slots[m++] = idx;
@@ -232,14 +272,18 @@ public sealed partial class SimBridge
         for (var j = 0; j < m; j++)
         {
             var idx = slots[j];
-            TakeFire(ref vitals[idx], ref brains[idx], ref timers[idx], shooters[j], tick, chunk, idx, minDelay, delaySpan, ref engaged, ref killed);
+            TakeFire(in cluster, vitals, brains, ref vitalsRw, ref brainsRw, ref timers[idx], shooters[j], tick, chunk, idx, minDelay, delaySpan, ref engaged,
+                ref killed);
         }
     }
 
     /// <summary>The damage from <paramref name="shooters"/> players in range, and what it does to the creature.</summary>
     private static void TakeFire(
-        ref CreatureVitals v,
-        ref CreatureBrain ai,
+        in ClusterRef<Creature> cluster,
+        ReadOnlySpan<CreatureVitals> vitals,
+        ReadOnlySpan<CreatureBrain> brains,
+        ref Span<CreatureVitals> vitalsRw,
+        ref Span<CreatureBrain> brainsRw,
         ref CreatureTimers t,
         int shooters,
         long tick,
@@ -256,22 +300,24 @@ public sealed partial class SimBridge
         }
 
         engaged++;
-        v.AttackCooldown = minDelay + (int)(Hash01(Salt(tick, chunk, idx, 0x27220A95u)) * delaySpan);
-        v.Health -= PlayerDamagePerHit * shooters;
-        if (v.Health > 0)
+        t.AttackCooldown = minDelay + (int)(Hash01(Salt(tick, chunk, idx, 0x27220A95u)) * delaySpan);
+        var health = vitals[idx].Health - (PlayerDamagePerHit * shooters);
+        if (health > 0)
         {
+            VitalsRw(in cluster, ref vitalsRw)[idx].Health = health;
+
             // Wounded and now angry: the creature turns on whoever is shooting, which is what pulls a lair.
-            if (ai.Mode == AiMode.Wander)
+            if (brains[idx].Mode == AiMode.Wander)
             {
-                ai.Mode = AiMode.Pursue;
+                BrainsRw(in cluster, ref brainsRw)[idx].Mode = AiMode.Pursue;
                 t.ThinkCooldown = 0;
             }
 
             return;
         }
 
-        v.Health = 0;
-        ai.Mode = AiMode.Dead;
+        VitalsRw(in cluster, ref vitalsRw)[idx].Health = 0;
+        BrainsRw(in cluster, ref brainsRw)[idx].Mode = AiMode.Dead;
         t.ThinkCooldown = RespawnTicks;
         killed++;
     }

@@ -389,6 +389,10 @@ public sealed class SubscriptionsCommands
     public (double BroadUs, double NarrowUs, double FlushUs) InterestPhases =>
         _ingress.Interest == null ? default : _ingress.Interest.InterestPhases;
 
+    /// <summary>The interest bookkeeping the phases leave out, and the resolved groups' total, in microseconds. Needs <c>MeasureInterestPhases</c>.</summary>
+    public (double InteriorUs, double RetainUs, double CloseUs, double GroupUs) InterestBookkeeping =>
+        _ingress.Interest == null ? default : _ingress.Interest.InterestBookkeeping;
+
     /// <summary>How much of the interest answer has been what the sessions already held, since start.</summary>
     public (long RunsUnchanged, long RunsTotal, long SessionsCoherent, long SessionsTotal) InterestCoherence =>
         _ingress.Interest == null ? default : _ingress.Interest.InterestCoherence;
@@ -685,6 +689,26 @@ public sealed class SubscriptionsCommands
 
     /// <summary>The frame stage's span against the busy time inside it, and the concurrency the two imply.</summary>
     public (double SpanMs, double BusyMs, double Concurrency, double StartSpreadMs) FrameSpan => _ingress.Frames == null ? default : _ingress.Frames.ChunkSpan;
+
+    /// <summary>
+    /// The projection stage's serial blocks step per tick, split into block creation, parked-entry drain and the watched-block gather, and its parallel
+    /// busy time per tick, in ms. Zero unless phase timing is on.
+    /// </summary>
+    public (double Create, double Drain, double Gather, double Busy) ProjectPrologueMs
+    {
+        get
+        {
+            var n = Volatile.Read(ref Internals.SubscriptionsProjectExecSystem.PrologueCount);
+            if (n == 0)
+            {
+                return default;
+            }
+
+            var k = 1000d / System.Diagnostics.Stopwatch.Frequency / n;
+            return (Internals.SubscriptionsProjectExecSystem.PrologueCreateTicks * k, Internals.SubscriptionsProjectExecSystem.PrologueDrainTicks * k,
+                Internals.SubscriptionsProjectExecSystem.PrologueGatherTicks * k, Volatile.Read(ref Internals.SubscriptionsProjectExecSystem.ProjectBusyTicks) * k);
+        }
+    }
 
     /// <summary>The frame stage's single-threaded prologue, per tick, in ms.</summary>
     public (double Prologue, double Sweep, double Prepare) FramePrologueMs => _ingress.Frames == null ? default : _ingress.Frames.PrologueMs;

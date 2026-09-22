@@ -254,6 +254,9 @@ public sealed class SimConfig
     /// <summary>Whether up-to-date sessions stop re-stating unchanged membership. A same-binary switch, so one build is both arms.</summary>
     public bool SubscriptionsSparse;
 
+    /// <summary>Whether projection re-encodes only slots the engine marked changed (<c>--subs-content-gate on|off</c>, default on). A same-binary switch.</summary>
+    public bool SubscriptionsContentGate = true;
+
     /// <summary>The interest cell-group cap; zero is automatic. <c>--subs-group-cap</c>.</summary>
     public int SubscriptionsGroupCap;
 
