@@ -63,7 +63,7 @@ tx.Commit();   // batch appended now; durable on the next GroupCommit flush
 - **Logical-only records** — never a page, chunk, or buffer ID — so replay tolerates a different allocation outcome than the run that produced the log.
 - **One codec, one format** — all record bytes are written and read by a single codec on both the commit and recovery paths; no second, divergent path can drift out of sync.
 - **Torn-tail safe** — chunks are CRC-chained; a partial last write is detected and the log truncates at the first invalid chunk instead of being misread as valid data.
-- **Honest watermarks** — `CheckpointLSN ≤ DurableLsn ≤ LastAppendedLsn` always holds; `DurableLsn` never claims a record durable before it is actually fsynced.
+- **Honest watermarks** — `CheckpointLSN ≤ DurableLsn ≤ LastPublishedLsn ≤ LastAppendedLsn` always holds; `DurableLsn` never claims a record durable before it is actually fsynced. `LastAppendedLsn` is the allocation frontier; `LastPublishedLsn` is the highest LSN a frame actually published with, and is what a flush waits for.
 - **Bounded record size** — a single record (header + payload) is capped at chunk size minus envelope (~64 KB); oversized component/collection payloads are rejected at schema registration, not at WAL-write time.
 - **Commit stays cheap** — no disk I/O on the commit path itself beyond serializing into the in-memory buffer (~1–2 µs); FUA cost (~10–80 µs) is paid only when a mode actually waits for it.
 - **Backpressure, not silent loss** — a full commit buffer surfaces as a transient `WalBackPressureTimeoutException`; a single claim larger than the buffer throws `WalClaimTooLargeException`. Append either appends every record or throws — never a partial write.

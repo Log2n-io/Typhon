@@ -78,15 +78,21 @@ jobs:
 
             Step 2 - do EXACTLY these two writes, nothing else:
             (a) Add zero or more fitting labels from this EXISTING set (do NOT create new labels):
-                bug, enhancement, documentation, performance, refactoring, testing, technical-debt,
-                needs-info. Add `needs-info` if key details (repro, version, logs) are missing. Run:
+                documentation, performance, refactoring, testing, technical-debt, needs-info.
+                Add `needs-info` if key details (repro, version, logs) are missing.
+                Whether the issue is a bug or a feature is NOT a label: the Issue Type (Bug / Feature /
+                Question) carries it, and the intake form already set one. Neither Priority nor Area is a
+                label either. Run:
                   gh issue edit ${{ github.event.issue.number }} --repo ${{ github.repository }} --add-label "l1,l2"
             (b) Post ONE comment:
                   gh issue comment ${{ github.event.issue.number }} --repo ${{ github.repository }} --body "..."
                 The comment must contain: a one-line summary of what the issue is really asking; the
-                single most likely Area (one of: Database, MVCC, Transactions, Indexes, Schema, Storage,
-                Memory, Concurrency, Primitives, Observability, Execution, Errors, Workbench); up to 3
-                links to possibly-duplicate existing issues; and any missing info needed to act. Keep it
+                most likely Issue Type (Bug, Feature or Question), flagged when it differs from the one
+                the issue already has; the single most likely Area (one of: Concurrency, Execution,
+                Storage, Durability, MVCC, Schema, Spatial, Query, Runtime, Observability, Resources,
+                Errors, Utilities, Workbench, Indexes - `Execution` is the transaction/commit layer, the
+                tick loop and system scheduling are `Runtime`); up to 3 links to possibly-duplicate
+                existing issues; and any missing info needed to act. Keep it
                 concise and friendly, and state that it is an automated first pass a maintainer will review.
 
             Do NOT set the issue Type, assignees, milestone, or project. Do NOT edit the issue title or

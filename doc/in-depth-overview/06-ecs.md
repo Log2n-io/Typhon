@@ -147,7 +147,7 @@ EntityId id = tx.Spawn<Ant>(
 
 - Allocates a fresh `EntityKey` (monotonic `Interlocked.Increment` on the per-archetype `NextEntityKey`).
 - Allocates chunks in the relevant `ComponentTable`s (Versioned components go into `ComponentSegment`, Transient into `TransientComponentSegment`).
-- Copies provided `ComponentValue` payloads; unspecified components are zero-initialized and disabled (see EnabledBits below).
+- Copies provided `ComponentValue` payloads; unspecified `SingleVersion`/`Transient` components are zero-initialized and disabled. Unspecified `Versioned` components are *absent* — no chunk and no revision chain; `Enable(comp)` on an absent slot throws, so use `Enable(comp, in value)` or supply it at Spawn (see EnabledBits below).
 - The entity is held in a **pending spawn list** on the `Transaction`; insertion into the per-archetype `EntityMap` happens at **commit** with `BornTSN = TSN`.
 
 So a spawn is visible to *this* transaction immediately, visible to *other* transactions only after commit.
@@ -266,7 +266,7 @@ ant.Write(Ant.Position, new Position(x, y));        // requires writable EntityR
 - `Read<T>(Comp<T>)` returns a `ref readonly T` directly into the chunk page (or cluster slot). Zero copy.
 - `Write<T>(Comp<T>, T)` mutates in place; for Versioned components, this is the *initial write before commit* — the actual revision-chain extension happens during commit.
 - `IsValid`, `IsWritable` properties. `IsWritable` reflects whether the `EntityRef` was obtained via `OpenMut` (true) vs `Open` (false).
-- `EnabledBits` tracks per-component enable state (16-bit mask, up to 16 components per archetype). A disabled component is present in storage but logically absent from queries — used for fast component toggles without re-archetyping.
+- `EnabledBits` tracks per-component enable state (16-bit mask, up to 16 components per archetype). A *disabled* component was supplied at Spawn (its storage exists) but is logically absent from queries — re-enabling it is a free O(1) bit flip. An *absent* component was never supplied and has no storage (for `Versioned`: no chunk, no revision chain); re-enabling requires `Enable(comp, in value)` to supply the value first.
 
 ---
 

@@ -63,7 +63,9 @@ anim.Time += dt;               // ~40 ns write, no dirty tracking, no WAL
 - An entity can mix `Transient` components with `Versioned`/`SingleVersion` ones; on recovery only the
   non-`Transient` components come back — the application must re-initialize `Transient` state for surviving
   entities.
-- `ComponentCollection<T>` (variable-length) fields are supported on `Transient`.
+- `ComponentCollection<T>` (variable-length) fields are **not** supported on `Transient`: registration throws
+  `InvalidOperationException`. The collection's buffers would live in a persistent store while the component itself
+  is RAM-only, orphaning them on restart. Use `Versioned` or `SingleVersion` for a component that needs one.
 - `ReadsSnapshot` is rejected for `Transient` components — there is no history to freeze to.
 
 ## 🧪 Tests

@@ -198,7 +198,7 @@ Every operation emits a tier-2-gated `TyphonEvent` span (`Spatial:RTree:Insert`,
 
 Every leaf entry carries a 32-bit `CategoryMask` — for a cell tree, the OR of the masks of the entities in that cluster; every node carries a `UnionCategoryMask` = OR of all descendants' masks. Queries pass a `categoryMask` and entire subtrees whose union mask doesn't intersect are pruned (`(unionMask & queryMask) == 0`). At leaf level the tree's own test is AND-conjunctive: `(leafMask & queryMask) == queryMask`. A query mask of `0` is a sentinel that bypasses filtering — useful when you want every result.
 
-**The two levels disagree on purpose, and the cluster level wins.** The cluster broadphase admits on *any* bit overlap, `(clusterMask & queryMask) != 0`, which is the semantic `[SpatialIndex(Category = …)]` documents. So `AabbClusterEnumerator` applies the category filter itself rather than handing the mask to a promoted cell's tree, which would apply the stricter rule and drop clusters the caller asked for.
+**The two levels disagree on purpose, and the cluster level wins.** The cluster broadphase admits on *any* bit overlap, `(clusterMask & queryMask) != 0`, which is the semantic `[SpatialIndex(Category = …)]` documents. So `AabbClusterEnumerator` applies the category filter itself rather than handing the mask to a promoted cell's tree, which would apply the stricter rule and drop clusters the caller asked for. The consequence is that the tree-level machinery above — the union-mask subtree prune and the AND-conjunctive leaf test — is **unreachable for cluster queries**: no `CellClusterTree` query wrapper takes a `categoryMask` (SQ-02), every production call passes `0` to the tree, and a promoted cell descends to every geometrically overlapping cluster and filters on the way out. See [Category Filtering](../feature-set/Spatial/spatial-category-filtering.md).
 
 Category masks are **archetype-level** in cluster archetypes (every entity in an archetype has the same value), so the per-cluster union is effectively a constant — incremental OR on spawn, no recompute on destroy.
 
@@ -224,7 +224,7 @@ Helpers ([`Spatial/internals/SpatialGeometry.cs`](https://github.com/Log2n-io/Ty
 
 A `SpatialFieldType` enum maps the schema-side `FieldType` to a compact 0–7 byte: `AABB2F=0`, `AABB3F=1`, `BSphere2F=2`, `BSphere3F=3`, `AABB2D=4`, …. `SpatialFieldInfo.ToVariant()` then maps that to the right `SpatialVariant` for the tree.
 
-Currently supported: **f32 only** (2D and 3D — Z is filtered at narrowphase). f64 variants are valid as field types and the `SpatialRTree` implementation handles them, but neither the grid bucketing nor the cluster bounds do, so no live query path reaches them. `SpatialGrid.ValidateSupportedFieldType` enforces this at `ConfigureSpatialGrid` time.
+All eight field types are supported on the live path since #914 — f32 and f64, 2D and 3D (Z is filtered at narrowphase for a 2D field). Grid bucketing, cluster bounds and the narrowphase all handle the f64 tiers; the cluster bounds store them the same way as f32 ones, as f32 boxes relative to their cell. `SpatialGrid.ValidateSupportedFieldType` now only rejects a value outside the `SpatialFieldType` enum.
 
 ---
 

@@ -27,10 +27,11 @@ core when ticks are milliseconds apart. The next tick's target is always compute
 *previous target* (metronome-style), so timing error never compounds. `RuntimeOptions.WorkerCount`
 worker threads (also `AboveNormal` priority) execute the system DAG via any-worker dispatch — workers
 race to claim ready systems via CAS, with no fixed thread-to-system affinity. Between ticks, workers
-block on a kernel wait (`ManualResetEventSlim`, ~1-5µs wake latency) rather than spinning: that
-latency is negligible against a tick gap that's milliseconds long, and the wait costs zero CPU while
-idle. The TickDriver wakes every worker at once for the next tick (a generation-counter bump plus a
-single `Set()`) — there is no per-worker staggered wake in the current implementation.
+block on a kernel wait rather than spinning: that latency is negligible against a tick gap that's
+milliseconds long, and the wait costs zero CPU while idle. Each worker parks on its **own**
+`ManualResetEventSlim`, and the TickDriver wakes all of them for the next tick with a
+generation-counter bump plus a `Set()` on every worker's event — there is no per-worker staggered or
+partial wake in the current implementation.
 
 ## 💻 Usage
 
@@ -56,10 +57,13 @@ Console.WriteLine($"{runtime.Scheduler.WorkerCount} workers, tick {runtime.Curre
 
 - The auto-detect formula reserves headroom for I/O and OS/background work — `Max(1,
   ProcessorCount - 4)`, never all cores by default.
-- Worker wake-up is a single kernel-event signal shared by every worker for a given tick; there is no
-  dynamic/partial worker wake. This is a deliberate v1 choice — under-waking risked doubling tick
-  time at 60-128Hz in POC measurements — not a missing feature; idle workers cost almost nothing
-  while blocked on the kernel wait.
+- Every worker is woken for every tick; there is no dynamic/partial worker wake. This is a deliberate
+  v1 choice — under-waking risked doubling tick time at 60-128Hz in POC measurements — not a missing
+  feature; idle workers cost almost nothing while blocked on the kernel wait.
+- The wake uses one event **per worker**, not one event shared by the pool. A shared event's `Set()`
+  released every parked worker at once and each had to re-take the event's internal lock to leave
+  `Wait`, so they queued on it: with 32 parked workers the median worker ran 293 µs after the `Set()`
+  and the last 5.9 ms; with an event each, 85 µs and 146 µs.
 - The TickDriver's three-phase wait self-calibrates once at startup against this machine's actual
   `Thread.Sleep(1)` resolution, so the Sleep→Yield split point adapts across OS/hardware without
   configuration.

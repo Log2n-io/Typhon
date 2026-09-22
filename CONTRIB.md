@@ -195,7 +195,7 @@ When linking to `claude/` docs in GitHub issues, use the `main` branch:
 | Artifact | Location | Required Fields |
 |----------|----------|-----------------|
 | Design doc | `claude/design/[category]/Name.md` | Summary, Goals, Non-Goals, Design, Testing Strategy |
-| GitHub Issue | Required | Label: `enhancement`/`bug`, Status: `Todo` |
+| GitHub Issue | Required | Issue Type: `Feature`/`Bug`, Status: `Todo` |
 | Branch | `feature/xxx` or `fix/xxx` | Created when work begins |
 
 **Claude's Role:**
