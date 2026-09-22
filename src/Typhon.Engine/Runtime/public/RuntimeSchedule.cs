@@ -704,6 +704,17 @@ public sealed class RuntimeSchedule
                 $"System '{reg.Name}': tier filter is only supported on QuerySystem, not {reg.Type}.");
         }
 
+        if (reg.TierFilter != SimTier.All && reg.TierFilter != SimTier.None && !reg.Parallel)
+        {
+            // #908: tier scoping only ever existed on the parallel dispatch — OnParallelQueryPrepare is what reads TierClusterIndex and strides the
+            // amortization bucket. A non-parallel system built its entity set straight from the View, so the tier filter was accepted and then ignored:
+            // the system processed EVERY entity, every tick, and with cellAmortize it did so with a delta time multiplied by the amortization factor —
+            // silently wrong integration rather than a missing optimization. Reject it at Build instead of pretending to honour it.
+            throw new InvalidOperationException(
+                $"System '{reg.Name}': tier filter (and cellAmortize with it) requires parallel dispatch — a single-invocation QuerySystem iterates its " +
+                "input View, which has no tier scope. Add b.Parallel() / parallel: true, or drop the tier filter.");
+        }
+
         if (reg.Checkerboard && !reg.Parallel)
         {
             throw new InvalidOperationException($"System '{reg.Name}': checkerboard dispatch requires parallel: true. Add b.Parallel() or parallel: true.");

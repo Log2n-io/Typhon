@@ -177,6 +177,8 @@ public struct TickContext {
 }
 ```
 
+`Accessor` is filled on every path that has entity access: the per-worker `EntityAccessor` on the lock-free parallel path, the system's (or the chunk's) `Transaction` otherwise — the very object `Transaction` carries, since `Transaction` derives from `EntityAccessor`. `Transaction` alone is null on the lock-free path, where Spawn/Destroy/Commit do not exist. Every QuerySystem also receives `ClusterIds` and a half-open `[StartClusterIndex, EndClusterIndex)` partition of it — a chunk's share when parallel, the whole list when single-invocation — so one cluster-walking body is correct in both modes. That partition is a storage slice: it does not carry the system's `Input` predicate or change filter, in either mode.
+
 `CreateSideTransaction(durabilityMode)` is the escape hatch for economy-critical operations (trades, purchases) that must commit independently of the tick's main UoW. The caller owns and disposes the side transaction.
 
 ---

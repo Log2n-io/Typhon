@@ -30,6 +30,8 @@ public class Ant : Archetype<Ant>
 }
 
 // Bulk iteration — the cluster-native path, ~50x faster than per-entity Open/OpenMut.
+// Identical in a parallel and a non-parallel QuerySystem: ctx.Accessor is always a usable handle, and the
+// [StartClusterIndex, EndClusterIndex) partition is this worker's share — or, single-invocation, all of it.
 var ants = ctx.Accessor.For<Ant>();
 using var clusters = ants.GetClusterEnumerator();
 while (clusters.MoveNext())
@@ -58,6 +60,8 @@ pos.X += 1;
 ## ⚠️ Guarantees & limits
 
 - **Cluster size is auto-computed, not chosen by the caller**: N ∈ [8, 64] is picked per archetype to maximize entities-per-page; iteration code is identical for every N.
+- **Every QuerySystem gets a cluster partition**: `[StartClusterIndex, EndClusterIndex)` indexes `ClusterIds`. A parallel worker gets its share; a single-invocation system gets the whole list. The range is half-open and always literal, so an empty range means the archetype had no clusters this tick, never "walk everything".
+- **A cluster walk is not a View walk**: the partition is a slice of storage. It does not apply the system's `.Input(...)` predicate or its change filter, in either dispatch mode — iterate `ctx.Entities` when those semantics matter.
 - **Every archetype is cluster-backed, and there is no opt-out**: eligibility is unconditional, the pure-`Versioned` archetype included — a cluster stores the `Versioned` HEAD in the slot and keeps the revision chain separate, exactly as it does for a mixed archetype. Being unconditional is what makes exactly one spatial index possible; an opt-out would keep a second index home alive for every consumer to branch on.
 - **Direct `GetSpan`/`Get` writes bypass dirty tracking**: call `MarkCurrentDirty()` (whole cluster) or `MarkSlotDirty(slot)` (single entity) after writing, or the change never reaches the WAL/checkpoint. Writing `Versioned` components through `GetSpan` is rejected by design (`Debug.Assert`) — use `OpenMut`/`Write` for those, which still goes through the revision chain.
 - **Measured impact** (100K entities, 2-component archetype): per-entity cost 134 ns → ~2.7 ns (~50x), tick time ~10x, working set 19.2 MB → 2.5 MB (L3 → L2).

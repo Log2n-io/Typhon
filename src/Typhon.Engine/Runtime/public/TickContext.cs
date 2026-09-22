@@ -47,9 +47,12 @@ public struct TickContext
     public Transaction Transaction { get; init; }
 
     /// <summary>
-    /// Per-worker EntityAccessor for parallel QuerySystems that do NOT write Versioned components.
-    /// Provides Open/OpenMut with warm ChunkAccessor caches, zero per-entity dictionary overhead.
-    /// Null when the system uses Transaction-based access (WritesVersioned=true or non-parallel systems).
+    /// The entity-access handle for this dispatch, and the one a system body should be written against: it is filled on every path that has entity access.
+    /// On the lock-free parallel path (a parallel QuerySystem that does NOT write Versioned components) it is that worker's own <see cref="EntityAccessor"/>,
+    /// with warm ChunkAccessor caches and zero per-entity dictionary overhead. Everywhere else it is the same object <see cref="Transaction"/> carries, since
+    /// <c>Transaction</c> derives from <c>EntityAccessor</c> — so <c>ctx.Accessor.OpenMut(...)</c> and <c>ctx.Accessor.GetClusterEnumerator(...)</c> compile
+    /// and run whether or not the system declares <c>.Parallel()</c> (#908). What each path ALLOWS is still decided by the declaration: a Versioned write
+    /// through the lock-free path throws, and Spawn/Destroy/Commit live on <see cref="Transaction"/>, which is null there.
     /// </summary>
     public EntityAccessor Accessor { get; init; }
 
@@ -93,13 +96,17 @@ public struct TickContext
     /// into <see cref="ClusterIds"/>, which points at either the full <c>ActiveClusterIds</c> (for <see cref="SimTier.All"/> systems) or a per-tier cluster
     /// list (for tier-filtered systems). Game code that passed <c>ctx.StartClusterIndex</c> / <c>ctx.EndClusterIndex</c> to the old two-argument
     /// <c>GetClusterEnumerator(int, int)</c> overload must migrate to the new three-argument overload that takes <see cref="ClusterIds"/> explicitly.</para>
-    /// <para>Default 0 (not -1) due to struct constraint. Check <c>EndClusterIndex &gt; StartClusterIndex</c> for validity — a zero range means not applicable
-    /// (non-parallel, non-cluster, or entity-level dispatch).</para>
+    /// <para>Every QuerySystem bound to a cluster-eligible input archetype gets a partition: a chunk's share of the split under <c>.Parallel()</c>, and the
+    /// WHOLE list — <c>[0, clusterCount)</c> — for a single-invocation system, which owns everything (#908). The range is half-open and always literal, so an
+    /// empty range means this dispatch has no clusters to walk (an archetype with none this tick, or a chunk whose share is empty), never "walk them all".
+    /// A system with no input View (a CallbackSystem) has no partition and no <see cref="ClusterIds"/>.</para>
+    /// <para>The partition is a slice of STORAGE. Walking it does not apply the system's <c>Input</c> View predicate or its change filter, in either dispatch
+    /// mode — iterate <see cref="Entities"/> when those semantics matter.</para>
     /// </remarks>
     public int StartClusterIndex { get; init; }
 
     /// <summary>Exclusive end index into <see cref="ClusterIds"/> for this worker's assigned cluster range.</summary>
-    /// <remarks>Default 0. Check <c>EndClusterIndex &gt; StartClusterIndex</c> for validity — a zero range means not applicable.</remarks>
+    /// <remarks>Exclusive. <c>EndClusterIndex == StartClusterIndex</c> is an empty partition — a dispatch with no clusters to walk, never a full walk.</remarks>
     public int EndClusterIndex { get; init; }
 
     /// <summary>

@@ -35,6 +35,11 @@ public unsafe partial class EntityAccessor
     /// </summary>
     /// <param name="startIndex">Inclusive start into <see cref="ArchetypeClusterState.ActiveClusterIds"/>. Use <see cref="TickContext.StartClusterIndex"/>.</param>
     /// <param name="endIndex">Exclusive end index. Use <see cref="TickContext.EndClusterIndex"/>.</param>
+    /// <remarks>
+    /// The half-open range is always honored literally: an empty range walks nothing, and is never shorthand for all active clusters. Every QuerySystem is
+    /// handed a real partition — a chunk's share when parallel, <c>[0, clusterCount)</c> when single-invocation — so passing
+    /// <see cref="TickContext.StartClusterIndex"/> / <see cref="TickContext.EndClusterIndex"/> is correct in both dispatch modes (#908).
+    /// </remarks>
     public ClusterEnumerator<TArch> GetClusterEnumerator<TArch>(int startIndex, int endIndex) where TArch : class
     {
         var meta = ArchetypeRegistry.GetMetadata<TArch>();
@@ -52,6 +57,10 @@ public unsafe partial class EntityAccessor
     /// Get a full cluster enumerator over all active clusters, bypassing <see cref="ArchetypeAccessor{TArch}"/>.
     /// See <see cref="GetClusterEnumerator{TArch}(int,int)"/> for details.
     /// </summary>
+    /// <remarks>
+    /// A whole-archetype storage walk, ignoring any dispatch partition. Like the scoped overloads it does not inherit a system's <c>Input</c> View,
+    /// <c>ctx.Entities</c>, change filter or tier scope — reach for it only when the whole archetype is genuinely what you mean.
+    /// </remarks>
     public ClusterEnumerator<TArch> GetClusterEnumerator<TArch>() where TArch : class
     {
         var meta = ArchetypeRegistry.GetMetadata<TArch>();
@@ -72,7 +81,7 @@ public unsafe partial class EntityAccessor
     /// </code>
     /// When <paramref name="clusterIds"/> is the archetype's <c>ActiveClusterIds</c>, this is semantically equivalent to
     /// <see cref="GetClusterEnumerator{TArch}(int,int)"/>. When it is a per-tier cluster list, the enumerator iterates only
-    /// the tier's clusters.
+    /// the tier's clusters. The supplied half-open range is literal: <c>(0,0)</c> is empty, not "all clusters".
     /// </summary>
     public ClusterEnumerator<TArch> GetClusterEnumerator<TArch>(int[] clusterIds, int startIndex, int endIndex) where TArch : class
     {

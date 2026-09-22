@@ -44,6 +44,13 @@ public class AccessDagDerivationTests
         protected override void Execute(TickContext ctx) { }
     }
 
+    private class QuerySys : QuerySystem
+    {
+        public Action<SystemBuilder> ConfigureAction;
+        protected override void Configure(SystemBuilder b) => ConfigureAction?.Invoke(b);
+        protected override void Execute(TickContext ctx) { }
+    }
+
     private static RuntimeOptions Options() => new() { BaseTickRate = 1000, WorkerCount = 1 };
 
     // ── W×W detection ──────────────────────────────────────────────────
@@ -505,6 +512,46 @@ public class AccessDagDerivationTests
         // Same phase, no declarations → no derived edges
         Assert.That(aDef.Successors, Does.Not.Contain(bDef.Index));
         Assert.That(bDef.Successors, Does.Not.Contain(aDef.Index));
+    }
+
+    [Test]
+    public void DeclaredComponentAccess_DoesNotControlCallbackMembership()
+    {
+        using var scheduler = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
+            .Add(new Sys
+            {
+                ConfigureAction = b => b.Name("DeclaredCallback").Reads<CompA>().Writes<CompB>()
+            })
+            .Build(_registry.Runtime);
+
+        Assert.That(scheduler.UserSystems.Select(s => s.Name), Does.Contain("DeclaredCallback"),
+            "component declarations derive/validate edges; they must never decide whether a registered system belongs to the DAG (#908)");
+    }
+
+    [Test]
+    public void ForeignStyleDeclarations_WithInputFactory_DoNotControlQueryMembership()
+    {
+        using var scheduler = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
+            .Add(new QuerySys
+            {
+                // Build deliberately does not invoke the factory. This regression owns the #908 membership contract:
+                // declarations beyond an input archetype are scheduling metadata, not a pruning predicate.
+                ConfigureAction = b => b.Name("DeclaredQuery")
+                    .Writes<CompA>()
+                    .Writes<CompB>()
+                    .Writes<CompC>()
+                    .Input(() => null)
+            })
+            .Build(_registry.Runtime);
+
+        Assert.That(scheduler.UserSystems.Select(s => s.Name), Does.Contain("DeclaredQuery"),
+            "an Input factory plus additional component declarations must leave the registered QuerySystem in the DAG (#908)");
     }
 
     // ── Multiple components, mixed access ─────────────────────────────

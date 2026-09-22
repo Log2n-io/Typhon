@@ -250,6 +250,31 @@ class TierDispatchTests : TestBase<TierDispatchTests>
         view.Dispose();
     }
 
+    /// <summary>
+    /// #908: tier scoping lives in the parallel Prepare (it reads TierClusterIndex and strides the amortization bucket). A single-invocation QuerySystem
+    /// builds its entity set from the View, which has no tier scope, so the filter used to be accepted and then ignored — and with cellAmortize the system
+    /// ran every tick on every entity with a delta time multiplied by the amortization factor. Rejected at Build rather than silently mis-integrated.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CD-03")]
+    public void Build_TierFilterWithoutParallel_Throws()
+    {
+        using var dbe = SetupEngineWithGrid();
+        using var tx = dbe.CreateQuickTransaction();
+        var view = tx.Query<TierUnit>().ToView();
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+        {
+            TyphonRuntime.Create(dbe, schedule =>
+            {
+                var dag = schedule.PublicTrack.DeclareDag("Test");
+                dag.QuerySystem("Bad", _ => { }, input: () => view, tier: SimTier.Tier0);
+            }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
+        });
+        Assert.That(ex.Message, Does.Contain("requires parallel dispatch"));
+        view.Dispose();
+    }
+
     [Test]
     public void Build_NegativeCellAmortize_Throws()
     {

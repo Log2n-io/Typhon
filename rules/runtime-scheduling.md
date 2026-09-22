@@ -465,7 +465,8 @@ descends from this one property.
 ### CD-02: A dispatch's chunks tile the cluster list Prepare counted `[fatal]` `[silent]`
   invariant the cluster ranges a parallel QuerySystem's chunks walk tile the list its dispatch splits exactly: chunk k of n walks its share of an
             equal split (ChunkClusterRange), the first (length mod n) chunks taking one cluster more, so every cluster is walked by exactly one chunk
-  invariant the list and its length are read once, in Prepare (OnParallelQueryPrepare), and every chunk walks that array and splits that length,
+  invariant the list and its length are read once, in PrepareDispatchClusterList (called from OnParallelQueryPrepare, and from OnSystemStartInternal for a
+            single-invocation QuerySystem), and every chunk walks that array and splits that length,
             never the live pair: a spawn can append to an archetype's list while the chunks run (AddToActiveList, under its latch), and chunks that
             read two lengths do not tile. An append leaves the array's first entries as they are, even when it moves the list to a larger array.
             Clusters appended during a dispatch are walked from the next tick
@@ -473,13 +474,36 @@ descends from this one property.
             of the length protects against)
   on_violation: silent: a cluster walked twice (its entities updated twice, its queries counted twice) or not at all (a tick of work skipped for
     its entities), with nothing raised
-  scope: TyphonRuntime.cs (OnParallelQueryPrepare, ChunkUnits, ChunkClusterRange, ExecuteChunkWithAccessor, ExecuteChunkWithTransaction)
+  scope: TyphonRuntime.cs (OnParallelQueryPrepare, PrepareDispatchClusterList, ChunkUnits, ChunkClusterRange, ExecuteChunkWithAccessor,
+         ExecuteChunkWithTransaction)
   verified: ChunkClusterRangeTests.AListThatGrowsDuringTheDispatch_IsStillTiled (the first chunk spawns a new cluster before the next reads its
             range, on the accessor path and on the per-chunk Transaction path; against the code that split the live length it fails:
             "[0,18) [19,37)" for a list of 36 on both paths, the second chunk splitting the 37 clusters the spawn left). The change-filtered path reaches the
             same ChunkClusterRange but no test drives it
   note: no RuleMutant. Putting the live read back on the chunk path would take a seam there; the verifier was run against the code that did it,
         and failed as quoted
+
+### CD-03: Every system dispatch hands the body a usable handle, and every QuerySystem a real cluster partition `[silent]`
+  invariant ∀ dispatch of a system with entity access: `ctx.Accessor != null` — the per-worker `EntityAccessor` on the lock-free parallel path, the
+            system's (or the chunk's) `Transaction` on every other path, which IS an `EntityAccessor`. `ctx.Transaction` stays null on the lock-free
+            path, where Spawn/Destroy/Commit do not exist
+  invariant ∀ QuerySystem bound to a cluster-eligible input archetype: `ClusterIds != null` and `[StartClusterIndex, EndClusterIndex)` is that
+            system's real share of it — a chunk's slice under `.Parallel()`, `[0, clusterCount)` for a single invocation, which owns the whole list.
+            An empty range means this dispatch has no clusters, never "walk them all"
+  scope: `Runtime/public/TyphonRuntime.cs` (`OnSystemStartInternal`, `PrepareDispatchClusterList`, `ExecuteChunkWithAccessor`,
+         `ExecuteChunkWithTransaction`, `ResolveChangeFilters` — the cluster-state binding, which covers every QuerySystem, not only the parallel ones),
+         `Runtime/public/TickContext.cs` (`Accessor`, `StartClusterIndex`, `EndClusterIndex`, `ClusterIds`)
+  requires a tier filter is rejected at `RuntimeSchedule.Build` for a non-parallel QuerySystem (`ValidateRegistration`): tier scope exists only in the
+           parallel Prepare, and the entity set of a single-invocation system comes from its View, which has none
+  on_violation: silent, and it was: before #908 a non-parallel QuerySystem was left unbound, so its context carried `ClusterIds == null`, the unfilled
+                `(0,0)` range and `Accessor == null`. The same cluster-walking body that processed the whole population under `.Parallel()` either threw a
+                NullReferenceException (caught, logged, system skipped for the tick) or walked an empty range and processed nothing — the behaviour simply
+                stopped happening, at normal tick cost, which is the hardest failure to notice in a simulation
+  rationale: which dispatch path a system takes is a declaration (`.Parallel()`, `WritesVersioned`), not something a body should have to re-derive from
+             which context fields happen to be null. Reporting it through nullable fields is what made one body mode-dependent
+  verified: SystemArchetypeTouchTests.NonParallelQuery_OwnsItsWholeClusterPartition_AndRunsTheParallelBodyUnchanged (the parallel fixture's own
+            CountVisited body, unchanged, on a single-invocation system — visits every entity, non-null Accessor, non-null ClusterIds, `[0, count)`),
+            TierDispatchTests.Build_TierFilterWithoutParallel_Throws (the `requires`)
 
 ## Module: Worker Wake
 
