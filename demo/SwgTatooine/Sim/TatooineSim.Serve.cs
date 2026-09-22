@@ -76,6 +76,7 @@ public sealed partial class TatooineSim
         _runtime.OnTickAborted += (_, outcome)
             => Console.WriteLine($"  !! tick {outcome.TickNumber} aborted: {outcome.Reason} in '{outcome.FailedSystemName}'");
 
+        TatooineReplication.Scheduler = _runtime.Scheduler;
         _runtime.Start();
 
         try

@@ -287,6 +287,15 @@ public sealed class SimConfig
     public int WorkerIdleSpin = 100;
 
     /// <summary>
+    /// <c>--sched-hot N</c>: idle workers that keep spinning inside a dispatch while the rest park; negative for the legacy spin-then-yield loop. Unset
+    /// leaves the engine's default (<see cref="Typhon.Engine.DagScheduler.WorkerHotSpinners"/>).
+    /// </summary>
+    public int? WorkerHotSpinners;
+
+    /// <summary><c>--sched-park-us N</c>: how long an idle worker spins before it may park. Unset leaves the engine's default.</summary>
+    public int? WorkerParkAfterUs;
+
+    /// <summary>
     /// <c>--idle-creatures F</c>: the fraction of spawned creatures that are ambient — never think, never move. 0 by default.
     /// </summary>
     /// <remarks>

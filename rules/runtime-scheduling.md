@@ -582,6 +582,37 @@ Between dispatches every worker parks in a kernel wait. These rules say how a di
   note: no RuleMutant. When the counter landed, hand-made mutants of the check, one of them dropping the clear-event clause, were each caught
         by these tests
 
+### WK-03: A worker parked inside a dispatch is woken for the work it is needed for, and when the dispatch ends `[perf]` `[silent]`
+  invariant under the parking policy (HotSpinners >= 0) an idle worker spins with PAUSE, never a yield, and after ParkAfterUs parks on its OWN in-tick
+            event (_parkWake[workerId]) unless fewer than HotSpinners other workers are spinning; its state (_idleState) is busy, spinning or parked
+  invariant a worker parks by storing "parked" and counting itself (_parkedCount, an interlocked increment: a full fence) BEFORE it re-checks for work,
+            the dispatch's end and shutdown; a publisher stores the ready flag and claim word BEFORE a full fence and only then reads the parked count
+            and the states (WakeParked). One of the two sees the other: the fenced store-buffer pattern
+  invariant a wake is claimed by compare-exchanging a state from parked to busy; the claimer alone Sets the event, and the worker alone Resets it, only
+            after consuming that Set (also when it un-parks itself and loses the race to a claimer): an event is set exactly when a claimed wake is
+            unconsumed
+  invariant a multi-chunk dispatch (DispatchParallelQuery, a pipeline's successor publish) wakes one parked worker per chunk beyond the publishing worker
+            and the workers spinning at that moment (WakeForChunks); the completion that takes _systemsRemaining to zero wakes every parked worker, and so do
+            the end of DispatchTrackMultiThreaded, Shutdown and Dispose
+  invariant the park wait's backstop (ParkBackstop, 2 ms) is a liveness net, not a way to be woken
+  rationale: the legacy policy spun, then yielded forever. Thread.Yield gives the core up only to a thread ready on it and otherwise returns at once, so
+    an idle worker was a tight loop at 100 % of a core — measured on the SWG demo at 1 000 sessions as ~36 % of worker time inside dispatches — which
+    starved the thread pool running the sends and ASP.NET Core. Parking (no hot spinner, park after 10 µs) returned ~2.9 cores and made the tick 4.3 %
+    shorter at P50 and 6.2 % at P99 over six interleaved pairs, with the same worker work per tick. A worker left parked when its dispatch ends is still
+    inside it: the next dispatch's wake Sets the between-tick events (WK-01), not the park events, so it stays there until its backstop or until some later
+    multi-chunk dispatch happens to wake it — which is why the end of a track must wake it
+  on_violation: a worker sleeps through work it was needed for until the backstop — latency, not corruption: the dispatch completes on the other
+    workers, later. Silent: nothing counts a late wake
+  scope: DagScheduler.Idle.cs (ParkIdleWorker, WakeParked, WakeForChunks, CountSpinning), DagScheduler.cs (WorkerLoop, DispatchParallelQuery,
+         OnSystemComplete, DispatchTrackMultiThreaded, Shutdown, Dispose)
+  verified: WorkerParkingTests — every test with no hot spinner, parking at once and a 30 s backstop, over all-hands parallel systems whose chunks wait
+            for the whole pool: AParallelDispatchAfterASerialGap_WakesTheParkedPool (the pool parks during a serial gate, the dispatch after it must wake
+            it); TheEndOfADispatch_ReturnsEveryParkedWorkerToTheBetweenTickWait (one serial system per tick: every worker must reach the between-tick
+            wait on most ticks); NoWakeIsLost_AcrossThousandsOfParks
+  note: no RuleMutant. Hand-made mutants, each caught (2026-09-22): WakeForChunks made a no-op fails the serial-gap and churn tests; both track-end
+        wakes removed fails the end-of-dispatch test. That test replaced one that ended a track and needed all hands in the next, which the mutant
+        passed: the next track's multi-chunk root dispatch woke the leftover workers itself
+
 ## Module: API Contract Stability
 
 ### AS-01: `.After()` / `.Before()` survive auto-DAG `[design]`

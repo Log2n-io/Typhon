@@ -84,6 +84,15 @@ public static class CommandLine
             var other => throw new ArgumentException($"--subs-interest takes cell or pull, not '{other}'"),
         };
         c.WorkerIdleSpin = Int(args, "--idle-spin", c.WorkerIdleSpin);
+        if (Array.IndexOf(args, "--sched-hot") >= 0)
+        {
+            c.WorkerHotSpinners = Int(args, "--sched-hot", 0);
+        }
+
+        if (Array.IndexOf(args, "--sched-park-us") >= 0)
+        {
+            c.WorkerParkAfterUs = Int(args, "--sched-park-us", 0);
+        }
         c.SubscriptionsDynamicSchedule = Str(args, "--subs-sched", "dynamic") switch
         {
             "dynamic" => true,

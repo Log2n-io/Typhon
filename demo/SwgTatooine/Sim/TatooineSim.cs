@@ -49,6 +49,17 @@ public sealed partial class TatooineSim : IDisposable
 
         // A latency knob on the shared pool, set here rather than defaulted in the engine so a sweep can move it: see DagScheduler.WorkerIdleSpinBudget.
         DagScheduler.WorkerIdleSpinBudget = config.WorkerIdleSpin;
+        if (config.WorkerHotSpinners is { } hot)
+        {
+            DagScheduler.WorkerHotSpinners = hot;
+        }
+
+        if (config.WorkerParkAfterUs is { } parkUs)
+        {
+            DagScheduler.WorkerParkAfterUs = parkUs;
+        }
+
+        DagScheduler.MeasureWorkerIdle = config.SubscriptionsPhaseTiming;
         _simdNarrowphaseBefore = Typhon.Engine.Internals.SpatialQueryTuning.SimdNarrowphase;
     }
 

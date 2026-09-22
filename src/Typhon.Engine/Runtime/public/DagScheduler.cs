@@ -812,6 +812,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         // Per-worker telemetry
         _workerActiveTicks = new long[_workerCount];
         _workerIdleTicks = new long[_workerCount];
+        InitIdle(_workerCount);
 
         // Create worker threads (not started yet), each with its own wake event
         if (_workerCount > 1)
@@ -949,6 +950,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         Volatile.Write(ref _workerShutdown, 1);
         Interlocked.Increment(ref _tickGeneration);
         WakeWorkers(); // Wake any blocked workers
+        WakeParked(int.MaxValue);
 
         // Join worker threads (guard against unstarted threads)
         JoinWorkers();
@@ -968,6 +970,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             Volatile.Write(ref _workerShutdown, 1);
             Interlocked.Increment(ref _tickGeneration);
             WakeWorkers();
+            WakeParked(int.MaxValue);
             JoinWorkers();
         }
 
@@ -985,6 +988,11 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             foreach (var wake in _workerWake)
             {
                 wake.Dispose();
+            }
+
+            foreach (var park in _parkWake)
+            {
+                park.Dispose();
             }
         }
     }
@@ -1542,6 +1550,15 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             // Started when idleSpins first goes from 0 → 1; ended when work is found.
             var idleSpan = default(SchedulerWorkerIdleEvent);
             var idleSpellStart = 0L;
+
+            // In-tick idle policy (DagScheduler.Idle.cs): read once per dispatch, so a switch flipped mid-dispatch cannot mix the two policies in one spell.
+            var parking = HotSpinners >= 0;
+            var hotSpinners = HotSpinners;
+            var parkAfterTicks = ParkAfterUs * Stopwatch.Frequency / 1_000_000L;
+            var measureIdle = MeasureIdle;
+            var dispatchFrom = measureIdle ? Stopwatch.GetTimestamp() : 0L;
+            var parkSpinFrom = 0L;
+            var spellParked = 0L;
             // Deliberately NOT gated on _workerShutdown: a worker that is mid-tick must finish the tick, or shutdown silently drops the work of the tick in
             // flight (it cost a real regression to learn this — Telemetry_ReadyTick_NotInflatedBySibling went red with ReadyTick 0 because the last tick was
             // abandoned). The escape hatch is _tickInProgress, which the completion barrier in DispatchTrackMultiThreaded now always clears — including when
@@ -1553,10 +1570,21 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                 {
                     if (idleSpins > 0)
                     {
+                        if (parking)
+                        {
+                            Volatile.Write(ref _idleState[workerId].Value, IdleBusy);
+                        }
+
                         // End of idle spell — close the span if one was started.
                         if (idleSpellStart != 0)
                         {
                             var idleEnd = Stopwatch.GetTimestamp();
+                            if (measureIdle)
+                            {
+                                NoteIdleSpell(workerId, idleEnd - idleSpellStart, spellParked);
+                            }
+
+                            spellParked = 0L;
                             var idleUs = (idleEnd - idleSpellStart) * 1_000_000L / Stopwatch.Frequency;
                             idleSpan.SpinCount = (ushort)Math.Min(idleSpins, ushort.MaxValue);
                             idleSpan.IdleUs = (uint)Math.Min(idleUs, uint.MaxValue);
@@ -1603,9 +1631,26 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                         // First idle iter — start the Idle span.
                         idleSpan = TyphonEvent.BeginSchedulerWorkerIdle((byte)workerId);
                         idleSpellStart = Stopwatch.GetTimestamp();
+                        parkSpinFrom = idleSpellStart;
+                        if (parking)
+                        {
+                            Volatile.Write(ref _idleState[workerId].Value, IdleSpinning);
+                        }
                     }
                     idleSpins++;
-                    if (idleSpins <= WorkerIdleSpinBudget)
+                    if (parking)
+                    {
+                        // Spin with PAUSE — never a yield, which hands the core away for up to a quantum. Past the spin window, park unless too few
+                        // others are left spinning to take the next ready system at once.
+                        Thread.SpinWait(4);
+                        if ((idleSpins & 15) == 0 && Stopwatch.GetTimestamp() - parkSpinFrom >= parkAfterTicks
+                            && (hotSpinners == 0 || CountSpinning(workerId) >= hotSpinners))
+                        {
+                            spellParked += ParkIdleWorker(workerId);
+                            parkSpinFrom = Stopwatch.GetTimestamp();
+                        }
+                    }
+                    else if (idleSpins <= WorkerIdleSpinBudget)
                     {
                         if (trackUtilization)
                         {
@@ -1634,10 +1679,25 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                 }
             }
 
+            if (parking)
+            {
+                Volatile.Write(ref _idleState[workerId].Value, IdleBusy);
+            }
+
+            if (measureIdle)
+            {
+                _idleCounters[workerId].InDispatchTicks += Stopwatch.GetTimestamp() - dispatchFrom;
+            }
+
             // Tick ended — close any pending idle span left from end-of-tick idle.
             if (idleSpellStart != 0)
             {
                 var idleEnd = Stopwatch.GetTimestamp();
+                if (measureIdle)
+                {
+                    NoteIdleSpell(workerId, idleEnd - idleSpellStart, spellParked);
+                }
+
                 var idleUs = (idleEnd - idleSpellStart) * 1_000_000L / Stopwatch.Frequency;
                 idleSpan.SpinCount = (ushort)Math.Min(idleSpins, ushort.MaxValue);
                 idleSpan.IdleUs = (uint)Math.Min(idleUs, uint.MaxValue);
@@ -2052,6 +2112,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         // Correct on arm64; free on x64 (TSO).
         OpenChunkClaims(sysIdx, totalChunks);
         MarkSystemReady(sysIdx);
+        WakeForChunks(totalChunks);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -2060,7 +2121,11 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
     private void OnSystemComplete(int sysIdx, int workerId, bool trackUtilization)
     {
-        Interlocked.Decrement(ref _systemsRemaining.Value);
+        if (Interlocked.Decrement(ref _systemsRemaining.Value) == 0)
+        {
+            // The track is done: every parked worker leaves the dispatch now rather than at its backstop.
+            WakeParked(int.MaxValue);
+        }
 
         // `readyUs` contract: a successor becomes ready the instant its last predecessor completes. `sysIdx` IS that last predecessor for every successor this
         // call decrements to zero, so all of them share one ready timestamp — `sysIdx`'s completion — captured once here, before the loop. Capturing it
@@ -2149,6 +2214,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                             // publish there is.
                             OpenChunkClaims(succIdx, Systems[succIdx].TotalChunks);
                             MarkSystemReady(succIdx);
+                            WakeForChunks(Systems[succIdx].TotalChunks);
                         }
                     }
                 }
@@ -2552,6 +2618,9 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         // Always cleared, including on the abandoned path above — this is the escape hatch the workers' within-tick dispatch loop keys on, so leaving it set
         // would strand every worker still inside the tick.
         _tickInProgress = 0;
+
+        // And a worker parked inside the dispatch is woken to see it: normally the last completion already did this, but not on the abandoned path.
+        WakeParked(int.MaxValue);
     }
 
     /// <summary>

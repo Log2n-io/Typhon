@@ -167,9 +167,15 @@ public static class TatooineReplication
     /// </para>
     /// </remarks>
     private static long _placeTicks;
-    private static long _sendWindowFrom, _sendFramesFrom, _sendBytesFrom, _sendAllocFrom, _sendItemsFrom;
-    private static double _sendCpuFrom;
-    private static int _sendGen0From;
+
+    /// <summary>The runtime's scheduler, for the periodic worker-idle line.</summary>
+    internal static DagScheduler Scheduler;
+    private static (double InDispatchMs, double IdleMs, double ParkedMs, long Parks, long Backstops, long Spells, long Wakes) IdleFrom;
+    private static long IdleTickFrom;
+    private static (double ActiveMs, double TickWallMs, long Ticks, int Workers) _utilFrom;
+    private static long SendWindowFrom, SendFramesFrom, SendBytesFrom, SendAllocFrom, SendItemsFrom;
+    private static double SendCpuFrom;
+    private static int SendGen0From;
 
     public static void PlacePlayerSessions(TickContext tick)
     {
@@ -306,24 +312,59 @@ public static class TatooineReplication
             var alloc = GC.GetTotalAllocatedBytes();
             var items = System.Threading.ThreadPool.CompletedWorkItemCount;
             var gen0 = GC.CollectionCount(0);
-            if (_sendWindowFrom != 0)
+            if (SendWindowFrom != 0)
             {
-                var wallMs = (now - _sendWindowFrom) * 1000d / System.Diagnostics.Stopwatch.Frequency;
+                var wallMs = (now - SendWindowFrom) * 1000d / System.Diagnostics.Stopwatch.Frequency;
                 Console.Error.WriteLine(
                     $"  send path: wake {sendPath.WakeMsPerPublish:F3} ms/publish on the driver ({sendPath.WokenPerPublish:F0} woken), pool delay {sendPath.QueueDelayUs:F0} us, "
-                    + $"send {sendPath.SendUs:F1} us ({sendPath.SendsSync} sync, {sendPath.SendsAsync} async); window: {(st.Frames - _sendFramesFrom) * 1000d / wallMs:F0} frames/s, "
-                    + $"{(st.Bytes - _sendBytesFrom) / wallMs / 1000d:F1} MB/s, process CPU {(cpu - _sendCpuFrom) / wallMs:F2} cores, "
-                    + $"alloc {(alloc - _sendAllocFrom) / wallMs / 1000d:F2} MB/s, pool items {(items - _sendItemsFrom) * 1000d / wallMs:F0}/s, "
-                    + $"pool threads {System.Threading.ThreadPool.ThreadCount}, gen0 {gen0 - _sendGen0From}");
+                    + $"send {sendPath.SendUs:F1} us ({sendPath.SendsSync} sync, {sendPath.SendsAsync} async); window: {(st.Frames - SendFramesFrom) * 1000d / wallMs:F0} frames/s, "
+                    + $"{(st.Bytes - SendBytesFrom) / wallMs / 1000d:F1} MB/s, process CPU {(cpu - SendCpuFrom) / wallMs:F2} cores, "
+                    + $"alloc {(alloc - SendAllocFrom) / wallMs / 1000d:F2} MB/s, pool items {(items - SendItemsFrom) * 1000d / wallMs:F0}/s, "
+                    + $"pool threads {System.Threading.ThreadPool.ThreadCount}, gen0 {gen0 - SendGen0From}");
             }
 
-            _sendWindowFrom = now;
-            _sendFramesFrom = st.Frames;
-            _sendBytesFrom = st.Bytes;
-            _sendCpuFrom = cpu;
-            _sendAllocFrom = alloc;
-            _sendItemsFrom = items;
-            _sendGen0From = gen0;
+            if (Scheduler != null && SendWindowFrom != 0)
+            {
+                var wi = Scheduler.WorkerIdle;
+                var ticks = Math.Max(1, Scheduler.CurrentTickNumber - IdleTickFrom);
+                var inDispatch = wi.InDispatchMs - IdleFrom.InDispatchMs;
+                var idle = wi.IdleMs - IdleFrom.IdleMs;
+                var parked = wi.ParkedMs - IdleFrom.ParkedMs;
+                Console.Error.WriteLine(
+                    $"  scheduler: {inDispatch / ticks:F2} ms worker time in dispatches per tick, idle {(inDispatch <= 0 ? 0 : idle * 100d / inDispatch):F1} % "
+                    + $"(parked {(inDispatch <= 0 ? 0 : parked * 100d / inDispatch):F1} %, spinning {(inDispatch <= 0 ? 0 : (idle - parked) * 100d / inDispatch):F1} %); "
+                    + $"per tick: {(double)(wi.Parks - IdleFrom.Parks) / ticks:F1} parks, {(double)(wi.Wakes - IdleFrom.Wakes) / ticks:F1} wakes, "
+                    + $"{(double)(wi.Backstops - IdleFrom.Backstops) / ticks:F2} backstops, {(double)(wi.Spells - IdleFrom.Spells) / ticks:F1} idle spells");
+            }
+
+            if (Scheduler != null && SendWindowFrom != 0)
+            {
+                var wu = Scheduler.WorkerUtilization;
+                var uTicks = wu.Ticks - _utilFrom.Ticks;
+                if (uTicks > 0)
+                {
+                    var active = wu.ActiveMs - _utilFrom.ActiveMs;
+                    var wall = wu.TickWallMs - _utilFrom.TickWallMs;
+                    Console.Error.WriteLine(
+                        $"  worker utilization: {active / uTicks:F2} ms active per tick over {wall / uTicks:F2} ms tick wall, "
+                        + $"{(wall <= 0 ? 0 : active * 100d / (wall * wu.Workers)):F1} % of {wu.Workers} workers");
+                }
+            }
+
+            if (Scheduler != null)
+            {
+                _utilFrom = Scheduler.WorkerUtilization;
+                IdleFrom = Scheduler.WorkerIdle;
+                IdleTickFrom = Scheduler.CurrentTickNumber;
+            }
+
+            SendWindowFrom = now;
+            SendFramesFrom = st.Frames;
+            SendBytesFrom = st.Bytes;
+            SendCpuFrom = cpu;
+            SendAllocFrom = alloc;
+            SendItemsFrom = items;
+            SendGen0From = gen0;
             var isp = subs.InterestSpan;
             Console.Error.WriteLine(
                 $"  interest span: {isp.SpanMs:F2} ms wall, {isp.BusyMs:F2} ms busy "

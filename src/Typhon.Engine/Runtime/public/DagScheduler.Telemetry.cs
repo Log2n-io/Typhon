@@ -37,6 +37,21 @@ public sealed partial class DagScheduler
 
         _previousTickStart = tickStart;
 
+        // Worker utilization (Scheduler:Gauges:WorkerUtilization): the per-worker time inside system and chunk bodies this tick, folded into running
+        // totals so it can be read at all — the per-tick arrays are cleared by the next ResetTickState and nothing else ever read them.
+        if (TelemetryConfig.SchedulerActive && TelemetryConfig.SchedulerTrackWorkerUtilization)
+        {
+            long active = 0;
+            for (var w = 0; w < _workerActiveTicks.Length; w++)
+            {
+                active += _workerActiveTicks[w];
+            }
+
+            Volatile.Write(ref _utilActiveTicks, _utilActiveTicks + active);
+            Volatile.Write(ref _utilTickTicks, _utilTickTicks + tickDurationTicks);
+            Volatile.Write(ref _utilTicks, _utilTicks + 1);
+        }
+
         var activeSystemCount = 0;
         var totalEntitiesProcessed = 0;
 
